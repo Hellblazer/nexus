@@ -807,12 +807,22 @@ def test_per_doc_continuation_slice_is_never_stamped_dcv2k() -> None:
     assert cat.complete_calls == []
 
 
-def test_production_writer_really_lacks_write_manifest_many_dcv2k() -> None:
-    """NON-VACUITY for the pins above: the double's shape is not invented —
-    the real service writer's closed whitelist genuinely omits the op, which
-    is WHY the ride is unreachable in production. If this ever starts passing
-    a callable, the ride is live and the per-doc stamp becomes belt-and-braces
-    rather than the only stamp."""
+def test_production_writer_now_exposes_write_manifest_many_67qsd() -> None:
+    """FLIPPED 2026-08-08 (nexus-67qsd): this test used to be named
+    ``test_production_writer_really_lacks_write_manifest_many_dcv2k`` and
+    asserted the OPPOSITE — that the real service writer's closed whitelist
+    omitted ``write_manifest_many``, which was WHY the ride above was
+    unreachable and the per-doc stamp (``_WhitelistWriter``-driven tests
+    above) was the ONLY stamp production ever took. nexus-67qsd's whitelist
+    comment predicted exactly this flip ("this bead comments the tripwire
+    will go red"): ``write_manifest_many`` is now in ``CATALOG_WRITE_OPS``
+    (landed together with nexus-tgrgs's fast-branch sweep fold-in — never
+    whitelist-first, per nexus-jk88j), so the fast branch — not the per-doc
+    branch above — is now the path production takes for a full-file
+    flush-grain batch. The per-doc stamp remains belt-and-braces for the
+    paths that still fall back to it (404 / no-capability / continuation
+    slice), which is exactly what the ``_WhitelistWriter`` tests above
+    continue to pin with a double that deliberately lacks the capability."""
     from nexus.catalog.factory import _ServiceCatalogWriter
 
     class _AnythingGoes:
@@ -821,7 +831,7 @@ def test_production_writer_really_lacks_write_manifest_many_dcv2k() -> None:
 
     w = _ServiceCatalogWriter(_AnythingGoes())
     assert callable(getattr(w, "complete_index_run", None))
-    assert getattr(w, "write_manifest_many", None) is None
+    assert callable(getattr(w, "write_manifest_many", None))
 
 
 def test_continuation_claim_warns_exactly_once_across_fallthrough(caplog) -> None:

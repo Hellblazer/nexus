@@ -1181,20 +1181,126 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     _record_superseded_swept(len(orphaned))
 
 
+def _sweep_superseded_vectors_many(
+    cat, dropped_by_doc: dict[str, set[str]], collection: str | None, *,
+    reader, notes_provider,
+) -> None:
+    """Batch-safe sibling of :func:`_sweep_superseded_vectors` for the
+    ``write_manifest_many`` fast branch (nexus-tgrgs / nexus-jk88j,
+    2026-08-08).
+
+    ``_manifest_write_loop`` calls this ONLY after ``write_manifest_many``'s
+    POST has returned — every doc in the batch has therefore already
+    committed (or is known-failed and excluded) server-side by the time any
+    candidate is considered, and every candidate handed in here has ALREADY
+    had every chash any document in THIS SAME BATCH still references
+    subtracted (successful docs via their new manifest, failed docs via
+    their unchanged prior manifest — see ``_manifest_write_loop``'s
+    ``_live_union``). That two-part ordering is what closes the intra-batch
+    TOCTOU the design memo documents (T2
+    ``nexus/design-eslkl-hook-lock-narrowing`` §2b): sweeping doc A's drop
+    before doc B's write of the identical chash had committed could delete
+    a row B's manifest still needs. Deferring every sweep decision until
+    the WHOLE batch has settled, and pre-subtracting the batch's own live
+    set before any network read, removes that window by construction
+    rather than by locking. The cross-FIRE race (two DIFFERENT flush-grain
+    hook fires, i.e. two separate calls to this function/its caller,
+    running concurrently) is a separate, still-open hazard — accepted per
+    the design memo's recommended sequencing (this bead lands before the
+    hook-lock narrowing in nexus-eslkl, so flush-grain fires remain
+    serialized by ``LockedHookRegistry`` for now). CAVEAT (nexus-uxkq5,
+    critic finding): that serialization is CONDITIONAL —
+    ``LockedHookRegistry`` wraps the registry only when
+    ``resolve_index_concurrency() > 1``, while ``ChunkBatcher``'s
+    ``flush_concurrency=3`` is unconditional, so under
+    ``NX_INDEX_CONCURRENCY=1`` flush fires run on a BARE registry and the
+    cross-fire window is live; batching also widens it there (every doc's
+    before-read now spans the whole batch's write, not just its own). The
+    real closure is the engine-side per-doc-txn sweep fold; tracked in
+    nexus-uxkq5 / nexus-eslkl.
+
+    One ``docs_for_chashes`` round trip (via the shared
+    :func:`nexus.indexer_utils.orphaned_chashes` union guard, reused
+    unmodified — passing a synthetic non-doc-id ``doc_id`` disables its
+    single-document self-exclusion, which is exactly what a
+    multi-document candidate set needs: ANY live reference, from ANY
+    document, protects the candidate) and one T3 ``delete`` for the WHOLE
+    BATCH, versus one of each per document in the per-doc path — the same
+    round-trip-count discipline nexus-67qsd applies to the write half.
+
+    Same fail-open contract as :func:`_sweep_superseded_vectors`: any read
+    failure (reverse lookup or note lookup) deletes nothing and records a
+    named skip for every document whose candidates were in flight, never
+    silently. Over-retention is recoverable; over-deletion is not.
+    """
+    import structlog  # noqa: PLC0415 — deferred to function scope (lazy logger init)
+
+    if not collection:
+        return
+    candidates: set[str] = set()
+    for s in dropped_by_doc.values():
+        candidates |= s
+    if not candidates:
+        return
+    from nexus.indexer_utils import orphaned_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+
+    _batch_label = f"write_many_batch[{len(dropped_by_doc)}_docs]"
+    orphaned = orphaned_chashes(reader, _batch_label, candidates)
+    shared = len(candidates) - len(orphaned)
+    if not orphaned:
+        return
+    try:
+        notes = notes_provider()
+    except Exception as exc:  # noqa: BLE001 — cannot prove note-safety: keep everything, same fail-open direction as orphaned_chashes
+        structlog.get_logger().warning(
+            "superseded_sweep_skipped_note_lookup_failed",
+            doc_id=_batch_label, collection=collection, candidates=len(orphaned),
+            error=str(exc))
+        for doc_id in dropped_by_doc:
+            _record_superseded_sweep_skip(doc_id, collection, "note_lookup_failed")
+        return
+    kept_notes = len(orphaned)
+    orphaned = [h for h in orphaned if h not in notes]
+    kept_notes -= len(orphaned)
+    if not orphaned:
+        return
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred: hot path
+
+        make_t3().get_collection(collection).delete(ids=orphaned)
+    except Exception as exc:  # noqa: BLE001 — the index must not fail on cleanup
+        structlog.get_logger().warning(
+            "superseded_sweep_failed", doc_id=_batch_label, collection=collection,
+            orphans=len(orphaned), error=str(exc))
+        for doc_id in dropped_by_doc:
+            _record_superseded_sweep_skip(doc_id, collection, "delete_failed")
+        return
+    structlog.get_logger().info(
+        "superseded_vectors_swept_batch", doc_count=len(dropped_by_doc),
+        collection=collection, deleted=len(orphaned), kept_shared=shared,
+        kept_notes=kept_notes)
+    _record_superseded_swept(len(orphaned))
+
+
 def _stamp_index_run_complete(cat, doc_id: str, content_hash: str,
                               chunk_count: int) -> None:
     """Fail-closed completion stamp on the PER-DOC manifest path (nexus-dcv2k).
 
     ``write_manifest_many``'s ``complete`` map (nexus-5xn3k.4) rides the batch
-    POST and is the zero-extra-round-trip form — but it is only reachable when
-    the writer actually exposes ``write_manifest_many``, and the production
-    writer (``_ServiceCatalogWriter``) does NOT: the op is absent from both
-    ``CATALOG_WRITE_OPS`` and ``_SERVICE_ONLY_WRITE_OPS``, so the capability
-    check one frame up is False on every real run and the ride never fires.
-    The per-doc branch below is the path production takes, so the stamp has to
-    land there too or the fence stays ``'indexing'`` forever and every
-    subsequent index re-embeds the document (the .3 three-way reads
-    ``'indexing'`` as stale-definitively, by design).
+    POST and is the zero-extra-round-trip form. Until nexus-67qsd (2026-08-08)
+    it was UNREACHABLE in service mode: ``write_manifest_many`` was absent
+    from both ``CATALOG_WRITE_OPS`` and ``_SERVICE_ONLY_WRITE_OPS``, so the
+    capability check one frame up was False on every real run and the ride
+    never fired — this per-doc branch was the ONLY path production actually
+    took. ``write_manifest_many`` is now whitelisted and IS the hot path for
+    a full-file flush-grain batch (see ``_manifest_write_loop``); this
+    per-doc stamp remains load-bearing belt-and-braces for the paths that
+    still bypass the fast branch — a 404 (pre-v0.1.24 engine), an
+    all-continuation batch, or a writer double lacking the capability — so
+    the fence still lands (never stays ``'indexing'`` forever, forcing every
+    subsequent index to re-embed the document; the .3 three-way reads
+    ``'indexing'`` as stale-definitively, by design) on every path, not only
+    the common one.
 
     Contract parity with ``stampCompleteIfVerified``'s ride, deliberately:
 
@@ -1259,7 +1365,28 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
     # (engine < v0.1.24) or missing capability falls back to the per-doc
     # loop below. Flush-grain batches always carry complete files
     # (position 0 present), matching write_many's replace semantics.
+    #
+    # nexus-tgrgs/jk88j (2026-08-08): this is now the HOT path in service
+    # mode (nexus-67qsd's whitelist add makes write_manifest_many reachable
+    # through the production writer for the first time) — the per-doc loop
+    # below is the fallback (404 / missing capability / continuation
+    # slices), not the common case it was when write_many was dead.
     _warned_partial_claims = False
+    # nexus-39upx round 2 SIGNIFICANT 1: ONE cache per call (per collection),
+    # shared across every doc_id below (both the write_many fast path's
+    # batch sweep and the per-doc fallback loop) — not one catalog-documents
+    # fetch per orphan-triggering document. Hoisted to the top of the
+    # function (nexus-tgrgs) so the fast branch can share it too; cheap to
+    # construct even when nothing ever triggers a sweep — the underlying
+    # fetch is fully lazy (CollectionDocumentsCache.get() is never called
+    # unless something actually has surviving union-guard candidates).
+    from nexus.indexer_utils import CollectionDocumentsCache, live_note_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+
+    _notes_cache = CollectionDocumentsCache(reader, collection or "")
+
+    def _notes_provider() -> set[str]:
+        return live_note_chashes(_notes_cache.get())
+
     if callable(getattr(cat, "write_manifest_many", None)):
         # No len(by_doc) gate (critique Critical, nexus-u2kwq): write_many
         # handles N=1 fine, and single-doc batches MUST take it — the
@@ -1316,6 +1443,32 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
             _complete_map = {
                 d: h for d, h in (manifest_complete or {}).items() if d in _full_ids
             }
+            # nexus-tgrgs/jk88j (2026-08-08): the 39upx sweep's "before" read,
+            # batched via the existing get_manifests (already paged/count-
+            # reconciled client-side — no new engine endpoint needed here;
+            # see the design memo for why a dedicated get_chunk_chashes_many
+            # was considered and found unnecessary). MUST happen before the
+            # write below: it captures what each doc's manifest referenced
+            # PRE-replace. Fail-open per doc — a read failure means that
+            # doc's sweep is skipped, never that the whole batch's write is
+            # blocked (no sweep beats a wrong sweep, but the manifest write
+            # itself is unrelated and must proceed regardless).
+            _before_by_doc: dict[str, set[str]] = {}
+            try:
+                _manifests_before = reader.get_manifests(list(_full_ids)) or {}
+                for _d in _full_ids:
+                    _before_by_doc[_d] = {
+                        row.chash for row in _manifests_before.get(_d, []) if row.chash
+                    }
+            except Exception as _exc:  # noqa: BLE001 — no sweep beats a wrong sweep
+                import structlog  # noqa: PLC0415 — deferred: hot path
+                structlog.get_logger().warning(
+                    "superseded_sweep_before_read_failed",
+                    doc_ids=sorted(_full_ids), collection=collection,
+                    error=str(_exc), path="write_many")
+                for _d in _full_ids:
+                    _before_by_doc[_d] = set()
+                    _record_superseded_sweep_skip(_d, collection, "before_read_failed")
             try:
                 if _complete_map:
                     res = _manifest_write_with_retry(
@@ -1380,6 +1533,41 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
                     )
                     for doc_id in failed:
                         _record_manifest_write_failure(doc_id)
+                # nexus-tgrgs/jk88j (2026-08-08): the 39upx sweep, folded
+                # into the fast branch. Runs only here — after the POST has
+                # returned — because every doc's write has now committed
+                # (or is known-failed, in `failed`). Computing dropped sets
+                # and the batch-wide "still live" union BEFORE any network
+                # read is what closes the intra-batch TOCTOU (design memo
+                # §2b): a chash any doc in this batch currently references —
+                # successes via their NEW manifest, failures via their
+                # UNCHANGED prior manifest (their write did not land, so
+                # `before` is still their truth, not `new`) — is subtracted
+                # before the reverse-lookup ever asks the network, so no
+                # sibling write in this same POST can race the check.
+                _failed_ids = set(failed)
+                _new_by_doc = {
+                    _d: {c["chash"] for c in _chunks if c["chash"]}
+                    for _d, _chunks in full_docs
+                }
+                _live_union: set[str] = set()
+                for _d in _full_ids:
+                    _live_union |= (
+                        _new_by_doc[_d] if _d not in _failed_ids
+                        else _before_by_doc.get(_d, set())
+                    )
+                _dropped_by_doc: dict[str, set[str]] = {}
+                for _d in _full_ids:
+                    if _d in _failed_ids:
+                        continue  # unknown write outcome: no sweep beats a wrong sweep
+                    _dropped = _before_by_doc.get(_d, set()) - _new_by_doc[_d]
+                    _dropped -= _live_union
+                    if _dropped:
+                        _dropped_by_doc[_d] = _dropped
+                if _dropped_by_doc:
+                    _sweep_superseded_vectors_many(
+                        cat, _dropped_by_doc, collection,
+                        reader=reader, notes_provider=_notes_provider)
             except Exception as exc:  # noqa: BLE001 — GH #1371: non-propagating by contract; 404 falls back per-doc, anything else is recorded+swallowed here
                 status = getattr(
                     getattr(exc, "response", None), "status_code", None
@@ -1414,19 +1602,9 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
             return
     from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred (leaf module, avoid import cost on the no-op path)
 
-    # nexus-39upx round 2 SIGNIFICANT 1: ONE cache per call (per collection),
-    # shared across every doc_id below — not one catalog-documents fetch per
-    # orphan-triggering document. Cheap to construct even when this batch
-    # never triggers a sweep at all: the underlying fetch is fully lazy
-    # (CollectionDocumentsCache.get() is never called unless a document in
-    # this batch actually has surviving union-guard candidates to check).
-    from nexus.indexer_utils import CollectionDocumentsCache, live_note_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
-
-    _notes_cache = CollectionDocumentsCache(reader, collection or "")
-
-    def _notes_provider() -> set[str]:
-        return live_note_chashes(_notes_cache.get())
-
+    # (_notes_cache / _notes_provider constructed once, at the top of this
+    # function — nexus-tgrgs hoisted them so the write_many fast branch's
+    # batch sweep above shares the same memoized cache.)
     for doc_id, indexed_metas in by_doc.items():
         chunks = _manifest_chunk_rows(indexed_metas)
         if all(not c["chash"] for c in chunks):
@@ -1481,12 +1659,16 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
                 if callable(_resync):
                     _manifest_write_with_retry(_resync, doc_id)
                 # nexus-dcv2k (RUNFENCE .4 regression): the completion stamp
-                # rides write_manifest_many — which the production writer does
-                # not expose, so on every real run control reaches HERE with the
-                # claim unstamped. Stamp after the rows, the sweep and the
-                # chunk_count resync have settled: the engine's verify reads the
-                # manifest this doc just wrote. Position-0 only — a continuation
-                # slice is not a whole document (handled in the else branch).
+                # normally rides write_manifest_many's `complete` map — but a
+                # doc that reached THIS per-doc branch (404 fallback,
+                # capability-less writer, or a continuation slice claimed
+                # complete in error) never went through that POST, so it
+                # would land here unstamped if this fallback did not stamp
+                # it too. Stamp after the rows, the sweep and the
+                # chunk_count resync have settled: the engine's verify reads
+                # the manifest this doc just wrote. Position-0 only — a
+                # continuation slice is not a whole document (handled in the
+                # else branch).
                 _claimed_hash = (manifest_complete or {}).get(doc_id)
                 if _claimed_hash:
                     _stamp_index_run_complete(
