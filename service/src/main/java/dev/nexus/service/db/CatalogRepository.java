@@ -3607,6 +3607,37 @@ public final class CatalogRepository {
      *       the residual this narrows but does not fully close (structurally the same
      *       promote-then-later-finalize gap as nexus-kl2z6, one level up the RDR-180
      *       pipeline).</td></tr>
+     *   <tr><td>{@code RekeyOps.rekey}</td><td>RDR-180 Item6's per-tenant full-digest rekey,
+     *       raw SQL — added post-review (nexus-t76bp round 1; REWORKED per critic-p1 Critical, T2
+     *       nexus/critique-t76bp-rekey-gate-2026-08-08 [21807]). Round 1 gated ONLY the step-5
+     *       manifest cascade ({@code UPDATE catalog_document_chunks SET chash = a.new_chash ...},
+     *       tenant-wide, no collection filter of its own); the critic found steps 3 (Item8
+     *       disposition) and 4 (two-phase content rekey — the step that makes rekeyed content
+     *       physically live under its new digest) ran entirely ungated for a span the class's own
+     *       javadoc documents as potentially minutes at real scale, leaving a silent-dangling-
+     *       reference window round 1 did not close. Investigated whether this method runs under a
+     *       code-enforced exclusivity that would make the gate redundant: the only lock it takes
+     *       ({@code staging:<tenant>}) is shared with {@code StagingPromoteOps} ONLY — no
+     *       serving-path manifest writer (`writeManifestRows`/`appendManifestChunks`/
+     *       `importChunksBatch`/`doImportChunk`) ever acquires or checks it, so the javadoc's
+     *       "freeze window" is an operational convention, not an engine-enforced guarantee. Gates
+     *       per DISTINCT target collection, resolved BEFORE step 3 begins (not immediately before
+     *       step 5), joining the alias map's {@code old_bytes} values — every mismatched row's
+     *       CURRENT physical chash, since nothing has been rekeyed yet at that point — against
+     *       {@code chunks_384/768/1024}; coextensive with what steps 3-4 are about to touch since
+     *       neither ever moves a physical row's {@code collection}, only its {@code chash}. Held
+     *       continuously through step 5's commit. NAMED RESIDUAL: step 3's orphan-synthesize
+     *       sub-branch mints alias rows with no prior {@code old_bytes} fact, so its collections
+     *       are not resolved or gated by this query. That narrower window is not covered by THIS
+     *       gate; what actually protects it is that the surrogate chash exists only on the
+     *       physical row {@code rekey} itself UPDATEd, row-locked from that UPDATE through
+     *       commit — a racing sweep's DELETE blocks on the row lock, then EvalPlanQual re-checks
+     *       its predicate against the post-commit row and finds zero matches. {@code rekey}
+     *       separately aborts loud (mirroring {@code StagingPromoteOps.finalizeTenant}) if its
+     *       in-transaction verify ever finds a nonzero {@code residual_mismatched} or {@code
+     *       dangling_manifest} count — a backstop for pre-existing corruption and any OTHER gap,
+     *       present or future, not a detector for races that commit after this transaction's own
+     *       snapshot (which it structurally cannot see).</td></tr>
      * </table>
      *
      * <p>Package-private, not {@code private}: {@code ChashRepository} and {@code

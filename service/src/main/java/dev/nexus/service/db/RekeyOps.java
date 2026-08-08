@@ -2,12 +2,19 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
+import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
 
 /**
  * RDR-180 Item6, engine half (nexus-jxizy.6): the per-tenant full-digest
@@ -149,6 +156,100 @@ public final class RekeyOps {
             // asserts the resulting statistics, never the statement.
             counts.put("alias_stats_refreshed", ChashSqlIdioms.refreshAliasStats(ctx));
 
+            // (2b) nexus-t76bp REWORK (critic-p1 Critical, T2 nexus/critique-
+            // t76bp-rekey-gate-2026-08-08 [21807]): round 1 of this bead
+            // gated ONLY step 5's manifest UPDATE. The critic traced the
+            // full method body and found steps 3 (Item8 disposition) and 4
+            // (two-phase content rekey — the step that makes rekeyed
+            // content physically live under its NEW digest) ran entirely
+            // UNGATED, for a span the class javadoc itself documents as
+            // potentially MINUTES at real scale (F2: 101min pre-fix). A
+            // concurrent, unrelated document's ordinary sweep sharing that
+            // exact (collection, chash) pair could delete the physical
+            // content during that window; step 5's then-only gate-resolution
+            // query ran AFTER the damage, correctly found nothing left to
+            // protect, and its UPDATE repointed the manifest unconditionally
+            // — a silent dangling reference. Fixed per the critic's
+            // Option 1: acquire every target-collection gate HERE, before
+            // step 3 begins, using the alias map step 2 just built, and hold
+            // through step 5's commit (xact-scoped advisory locks release
+            // only at commit/rollback — no explicit release needed).
+            //
+            // COST (code-review-expert T2 review-11gh6-gate-2026-08-08
+            // [21797], T76BP REWORK DELTA D3): holding these gates SHARED
+            // from here through commit means every concurrent sweep on a
+            // touched collection fails open to sweep_skipped (39upx
+            // accounting) for this rekey's FULL duration — potentially
+            // minutes at real scale (F2: 101min pre-fix; 461s post-fix).
+            // This is the deliberate tradeoff (finite writer-side stall,
+            // sweeps simply retry later), not an accident.
+            //
+            // Resolved via `old_bytes`, not `new_chash`: at THIS point in
+            // the method no physical row has been rekeyed yet, so a
+            // `new_chash` join (the shape round 1 used, correct only
+            // immediately before step 5) would find nothing. `old_bytes` is
+            // every mismatched row's CURRENT physical chash by construction
+            // of step 2's INSERT — and it is coextensive with what steps 3
+            // (Item8's `reference_only_resolved`, which also joins on
+            // `a.old_bytes = c.chash`) and 4 (`ChashSqlIdioms.
+            // contentCollapseDelete`/`contentRekeyUpdate`, whose predicate
+            // is exactly step 2's alias-generating predicate) are about to
+            // touch: neither the collapse phase nor the rekey phase ever
+            // changes a physical row's `collection` column, only its
+            // `chash` — so "every collection currently holding a row at
+            // `old_bytes`" IS "every collection steps 3-4 are about to
+            // mutate," by construction, not by proxy. (A collapse-loser
+            // that is already AT the digest key, not itself mismatched, is
+            // never gate-relevant on its own: a collapse GROUP only forms
+            // when count(*) > 1 for a (collection, digest) pair, which
+            // requires at least one MISMATCHED sibling in that same group
+            // — so the group's collection is always reachable via that
+            // sibling's `old_bytes`, never missed.)
+            //
+            // NAMED RESIDUAL (not closed by this query — stating exactly
+            // what remains open, matching the kl2z6/document_restore/
+            // promoteCollection discipline rather than claiming closure):
+            // step 3's ORPHAN-SYNTHESIZE sub-branch (below) mints alias
+            // rows for rows that, by `orphanCond`'s own definition, have NO
+            // alias fact yet at this point — so their collections are NOT
+            // resolved by this query and are NOT gated by it. What
+            // actually protects that sub-branch is a DIFFERENT mechanism:
+            // the synthesized surrogate chash exists only on rows this
+            // transaction itself UPDATEs, which stay row-locked through
+            // commit — a racing sweep's DELETE blocks on the row lock and
+            // then EvalPlanQual-rechecks its quals against the new row
+            // version, matching zero rows. The step-6 abort-on-nonzero
+            // below is the BACKSTOP, not the shield for this residual: it
+            // detects pre-existing corruption and races committed before
+            // its own snapshot, and structurally cannot see a sweep that
+            // commits after this transaction (critic Option 2, deliberately
+            // COMBINED with Option 1 here rather than substituted for it —
+            // prevention where structural, detection where prevention is
+            // impossible).
+            // jOOQ DSL rendering (nexus-t76bp representation-only pass, Hal
+            // directive 2026-08-08): identical to the prior raw SQL —
+            // DISTINCT phys.collection, inner JOIN chash_alias to the
+            // three-dim UNION ALL on phys.chash = a.old_bytes. No bind
+            // values in this statement (no user input reaches it either
+            // way); the rewrite is about typed columns and generated
+            // tables, not injection risk.
+            var phys = ctx.select(CHUNKS_384.COLLECTION, CHUNKS_384.CHASH).from(CHUNKS_384)
+                .unionAll(ctx.select(CHUNKS_768.COLLECTION, CHUNKS_768.CHASH).from(CHUNKS_768))
+                .unionAll(ctx.select(CHUNKS_1024.COLLECTION, CHUNKS_1024.CHASH).from(CHUNKS_1024))
+                .asTable("phys");
+            var targetCollections = ctx.selectDistinct(phys.field("collection", String.class))
+                .from(CHASH_ALIAS)
+                .join(phys).on(phys.field("chash", byte[].class).eq(CHASH_ALIAS.OLD_BYTES))
+                .fetch();
+            for (String c : targetCollections.stream()
+                    .map(r -> r.get(0, String.class))
+                    .filter(name -> name != null && !name.isBlank())
+                    .sorted()
+                    .distinct()
+                    .toList()) {
+                CatalogRepository.acquireSweepGateShared(ctx, tenant, c);
+            }
+
             // (3) Item8: empty-text rows. Reference-only rows resolve through
             // the alias just built from content-bearing siblings; the rest are
             // orphans under the per-run policy.
@@ -259,6 +360,19 @@ public final class RekeyOps {
 
             // (5) cascades via the alias map.
             // manifest: chash not in its PK — plain rewrite.
+            //
+            // nexus-t76bp (RekeyOps UPDATE-verb catalog_document_chunks
+            // writes were outside the sweep gate — same defect class as
+            // nexus-11gh6, different SQL verb; REWORKED per critic-p1
+            // Critical, T2 nexus/critique-t76bp-rekey-gate-2026-08-08
+            // [21807]): every target collection's sweep gate was already
+            // acquired at step (2b) above, BEFORE steps 3-4 ran, and is
+            // held continuously through this statement's commit (xact-
+            // scoped advisory locks release only at commit/rollback). See
+            // step (2b)'s comment for the freeze-window investigation, why
+            // the resolution moved there and switched to an `old_bytes`
+            // join, and the named orphan-synthesize residual the step-6
+            // abort below covers instead of a wider gate.
             counts.put("manifest_repointed", ctx.execute(
                 "UPDATE nexus.catalog_document_chunks m SET chash = a.new_chash "
                 + "FROM nexus.chash_alias a "
@@ -339,8 +453,55 @@ public final class RekeyOps {
                     ChashSqlIdioms.residualMismatchCount(t)).get(0, Integer.class);
             }
             counts.put("residual_mismatched", residual);
-            counts.put("dangling_manifest", ctx.fetchOne(
-                ChashSqlIdioms.danglingManifestCount()).get(0, Integer.class));
+            Integer danglingManifest = danglingManifestCountDsl(ctx);
+            counts.put("dangling_manifest", danglingManifest);
+            // nexus-t76bp REWORK, critic Option 2 (T2 nexus/critique-t76bp-
+            // rekey-gate-2026-08-08 [21807]): both counts were COMPUTED here
+            // but never ENFORCED — the class's own javadoc said "MUST all be
+            // zero" while the code merely returned them in the envelope for
+            // "the client rung" to check post-hoc. StagingPromoteOps.
+            // finalizeTenant, the sibling chash mover, already throws loud
+            // on the identical counts (see
+            // preExistingDanglingManifestRow_abortsFinalizeLoud). Mirrored
+            // here as the DETECTION half of the combined fix.
+            //
+            // ACTUAL COVERAGE (corrected per critic round 2, T2 same doc,
+            // "residual-naming adjudication" — the prior wording here
+            // overclaimed "catches ANY race in a window the gate does not
+            // cover", which is false): this check runs INSIDE rekey's own
+            // transaction, so it can only ever see state COMMITTED before
+            // its own statement's snapshot. It catches pre-existing
+            // corruption (a dangling/mismatched row that already existed
+            // before this rekey began) and any race that committed before
+            // this point in this same transaction's view. A sweep that
+            // blocks on rekey's OWN row locks necessarily commits AFTER
+            // rekey does — permanently invisible to this check, not caught
+            // by it.
+            //
+            // What actually protects step (2b)'s named residual — the
+            // orphan-synthesize sub-branch — is a DIFFERENT mechanism, not
+            // this scan: the surrogate chash exists only on the physical
+            // row rekey itself just UPDATEd, and that row stays
+            // exclusively locked from the UPDATE through this
+            // transaction's commit. A concurrent sweep's DELETE targeting
+            // the same row blocks on that row lock; once rekey commits,
+            // the sweep's statement re-evaluates its own quals against the
+            // new row version (EvalPlanQual) and finds it no longer
+            // matches (chash/metadata changed under it), so the DELETE
+            // affects zero rows instead of removing a now-referenced
+            // surrogate. This check remains a genuine backstop for every
+            // OTHER gap, present or future ("no silent fallbacks for
+            // data-correctness problems — FAIL LOUD") — it is just not the
+            // mechanism protecting the synthesize path specifically.
+            if (residual != 0) {
+                throw new IllegalStateException(
+                    "rekey left " + residual + " digest-mismatched content row(s) — aborting");
+            }
+            if (danglingManifest != null && danglingManifest != 0) {
+                throw new IllegalStateException(
+                    "rekey found " + danglingManifest + " dangling manifest row(s) "
+                    + "(manifest chash with no content row in any dim) — aborting");
+            }
             // Census (nexus-jxizy.10.5): REPORTED here, fatal only on the
             // staging-finalize path — the shipped in-store rekey keeps its
             // contract while the envelope gains the every-column visibility
@@ -355,6 +516,32 @@ public final class RekeyOps {
         });
         log.info("event=rekey_complete tenant={} counts={}", tenant, out);
         return out;
+    }
+
+    /**
+     * jOOQ DSL rendering of {@link ChashSqlIdioms#danglingManifestCount()}
+     * (nexus-t76bp representation-only pass, Hal directive 2026-08-08):
+     * same semantics — {@code count(*)} of manifest rows whose chash
+     * matches no content row in any of the three dim tables. Kept LOCAL to
+     * this class rather than changing {@code ChashSqlIdioms}'s shared
+     * method: that helper is also called, unchanged, by {@code
+     * StagingPromoteOps.finalizeTenant} — a site outside this pass's
+     * three-site scope — so its raw-SQL-returning signature is left alone
+     * to avoid forcing an edit there. The two renderings are logically
+     * identical (verified against the SQL in {@code
+     * ChashSqlIdioms.danglingManifestCount()}), just two representations
+     * of the one query for two call sites in this pass.
+     */
+    private static Integer danglingManifestCountDsl(DSLContext ctx) {
+        return ctx.selectCount()
+            .from(CATALOG_DOCUMENT_CHUNKS)
+            .where(DSL.notExists(ctx.selectOne().from(CHUNKS_384)
+                    .where(CHUNKS_384.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
+            .and(DSL.notExists(ctx.selectOne().from(CHUNKS_768)
+                    .where(CHUNKS_768.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
+            .and(DSL.notExists(ctx.selectOne().from(CHUNKS_1024)
+                    .where(CHUNKS_1024.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
+            .fetchOne(0, Integer.class);
     }
 
     /** UNION ALL of mismatched content rows across dims with recovered old_ref. */
