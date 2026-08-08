@@ -43,7 +43,11 @@ The Java CI (`service-ci.yml`) is **advisory** — it does not block auto-merge 
 > arg loop with a RETIRED message and exit 2. This step named `--guided` for
 > one cut after the retirement and would have failed the next engine cut at the
 > gate. Surviving journeys: `--era-hop`, `--package-upgrade`, `--shakeout`,
-> `--fullstack`, `--chash-window`, and the default `rehearse.sh` (Phases A/D/E).
+> `--fullstack`, `--chash-window`, `--stranded` (nexus-8nlj4: two-hop
+> stranded-redirect — armed-detector refusal + pin-side migration; weekly
+> heartbeat via stranded-redirect-rehearsal.yml, dispatch it on demand when a
+> cut touches stranded_install.py or the migration-rehearsal harness), and the
+> default `rehearse.sh` (Phases A/D/E).
 
 > **Ordering, still load-bearing.** `--shakeout` BUILDS the candidate locally
 > (`run.sh` does the GraalVM `-Ob` native build; only the retired `--cold` path

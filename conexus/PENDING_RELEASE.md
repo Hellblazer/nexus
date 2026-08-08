@@ -64,6 +64,14 @@ mechanize, it matters enough to ship.
   wheel has no emitter); self-healing via the same SessionStart block's
   `nx upgrade --auto` + the lockstep hook — state this in the release
   notes rather than letting it read as a regression report.
+- `conexus/skills/writing-nx-skills/SKILL.md` — nexus-h33x8.4 companion
+  doc edit (rode the same commit, declared late — caught by the drift
+  ledger at the 8nlj4 batch push): the "Updating using-nx-skills"
+  section now explains the SessionStart-delivery split — the injected
+  text is `GUIDANCE_IMPERATIVE` in `src/nexus/session_start_guidance.py`
+  (wheel, Tier B), so editing the skill's SKILL.md alone no longer
+  changes what a fresh session sees; keep both in sync by hand until
+  nexus-h33x8.5 diverges them deliberately. Doc-only; no behavior.
 - `conexus/hooks/scripts/version_lockstep_action.py` — the detached
   auto-upgrade now writes an always-on audit line per swap attempt
   (`lockstep_upgrade_started` / `lockstep_upgrade_result`) to
