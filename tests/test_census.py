@@ -18,23 +18,34 @@ from __future__ import annotations
 import json
 import pathlib
 import re
+from typing import Any
 
 import pytest
 from click.testing import CliRunner
 
 from nexus.census import (
+    LEDGER_NAME_CHARSET_RE,
+    MISSING_SUBAGENT_TYPE,
     SUBSTANTIAL_THRESHOLD,
     UNMEASURABLE_EMPTY,
     UNMEASURABLE_NO_TOOL_USE,
     UNMEASURABLE_UNPARSEABLE,
     UNMEASURABLE_UNREADABLE,
+    SessionDispatchCensus,
     census_corpus,
+    census_corpus_dispatches,
     census_session,
+    census_session_dispatches,
     classify_tool,
     count_tool_uses,
     default_project_dir,
+    dispatches_to_json,
+    find_suspect_dispatch_shaped_blocks,
+    iter_dispatches,
     iter_tool_use_blocks,
+    render_dispatches_text,
     render_text,
+    sanitize_dispatch_name,
     to_json,
 )
 from nexus.cli import main
@@ -57,6 +68,34 @@ def _assistant(*tool_names: str, sidechain: bool = False, ts: str = "2026-07-31T
             "role": "assistant",
             "content": [{"type": "tool_use", "name": n, "input": {}} for n in tool_names],
         },
+    }
+
+
+def _agent(
+    *dispatches: tuple[str | None, str | None],
+    sidechain: bool = False,
+    ts: str = "2026-07-31T12:00:00.000Z",
+) -> dict:
+    """Build one assistant record with Agent tool_use blocks.
+
+    Each element of ``dispatches`` is ``(subagent_type, description)``; a
+    ``None`` subagent_type omits ``input.subagent_type`` entirely (the
+    "malformed record" case a real transcript should not produce but a
+    recognizer must not crash on).
+    """
+    blocks = []
+    for subagent_type, description in dispatches:
+        block_input: dict[str, Any] = {}
+        if subagent_type is not None:
+            block_input["subagent_type"] = subagent_type
+        if description is not None:
+            block_input["description"] = description
+        blocks.append({"type": "tool_use", "name": "Agent", "input": block_input})
+    return {
+        "type": "assistant",
+        "isSidechain": sidechain,
+        "timestamp": ts,
+        "message": {"role": "assistant", "content": blocks},
     }
 
 
@@ -655,3 +694,505 @@ def test_unmeasurable_share_is_reported(tmp_path: pathlib.Path) -> None:
     assert result.exit_code == 0
     assert result.unmeasurable_share == pytest.approx(2 / 3)
     assert "66.7%" in render_text(result)
+
+
+# ============================================================================
+# nexus-h33x8.2 — dispatch recognition
+#
+# THE PROOF THIS SECTION EXISTS FOR: nexus-nu7fo recorded four consecutive
+# sessions where the RDR-184 ledger recognised 0 of N dispatched agents
+# (0/6, 0/10, 0/7, 0/2) because it keyed on a name-morphology the Agent
+# tool cannot produce. TestGoldenSessionDispatches below recognises all 7
+# of session 75695009's dispatches from the same transcript the ledger
+# saw and reported 0/7 against — that 0-vs-7 delta is the deliverable.
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# sanitize_dispatch_name
+# --------------------------------------------------------------------------
+
+def test_sanitize_verbatim_when_already_ledger_valid() -> None:
+    """AGENTS.md's hot-rule convention: verbatim, colon included, never invented.
+
+    This is VERIFICATION 4 from the bead, checked against the CURRENT
+    ledger charset (colon-inclusive, tests/e2e/lib/expectations.sh) rather
+    than the OLDER colon-excluding charset the bead's BUILD text quotes —
+    see LEDGER_NAME_CHARSET_RE's docstring for why sanitizing the colon
+    away would be wrong today.
+    """
+    sanitized, changed = sanitize_dispatch_name("conexus:substantive-critic")
+    assert sanitized == "conexus:substantive-critic"
+    assert changed is False
+    assert LEDGER_NAME_CHARSET_RE.match(sanitized)
+
+
+def test_sanitize_transforms_disallowed_interior_characters() -> None:
+    sanitized, changed = sanitize_dispatch_name("conexus/weird type!")
+    assert changed is True
+    assert LEDGER_NAME_CHARSET_RE.match(sanitized)
+    assert "/" not in sanitized
+    assert " " not in sanitized
+    assert "!" not in sanitized
+
+
+def test_sanitize_prefixes_a_non_alnum_leading_character() -> None:
+    sanitized, changed = sanitize_dispatch_name("-leading-dash")
+    assert changed is True
+    assert LEDGER_NAME_CHARSET_RE.match(sanitized)
+    assert sanitized[0].isalnum()
+
+
+def test_sanitize_truncates_over_64_chars() -> None:
+    raw = "a" * 100
+    sanitized, changed = sanitize_dispatch_name(raw)
+    assert changed is True
+    assert len(sanitized) == 64
+    assert LEDGER_NAME_CHARSET_RE.match(sanitized)
+
+
+def test_sanitize_empty_raw_gets_a_placeholder() -> None:
+    sanitized, changed = sanitize_dispatch_name("")
+    assert changed is True
+    assert sanitized
+    assert LEDGER_NAME_CHARSET_RE.match(sanitized)
+
+
+def test_sanitize_collision_two_distinct_raw_values_fold_together() -> None:
+    """Collision behavior: flagged, never silently merged.
+
+    Two DIFFERENT raw subagent_type strings that both scrub to the same
+    sanitized key must not look like one type dispatched twice to a
+    downstream consumer that only reads type_counts.
+    """
+    root_records = [_agent(("weird!type", "a"), ("weird?type", "b"))]
+    dispatches = iter_dispatches(root_records, session_id="s", scope="orchestrator")
+    assert len({d.subagent_type_sanitized for d in dispatches}) == 1
+
+    sess = SessionDispatchCensus(session_id="s", dispatches=dispatches)
+    collisions = sess.sanitize_collisions
+    assert len(collisions) == 1
+    assert set(collisions[0]["raw_values"]) == {"weird!type", "weird?type"}
+    # Not silently merged: type_counts still credits both under one key,
+    # which is exactly the fact sanitize_collisions exists to surface.
+    assert sess.type_counts[collisions[0]["sanitized"]] == 2
+
+
+# --------------------------------------------------------------------------
+# iter_dispatches / DispatchRecord
+# --------------------------------------------------------------------------
+
+def test_iter_dispatches_ignores_non_agent_tool_use() -> None:
+    """Falsify-by-deletion analog for the Agent-name filter: a fixture that
+    mixes Agent and non-Agent tool_use must not count the non-Agent ones.
+    If the ``block.get("name") != "Agent"`` guard in iter_dispatches were
+    ever deleted, this assertion would go from 1 to 3 and fail.
+    """
+    records = [_assistant("Bash", "Read"), _agent(("conexus:debugger", None))]
+    dispatches = iter_dispatches(records, session_id="s", scope="orchestrator")
+    assert len(dispatches) == 1
+    assert dispatches[0].subagent_type_sanitized == "conexus:debugger"
+
+
+# --------------------------------------------------------------------------
+# Rider 2 (fix round 2, 2026-08-08) — suspect non-Agent dispatch-shaped blocks
+# --------------------------------------------------------------------------
+
+def _non_agent_block_with_subagent_type(
+    tool_name: str, subagent_type: str, ts: str = "2026-07-31T12:00:00.000Z"
+) -> dict:
+    """A tool_use block that LOOKS like a dispatch but is not named Agent —
+    the drift signature Rider 2 asks the census to flag rather than silently
+    drop. Mirrors ``conexus/hooks/scripts/agent-dispatch-expect.sh``'s own
+    precedent: it special-cases ``"Task"`` as "the pre-rename spelling of
+    the same tool" alongside ``"Agent"``, proof this exact rename shape has
+    happened in this harness before.
+    """
+    return {
+        "type": "assistant",
+        "isSidechain": False,
+        "timestamp": ts,
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": tool_name,
+                    "input": {"subagent_type": subagent_type},
+                }
+            ],
+        },
+    }
+
+
+def test_find_suspect_dispatch_shaped_blocks_flags_renamed_tool() -> None:
+    records = [_non_agent_block_with_subagent_type("Task", "conexus:debugger")]
+    suspects = find_suspect_dispatch_shaped_blocks(records, scope="orchestrator")
+    assert len(suspects) == 1
+    assert suspects[0]["tool_name"] == "Task"
+    assert suspects[0]["subagent_type"] == "conexus:debugger"
+    assert suspects[0]["scope"] == "orchestrator"
+
+
+def test_find_suspect_dispatch_shaped_blocks_ignores_agent_and_no_subagent_type() -> None:
+    records = [_agent(("conexus:debugger", None)), _assistant("Bash")]
+    assert find_suspect_dispatch_shaped_blocks(records, scope="orchestrator") == []
+
+
+def test_census_session_dispatches_surfaces_suspects_without_failing_measurability(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Warn-only: a suspect block is reported, but does not push the
+    session to UNMEASURABLE and does not change exit_code."""
+    root = tmp_path / "p"
+    root.mkdir()
+    _write(
+        root / "s.jsonl",
+        [_agent(("conexus:debugger", "real")), _non_agent_block_with_subagent_type("Task", "conexus:deep-analyst")],
+    )
+    sess = census_session_dispatches(root, "s")
+    assert sess.measurable
+    assert sess.total_dispatches == 1  # the Task block is NOT counted as a recognized dispatch
+    assert len(sess.suspect_blocks) == 1
+    assert sess.suspect_blocks[0]["tool_name"] == "Task"
+
+    result = census_corpus_dispatches(root)
+    assert result.exit_code == 0
+    assert result.suspect_blocks_total == 1
+
+
+def test_render_dispatches_text_warns_on_suspect_blocks(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "p"
+    root.mkdir()
+    _write(root / "s.jsonl", [_non_agent_block_with_subagent_type("Task", "conexus:debugger")])
+    out = render_dispatches_text(census_corpus_dispatches(root))
+    assert "WARNING" in out
+    assert "Task" in out
+
+
+def test_dispatches_to_json_carries_suspect_blocks(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "p"
+    root.mkdir()
+    _write(root / "s.jsonl", [_non_agent_block_with_subagent_type("Task", "conexus:debugger")])
+    payload = json.loads(dispatches_to_json(census_corpus_dispatches(root)))
+    assert payload["suspect_blocks_total"] == 1
+    assert payload["sessions"][0]["suspect_blocks"][0]["tool_name"] == "Task"
+
+
+def test_iter_dispatches_assigns_type_ordinal_per_sanitized_type() -> None:
+    """type_ordinal disambiguates repeated same-type dispatches — the
+    reason BUILD asks for an ordinal at all."""
+    records = [
+        _agent(("conexus:code-review-expert", "first")),
+        _agent(("conexus:substantive-critic", "second")),
+        _agent(("conexus:code-review-expert", "third")),
+    ]
+    dispatches = iter_dispatches(records, session_id="s", scope="orchestrator")
+    ordinals = [(d.session_ordinal, d.type_ordinal, d.subagent_type_sanitized) for d in dispatches]
+    assert ordinals == [
+        (1, 1, "conexus:code-review-expert"),
+        (2, 1, "conexus:substantive-critic"),
+        (3, 2, "conexus:code-review-expert"),
+    ]
+
+
+def test_iter_dispatches_records_but_flags_missing_subagent_type() -> None:
+    """A dispatch with no input.subagent_type is still enumerated — dropping
+    the row would break VERIFICATION 2's raw-count equality — and keyed as
+    ``general-purpose``, matching what agent-dispatch-expect.sh's own EXPECT
+    row computes for the SAME omitted field (nexus-a795d:
+    ``str(ti.get("subagent_type") or "general-purpose")``). Review finding
+    S1 (fix round 2, 2026-08-08): the census must match the hook's key or
+    "pass subagent_type straight to expectations_expect" is false for every
+    one of these rows. ``subagent_type_missing``/``subagent_type_raw is
+    None`` remain the provenance flags distinguishing this from a REAL,
+    explicitly-general-purpose dispatch.
+    """
+    records = [_agent((None, "no type on this one"))]
+    dispatches = iter_dispatches(records, session_id="s", scope="orchestrator")
+    assert len(dispatches) == 1
+    d = dispatches[0]
+    assert d.subagent_type_missing is True
+    assert d.subagent_type_raw is None
+    assert d.subagent_type_sanitized == "general-purpose"
+    assert d.subagent_type_sanitized == MISSING_SUBAGENT_TYPE
+
+
+def test_to_dict_subagent_type_is_the_sanitized_ledger_consumable_form() -> None:
+    records = [_agent(("weird!type", "d"))]
+    d = iter_dispatches(records, session_id="s", scope="orchestrator")[0]
+    row = d.to_dict()
+    assert row["subagent_type"] == d.subagent_type_sanitized
+    assert row["subagent_type_raw"] == "weird!type"
+    assert LEDGER_NAME_CHARSET_RE.match(row["subagent_type"])
+
+
+# --------------------------------------------------------------------------
+# census_session_dispatches — non-vacuity and roll-up
+# --------------------------------------------------------------------------
+
+def test_session_with_no_agent_dispatch_is_a_measured_zero(tmp_path: pathlib.Path) -> None:
+    """A session that used other tools but dispatched nothing is NOT the
+    nexus-nu7fo defect class — it must not report UNMEASURABLE."""
+    root = tmp_path / "p"
+    root.mkdir()
+    _write(root / "s.jsonl", [_assistant("Bash", "Skill")])
+    sess = census_session_dispatches(root, "s")
+    assert sess.measurable
+    assert sess.total_dispatches == 0
+
+
+def test_session_with_zero_tool_use_blocks_is_unmeasurable(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "p"
+    root.mkdir()
+    _write(root / "s.jsonl", [{"type": "user", "message": {"role": "user", "content": "hi"}}])
+    sess = census_session_dispatches(root, "s")
+    assert not sess.measurable
+    assert sess.unmeasurable_reason == UNMEASURABLE_NO_TOOL_USE
+
+
+def test_empty_transcript_is_unmeasurable(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "p"
+    root.mkdir()
+    (root / "s.jsonl").write_text("")
+    sess = census_session_dispatches(root, "s")
+    assert not sess.measurable
+    assert sess.unmeasurable_reason == UNMEASURABLE_EMPTY
+
+
+def test_corrupt_transcript_is_unmeasurable(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "p"
+    root.mkdir()
+    (root / "s.jsonl").write_text("{not json\n{also not json\n")
+    sess = census_session_dispatches(root, "s")
+    assert not sess.measurable
+    assert sess.unmeasurable_reason == UNMEASURABLE_UNPARSEABLE
+
+
+def test_subagent_dispatch_rolls_up_to_parent_session(tmp_path: pathlib.Path) -> None:
+    """A subagent that itself dispatches a nested Agent must attribute to
+    the PARENT session, per .1's roll-up rule — not appear as its own
+    session or vanish."""
+    root = tmp_path / "p"
+    root.mkdir()
+    _write(root / "s.jsonl", [_assistant("Bash")])
+    _write(
+        root / "s" / "subagents" / "agent-a1.jsonl",
+        [_agent(("conexus:code-explorer", "nested"), sidechain=True)],
+    )
+    sess = census_session_dispatches(root, "s")
+    assert sess.total_dispatches == 1
+    assert sess.dispatches[0].scope == "subagent"
+    assert sess.dispatches[0].subagent_type_sanitized == "conexus:code-explorer"
+
+
+def test_type_ordinal_threads_across_files_within_one_session(tmp_path: pathlib.Path) -> None:
+    """Review finding I1 (fix round 2026-08-08): the same subagent_type
+    dispatched once in the orchestrator file and again in a subagent file
+    must land on type_ordinal [1, 2], not [1, 1] — a fresh per-file
+    Counter would silently produce duplicate (subagent_type, type_ordinal)
+    keys within one session, contradicting the BUILD contract.
+    """
+    root = tmp_path / "p"
+    root.mkdir()
+    _write(root / "s.jsonl", [_agent(("conexus:code-review-expert", "orch dispatch"))])
+    _write(
+        root / "s" / "subagents" / "agent-a1.jsonl",
+        [_agent(("conexus:code-review-expert", "nested dispatch"), sidechain=True)],
+    )
+    sess = census_session_dispatches(root, "s")
+    assert sess.total_dispatches == 2
+    type_ordinals = [d.type_ordinal for d in sess.dispatches]
+    assert type_ordinals == [1, 2]
+    assert sess.type_counts == {"conexus:code-review-expert": 2}
+    # session_ordinal keeps its own independent, already-correct sequence.
+    assert [d.session_ordinal for d in sess.dispatches] == [1, 2]
+
+
+def test_corpus_sanitize_collisions_span_sessions(tmp_path: pathlib.Path) -> None:
+    """Review finding M2 (fix round 2026-08-08): a collision can be
+    invisible at the SESSION level (each session contributes only one raw
+    value to the shared sanitized key) yet real at the CORPUS level, where
+    type_counts merges across sessions. Merging each session's own
+    (already-filtered, single-raw-value) collision list would miss this.
+    """
+    root = tmp_path / "p"
+    root.mkdir()
+    _write(root / "a.jsonl", [_agent(("weird!type", "in session a"))])
+    _write(root / "b.jsonl", [_agent(("weird?type", "in session b"))])
+
+    sess_a = census_session_dispatches(root, "a")
+    sess_b = census_session_dispatches(root, "b")
+    assert sess_a.sanitize_collisions == []  # no collision visible within EITHER session alone
+    assert sess_b.sanitize_collisions == []
+
+    result = census_corpus_dispatches(root)
+    assert result.type_counts == {"weird-type": 2}  # merged, as the ledger would see it
+    collisions = result.sanitize_collisions
+    assert len(collisions) == 1
+    assert collisions[0]["sanitized"] == "weird-type"
+    assert set(collisions[0]["raw_values"]) == {"weird!type", "weird?type"}
+
+
+def test_corpus_dispatches_reproduces_raw_agent_tool_use_count(tmp_path: pathlib.Path) -> None:
+    """VERIFICATION 2 in miniature: recognized count must equal the raw
+    Agent tool_use count from the same transcript, not merely a bucket
+    total that happens to look plausible."""
+    root = tmp_path / "p"
+    root.mkdir()
+    records = [
+        _agent(("conexus:code-review-expert", "a"), ("conexus:substantive-critic", "b")),
+        _assistant("Bash"),
+        _agent(("conexus:debugger", "c")),
+    ]
+    _write(root / "s.jsonl", records)
+    raw_counts, _ = count_tool_uses(records)
+    result = census_corpus_dispatches(root)
+    assert result.total_dispatches == raw_counts["Agent"] == 3
+
+
+# --------------------------------------------------------------------------
+# GOLDEN SESSION — VERIFICATION 1: exact recognized count and type multiset
+# --------------------------------------------------------------------------
+
+class TestGoldenSessionDispatches:
+    """Contrast with nexus-nu7fo's own recorded ledger result for the SAME
+    class of session: `checked=8 recognized=0`. This module recognizes all
+    7 dispatches in the frozen prefix — the 0-vs-7 delta is the proof the
+    bead asks to be printed side by side when it closes.
+    """
+
+    def test_golden_session_exact_dispatch_count(self) -> None:
+        result = census_corpus_dispatches(GOLDEN_FIXTURE, session=GOLDEN_SESSION)
+        assert result.exit_code == 0
+        assert result.total_dispatches == 7  # ledger recorded recognized=0 for this class
+
+    def test_golden_session_type_multiset(self) -> None:
+        sess = census_session_dispatches(GOLDEN_FIXTURE, GOLDEN_SESSION)
+        assert sess.type_counts == {
+            "conexus:code-review-expert": 2,
+            "conexus:substantive-critic": 2,
+            "conexus:debugger": 1,
+            "conexus:deep-analyst": 1,
+            "conexus:architect-planner": 1,
+        }
+
+    def test_golden_session_ordinals_disambiguate_repeated_types(self) -> None:
+        sess = census_session_dispatches(GOLDEN_FIXTURE, GOLDEN_SESSION)
+        ordinals = [(d.session_ordinal, d.type_ordinal, d.subagent_type_sanitized) for d in sess.dispatches]
+        assert ordinals == [
+            (1, 1, "conexus:code-review-expert"),
+            (2, 1, "conexus:substantive-critic"),
+            (3, 2, "conexus:code-review-expert"),
+            (4, 2, "conexus:substantive-critic"),
+            (5, 1, "conexus:debugger"),
+            (6, 1, "conexus:deep-analyst"),
+            (7, 1, "conexus:architect-planner"),
+        ]
+
+    def test_golden_session_no_sanitization_needed_but_verified(self) -> None:
+        """Every real subagent_type in the golden session already satisfies
+        the ledger charset verbatim — sanitization exists for the edge
+        case, not the common path."""
+        sess = census_session_dispatches(GOLDEN_FIXTURE, GOLDEN_SESSION)
+        assert all(not d.subagent_type_changed for d in sess.dispatches)
+        assert sess.sanitize_collisions == []
+
+    def test_golden_session_falsify_by_deletion(self) -> None:
+        """Delete the Agent-name filter (simulated: count ALL tool_use
+        blocks instead) and the golden count changes — proving the
+        assertions above depend on the filter rather than surviving its
+        removal vacuously (nexus-h33x8.1 VERIFICATION 4's own finding:
+        Skill-branch deletion is vacuous on this session, Agent is not)."""
+        sess = census_session(GOLDEN_FIXTURE, GOLDEN_SESSION)  # capability census
+        all_tool_use_total = sum(sess.orchestrator.values())
+        assert all_tool_use_total > 7  # Bash/Edit/Read/etc. alongside the 7 Agent calls
+
+
+# --------------------------------------------------------------------------
+# rendering / JSON
+# --------------------------------------------------------------------------
+
+def test_render_dispatches_text_marks_changed_rows(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "p"
+    root.mkdir()
+    _write(root / "s.jsonl", [_agent(("weird!type", "needs sanitizing"))])
+    out = render_dispatches_text(census_corpus_dispatches(root))
+    assert "*" in out
+    assert "needs sanitizing" in out
+    assert "N-of-type" in out
+
+
+def test_render_dispatches_text_flags_partial_parse(tmp_path: pathlib.Path) -> None:
+    """Rider 1 (fix round 2, 2026-08-08): a corrupted transcript tail must
+    not read as a clean, lower dispatch count in TEXT mode — the PARTIAL
+    fact JSON already carried via ``partial``/``parse_errors`` must also
+    render here, mirroring ``render_text``'s own PARTIAL block."""
+    root = tmp_path / "p"
+    root.mkdir()
+    (root / "s.jsonl").write_text(
+        json.dumps(_agent(("conexus:debugger", "before the corruption"))) + "\n{ truncated\n"
+    )
+    result = census_corpus_dispatches(root)
+    assert result.sessions[0].partial
+    out = render_dispatches_text(result)
+    assert "PARTIAL" in out
+    assert "1 line(s) skipped" in out
+
+
+def test_dispatches_to_json_row_shape(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "p"
+    root.mkdir()
+    _write(root / "s.jsonl", [_agent(("conexus:debugger", "d"))])
+    payload = json.loads(dispatches_to_json(census_corpus_dispatches(root)))
+    assert payload["total_dispatches"] == 1
+    assert payload["type_counts"] == {"conexus:debugger": 1}
+    row = payload["sessions"][0]["dispatches"][0]
+    assert row["subagent_type"] == "conexus:debugger"
+    assert row["session_ordinal"] == 1
+    assert row["type_ordinal"] == 1
+    assert payload["ledger_name_charset"] == LEDGER_NAME_CHARSET_RE.pattern
+
+
+def test_dispatches_unmeasurable_scope_error_reported(tmp_path: pathlib.Path) -> None:
+    result = census_corpus_dispatches(tmp_path / "nope")
+    assert result.exit_code != 0
+    assert "UNMEASURABLE" in render_dispatches_text(result)
+
+
+# --------------------------------------------------------------------------
+# CLI boundary
+# --------------------------------------------------------------------------
+
+def test_cli_dispatches_registered_on_census_group() -> None:
+    assert "dispatches" in census_group.commands
+
+
+def test_cli_dispatches_measurable_exits_zero(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "p"
+    root.mkdir()
+    _write(root / "s.jsonl", [_agent(("conexus:debugger", "d"))])
+    res = _invoke(["dispatches", "--project-dir", str(root)])
+    assert res.exit_code == 0, res.output
+    assert "Agent dispatch(es)" in res.output
+
+
+def test_cli_dispatches_unmeasurable_exits_nonzero(tmp_path: pathlib.Path) -> None:
+    res = _invoke(["dispatches", "--project-dir", str(tmp_path / "nope")])
+    assert res.exit_code != 0
+    assert "UNMEASURABLE" in res.output
+
+
+def test_cli_dispatches_json_mode_is_parseable(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "p"
+    root.mkdir()
+    _write(root / "s.jsonl", [_agent(("conexus:debugger", "d"))])
+    res = _invoke(["dispatches", "--project-dir", str(root), "--json"])
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["total_dispatches"] == 1
+
+
+def test_cli_dispatches_golden_session() -> None:
+    res = _invoke(["dispatches", "--project-dir", str(GOLDEN_FIXTURE), "--session", GOLDEN_SESSION])
+    assert res.exit_code == 0, res.output
+    assert "7 Agent dispatch(es)" in res.output

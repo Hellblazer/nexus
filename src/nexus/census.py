@@ -81,7 +81,12 @@ from typing import Any, Iterable, Iterator
 __all__ = [
     "CAPABILITIES",
     "CorpusCensus",
+    "CorpusDispatchCensus",
+    "DispatchRecord",
+    "LEDGER_NAME_CHARSET_RE",
+    "MISSING_SUBAGENT_TYPE",
     "SessionCensus",
+    "SessionDispatchCensus",
     "UNMEASURABLE_EMPTY",
     "UNMEASURABLE_MISSING",
     "UNMEASURABLE_NO_TOOL_USE",
@@ -89,12 +94,19 @@ __all__ = [
     "UNMEASURABLE_UNREADABLE",
     "SUBSTANTIAL_THRESHOLD",
     "census_corpus",
+    "census_corpus_dispatches",
     "census_session",
+    "census_session_dispatches",
     "classify_tool",
     "count_tool_uses",
     "default_project_dir",
+    "dispatches_to_json",
+    "find_suspect_dispatch_shaped_blocks",
+    "iter_dispatches",
     "iter_tool_use_blocks",
+    "render_dispatches_text",
     "render_text",
+    "sanitize_dispatch_name",
     "session_transcript_files",
     "to_json",
 ]
@@ -571,6 +583,498 @@ def census_corpus(
 
 
 # ---------------------------------------------------------------------------
+# dispatch recognition (nexus-h33x8.2)
+#
+# THE DEBT THIS PAYS: nexus-nu7fo recorded four consecutive sessions in
+# which the RDR-184 Gap-1 ledger recognised ZERO of N dispatched agents
+# (0/6, 0/10, 0/7, 0/2), because the guard keyed on a NAME-MORPHOLOGY
+# (``a<name>-<hash>``) the Agent tool has no ``name`` parameter to ever
+# produce. This section is the transcript-based recognizer nu7fo's own
+# fix option (a) called for: every ``Agent`` tool_use block already
+# carries ``input.subagent_type`` and ``input.description`` — verified,
+# not assumed, against session 75695009 and pinned by the golden fixture
+# below.
+#
+# SCOPE FENCE (binding, not a suggestion): this module SUPPLIES the
+# recognizer. It does not modify ``tests/e2e/lib/expectations.sh``, does
+# not change the ledger's verdict logic, and does not decide nu7fo's
+# resolution — that bead (closed 2026-08-07, superseded by the
+# dispatch-expect hook + the AGENTS.md verbatim-subagent-type convention)
+# owns that call.
+# ---------------------------------------------------------------------------
+
+#: The ledger's own name charset, mirrored READ-ONLY from
+#: ``expectations_expect`` in ``tests/e2e/lib/expectations.sh`` (its "Name
+#: charset" comment, current at time of writing). A plugin-namespaced
+#: ``subagent_type`` like ``conexus:substantive-critic`` ALREADY satisfies
+#: this — that is the point of AGENTS.md's hot-rule convention, "keyed on
+#: the subagent type verbatim, colon included — never an invented name"
+#: (nexus-nu7fo). This constant exists so the rare value that would NOT
+#: satisfy the ledger's charset is caught and reported instead of emitted
+#: silently mismatched.
+#:
+#: DISCREPANCY WITH THE BEAD'S OWN TEXT, stated rather than hidden:
+#: nexus-h33x8.2's BUILD section quotes an OLDER, colon-EXCLUDING charset
+#: (``^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$``) and says a colon "MUST be
+#: sanitized before emission". That was true of the PINNED plugin release
+#: at the time the bead was written. nexus-nu7fo's own comment history
+#: (2026-08-01, "PREMISE CORRECTION" / retraction / final confirmation)
+#: records the colon being ADDED to the live charset (nexus-qc4p1) and the
+#: bead closing on 2026-08-07 with the verbatim-with-colon convention
+#: adopted. Sanitizing the colon AWAY today would recreate the exact
+#: pairing failure the whole nu7fo saga is about — so this module follows
+#: the CURRENT charset, verbatim-preserving whenever the raw value already
+#: qualifies, and transforms only what the ledger would otherwise reject.
+LEDGER_NAME_CHARSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_:-]{0,63}$")
+
+#: Substituted when an ``Agent`` block carries no ``input.subagent_type``
+#: at all. This is NOT an invented placeholder — it is the harness's own
+#: documented default. ``conexus/hooks/scripts/agent-dispatch-expect.sh``
+#: (nexus-a795d) computes the EXPECT-row name identically:
+#:
+#:     # subagent_type ABSENT/EMPTY => general-purpose (nexus-a795d).
+#:     ...
+#:     str(ti.get("subagent_type") or "general-purpose"),
+#:
+#: because the harness itself starts a ``general-purpose`` agent for an
+#: omitted ``subagent_type`` — the dispatch is real, only the field is
+#: absent. A recognizer that emitted anything else here (the original
+#: ``"missing-subagent-type"`` sentinel this constant used to hold, review
+#: finding S1, nexus-h33x8.2 fix round 2 2026-08-08) would key its row
+#: DIFFERENTLY from the row the ledger's own hook already writes for the
+#: exact same dispatch, breaking "pass ``subagent_type`` straight to
+#: ``expectations_expect``" for every one of these rows (28/1304 in the
+#: live corpus at last count). Already ledger-charset valid, so it never
+#: itself needs sanitizing; ``DispatchRecord`` still flags
+#: ``subagent_type_missing`` (and keeps ``subagent_type_raw is None``) so
+#: this is never confused with a REAL ``general-purpose`` dispatch that
+#: had a properly-populated field.
+MISSING_SUBAGENT_TYPE = "general-purpose"
+
+
+def sanitize_dispatch_name(raw: str) -> tuple[str, bool]:
+    """Map a raw ``subagent_type`` to a form the ledger's charset accepts.
+
+    Returns ``(sanitized, changed)``. The common case — a plugin-namespaced
+    type such as ``conexus:substantive-critic`` — already matches
+    :data:`LEDGER_NAME_CHARSET_RE` and comes back UNCHANGED, verbatim
+    colon included; ``changed`` is only ``True`` for a value the ledger's
+    ``expectations_expect`` would otherwise reject outright (an empty
+    string, a leading non-alphanumeric character, an interior character
+    outside the charset, or a string over 64 characters). This function
+    never invents a name (nexus-nu7fo's central complaint) — it only
+    repairs what would fail validation.
+    """
+    if LEDGER_NAME_CHARSET_RE.match(raw):
+        return raw, False
+    scrubbed = re.sub(r"[^A-Za-z0-9_:-]", "-", raw)
+    if not scrubbed or not scrubbed[0].isalnum():
+        scrubbed = "x" + scrubbed
+    return scrubbed[:64], True
+
+
+@dataclass
+class DispatchRecord:
+    """One ``Agent`` tool_use block, decoded for the RDR-184 ledger.
+
+    ``session_ordinal`` numbers every Agent dispatch found for the session
+    in the same file-then-record order :func:`census_session` walks
+    (orchestrator file first, then subagent files). Within the subagent
+    files, that order is ``sorted(sub_dir.rglob(...))`` — LEXICOGRAPHIC BY
+    FILENAME, not temporal — so a cross-file ``session_ordinal`` sequence
+    is a stable display order, not proof of dispatch wall-clock order
+    (already the case pre-fix; noted explicitly per review, since the
+    ordinal is display-only doctrine anyway — see below). ``type_ordinal``
+    numbers only the occurrences of THIS record's sanitized
+    ``subagent_type`` — "the Nth dispatch of this type" — which is what
+    BUILD's "ordinal is required because the same type is dispatched
+    repeatedly" is actually disambiguating.
+
+    NEITHER ordinal is a ledger PAIRING key. ``tests/e2e/lib/
+    expectations.sh``'s own "WHY N-OF-TYPE AND NOT AN ORDINAL" comment
+    (read-only, not restated here beyond this pointer) establishes that no
+    per-instance identifier survives from the PreToolUse payload to the
+    SubagentStart payload, so an ordinal invented on this side could never
+    be paired against anything the hook writes. The ledger already
+    matches N EXPECT rows of a type against N STARTs of that type
+    (first-appearance order, credit-consuming); this module's
+    contribution is exposing that same N — see
+    ``SessionDispatchCensus.type_counts`` — with the ordinals kept as a
+    human display aid ("which one was #2") rather than a join key.
+    """
+
+    session_id: str
+    scope: str  # "orchestrator" | "subagent"
+    record_index: int
+    session_ordinal: int
+    type_ordinal: int
+    subagent_type_raw: str | None
+    subagent_type_missing: bool
+    subagent_type_sanitized: str
+    subagent_type_changed: bool
+    description: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        """``subagent_type`` here is the SANITIZED, ledger-consumable form —
+        what a caller should hand to ``expectations_expect``. The raw
+        transcript value is kept alongside for provenance."""
+        return {
+            "session_id": self.session_id,
+            "scope": self.scope,
+            "record_index": self.record_index,
+            "session_ordinal": self.session_ordinal,
+            "type_ordinal": self.type_ordinal,
+            "subagent_type": self.subagent_type_sanitized,
+            "subagent_type_raw": self.subagent_type_raw,
+            "subagent_type_missing": self.subagent_type_missing,
+            "subagent_type_sanitized_changed": self.subagent_type_changed,
+            "description": self.description,
+        }
+
+
+def iter_dispatches(
+    records: list[dict[str, Any]],
+    *,
+    session_id: str,
+    scope: str,
+    ordinal_start: int = 1,
+    type_counts: Counter[str] | None = None,
+) -> list[DispatchRecord]:
+    """Decode every ``Agent`` tool_use block in ``records`` into ``DispatchRecord``s.
+
+    Built on :func:`iter_tool_use_blocks` — its ``input`` is what carries
+    ``subagent_type`` / ``description``; a name-only counter (like
+    :func:`count_tool_uses`) would have discarded exactly what this needs,
+    which is why nexus-h33x8.1 exported the richer primitive for this
+    module to extend rather than duplicate.
+
+    ``type_counts`` is the running per-type ordinal counter, mutated in
+    place. It defaults to a FRESH counter (one call == one file's worth of
+    ordinals), which is correct for a single-file caller but WRONG for a
+    multi-file session: a caller walking several transcript files for one
+    session (:func:`census_session_dispatches`, orchestrator + subagent
+    files) must pass the SAME ``Counter`` across every call — exactly as it
+    already threads ``ordinal_start`` — or two dispatches of the same type
+    in different files both land on ``type_ordinal=1`` instead of ``[1, 2]``
+    (review finding I1, nexus-h33x8.2 fix round 2026-08-08).
+    """
+    out: list[DispatchRecord] = []
+    type_seen: Counter[str] = type_counts if type_counts is not None else Counter()
+    ordinal = ordinal_start
+    for index, block in iter_tool_use_blocks(records):
+        if block.get("name") != "Agent":
+            continue
+        block_input = block.get("input") or {}
+        raw = block_input.get("subagent_type")
+        missing = raw is None
+        sanitized, changed = sanitize_dispatch_name(raw if raw is not None else MISSING_SUBAGENT_TYPE)
+        type_seen[sanitized] += 1
+        out.append(
+            DispatchRecord(
+                session_id=session_id,
+                scope=scope,
+                record_index=index,
+                session_ordinal=ordinal,
+                type_ordinal=type_seen[sanitized],
+                subagent_type_raw=raw,
+                subagent_type_missing=missing,
+                subagent_type_sanitized=sanitized,
+                subagent_type_changed=changed,
+                description=block_input.get("description"),
+            )
+        )
+        ordinal += 1
+    return out
+
+
+def find_suspect_dispatch_shaped_blocks(
+    records: list[dict[str, Any]], *, scope: str
+) -> list[dict[str, Any]]:
+    """Flag ``tool_use`` blocks that LOOK like a dispatch but are not named ``Agent``.
+
+    Rider 2 (fix round 2, nexus-h33x8.2, 2026-08-08): the one structurally
+    silent drift shape this recognizer cannot detect from its own count
+    alone is an Agent-block-specific rename or restructure — every OTHER
+    tool_use still parses and counts normally, dispatches quietly stop
+    being recognized, and nothing here goes UNMEASURABLE because the
+    transcript is perfectly well-formed. This repo has already lived
+    through exactly this shape once: ``conexus/hooks/scripts/
+    agent-dispatch-expect.sh`` still special-cases ``"Task"`` as "the
+    pre-rename spelling of the same tool" alongside ``"Agent"``. A block
+    named anything other than ``Agent`` that nonetheless carries
+    ``input.subagent_type`` is the same signature — flagged here, NOT
+    silently dropped and NOT failing the census (this is a WARNING, not an
+    UNMEASURABLE reason; the census still trusts its own Agent-only count).
+    """
+    suspects: list[dict[str, Any]] = []
+    for index, block in iter_tool_use_blocks(records):
+        name = block.get("name")
+        if name == "Agent":
+            continue
+        subagent_type = (block.get("input") or {}).get("subagent_type")
+        if subagent_type:
+            suspects.append(
+                {
+                    "scope": scope,
+                    "record_index": index,
+                    "tool_name": name,
+                    "subagent_type": subagent_type,
+                }
+            )
+    return suspects
+
+
+@dataclass
+class SessionDispatchCensus:
+    """One session's recognized Agent dispatches."""
+
+    session_id: str
+    dispatches: list[DispatchRecord] = field(default_factory=list)
+    suspect_blocks: list[dict[str, Any]] = field(default_factory=list)
+    parse_errors: int = 0
+    subagent_files: int = 0
+    records_seen: int = 0
+    last_timestamp: str | None = None
+    unmeasurable_reason: str | None = None
+
+    @property
+    def measurable(self) -> bool:
+        return self.unmeasurable_reason is None
+
+    @property
+    def partial(self) -> bool:
+        return self.measurable and self.parse_errors > 0
+
+    @property
+    def total_dispatches(self) -> int:
+        return len(self.dispatches)
+
+    @property
+    def type_counts(self) -> dict[str, int]:
+        """N-of-type per SANITIZED subagent_type.
+
+        This is what the ledger's N-of-type credit matching
+        (``tests/e2e/lib/expectations.sh``) actually consumes — NOT the
+        ordinal, see :class:`DispatchRecord`'s docstring for why an
+        ordinal cannot be a pairing key in this harness.
+        """
+        return dict(Counter(d.subagent_type_sanitized for d in self.dispatches))
+
+    @property
+    def sanitize_collisions(self) -> list[dict[str, Any]]:
+        """Sanitized names produced by more than one DISTINCT raw value.
+
+        Collision behavior: rows are never silently merged. Two different
+        raw ``subagent_type`` strings folding to the same ledger key would
+        otherwise let a downstream consumer double-credit two different
+        agent types as if they were one; this surfaces the fact instead so
+        it can be inspected. Two dispatches sharing the SAME raw value
+        (the common, expected case — a type dispatched more than once) is
+        not a collision, it is exactly what ``type_ordinal`` disambiguates.
+        """
+        by_sanitized: dict[str, set[str]] = {}
+        for d in self.dispatches:
+            raw_key = d.subagent_type_raw if d.subagent_type_raw is not None else MISSING_SUBAGENT_TYPE
+            by_sanitized.setdefault(d.subagent_type_sanitized, set()).add(raw_key)
+        return [
+            {"sanitized": sanitized, "raw_values": sorted(raws)}
+            for sanitized, raws in sorted(by_sanitized.items())
+            if len(raws) > 1
+        ]
+
+
+def census_session_dispatches(project_dir: pathlib.Path, session_id: str) -> SessionDispatchCensus:
+    """Census one session's Agent dispatches.
+
+    Reuses :func:`session_transcript_files` rather than restating the
+    file-walk or the parent-attribution roll-up — nexus-h33x8.1 exported
+    it precisely so this bead would not duplicate it (the dual-maintenance
+    class this repo's daemon-lifecycle hot rule already names as
+    recurring). The UNMEASURABLE-reason precedence mirrors
+    :func:`census_session` exactly, substituting "found ANY tool_use
+    block" for "found ANY dispatch" as the measurability signal — a
+    session that used other tools but dispatched nothing is a MEASURED
+    zero dispatch count, not a fourth unmeasurable reason.
+    """
+    main, sub_paths, traversal_error = session_transcript_files(project_dir, session_id)
+
+    dispatches: list[DispatchRecord] = []
+    errors = 0
+    records_seen = 0
+    total_tool_use_blocks = 0
+    stamps: list[str] = []
+    sub_files = 0
+    found_any_file = False
+    unreadable = traversal_error
+    ordinal = 1
+    # SAME counter across every file in the session, mirroring ordinal_start
+    # above — a type dispatched once in the orchestrator file and again in a
+    # subagent file must land on type_ordinal [1, 2], not [1, 1] (review
+    # finding I1, nexus-h33x8.2 fix round 2026-08-08). A fresh Counter per
+    # file would silently produce duplicate (subagent_type, type_ordinal)
+    # keys within one session.
+    type_counts: Counter[str] = Counter()
+    suspect_blocks: list[dict[str, Any]] = []
+
+    for path, scope in [(main, "orchestrator")] + [(p, "subagent") for p in sub_paths]:
+        if path is None:
+            continue
+        found_any_file = True
+        if scope == "subagent":
+            sub_files += 1
+        records, errs, could_not_read = _parse_jsonl(path)
+        total_tool_use_blocks += sum(1 for _ in iter_tool_use_blocks(records))
+        decoded = iter_dispatches(
+            records,
+            session_id=session_id,
+            scope=scope,
+            ordinal_start=ordinal,
+            type_counts=type_counts,
+        )
+        dispatches.extend(decoded)
+        ordinal += len(decoded)
+        # Rider 2: warn-only drift signal, never gates measurability.
+        suspect_blocks.extend(find_suspect_dispatch_shaped_blocks(records, scope=scope))
+        errors += errs
+        unreadable = unreadable or could_not_read
+        records_seen += len(records)
+        if (ts := _last_timestamp(records)) is not None:
+            stamps.append(ts)
+
+    census = SessionDispatchCensus(
+        session_id=session_id,
+        dispatches=dispatches,
+        suspect_blocks=suspect_blocks,
+        parse_errors=errors,
+        subagent_files=sub_files,
+        records_seen=records_seen,
+        last_timestamp=max(stamps) if stamps else None,
+    )
+
+    # Same precedence as census_session: no file at all, then "found some
+    # signal", then unreadable, then empty/unparseable/no-tool-use. Each is
+    # a different fact about the measurement.
+    if not found_any_file and not traversal_error:
+        census.unmeasurable_reason = UNMEASURABLE_MISSING
+    elif total_tool_use_blocks > 0:
+        census.unmeasurable_reason = None
+    elif unreadable:
+        census.unmeasurable_reason = UNMEASURABLE_UNREADABLE
+    elif records_seen == 0 and errors == 0:
+        census.unmeasurable_reason = UNMEASURABLE_EMPTY
+    elif records_seen == 0:
+        census.unmeasurable_reason = UNMEASURABLE_UNPARSEABLE
+    else:
+        census.unmeasurable_reason = UNMEASURABLE_NO_TOOL_USE
+    return census
+
+
+@dataclass
+class CorpusDispatchCensus:
+    """Aggregate dispatch recognition over the sessions in scope."""
+
+    project_dir: pathlib.Path
+    sessions: list[SessionDispatchCensus] = field(default_factory=list)
+    unmeasurable: list[SessionDispatchCensus] = field(default_factory=list)
+    scope_error: str | None = None
+
+    @property
+    def measurable_sessions(self) -> int:
+        return len(self.sessions)
+
+    @property
+    def unmeasurable_sessions(self) -> int:
+        return len(self.unmeasurable)
+
+    @property
+    def unmeasurable_by_reason(self) -> dict[str, int]:
+        return dict(Counter(s.unmeasurable_reason or "?" for s in self.unmeasurable))
+
+    @property
+    def exit_code(self) -> int:
+        """Non-zero only when the run measured *nothing* — see census_corpus."""
+        return 0 if self.measurable_sessions else 1
+
+    @property
+    def total_dispatches(self) -> int:
+        return sum(s.total_dispatches for s in self.sessions)
+
+    @property
+    def type_counts(self) -> dict[str, int]:
+        totals: Counter[str] = Counter()
+        for sess in self.sessions:
+            totals.update(sess.type_counts)
+        return dict(totals)
+
+    @property
+    def sanitize_collisions(self) -> list[dict[str, Any]]:
+        """Corpus-wide collisions, RECOMPUTED over every dispatch's raw
+        value — not merged from each session's own (already-filtered)
+        collision list.
+
+        Merging per-session collisions would miss a cross-session
+        collision: session A contributing only ``"weird!type"`` and
+        session B only ``"weird?type"`` each shows ZERO collisions on its
+        own (one raw value per sanitized key, within that session), yet
+        both fold to the same corpus-level ``type_counts`` key. Review
+        finding M2, nexus-h33x8.2 fix round 2026-08-08.
+        """
+        by_sanitized: dict[str, set[str]] = {}
+        for sess in self.sessions:
+            for d in sess.dispatches:
+                raw_key = (
+                    d.subagent_type_raw if d.subagent_type_raw is not None else MISSING_SUBAGENT_TYPE
+                )
+                by_sanitized.setdefault(d.subagent_type_sanitized, set()).add(raw_key)
+        return [
+            {"sanitized": k, "raw_values": sorted(v)}
+            for k, v in sorted(by_sanitized.items())
+            if len(v) > 1
+        ]
+
+    @property
+    def suspect_blocks_total(self) -> int:
+        """Corpus-wide count of Rider-2 drift-signal blocks — see
+        :func:`find_suspect_dispatch_shaped_blocks`. Warn-only; never
+        affects ``exit_code``."""
+        return sum(len(s.suspect_blocks) for s in self.sessions)
+
+
+def census_corpus_dispatches(
+    project_dir: pathlib.Path, *, session: str | None = None
+) -> CorpusDispatchCensus:
+    """Census every session's Agent dispatches under ``project_dir`` (or just one).
+
+    Scoping and ``scope_error`` precedence mirror :func:`census_corpus`.
+    """
+    result = CorpusDispatchCensus(project_dir=project_dir)
+
+    if not project_dir.is_dir():
+        result.scope_error = f"project dir not found: {project_dir}"
+        return result
+
+    if session:
+        ids, listing_failed = [session], False
+    else:
+        ids, listing_failed = _session_ids(project_dir)
+    if listing_failed:
+        result.scope_error = f"project dir could not be listed: {project_dir}"
+        return result
+    if not ids:
+        result.scope_error = f"no session transcripts under {project_dir}"
+        return result
+
+    for session_id in ids:
+        sess = census_session_dispatches(project_dir, session_id)
+        (result.sessions if sess.measurable else result.unmeasurable).append(sess)
+
+    if session and not result.sessions:
+        if all(s.unmeasurable_reason == UNMEASURABLE_MISSING for s in result.unmeasurable):
+            result.scope_error = f"session not found: {session}"
+    return result
+
+
+# ---------------------------------------------------------------------------
 # rendering
 # ---------------------------------------------------------------------------
 
@@ -712,6 +1216,156 @@ def to_json(result: CorpusCensus) -> str:
                 "partial": s.partial,
                 "substantial": s.substantial,
                 "last_timestamp": s.last_timestamp,
+            }
+            for s in result.sessions
+        ],
+        "unmeasurable": [
+            {
+                "session_id": s.session_id,
+                "reason": s.unmeasurable_reason,
+                "parse_errors": s.parse_errors,
+                "subagent_files": s.subagent_files,
+            }
+            for s in result.unmeasurable
+        ],
+    }
+    return json.dumps(payload, indent=2, sort_keys=True)
+
+
+# ---------------------------------------------------------------------------
+# dispatch recognition — rendering (nexus-h33x8.2)
+# ---------------------------------------------------------------------------
+
+_DISPATCH_VERDICT_REFUSAL = (
+    "Recognized dispatches only. This does NOT verify EXPECT rows were "
+    "written, does NOT compute undeclared/BLINDSPOT, and does not modify "
+    "or replace tests/e2e/lib/expectations.sh (nexus-h33x8.2 scope fence "
+    "— that ledger's own resolution is nexus-nu7fo's call). 'subagent_type' "
+    "below is the SANITIZED, ledger-consumable form; a '*' marks a row "
+    "where sanitization changed the raw transcript value."
+)
+
+
+def render_dispatches_text(result: CorpusDispatchCensus) -> str:
+    """Human-readable dispatch report. Measured zero and measured nothing differ."""
+    lines: list[str] = []
+
+    if result.scope_error:
+        lines.append(f"UNMEASURABLE: {result.scope_error}")
+        lines.append("")
+        lines.append(_DISPATCH_VERDICT_REFUSAL)
+        return "\n".join(lines) + "\n"
+
+    n = result.measurable_sessions
+    lines.append(f"Dispatch census — {result.project_dir}")
+    lines.append(
+        f"{n} measurable session(s); {result.total_dispatches} Agent dispatch(es) "
+        "recognised in total. Subagent dispatches roll up to their PARENT session."
+    )
+    if result.suspect_blocks_total:
+        lines.append(
+            f"WARNING: {result.suspect_blocks_total} non-Agent tool_use block(s) carrying "
+            "input.subagent_type across the corpus — see per-session WARNING lines below."
+        )
+    lines.append("")
+
+    for sess in result.sessions:
+        lines.append(f"session {sess.session_id}  ({sess.total_dispatches} dispatch(es))")
+        if sess.dispatches:
+            header = f"{'ord':>4} {'type-ord':>8} {'scope':<11} subagent_type"
+            lines.append(header)
+            lines.append("-" * len(header))
+            for d in sess.dispatches:
+                marker = "*" if d.subagent_type_changed else " "
+                desc = f"  # {d.description}" if d.description else ""
+                lines.append(
+                    f"{d.session_ordinal:>4} {d.type_ordinal:>8} {d.scope:<11} "
+                    f"{marker}{d.subagent_type_sanitized}{desc}"
+                )
+            lines.append("")
+            lines.append("  N-of-type (what the ledger's credit matching consumes):")
+            for t, c in sorted(sess.type_counts.items()):
+                lines.append(f"    {t:<48} {c:>3}")
+            if sess.sanitize_collisions:
+                lines.append("  SANITIZE COLLISIONS (distinct raw values folded to one key):")
+                for collision in sess.sanitize_collisions:
+                    lines.append(
+                        f"    {collision['sanitized']}: {', '.join(collision['raw_values'])}"
+                    )
+        else:
+            lines.append("  (no Agent dispatch — measured zero, not unmeasurable)")
+        if sess.suspect_blocks:
+            lines.append(
+                f"  WARNING: {len(sess.suspect_blocks)} non-Agent tool_use block(s) carried "
+                "input.subagent_type — possible Agent-block rename/drift, NOT counted above:"
+            )
+            for suspect in sess.suspect_blocks:
+                lines.append(
+                    f"    scope={suspect['scope']} record={suspect['record_index']} "
+                    f"name={suspect['tool_name']!r} subagent_type={suspect['subagent_type']!r}"
+                )
+        lines.append("")
+
+    # Rider 1 (fix round 2, nexus-h33x8.2, 2026-08-08): without this block a
+    # corrupted-tail transcript silently read as a clean, lower dispatch
+    # count in text mode — the same fact JSON already carries via
+    # ``partial``/``parse_errors`` on each session, just never rendered here.
+    partial = [s for s in result.sessions if s.partial]
+    if partial:
+        lines.append(
+            f"PARTIAL: {len(partial)} measured session(s) had unparseable lines "
+            f"({sum(s.parse_errors for s in partial)} line(s) skipped) — the "
+            "dispatch count above may be an undercount, not a clean total."
+        )
+        lines.append("")
+
+    if result.unmeasurable:
+        lines.append(
+            f"UNMEASURABLE: {result.unmeasurable_sessions} session(s) yielded no "
+            "measurement — NOT a zero:"
+        )
+        for reason, count in sorted(result.unmeasurable_by_reason.items()):
+            lines.append(f"    {reason:<24} {count:>4d}")
+        lines.append("")
+
+    lines.append(_DISPATCH_VERDICT_REFUSAL)
+    return "\n".join(lines) + "\n"
+
+
+def dispatches_to_json(result: CorpusDispatchCensus) -> str:
+    """Machine-readable dispatch report.
+
+    Each row's ``subagent_type`` is the SANITIZED, ledger-consumable
+    form — pass it straight to ``expectations_expect``. ``type_counts``
+    (per session and aggregate) is the N-of-type figure the ledger's own
+    credit matching actually consumes; ordinals are exposed for display
+    only, see :class:`DispatchRecord`.
+    """
+    payload: dict[str, Any] = {
+        "project_dir": str(result.project_dir),
+        "scope_error": result.scope_error,
+        "measurable_sessions": result.measurable_sessions,
+        "unmeasurable_sessions": result.unmeasurable_sessions,
+        "unmeasurable_by_reason": result.unmeasurable_by_reason,
+        "exit_code": result.exit_code,
+        "total_dispatches": result.total_dispatches,
+        "type_counts": result.type_counts,
+        "sanitize_collisions": result.sanitize_collisions,
+        "suspect_blocks_total": result.suspect_blocks_total,
+        "ledger_name_charset": LEDGER_NAME_CHARSET_RE.pattern,
+        "verdict_refusal": _DISPATCH_VERDICT_REFUSAL,
+        "sessions": [
+            {
+                "session_id": s.session_id,
+                "total_dispatches": s.total_dispatches,
+                "type_counts": s.type_counts,
+                "sanitize_collisions": s.sanitize_collisions,
+                "suspect_blocks": s.suspect_blocks,
+                "subagent_files": s.subagent_files,
+                "parse_errors": s.parse_errors,
+                "partial": s.partial,
+                "last_timestamp": s.last_timestamp,
+                "dispatches": [d.to_dict() for d in s.dispatches],
             }
             for s in result.sessions
         ],
