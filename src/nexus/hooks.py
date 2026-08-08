@@ -183,7 +183,45 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
     # RDR-155 P4b: the substrate-migration bridge notice (nexus-0rwwv) died
     # with the migration machinery; stranded pre-PG installs are redirected
     # to the LAST_MIGRATION_CAPABLE release by the stranded-install detector.
-    return f"Nexus ready (session: {session_id})."
+    return f"Nexus ready (session: {session_id}).{_stale_mcp_host_warning()}"
+
+
+def _stale_mcp_host_warning() -> str:
+    """One-line SessionStart nudge when a live nx-mcp/nx-mcp-catalog process
+    (this session's or ANOTHER live session's — machine-wide, unscoped)
+    predates the installed conexus distribution.
+
+    nexus-otnvr item 5 (substantive-critic 2026-08-08): ``nx doctor``'s
+    "Process freshness" check (:func:`nexus.health._check_process_skew`,
+    nexus-4xgfy) already detects this, but only when an operator happens to
+    run ``nx doctor`` by hand — every OTHER live session stays blind to a
+    background upgrade until it hits an import error mid tool-call (the
+    reactive :mod:`nexus.mcp._stale_host` decorator). ``nx hook
+    session-start`` is the one hook-surface invocation that already runs
+    the FULL installed ``nx`` (not a bare, package-less interpreter like
+    the other SessionStart scripts), so this is the cheapest proactive
+    close for that gap: every NEW session announces it if ANY nx-mcp
+    process anywhere on the box is stale — reusing
+    :func:`nexus.upgrade_finish.detect_stale_processes` directly, the
+    identical primitive doctor calls, so the two surfaces can never
+    diverge on what "stale" means.
+
+    Never raises — a probe failure here must not break session start
+    (mirrors every other best-effort leg in this module).
+    """
+    try:
+        from nexus.upgrade_finish import detect_stale_processes  # noqa: PLC0415 — deferred import, only needed on this path
+        report = detect_stale_processes()
+    except Exception:  # noqa: BLE001 — session start must never break on this probe
+        return ""
+    hosts = [p for p in report.stale if p.kind == "mcp-host"]
+    if not hosts:
+        return ""
+    return (
+        f" NOTE: {len(hosts)} nx-mcp process(es) on this box predate the "
+        f"installed conexus {report.installed_version} — if tool calls "
+        f"start failing with import errors, run /mcp to reconnect."
+    )
 
 
 # -- SessionEnd ---------------------------------------------------------------

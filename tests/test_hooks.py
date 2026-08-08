@@ -353,3 +353,96 @@ def test_session_start_carries_no_migration_notice(monkeypatch):
     assert "Nexus ready" in output
     assert "storage migration" not in output
     assert "guided-upgrade" not in output
+
+
+# ── nexus-otnvr item 5: proactive stale-mcp-host SessionStart nudge ─────────
+#
+# substantive-critic 2026-08-08: doctor's Process freshness check
+# (nexus-4xgfy) only fires when an operator manually runs `nx doctor` —
+# every OTHER live Claude session stays blind to a background upgrade.
+# `nx hook session-start` is the one hook-surface invocation that runs the
+# full installed nx (package imports available, unlike the bare-interpreter
+# hook scripts), so it's the cheapest proactive close: every NEW session
+# announces machine-wide nx-mcp staleness via the identical primitive
+# doctor uses (nexus.upgrade_finish.detect_stale_processes), so the two
+# surfaces can never diverge on what "stale" means.
+
+
+class _FakeStaleProcess:
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+
+
+class _FakeSkewReport:
+    def __init__(self, *, stale: list, installed_version: str = "9.9.9") -> None:
+        self.stale = stale
+        self.installed_version = installed_version
+
+
+class TestStaleMcpHostSessionStartNudge:
+    def test_no_stale_processes_appends_nothing(self, monkeypatch) -> None:
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch(
+                "nexus.upgrade_finish.detect_stale_processes",
+                return_value=_FakeSkewReport(stale=[]),
+            ),
+        ):
+            output = session_start(claude_session_id="s-otnvr-clean")
+        assert "Nexus ready" in output
+        assert "NOTE" not in output
+        assert "predate" not in output
+
+    def test_stale_non_mcp_process_appends_nothing(self, monkeypatch) -> None:
+        """Only mcp-host staleness is this session's business — a stale
+        aspect-worker/mineru/service process is doctor's/restart-stale's
+        job, not a SessionStart nudge."""
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch(
+                "nexus.upgrade_finish.detect_stale_processes",
+                return_value=_FakeSkewReport(stale=[_FakeStaleProcess("aspect-worker")]),
+            ),
+        ):
+            output = session_start(claude_session_id="s-otnvr-other-kind")
+        assert "NOTE" not in output
+
+    def test_stale_mcp_host_appends_warning_with_version_and_mcp_hint(
+        self, monkeypatch
+    ) -> None:
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch(
+                "nexus.upgrade_finish.detect_stale_processes",
+                return_value=_FakeSkewReport(
+                    stale=[_FakeStaleProcess("mcp-host"), _FakeStaleProcess("mcp-host")],
+                    installed_version="7.5.0",
+                ),
+            ),
+        ):
+            output = session_start(claude_session_id="s-otnvr-stale")
+        assert "Nexus ready" in output
+        assert "NOTE" in output
+        assert "2 nx-mcp process(es)" in output
+        assert "7.5.0" in output
+        assert "/mcp" in output
+
+    def test_probe_failure_never_breaks_session_start(self, monkeypatch) -> None:
+        from unittest.mock import patch as _patch
+
+        def boom():
+            raise RuntimeError("ps unavailable")
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch("nexus.upgrade_finish.detect_stale_processes", side_effect=boom),
+        ):
+            output = session_start(claude_session_id="s-otnvr-probe-fail")
+        assert "Nexus ready" in output
+        assert "NOTE" not in output

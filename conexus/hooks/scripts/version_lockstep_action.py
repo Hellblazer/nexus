@@ -84,6 +84,71 @@ def marker_path() -> Path:
     return Path.home() / ".config" / "nexus" / "cli_lockstep_marker"
 
 
+def log_path() -> Path:
+    """Per-user durable log of every actual venv-mutating lockstep attempt.
+
+    nexus-otnvr item 4: a live 7.4.0 session found the tool venv already
+    swapped to PyPI at session start (dist-info mtime 00:17, MCP servers
+    spawning 00:17:31 — the swap RACED the server boot) with no way to tell
+    afterward that this action had run, let alone when or with what
+    outcome. ``debug()`` above is gated behind ``NX_HOOK_DEBUG=1`` and
+    ``dispatch_action()`` (the hook) launches this script with stdout/stderr
+    both DEVNULL'd (fire-and-forget, CA-4) — so nothing this script prints
+    is EVER visible by default, debug flag or not. This log is the loud,
+    always-on, un-gated record: one line per actual `uv tool upgrade`
+    attempt and one line per its outcome, appended regardless of
+    NX_HOOK_DEBUG. ``NX_LOCKSTEP_LOG`` overrides the location for tests,
+    mirroring ``NX_LOCKSTEP_MARKER``.
+    """
+    override = os.environ.get("NX_LOCKSTEP_LOG")
+    if override:
+        return Path(override)
+    return Path.home() / ".config" / "nexus" / "lockstep.log"
+
+
+#: code-review Important-3 (2026-08-08): a bare unbounded `open("a")`
+#: append has no rotation. In practice this is ~2 lines per infrequent
+#: swap event, but an explicit cap costs one `stat()` and is cheap
+#: insurance. Deliberately NOT `logging.handlers.RotatingFileHandler` —
+#: this hook keeps a minimal footprint (same posture as
+#: ``uv_receipt_present``'s docstring: it avoids importing the ``nexus``
+#: package itself). A manual single-generation rotate (active file ->
+#: `.1`, overwriting any prior `.1`) via `Path.replace()` (an atomic
+#: POSIX rename) is enough. ``NX_LOCKSTEP_LOG_MAX_BYTES`` overrides the
+#: threshold for tests.
+_DEFAULT_LOG_MAX_BYTES = 1_000_000
+
+
+def _log_max_bytes() -> int:
+    try:
+        return int(os.environ.get("NX_LOCKSTEP_LOG_MAX_BYTES", str(_DEFAULT_LOG_MAX_BYTES)))
+    except (TypeError, ValueError):
+        return _DEFAULT_LOG_MAX_BYTES
+
+
+def log_event(event: str, **fields: str) -> None:
+    """Append one human-readable, timestamped line — ALWAYS, never gated
+    behind NX_HOOK_DEBUG (that is precisely the gap this closes). Best
+    effort: an unwritable config dir must never break the action."""
+    import datetime  # noqa: PLC0415 — stdlib, deferred for startup cost
+
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    kv = " ".join(f"{k}={v}" for k, v in fields.items())
+    line = f"{ts} {event} {kv}".rstrip() + "\n"
+    try:
+        path = log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if path.stat().st_size > _log_max_bytes():
+                path.replace(path.with_name(path.name + ".1"))
+        except FileNotFoundError:
+            pass
+        with path.open("a") as f:
+            f.write(line)
+    except OSError as exc:
+        debug(f"log_event failed (non-fatal): {exc}")
+
+
 def uv_receipt_present() -> bool:
     """True iff conexus was installed via ``uv tool`` (receipt present).
 
@@ -204,25 +269,48 @@ def main(argv: list[str]) -> None:
         # 2. No-op fast path: CLI already at or above target -> record
         #    lockstep and stop (also handles the plugin-downgrade case where
         #    the installed CLI is ahead of the pinned plugin version).
-        if satisfies(installed_nx_version(), target):
+        # nexus-otnvr item 4: capture this ONCE and reuse it as the "before"
+        # value for the started-log below — a second installed_nx_version()
+        # call here would be a second real `nx --version` subprocess for no
+        # behavioral gain, and (test seam note) would consume a second
+        # element from callers' scripted installed_versions() sequences.
+        before = installed_nx_version()
+        if satisfies(before, target):
             debug(f"nx already satisfies target {target}; writing marker")
             write_marker(target)
             return
 
         # 3. Two-command safe upgrade, strict order. Stop on first failure
-        #    so a failed binary upgrade never proceeds to migrations.
+        #    so a failed binary upgrade never proceeds to migrations. LOUD
+        #    (nexus-otnvr item 4): this is the actual venv-mutating step —
+        #    log it starting, unconditionally, before it can race anything
+        #    (an MCP host booting concurrently, another `nx` invocation).
+        log_event(
+            "lockstep_upgrade_started", target=target, installed=str(before),
+        )
         if not run_cmd(["uv", "tool", "upgrade", "conexus"], timeout=_UV_TIMEOUT):
             debug("uv tool upgrade failed; leaving marker stale for retry")
+            log_event("lockstep_upgrade_result", target=target, outcome="uv_upgrade_failed")
             return
         if not run_cmd(["nx", "upgrade"], timeout=_NX_UPGRADE_TIMEOUT):
             debug("nx upgrade failed; leaving marker stale for retry")
+            log_event("lockstep_upgrade_result", target=target, outcome="nx_upgrade_failed")
             return
 
         # 4. Marker only on confirmed lockstep (installed >= target).
-        if satisfies(installed_nx_version(), target):
+        after = installed_nx_version()
+        if satisfies(after, target):
             write_marker(target)
+            log_event(
+                "lockstep_upgrade_result", target=target, outcome="success",
+                installed=str(after),
+            )
         else:
             debug("version still below target after upgrade; leaving marker stale")
+            log_event(
+                "lockstep_upgrade_result", target=target,
+                outcome="version_still_mismatched", installed=str(after),
+            )
     except Exception as exc:  # noqa: BLE001 - detached action must never raise
         debug(f"swallowed unexpected error: {exc}")
 

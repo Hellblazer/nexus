@@ -31,4 +31,11 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release (pinned: v7.4.0)
 
-(empty — v7.4.0 shipped everything; add entries as new plugin-surface changes land on develop)
+- `conexus/hooks/scripts/version_lockstep_action.py` — the detached
+  auto-upgrade now writes an always-on audit line per swap attempt
+  (`lockstep_upgrade_started` / `lockstep_upgrade_result`) to
+  `~/.config/nexus/lockstep.log` (nexus-otnvr item 4: the hook's output
+  was routed to DEVNULL and its debug() gated behind NX_HOOK_DEBUG, so
+  the venv swap was invisible — it raced the MCP server boot at the
+  7.4.0 reinstall with no trace). Installed sessions keep the silent
+  swap until the next plugin release.

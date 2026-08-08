@@ -51,6 +51,13 @@ def marker(tmp_path: Path, monkeypatch) -> Path:
     return m
 
 
+@pytest.fixture()
+def log(tmp_path: Path, monkeypatch) -> Path:
+    p = tmp_path / "nexus" / "lockstep.log"
+    monkeypatch.setenv("NX_LOCKSTEP_LOG", str(p))
+    return p
+
+
 def _wire(mod, monkeypatch, *, receipt: bool, installed_versions, run_results):
     """Install the standard set of seam patches.
 
@@ -258,6 +265,125 @@ class TestFailureLeavesMarkerStale:
         monkeypatch.setattr(mod, "uv_receipt_present", boom)
         mod.main(["action", "9.9.9"])  # must not raise
         assert not marker.exists()
+
+
+class TestLoudLog:
+    """nexus-otnvr item 4: the actual venv-mutating step (`uv tool upgrade
+    conexus`) must be LOUD — a durable, always-on log line, never gated
+    behind NX_HOOK_DEBUG (which the live incident's operator did not have
+    set, and which the hook's own DEVNULL'd stdout/stderr would have
+    swallowed anyway)."""
+
+    def test_success_logs_started_then_result(
+        self, mod, marker, log, monkeypatch
+    ) -> None:
+        _wire(
+            mod, monkeypatch, receipt=True,
+            installed_versions=["1.0.0", "9.9.9"], run_results={},
+        )
+        # Prove the log is NOT gated behind NX_HOOK_DEBUG: leave it unset/0.
+        monkeypatch.setattr(mod, "DEBUG", False)
+        mod.main(["action", "9.9.9"])
+        lines = log.read_text().strip().splitlines()
+        assert len(lines) == 2, lines
+        assert "lockstep_upgrade_started" in lines[0]
+        assert "target=9.9.9" in lines[0]
+        assert "installed=1.0.0" in lines[0]
+        assert "lockstep_upgrade_result" in lines[1]
+        assert "outcome=success" in lines[1]
+        assert "installed=9.9.9" in lines[1]
+
+    def test_uv_upgrade_failure_logs_that_outcome(
+        self, mod, marker, log, monkeypatch
+    ) -> None:
+        _wire(
+            mod, monkeypatch, receipt=True,
+            installed_versions=["1.0.0"],
+            run_results={"uv tool": False},
+        )
+        mod.main(["action", "9.9.9"])
+        text = log.read_text()
+        assert "lockstep_upgrade_started" in text
+        assert "outcome=uv_upgrade_failed" in text
+
+    def test_nx_upgrade_failure_logs_that_outcome(
+        self, mod, marker, log, monkeypatch
+    ) -> None:
+        _wire(
+            mod, monkeypatch, receipt=True,
+            installed_versions=["1.0.0"],
+            run_results={"nx upgrade": False},
+        )
+        mod.main(["action", "9.9.9"])
+        assert "outcome=nx_upgrade_failed" in log.read_text()
+
+    def test_version_still_mismatched_logs_that_outcome(
+        self, mod, marker, log, monkeypatch
+    ) -> None:
+        _wire(
+            mod, monkeypatch, receipt=True,
+            installed_versions=["1.0.0", "1.0.1"], run_results={},
+        )
+        mod.main(["action", "9.9.9"])
+        text = log.read_text()
+        assert "outcome=version_still_mismatched" in text
+        assert "installed=1.0.1" in text
+
+    def test_editable_gate_skip_logs_nothing(self, mod, marker, log, monkeypatch) -> None:
+        """No venv mutation is even attempted — nothing to log."""
+        _wire(
+            mod, monkeypatch, receipt=False,
+            installed_versions=["1.0.0"], run_results={},
+        )
+        mod.main(["action", "9.9.9"])
+        assert not log.exists()
+
+    def test_no_op_fast_path_logs_nothing(self, mod, marker, log, monkeypatch) -> None:
+        """Already at target: no mutation attempted, nothing to log."""
+        _wire(
+            mod, monkeypatch, receipt=True,
+            installed_versions=["9.9.9"], run_results={},
+        )
+        mod.main(["action", "9.9.9"])
+        assert not log.exists()
+
+    def test_log_event_never_raises_on_unwritable_path(self, mod, monkeypatch) -> None:
+        # A path under a file (not a directory) can never be mkdir'd into.
+        monkeypatch.setenv("NX_LOCKSTEP_LOG", "/dev/null/impossible/lockstep.log")
+        mod.log_event("lockstep_upgrade_started", target="9.9.9")  # must not raise
+
+    def test_log_rotates_past_max_bytes(self, mod, log, monkeypatch) -> None:
+        """code-review Important-3: unbounded append gets a cheap cap. Set
+        the threshold tiny so a couple of real log_event() calls exceed it
+        without writing a real megabyte in a unit test."""
+        monkeypatch.setenv("NX_LOCKSTEP_LOG_MAX_BYTES", "10")
+        mod.log_event("lockstep_upgrade_started", target="1.0.0")  # > 10 bytes already
+        first_content = log.read_text()
+        assert first_content  # sanity: something was written
+
+        mod.log_event("lockstep_upgrade_result", target="1.0.0", outcome="success")
+
+        rotated = log.with_name(log.name + ".1")
+        assert rotated.exists(), "log over threshold must rotate to .1"
+        assert rotated.read_text() == first_content
+        # The active file now holds ONLY the second event, not both.
+        active_content = log.read_text()
+        assert "lockstep_upgrade_started" not in active_content
+        assert "lockstep_upgrade_result" in active_content
+
+    def test_log_does_not_rotate_under_threshold(self, mod, log, monkeypatch) -> None:
+        monkeypatch.setenv("NX_LOCKSTEP_LOG_MAX_BYTES", "1000000")
+        mod.log_event("lockstep_upgrade_started", target="1.0.0")
+        mod.log_event("lockstep_upgrade_result", target="1.0.0", outcome="success")
+        rotated = log.with_name(log.name + ".1")
+        assert not rotated.exists()
+        content = log.read_text()
+        assert "lockstep_upgrade_started" in content
+        assert "lockstep_upgrade_result" in content
+
+    def test_log_max_bytes_env_parse_falls_back_on_garbage(self, mod, monkeypatch) -> None:
+        monkeypatch.setenv("NX_LOCKSTEP_LOG_MAX_BYTES", "not-a-number")
+        assert mod._log_max_bytes() == mod._DEFAULT_LOG_MAX_BYTES
 
 
 class TestVersionParsing:
