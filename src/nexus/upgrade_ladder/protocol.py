@@ -149,5 +149,19 @@ class Rung(Protocol):
 
     def verify(self) -> bool:
         """READ-ONLY: is the target state actually reached? The runner records
-        completion ONLY on a True return (RDR-142)."""
+        completion ONLY on a True return (RDR-142).
+
+        MUST assert on the PRESENCE of a positive signal, never on the
+        absence of a negative one (nexus-hdumg): a verification query that
+        errors, returns no rows, or returns NULL is "unknown", and unknown
+        is not "reached". A rung whose evidence source can be unavailable
+        returns False and explains via the optional ``verify_detail`` below
+        — it never falls back to the self-report of whatever did the work.
+        """
         ...
+
+    # OPTIONAL (structural): rungs MAY expose ``verify_detail() -> str``
+    # returning the operator-facing reason a verify refused. The runner puts
+    # it in the VERIFY_FAILED detail, which is what `nx upgrade` prints;
+    # rungs without it get the generic message. Not declared as a required
+    # protocol member so existing rungs and test fakes stay conforming.

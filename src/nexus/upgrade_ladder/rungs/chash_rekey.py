@@ -38,6 +38,7 @@ from typing import Any
 
 import structlog
 
+from nexus.db.chash_tables import ConformanceProbe, ProbeState
 from nexus.db.t2.rekey_client import RekeyJobLostError
 from nexus.upgrade_ladder.protocol import (
     ConvergeOutcome,
@@ -84,6 +85,46 @@ CONTENT_OCTET_CHECKS: tuple[tuple[str, str], ...] = OCTET_CHECKS[:3]
 POINTER_OCTET_CHECKS: tuple[tuple[str, str], ...] = OCTET_CHECKS[3:]
 
 
+def probe_from_diagnostic_output(
+    statements: tuple[str, ...],
+    outputs: tuple[str, ...] | list[str],
+) -> ConformanceProbe:
+    """Turn raw ``run_diagnostic_sql`` output into a :class:`ConformanceProbe`.
+
+    NON-VACUITY IS THE WHOLE POINT (nexus-hdumg). ``sum(int(c) for c in
+    outputs)`` is 0 for an EMPTY sequence — the arithmetic identity that
+    silently converts "I scanned no tables" into "no non-conformant rows".
+    RDR-187 already narrowed ``POISON_CHASH_TABLES`` from five entries to
+    four; a further narrowing (or a partial psql result) must fail the
+    probe, never pass it. Likewise an empty output line is psql's rendering
+    of a NULL aggregate — a stale view generation carrying no row for the
+    filtered table — which is "unknown", never a count (the
+    ``debt_chash_conformance_statements`` docstring says so in prose; this
+    enforces it).
+    """
+    if not statements:
+        return ConformanceProbe.failed(
+            "the conformance probe issued NO statements — it scanned nothing, "
+            "which is not a clean store"
+        )
+    if len(outputs) != len(statements):
+        return ConformanceProbe.failed(
+            f"the conformance probe returned {len(outputs)} result(s) for "
+            f"{len(statements)} statement(s) — a partial scan is not a clean store"
+        )
+    blank = [s for s, o in zip(statements, outputs) if not o.strip()]
+    if blank:
+        return ConformanceProbe.failed(
+            "the conformance probe returned a NULL aggregate (psql empty line) "
+            f"for {len(blank)} statement(s) — the counted relation carries no "
+            f"row for that table (stale diag view generation). First: {blank[0]}"
+        )
+    try:
+        return ConformanceProbe.measured(sum(int(o) for o in outputs))
+    except ValueError as exc:
+        return ConformanceProbe.failed(f"non-numeric conformance output: {exc}")
+
+
 def validate_statements(
     checks: tuple[tuple[str, str], ...] = OCTET_CHECKS,
 ) -> tuple[str, ...]:
@@ -110,10 +151,15 @@ class ChashRekeyRung:
     - ``freeze_fn() -> Callable[[], None]`` — enter the writer freeze,
       returning the restore callable. Defaults to the RDR-159 sentinel
       snapshot/restore.
-    - ``detect_probe_fn() -> int | None`` — READ-ONLY count of
-      width-non-conformant poison rows (the diag path), ``None`` when
-      unknowable (managed / no diag creds). Drives ``detect`` only; the
-      idempotent rekey is the actual convergence mechanism.
+    - ``detect_probe_fn() -> ConformanceProbe`` — READ-ONLY count of
+      width-non-conformant poison rows (the diag path) as a TRI-STATE
+      (nexus-hdumg): MEASURED(count) / UNAVAILABLE(reason — no diag path on
+      this box) / FAILED(reason — the diagnostic was attempted and could
+      not execute). It used to return ``int | None``, and ``None`` fed a
+      ``verify()`` that fell back to the engine's own rekey envelope — so a
+      diagnostic that could not run was indistinguishable from a clean
+      store and the rung reported "converged and verified". Absence of a
+      non-conformance signal is NOT a conformance signal.
     - ``validated_probe_fn() -> bool | None`` — READ-ONLY: are all five
       octet CHECKs convalidated? This is the DATA-SIDE completion marker
       (nexus-p78a0): boot never VALIDATEs, only this rung's own VALIDATE
@@ -134,7 +180,7 @@ class ChashRekeyRung:
         pointer_debt_fn: Callable[[], dict[str, int] | None] | None = None,
         reprovision_fn: Callable[[], None] | None = None,
         freeze_fn: Callable[[], Callable[[], None]] | None = None,
-        detect_probe_fn: Callable[[], int | None] | None = None,
+        detect_probe_fn: Callable[[], ConformanceProbe] | None = None,
         validated_probe_fn: Callable[[], bool | None] | None = None,
         applicable_fn: Callable[[], bool] | None = None,
         orphan_policy: str = "drop",
@@ -146,7 +192,11 @@ class ChashRekeyRung:
         )
         self._reprovision_fn = reprovision_fn if reprovision_fn is not None else (lambda: None)
         self._freeze_fn = freeze_fn if freeze_fn is not None else _sentinel_freeze
-        self._detect_probe_fn = detect_probe_fn if detect_probe_fn is not None else (lambda: None)
+        self._detect_probe_fn = (
+            detect_probe_fn
+            if detect_probe_fn is not None
+            else (lambda: ConformanceProbe.unavailable("no conformance probe wired"))
+        )
         self._validated_probe_fn = validated_probe_fn if validated_probe_fn is not None else (lambda: None)
         self._applicable_fn = applicable_fn if applicable_fn is not None else (lambda: True)
         if orphan_policy not in ("drop", "synthesize"):
@@ -155,6 +205,9 @@ class ChashRekeyRung:
             )
         self._orphan_policy = orphan_policy
         self._last_counts: dict[str, Any] | None = None
+        #: Populated by a REFUSING :meth:`verify` so the runner can put the
+        #: reason in front of the operator (nexus-hdumg). Cleared on success.
+        self._verify_detail: str = ""
 
     # ── Rung protocol ────────────────────────────────────────────────────────
 
@@ -186,18 +239,19 @@ class ChashRekeyRung:
             # what any ledger says.
             return RungStatus(applicable=True, converged=True)
         probe = self._detect_probe_fn()
-        if probe == 0:
+        if probe.unmeasured:
+            return RungStatus(applicable=True, converged=False, pending_detail=(
+                f"conformance {probe.state.value} ({probe.reason}) — the "
+                "idempotent rekey converges the data, but this rung cannot "
+                "record completion until the diagnostic can be measured"
+            ))
+        if probe.count == 0:
             return RungStatus(applicable=True, converged=False, pending_detail=(
                 "no width-non-conformant poison rows counted — rekey run "
                 "needed once to build the alias map and validate the checks"
             ))
-        if probe is None:
-            return RungStatus(applicable=True, converged=False, pending_detail=(
-                "conformance unknowable here (no diag path) — the "
-                "idempotent rekey converges it"
-            ))
         return RungStatus(applicable=True, converged=False, pending_detail=(
-            f"{probe} width-non-conformant poison row(s) pending rekey"
+            f"{probe.count} width-non-conformant poison row(s) pending rekey"
         ))
 
     def _rekey_with_restart_retry(self, report: ProgressReporter) -> dict[str, Any]:
@@ -284,6 +338,24 @@ class ChashRekeyRung:
                             "refusing to record completion"
                         )
                 outstanding = {t: n for t, n in debt_after.items() if n > 0}
+                if outstanding and debt_before is None:
+                    # nexus-hdumg sibling sweep, same class as the verify fix:
+                    # the amnesty's entire justification is "this debt
+                    # PRE-EXISTED". With no BEFORE measurement that claim has
+                    # no evidence — and note the growth check above is itself
+                    # skipped when debt_before is None, so orphans this rekey
+                    # CREATED would be waved through as pre-existing. Absent
+                    # evidence must not grant an exemption: validate all four
+                    # and let VALIDATE fail loud (the next run, with a working
+                    # probe, grants the amnesty properly).
+                    _log.warning(
+                        "chash_rekey_debt_amnesty_refused_no_baseline",
+                        rung=self.name,
+                        outstanding=outstanding,
+                        note="pre-rekey pointer-debt baseline was unmeasurable; "
+                             "refusing to grandfather debt on absent evidence",
+                    )
+                    outstanding = {}
                 if outstanding:
                     checks = CONTENT_OCTET_CHECKS
                     debt_note = (
@@ -347,14 +419,70 @@ class ChashRekeyRung:
                 _log.error("chash_rekey_freeze_restore_failed", exc_info=True)
 
     def verify(self) -> bool:
-        """READ-ONLY where possible: the diag probe must count zero. Where
-        no probe exists (managed), the recorded converge envelope's zero
-        residual is the evidence — converge already raised on non-zero."""
+        """READ-ONLY: the diag probe must MEASURE zero. Nothing else passes.
+
+        nexus-hdumg — the vacuous-verification fix. This used to read::
+
+            probe = self._detect_probe_fn()          # int | None
+            if probe is not None:
+                return probe == 0
+            counts = self._last_counts               # the ENGINE's own echo
+            return counts is not None and int(counts.get("residual_mismatched", -1)) == 0
+
+        so a diagnostic that could not execute (``None``) fell through to
+        the rekey endpoint's self-reported envelope, and the rung reported
+        "converged and verified" off a conformance query that never ran
+        (observed in the engine-service-v0.1.69 deploy rehearsal, where
+        ``nexus.diag_chash_conformance`` was absent). The envelope is
+        evidence that the WORK ran — it is not an independent measurement
+        of the resulting store, and RDR-182's own contract is that an
+        unavailable diagnostic degrades to an explicit unavailable note,
+        never a silent all-clean.
+
+        The refusal is deliberately the ladder's EXISTING failure vocabulary
+        rather than a new state: a False here is ``RungOutcome.VERIFY_FAILED``
+        — nothing recorded, the derived position stays put (the RDR-142
+        guard), the walk stops, and ``nx upgrade`` exits non-zero naming the
+        reason. Both remedies for an unmeasurable store already run on this
+        same upgrade path (``backfill_diag_role_best_effort`` for absent
+        credentials, ``reprovision_diag_view_best_effort`` inside this rung's
+        own converge for an absent view), and the rekey is idempotent, so
+        the next run converges — the stop costs a re-run, never the store.
+        Managed installs never reach here: ``applicable_fn`` skips them.
+        """
         probe = self._detect_probe_fn()
-        if probe is not None:
-            return probe == 0
-        counts = self._last_counts
-        return counts is not None and int(counts.get("residual_mismatched", -1)) == 0
+        if probe.conformant:
+            self._verify_detail = ""
+            return True
+        if probe.state is ProbeState.MEASURED:
+            self._verify_detail = (
+                f"{probe.count} width-non-conformant chash row(s) remain after "
+                "the rekey — completion NOT recorded"
+            )
+            return False
+        self._verify_detail = (
+            f"chash conformance could not be verified: the diagnostic is "
+            f"{probe.state.value} ({probe.reason}). This is NOT a clean-store "
+            "verdict — the rekey may well have succeeded, but nothing measured "
+            "it, so no completion is recorded. Restore the diagnostic path "
+            "(`nx init --service` backfills the nexus_diag role and recreates "
+            "nexus.diag_chash_conformance), then re-run `nx upgrade` — the "
+            "rekey is idempotent."
+        )
+        _log.warning(
+            "chash_rekey_verify_unmeasurable",
+            rung=self.name,
+            probe_state=probe.state.value,
+            reason=probe.reason,
+        )
+        return False
+
+    def verify_detail(self) -> str:
+        """Operator-facing reason the last :meth:`verify` refused (``""`` when
+        it passed). OPTIONAL rung surface the runner consults so an
+        unmeasurable store's reason reaches the CLI instead of dying in a log
+        line (RDR-182: "an explicit unavailable note")."""
+        return self._verify_detail
 
 
 def default_chash_rekey_rung() -> "ChashRekeyRung":
@@ -369,21 +497,88 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
         with HttpRekeyClient() as store:
             return store.rekey(orphan_policy)
 
-    def _detect_probe() -> int | None:
-        try:
-            from nexus.db.chash_tables import chash_conformance_statements, legacy_chash_conformance_statements  # noqa: PLC0415 — deferred
-            from nexus.db.diag_connection import resolve_diag_credentials, run_diagnostic_sql  # noqa: PLC0415 — deferred
+    def _detect_probe() -> ConformanceProbe:
+        """The READ-ONLY conformance measurement, as a tri-state.
 
+        nexus-hdumg: this used to be a bare ``try/except -> None`` around
+        both legs, which collapsed "no diag role here", "the view is
+        absent", "psql exited 127", and "the lint refused the statement"
+        into one indistinguishable ``None`` that ``verify()`` then read as
+        good enough. The three arms below are the same tri-state
+        ``health._check_migration_state`` has carried since P2.1 — imported
+        here rather than reinvented.
+        """
+        from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred
+            chash_conformance_statements,
+            legacy_chash_conformance_statements,
+        )
+        from nexus.db.diag_connection import resolve_diag_credentials, run_diagnostic_sql  # noqa: PLC0415 — deferred
+        from nexus.remediation.sql_lint import DiagnosticSqlViolation  # noqa: PLC0415 — deferred
+
+        try:
             creds = resolve_diag_credentials(None)
-            if creds is None:
-                return None
+        except Exception as exc:  # noqa: BLE001 — an unreadable credential file is FAILED, never clean
+            return ConformanceProbe.failed(f"diag credential resolution raised: {exc}")
+        if creds is None:
+            return ConformanceProbe.unavailable(
+                "no nexus_diag credentials (pre-P2.1 install or no local "
+                "service PG) — `nx init --service` backfills the diagnostic role"
+            )
+
+        def _run(statements: tuple[str, ...]) -> ConformanceProbe:
+            """One leg. A LINT refusal PROPAGATES (it is a product defect, not
+            engine-generation skew — health.py re-raises for the same reason,
+            and the rung's old bare ``except Exception`` retried the legacy
+            statements and mislabeled it as a stale-view fallback). Every
+            other failure becomes a FAILED probe the caller may retry on the
+            other leg."""
             try:
-                counts = run_diagnostic_sql(chash_conformance_statements(), creds)
-            except Exception:  # noqa: BLE001 — stale/absent view: fall back to direct counts
-                counts = run_diagnostic_sql(legacy_chash_conformance_statements(), creds)
-            return sum(int(c) for c in counts)
-        except Exception:  # noqa: BLE001 — probe unknowable ≠ rung failure; converge is idempotent
-            return None
+                return probe_from_diagnostic_output(
+                    statements, run_diagnostic_sql(statements, creds)
+                )
+            except DiagnosticSqlViolation:
+                raise
+            except Exception as exc:  # noqa: BLE001 — a probe that could not run is FAILED, never clean
+                return ConformanceProbe.failed(f"diagnostic statement failed: {exc}")
+
+        try:
+            view_probe = _run(chash_conformance_statements())
+        except DiagnosticSqlViolation as exc:
+            return ConformanceProbe.failed(f"diagnostic lint refused the statement: {exc}")
+        if view_probe.state is ProbeState.MEASURED:
+            return view_probe
+
+        # LOUD, like health.py's chash_probe_view_fallback_legacy. The view is
+        # legitimately absent between an engine changeset that DROPs it
+        # (rdr180-001 / rdr187-001) and the next client-side re-provision, and
+        # on a fresh install before Liquibase has created the chash tables —
+        # so the underlying `diag_sql_failed` WARNING is EXPECTED there and
+        # must be readable AS a fallback rather than as the unexplained error
+        # it looks like on its own (nexus-hdumg Q1). A view that RAN but
+        # produced a NULL aggregate (a deployed generation with no row for a
+        # filtered table_name) takes this same path — same stale-view cause,
+        # same working fallback.
+        _log.warning(
+            "chash_rekey_probe_view_fallback_legacy",
+            rung=RUNG_CHASH_REKEY,
+            error=view_probe.reason[:200],
+            note="view-path conformance probe produced no measurement — "
+                 "falling back to legacy direct-table counts (view absent on "
+                 "pre-A6 engines, between a DROP-ing changeset and the next "
+                 "client re-provision, a view/owner grant gap, or a stale "
+                 "view generation). Any preceding diag_sql_failed is this "
+                 "expected fallback, not a store defect.",
+        )
+        try:
+            legacy_probe = _run(legacy_chash_conformance_statements())
+        except DiagnosticSqlViolation as exc:
+            return ConformanceProbe.failed(f"diagnostic lint refused the statement: {exc}")
+        if legacy_probe.state is ProbeState.MEASURED:
+            return legacy_probe
+        return ConformanceProbe.failed(
+            f"view path: {view_probe.reason[:120]} | legacy direct-table "
+            f"fallback: {legacy_probe.reason[:120]}"
+        )
 
     def _pointer_debt() -> dict[str, int] | None:
         """Per-table non-conformant counts for the two POINTER tables
@@ -460,7 +655,24 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
             from nexus.db.admin_sql import resolve_admin_credentials  # noqa: PLC0415 — deferred
 
             return resolve_admin_credentials(None) is not None
-        except Exception:  # noqa: BLE001 — unreadable creds = not actionable here
+        except Exception as exc:  # noqa: BLE001 — unreadable creds = not actionable here
+            # nexus-hdumg sibling sweep. A resolved None is the honest
+            # managed-mode signal; a RAISE is "we could not tell", and
+            # returning False for it makes the rung report
+            # SKIPPED_NOT_APPLICABLE — which the run report counts toward
+            # `converged`. Kept as False (a hard failure here would brick
+            # every box with a transiently unreadable credential file, and
+            # managed installs legitimately have none), but no longer
+            # SILENT: an operator reading a converged ladder on a local box
+            # needs this line to explain why the rekey rung never ran.
+            _log.warning(
+                "chash_rekey_actionability_unknown",
+                rung=RUNG_CHASH_REKEY,
+                error=str(exc)[:200],
+                note="admin-credential resolution raised — the rung will "
+                     "detect-and-SKIP as not-applicable. On a local install "
+                     "that is a false skip, not a managed-mode skip.",
+            )
             return False
 
     return ChashRekeyRung(

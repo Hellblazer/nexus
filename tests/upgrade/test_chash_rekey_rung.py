@@ -18,6 +18,7 @@ from nexus.db.t2.rekey_client import (
     RekeyJobLostError,
     RekeyJobTimeoutError,
 )
+from nexus.db.chash_tables import ConformanceProbe
 from nexus.upgrade_ladder.protocol import ConvergeOutcome
 from nexus.upgrade_ladder.rungs.chash_rekey import (
     OCTET_CHECKS,
@@ -72,7 +73,7 @@ def _rung(**over) -> tuple[ChashRekeyRung, dict]:
         ) or True,
         reprovision_fn=lambda: calls.setdefault("reprovisioned", True),
         freeze_fn=freeze,
-        detect_probe_fn=lambda: None,
+        detect_probe_fn=lambda: ConformanceProbe.unavailable('no diag path in this fixture'),
     )
     kwargs.update(over)
     return ChashRekeyRung(**kwargs), calls
@@ -80,17 +81,22 @@ def _rung(**over) -> tuple[ChashRekeyRung, dict]:
 
 class TestDetect:
     def test_zero_probe_still_applies_pending_first_run(self):
-        rung, _ = _rung(detect_probe_fn=lambda: 0)
+        rung, _ = _rung(detect_probe_fn=lambda: ConformanceProbe.measured(0))
         st = rung.detect()
         assert st.applicable and not st.converged
 
     def test_unknown_probe_applies(self):
-        rung, _ = _rung(detect_probe_fn=lambda: None)
+        """nexus-hdumg: an unmeasurable probe still APPLIES and stays pending,
+        and the doctor-facing detail now names WHICH state and why (it used
+        to say only 'unknowable here (no diag path)' regardless of whether
+        there was no diag path or the diagnostic had blown up)."""
+        rung, _ = _rung(detect_probe_fn=lambda: ConformanceProbe.unavailable('no diag path'))
         st = rung.detect()
-        assert st.applicable and "unknowable" in st.pending_detail
+        assert st.applicable and not st.converged
+        assert "unavailable" in st.pending_detail and "no diag path" in st.pending_detail
 
     def test_nonzero_probe_reports_count(self):
-        rung, _ = _rung(detect_probe_fn=lambda: 7)
+        rung, _ = _rung(detect_probe_fn=lambda: ConformanceProbe.measured(7))
         assert "7" in rung.detect().pending_detail
 
     def test_validated_checks_report_converged(self):
@@ -99,13 +105,13 @@ class TestDetect:
         detect must see convergence from the DATA or a rekeyed store reads
         as pending forever. The convalidated octet CHECKs are that marker —
         only the rung's own VALIDATE (or the managed operator's) sets them."""
-        rung, _ = _rung(detect_probe_fn=lambda: 0, validated_probe_fn=lambda: True)
+        rung, _ = _rung(detect_probe_fn=lambda: ConformanceProbe.measured(0), validated_probe_fn=lambda: True)
         st = rung.detect()
         assert st.applicable and st.converged
 
     def test_unvalidated_checks_stay_pending(self):
         for v in (False, None):
-            rung, _ = _rung(detect_probe_fn=lambda: 0, validated_probe_fn=lambda v=v: v)
+            rung, _ = _rung(detect_probe_fn=lambda: ConformanceProbe.measured(0), validated_probe_fn=lambda v=v: v)
             st = rung.detect()
             assert st.applicable and not st.converged
 
@@ -245,18 +251,32 @@ class TestRestartRetry:
 
 class TestVerify:
     def test_probe_zero_verifies(self):
-        rung, _ = _rung(detect_probe_fn=lambda: 0)
+        rung, _ = _rung(detect_probe_fn=lambda: ConformanceProbe.measured(0))
         assert rung.verify() is True
 
     def test_probe_nonzero_fails(self):
-        rung, _ = _rung(detect_probe_fn=lambda: 2)
+        rung, _ = _rung(detect_probe_fn=lambda: ConformanceProbe.measured(2))
         assert rung.verify() is False
 
-    def test_no_probe_uses_recorded_counts(self):
-        rung, _ = _rung(detect_probe_fn=lambda: None)
-        assert rung.verify() is False  # nothing recorded yet
+    def test_an_unmeasurable_probe_never_verifies(self):
+        """REPLACES ``test_no_probe_uses_recorded_counts``, which pinned the
+        nexus-hdumg defect as intended behaviour: it asserted that after a
+        clean converge, a rung with NO conformance measurement verifies True
+        off the rekey endpoint's own envelope. That envelope proves the WORK
+        ran; it is not an independent measurement of the store, and treating
+        it as one is what let 'rung converged and verified' print seconds
+        after ``event='diag_sql_failed'`` in the v0.1.69 rehearsal.
+
+        Full contract coverage lives in
+        ``test_chash_rekey_verification_non_vacuous.py``."""
+        rung, _ = _rung(detect_probe_fn=lambda: ConformanceProbe.unavailable('no diag path'))
+        assert rung.verify() is False  # nothing measured, nothing converged
         rung.converge(_Report())
-        assert rung.verify() is True
+        assert rung.verify() is False, (
+            "the engine's own zero-residual echo stood in for a conformance "
+            "measurement that never ran"
+        )
+        assert "not a clean-store verdict" in rung.verify_detail().lower()
 
 
 class TestValidateStatements:

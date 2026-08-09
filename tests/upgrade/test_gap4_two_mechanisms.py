@@ -350,10 +350,12 @@ def test_rung_convergence_is_re_derived_live_never_cached() -> None:
     # a remembered verdict.
     from nexus.upgrade_ladder.rungs.chash_rekey import ChashRekeyRung  # noqa: PLC0415 — test-local fixture construction
 
+    from nexus.db.chash_tables import ConformanceProbe  # noqa: PLC0415 — test-local
+
     world = {"nonconformant": 5, "validated": False}
     rung = ChashRekeyRung(
         rekey_fn=lambda _policy: {},
-        detect_probe_fn=lambda: world["nonconformant"],
+        detect_probe_fn=lambda: ConformanceProbe.measured(world["nonconformant"]),
         validated_probe_fn=lambda: world["validated"],
         applicable_fn=lambda: True,
     )

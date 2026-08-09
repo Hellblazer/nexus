@@ -33,7 +33,62 @@ can import it without pulling ``nexus.health``'s weight.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import Enum
 from typing import NamedTuple
+
+
+class ProbeState(str, Enum):
+    """Tri-state outcome of a chash-conformance probe (nexus-hdumg).
+
+    The two non-MEASURED arms exist so no consumer can collapse "I could
+    not count" into "I counted zero" — the vacuous-verification class. This
+    mirrors what ``health._check_migration_state`` and
+    ``diag_connection.live_store_detail`` already do in prose/sentinel form
+    (``nonconforming = -1``; "treat store state as UNKNOWN, not clean"),
+    hoisted into a type so the ladder rung cannot re-lose it.
+    """
+
+    MEASURED = "measured"        #: the diagnostic ran and produced a count
+    UNAVAILABLE = "unavailable"  #: no diagnostic path on this box (pre-P2.1 install)
+    FAILED = "failed"            #: the diagnostic was attempted and could not execute
+
+
+@dataclass(frozen=True)
+class ConformanceProbe:
+    """A conformance measurement, or an explicit reason there isn't one.
+
+    Frozen (the ``migrations.py`` StepOutcome precedent): a consumer can
+    never "fix up" a probe result into a clean verdict.
+    """
+
+    state: ProbeState
+    count: int = -1
+    reason: str = ""
+
+    @classmethod
+    def measured(cls, count: int) -> "ConformanceProbe":
+        if count < 0:
+            raise ValueError(f"a measured conformance count cannot be negative: {count}")
+        return cls(state=ProbeState.MEASURED, count=count)
+
+    @classmethod
+    def unavailable(cls, reason: str) -> "ConformanceProbe":
+        return cls(state=ProbeState.UNAVAILABLE, reason=reason)
+
+    @classmethod
+    def failed(cls, reason: str) -> "ConformanceProbe":
+        return cls(state=ProbeState.FAILED, reason=reason)
+
+    @property
+    def conformant(self) -> bool:
+        """True ONLY on a real measurement of zero. The single predicate any
+        verification gate may assert on — absence of a signal is never it."""
+        return self.state is ProbeState.MEASURED and self.count == 0
+
+    @property
+    def unmeasured(self) -> bool:
+        return self.state is not ProbeState.MEASURED
 
 
 class ChashBearingTable(NamedTuple):

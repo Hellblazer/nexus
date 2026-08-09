@@ -836,7 +836,20 @@ def _provision_diag_conformance_view(bins: PgBinaries, port: int, os_user: str) 
             "END IF; "
             "END $do$;",
         )
-        _log.info("pg_diag_conformance_view_provisioned")
+        # nexus-hdumg: the DO block's IF is a NO-OP whenever the chash tables
+        # are not all present — which is the NORMAL state on a fresh provision
+        # (Liquibase creates them at first engine boot, after this runs). The
+        # old unconditional "pg_diag_conformance_view_provisioned" asserted a
+        # creation that had usually not happened, so the later, expected
+        # `diag_sql_failed` on the absent view read as an unexplained error.
+        # Say what was actually attempted.
+        _log.info(
+            "pg_diag_conformance_view_provision_attempted",
+            note="no-op unless all chash-bearing tables already exist "
+                 "(fresh provisions create them at first engine boot; the "
+                 "conformance probe falls back to legacy direct-table counts "
+                 "until a later re-provision creates the view)",
+        )
     except Exception as exc:  # noqa: BLE001 — best-effort; absent view = probe falls back to legacy statements
         _log.warning("pg_diag_view_best_effort_failed", error=str(exc))
 

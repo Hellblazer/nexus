@@ -231,11 +231,20 @@ class LadderRunner:
         # Converged (either just now or found converged-but-unrecorded after a
         # crash): the RDR-142 guard — record ONLY on a passing verify.
         if not rung.verify():
-            _log.warning("ladder_rung_verify_failed", rung=rung.name)
+            # nexus-hdumg: a refusing verify() may carry WHY. Without this the
+            # only text distinguishing "poison rows remain" from "the
+            # conformance diagnostic could not run at all" lived in a log
+            # line, and the operator-facing message was a bare "verify
+            # failed" — RDR-182 requires the unavailable note itself to reach
+            # the operator. OPTIONAL structural surface: rungs without it
+            # keep the generic detail.
+            detail_fn = getattr(rung, "verify_detail", None)
+            detail = detail_fn() if callable(detail_fn) else ""
+            _log.warning("ladder_rung_verify_failed", rung=rung.name, detail=detail)
             return RungRun(
                 rung.name,
                 RungOutcome.VERIFY_FAILED,
-                detail="verify failed after converge; completion NOT recorded",
+                detail=detail or "verify failed after converge; completion NOT recorded",
             )
         self._store.record_verified(
             rung.name,
