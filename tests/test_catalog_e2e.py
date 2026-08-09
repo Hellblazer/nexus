@@ -155,14 +155,34 @@ def indexed_active(catalog_repo, registry, local_t3, monkeypatch):
 def injected_active(indexed_active):
     """PORT-side sibling of ``injected_catalog``: same singleton seeding, but
     the MCP tools resolve the ACTIVE catalog through the factory (service
-    handle under the suite default) instead of a local dir via env."""
+    handle under the suite default) instead of a local dir via env.
+
+    nexus-gtl01 ROOT CAUSE: this fixture used to ``return`` after assigning
+    ``mcp_infra._t3_instance``, so the in-memory ``local_t3`` handle it seeds
+    (``T3Database`` over ``InMemoryVectorClient`` — no HTTP, no PG) stayed
+    installed in the PROCESS-WIDE singleton for the rest of the worker. Any
+    later test in the same xdist worker that drives a real CLI write path
+    then silently wrote into that in-memory dict instead of the engine:
+    ``nx index md`` -> ``doc_indexer._index_document`` resolves its handle via
+    ``mcp_infra.get_t3()`` in service mode, so the upsert returned normally
+    having reached no engine at all, and the RUNFENCE completion check
+    correctly refused (referenced=1 present=0). That was the intermittent
+    scenario-journey red — intermittent only because xdist's dynamic
+    distribution decides which tests share a worker, never because of load.
+
+    The teardown below restores the symmetry every other injector in this
+    suite already has (``test_mcp_server.py``, ``test_relevance_log.py``,
+    ``test_rdr052_verification.py``, ``test_phase3_structured_chash.py`` all
+    reset before AND after). Pinned by ``tests/test_t3_singleton_leak_lint.py``.
+    """
     from nexus.mcp_server import _reset_singletons
     from nexus import mcp_infra
 
     cat, local_t3 = indexed_active
     _reset_singletons()
     mcp_infra._t3_instance = local_t3
-    return cat, local_t3
+    yield cat, local_t3
+    _reset_singletons()
 
 
 @pytest.fixture
