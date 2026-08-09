@@ -710,27 +710,62 @@ def detect_stranded_install_default() -> "StrandedInstall | None":
     ``--stranded`` rehearsal) only ever exercised LOCAL mode (bundled PG at
     the pin), so this gate aligns the fix's claimed scope with what was
     actually tested rather than overclaiming a cloud-mode fix that was
-    never verified. A cloud-mode-appropriate signal (bead nexus-cmtpa's
-    recommendation (b): bind the completion record to something
-    artifact-identifying, not a bare tenant boolean) is tracked as a
-    follow-up, not silently absorbed here.
+    never verified.
+
+    UPDATE (nexus-cmtpa, Hal decision 2026-08-09): the cloud-mode signal
+    ships in THIS function, not deferred — ``check_local_ack`` (below)
+    replaces the legacy-report-only fallback with an explicit consented
+    marker.
+
+    CLOUD-MODE primary signal (nexus-cmtpa): ``check_local_ack=True``
+    when NOT local mode — trusts a matching ``nx stranded ack`` consent
+    marker (:func:`nexus.stranded_install.write_ack_marker` /
+    :func:`nexus.stranded_install._has_matching_ack`), a LOCAL,
+    machine-scoped, EXPLICITLY CONSENTED signal independent of the
+    tenant-shared engine. Mutually exclusive with the ladder probe by
+    construction here (exactly one of ``ladder_probe`` /
+    ``check_local_ack`` is active, keyed on the same ``is_local_mode()``
+    read) — local mode keeps the stronger, engine-VERIFIED ladder signal
+    undiluted by a weaker self-attested one; cloud mode gets the
+    consent-marker escape instead of being stranded forever.
+    """
+    config_dir, chroma_dir, catalog_dir = _resolve_stranded_paths()
+    # nexus-cmtpa: the tenant-scoped ladder signal is sound ONLY when this
+    # install owns its own PG (local mode). Cloud/managed mode gets the
+    # consented local ack-marker signal instead -- see the docstring above.
+    local = is_local_mode()
+    ladder_probe = _ladder_migration_verified if local else None
+    from nexus.stranded_install import detect_stranded_install  # noqa: PLC0415 — leaf module, deferred to keep config import-light
+
+    return detect_stranded_install(
+        config_dir, chroma_dir, catalog_dir,
+        ladder_migration_verified=ladder_probe,
+        check_local_ack=not local,
+    )
+
+
+def _resolve_stranded_paths() -> tuple[Path, Path, Path]:
+    """The three path roots the stranded-install detector probes: config
+    dir, local Chroma dir, catalog dir.
+
+    Factored out of :func:`detect_stranded_install_default` (nexus-cmtpa)
+    so ``nx stranded ack`` (:mod:`nexus.commands.stranded_cmd`) resolves
+    the IDENTICAL roots detection uses -- the same nexus-rjod2 scope-
+    consistency contract applies to both: an ack computed against a
+    different scope than detection probes would fingerprint the wrong
+    files entirely. See :func:`detect_stranded_install_default`'s SCOPE
+    CONSISTENCY note for the override precedence this mirrors exactly.
     """
     import os  # noqa: PLC0415 — stdlib, branch-local
 
-    from nexus.stranded_install import detect_stranded_install, legacy_chroma_dir  # noqa: PLC0415 — leaf module, deferred to keep config import-light
+    from nexus.stranded_install import legacy_chroma_dir  # noqa: PLC0415 — leaf module, deferred to keep config import-light
 
     config_dir = nexus_config_dir()
     if os.environ.get("NX_LOCAL_CHROMA_PATH") or not os.environ.get("NEXUS_CONFIG_DIR"):
         chroma_dir = legacy_chroma_dir()
     else:
         chroma_dir = config_dir / "chroma"
-    # nexus-cmtpa: the tenant-scoped ladder signal is sound ONLY when this
-    # install owns its own PG (local mode) -- see the docstring above.
-    ladder_probe = _ladder_migration_verified if is_local_mode() else None
-    return detect_stranded_install(
-        config_dir, chroma_dir, catalog_path(),
-        ladder_migration_verified=ladder_probe,
-    )
+    return config_dir, chroma_dir, catalog_path()
 
 
 def is_local_mode() -> bool:

@@ -2629,6 +2629,32 @@ precondition does not touch), `nx init` (fresh install), `nx hooks install`
 
 ---
 
+## nx stranded
+
+The cloud-mode consented de-strand escape (nexus-cmtpa). The stranded-install
+detector's primary migrated signal is the engine-side upgrade-ladder
+completion record, which is sound in local mode (one bundled PG per install)
+but tenant-scoped rather than machine-scoped in managed/cloud mode — a shared
+tenant across two machines could otherwise let one machine's migration falsely
+clear the refusal for another machine's own, distinct, unmigrated pre-PG data.
+`nx stranded ack` is the explicit, local, machine-scoped alternative for that
+case only; it has no effect in local mode, where the engine-verified ladder
+signal already governs.
+
+```
+nx stranded ack             # Attest this machine's pre-PG data is migrated (prompts for confirmation)
+nx stranded ack --yes       # Same, unattended
+```
+
+`nx stranded ack` fingerprints the pre-PG artifact files found on this
+machine (path, size, mtime — never content) and records a local marker
+attesting the two-hop migration was completed for exactly that set. If those
+files later change, the fingerprint no longer matches and the stranded-install
+refusal returns. It never deletes anything — deletion of pre-PG artifacts
+remains a separate, independently consented act.
+
+---
+
 ## nx uninstall
 
 First-class agent teardown (RDR-165). See

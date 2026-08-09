@@ -36,16 +36,22 @@ import nexus.config as config_mod
 import nexus.stranded_install as stranded_install
 import nexus.upgrade_finish as upgrade_finish
 import nexus.upgrade_ladder.http_store as http_store_mod
+from nexus.commands.stranded_cmd import stranded_group
 from nexus.mcp._first_run import apply_stranded_notice
 from nexus.cli import main
 from nexus.commands.init import init_cmd
 from nexus.config import detect_stranded_install_default
 from nexus.health import _check_stranded_install
 from nexus.stranded_install import (
+    ACK_CONSENT_TEXT,
     LAST_MIGRATION_CAPABLE,
     STAMP_FILENAME,
     StrandedInstall,
+    _has_matching_ack,
+    artifact_fingerprint,
     detect_stranded_install,
+    discover_artifacts,
+    write_ack_marker,
 )
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent / "src" / "nexus"
@@ -896,3 +902,305 @@ class TestCloudModeGate:
         result = detect_stranded_install_default()
         assert calls == [1]
         assert result is None
+
+    def test_cloud_mode_consults_a_matching_local_ack_marker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PINNED cloud mode: check_local_ack is wired True, so a matching
+        `nx stranded ack` marker de-strands even though the ladder probe
+        is never consulted at all."""
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: False)
+        self._armed_dirs(tmp_path, monkeypatch)
+        config_dir = Path(os.environ["NEXUS_CONFIG_DIR"])
+        chroma_dir = Path(os.environ["NX_LOCAL_CHROMA_PATH"])
+        artifacts = discover_artifacts(config_dir, chroma_dir, config_dir / "catalog")
+        write_ack_marker(config_dir, artifacts)
+
+        result = detect_stranded_install_default()
+        assert result is None
+
+    def test_local_mode_ignores_a_matching_ack_marker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PINNED local mode: even a matching ack marker on disk must NOT
+        de-strand -- local mode's ONLY signal is the engine-verified
+        ladder; a weaker self-attestation must never override it (a local
+        user could otherwise `nx stranded ack` their way past a genuinely
+        unmigrated box)."""
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: True)
+        monkeypatch.setattr(config_mod, "_ladder_migration_verified", lambda: False)
+        self._armed_dirs(tmp_path, monkeypatch)
+        config_dir = Path(os.environ["NEXUS_CONFIG_DIR"])
+        chroma_dir = Path(os.environ["NX_LOCAL_CHROMA_PATH"])
+        artifacts = discover_artifacts(config_dir, chroma_dir, config_dir / "catalog")
+        write_ack_marker(config_dir, artifacts)
+
+        result = detect_stranded_install_default()
+        assert result is not None, (
+            "a matching ack marker must be IGNORED in local mode -- only "
+            "the ladder signal governs there"
+        )
+        assert result.ack_eligible is False
+
+
+class TestArtifactFingerprint:
+    """nexus-cmtpa: :func:`artifact_fingerprint` -- stability across
+    reboots (path+size+mtime, never content), sensitivity to real
+    changes, order-independence."""
+
+    def test_stable_across_repeated_calls(self, tmp_path: Path) -> None:
+        f = tmp_path / "a.db"
+        f.write_bytes(b"hello")
+        p = (str(f),)
+        assert artifact_fingerprint(p) == artifact_fingerprint(p)
+
+    def test_order_independent(self, tmp_path: Path) -> None:
+        f1 = tmp_path / "a.db"
+        f2 = tmp_path / "b.db"
+        f1.write_bytes(b"one")
+        f2.write_bytes(b"two")
+        assert artifact_fingerprint((str(f1), str(f2))) == artifact_fingerprint((str(f2), str(f1)))
+
+    def test_changes_on_size_change(self, tmp_path: Path) -> None:
+        f = tmp_path / "a.db"
+        f.write_bytes(b"hello")
+        before = artifact_fingerprint((str(f),))
+        f.write_bytes(b"hello world, now much longer")
+        after = artifact_fingerprint((str(f),))
+        assert before != after
+
+    def test_changes_on_mtime_change_same_size(self, tmp_path: Path) -> None:
+        f = tmp_path / "a.db"
+        f.write_bytes(b"hello")
+        before = artifact_fingerprint((str(f),))
+        os.utime(f, (1_000_000, 1_000_000))
+        after = artifact_fingerprint((str(f),))
+        assert before != after
+
+    def test_changes_when_a_file_disappears(self, tmp_path: Path) -> None:
+        f1 = tmp_path / "a.db"
+        f2 = tmp_path / "b.db"
+        f1.write_bytes(b"one")
+        f2.write_bytes(b"two")
+        before = artifact_fingerprint((str(f1), str(f2)))
+        f2.unlink()
+        after = artifact_fingerprint((str(f1), str(f2)))
+        assert before != after
+
+    def test_missing_file_does_not_raise(self, tmp_path: Path) -> None:
+        missing = tmp_path / "never-existed.db"
+        # Must not raise -- a MISSING sentinel keeps the digest computable.
+        artifact_fingerprint((str(missing),))
+
+
+class TestAckMarkerRoundtrip:
+    """nexus-cmtpa: :func:`write_ack_marker` / :func:`_has_matching_ack` --
+    the local, file-based, fingerprint-bound consent record."""
+
+    def test_no_marker_is_no_match(self, dirs: tuple[Path, Path, Path]) -> None:
+        config, _chroma, _catalog = dirs
+        assert _has_matching_ack(config, ("x",)) is False
+
+    def test_written_marker_matches_the_same_artifact_set(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        config, chroma, catalog = dirs
+        f = config / "memory.db"
+        f.write_bytes(b"x")
+        artifacts = (str(f),)
+        record = write_ack_marker(config, artifacts)
+        assert record["consent"] == ACK_CONSENT_TEXT
+        assert record["artifacts"] == list(artifacts)
+        assert "acked_at" in record
+        assert _has_matching_ack(config, artifacts) is True
+
+    def test_mismatch_after_artifact_changes_re_strands(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """The core safety property: an ack does NOT survive the acked
+        files actually changing afterward."""
+        config, _chroma, _catalog = dirs
+        f = config / "memory.db"
+        f.write_bytes(b"x")
+        artifacts = (str(f),)
+        write_ack_marker(config, artifacts)
+        assert _has_matching_ack(config, artifacts) is True
+
+        os.utime(f, (1_000_000, 1_000_000))  # simulate the file changing later
+        assert _has_matching_ack(config, artifacts) is False
+
+    def test_malformed_marker_is_no_match(self, dirs: tuple[Path, Path, Path]) -> None:
+        config, _chroma, _catalog = dirs
+        (config / stranded_install._ACK_MARKER_FILENAME).write_text("{not json")
+        assert _has_matching_ack(config, ("x",)) is False
+
+    def test_marker_missing_fingerprint_key_is_no_match(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        config, _chroma, _catalog = dirs
+        (config / stranded_install._ACK_MARKER_FILENAME).write_text('{"consent": "hi"}')
+        assert _has_matching_ack(config, ("x",)) is False
+
+
+class TestCheckLocalAckSignal:
+    """nexus-cmtpa: :func:`detect_stranded_install`'s ``check_local_ack``
+    parameter and the ``ack_eligible`` message-clause wiring it drives."""
+
+    def test_matching_ack_destrands(self, dirs: tuple[Path, Path, Path]) -> None:
+        config, chroma, catalog = dirs
+        f = config / "memory.db"
+        f.write_bytes(b"x")
+        artifacts = (str(f),)
+        write_ack_marker(config, artifacts)
+        result = detect_stranded_install(
+            config, chroma, catalog, last_migration_capable=_PIN,
+            check_local_ack=True,
+        )
+        assert result is None
+
+    def test_no_ack_stays_stranded_with_ack_eligible_message(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        config, chroma, catalog = dirs
+        (config / "memory.db").write_bytes(b"x")
+        result = detect_stranded_install(
+            config, chroma, catalog, last_migration_capable=_PIN,
+            check_local_ack=True,
+        )
+        assert result is not None
+        assert result.ack_eligible is True
+        assert "nx stranded ack" in result.message
+
+    def test_check_local_ack_false_never_advertises_ack(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """Default (``check_local_ack=False``): no ack clause, even if a
+        marker happens to be sitting on disk -- the signal is opt-in per
+        call, not auto-detected."""
+        config, chroma, catalog = dirs
+        f = config / "memory.db"
+        f.write_bytes(b"x")
+        write_ack_marker(config, (str(f),))
+        result = detect_stranded_install(
+            config, chroma, catalog, last_migration_capable=_PIN,
+        )
+        assert result is not None
+        assert result.ack_eligible is False
+        assert "nx stranded ack" not in result.message
+
+    def test_message_ordering_two_hop_before_ack_escape(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """Hal's explicit ordering requirement: the two-hop remedy leads;
+        the ack escape is the 'if you have already completed this'
+        clause, never advertised first."""
+        config, chroma, catalog = dirs
+        (config / "memory.db").write_bytes(b"x")
+        result = detect_stranded_install(
+            config, chroma, catalog, last_migration_capable=_PIN,
+            check_local_ack=True,
+        )
+        assert result is not None
+        two_hop_idx = result.message.index("Two-hop upgrade:")
+        ack_idx = result.message.index("nx stranded ack")
+        assert two_hop_idx < ack_idx
+
+    def test_mismatched_ack_stays_stranded(self, dirs: tuple[Path, Path, Path]) -> None:
+        config, chroma, catalog = dirs
+        f = config / "memory.db"
+        f.write_bytes(b"x")
+        artifacts = (str(f),)
+        write_ack_marker(config, artifacts)
+        os.utime(f, (1_000_000, 1_000_000))  # artifact changed since ack
+        result = detect_stranded_install(
+            config, chroma, catalog, last_migration_capable=_PIN,
+            check_local_ack=True,
+        )
+        assert result is not None
+        assert result.ack_eligible is True
+
+
+class TestAckCommand:
+    """nexus-cmtpa: ``nx stranded ack`` end-to-end via ``CliRunner``."""
+
+    def _env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        config = tmp_path / "cfg"
+        config.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
+        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma-none"))
+        monkeypatch.delenv("NEXUS_CATALOG_PATH", raising=False)
+        monkeypatch.setattr(stranded_install, "LAST_MIGRATION_CAPABLE", _PIN)
+        return config
+
+    def test_disarmed_detector_is_a_noop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = self._env(tmp_path, monkeypatch)
+        monkeypatch.setattr(stranded_install, "LAST_MIGRATION_CAPABLE", None)
+        result = CliRunner().invoke(stranded_group, ["ack", "--yes"], obj={})
+        assert result.exit_code == 0
+        assert "nothing to ack" in result.output
+        assert not (config / stranded_install._ACK_MARKER_FILENAME).exists()
+
+    def test_local_mode_is_a_noop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = self._env(tmp_path, monkeypatch)
+        (config / "memory.db").write_bytes(b"x")
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: True)
+        result = CliRunner().invoke(stranded_group, ["ack", "--yes"], obj={})
+        assert result.exit_code == 0
+        assert "LOCAL mode" in result.output
+        assert "has no effect" in result.output
+        assert not (config / stranded_install._ACK_MARKER_FILENAME).exists()
+
+    def test_no_artifacts_is_a_noop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = self._env(tmp_path, monkeypatch)
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: False)
+        result = CliRunner().invoke(stranded_group, ["ack", "--yes"], obj={})
+        assert result.exit_code == 0
+        assert "nothing to attest" in result.output
+        assert not (config / stranded_install._ACK_MARKER_FILENAME).exists()
+
+    def test_declining_confirmation_writes_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = self._env(tmp_path, monkeypatch)
+        (config / "memory.db").write_bytes(b"x")
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: False)
+        result = CliRunner().invoke(stranded_group, ["ack"], input="n\n", obj={})
+        assert result.exit_code == 0
+        assert "Aborted" in result.output
+        assert not (config / stranded_install._ACK_MARKER_FILENAME).exists()
+
+    def test_yes_flag_writes_the_marker_with_consent_shown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = self._env(tmp_path, monkeypatch)
+        (config / "memory.db").write_bytes(b"x")
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: False)
+        result = CliRunner().invoke(stranded_group, ["ack", "--yes"], obj={})
+        assert result.exit_code == 0
+        assert ACK_CONSENT_TEXT in result.output
+        assert "Recorded:" in result.output
+        marker = config / stranded_install._ACK_MARKER_FILENAME
+        assert marker.exists()
+        data = json.loads(marker.read_text())
+        assert data["consent"] == ACK_CONSENT_TEXT
+        assert str(config / "memory.db") in data["artifacts"]
+
+    def test_written_marker_actually_destrands_via_the_full_assembler(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End-to-end: ack via the CLI, then confirm
+        ``detect_stranded_install_default`` (the real production
+        assembler, not a hand-built call) sees the marker and de-strands."""
+        config = self._env(tmp_path, monkeypatch)
+        (config / "memory.db").write_bytes(b"x")
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: False)
+        result = CliRunner().invoke(stranded_group, ["ack", "--yes"], obj={})
+        assert result.exit_code == 0
+
+        assert detect_stranded_install_default() is None
