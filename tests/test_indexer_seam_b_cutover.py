@@ -279,6 +279,99 @@ def test_run_index_batch_flush_force_false_omits_force_re_embed(tmp_path, monkey
     assert kwargs["force_re_embed"] is False
 
 
+def test_run_index_batch_flush_retries_transient_failure_then_succeeds(tmp_path, monkeypatch):
+    """Code review Important I1 (2026-08-09, review T2 [22014]): the
+    combined write's cat.write_manifest_many call is wrapped in
+    _manifest_write_with_retry (indexer.py's _batch_flush) — no test
+    previously exercised retry-after-transient-failure through it. A
+    transient httpx.TransportError on the FIRST attempt must be retried
+    (not surfaced), and the retry must be side-effect-free: exactly ONE
+    successful write_manifest_many call is what _apply_combined_write_
+    response ever sees, so sweep/failure accounting is recorded exactly
+    once, never doubled by a retried-then-succeeded call.
+    """
+    import httpx
+
+    from nexus.db.http_vector_client import HttpVectorClient
+    from nexus.indexer import _run_index
+    from nexus.mcp_infra import (
+        get_superseded_sweep_stats,
+        reset_superseded_sweep_stats,
+    )
+
+    reset_superseded_sweep_stats()
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "hello.py").write_text("x = 1\n")
+    reg = _reg()
+
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
+    monkeypatch.setenv("NX_LOCAL", "0")
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
+    monkeypatch.setenv("CHROMA_API_KEY", "fake")
+    # Skip the real 0.5s backoff sleep (nexus.retry._MANIFEST_WRITE_RETRY_
+    # DELAYS[0]) — determinism/speed, not behavior: _manifest_write_with_
+    # retry's control flow (attempt-then-retry-then-succeed) is what this
+    # test asserts, not wall-clock timing.
+    monkeypatch.setattr("nexus.retry.time.sleep", lambda *_a, **_kw: None)
+
+    db = MagicMock(spec=HttpVectorClient)
+    catalog_writer = MagicMock()
+    transient = httpx.TransportError("connection reset")
+    success_response = {
+        "failed_doc_ids": [], "chunks_written": 1,
+        "swept": 3, "sweep_skipped": 0, "sweep_detail": [],
+    }
+    catalog_writer.write_manifest_many.side_effect = [transient, success_response]
+    captured: dict = {}
+
+    class _CapturingBatcher:
+        def __init__(self, *, flush, **_kw):
+            captured["flush"] = flush
+
+        def add(self, *_a, **_kw):
+            return False
+
+        def drain(self, on_progress=None) -> int:
+            return 0
+
+        @property
+        def pending_summary(self) -> dict:
+            return {"chunks": 0, "collections": 0, "in_flight": 0}
+
+        @property
+        def failed_files(self) -> dict:
+            return {}
+
+        @property
+        def stats(self) -> dict:
+            return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
+
+    with _service_mode_patches(
+        db, extra={"nexus.mcp_infra.get_catalog_writer": {"return_value": catalog_writer}},
+    ), patch("nexus.chunk_batcher.ChunkBatcher", _CapturingBatcher):
+        _run_index(repo, reg, force=False)
+
+        # Must not raise — the transient error is swallowed by the retry
+        # wrapper and the second attempt succeeds.
+        captured["flush"](
+            "code__repo__voyage-code-3__v1", ["a" * 64], ["doc1"], [{"m": 1}],
+            _flush_ctx(),
+        )
+
+    # Two calls to the underlying mock (1 failure + 1 success) — that is
+    # _manifest_write_with_retry's OWN internal retry, not a caller-level
+    # double-dispatch.
+    assert catalog_writer.write_manifest_many.call_count == 2
+    # Single-side-effect semantics: _apply_combined_write_response only
+    # ever sees the ONE successful response, so sweep accounting reflects
+    # exactly one write, not two.
+    stats = get_superseded_sweep_stats()
+    assert stats["swept"] == 3
+    reset_superseded_sweep_stats()
+
+
 def test_run_index_service_mode_uses_get_t3_not_make_t3(tmp_path, monkeypatch):
     """In service mode, _run_index must use mcp_infra.get_t3() to obtain the
     T3 handle rather than make_t3() — so HttpVectorClient is the write target."""

@@ -289,7 +289,16 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 58
 # body carries a conformant collection-name string verbatim against a
 # monkeypatched `_post`; no embedder runs. Rationale in conftest.py beside
 # the entries.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 39
+# 39 -> 40 (nexus-wxjr6, 2026-08-09, code review Important I1 follow-up):
+# +1, test_indexer_seam_b_cutover.py::test_run_index_batch_flush_retries_
+# transient_failure_then_succeeds — reason "string-literal-as-name", same
+# class as the two pre-existing force_re_embed siblings in the same file.
+# Missed in the I1 commit because the full suite ran BEFORE the mode-lint
+# census saw this specific new test (a targeted battery run doesn't
+# collect the whole session, so this lint's `request.session.items` census
+# is blind to it until a full run — see the module docstring). Rationale
+# in conftest.py beside the entry.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 40
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

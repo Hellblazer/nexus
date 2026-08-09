@@ -1627,6 +1627,15 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_forwards_force_re_embed",
     "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_force_false_omits_force_re_embed",
     #
+    # nexus-wxjr6 (2026-08-09, code review Important I1 follow-up):
+    # test_run_index_batch_flush_retries_transient_failure_then_succeeds —
+    # "string-literal-as-name", same class as the sibling pair immediately
+    # above. The voyage token is the same collection-NAME fixture literal
+    # passed to the mocked flush closure; the test asserts retry-after-
+    # transient-failure control flow and single-side-effect sweep
+    # accounting, not any cloud-mode embedder behavior.
+    "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_retries_transient_failure_then_succeeds",
+    #
     # nexus-te885.8.1 (pg-source reconcile leg for verify-fill): builds a
     # mocked /v1/vectors/collections response using conformant collection-
     # NAME strings (code__nexus-1-1__voyage-code-3__v1,

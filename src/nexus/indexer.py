@@ -3014,30 +3014,50 @@ class _CombinedWritePositionZeroViolation(RuntimeError):
 
 def _build_combined_write_payload(
     ids: list, docs: list, metas: list, file_contexts: list,
-) -> "tuple[list[dict], list[tuple[str, list[dict]]], dict[str, str]]":
+) -> "tuple[list[dict], list[tuple[str, list[dict]]], dict[str, str], list[str], list[str], list[dict]]":
     """Build the nexus-wxjr6 combined-write request pieces from one
     ChunkBatcher flush. Pure — no network calls, no catalog dependency —
     so it is unit-testable independent of ``_batch_flush``'s I/O.
 
-    Returns ``(chunks_payload, full_docs, complete_map)``:
+    Returns ``(chunks_payload, full_docs, complete_map, orphan_ids,
+    orphan_docs, orphan_metas)``:
 
-    * ``chunks_payload`` — ``[{chash, text, metadata}, ...]``, deduped by
-      chash (=id for T3, RDR-180), first occurrence wins — matches the
-      engine's own dedup discipline (design memo §1.1: "chunk text is
-      carried ONCE at the top level, keyed by chash").
+    * ``chunks_payload`` — ``[{chash, text, metadata}, ...]`` for chunks
+      belonging to a file that HAS catalog identity, deduped by chash
+      (=id for T3, RDR-180), first occurrence wins — matches the engine's
+      own dedup discipline (design memo §1.1: "chunk text is carried ONCE
+      at the top level, keyed by chash").
     * ``full_docs`` — ``[(doc_id, rows), ...]`` for every doc in this
       flush whose batch includes position 0 (ChunkBatcher's file-atomic
       contract guarantees this for every REAL doc — see the
-      ``_CombinedWritePositionZeroViolation`` raise below). Docs with no
-      catalog identity (``doc_id`` empty) are silently excluded here —
-      the caller is responsible for detecting and recording an
-      ALL-excluded batch as an identity drop (mirrors
-      ``manifest_write_batch_hook``'s ``by_doc`` early-out, GH #1397 /
-      nexus-94fxl); this function itself has no logging/recording
-      side effects.
+      ``_CombinedWritePositionZeroViolation`` raise below).
     * ``complete_map`` — ``{doc_id: content_hash}`` restricted to
       ``full_docs``' own ids, for the completion-stamp ride-along
       (nexus-5xn3k.4).
+    * ``orphan_ids``/``orphan_docs``/``orphan_metas`` — chunks belonging
+      EXCLUSIVELY to files with NO catalog identity (code review Critical
+      C1, 2026-08-09, review T2 [22014]): the engine's
+      ``upsertManifestChunkVectors`` (``CatalogRepository.java`` ~3966-
+      3984) only persists chashes referenced by a doc's OWN manifest
+      ``rows`` — the ``resolved`` chash map it receives is the FULL
+      flush-wide set, but only entries a REFERENCING doc names ever get
+      written. Before this fix, a mixed flush (some files with catalog
+      identity, some without — routine: ``code_indexer.py`` resolves
+      ``catalog_doc_id`` per FILE and stages the file into the batcher
+      regardless of whether resolution succeeded) sent EVERY file's
+      content in ``chunks_payload`` while ``full_docs`` only ever covered
+      identity-having docs: identity-less content was embedded (Voyage
+      cost paid) then silently discarded server-side — no log, no
+      counter, no error, and a REGRESSION vs pre-commit behavior (that
+      content used to land in T3 via the old direct upsert-chunks call,
+      orphaned-but-searchable). A chash claimed by BOTH an identity file
+      and an identity-less file (duplicate content across files, routine
+      boilerplate) is NOT treated as orphan — it is safely covered by the
+      identity file's manifest reference, so it stays in
+      ``chunks_payload``. The caller (``_batch_flush``) sends these
+      through the OLD ``db.upsert_chunks_with_embeddings`` call, exactly
+      preserving the pre-commit orphaned-but-searchable behavior for
+      files this function cannot manifest.
 
     Raises :class:`_CombinedWritePositionZeroViolation` if any
     identified doc's batch lacks position 0 — a DEFENDED invariant, not
@@ -3055,9 +3075,30 @@ def _build_combined_write_payload(
 
     from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 — deferred: avoid module-load cross-import
 
+    # Split by catalog identity FIRST (code review Critical C1): a chash
+    # is orphan-eligible only if EVERY file that stages it lacks catalog
+    # identity — a chash claimed by an identity-having file anywhere in
+    # this flush is safely referenceable and stays in chunks_payload.
+    identity_ids: set[str] = set()
+    orphan_candidate_ids: set[str] = set()
+    for _path, _c in file_contexts:
+        if not isinstance(_c, dict):
+            continue
+        target = identity_ids if _c.get("catalog_doc_id") else orphan_candidate_ids
+        target.update(_c.get("ids") or [])
+    orphan_only_ids = orphan_candidate_ids - identity_ids
+
     seen_chash: set[str] = set()
     chunks_payload: list[dict] = []
+    orphan_ids: list[str] = []
+    orphan_docs: list[str] = []
+    orphan_metas: list[dict] = []
     for _cid, _cdoc, _cmeta in zip(ids, docs, metas):
+        if _cid in orphan_only_ids:
+            orphan_ids.append(_cid)
+            orphan_docs.append(_cdoc)
+            orphan_metas.append(_cmeta)
+            continue
         if _cid in seen_chash:
             continue
         seen_chash.add(_cid)
@@ -3094,7 +3135,7 @@ def _build_combined_write_payload(
         and _c.get("metadatas")
         and _c["metadatas"][0].get("content_hash")
     }
-    return chunks_payload, full_docs, complete_map
+    return chunks_payload, full_docs, complete_map, orphan_ids, orphan_docs, orphan_metas
 
 
 def _run_index(
@@ -3759,9 +3800,39 @@ def _run_index(
             # run, like ``db`` above) so ``--force`` reaches the server's
             # forceReEmbed escape for the batched flush path too, not
             # just the per-file fallback below.
-            chunks_payload, full_docs, complete_map = _build_combined_write_payload(
-                _ids, _docs, _metas, _file_contexts,
-            )
+            (
+                chunks_payload, full_docs, complete_map,
+                orphan_ids, orphan_docs, orphan_metas,
+            ) = _build_combined_write_payload(_ids, _docs, _metas, _file_contexts)
+
+            if orphan_ids:
+                # Code review Critical C1 (2026-08-09, review T2 [22014]):
+                # chunks whose file has NO catalog identity can never be
+                # referenced by any doc's manifest rows, so the engine
+                # would embed them (Voyage cost paid) and then silently
+                # discard them (upsertManifestChunkVectors only persists
+                # chashes a doc's OWN rows name). Route them through the
+                # OLD direct upsert-chunks call instead — preserves the
+                # pre-nexus-wxjr6 behavior EXACTLY (content lands in T3,
+                # orphaned but searchable, no manifest) rather than either
+                # silently losing it or changing what "orphaned" means.
+                # INFO, not WARNING: this is the SAME state the pre-commit
+                # code produced silently for identity-less chunks; logging
+                # it is strictly better observability, not a new failure.
+                _log.info(
+                    "combined_write_orphan_chunks_routed_to_legacy_upsert",
+                    collection=collection,
+                    count=len(orphan_ids),
+                )
+                db.upsert_chunks_with_embeddings(
+                    collection_name=collection,
+                    ids=orphan_ids,
+                    documents=orphan_docs,
+                    embeddings=[[] for _ in orphan_ids],  # Seam B: server embeds
+                    metadatas=orphan_metas,
+                    force_re_embed=force,
+                )
+
             if not full_docs:
                 # Mirrors manifest_write_batch_hook's identical early-out
                 # (GH #1397 / nexus-94fxl): no file in this flush carries
@@ -3772,7 +3843,10 @@ def _run_index(
                 # Structurally this should not happen for the
                 # ChunkBatcher path (catalog registration precedes
                 # indexing), so this is a defended invariant, not routine
-                # traffic.
+                # traffic. (A MIXED flush with SOME identity-having files
+                # already got its combined write above/below this branch
+                # — this is the ALL-orphan case, already fully handled by
+                # the orphan routing above.)
                 from nexus.mcp_infra import _record_manifest_identity_drop  # noqa: PLC0415 — deferred (lazy import, rare path)
                 _record_manifest_identity_drop(collection, len(_ids))
                 _log.warning(
