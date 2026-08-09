@@ -40,7 +40,12 @@ class ServiceTokenScopeBackfillTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.start();
+        // nexus-yhmav opt-out: this class hand-builds the PRE-003 table shape and
+        // applies ONLY service-tokens-003-scope-column.xml (not the master changelog)
+        // -- a shared, already-fully-migrated-to-HEAD cluster is incompatible with
+        // that premise by construction (the bare CREATE TABLE below would collide
+        // with the template's already-migrated nexus.service_tokens).
+        pg = PgContainerHelper.startDedicated();
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // Pre-003 shape, verbatim from service-tokens-001 + 002.
