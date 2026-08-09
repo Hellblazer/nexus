@@ -40,6 +40,10 @@ Route mapping (matches TelemetryHandler Java):
     POST /v1/telemetry/ids/probe        — probe_ids (verify-fill inner loop, RDR-178 wave-2 P1)
     GET  /v1/telemetry/nx_answer_runs/query — query_nx_answer_runs (nexus-eho3u: the read
                                                half of a formerly write-only instrument)
+    GET  /v1/telemetry/tier_writes/list — list_tier_writes (nexus-onjvy gap 4: per-row
+                                           target_title, the aggregate query route cannot
+                                           carry it; capped page + exact total, same
+                                           envelope discipline as list_hook_failures)
 """
 
 from __future__ import annotations
@@ -168,6 +172,69 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             params["since"] = since
         data = self._get("/v1/telemetry/tier_writes/query", params=params)
         return self._map_tier_write_rows(data)
+
+    def list_tier_writes(
+        self,
+        *,
+        session_id: str | None = None,
+        since: str | None = None,
+        last_n: int | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Per-row tier-write detail — ``GET /v1/telemetry/tier_writes/list``.
+
+        nexus-onjvy gap 4: ``target_title`` is accepted and stored by
+        :meth:`record_tier_write`, but until this route landed it was readable
+        through NO route in service mode — :meth:`query_tier_writes` is an
+        AGGREGATE grouped by (tool, tier, agent, project) with no target slot,
+        and a per-row title carried on an aggregated group would be incoherent.
+        This is a SEPARATE unaggregated read path, one row per write.
+
+        Review finding (reviewer/critic convergence, 2026-08-08): this was the
+        only tier_writes read path with no page cap — an unfiltered call
+        returned every row ever recorded for the tenant, and callers had no
+        kwarg to bound it even deliberately. Same capped-page-plus-exact-total
+        envelope discipline as :meth:`list_hook_failures`:
+
+        Returns ``{"rows": [(tool, tier, agent, project, target_title), ...],
+        "total": int}``. ``rows`` is capped at ``limit``, most recent write
+        first; ``total`` is the FULL count for the ``session_id``/``since``/
+        ``last_n`` filter, independent of ``limit`` — a caller asking for the
+        last 20 rows must not see a total of 20. Unlike
+        :meth:`query_tier_writes`, NULL ``agent``/``project``/``target_title``
+        map to ``None`` directly (the engine sends JSON ``null`` on this
+        route, not ``""`` — there is no aggregation collapsing many NULLs
+        into one bucket to disambiguate).
+
+        Same filter precedence as :meth:`query_tier_writes` (``last_n`` >
+        ``session_id`` > ``since``); requires an engine carrying the
+        nexus-onjvy cut — older engines 404.
+
+        Args:
+            limit: max rows in the returned page (default 100, matching
+                :meth:`list_hook_failures`). Does not affect ``total``.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if last_n:
+            params["last_n"] = last_n
+        elif session_id:
+            params["session_id"] = session_id
+        elif since:
+            params["since"] = since
+        resp = self._get("/v1/telemetry/tier_writes/list", params=params)
+        if not isinstance(resp, dict):  # defensive: a stripped proxy response
+            return {"rows": [], "total": 0}
+        rows = [
+            (
+                str(r.get("tool", "")),
+                str(r.get("tier", "")),
+                r.get("agent"),
+                r.get("project"),
+                r.get("target_title"),
+            )
+            for r in (resp.get("rows") or [])
+        ]
+        return {"rows": rows, "total": int(resp.get("total") or 0)}
 
     def query_tier_writes_once(
         self,

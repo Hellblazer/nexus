@@ -82,30 +82,30 @@ def _read_memory(db: Path, project: str, title: str) -> tuple | None:
 def _read_tier_writes(db: Path) -> list[tuple]:
     """Tier-write rows as ``(tool, tier, agent, project, target_title)``.
 
-    SUBSTRATE-ASYMMETRIC BY NECESSITY, and the asymmetry is a service gap,
-    not a test convenience (nexus-onjvy class).
+    nexus-onjvy gap 4 RESOLVED: ``tier_writes.target_title`` was WRITE-ONLY in
+    service mode — accepted and stored by ``recordTierWrite`` /
+    ``importTierWritesBatch``, but the only read route,
+    ``query_tier_writes`` (``GET /v1/telemetry/tier_writes/query``), is an
+    AGGREGATE shaped ``(tool, tier, agent, project, count)`` with no target
+    slot. ``list_tier_writes`` (``GET /v1/telemetry/tier_writes/list``) is
+    the unaggregated per-row read route that closes the gap: one row per
+    write, ``target_title`` included.
 
-    ``tier_writes.target_title`` is WRITE-ONLY in service mode. The engine
-    accepts and stores it — ``TelemetryHandler`` reads ``target_title`` off
-    the body and ``TelemetryRepository.recordTierWrite`` /
-    ``importTierWritesBatch`` both ``set`` the column — but every one of the
-    three ``TIER_WRITES.TARGET_TITLE`` references in the Java source is an
-    INSERT. There is no SELECT of it anywhere, and the only read route,
-    ``query_tier_writes`` (``GET /v1/telemetry/tier_writes/query``), returns
-    an AGGREGATE shaped ``(tool, tier, agent, project, count)``.
-
-    So the service arm returns ``None`` in the target slot and the caller
-    asserts that broken value against the bead, rather than the test being
-    rewritten to stop asking. When a read route lands, the assertion fails
-    loudly instead of silently going green.
+    Called with zero filters, relying on the isolated per-test tmp DB (a
+    fresh tenant per test, via ``isolated_t2``) rather than a server-side
+    "all rows" guarantee: ``list_tier_writes`` is capped at its default
+    ``limit`` (100, review finding 2026-08-08 — the route used to return
+    every tier_writes row ever recorded for the tenant, unbounded) and this
+    module's tests never write anywhere near that many rows per DB, so the
+    default page is never actually truncating anything here. Discards
+    ``total`` — this helper only cares about the rows themselves.
     """
 
     from nexus.db.t2 import T2Database
 
     with T2Database(db) as t2:
-        rows = t2.telemetry.query_tier_writes()
-    # (tool, tier, agent, project, count) -> target_title is unreadable here.
-    return [(tool, tier, agent, project, None) for tool, tier, agent, project, _n in rows]
+        result = t2.telemetry.list_tier_writes()
+    return list(result["rows"])
 
 
 def _telemetry_store(db: Path):
@@ -116,20 +116,13 @@ def _telemetry_store(db: Path):
 
 
 def _assert_target_title(got: str | None, expected: str) -> None:
-    """Assert ``target_title`` at its real value on each substrate.
+    """Assert ``target_title`` at its real value (nexus-onjvy gap 4 resolved).
 
-    NOT an xfail and NOT a dropped assertion: on the service backend the
-    column is write-only (see :func:`_read_tier_writes`), so the honest
-    expectation is ``None``, stated against the bead. If a read route lands
-    and this starts returning the title, THIS ASSERTION FAILS — which is
-    the point. A silent green would let the gap close without anyone
-    restoring the real check.
+    Restored to an unconditional strict check now that ``list_tier_writes``
+    exists (see :func:`_read_tier_writes`) — no more substrate-asymmetric
+    branch to carry.
     """
-    assert got is None, (
-        f"nexus-onjvy looks RESOLVED — tier_writes.target_title read back "
-        f"as {got!r}. Restore the unconditional 'target == {expected!r}' "
-        f"assertion and drop this branch."
-    )
+    assert got == expected
 
 
 class TestSignatureAcceptsKwargs:

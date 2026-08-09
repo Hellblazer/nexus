@@ -372,6 +372,55 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
             self._send(200, out)
             return
 
+        elif pp == "/v1/telemetry/tier_writes/list":
+            # nexus-onjvy gap 4: mirror TelemetryRepository.listTierWrites —
+            # same filter precedence as /tier_writes/query, but UNAGGREGATED
+            # per-row detail including target_title, ordered ts desc, id desc.
+            # Review finding (reviewer/critic convergence): capped page +
+            # exact total, same envelope discipline as hook_failures/list —
+            # "total" is computed over the FULL filtered set, before "limit".
+            session_id = qs.get("session_id", "")
+            since      = qs.get("since", "")
+            last_n     = int(qs.get("last_n", "0"))
+            limit      = int(qs.get("limit", "100"))
+            with _STORE_LOCK:
+                rows = list(_tier_writes)
+            if last_n > 0:
+                latest: dict[str, str] = {}
+                for r in rows:
+                    if r["session_id"] not in latest or r["ts"] > latest[r["session_id"]]:
+                        latest[r["session_id"]] = r["ts"]
+                keep = {
+                    s for s, _ in sorted(
+                        latest.items(), key=lambda kv: kv[1], reverse=True,
+                    )[:last_n]
+                }
+                rows = [r for r in rows if r["session_id"] in keep]
+            elif session_id:
+                rows = [r for r in rows if r["session_id"] == session_id]
+            elif since:
+                rows = [r for r in rows if r["ts"] >= since]
+            rows = sorted(rows, key=lambda r: (r["ts"], r["id"]), reverse=True)
+            total = len(rows)
+            page = rows[:limit]
+            out = {
+                "rows": [
+                    {
+                        "session_id":   r["session_id"],
+                        "ts":           r["ts"],
+                        "tool":         r["tool"],
+                        "tier":         r["tier"],
+                        "agent":        r["agent"],
+                        "project":      r["project"],
+                        "target_title": r["target_title"],
+                    }
+                    for r in page
+                ],
+                "total": total,
+            }
+            self._send(200, out)
+            return
+
         elif pp == "/v1/telemetry/consents/list":
             with _STORE_LOCK:
                 self._send(200, list(_consents))
@@ -722,6 +771,109 @@ class TestQueryTierWrites:
         )
         with _pytest.raises(httpx.HTTPStatusError):
             client.query_tier_writes_once(session_id="once-1", timeout=2.0)
+
+
+class TestListTierWrites:
+    """nexus-onjvy gap 4: per-row tier-write detail — GET /v1/telemetry/tier_writes/list.
+
+    Unaggregated twin of TestQueryTierWrites: same filters, but target_title
+    (unreadable through query_tier_writes' aggregate) must round-trip, and two
+    rows with identical (tool, tier, agent, project) must stay two rows, not
+    collapse into one grouped count. Returns {"rows": [...], "total": N} —
+    same capped-page-plus-exact-total envelope discipline as
+    list_hook_failures (review finding: this was the sole tier_writes read
+    path with no page cap).
+    """
+
+    def test_session_filter_returns_per_row_detail_not_aggregated(self, client):
+        client.record_tier_write(
+            session_id="s1", ts="2026-07-15T10:00:00Z",
+            tool="memory_put", tier="T2", agent="developer", project="nexus",
+            target_title="notes.md",
+        )
+        client.record_tier_write(
+            session_id="s1", ts="2026-07-15T10:01:00Z",
+            tool="memory_put", tier="T2", agent="developer", project="nexus",
+            target_title="other.md",
+        )
+        client.record_tier_write(
+            session_id="s1", ts="2026-07-15T10:02:00Z",
+            tool="store_put", tier="T3",
+        )
+
+        result = client.list_tier_writes(session_id="s1")
+        # NOT collapsed into one (tool, tier, agent, project) group the way
+        # query_tier_writes would — three writes in, three rows out.
+        assert result["rows"] == [
+            ("store_put", "T3", None, None, None),
+            ("memory_put", "T2", "developer", "nexus", "other.md"),
+            ("memory_put", "T2", "developer", "nexus", "notes.md"),
+        ]
+        assert result["total"] == 3
+
+    def test_last_n_sessions_and_since(self, client):
+        client.record_tier_write(
+            session_id="old", ts="2026-07-01T00:00:00Z", tool="a", tier="T1",
+            target_title="old-title",
+        )
+        client.record_tier_write(
+            session_id="new", ts="2026-07-15T00:00:00Z", tool="b", tier="T2",
+            target_title="new-title",
+        )
+
+        recent = client.list_tier_writes(last_n=1)
+        assert recent["rows"] == [("b", "T2", None, None, "new-title")]
+        assert recent["total"] == 1
+
+        since = client.list_tier_writes(since="2026-07-10T00:00:00Z")
+        assert since["rows"] == [("b", "T2", None, None, "new-title")]
+        assert since["total"] == 1
+
+    def test_empty_returns_empty_rows_and_zero_total(self, client):
+        result = client.list_tier_writes(session_id="nope")
+        assert result["rows"] == []
+        assert result["total"] == 0
+
+    def test_no_target_title_maps_to_none(self, client):
+        client.record_tier_write(
+            session_id="notitle-1", ts="2026-07-15T10:00:00Z",
+            tool="scratch_put", tier="T1",
+        )
+        result = client.list_tier_writes(session_id="notitle-1")
+        assert result["rows"] == [("scratch_put", "T1", None, None, None)]
+
+    def test_limit_caps_the_page_but_total_stays_exact(self, client):
+        # Review finding (reviewer [21898] == critic [21897], 2026-08-08):
+        # list_tier_writes had no limit kwarg at all, so a caller could not
+        # bound an unfiltered call even deliberately. Pin the cap
+        # non-vacuously: over-insert past the default/requested limit and
+        # assert the PAGE is capped while total reports the FULL count.
+        for i in range(7):
+            client.record_tier_write(
+                session_id="cap-sess", ts=f"2026-07-20T00:00:{i:02d}Z",
+                tool="memory_put", tier="T2", target_title=f"title-{i}",
+            )
+
+        capped = client.list_tier_writes(session_id="cap-sess", limit=3)
+        assert len(capped["rows"]) == 3
+        assert capped["total"] == 7, (
+            "total must be the FULL filtered count, independent of limit — "
+            "a caller asking for 3 rows must not see a total of 3"
+        )
+        # Most-recent-first ordering survives the cap.
+        titles = [r[4] for r in capped["rows"]]
+        assert titles == ["title-6", "title-5", "title-4"]
+
+        uncapped = client.list_tier_writes(session_id="cap-sess", limit=100)
+        assert len(uncapped["rows"]) == 7
+        assert uncapped["total"] == 7
+
+    def test_default_limit_matches_list_hook_failures(self, client):
+        # No explicit limit kwarg -> default of 100, same as list_hook_failures.
+        import inspect
+
+        sig = inspect.signature(client.list_tier_writes)
+        assert sig.parameters["limit"].default == 100
 
 
 class TestQueryNxAnswerRuns:

@@ -26,7 +26,7 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * nexus-onjvy — the three new read routes are actually ROUTED and serve over HTTP.
+ * nexus-onjvy — the four new read routes are actually ROUTED and serve over HTTP.
  *
  * <p>WHY THIS EXISTS SEPARATELY from TelemetryRepositoryTest / TaxonomyRepositoryTest.
  * Those prove the SQL: given a repository method, the right rows come back. They say
@@ -218,6 +218,65 @@ class OnjvyReadRoutesHandlerTest {
             .as("neither source collection was ever discovered").isEqualTo(2);
         assertThat(hub.get("is_stale"))
             .as("a never-discovered contributor forces stale").isEqualTo(true);
+    }
+
+    // ── gap 4: tier_writes.target_title ───────────────────────────────────────
+
+    @Test
+    void tierWritesList_isRoutedAndCarriesTargetTitle() throws Exception {
+        var rec = post("/v1/telemetry/tier_writes/record",
+            "{\"session_id\":\"route-tw-sess\",\"tool\":\"memory_put\",\"tier\":\"T2\","
+            + "\"agent\":\"developer\",\"project\":\"route-proj\",\"target_title\":\"route-target.md\"}");
+        assertThat(rec.statusCode()).isEqualTo(200);
+
+        var resp = get("/v1/telemetry/tier_writes/list?session_id=route-tw-sess");
+
+        assertThat(resp.statusCode())
+            .as("a 404 here means the case label is not wired, which no repository "
+                + "test can see")
+            .isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body)
+            .as("capped-page-plus-exact-total envelope, same discipline as "
+                + "hook_failures/list")
+            .containsKeys("rows", "total");
+        @SuppressWarnings("unchecked")
+        var rows = (List<Map<String, Object>>) body.get("rows");
+        assertThat(rows).isNotEmpty();
+        var row = rows.stream()
+            .filter(r -> "route-tw-sess".equals(r.get("session_id"))).findFirst().orElseThrow();
+        assertThat(row.get("target_title")).isEqualTo("route-target.md");
+        assertThat(row.get("tool")).isEqualTo("memory_put");
+        assertThat(row.get("agent")).isEqualTo("developer");
+    }
+
+    @Test
+    void tierWritesList_limitIsRoutedAndCapsThePage() throws Exception {
+        // Review finding (reviewer [21898] == critic [21897]): the route must
+        // actually honor ?limit= over HTTP, not just in the repository layer —
+        // same routing-seam rationale as every other test in this class.
+        for (int i = 0; i < 5; i++) {
+            var rec = post("/v1/telemetry/tier_writes/record",
+                "{\"session_id\":\"route-tw-cap\",\"tool\":\"memory_put\",\"tier\":\"T2\","
+                + "\"target_title\":\"cap-" + i + "\"}");
+            assertThat(rec.statusCode()).isEqualTo(200);
+        }
+
+        var resp = get("/v1/telemetry/tier_writes/list?session_id=route-tw-cap&limit=2");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        @SuppressWarnings("unchecked")
+        var rows = (List<Map<String, Object>>) body.get("rows");
+        assertThat(rows).as("page must be capped at limit=2").hasSize(2);
+        assertThat(((Number) body.get("total")).intValue())
+            .as("total must be the full 5, not the capped page size")
+            .isEqualTo(5);
+    }
+
+    @Test
+    void tierWritesList_rejectsWrongMethod() throws Exception {
+        var resp = post("/v1/telemetry/tier_writes/list", "{}");
+        assertThat(resp.statusCode()).isNotEqualTo(200);
     }
 
     private HttpResponse<String> post(String path, String body) throws Exception {

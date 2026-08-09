@@ -386,6 +386,102 @@ class TelemetryRepositoryTest {
         assertThat(repo.queryTierWrites(TENANT_A, "", "", 0).size()).isGreaterThanOrEqualTo(3);
     }
 
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> rowsOf(Map<String, Object> result) {
+        return (List<Map<String, Object>>) result.get("rows");
+    }
+
+    private static int totalOf(Map<String, Object> result) {
+        return (int) result.get("total");
+    }
+
+    @Test @Order(31)
+    void listTierWrites_returnsPerRowDetailIncludingTargetTitle() {
+        // nexus-onjvy gap 4: target_title is written by recordTierWrite but was
+        // readable through NO route — queryTierWrites is an AGGREGATE with no
+        // target slot. listTierWrites is the per-row detail route: unaggregated,
+        // so target_title (which is meaningless averaged across rows) survives.
+        repo.recordTierWrite(TENANT_A, "sess-detail-1", PAST_TS,
+            "memory_put", "T2", "developer", "proj-detail", "notes.md");
+        repo.recordTierWrite(TENANT_A, "sess-detail-1", "2024-01-15T10:31:00Z",
+            "memory_put", "T2", "developer", "proj-detail", "other.md");
+        repo.recordTierWrite(TENANT_A, "sess-detail-2", PAST_TS,
+            "scratch_put", "T1", null, null, "no-title-here");
+        repo.recordTierWrite(TENANT_B, "sess-detail-1", PAST_TS,
+            "memory_put", "T2", "developer", "proj-detail", "leaked.md");
+
+        // Session filter: two distinct rows, NOT collapsed into one aggregate
+        // group the way queryTierWrites would (same tool/tier/agent/project).
+        var result = repo.listTierWrites(TENANT_A, "sess-detail-1", "", 0, 100);
+        var rows = rowsOf(result);
+        assertThat(rows).hasSize(2);
+        assertThat(totalOf(result)).as("total must match the unpaged row count").isEqualTo(2);
+        var titles = rows.stream().map(r -> (String) r.get("target_title")).toList();
+        assertThat(titles).containsExactlyInAnyOrder("notes.md", "other.md");
+        var row0 = rows.get(0);
+        assertThat(row0).containsKeys(
+            "session_id", "ts", "tool", "tier", "agent", "project", "target_title");
+
+        // A row with target_title=null round-trips as null, not "" (unlike the
+        // aggregate's NULL -> "" mapping for agent/project).
+        var sess2 = rowsOf(repo.listTierWrites(TENANT_A, "sess-detail-2", "", 0, 100));
+        assertThat(sess2).hasSize(1);
+        assertThat(sess2.get(0).get("target_title")).isEqualTo("no-title-here");
+        assertThat(sess2.get(0).get("agent")).isNull();
+
+        // Tenant isolation: TENANT_B's identical session id sees only its own row.
+        var rowsB = rowsOf(repo.listTierWrites(TENANT_B, "sess-detail-1", "", 0, 100));
+        assertThat(rowsB).hasSize(1);
+        assertThat(rowsB.get(0).get("target_title")).isEqualTo("leaked.md");
+
+        // since filter far in the future -> empty (rows AND total); no filters ->
+        // at least the rows recorded above for the tenant.
+        var future = repo.listTierWrites(TENANT_A, "", "2099-01-01T00:00:00Z", 0, 100);
+        assertThat(rowsOf(future)).isEmpty();
+        assertThat(totalOf(future)).isZero();
+        var unfiltered = repo.listTierWrites(TENANT_A, "", "", 0, 100);
+        assertThat(rowsOf(unfiltered).size()).isGreaterThanOrEqualTo(3);
+        assertThat(totalOf(unfiltered)).isGreaterThanOrEqualTo(3);
+
+        // last_n sessions: same precedence as queryTierWrites (last_n > session_id > since).
+        repo.recordTierWrite(TENANT_A, "sess-detail-future", "2030-01-01T00:00:00Z",
+            "nx_answer", "plan", null, null, "future.md");
+        var recent = rowsOf(repo.listTierWrites(TENANT_A, "", "", 1, 100));
+        assertThat(recent).hasSize(1);
+        assertThat(recent.get(0).get("target_title")).isEqualTo("future.md");
+    }
+
+    @Test @Order(31)
+    void listTierWrites_limitCapsThePageButTotalStaysExact() {
+        // Review finding (reviewer [21898] == critic [21897]): listTierWrites was
+        // the sole per-row list route in TelemetryHandler with no page cap — an
+        // unfiltered call returned every tier_writes row ever recorded for the
+        // tenant. Pin the cap non-vacuously: over-insert past the limit, assert
+        // the PAGE is capped while total reports the FULL filtered count.
+        String session = "sess-cap-test";
+        for (int i = 0; i < 7; i++) {
+            repo.recordTierWrite(TENANT_A, session,
+                String.format("2024-02-01T00:00:%02dZ", i),
+                "memory_put", "T2", "developer", "proj-cap", "title-" + i);
+        }
+
+        var capped = repo.listTierWrites(TENANT_A, session, "", 0, 3);
+        assertThat(rowsOf(capped)).as("page must be capped at the requested limit").hasSize(3);
+        assertThat(totalOf(capped))
+            .as("total must be the FULL filtered count, independent of limit — "
+                + "a caller asking for 3 rows must not see a total of 3")
+            .isEqualTo(7);
+
+        // Most-recent-first ordering survives the cap: the 3 returned rows are
+        // the 3 most recent (title-6, title-5, title-4), not the first 3 written.
+        var titles = rowsOf(capped).stream().map(r -> (String) r.get("target_title")).toList();
+        assertThat(titles).containsExactly("title-6", "title-5", "title-4");
+
+        var uncapped = repo.listTierWrites(TENANT_A, session, "", 0, 100);
+        assertThat(rowsOf(uncapped)).hasSize(7);
+        assertThat(totalOf(uncapped)).isEqualTo(7);
+    }
+
     // ── consents (RDR-182 nexus-ng2sy: service-mode consent-audit parity) ────────
 
     @Test @Order(32)
