@@ -980,6 +980,28 @@ def _upsert_skip_reembed(
     if not _hvc.is_vector_service_mode():
         db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
         return len(ids)
+    if not _hvc.is_service_backed(db):
+        # nexus-5lygi: NX_STORAGE_BACKEND_VECTORS says service mode (the
+        # ``is_vector_service_mode()`` gate above passed), but the db
+        # handle actually resolved here is not ``HttpVectorClient`` — env
+        # state and handle type CAN diverge (see
+        # ``is_vector_service_mode``'s own docstring), and this is exactly
+        # the shape a leaked test fixture produces by swapping
+        # ``mcp_infra._t3_instance`` to an in-process handle without
+        # restoring it (nexus-gtl01 root cause: T2
+        # nexus/gtl01-root-cause-2026-08-09). A WARNING, not a raise or a
+        # skip: tests legitimately inject non-service handles on purpose,
+        # and the branches below still need to run against whatever ``db``
+        # is. This single log line is the correlation that would have
+        # turned two days of gtl01 triage aimed at the engine into an
+        # immediate "the handle is wrong, not the engine" read — see the
+        # scoped comment below on what the ack-contract invariant does and
+        # does not prove for a handle like this.
+        _log.warning(
+            "upsert_skip_reembed_non_service_handle",
+            collection=collection_name,
+            handle_type=type(db).__name__,
+        )
     if force:
         _log.debug(
             "upsert_skip_reembed_branch",
@@ -1028,16 +1050,36 @@ def _upsert_skip_reembed(
         # captured 2026-08-08 recurrence took (probe present=0, branch=
         # full_upsert_no_existing, count=1) immediately before the chunk was
         # found absent at verify, with no exception raised in between.
-        # Reaching this line means ``db.upsert_chunks_with_embeddings``
-        # RETURNED without raising — HttpVectorClient's ack-mismatch house
-        # pattern raises inside it on a missing/wrong count, so a normal
-        # return here rules out "the write call never completed" and "an
-        # exception was silently swallowed above this line" as explanations
-        # for a later-absent chunk, narrowing the healthy-shape residue to
-        # the engine-side commit-durability question logged alongside
-        # HttpVectorClient's own request/response events (see
-        # http_vector_upsert_chunks_response's comment for what remains
-        # undecidable from the client side alone).
+        #
+        # nexus-5lygi: the claim that follows is SCOPED to ``db`` actually
+        # being an ``HttpVectorClient`` — it is a property of that ONE
+        # implementation of this duck-typed interface, not of "reaching
+        # this line" in general. For HttpVectorClient, reaching this line
+        # means ``upsert_chunks_with_embeddings`` RETURNED without raising
+        # — its ack-mismatch house pattern raises inside it on a missing/
+        # wrong count, so a normal return DOES rule out "the write call
+        # never completed" and "an exception was silently swallowed above
+        # this line" as explanations for a later-absent chunk, narrowing
+        # the healthy-shape residue to the engine-side commit-durability
+        # question logged alongside HttpVectorClient's own request/
+        # response events (see http_vector_upsert_chunks_response's
+        # comment for what remains undecidable from the client side
+        # alone).
+        #
+        # For any OTHER handle reachable here — e.g. a ``T3Database`` over
+        # ``InMemoryVectorClient``, the shape a leaked test fixture can
+        # swap into the ``mcp_infra._t3_instance`` singleton without
+        # restoring it — a normal return proves NONE of that. Such a
+        # handle returns having written to an in-process structure only;
+        # it says nothing about whether any bytes ever reached the engine,
+        # let alone whether the engine committed them. The WARNING logged
+        # above (``upsert_skip_reembed_non_service_handle``) fires exactly
+        # when this scoping matters: this comment's invariant held, but it
+        # was being read as if it covered the handle that was actually in
+        # play, which is precisely how two days of gtl01 triage got aimed
+        # at engine-side commit durability and cross-tenant RLS/GUC bleed
+        # while the real cause was upsert-never-sent from a non-service
+        # handle (root cause: T2 nexus/gtl01-root-cause-2026-08-09).
         _log.debug(
             "upsert_skip_reembed_upsert_outcome",
             collection=collection_name,

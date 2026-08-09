@@ -65,6 +65,36 @@ def _service_db(monkeypatch, existing: set[str]) -> MagicMock:
     return db
 
 
+class _TransparentNonServiceHandle:
+    """nexus-5lygi: minimal duck-typed stand-in for a leaked in-process T3
+    handle — implements the three methods ``_upsert_skip_reembed`` calls,
+    but is deliberately NOT an ``HttpVectorClient`` instance, mirroring the
+    ``T3Database``-over-``InMemoryVectorClient`` shape nexus-gtl01's root
+    cause found swapped into ``mcp_infra._t3_instance`` by a leaked test
+    fixture (T2 nexus/gtl01-root-cause-2026-08-09)."""
+
+    def __init__(self, existing: set[str]):
+        self._existing = existing
+
+    def existing_ids(self, collection_name, ids):
+        return self._existing
+
+    def upsert_chunks_with_embeddings(self, *args, **kwargs):
+        return None
+
+    def update_chunks(self, *args, **kwargs):
+        return []
+
+
+def _non_service_db(monkeypatch, existing: set[str]) -> "_TransparentNonServiceHandle":
+    # env state says service mode — the divergence-from-handle-type case
+    # ``is_vector_service_mode``'s own docstring calls out.
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client.is_vector_service_mode", lambda: True,
+    )
+    return _TransparentNonServiceHandle(existing)
+
+
 def _events(logs: list[dict], event: str) -> list[dict]:
     return [e for e in logs if e["event"] == event]
 
@@ -254,3 +284,41 @@ class TestUpdateChunksDispositionLogged:
         )
         assert dispositions[0]["missing_reported"] is False
         assert dispositions[0]["missing_count"] is None
+
+
+class TestNonServiceHandleWarning:
+    """nexus-5lygi: ``is_vector_service_mode()`` (env state) says service
+    mode but the resolved ``db`` handle is not ``HttpVectorClient`` — the
+    exact shape nexus-gtl01's root cause traced to a leaked test fixture.
+    A WARNING naming the actual handle type must fire, unconditionally of
+    which downstream branch runs, and must NOT fire for a genuine
+    service-backed handle (the common case, exercised by every other test
+    in this file)."""
+
+    def test_non_service_handle_logs_warning_with_handle_type(self, monkeypatch):
+        db = _non_service_db(monkeypatch, existing=set())
+        with _capture_debug_logs() as logs:
+            _upsert_skip_reembed(db, _COLL, _IDS, _DOCS, _EMB, _METAS)
+
+        warnings = _events(logs, "upsert_skip_reembed_non_service_handle")
+        assert len(warnings) == 1, f"expected exactly one, got: {logs}"
+        assert warnings[0]["collection"] == _COLL
+        assert warnings[0]["handle_type"] == "_TransparentNonServiceHandle"
+        assert warnings[0]["log_level"] == "warning"
+
+    def test_non_service_handle_warning_fires_on_the_force_branch_too(self, monkeypatch):
+        # The check runs before the force/probe/split branch split, so it
+        # must fire regardless of which branch is actually taken.
+        db = _non_service_db(monkeypatch, existing=set())
+        with _capture_debug_logs() as logs:
+            _upsert_skip_reembed(db, _COLL, _IDS, _DOCS, _EMB, _METAS, force=True)
+
+        warnings = _events(logs, "upsert_skip_reembed_non_service_handle")
+        assert len(warnings) == 1
+
+    def test_service_backed_handle_does_not_log_the_warning(self, monkeypatch):
+        db = _service_db(monkeypatch, existing=set())
+        with _capture_debug_logs() as logs:
+            _upsert_skip_reembed(db, _COLL, _IDS, _DOCS, _EMB, _METAS)
+
+        assert _events(logs, "upsert_skip_reembed_non_service_handle") == []
