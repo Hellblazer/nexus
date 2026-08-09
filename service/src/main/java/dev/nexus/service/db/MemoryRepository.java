@@ -252,6 +252,102 @@ public final class MemoryRepository {
     }
 
     /**
+     * nexus-senub: guard against silently returning {@code []} for a query
+     * whose PRIMARY prose leg — {@code plainto_tsquery('english', ...)}, the
+     * only {@link #ftsQuery} leg that reaches {@code content} (weight B) —
+     * reduced to nothing searchable. Measured cause: PostgreSQL's
+     * {@code plainto_tsquery('english', ...)} silently strips English
+     * stopwords, so a query made ENTIRELY of them ({@code "and"}, bare
+     * {@code "NOT"}) or of no indexable text at all ({@code "..."})
+     * degenerates to an empty tsquery ({@code numnode = 0}) that can never
+     * match {@code content}, corpus-independent — not "nothing relevant",
+     * literally nothing, ever. The caller cannot distinguish that from a
+     * genuine empty store, which is exactly the no-silent-fallbacks class
+     * this bead is filed under: a human concludes the entry is absent, and an
+     * agent treats an empty {@code memory search} as evidence of absence and
+     * re-derives from scratch.
+     *
+     * <p>Call ONLY when a search already came back empty. A query whose
+     * english leg is empty but that still matched something through the
+     * {@code 'simple'} title/tag leg (memory-002's separator segment, or a
+     * literal tag) is a REAL result and must stay a normal 200 — this guard
+     * never discards a hit, it only replaces an AMBIGUOUS {@code []} with a
+     * loud, named reason once there is nothing left to return anyway.
+     *
+     * <p>Checking the COMBINED {@link #ftsQuery} tsquery's {@code numnode}
+     * instead would never catch this: the {@code 'simple'} leg (title/tags
+     * only) has no stopword list at all, so a query like {@code "and"} still
+     * yields a non-empty COMBINED tsquery (one node, from the simple leg)
+     * even though {@code content} — the field a free-text search is normally
+     * about — was never reachable by it. Measured directly against a scratch
+     * Postgres instance before writing this: {@code plainto_tsquery('english',
+     * 'and')} has {@code numnode = 0}; {@code plainto_tsquery('simple', 'and')}
+     * has {@code numnode = 1} ({@code 'and':1}, no stripping); the OR'd
+     * combination therefore has {@code numnode = 1} and would slip past a
+     * combined-query check while {@code content} stays permanently
+     * unreachable by that query. The english leg is the one leg that
+     * genuinely covers prose, so it is the one leg whose emptiness actually
+     * means "nothing to search {@code content} with."
+     *
+     * @throws DegenerateQueryException naming the query and the reason,
+     *         caught by {@code MemoryHandler}'s search handlers and mapped to
+     *         an HTTP 400 carrying {@code "code":"no_searchable_terms"} —
+     *         matches the retired SQLite arm's {@code ValueError} contract in
+     *         spirit (a loud error instead of a silent {@code []}), on a
+     *         substrate where the actual mechanism is stopword reduction, not
+     *         FTS5 operator syntax (there is no operator grammar on this
+     *         substrate: {@code plainto_tsquery} accepts arbitrary text
+     *         without ever raising a syntax error). A DISTINCT exception type
+     *         (not a bare {@code IllegalArgumentException}) is deliberate —
+     *         {@code MemoryHandler.requireString} raises plain
+     *         {@code IllegalArgumentException} for missing/blank fields,
+     *         which the outer generic ladder maps to the SAME
+     *         {@code {"error": ...}} 400 shape with no discriminator. Without
+     *         a distinct type here, the client could not tell "your query is
+     *         unsearchable" from "you forgot a required field" apart — and
+     *         {@code HttpMemoryStore}'s ValueError conversion would then
+     *         mislabel a genuine caller bug as a degenerate-query rejection,
+     *         which {@code db/t1.py}'s pre-existing
+     *         {@code except ValueError: return []} absorption path would
+     *         silently swallow, recreating the exact ambiguity class this
+     *         bead exists to eliminate (critic finding, nexus-senub review).
+     */
+    private static void guardAgainstDegenerateQuery(DSLContext ctx, String query) {
+        Integer numnode = ctx.select(field(
+                    "numnode(plainto_tsquery('english', nexus.fold_diacritics({0})))",
+                    Integer.class, val(query)))
+                .fetchOne(0, Integer.class);
+        if (numnode == null || numnode == 0) {
+            throw new DegenerateQueryException(
+                "no searchable terms in query '" + query + "' — every word is a "
+                + "stopword, punctuation, or otherwise not indexable prose text");
+        }
+    }
+
+    /**
+     * nexus-senub: a query with no searchable terms (see
+     * {@link #guardAgainstDegenerateQuery}). Extends
+     * {@link IllegalArgumentException} (so it is still caught by any
+     * defense-in-depth generic {@code IllegalArgumentException} handler) but
+     * is ALSO caught specifically by {@code MemoryHandler}'s search handlers
+     * so the 400 body can carry a distinct {@code "code"} field — the same
+     * shape convention as {@code CatalogRepository.DanglingEndpointException}
+     * / {@code CatalogHandler}'s {@code "dangling_endpoint"} code
+     * (nexus-9ssih). A caller (e.g. {@code HttpMemoryStore}) keys its
+     * ValueError-vs-HTTPStatusError decision on the presence of this code,
+     * never on the bare HTTP status — a 400 with no code is a DIFFERENT
+     * failure class (a caller bug: missing/blank required field) and must
+     * propagate as-is, not be mislabeled.
+     */
+    public static final class DegenerateQueryException extends IllegalArgumentException {
+        private static final long serialVersionUID = 1L;
+
+        DegenerateQueryException(String message) {
+            super(message);
+        }
+    }
+
+    /**
      * FTS search using the {@code fts_vector} GIN index.
      *
      * <p>Uses a dual-tsquery OR to cover both prose and identifier columns:
@@ -296,6 +392,9 @@ public final class MemoryRepository {
                           .where(condition(ftsWhere, val(query)))
                           .orderBy(field("ts_rank(fts_vector, " + ftsQuery(query) + ")", Double.class, val(query)).desc(), MEMORY.ID.asc())
                           .fetch();
+            }
+            if (rows.isEmpty()) {
+                guardAgainstDegenerateQuery(ctx, query);
             }
             if (trackAccess && !rows.isEmpty()) {
                 List<Long> ids = rows.map(r -> r.getId());
@@ -383,12 +482,16 @@ public final class MemoryRepository {
                                             .replace("%", "\\%")
                                             .replace("*", "%")
                                             .replace("?", "_");
-            return ctx.selectFrom(MEMORY)
+            var rows = ctx.selectFrom(MEMORY)
                       .where(condition(
                           "fts_vector @@ " + ftsQuery(query) + " AND project LIKE {1} ESCAPE '\\'",
                           val(query), val(likePattern)))
                       .orderBy(field("ts_rank(fts_vector, " + ftsQuery(query) + ")", Double.class, val(query)).desc(), MEMORY.ID.asc())
                       .fetch();
+            if (rows.isEmpty()) {
+                guardAgainstDegenerateQuery(ctx, query);
+            }
+            return rows;
         });
     }
 
@@ -406,12 +509,16 @@ public final class MemoryRepository {
                                    .replace("%", "\\%")
                                    .replace("_", "\\_");
             String likePattern = "%," + escapedTag + ",%";
-            return ctx.selectFrom(MEMORY)
+            var rows = ctx.selectFrom(MEMORY)
                       .where(condition(
                           "fts_vector @@ " + ftsQuery(query) + " AND (',' || tags || ',') LIKE {1} ESCAPE '\\'",
                           val(query), val(likePattern)))
                       .orderBy(field("ts_rank(fts_vector, " + ftsQuery(query) + ")", Double.class, val(query)).desc(), MEMORY.ID.asc())
                       .fetch();
+            if (rows.isEmpty()) {
+                guardAgainstDegenerateQuery(ctx, query);
+            }
+            return rows;
         });
     }
 

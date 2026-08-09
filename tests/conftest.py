@@ -1711,7 +1711,15 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
 
 @pytest.fixture
 def db(tmp_path: Path) -> T2Database:
-    """Provide a T2Database backed by a temporary SQLite file."""
+    """Provide a T2Database backed by the engine test substrate (all-HTTP).
+
+    ``path`` is RETAINED-AND-IGNORED for signature stability (RDR-158 P4,
+    SQLite retirement) — see ``T2Database.__init__``'s own docstring. Every
+    domain store is an HTTP client over the engine's PG tables; there is no
+    local ``.db`` file backing this fixture despite the path-shaped
+    argument. The engine substrate self-provisions (or skips) via
+    ``ensure_engine``/``mint_test_tenant`` elsewhere in this module.
+    """
     database = T2Database(tmp_path / "memory.db")
     yield database
     database.close()

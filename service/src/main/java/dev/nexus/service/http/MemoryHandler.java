@@ -230,8 +230,12 @@ public final class MemoryHandler implements HttpHandler {
         String access  = optStringOrNull(body, "access");
         boolean trackAccess = !"silent".equals(access);
 
-        var rows = repo.search(tenant, query, project, trackAccess);
-        HttpUtil.send(ex, 200, json(rows.stream().map(this::recordToMap).toList()));
+        try {
+            var rows = repo.search(tenant, query, project, trackAccess);
+            HttpUtil.send(ex, 200, json(rows.stream().map(this::recordToMap).toList()));
+        } catch (MemoryRepository.DegenerateQueryException e) {
+            sendDegenerateQueryError(ex, tenant, e);
+        }
     }
 
     /**
@@ -292,8 +296,12 @@ public final class MemoryHandler implements HttpHandler {
         String query       = requireString(body, "query");
         String projectGlob = requireString(body, "project_glob");
 
-        var rows = repo.searchGlob(tenant, query, projectGlob);
-        HttpUtil.send(ex, 200, json(rows.stream().map(this::recordToMap).toList()));
+        try {
+            var rows = repo.searchGlob(tenant, query, projectGlob);
+            HttpUtil.send(ex, 200, json(rows.stream().map(this::recordToMap).toList()));
+        } catch (MemoryRepository.DegenerateQueryException e) {
+            sendDegenerateQueryError(ex, tenant, e);
+        }
     }
 
     /**
@@ -307,8 +315,31 @@ public final class MemoryHandler implements HttpHandler {
         String query = requireString(body, "query");
         String tag   = requireString(body, "tag");
 
-        var rows = repo.searchByTag(tenant, query, tag);
-        HttpUtil.send(ex, 200, json(rows.stream().map(this::recordToMap).toList()));
+        try {
+            var rows = repo.searchByTag(tenant, query, tag);
+            HttpUtil.send(ex, 200, json(rows.stream().map(this::recordToMap).toList()));
+        } catch (MemoryRepository.DegenerateQueryException e) {
+            sendDegenerateQueryError(ex, tenant, e);
+        }
+    }
+
+    /**
+     * nexus-senub critic follow-up: shared responder for
+     * {@link MemoryRepository.DegenerateQueryException} across all three FTS
+     * search routes — one owner, matching {@code ftsQuery}'s one-owner shape
+     * on the repository side. Emits {@code "code":"no_searchable_terms"} so
+     * the client can discriminate this 400 from {@link #requireString}'s
+     * generic missing/blank-field 400 (same {@code {"error": ...}} shape
+     * otherwise) — same house convention as {@code CatalogHandler}'s
+     * {@code "dangling_endpoint"} code (nexus-9ssih).
+     */
+    private void sendDegenerateQueryError(
+            HttpExchange ex, String tenant, MemoryRepository.DegenerateQueryException e) throws IOException {
+        log.debug("event=memory_degenerate_query tenant={} error={}", tenant, e.getMessage());
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("error", e.getMessage());
+        payload.put("code", "no_searchable_terms");
+        HttpUtil.send(ex, 400, json(payload));
     }
 
     /**

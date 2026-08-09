@@ -32,10 +32,12 @@ The fake server:
 
 from __future__ import annotations
 
+import re
 import threading
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
 import pytest
 
 from nexus.db.t2.http_memory_store import DEFAULT_TENANT, HttpMemoryStore
@@ -44,6 +46,23 @@ from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 TOKEN = "fake-service-token-xyz"
 
 # ── In-process fake server ────────────────────────────────────────────────────
+
+#: nexus-senub. Mirrors dev.nexus.service.db.MemoryRepository.STOPWORDS (and
+#: this fake's own pre-existing /put_or_merge stopword set below) so the fake
+#: server can simulate the real engine's guardAgainstDegenerateQuery 400 —
+#: not a claim that this IS PostgreSQL's actual 'english' stopword list, only
+#: that it exercises the class of query this bead is about.
+_SEARCH_STOPWORDS = {
+    "the", "a", "an", "in", "of", "for", "to", "and", "or", "is", "are", "was",
+    "it", "that", "this", "with", "on", "at", "by", "from", "as", "be", "not",
+}
+
+
+def _has_no_searchable_terms(query: str) -> bool:
+    """True when every alphanumeric token in *query* is a stopword, or there
+    are no alphanumeric tokens at all (punctuation-only / empty)."""
+    tokens = re.findall(r"[a-zA-Z0-9]+", query.lower())
+    return not any(t not in _SEARCH_STOPWORDS for t in tokens)
 
 # Shared in-memory store: {project: {title: entry_dict}}
 _STORE: dict[str, dict[str, dict[str, Any]]] = {}
@@ -177,42 +196,112 @@ class _FakeMemoryHandler(FakeT2HandlerBase):
                         self._send(200, {"id": entry["id"], "action": "inserted"})
 
         elif op == "/search":
-            query = body.get("query", "").lower()
+            raw_query = body.get("query", "")
+            # nexus-senub critic follow-up: mirrors MemoryHandler.requireString
+            # running BEFORE the repository is ever called — a missing/blank
+            # query is a DIFFERENT, discriminator-less 400 (same {"error":...}
+            # shape, no "code" field). Must stay a plain httpx.HTTPStatusError
+            # on the client, never mislabeled as a degenerate-query rejection.
+            if not raw_query.strip():
+                self._send(400, {"error": "missing required field: query"})
+                return
+            query = raw_query.lower()
             project_filter = body.get("project")
+            # nexus-senub: CONTENT is reachable only for a non-degenerate query
+            # — mirrors the real engine's content column being indexed ONLY
+            # through the stopword-stripping 'english' tsvector leg
+            # (MemoryRepository.ftsQuery), while title/tags use 'simple' (no
+            # stopword stripping) and stay reachable. A naive plain substring
+            # check on content would find "and" inside "clause and clause"
+            # trivially and never exercise the 400 this fake exists to
+            # simulate — that IS the bug this fix closes (found by the real
+            # failure: DID NOT RAISE).
+            degenerate = _has_no_searchable_terms(raw_query)
             results = []
             with _STORE_LOCK:
                 for proj, entries in _STORE.items():
                     if project_filter and proj != project_filter:
                         continue
                     for entry in entries.values():
-                        if query in entry["content"].lower() or query in entry["title"].lower():
+                        title_hit = query in entry["title"].lower()
+                        content_hit = (not degenerate) and (query in entry["content"].lower())
+                        if title_hit or content_hit:
                             results.append(dict(entry))
+            # only fires when the search ALSO came back empty, so a real
+            # title/tag hit through a stopword-shaped query still 200s.
+            if not results and degenerate:
+                self._send(400, {
+                    "error": (
+                        f"no searchable terms in query '{raw_query}' — every "
+                        "word is a stopword, punctuation, or otherwise not "
+                        "indexable prose text"
+                    ),
+                    # nexus-senub critic follow-up: the machine-readable
+                    # discriminator — MUST be present so HttpMemoryStore
+                    # converts this (and ONLY this) 400 class to ValueError.
+                    "code": "no_searchable_terms",
+                })
+                return
             self._send(200, results)
 
         elif op == "/search_glob":
-            query = body.get("query", "").lower()
+            raw_query = body.get("query", "")
+            if not raw_query.strip():
+                self._send(400, {"error": "missing required field: query"})
+                return
+            query = raw_query.lower()
             glob = body.get("project_glob", "").replace("*", "")
+            # nexus-senub: same content-only-reachable-when-non-degenerate
+            # asymmetry as /search above.
+            degenerate = _has_no_searchable_terms(raw_query)
             results = []
             with _STORE_LOCK:
                 for proj, entries in _STORE.items():
                     if glob and glob not in proj:
                         continue
                     for entry in entries.values():
-                        if query in entry["content"].lower():
+                        if (not degenerate) and (query in entry["content"].lower()):
                             results.append(dict(entry))
+            if not results and degenerate:
+                self._send(400, {
+                    "error": (
+                        f"no searchable terms in query '{raw_query}' — every "
+                        "word is a stopword, punctuation, or otherwise not "
+                        "indexable prose text"
+                    ),
+                    "code": "no_searchable_terms",
+                })
+                return
             self._send(200, results)
 
         elif op == "/search_by_tag":
-            query = body.get("query", "").lower()
+            raw_query = body.get("query", "")
+            if not raw_query.strip():
+                self._send(400, {"error": "missing required field: query"})
+                return
+            query = raw_query.lower()
             tag = body.get("tag", "")
+            # nexus-senub: same content-only-reachable-when-non-degenerate
+            # asymmetry as /search above.
+            degenerate = _has_no_searchable_terms(raw_query)
             results = []
             with _STORE_LOCK:
                 for proj, entries in _STORE.items():
                     for entry in entries.values():
                         tags = entry.get("tags", "")
                         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
-                        if query in entry["content"].lower() and tag in tag_list:
+                        if (not degenerate) and (query in entry["content"].lower()) and tag in tag_list:
                             results.append(dict(entry))
+            if not results and degenerate:
+                self._send(400, {
+                    "error": (
+                        f"no searchable terms in query '{raw_query}' — every "
+                        "word is a stopword, punctuation, or otherwise not "
+                        "indexable prose text"
+                    ),
+                    "code": "no_searchable_terms",
+                })
+                return
             self._send(200, results)
 
         elif op == "/expire":
@@ -463,6 +552,70 @@ class TestSearch:
         results = store.search_by_tag("blorptastic", "special")
         assert len(results) >= 1
         assert results[0]["title"] == "tagged"
+
+    # ── nexus-senub: degenerate (stopword-only) query 400 -> ValueError ──────
+
+    def test_search_stopwordOnly_raisesValueError_notSilentEmpty(
+        self, store: HttpMemoryStore,
+    ) -> None:
+        store.put("senub-p", "operators.md", "clause and clause", ttl=30)
+        with pytest.raises(ValueError, match="and"):
+            store.search("and", project="senub-p")
+
+    def test_search_realQuery_stillReturnsEmptyList_notValueError(
+        self, store: HttpMemoryStore,
+    ) -> None:
+        # NON-VACUITY companion: a real (non-stopword) query that matches
+        # nothing must stay a plain empty list, never an exception — the
+        # guard only fires for a degenerate query, not for any empty result.
+        results = store.search("zzznotpresent", project="senub-p-control")
+        assert results == []
+
+    def test_search_glob_stopwordOnly_raisesValueError(
+        self, store: HttpMemoryStore,
+    ) -> None:
+        store.put("senub-glob-p", "g.md", "clause and clause", ttl=30)
+        with pytest.raises(ValueError, match="and"):
+            store.search_glob("and", "senub-glob-*")
+
+    def test_search_by_tag_stopwordOnly_raisesValueError(
+        self, store: HttpMemoryStore,
+    ) -> None:
+        store.put("senub-tag-p", "t.md", "clause and clause", tags="rdr", ttl=30)
+        with pytest.raises(ValueError, match="and"):
+            store.search_by_tag("and", "zzz-no-such-tag")
+
+    # ── critic follow-up (nexus-senub review [21909], Significant finding):
+    #    the ValueError conversion must key on a structured discriminator,
+    #    never the bare 400 status — pin BOTH directions so a future caller
+    #    bug (e.g. a missing/blank query) can never be mislabeled as a
+    #    degenerate-query rejection and silently absorbed by db/t1.py's
+    #    pre-existing `except ValueError: return []`. ──────────────────────
+
+    def test_search_degenerateQueryMarker_becomesValueError(
+        self, store: HttpMemoryStore,
+    ) -> None:
+        # Same case as test_search_stopwordOnly_raisesValueError_notSilentEmpty
+        # above, restated to name the discriminator explicitly: the fake's
+        # 400 for this case carries "code": "no_searchable_terms", and THAT
+        # is what the client keys on, not the status code alone.
+        store.put("senub-marker-p", "operators.md", "clause and clause", ttl=30)
+        with pytest.raises(ValueError, match="and"):
+            store.search("and", project="senub-marker-p")
+
+    def test_search_discriminatorLess400_propagatesAsHTTPStatusError(
+        self, store: HttpMemoryStore,
+    ) -> None:
+        # A missing/blank query is a DIFFERENT 400 class — same {"error":...}
+        # shape, no "code" field (mirrors MemoryHandler.requireString, which
+        # runs BEFORE the repository and never sees the query at all). Must
+        # propagate as its natural httpx.HTTPStatusError, NEVER become a
+        # ValueError — a client that converted every 400 indiscriminately
+        # would relabel this caller bug as "your query is unsearchable" and
+        # a caller using the pre-existing `except ValueError: return []`
+        # pattern (nexus/db/t1.py:98) would silently swallow it.
+        with pytest.raises(httpx.HTTPStatusError):
+            store.search("")
 
 
 class TestListAndAll:
