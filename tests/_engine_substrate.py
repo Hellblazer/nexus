@@ -32,6 +32,21 @@ OWNER PID is dead (never PPID-based: ``pg_ctl start`` daemonizes even for
 a live session, so a fresh postmaster's PPID is 1 within moments of
 boot — only the sidecar's owner-pid check tells stale from live). See
 :func:`sweep_stale_substrate_clusters`.
+
+Sidecar-write TIMING (nexus-ui654 follow-up, critic Q3): the sidecar is
+written TWICE per boot, not once at the end — immediately once the
+postmaster is confirmed up (postmaster identity only; engine fields
+``None``), then updated immediately once the JVM ``Popen`` call returns
+(which hands back the engine PID synchronously, well before the up-to-60s
+``_wait_tcp`` call that follows it). The original nexus-lgdy1 shape wrote
+the sidecar only once, at the very END of ``_boot()`` — after createdb,
+role bootstrap, JVM spawn, and the full TCP-wait — leaving a real,
+observed (not hypothetical) window in which a kill produced a
+SIDECAR-LESS cluster that ``_sweep_legacy_cluster`` permanently refuses
+to auto-reap. Concurrency-window control (nexus-ui654's own
+``_boot_semaphore_slot``) is a separate, complementary mechanism — it
+bounds how many boots run at once; this fix bounds how LONG each boot's
+own un-reapable window lasts.
 """
 from __future__ import annotations
 
@@ -402,6 +417,21 @@ def _boot() -> dict:
             check=True, capture_output=True,
         )
     postmaster_pid = _read_postmaster_pid(pgdata)
+    # Concurrency-window control's OTHER half (nexus-ui654 follow-up,
+    # critic Q3): write the sidecar NOW, immediately once the postmaster
+    # identity is known -- not at the very end of _boot() after createdb +
+    # role bootstrap + JVM spawn + up to 60s of TCP-wait. A kill anywhere
+    # in that (formerly ~60s, now milliseconds) window used to leave a
+    # SIDECAR-LESS cluster that _sweep_legacy_cluster() permanently
+    # refuses to auto-reap. engine_pid/svc_port are genuinely not known
+    # yet at this point -- write None for both; the reaper skips a None
+    # leg rather than treating it as dead or mismatched, so this partial
+    # sidecar is still fully reapable for the postmaster leg. Updated
+    # (not re-created) once the engine identity is known, below.
+    sidecar_started_at = _write_sidecar(
+        pgdata, pg_port=pg_port, svc_port=None,
+        postmaster_pid=postmaster_pid, engine_pid=None,
+    )
 
     def _kill_pg() -> None:
         # Review finding (P0 remainder, Important 1): any failure after
@@ -466,6 +496,16 @@ def _boot() -> dict:
         stdout=svc_log, stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
     )
+    # svc.pid is known SYNCHRONOUSLY the instant Popen returns -- no reason
+    # to defer recording it until _wait_tcp succeeds (which can legitimately
+    # take up to 60s). Update the sidecar now, before the wait, so a kill
+    # during the wait still leaves a complete, reapable sidecar (nexus-ui654
+    # follow-up, critic Q3).
+    _write_sidecar(
+        pgdata, pg_port=pg_port, svc_port=svc_port,
+        postmaster_pid=postmaster_pid, engine_pid=svc.pid,
+        started_at=sidecar_started_at,
+    )
     try:
         _wait_tcp("127.0.0.1", svc_port, timeout=60.0)
     except TimeoutError:
@@ -481,11 +521,6 @@ def _boot() -> dict:
             f"T2 engine substrate: service did not bind port {svc_port}. "
             f"Tail of engine log ({svc_log_path}):\n{out}"
         ) from None
-
-    _write_sidecar(
-        pgdata, pg_port=pg_port, svc_port=svc_port,
-        postmaster_pid=postmaster_pid, engine_pid=svc.pid,
-    )
 
     state = {
         "base_url": f"http://127.0.0.1:{svc_port}",
@@ -549,20 +584,37 @@ def _teardown() -> None:
 
 
 def _write_sidecar(
-    pgdata: str, *, pg_port: int, svc_port: int,
-    postmaster_pid: int | None, engine_pid: int,
-) -> None:
+    pgdata: str, *, pg_port: int, svc_port: int | None,
+    postmaster_pid: int | None, engine_pid: int | None,
+    started_at: float | None = None,
+) -> float:
     """Record enough identity to re-verify both children before a future
     sweep ever signals them: PID + full expected cmdline for each, plus
     the owning pytest PID whose liveness is the sole staleness signal.
 
-    Written LAST, only once both children are confirmed up (after
-    ``_wait_tcp`` succeeds) — a half-booted cluster has no sidecar and is
-    swept via the (non-killing) legacy path if it is ever orphaned, which
-    is the conservative direction to fail in.
+    Written TWICE per boot (nexus-ui654 follow-up, critic Q3 -- see
+    ``_boot()``'s call sites): once immediately after the postmaster is
+    confirmed up (``engine_pid``/``svc_port`` still ``None`` -- not yet
+    known), and again immediately after the JVM ``Popen`` call returns
+    (which hands back ``engine_pid`` synchronously, well before
+    ``_wait_tcp`` ever gets a chance to time out). A leg recorded as
+    ``None`` here is skipped by the reaper (``_reap_cluster``'s
+    ``isinstance(pid, int)`` guard), never mistaken for "dead" or
+    "mismatch" -- so an EARLY sidecar with only the postmaster identity is
+    still fully reapable for that leg, closing the un-reapable window down
+    to the handful of milliseconds before the FIRST write (mkdtemp +
+    initdb + pg_ctl start, during which nothing is running yet to leak).
+
+    *started_at*: pass the value returned by an earlier call to keep it
+    stable across the two writes for the same boot; omitted (``None``)
+    captures a fresh timestamp -- used by the first, early call.
+
+    Returns the ``started_at`` value actually written, so the caller can
+    thread it into the second call.
     """
     from nexus.daemon.service_registry import process_command
 
+    resolved_started_at = started_at if started_at is not None else time.time()
     payload = {
         "owner_pytest_pid": os.getpid(),
         "owner_cmdline": process_command(os.getpid()),
@@ -571,16 +623,17 @@ def _write_sidecar(
             process_command(postmaster_pid) if postmaster_pid else ""
         ),
         "engine_pid": engine_pid,
-        "engine_cmdline": process_command(engine_pid),
+        "engine_cmdline": process_command(engine_pid) if engine_pid else "",
         "pg_port": pg_port,
         "svc_port": svc_port,
         "pgdata": pgdata,
-        "started_at": time.time(),
+        "started_at": resolved_started_at,
     }
     path = Path(pgdata) / _SIDECAR_FILENAME
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2))
     tmp.replace(path)  # atomic: a reader never sees a torn sidecar
+    return resolved_started_at
 
 
 @dataclass
@@ -888,8 +941,25 @@ def _sweep_legacy_cluster(cluster_dir: Path, result: SweepResult) -> None:
     serving a concurrently running OLD-code pytest session (e.g. a
     still-running job from a commit predating this fix).
 
-    This is a one-time, shrinking population: every cluster created after
-    this fix ships carries a sidecar and is swept automatically above.
+    NOT a one-time, shrinking population (correction, nexus-ui654
+    follow-up: the original "shrinking population" claim here was
+    empirically FALSE — a critic run observed this exact warning firing
+    repeatedly long after nexus-lgdy1 shipped). Two live, ongoing sources
+    still land here even after the sidecar-timing fix in ``_boot()``
+    (sidecar now written immediately once the postmaster is up, then
+    updated immediately once the JVM ``Popen`` returns — see that
+    function): (1) any cluster whose owning process was killed in the
+    now-millisecond window between ``tempfile.mkdtemp()`` and the FIRST
+    ``_write_sidecar`` call (mkdtemp + initdb + pg_ctl start) — narrow,
+    but not zero, and there is genuinely no live postgres to leak in that
+    specific window since the postmaster isn't up yet; and (2) any
+    cluster created by an OLDER pytest process (a build predating this
+    fix, or predating nexus-lgdy1 entirely) that is still on disk. This
+    function's own conservative refusal is exactly why such clusters keep
+    accumulating as reported-not-reaped debris rather than being silently
+    dropped — reap them manually via ``scripts/sweep-test-substrates.sh``
+    or the ``pg_ctl``/``rm -rf`` line in the warning below once you've
+    confirmed they're genuinely orphaned.
     """
     postmaster_pid = _read_postmaster_pid(str(cluster_dir))
     detail = (
