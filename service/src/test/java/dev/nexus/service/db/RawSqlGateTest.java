@@ -57,6 +57,27 @@ import java.util.stream.Stream;
  * {@link #statementGranular_staleFingerprintNeverMatched_isFlagged} for the
  * falsification proof of both directions.
  *
+ * <p><b>SCOPE OF THE "cannot shelter new raw statements" GUARANTEE</b>
+ * (nexus-8emxy, critic Critical on increment 5's first review pass,
+ * 2026-08-09): the guarantee above is real but bounded to what {@link
+ * #RAW_EXECUTE} can SEE — a LITERAL {@code .execute(}/{@code .fetch(}
+ * -family call. It does NOT extend to raw SQL assembled DYNAMICALLY (a
+ * {@code StringBuilder} chain across many lines, runtime-varying
+ * WHERE-predicate loops) and funneled through a NAMED PRIVATE WRAPPER
+ * method rather than a literal call — {@code PgVectorRepository.
+ * searchWithTokens}/{@code hybridSearch} call their private {@code
+ * rawVectorFetch(ctx, sql, binds)} BY NAME, which {@code RAW_EXECUTE}
+ * cannot match at all (not "excused" — no anchor exists there for
+ * statement-granularity to attach to). Confirmed empirically: appending an
+ * entirely new raw-SQL predicate to {@code searchWithTokens}'s {@code
+ * StringBuilder} produced ZERO gate signal before the fix below. {@link
+ * #RAW_SQL_ASSEMBLY_SENTINELS} closes this SPECIFIC instance with a
+ * coarser, whole-method-body tripwire (see its own javadoc) — it is a
+ * targeted patch for the bead's first NAMED motivating file, not a general
+ * solution to "a raw-SQL execution wrapper hidden behind an arbitrary
+ * method name" recurring elsewhere in the codebase. That general problem is
+ * tracked as nexus-8emxy (P2), not closed by this file.
+ *
  * <p>Each sanctioned method's REGISTRATION (a key in {@link
  * #SANCTIONED_STATEMENTS}) still needs a {@code // SANCTIONED RAW
  * (nexus-mzuj9): <why>} comment at its definition site (auditable, not
@@ -69,10 +90,21 @@ import java.util.stream.Stream;
  * string without ever calling {@code execute}/{@code fetch} itself; the
  * other's argument is a named constant, not a literal, which evades the
  * name-based heuristic below — a pre-existing, documented KNOWN RESIDUAL).
- * Keeping the registration with zero declared statements is strictly safer
- * than removing it: any FUTURE literal raw call accidentally added to
- * either method is caught immediately (owner-attributed, zero fingerprints
- * match by construction) instead of needing a fresh registration to notice.
+ * NOT kept for detection speed — a registered zero-fingerprint entry and no
+ * entry at all behave IDENTICALLY at scan time (both fail any future
+ * literal match immediately; verified directly by falsifying {@code
+ * RekeyOps.rekey}'s OWN removal below, which detects exactly as fast via
+ * the plain unowned-violation path — only the failure MESSAGE differs).
+ * Kept instead because these two methods genuinely CONTAIN/PRODUCE raw SQL
+ * (unlike {@code RekeyOps.rekey}, whose "raw SQL" was entirely delegation
+ * to elsewhere-registered primitives, hence removed outright below): the
+ * registration is this class's own documented AUDIT-TRAIL invariant — "a
+ * handful of read sites genuinely cannot be expressed as typed jOOQ DSL...
+ * named here explicitly" (this class's own top-level javadoc). Dropping
+ * these two entries would make them invisible to anyone reading {@link
+ * #SANCTIONED_STATEMENTS} as the inventory of "where does raw SQL exist in
+ * this codebase, and why" — a misleading omission given they demonstrably
+ * DO belong in that inventory, gate-visibility of their call shape aside.
  */
 class RawSqlGateTest {
 
@@ -907,5 +939,278 @@ class RawSqlGateTest {
             .as("the allowlist is text-scoped, not method-scoped -- a DIFFERENT non-literal "
                 + "expression inside the same allowlisted method still fails")
             .isNotEmpty();
+    }
+
+    // ── nexus-4okz4 increment 5 post-review fix (critic Critical, nexus-8emxy,
+    //    T2 critique-4okz4-increment5-2026-08-09): whole-method-body sentinels
+    //    for raw-SQL ASSEMBLY funneled through a named non-execute/fetch-shaped
+    //    wrapper ──
+
+    /**
+     * Whole-method-body sentinels: {@code file.java -> {method name ->
+     * {expected canonical whole-body texts}}}. A STRUCTURALLY DIFFERENT
+     * mechanism from {@link #SANCTIONED_STATEMENTS} (which fingerprints ONE
+     * {@code .execute(}/{@code .fetch(}-shaped LITERAL call) — this exists
+     * because {@code PgVectorRepository.searchWithTokens}/{@code
+     * hybridSearch} build SQL DYNAMICALLY across many lines (a {@code
+     * StringBuilder} chain, runtime-varying WHERE-predicate loops, a
+     * selectivity-dependent branch between structurally different queries)
+     * and funnel the result through the PRIVATE WRAPPER {@code
+     * rawVectorFetch(ctx, sql, binds)} — called BY NAME, never via a
+     * literal {@code .execute(}/{@code .fetch(} at the CALL site. {@link
+     * #RAW_EXECUTE} anchors exclusively on those two call SHAPES, so it has
+     * NO anchor inside {@code searchWithTokens}/{@code hybridSearch} at
+     * all — not "excused," structurally INVISIBLE, statement-granular or
+     * not. Confirmed empirically (nexus-8emxy falsification, 2026-08-09):
+     * appending an entirely new raw-SQL predicate to {@code
+     * searchWithTokens}'s {@code StringBuilder} produced ZERO gate signal;
+     * {@code RawSqlGateTest} stayed 12/12 green with the probe in place.
+     *
+     * <p>This is a COARSER, whole-body tripwire, not a finer one: the
+     * method's ENTIRE whitespace-collapsed body text must match one of the
+     * registered snapshots EXACTLY. ANY edit — a new predicate, a changed
+     * literal, a restructured branch — changes the canonical text and
+     * fails the gate, forcing a maintainer to consciously update the
+     * registration (and thus review the diff) before it can land. This is
+     * STRONGER than statement-granular protection for these two methods
+     * (it also catches an EDITED existing statement, not just an ADDED
+     * one), traded against being unable to say WHICH statement inside the
+     * body changed — appropriate for a method whose danger is the shape of
+     * a dynamically-composed query, not a single fixed literal.
+     *
+     * <p>Registered under the bare method name — like {@link
+     * #SANCTIONED_STATEMENTS}, this matches EVERY same-named overload
+     * ({@link #sanctionedRegions} is name-only, not overload-aware).
+     * {@code searchWithTokens}/{@code hybridSearch} each have several thin
+     * one-line delegating overloads sharing the bare name with the one
+     * real SQL-assembling implementation; all bodies found are registered
+     * (harmless conservatism — a delegator's body is a natural, low-churn
+     * additional tripwire, not overreach).
+     */
+    private static final Map<String, Map<String, java.util.Set<String>>> RAW_SQL_ASSEMBLY_SENTINELS =
+        Map.of(
+        "PgVectorRepository.java", Map.of(
+            "searchWithTokens", java.util.Set.of(
+                "{ return searchWithTokens(tenant, queryText, collectionNames, nResults, where, false); }",
+                "{ if (collectionNames == null || collectionNames.isEmpty()) { return new Tokened<>(List.of(), 0L); }"
+                + " int dim = dimForCollection(collectionNames.get(0)); for (String col : collectionNames) { int colDim"
+                + " = dimForCollection(col); if (colDim != dim) { throw new IllegalArgumentException( \"mixed dimensions"
+                + " in one search call: '\" + collectionNames.get(0) + \"' is \" + dim + \"-dim but '\" + col + \"' is \" + co"
+                + "lDim + \"-dim - one query vector cannot serve both spaces\"); } } // Route by the first collection - t"
+                + "he same-dim check above guarantees the set is // homogeneous, and the Python client never mixes embe"
+                + "dder families in one call // (same convention as the Chroma path). EmbedResult embedResult = embedQu"
+                + "ery(collectionNames.get(0), queryText, dim); float[] queryVec = embedResult.embeddings().get(0); Str"
+                + "ingBuilder sql = new StringBuilder() // RDR-180: bytea storage — hex at the SQL seam (raw-SQL twin o"
+                + "f // the ChashHex converted type the jOOQ paths use). .append(\"SELECT encode(chash, 'hex') AS chash,"
+                + " chunk_text, collection, metadata::text AS metadata_json,\") .append(\" (embedding <=> ?::vector) AS d"
+                + "istance\") .append(\" FROM \").append(chunksTable(dim)).append(\" c\") .append(\" WHERE c.collection IN (\""
+                + ").append(placeholders(collectionNames.size())).append(\")\") // RDR-156 Decision 6 (nexus-3ck2g): live"
+                + "_chunks predicate, inlined so the // HNSW index scan on c stays engaged (see liveChunksPredicate's j"
+                + "avadoc). .append(\" AND \").append(liveChunksPredicate(\"c\")); List<Object> binds = new ArrayList<>(); "
+                + "binds.add(vectorLiteral(queryVec)); binds.addAll(collectionNames); if (where != null) { for (Map.Ent"
+                + "ry<String, Object> e : where.entrySet()) { appendWherePredicate(sql, binds, e.getKey(), e.getValue()"
+                + "); } } sql.append(\" ORDER BY distance ASC, chash ASC LIMIT ?\"); binds.add(nResults); Result<Record> "
+                + "result = tenantScope.withTenant(tenant, ctx -> { // Filtered-ANN recall: keep HNSW scanning past ef_"
+                + "search when the RLS + // collection + metadata predicates narrow the candidate set. SET LOCAL is // "
+                + "txn-scoped (same pool discipline as the TenantScope GUC stamp). PgSession.setLocal(ctx, \"hnsw.iterat"
+                + "ive_scan\", \"relaxed_order\"); return rawVectorFetch(ctx, sql.toString(), binds.toArray()); }); List<M"
+                + "ap<String, Object>> rows = new ArrayList<>(result.size()); for (Record rec : result) { Map<String, O"
+                + "bject> row = new LinkedHashMap<>(); row.put(\"id\", rec.get(\"chash\", String.class)); row.put(\"content\""
+                + ", rec.get(\"chunk_text\", String.class)); row.put(\"distance\", rec.get(\"distance\", Double.class)); row."
+                + "put(\"collection\", rec.get(\"collection\", String.class)); row.putAll(fromJson(rec.get(\"metadata_json\","
+                + " String.class))); rows.add(row); } // RDR-169 G5: surface address triple additively (chash + span al"
+                + "ways; source_uri opt-in) enrichSearchRows(tenant, rows, includeSourceUri); return new Tokened<>(rows"
+                + ", embedResult.tokens()); }"),
+            "hybridSearch", java.util.Set.of(
+                "{ return hybridSearchWithTokens(tenant, queryText, collectionNames, nResults, where, false).value();"
+                + " }",
+                "{ return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null); "
+                + "}",
+                "{ if (collectionNames == null || collectionNames.isEmpty()) { return List.of(); } // queryText is bo"
+                + "und twice below as a raw text parameter (plainto_tsquery + // trgm <%); a NUL-bearing query would hi"
+                + "t the same UTF8-0x00 rejection the // upsert path sanitizes (nexus-rvfwj sibling hole, dual-review H"
+                + "1). queryText = stripNul(queryText); if (nResults < 1) { // LIMIT -1 is \"no limit\" in Postgres - a n"
+                + "on-positive value would silently // unbound the query instead of capping it. throw new IllegalArgume"
+                + "ntException(\"nResults must be >= 1, got \" + nResults); } if (selectiveGateMax < 1) { // A non-positi"
+                + "ve threshold routes EVERY gate to the HNSW-first branch // (matchCount >= 0 is always > a non-positi"
+                + "ve cutoff), silently re-enabling // the lcogi selective-gate collapse. Reject rather than mis-dispat"
+                + "ch. throw new IllegalArgumentException( \"selectiveGateMax must be >= 1, got \" + selectiveGateMax); }"
+                + " int dim = dimForCollection(collectionNames.get(0)); for (String col : collectionNames) { int colDim"
+                + " = dimForCollection(col); if (colDim != dim) { throw new IllegalArgumentException( \"mixed dimensions"
+                + " in one hybrid-search call: '\" + collectionNames.get(0) + \"' is \" + dim + \"-dim but '\" + col + \"' is"
+                + " \" + colDim + \"-dim - one query vector cannot serve both spaces\"); } } EmbedResult hybridEmbed = emb"
+                + "edQuery(collectionNames.get(0), queryText, dim); if (tokensOut != null) tokensOut[0] = hybridEmbed.t"
+                + "okens(); float[] queryVec = hybridEmbed.embeddings().get(0); // Non-text scope (collection IN + meta"
+                + "data where). Shared by the selective // rank-by-chash query (nexus-x7z7l): that query re-applies the"
+                + "se cheap predicates // but NOT the text gate - the gate's matching chashes already satisfy it, so th"
+                + "e // expensive <% trigram heap-recheck runs ONCE (in the bounded fetch below), not // again at rank "
+                + "time. (The metadata->>? predicate is kept on the rank query, not // dropped: two same-text rows in d"
+                + "ifferent collections share a chash, so chash // alone would not re-impose a per-row metadata filter."
+                + ") StringBuilder scope = new StringBuilder() .append(\" WHERE collection IN (\").append(placeholders(co"
+                + "llectionNames.size())).append(\")\"); List<Object> scopeBinds = new ArrayList<>(collectionNames); // R"
+                + "DR-156 Decision 6 (nexus-3ck2g): live_chunks predicate folded into `scope` // BEFORE `gate` is deriv"
+                + "ed from it below, so every downstream query built off // either scope or gate — the bounded gate-sel"
+                + "ectivity probe, the selective // chash-ranked rank, and the HNSW-first fallback, all three read site"
+                + "s — inherits // it by construction; a single fix point instead of three. Inlined (never a JOIN // to"
+                + " nexus.live_chunks) so the HNSW/GIN scans on `c` (the alias assigned to // `table` below) stay engag"
+                + "ed — see liveChunksPredicate's javadoc. scope.append(\" AND \").append(liveChunksPredicate(\"c\")); // F"
+                + "ull gate = scope AND a text signal. FTS lexeme match OR word-trigram similarity: // the <% operator "
+                + "form (word_similarity >= pg_trgm.word_similarity_threshold) is // gin_trgm_ops-indexable (vectors-00"
+                + "2) where the function-call form is not; // word_similarity (vs plain similarity) does not dilute wit"
+                + "h chunk_text length. // The threshold GUC is pinned per-transaction below. StringBuilder gate = new "
+                + "StringBuilder(scope) .append(\" AND (chunk_tsv @@ plainto_tsquery('english', ?) OR ? <% chunk_text)\")"
+                + "; List<Object> gateBinds = new ArrayList<>(scopeBinds); gateBinds.add(queryText); gateBinds.add(quer"
+                + "yText); if (where != null) { for (Map.Entry<String, Object> e : where.entrySet()) { appendWherePredi"
+                + "cate(gate, gateBinds, e.getKey(), e.getValue()); appendWherePredicate(scope, scopeBinds, e.getKey(),"
+                + " e.getValue()); } } final String table = chunksTable(dim) + \" c\"; final String gateSql = gate.toStri"
+                + "ng(); final String scopeSql = scope.toString(); final String vecLit = vectorLiteral(queryVec); // SE"
+                + "LECTIVITY-AWARE DISPATCH (nexus-lcogi; single-gate-eval, nexus-x7z7l). ONE // bounded fetch of the g"
+                + "ate's chashes (LIMIT SELECTIVE_GATE_MAX+1) both picks the // plan AND, for the selective case, IS th"
+                + "e gate evaluation - the ranked query then // filters by chash (PK lookup), so the expensive <% trigr"
+                + "am heap-recheck runs once, // not twice. The prior design ran a standalone COUNT(*) probe AND re-ran"
+                + " the gate in // the ranked query: on a large code corpus that was two ~650ms <% heap-rechecks per //"
+                + " call (conexus-qsa EXPLAIN: count probe 700ms + materialized-CTE rank 654ms, both // dominated by th"
+                + "e lossy gin_trgm_ops recheck over ~1900 candidate rows). // // * SELECTIVE gate (matches <= SELECTIV"
+                + "E_GATE_MAX): the bounded fetch returns the // COMPLETE gate (all matches, since it did not hit the L"
+                + "IMIT). Rank those exact // chashes by cosine distance via a chash IN (...) filter + the cheap non-te"
+                + "xt // scope (collection/metadata). No HNSW, no re-gate: ranks the small gated set // exactly, with N"
+                + "O dependence on hnsw.max_scan_tuples (the lcogi collapse fix is // preserved - the prior HNSW-first "
+                + "single-query plan starved selective gates). // // * NON-SELECTIVE gate (matches > SELECTIVE_GATE_MAX"
+                + "): the bounded fetch hit the // LIMIT (returned SELECTIVE_GATE_MAX+1 chashes) and is discarded - kee"
+                + "p the // HNSW-first plan (gate as scan filter, iterative_scan). A dense gate is usually // found wit"
+                + "hin the scan budget; materializing a huge gated set (~4 KB/row // embeddings) would spill work_mem. "
+                + "The bounded fetch caps this probe's cost // (the prior unbounded COUNT scanned the full dense gate)."
+                + " Same SEMI-selective // caveat as before applies; P5.2's RRF fusion closes that window. // // matche"
+                + "s == 0 -> empty gate -> selective branch returns an empty result (no silent // vector fallback), han"
+                + "dled explicitly (chash IN () is not valid SQL). List<Object> probeBinds = new ArrayList<>(gateBinds)"
+                + "; probeBinds.add(selectiveGateMax + 1); Result<Record> result = tenantScope.withTenant(tenant, ctx -"
+                + "> { // Trigram gate calibration (contract anchor): word_similarity >= 0.6, pg_trgm's // default - ty"
+                + "po-probe candidates sit at ~0.9 and pass, no-signal rows at ~0.1 // do not. Pinned per-transaction s"
+                + "o the gate is independent of cluster config. PgSession.setLocal(ctx, \"pg_trgm.word_similarity_thresh"
+                + "old\", \"0.6\"); List<String> gateChashes = rawVectorFetch( ctx, \"SELECT encode(chash, 'hex') AS chash "
+                + "FROM \" + table + gateSql + \" LIMIT ?\", probeBinds.toArray()) .map(r -> r.get(\"chash\", String.class))"
+                + "; if (gateChashes.size() <= selectiveGateMax) { // Selective: the bounded fetch returned the COMPLET"
+                + "E gate (the LIMIT did NOT // fire - fewer than selectiveGateMax+1 matches exist, so it scanned the f"
+                + "ull // GIN candidate set, same work the old COUNT(*) did). The win is not a // cheaper probe: this s"
+                + "ingle gate scan REPLACES both the old COUNT(*) probe // AND the MATERIALIZED-CTE gate re-evaluation "
+                + "- the rank below filters by // chash with NO text gate, so the <% heap-recheck happens once, not twi"
+                + "ce. if (gateChashes.isEmpty()) { // Empty gate: typed-empty result (chash IN () is invalid SQL). ret"
+                + "urn rawVectorFetch(ctx, \"SELECT NULL::text AS chash, NULL::text AS chunk_text,\" + \" NULL::text AS co"
+                + "llection, NULL::text AS metadata_json,\" + \" NULL::float8 AS distance WHERE false\"); } // chash is NO"
+                + "T unique across collections (the table key is // (tenant_id, collection, chash)): a multi-collection"
+                + " gate can return the // same chash from N collections. Dedup the IN list - the collection scope in /"
+                + "/ scopeSql still yields one ranked row per (collection, chash). Dedup runs // AFTER the size-based d"
+                + "ispatch so the selective/non-selective boundary stays // identical to the old per-row COUNT(*). List"
+                + "<String> inChashes = gateChashes.stream().distinct().toList(); String sql = \"SELECT encode(chash, 'h"
+                + "ex') AS chash, chunk_text, collection, metadata::text AS metadata_json,\" + \" (embedding <=> ?::vecto"
+                + "r) AS distance FROM \" + table + scopeSql + \" AND chash IN (\" + decodePlaceholders(inChashes.size()) "
+                + "+ \")\" + \" ORDER BY distance ASC, chash ASC LIMIT ?\"; List<Object> b = new ArrayList<>(); b.add(vecLi"
+                + "t); b.addAll(scopeBinds); b.addAll(inChashes); b.add(nResults); return rawVectorFetch(ctx, sql, b.to"
+                + "Array()); } // HNSW-first for a dense gate: keep HNSW scanning past ef_search. PgSession.setLocal(ct"
+                + "x, \"hnsw.iterative_scan\", \"relaxed_order\"); String sql = \"SELECT encode(chash, 'hex') AS chash, chun"
+                + "k_text, collection, metadata::text AS metadata_json,\" + \" (embedding <=> ?::vector) AS distance FROM"
+                + " \" + table + gateSql + \" ORDER BY distance ASC, chash ASC LIMIT ?\"; List<Object> b = new ArrayList<>"
+                + "(); b.add(vecLit); b.addAll(gateBinds); b.add(nResults); return rawVectorFetch(ctx, sql, b.toArray()"
+                + "); }); List<Map<String, Object>> rows = new ArrayList<>(result.size()); for (Record rec : result) { "
+                + "Map<String, Object> row = new LinkedHashMap<>(); row.put(\"id\", rec.get(\"chash\", String.class)); row."
+                + "put(\"content\", rec.get(\"chunk_text\", String.class)); row.put(\"distance\", rec.get(\"distance\", Double."
+                + "class)); row.put(\"collection\", rec.get(\"collection\", String.class)); row.putAll(fromJson(rec.get(\"me"
+                + "tadata_json\", String.class))); rows.add(row); } return rows; }")));
+
+    /** Per-file scan for {@link #RAW_SQL_ASSEMBLY_SENTINELS} violations:
+     * every registered method's CURRENT whole-body canonical text must
+     * match one of its declared snapshots exactly, and every declared
+     * snapshot must be matched by some current body (symmetric, same
+     * discipline as {@link #scan}'s stale-fingerprint sweep). */
+    static List<String> scanAssemblySentinels(String fileName, String rawSource) {
+        String blanked = blank(rawSource);
+        Map<String, java.util.Set<String>> methods =
+            RAW_SQL_ASSEMBLY_SENTINELS.getOrDefault(fileName, Map.of());
+        List<String> violations = new ArrayList<>();
+        for (var entry : methods.entrySet()) {
+            String name = entry.getKey();
+            java.util.Set<String> expected = entry.getValue();
+            List<int[]> regions = sanctionedRegions(blanked, java.util.Set.of(name));
+            if (regions.isEmpty()) {
+                violations.add(fileName + "  SENTINEL METHOD NOT FOUND: " + name
+                    + " -- registered in RAW_SQL_ASSEMBLY_SENTINELS but no method of "
+                    + "that name exists in this file any more; remove or update the "
+                    + "registration");
+                continue;
+            }
+            java.util.Set<String> actual = new java.util.LinkedHashSet<>();
+            for (int[] r : regions) {
+                actual.add(canonicalStatementText(rawSource, r));
+            }
+            for (String a : actual) {
+                if (!expected.contains(a)) {
+                    violations.add(fileName + "  SENTINEL BODY CHANGED in " + name
+                        + " -- this raw-SQL-assembling method's body no longer matches "
+                        + "any registered snapshot; review the diff for a new/edited raw "
+                        + "SQL fragment, then copy the canonical text below into "
+                        + "RAW_SQL_ASSEMBLY_SENTINELS verbatim: " + a);
+                }
+            }
+            for (String e : expected) {
+                if (!actual.contains(e)) {
+                    violations.add(fileName + "  STALE SENTINEL in " + name
+                        + " -- a registered snapshot no longer matches any method body "
+                        + "found; remove it: " + e);
+                }
+            }
+        }
+        return violations;
+    }
+
+    @Test
+    void noUnreviewedRawSqlAssemblyChanges() throws IOException {
+        Path root = Path.of("src", "main", "java");
+        assertThat(root).exists();
+
+        List<String> violations = new ArrayList<>();
+        try (Stream<Path> files = Files.walk(root)) {
+            files.filter(p -> p.toString().endsWith(".java")).forEach(p -> {
+                try {
+                    violations.addAll(scanAssemblySentinels(
+                        p.getFileName().toString(), Files.readString(p)));
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        }
+
+        assertThat(violations)
+            .as("a raw-SQL-ASSEMBLING method (StringBuilder-built SQL funneled through a "
+                + "named non-execute/fetch wrapper) changed body since its "
+                + "RAW_SQL_ASSEMBLY_SENTINELS snapshot was registered — review the diff for "
+                + "a new or edited raw SQL fragment, then update the registration to the new "
+                + "canonical text shown in the failure message")
+            .isEmpty();
+    }
+
+    @Test
+    void assemblySentinel_bodyChange_isFlagged() {
+        String synthetic = String.join("\n",
+            "public final class PgVectorRepository {",
+            "    private void hybridSearch() {",
+            "        rawVectorFetch(ctx, \"SELECT 1 WHERE definitely-not-the-real-body\");",
+            "    }",
+            "}");
+        assertThat(scanAssemblySentinels("PgVectorRepository.java", synthetic))
+            .as("a body that matches none of the registered snapshots must fail loud, "
+                + "even though a method of that name IS registered")
+            .anySatisfy(h -> assertThat(h).contains("SENTINEL BODY CHANGED")
+                .contains("hybridSearch"));
+    }
+
+    @Test
+    void assemblySentinel_unregisteredFileOrMethod_isUnaffected() {
+        String synthetic = String.join("\n",
+            "public final class SomeOtherClass {",
+            "    void whatever() {",
+            "        rawVectorFetch(ctx, \"anything\");",
+            "    }",
+            "}");
+        assertThat(scanAssemblySentinels("SomeOtherClass.java", synthetic)).isEmpty();
     }
 }
