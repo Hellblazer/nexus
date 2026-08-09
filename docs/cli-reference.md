@@ -1588,6 +1588,8 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 
 **`search` flags:** `--project NAME`
 
+**Degenerate queries now fail loud instead of returning a silent empty result** (nexus-senub, engine v0.1.69+): a query with no searchable terms — every word an English stopword (`nx memory search AND`) or punctuation-only — used to come back as an ordinary `No results found.`, indistinguishable from a real empty result. The engine now returns `400 {"code": "no_searchable_terms", ...}` for this case and `nx memory search`/`search_glob`/`search_by_tag` exit non-zero with a clean error message instead. This is corpus-dependent, not a blanket rejection: a stopword-only query can still resolve a real hit through the title/tag index (which doesn't strip stopwords) and return normally — only a search that finds nothing AND has no searchable content-side term hits the 400. Older engines fail open to the prior silent-empty-result behavior (no version gate).
+
 **`delete` flags:**
 
 | Flag | Description |
