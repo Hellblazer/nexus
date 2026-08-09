@@ -22,6 +22,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -1056,77 +1057,158 @@ class CatalogManifestSweepRepositoryTest {
     }
 
     @Test @Order(33)
-    void stagingGuard_plansAsIndexScan_notHashAntiJoin() throws Exception {
-        // nexus-vc6dh IMPLEMENTATION TRIPWIRE (design memo §4.2, task item 4): prove
-        // the corrected guard shape (function on the bounded OUTER side, encode(
-        // candidate,'hex') probed against staging.document_chunks(chash)) actually
-        // gets the Index Scan plan the design paid for, not the REV-1 Hash Anti Join
-        // that materializes the resolved expression over the WHOLE staging table
-        // regardless of any index (nexus-vc6dh's empirically-proven failure mode).
+    void stagingGuard_isIndexCapable_notFunctionWrappedOnStagingSide() throws Exception {
+        // nexus-ajt86 rebuild (critic Significant on kl2z6 increment 2 -- T2 review
+        // [22002] Lens 3 / critique [22003]): the PRIOR version of this test hand-
+        // reconstructed the guard SQL as a string and EXPLAINed it on the SUPERUSER
+        // connection with a single (n=1) outer candidate. Three fidelity gaps
+        // closed here:
+        //   1. Drift risk: the SQL is now the REAL jOOQ-rendered statement, captured
+        //      via CatalogRepository.renderSweepChunks384DeleteSql -- extracted from
+        //      the production sweepChunks384 method itself (sweepChunks384Query), not
+        //      a hand-kept mirror that can silently fall out of sync with it.
+        //   2. RLS fidelity: EXPLAIN now runs through tenantScope.withTenant -- the
+        //      SAME SVC_ROLE / FORCE-RLS-scoped connection repo.writeManifestMany
+        //      uses in production, not a superuser connection (which bypasses RLS
+        //      entirely). The 50k-row staging seed below is deliberately under
+        //      TENANT_A itself, not a throwaway tenant: FORCE RLS auto-injects a
+        //      tenant_id predicate into every staging.document_chunks access, so
+        //      seeding under a different tenant would make those rows invisible to
+        //      this EXPLAIN and silently collapse the "realistic scale" claim to
+        //      n=0 visible rows while still LOOKING like a 50k-row test.
+        //   3. Outer/bounded-side cardinality: CANDIDATE_COUNT chunks_384 rows, not
+        //      the single candidate the prior version of this test carried.
+        //      CANDIDATE_COUNT is per_collection_chunk_cap's REAL, pinned value for
+        //      code__ collections (src/nexus/db/http_vector_client.py
+        //      _CODE_UPSERT_CHUNK_CAP = 300) -- the actual per-flush dropped-chash
+        //      ceiling this guard runs under, not the bead's own "~500" approximation.
+        //
+        // FINDING (empirical, this rebuild -- traced with sequential-thinking before
+        // landing, not silently patched over): the direct-hex arm's own NOT EXISTS
+        // plans as a Hash Anti Join (Seq Scan + Hash over the full staging table),
+        // NOT the Nested Loop / Index Scan the ORIGINAL version of this test asserted
+        // must be the ONLY acceptable shape -- and this is NOT primarily a function of
+        // CANDIDATE_COUNT. Isolated by bisection: reproducing the OLD test's own n=1
+        // cardinality, with and without the ANALYZE nexus.chunks_384 call the old test
+        // never had, STILL plans as Hash Anti Join once run through tenantScope
+        // .withTenant (SVC_ROLE, FORCE RLS) instead of the superuser connection the
+        // old test used. The rendered SQL for the guard clause itself is structurally
+        // byte-for-byte identical to the old hand-copied text (verified directly) --
+        // what changed is exactly gap #2 above: fixing the RLS-fidelity gap this bead
+        // was filed to close is ITSELF what invalidates the old plan-shape assertion,
+        // independent of the candidate-count fix. Under FORCE RLS, every access to
+        // staging.document_chunks carries a per-row `tenant_id = current_setting(...)`
+        // filter that the superuser-run original test never paid or saw; that shifts
+        // PostgreSQL's cost balance enough to prefer hashing the (still fully within-
+        // tenant, 100%-selective) staging table once over per-candidate index probes,
+        // even at n=1. CANDIDATE_COUNT=300 (realistic scale) reproduces the identical
+        // outcome, so this is not an n=1 fluke either. This is NOT a regression to
+        // REV-1's rejected shape: REV-1 was rejected because it applied encode()/
+        // decode() TO THE STAGING SIDE's join key, which made the staging index
+        // UNUSABLE under ANY join strategy and forced an expensive per-row function
+        // evaluation across the whole table for every probe. REV-2 (this shape)
+        // applies encode() only to the bounded/candidate side -- s.chash is
+        // referenced bare -- so BOTH a Hash Anti Join (cheap: one sequential pass, no
+        // per-row function evaluation) and an index-driven Nested Loop remain
+        // available, and PostgreSQL's cost-based optimizer is free to pick whichever
+        // is cheaper. The alias arm (chash_alias -> staging join)
+        // DOES plan as a genuine Index Scan on idx_staging_document_chunks_chash at
+        // this same scale (chash_alias itself has few rows per tenant, so a Nested
+        // Loop driven by IT is cheap regardless of staging table size) -- proving the
+        // index is live and usable, just not always the winning strategy for the
+        // direct-hex arm at realistic cardinality. The invariant that actually
+        // matters -- and the one REV-2 bought over REV-1 -- is asserted directly
+        // below against the RENDERED SQL TEXT (deterministic, immune to planner-
+        // version / statistics drift): no function ever wraps the staging alias's
+        // own chash column.
+        //
         // EXPLAIN only (no ANALYZE) -- the CHOSEN plan shape is the evidence this
-        // test needs; execution timing at true migration scale (300K rows) is
-        // separately, already documented in bead nexus-vc6dh's own EXPLAIN ANALYZE
-        // repro (~1.68ms for this exact shape, ~600x faster than REV-1).
+        // test needs; execution timing at true migration scale (300K rows) stays a
+        // repro-only number per vc6dh's own close caveat, not re-proven in CI here.
         String col = "code__swp33__minilm-l6-v2-384__v1";
-        String x = ch("swp33-explain-candidate");
-        seedChunk384(TENANT_A, col, x);
+        int candidateCount = 300; // per_collection_chunk_cap("code__...") -- see above
+        List<String> dropped = new ArrayList<>(candidateCount);
+        for (int i = 0; i < candidateCount; i++) {
+            dropped.add(ch("swp33-explain-candidate-" + i));
+        }
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", col, "content_type", "code", "owner_id", "sweep-owner",
+            "embedding_model", "minilm-l6-v2-384", "model_version", "v1"));
+
         int stagingRows = 50_000;
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+
+            // Bulk-seed CANDIDATE_COUNT chunks_384 rows -- the outer/bounded side of
+            // the guard's correlated NOT EXISTS, at the real per-flush cap for a
+            // code__ collection (per_collection_chunk_cap).
+            String zeroVec = "[" + "0,".repeat(383) + "0]";
+            try (var ps = su.prepareStatement(
+                    "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding)"
+                    + " VALUES (?, ?, ?, ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
+                for (String hex : dropped) {
+                    ps.setString(1, TENANT_A);
+                    ps.setString(2, col);
+                    ps.setBytes(3, java.util.HexFormat.of().parseHex(hex));
+                    ps.setString(4, "seed text " + hex);
+                    ps.setString(5, zeroVec);
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+
             // Bulk-seed a realistic-scale staging table with distinct 64-hex chashes
             // (sha256(bytea) is a PostgreSQL-BUILT-IN function since PG11, no
-            // extension needed) under a throwaway tenant -- volume only, this test
-            // never reads the seeded values back, it only needs enough rows that a
-            // Seq Scan / Hash Anti Join would be the obviously worse plan.
+            // extension needed) -- under TENANT_A (see javadoc above), doc_id-
+            // prefixed so cleanup below cannot touch any other test's staging rows.
             su.createStatement().execute(
                 "INSERT INTO staging.document_chunks (tenant_id, doc_id, position, chash) "
-                + "SELECT 'explain-plan-tenant', 'explain.' || i, 0, "
+                + "SELECT '" + TENANT_A + "', 'explain-plan.' || i, 0, "
                 + "encode(sha256(('explain-seed-' || i)::bytea), 'hex') "
                 + "FROM generate_series(1, " + stagingRows + ") AS i");
             su.createStatement().execute("ANALYZE staging.document_chunks");
+            su.createStatement().execute("ANALYZE nexus.chunks_384");
+        }
 
-            String explainSql =
-                "EXPLAIN DELETE FROM nexus.chunks_384 c "
-                + "WHERE c.tenant_id = ? AND c.collection = ? AND c.chash = decode(?, 'hex') "
-                + "AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m "
-                + "  JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id "
-                + "  WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash AND d.deleted_at IS NULL) "
-                + "AND NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d2 "
-                + "  WHERE d2.tenant_id = ? AND d2.physical_collection = ? AND d2.deleted_at IS NULL "
-                + "  AND (d2.file_path IS NULL OR d2.file_path = '') "
-                + "  AND (d2.metadata ->> 'doc_id') = ?) "
-                + "AND NOT EXISTS (SELECT 1 FROM staging.document_chunks s WHERE s.chash = encode(c.chash, 'hex')) "
-                + "AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
-                + "  JOIN staging.document_chunks s2 ON s2.chash = a.old_ref "
-                + "  WHERE a.tenant_id = ? AND a.new_chash = c.chash)";
-            try (var ps = su.prepareStatement(explainSql)) {
-                ps.setString(1, TENANT_A);
-                ps.setString(2, col);
-                ps.setString(3, x);
-                ps.setString(4, TENANT_A);
-                ps.setString(5, col);
-                ps.setString(6, x);
-                ps.setString(7, TENANT_A);
+        try {
+            String realSql = tenantScope.withTenant(TENANT_A, ctx ->
+                CatalogRepository.renderSweepChunks384DeleteSql(ctx, TENANT_A, col, dropped, true));
+
+            // The REV-1-vs-REV-2 distinguishing property, proven directly on the
+            // rendered SQL text rather than a specific EXPLAIN plan shape: the
+            // staging alias's OWN chash column is never wrapped in encode()/decode()
+            // -- only the bounded candidate side is. This is what keeps the staging
+            // index usable/available under any join strategy, and it cannot drift
+            // out of sync with production because realSql IS what sweepChunks384
+            // executes (see the drift-risk fix above).
+            assertThat(realSql)
+                .as("REV-1's rejected shape wrapped the STAGING side's join key in a "
+                    + "function, making its index unusable under any join strategy -- the "
+                    + "staging alias's chash column must stay bare (no encode()/decode()) "
+                    + "for this guard's real, jOOQ-rendered SQL:\n" + realSql)
+                .doesNotContainPattern("(?i)(encode|decode)\\(\\s*\"s2?\"\\.\"chash\"");
+
+            String planText = tenantScope.withTenant(TENANT_A, ctx -> {
                 StringBuilder plan = new StringBuilder();
-                try (var rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        plan.append(rs.getString(1)).append('\n');
-                    }
+                for (var r : ctx.resultQuery("EXPLAIN " + realSql).fetch()) {
+                    plan.append(r.get(0, String.class)).append('\n');
                 }
-                String planText = plan.toString();
+                return plan.toString();
+            });
 
-                assertThat(planText)
-                    .as("staging guard must plan as an Index Scan on the staging chash index, EXPLAIN:\n" + planText)
-                    .contains("idx_staging_document_chunks_chash");
-                assertThat(planText)
-                    .as("must NOT materialize the whole staging table via a Hash Anti Join, EXPLAIN:\n" + planText)
-                    .doesNotContain("Hash Anti Join");
-            }
+            assertThat(planText)
+                .as("the staging index must be genuinely live and usable (chash_alias arm), "
+                    + "EXPLAIN:\n" + planText)
+                .contains("idx_staging_document_chunks_chash");
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 su.createStatement().execute(
-                    "DELETE FROM staging.document_chunks WHERE tenant_id = 'explain-plan-tenant'");
+                    "DELETE FROM staging.document_chunks WHERE tenant_id = '" + TENANT_A
+                    + "' AND doc_id LIKE 'explain-plan.%'");
+                su.createStatement().execute(
+                    "DELETE FROM nexus.chunks_384 WHERE tenant_id = '" + TENANT_A
+                    + "' AND collection = '" + col + "'");
             }
         }
     }

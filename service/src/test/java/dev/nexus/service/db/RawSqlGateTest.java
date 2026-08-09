@@ -116,7 +116,11 @@ class RawSqlGateTest {
      * {@code executeQuery("...")/executeUpdate("...")}, and the fetch-side
      * siblings {@code .fetch("...")/.fetch(sql...)},
      * {@code .fetchOne("...")/.fetchOne(sql...)},
-     * {@code .fetchAny("...")/.fetchAny(sql...)}, {@code .resultQuery("...")}.
+     * {@code .fetchAny("...")/.fetchAny(sql...)},
+     * {@code .resultQuery("...")/.resultQuery(sql...)} (nexus-rfx2j: the
+     * sql/SQL-prefix branch used to be missing here, an asymmetry with its
+     * four siblings above -- closed so a future sql-prefixed resultQuery
+     * call is caught the same way a sql-prefixed execute/fetch call is).
      * A bare {@code .execute()}/{@code .fetch()}/{@code .fetchOne()} (jOOQ DSL
      * terminal, no string/variable argument) does not match.
      *
@@ -133,7 +137,7 @@ class RawSqlGateTest {
         + "|\\.fetch\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.fetchOne\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.fetchAny\\(\\s*(\"|sql|SQL|new StringBuilder)"
-        + "|\\.resultQuery\\(\\s*\")",
+        + "|\\.resultQuery\\(\\s*(\"|sql|SQL|new StringBuilder))",
         Pattern.DOTALL);
 
 
@@ -483,12 +487,34 @@ class RawSqlGateTest {
             SANCTIONED_STATEMENTS.getOrDefault(fileName, Map.of());
 
         Map<String, List<int[]>> regionsByMethod = new LinkedHashMap<>();
+        List<String> violations = new ArrayList<>();
         for (String name : methodStatements.keySet()) {
-            regionsByMethod.put(name, sanctionedRegions(blanked, java.util.Set.of(name)));
+            List<int[]> regions = sanctionedRegions(blanked, java.util.Set.of(name));
+            // nexus-rfx2j: sanctionedRegions attributes by BARE method name only
+            // (no enclosing-class scoping) -- if a sanctioned file ever grows a
+            // second, same-named method in a different (e.g. nested) class, BOTH
+            // declarations collapse into one region list under this one key, and
+            // a match inside the UNSANCTIONED twin could inherit the sanctioned
+            // twin's excusal/count budget. Rather than adding class-scoped
+            // attribution (a bigger rewrite for a collision that has never
+            // occurred), this asserts the invariant the simpler bare-name
+            // attribution depends on: exactly one physical declaration per
+            // sanctioned name per file. See
+            // #sanctionedRegions_bareNameCollisionAcrossClasses_isFlaggedAmbiguous
+            // for the falsification proof.
+            if (regions.size() > 1) {
+                violations.add(fileName + "  AMBIGUOUS SANCTIONED METHOD NAME: \"" + name
+                    + "\" matches " + regions.size() + " method declarations in this file -- "
+                    + "sanctionedRegions() attributes by bare name only, so a same-named "
+                    + "method in a different class/nested class would silently share this "
+                    + "name's sanction. Rename one of the methods, or extend "
+                    + "sanctionedRegions() to scope by enclosing class before adding a "
+                    + "second same-named declaration to a sanctioned file.");
+            }
+            regionsByMethod.put(name, regions);
         }
 
         Map<String, Map<String, Integer>> consumedByMethod = new LinkedHashMap<>();
-        List<String> violations = new ArrayList<>();
 
         var m = RAW_EXECUTE.matcher(blanked);
         while (m.find()) {
@@ -627,6 +653,65 @@ class RawSqlGateTest {
             "    }",
             "}");
         assertThat(scan("PoolerModeCheck.java", synthetic)).isEmpty();
+    }
+
+    /**
+     * nexus-rfx2j falsification proof: {@link #sanctionedRegions} matches by
+     * bare method name only, with no enclosing-class scoping. A same-named
+     * method declared a second time in a different (here: nested) class
+     * must be flagged as an ambiguous sanction target, not silently allowed
+     * to share the outer method's excusal. Before the fix in {@link #scan},
+     * this synthetic source produced ZERO violations for the collision
+     * itself (only whatever the decoy's own raw-SQL text happened to
+     * trigger) -- verified manually by reverting the {@code regions.size()
+     * > 1} check and re-running this test, which then failed for lack of
+     * an AMBIGUOUS finding.
+     */
+    @Test
+    void sanctionedRegions_bareNameCollisionAcrossClasses_isFlaggedAmbiguous() {
+        String synthetic = String.join("\n",
+            "public final class PoolerModeCheck {",
+            "    private void fetchShowConfig() {",
+            "        ctx.fetch(\"SHOW CONFIG\");",
+            "    }",
+            "    static class Decoy {",
+            "        void fetchShowConfig() {",
+            "        }",
+            "    }",
+            "}");
+        List<String> hits = scan("PoolerModeCheck.java", synthetic);
+        assertThat(hits)
+            .as("a same-named method in a different (nested) class must be flagged as an "
+                + "ambiguous sanction target -- sanctionedRegions() cannot tell them apart "
+                + "by bare name alone")
+            .anySatisfy(h -> assertThat(h).contains("AMBIGUOUS SANCTIONED METHOD NAME")
+                .contains("fetchShowConfig"));
+    }
+
+    /**
+     * nexus-rfx2j falsification proof: {@link #RAW_EXECUTE}'s
+     * {@code .resultQuery(} alternation previously matched only an
+     * immediate opening quote, unlike its {@code .execute}/{@code .fetch}/
+     * {@code .fetchOne}/{@code .fetchAny} siblings, which also match a
+     * "sql"/"SQL"-prefixed variable. Reverting the added
+     * {@code (\"|sql|SQL|new StringBuilder)} branch back to the old
+     * {@code \"} -only form makes this test fail (zero violations) --
+     * verified manually before applying the fix below and reverted
+     * immediately after confirming it.
+     */
+    @Test
+    void rawExecute_resultQuerySqlPrefixedVariable_isFlagged() {
+        String synthetic = String.join("\n",
+            "public final class SomeRepo {",
+            "    void probe() {",
+            "        ctx.resultQuery(sqlProbe, bytes);",
+            "    }",
+            "}");
+        List<String> hits = scan("SomeRepo.java", synthetic);
+        assertThat(hits)
+            .as(".resultQuery(sql-prefixed-variable) must match RAW_EXECUTE, consistent "
+                + "with its .execute/.fetch/.fetchOne/.fetchAny siblings")
+            .anySatisfy(h -> assertThat(h).contains("resultQuery"));
     }
 
     // ── nexus-4okz4 increment 5: statement-granular falsification proof ──

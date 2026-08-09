@@ -42,12 +42,14 @@ import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
+import org.jooq.DeleteConditionStep;
 import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Query;
 import org.jooq.SelectField;
 import org.jooq.Table;
 import org.jooq.UpdateSetMoreStep;
+import org.jooq.conf.ParamType;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.slf4j.Logger;
@@ -4634,8 +4636,16 @@ public final class CatalogRepository {
      *        {@link DSL#noCondition()}, so the rendered SQL (and plan)
      *        matches pre-staging-guard behaviour exactly.
      */
-    private static int sweepChunks384(DSLContext ctx, String tenant, String collection, List<String> dropped,
-                                       boolean stagingActive) {
+    /**
+     * Builds (does NOT execute) the {@code chunks_384} sweep DELETE — extracted from
+     * {@link #sweepChunks384} (nexus-ajt86) so {@link #renderSweepChunks384DeleteSql}
+     * (test-support) can EXPLAIN the EXACT statement production issues, eliminating
+     * the hand-copied-mirror drift risk {@code CatalogManifestSweepRepositoryTest}'s
+     * original plan-shape test carried (a raw string reconstruction of this method's
+     * SQL that could silently fall out of sync if this method ever changed).
+     */
+    private static DeleteConditionStep<?> sweepChunks384Query(
+            DSLContext ctx, String tenant, String collection, List<String> dropped, boolean stagingActive) {
         return ctx.deleteFrom(CHUNKS_384)
             .where(CHUNKS_384.TENANT_ID.eq(tenant))
             .and(CHUNKS_384.COLLECTION.eq(collection))
@@ -4657,8 +4667,28 @@ public final class CatalogRepository {
                 .and(CATALOG_DOCUMENTS.FILE_PATH.isNull().or(CATALOG_DOCUMENTS.FILE_PATH.eq("")))
                 .and(DOC_META_DOC_ID.eq(DSL.field("encode({0}, 'hex')", String.class, CHUNKS_384.CHASH)))))
             // nexus-kl2z6 increment 2 / nexus-vc6dh STAGING GUARD (§4.2).
-            .and(stagingActive ? stagingGuardCondition(ctx, tenant, CHUNKS_384.CHASH) : DSL.noCondition())
-            .execute();
+            .and(stagingActive ? stagingGuardCondition(ctx, tenant, CHUNKS_384.CHASH) : DSL.noCondition());
+    }
+
+    private static int sweepChunks384(DSLContext ctx, String tenant, String collection, List<String> dropped,
+                                       boolean stagingActive) {
+        return sweepChunks384Query(ctx, tenant, collection, dropped, stagingActive).execute();
+    }
+
+    /**
+     * TEST-SUPPORT ONLY (nexus-ajt86) — renders the {@code chunks_384} sweep DELETE's
+     * real, jOOQ-generated SQL with every bind parameter inlined, for EXPLAIN-based
+     * plan-shape tests ({@code CatalogManifestSweepRepositoryTest
+     * .stagingGuard_isIndexCapable_notFunctionWrappedOnStagingSide}). {@code public} rather than
+     * package-private because the test class lives in {@code dev.nexus.service}, a
+     * different package than this one ({@code dev.nexus.service.db}) — package-
+     * private visibility would not reach it. Never call this from request-handling
+     * code; use {@link #sweepChunks384} for the real execution path.
+     */
+    public static String renderSweepChunks384DeleteSql(
+            DSLContext ctx, String tenant, String collection, List<String> dropped, boolean stagingActive) {
+        return sweepChunks384Query(ctx, tenant, collection, dropped, stagingActive)
+            .getSQL(ParamType.INLINED);
     }
 
     /** Per-dim sweep DELETE against {@code chunks_768} — see {@link #sweepChunks384}. */
