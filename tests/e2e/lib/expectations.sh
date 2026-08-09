@@ -595,7 +595,7 @@ expectations_owes_report() {
     # so a test can force other racers to exhaust their try budget instead
     # of relying on incidental CI load. No-op unless explicitly set by a
     # test harness.
-    if [[ "$NX_EXPECT_LOCK_HOLD_DELAY_S" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    if [[ "${NX_EXPECT_LOCK_HOLD_DELAY_S:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
         sleep "$NX_EXPECT_LOCK_HOLD_DELAY_S"
     fi
 
