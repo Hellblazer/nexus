@@ -160,9 +160,15 @@ jobs:
       # NOTE: the job id/display name still say "drift guard" — they are kept
       # verbatim because the PR status-check name is referenced by branch
       # protection; renaming would strand required checks.
+      # nexus-13eb0: forkCount default (4) is the LOCAL-loop parallelism
+      # lever. GH-hosted ubuntu-latest runners are 4-core/16GB, sized for
+      # the existing serial job shape, not evaluated for N concurrent
+      # Testcontainers PG forks; pin CI to the pre-existing serial behavior
+      # explicitly rather than silently inheriting the new local default.
+      # Revisit deliberately if CI itself is ever parallelized.
       - name: Run Java test suite
         working-directory: service
-        run: ./mvnw -q test
+        run: ./mvnw -q test -Dnexus.test.forks=1
 
       # nexus-c3rer: the old-to-HEAD upgrade rehearsal skips (JUnit
       # Assumptions.abort) when the old engine tag is unavailable — a skip
