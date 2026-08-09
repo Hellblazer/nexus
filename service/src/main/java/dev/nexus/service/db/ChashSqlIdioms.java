@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 package dev.nexus.service.db;
 
+import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
@@ -408,5 +409,26 @@ public final class ChashSqlIdioms {
             .and(DSL.notExists(ctx.selectOne().from(CHUNKS_1024)
                     .where(CHUNKS_1024.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
             .fetchOne(0, Integer.class);
+    }
+
+    /**
+     * The three-way {@code EXISTS} disjunction proving a chash is CANONICAL
+     * (a content row for it exists in any of the three dim tables) —
+     * nexus-4okz4 increment 4 shared home for the idiom {@code
+     * StagingPromoteOps} privately carries as {@code canonExistsDsl}
+     * (increment 3, already reviewed/gated — left as-is rather than touched
+     * to converge, per the single-homed-for-NEW-callers discipline) and
+     * {@code ChashSqlIdioms.danglingManifestCountDsl} inlines as three
+     * explicit {@code NOT EXISTS} conjuncts above. {@code ChashCensus}'
+     * dangling-pointer scan is this method's first caller — new call sites
+     * reach for THIS one rather than re-deriving the disjunction locally.
+     * Same three-explicit-branches discipline as the fourth-dim checklist
+     * ({@code RawSqlGateTest.chunkTablesCanary_...}) — a fourth dim needs
+     * this method added to that checklist too.
+     */
+    public static Condition existsInAnyDim(DSLContext ctx, Field<byte[]> chash) {
+        return DSL.exists(ctx.selectOne().from(CHUNKS_384).where(CHUNKS_384.CHASH.eq(chash)))
+            .or(DSL.exists(ctx.selectOne().from(CHUNKS_768).where(CHUNKS_768.CHASH.eq(chash))))
+            .or(DSL.exists(ctx.selectOne().from(CHUNKS_1024).where(CHUNKS_1024.CHASH.eq(chash))));
     }
 }

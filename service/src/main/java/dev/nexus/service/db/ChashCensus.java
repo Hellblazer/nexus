@@ -2,12 +2,21 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.Table;
+import org.jooq.TableField;
+import org.jooq.impl.DSL;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+
+import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
+import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
+import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 
 /**
  * RDR-180 COLUMN CENSUS (nexus-jxizy.10.5, Hal directive 2026-07-19):
@@ -41,11 +50,29 @@ import java.util.Set;
  * columns — a census that cannot see its own inventory is broken, and a
  * clean report from a broken census is the exact failure mode this class
  * exists to kill.
+ *
+ * <p>nexus-4okz4 increment 4: the class carried a file-level SANCTIONED RAW
+ * entry ("no generated jOOQ table can exist for a column the census exists
+ * to DISCOVER") that conflated two different things — the discovered
+ * COLUMNS are genuinely runtime-only (no codegen for a table jOOQ doesn't
+ * know exists), but the SQL that queries them does not need to be raw
+ * string concatenation to be dynamic. {@code DSL.table(DSL.name(...))} /
+ * {@code DSL.field(DSL.name(...), Class)} build typed-shaped, properly
+ * identifier-quoted references to a runtime-discovered table/column with
+ * no codegen involved at all — the same idiom {@link
+ * dev.nexus.service.http.VersionHandler} already uses for {@code
+ * public.databasechangelog} (outside jOOQ's {@code nexus}/{@code t1}
+ * codegen scope for a different reason: cross-schema, not runtime-unknown).
+ * {@code information_schema.columns}/{@code .tables} get the same
+ * treatment. The three FIXED hex-keyed pointer tables in {@link
+ * #danglingPointers} ({@code topic_assignments}, {@code frecency}, {@code
+ * relevance_log}) are not runtime-discovered at all — they are compile-time
+ * known and DO have generated {@code Tables} constants, so that leg
+ * converts to fully typed DSL via {@link ChashSqlIdioms#existsInAnyDim}.
+ * Zero raw string-SQL execute/fetch sites remain in this class; the
+ * RawSqlGateTest allowlist entry is REMOVED (see that test's comment for
+ * the dead-sanction-entry discipline this follows).
  */
-// SANCTIONED RAW (nexus-jxizy.10.5, RawSqlGateTest allowlist): the census is
-// dynamic-by-construction (columns enumerated from information_schema at
-// run time) — no generated jOOQ table can exist for a column the census
-// exists to DISCOVER. Read-only counts; never serving-path.
 public final class ChashCensus {
 
     private ChashCensus() {
@@ -90,18 +117,35 @@ public final class ChashCensus {
 
     private static final String LEGACY_SHAPE = "^([0-9a-f]{16}|[0-9a-f]{32})$";
 
+    // Typed ad-hoc DSL.table/DSL.field references (same idiom as
+    // VersionHandler.DATABASECHANGELOG): information_schema is outside
+    // jOOQ codegen's nexus/t1 inputSchema scope, so there is no generated
+    // Tables.COLUMNS — that is a codegen-coverage fact, not a reason to
+    // fall back to string-concatenated SQL.
+    private static final Table<?> INFO_COLUMNS = DSL.table(DSL.name("information_schema", "columns"));
+    private static final Table<?> INFO_TABLES  = DSL.table(DSL.name("information_schema", "tables"));
+
     /** Enumerate schema-nexus columns of one udt type: {@code table.column}. */
     private static List<String[]> columns(DSLContext ctx, String udt) {
+        Table<?> c = INFO_COLUMNS.as("c");
+        Table<?> t = INFO_TABLES.as("t");
+        Field<String> cSchema = DSL.field(DSL.name("c", "table_schema"), String.class);
+        Field<String> cTable  = DSL.field(DSL.name("c", "table_name"), String.class);
+        Field<String> cColumn = DSL.field(DSL.name("c", "column_name"), String.class);
+        Field<String> cUdt    = DSL.field(DSL.name("c", "udt_name"), String.class);
+        Field<String> tSchema = DSL.field(DSL.name("t", "table_schema"), String.class);
+        Field<String> tTable  = DSL.field(DSL.name("t", "table_name"), String.class);
+        Field<String> tType   = DSL.field(DSL.name("t", "table_type"), String.class);
+
         List<String[]> out = new ArrayList<>();
-        ctx.resultQuery(
-                "SELECT c.table_name, c.column_name "
-                + "FROM information_schema.columns c "
-                + "JOIN information_schema.tables t "
-                + "  ON t.table_schema = c.table_schema AND t.table_name = c.table_name "
-                + "WHERE c.table_schema = 'nexus' AND c.udt_name = ? "
-                + "  AND t.table_type = 'BASE TABLE' "
-                + "ORDER BY c.table_name, c.column_name", udt)
-            .forEach(r -> out.add(new String[] {r.get(0, String.class), r.get(1, String.class)}));
+        ctx.select(cTable, cColumn)
+            .from(c)
+            .join(t).on(tSchema.eq(cSchema).and(tTable.eq(cTable)))
+            .where(cSchema.eq("nexus"))
+            .and(cUdt.eq(udt))
+            .and(tType.eq("BASE TABLE"))
+            .orderBy(cTable, cColumn)
+            .forEach(r -> out.add(new String[] {r.get(cTable), r.get(cColumn)}));
         return out;
     }
 
@@ -118,23 +162,56 @@ public final class ChashCensus {
         Map<String, Integer> residue = new LinkedHashMap<>();
         for (String[] col : columns(ctx, "text")) {
             if (excluded(TEXT_EXCLUSIONS, col[0], col[1])) continue;
-            Integer n = ctx.fetchOne(
-                "SELECT count(*) FROM nexus.\"" + col[0] + "\""
-                + " WHERE \"" + col[1] + "\" ~ '" + LEGACY_SHAPE + "'").get(0, Integer.class);
+            Table<?> tbl = DSL.table(DSL.name("nexus", col[0]));
+            Field<String> fld = DSL.field(DSL.name(col[1]), String.class);
+            Integer n = ctx.selectCount().from(tbl)
+                .where(fld.likeRegex(LEGACY_SHAPE))
+                .fetchOne(0, Integer.class);
             if (n != null && n > 0) residue.put(col[0] + "." + col[1], n);
         }
         for (String[] col : columns(ctx, "bytea")) {
             if (excluded(BYTEA_EXCLUSIONS, col[0], col[1])) continue;
-            Integer n = ctx.fetchOne(
-                "SELECT count(*) FROM nexus.\"" + col[0] + "\""
-                + " WHERE \"" + col[1] + "\" IS NOT NULL AND octet_length(\"" + col[1] + "\") <> 32")
-                .get(0, Integer.class);
+            Table<?> tbl = DSL.table(DSL.name("nexus", col[0]));
+            Field<byte[]> fld = DSL.field(DSL.name(col[1]), byte[].class);
+            Integer n = ctx.selectCount().from(tbl)
+                .where(fld.isNotNull())
+                .and(DSL.function("octet_length", Integer.class, fld).ne(32))
+                .fetchOne(0, Integer.class);
             if (n != null && n > 0) residue.put(col[0] + "." + col[1] + "[bytea]", n);
         }
         // Dangling 64-hex pointers: hex-keyed stores whose id resolves to no
         // content row in any dim (the critic-C3 verify gap, closed).
         residue.putAll(danglingPointers(ctx));
         return residue;
+    }
+
+    /** EITHER era's chash shape — the 64-only filter was the blindness. */
+    private static final String EITHER_ERA_SHAPE = "^([0-9a-f]{32}|[0-9a-f]{64})$";
+
+    /**
+     * Count rows of one hex-keyed pointer table (nexus-4okz4 increment 4)
+     * whose {@code hexCol} value is shaped like a chash of either era AND
+     * resolves to a live chunk by NO route — neither directly nor through
+     * {@code chash_alias}. Fully typed DSL: {@code topic_assignments},
+     * {@code frecency}, {@code relevance_log} are compile-time-known
+     * tables (unlike the runtime-discovered columns above), so this reuses
+     * the generated {@code Tables} constants and {@link
+     * ChashSqlIdioms#existsInAnyDim} rather than string-formatting a
+     * template. {@code decode(hexCol, 'hex')}/{@code 'hex'} occurrences
+     * below are each in their OWN independent {@code NOT EXISTS}/{@code
+     * EXISTS} clause (no DISTINCT-ON/GROUP-BY structural-match requirement
+     * across them), so plain binds (not {@code DSL.inline}) are safe per
+     * the INLINE-VS-BIND rule ({@link ChashSqlIdioms} class javadoc).
+     */
+    private static Integer unresolvableHexCount(DSLContext ctx, TableField<?, String> hexCol) {
+        Field<byte[]> decoded = DSL.function("decode", byte[].class, hexCol, DSL.val("hex"));
+        return ctx.selectCount().from(hexCol.getTable())
+            .where(hexCol.likeRegex(EITHER_ERA_SHAPE))
+            .and(DSL.not(ChashSqlIdioms.existsInAnyDim(ctx, decoded)))
+            .and(DSL.notExists(ctx.selectOne().from(CHASH_ALIAS)
+                    .where(CHASH_ALIAS.OLD_REF.eq(hexCol))
+                    .and(ChashSqlIdioms.existsInAnyDim(ctx, CHASH_ALIAS.NEW_CHASH))))
+            .fetchOne(0, Integer.class);
     }
 
     /**
@@ -165,27 +242,12 @@ public final class ChashCensus {
      */
     private static Map<String, Integer> danglingPointers(DSLContext ctx) {
         Map<String, Integer> out = new LinkedHashMap<>();
-        // Resolves-by-no-route, for a hex-TEXT pointer of either era.
-        String unresolvableHex =
-            "NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = decode(%1$s, 'hex')) "
-            + "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = decode(%1$s, 'hex')) "
-            + "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = decode(%1$s, 'hex')) "
-            + "AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
-            + "                 WHERE a.old_ref = %1$s "
-            + "                   AND (EXISTS (SELECT 1 FROM nexus.chunks_384 k WHERE k.chash = a.new_chash) "
-            + "                     OR EXISTS (SELECT 1 FROM nexus.chunks_768 k WHERE k.chash = a.new_chash) "
-            + "                     OR EXISTS (SELECT 1 FROM nexus.chunks_1024 k WHERE k.chash = a.new_chash)))";
-        Map<String, String> hexKeyed = Map.of(
-            "topic_assignments", "doc_id",
-            "frecency", "chunk_id",
-            "relevance_log", "chunk_id");
-        for (Map.Entry<String, String> e : hexKeyed.entrySet()) {
-            String col = e.getValue();
-            Integer n = ctx.fetchOne(
-                "SELECT count(*) FROM nexus." + e.getKey() + " p "
-                // EITHER era's chash shape — the 64-only filter was the blindness.
-                + "WHERE p." + col + " ~ '^([0-9a-f]{32}|[0-9a-f]{64})$' AND "
-                + String.format(unresolvableHex, "p." + col)).get(0, Integer.class);
+        Map<String, TableField<?, String>> hexKeyed = Map.of(
+            "topic_assignments", TOPIC_ASSIGNMENTS.DOC_ID,
+            "frecency", FRECENCY.CHUNK_ID,
+            "relevance_log", RELEVANCE_LOG.CHUNK_ID);
+        for (Map.Entry<String, TableField<?, String>> e : hexKeyed.entrySet()) {
+            Integer n = unresolvableHexCount(ctx, e.getValue());
             if (n != null && n > 0) out.put("dangling." + e.getKey(), n);
         }
         // RDR-187 (nexus-piwya.5): the dangling.chash_index leg is RETIRED

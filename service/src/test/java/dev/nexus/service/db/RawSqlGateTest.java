@@ -130,19 +130,24 @@ class RawSqlGateTest {
             // REMOVED from this allowlist — a dead sanction entry would
             // otherwise point at a method that no longer exists.
             "rekey")),
-        Map.entry("StagingHandler.java", java.util.Set.of(
-            // SANCTIONED RAW (nexus-jxizy.10.4): the landing surface is
-            // dynamic-by-store (8 staging tables, per-store column lists,
-            // multi-row VALUES with ::vector/::jsonb casts) — one-shot
-            // migration plumbing over tables jOOQ codegen deliberately
-            // does not model (staging is transient landing state).
-            "handleLoad", "handleEmbedFill", "handleClear", "handleCounts")),
-        Map.entry("ChashCensus.java", java.util.Set.of(
-            // SANCTIONED RAW (nexus-jxizy.10.5): the census is dynamic BY
-            // CONSTRUCTION — columns enumerated from information_schema at
-            // run time; no generated jOOQ table can exist for a column the
-            // census exists to DISCOVER. Read-only counts, never serving-path.
-            "columns", "scan", "danglingPointers", "assertDiscoversKnownInventory")),
+        // StagingHandler.java: REMOVED (nexus-4okz4 increment 4) — handleLoad's
+        // per-store dynamic INSERT (typed DSL.table/DSL.name identifiers +
+        // Field<Vector>/Field<JSONB> for embedding/chunk_meta + a typed
+        // onConflict().doUpdate().set(Map) — see StoreSpec.dslTable/dynField/
+        // columnValue), handleEmbedFill's staging.chunks queries, and
+        // handleClear/handleCounts' per-store DELETE/COUNT all converted to
+        // typed jOOQ DSL. Nothing left to sanction — same dead-entry-avoidance
+        // discipline as StagingPromoteOps.java below.
+        // ChashCensus.java: REMOVED (nexus-4okz4 increment 4) — the DISCOVERED
+        // columns stay genuinely runtime-only (no codegen for a table jOOQ
+        // doesn't know exists), but the SQL querying them no longer needs to
+        // be raw string concatenation: DSL.table(DSL.name(...))/DSL.field(
+        // DSL.name(...), Class) build typed, properly quoted references with
+        // zero codegen involved (same idiom VersionHandler.DATABASECHANGELOG
+        // already used for public.databasechangelog). The three FIXED
+        // hex-keyed pointer tables in danglingPointers are compile-time known
+        // and DO have generated Tables constants, converted via
+        // ChashSqlIdioms.existsInAnyDim. Zero raw string-SQL sites remain.
         // StagingPromoteOps.java: REMOVED (nexus-4okz4 increment 3) — every
         // raw ctx.execute("...")/fetch*("...") site in promoteCollection and
         // finalizeTenant converted to typed jOOQ DSL; nothing left to
@@ -413,6 +418,9 @@ class RawSqlGateTest {
      *       per-dim content-table accessor)</li>
      *   <li>{@code dev.nexus.service.vectors.DimTables.CHUNKS} /
      *       {@code CENTROIDS} maps</li>
+     *   <li>{@code ChashSqlIdioms.existsInAnyDim} (nexus-4okz4 increment 4:
+     *       three explicit {@code EXISTS} disjuncts, {@code ChashCensus}'
+     *       shared dangling-pointer idiom)</li>
      * </ul>
      */
     @Test
