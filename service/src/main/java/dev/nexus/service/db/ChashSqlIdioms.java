@@ -45,20 +45,55 @@ import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
  * which. The class docstring's "single home" promise extends to the typed
  * forms: a caller building DSL statements should reach for the typed twin
  * here rather than re-deriving the formula locally.
+ *
+ * <p><b>THE INLINE-VS-BIND RULE (nexus-4okz4 increment 3, read this before
+ * adding or reusing a fragment here):</b> {@code DSL.val(literal)} mints an
+ * INDEPENDENT bind placeholder (a fresh {@code $N}) per TEXTUAL occurrence
+ * of the rendered SQL, even when every occurrence comes from the SAME Java
+ * {@code Field} object reused across clauses. PostgreSQL validates {@code
+ * SELECT DISTINCT ON (...)} against its leading {@code ORDER BY}
+ * expressions, and validates {@code GROUP BY} coverage of any ungrouped
+ * SELECT-list expression, by PARSE-TREE STRUCTURAL EQUALITY — evaluated
+ * BEFORE parameter binding. Two occurrences of the identical expression
+ * that differ only in which {@code $N} they happen to bind are NOT
+ * recognized as equal, so PostgreSQL reports a DISTINCT-ON/ORDER-BY
+ * mismatch, or "column must appear in the GROUP BY clause," even though
+ * both placeholders are bound to the SAME value at execution time. This is
+ * invisible until a caller reuses the SAME fragment expression in two
+ * clauses that need structural matching (DISTINCT ON + its ORDER BY, or a
+ * GROUP BY expression + its own SELECT-list occurrence) — a fragment used
+ * exactly once per statement (the common case: a WHERE predicate, a SET
+ * target) never hits it, because WHERE/SET don't require matching anything
+ * else textually. The fix, applied to {@link #digestField} and
+ * {@link #oldRefField} this increment: use {@code DSL.inline(literal)}
+ * instead of {@code DSL.val(literal)} for the fragment's embedded
+ * constants ({@code "UTF8"}, {@code "hex"}) — {@code DSL.inline} renders
+ * the (properly jOOQ-escaped) literal directly into the SQL text, so every
+ * occurrence is byte-for-byte identical and PostgreSQL's structural check
+ * passes. Safe here specifically because these are FIXED PROTOCOL
+ * CONSTANTS (encoding names), never derived from caller/user input — never
+ * inline a value that could originate outside this file's own literals.
+ * Before composing a NEW multi-occurrence DSL statement (a DISTINCT ON, a
+ * GROUP BY reused in the SELECT list) from fragments in this class, check
+ * whether the fragment embeds a {@code DSL.val(...)} literal; if it does
+ * and you need the SAME expression object more than once in one statement,
+ * either reach for an already-inlined twin or inline the literal locally
+ * the same way — do not rediscover this by way of a PostgreSQL error.
  */
-// SANCTIONED RAW (nexus-jxizy.10.2, narrowed nexus-4okz4 increment 2): the
-// residue after this increment converted contentRekeyUpdate,
+// SANCTIONED RAW (nexus-jxizy.10.2, narrowed nexus-4okz4 increment 2,
+// further narrowed increment 3): increment 2 converted contentRekeyUpdate,
 // frecencyAliasAggregate, and residualMismatchCount to typed DSL
 // (contentRekeyUpdateDsl / frecencyAliasAggregateDsl / residualMismatchCountDsl
 // — no allowlist entry needed, pure DSL, no raw-SQL string executed) and
-// deleted the now-dead raw-string forms outright. What remains sanctioned:
-// contentCollapseDelete (the ctid/array_agg ORDER BY keeper-selection idiom
-// has no jOOQ DSL form — array-subscript of an ordered array_agg), and
-// refreshAliasStats (ANALYZE is maintenance DDL with no jOOQ DSL form at
-// all, plus a privilege probe over pg_class/has_table_privilege system
-// catalogs codegen does not cover). chashOldBytes is a one-line string
-// helper with no execute/fetch call of its own — StagingPromoteOps-only,
-// out of this increment's scope. Never serving-path.
+// deleted the now-dead raw-string forms outright. Increment 3 did the same
+// for chashOldBytes -> chashOldBytesField (StagingPromoteOps' two alias-
+// INSERT sites were its only callers) — REMOVED from the allowlist below,
+// dead sanction entry avoided. What remains sanctioned: contentCollapseDelete
+// (the ctid/array_agg ORDER BY keeper-selection idiom has no jOOQ DSL form —
+// array-subscript of an ordered array_agg), and refreshAliasStats (ANALYZE
+// is maintenance DDL with no jOOQ DSL form at all, plus a privilege probe
+// over pg_class/has_table_privilege system catalogs codegen does not
+// cover). Never serving-path.
 public final class ChashSqlIdioms {
 
     private ChashSqlIdioms() {
@@ -84,12 +119,20 @@ public final class ChashSqlIdioms {
         + "ELSE convert_from(%1$s, 'UTF8') END";
 
     /**
-     * The canonical string-to-bytes function for
-     * {@code chash_alias.old_bytes} (rdr180-20 changeset) — call as
-     * {@code chashOldBytes("s.legacy_ref")}.
+     * Typed rendering of the canonical string-to-bytes function for
+     * {@code chash_alias.old_bytes} (rdr180-20 changeset) — added
+     * nexus-4okz4 increment 3, REPLACING the deleted string-returning
+     * {@code chashOldBytes(String)} outright: grep-verified zero remaining
+     * callers of the string form once StagingPromoteOps' two alias-INSERT
+     * sites (the only callers) converted to typed DSL — same single-homed
+     * discipline as {@link #contentRekeyUpdateDsl} etc. in increment 2, no
+     * forked variant left behind. {@code DSL.function}'s schema-qualified
+     * name form (verified: jOOQ's own javadoc documents {@code name} as
+     * "possibly qualified") renders the identical {@code
+     * nexus.chash_old_bytes(...)} call.
      */
-    public static String chashOldBytes(String refExpr) {
-        return "nexus.chash_old_bytes(" + refExpr + ")";
+    public static Field<byte[]> chashOldBytesField(Field<String> refExpr) {
+        return DSL.function("nexus.chash_old_bytes", byte[].class, refExpr);
     }
 
     /**
@@ -102,23 +145,48 @@ public final class ChashSqlIdioms {
      * RekeyOpsIntegrationTest (every rekey assertion depends on the digest
      * being right), so a drift between them fails loud on the next test
      * run rather than silently.
+     *
+     * <p>{@code DSL.inline("UTF8")}, NOT {@code DSL.val("UTF8")} (nexus-4okz4
+     * increment 3 pin, found by StagingPromoteOpsIntegrationTest, not
+     * anticipated by review): {@code "UTF8"} is a fixed protocol constant,
+     * never user input, so inlining it is injection-safe — and it MUST be
+     * inline because callers that reference this SAME returned expression
+     * object more than once within one rendered statement (e.g. a
+     * {@code SELECT DISTINCT ON (...)}  whose {@code ORDER BY} leads with
+     * the identical expression) need every textual occurrence to be
+     * byte-for-byte identical. PostgreSQL validates DISTINCT-ON/ORDER-BY
+     * (and, the sibling case, GROUP-BY coverage) by PARSE-TREE structural
+     * equality BEFORE parameter binding: a bind placeholder (`DSL.val`)
+     * mints an INDEPENDENT `$N` per textual occurrence even for the same
+     * Java object, so two occurrences of {@code sha256(convert_to(chunk_text,
+     * $N))} with different `$N` are NOT recognized as the same expression,
+     * even though both bind the same literal value at execution time —
+     * PostgreSQL then reports the DISTINCT ON / ORDER BY mismatch (or, for
+     * GROUP BY, that the ungrouped column "must appear in the GROUP BY
+     * clause"). A caller referencing this field only once per statement
+     * (the common case) sees no behavior change either way; this is a
+     * correctness fix for the multiple-occurrence case, not a
+     * representation change.
      */
     public static Field<byte[]> digestField(Field<String> chunkText) {
         return DSL.function("sha256", byte[].class,
-            DSL.function("convert_to", byte[].class, chunkText, DSL.val("UTF8")));
+            DSL.function("convert_to", byte[].class, chunkText, DSL.inline("UTF8")));
     }
 
     /**
      * Typed rendering of {@link #OLD_REF_LEMMA} (same in-store-only domain
      * constraint — see class docstring): {@code CASE WHEN
      * octet_length(chash) = 16 THEN encode(chash, 'hex') ELSE
-     * convert_from(chash, 'UTF8') END}. Added nexus-4okz4 increment 2.
+     * convert_from(chash, 'UTF8') END}. Added nexus-4okz4 increment 2;
+     * inlined literals (not bind parameters) added increment 3 — same
+     * multiple-occurrence hazard and injection-safety argument as
+     * {@link #digestField}'s javadoc.
      */
     public static Field<String> oldRefField(Field<byte[]> chash) {
         return DSL.when(
                 DSL.function("octet_length", Integer.class, chash).eq(16),
-                DSL.function("encode", String.class, chash, DSL.val("hex")))
-            .otherwise(DSL.function("convert_from", String.class, chash, DSL.val("UTF8")));
+                DSL.function("encode", String.class, chash, DSL.inline("hex")))
+            .otherwise(DSL.function("convert_from", String.class, chash, DSL.inline("UTF8")));
     }
 
     /**

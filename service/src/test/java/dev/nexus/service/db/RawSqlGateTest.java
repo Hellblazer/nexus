@@ -143,27 +143,29 @@ class RawSqlGateTest {
             // run time; no generated jOOQ table can exist for a column the
             // census exists to DISCOVER. Read-only counts, never serving-path.
             "columns", "scan", "danglingPointers", "assertDiscoversKnownInventory")),
-        Map.entry("StagingPromoteOps.java", java.util.Set.of(
-            // SANCTIONED RAW (nexus-jxizy.10.3): the land-then-transform
-            // promote/finalize — one-shot migration statements composing the
-            // ChashSqlIdioms fragments in the INSERT-into-populated-target
-            // shape (DISTINCT ON keepers, alias joins, GREATEST-merge,
-            // anti-join dedupes). Never serving-path.
-            "promoteCollection", "finalizeTenant")),
+        // StagingPromoteOps.java: REMOVED (nexus-4okz4 increment 3) — every
+        // raw ctx.execute("...")/fetch*("...") site in promoteCollection and
+        // finalizeTenant converted to typed jOOQ DSL; nothing left to
+        // sanction. A dead entry pointing at a fully-converted class would
+        // otherwise mask a future regression (a NEW raw site added later
+        // would need to earn its own allowlist entry, not inherit a stale
+        // one). See ChashSqlIdioms.java's entry below for what remains
+        // genuinely raw in the shared fragments StagingPromoteOps composes.
         Map.entry("ChashSqlIdioms.java", java.util.Set.of(
             // SANCTIONED RAW (nexus-jxizy.10.2, narrowed nexus-4okz4
-            // increment 2): this increment converted contentRekeyUpdate,
-            // frecencyAliasAggregate, and residualMismatchCount to typed
-            // DSL twins (contentRekeyUpdateDsl / frecencyAliasAggregateDsl
-            // / residualMismatchCountDsl — no allowlist entry needed, pure
+            // increment 2, further narrowed increment 3): increment 2
+            // converted contentRekeyUpdate, frecencyAliasAggregate, and
+            // residualMismatchCount to typed DSL twins
+            // (contentRekeyUpdateDsl / frecencyAliasAggregateDsl /
+            // residualMismatchCountDsl — no allowlist entry needed, pure
             // DSL, no raw-SQL string executed) and DELETED the now-dead
-            // raw-string forms outright, so all three are REMOVED from
-            // this allowlist. contentCollapseDelete remains: the
+            // raw-string forms outright. Increment 3 did the same for
+            // chashOldBytes -> chashOldBytesField (StagingPromoteOps' two
+            // alias-INSERT sites were its only callers) — REMOVED from
+            // this allowlist too. contentCollapseDelete remains: the
             // ctid/array_agg ORDER BY keeper-selection idiom (an
             // array-subscript of an ordered array_agg) has no jOOQ DSL
-            // form. chashOldBytes is untouched (StagingPromoteOps-only, a
-            // one-line string helper with no execute/fetch call of its
-            // own — out of this increment's scope).
+            // form.
             // SANCTIONED RAW (rdr180-17): refreshAliasStats additionally
             // EXECUTES — ANALYZE is maintenance DDL with no jOOQ DSL form at
             // all, and its privilege probe reads pg_class / has_table_privilege
@@ -171,7 +173,7 @@ class RawSqlGateTest {
             // caller's transaction so the planner sees the alias rows that
             // transaction just wrote (F2: 101min vs 461s), so it cannot be
             // hoisted out to a typed call site. Never serving-path.
-            "contentCollapseDelete", "chashOldBytes", "refreshAliasStats")),
+            "contentCollapseDelete", "refreshAliasStats")),
         Map.entry("SchemaMigrator.java", java.util.Set.of(
             // nexus-c4143 root fix: pg_constraint is a Postgres SYSTEM CATALOG (jOOQ
             // codegen only covers the nexus/t1 application schemas, no generated table
@@ -406,6 +408,9 @@ class RawSqlGateTest {
      *       UNION ALL branches)</li>
      *   <li>{@code StagingPromoteOps.finalizeTenant}'s residual-count call
      *       site (three explicit {@code residualMismatchCountDsl} calls)</li>
+     *   <li>{@code StagingPromoteOps.chunkDim} (nexus-4okz4 increment 3:
+     *       three explicit switch branches resolving {@code promoteCollection}'s
+     *       per-dim content-table accessor)</li>
      *   <li>{@code dev.nexus.service.vectors.DimTables.CHUNKS} /
      *       {@code CENTROIDS} maps</li>
      * </ul>
