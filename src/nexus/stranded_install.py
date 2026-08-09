@@ -197,7 +197,12 @@ class StrandedInstall:
             base += (
                 " If you have ALREADY completed the two-hop migration above "
                 "for this machine's own data, run `nx stranded ack` to "
-                "attest that and clear this refusal."
+                "attest that and clear this refusal. (If you previously "
+                "acked and this reappeared, a benign event likely changed "
+                "these files' timestamps — a backup restore, a volume "
+                "remount, a non-timestamp-preserving copy — rather than "
+                "new unmigrated data; re-verify and re-run `nx stranded "
+                "ack`.)"
             )
         return base
 

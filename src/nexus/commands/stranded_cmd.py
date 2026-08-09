@@ -36,6 +36,16 @@ this command NEVER deletes anything. Deletion of pre-PG artifacts remains
 a separate, third, independently consented act (unchanged, out of scope
 here) — acking a migration is not a request to remove the rollback
 copies.
+
+BENIGN MTIME DRIFT: the fingerprint (path + size + mtime, see
+:func:`nexus.stranded_install.artifact_fingerprint`) can legitimately
+change WITHOUT any new pre-PG data appearing — a backup restore, a volume
+remount, or a copy tool that does not preserve timestamps all touch
+``mtime`` on files whose bytes are otherwise identical. That reads
+exactly like drift to the fingerprint and re-strands. This is not a bug
+to work around: re-verify the artifacts are still genuinely migrated (the
+underlying data has not changed, only its timestamp), then simply
+re-run ``nx stranded ack``.
 """
 from __future__ import annotations
 
@@ -116,6 +126,11 @@ def ack_cmd(assume_yes: bool) -> None:
         "This does NOT delete these files — they remain on disk as "
         "copy-not-move rollback sources; deletion is a separate, "
         "explicitly consented step this command never performs."
+    )
+    click.echo(
+        "If you have NOT completed the migration, do not proceed: "
+        "acknowledging removes this warning permanently and any "
+        "unmigrated data in these files will not be flagged again."
     )
     if not assume_yes and not click.confirm(
         "\nProceed and record this attestation?"

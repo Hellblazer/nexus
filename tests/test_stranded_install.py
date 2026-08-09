@@ -1118,6 +1118,12 @@ class TestCheckLocalAckSignal:
         )
         assert result is not None
         assert result.ack_eligible is True
+        # nexus-cmtpa round-3 critique: name the benign mtime-drift
+        # triggers so a re-strand after a real ack does not read as data
+        # loss -- a backup restore / volume remount / non-timestamp-
+        # preserving copy is the likely cause, not new unmigrated data.
+        assert "backup restore" in result.message
+        assert "re-run `nx stranded ack`" in result.message
 
 
 class TestAckCommand:
@@ -1184,6 +1190,10 @@ class TestAckCommand:
         result = CliRunner().invoke(stranded_group, ["ack", "--yes"], obj={})
         assert result.exit_code == 0
         assert ACK_CONSENT_TEXT in result.output
+        # nexus-cmtpa round-3 critique: the stakes of a false attestation
+        # must be stated before the confirm (--yes skips the prompt itself
+        # but the stakes line is unconditional output either way).
+        assert "If you have NOT completed the migration, do not proceed" in result.output
         assert "Recorded:" in result.output
         marker = config / stranded_install._ACK_MARKER_FILENAME
         assert marker.exists()
