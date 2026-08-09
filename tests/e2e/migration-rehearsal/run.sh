@@ -8,6 +8,18 @@
 #   tests/e2e/migration-rehearsal/run.sh --era-hop    # RDR-185 era-spanning hop: ancient install -> current via `nx upgrade` ALONE (nexus-n7u38.30)
 #   tests/e2e/migration-rehearsal/run.sh --chash-window # RDR-180 pre-cutover window: cohort engine boots (bytea conversion) BEFORE the chash-rekey rung runs (nexus-p78a0)
 #   tests/e2e/migration-rehearsal/run.sh --stranded    # nexus-8nlj4 two-hop stranded-redirect: ancient Chroma artifacts + package-upgrade straight to current must trip the LAST_MIGRATION_CAPABLE detector; downgrading to the pin must be able to migrate them for real
+#   tests/e2e/migration-rehearsal/run.sh --comprehensive # Phase D: daily-driver surface (T2/T1/T3/catalog/doctor), deterministic bge-768 LOCAL only
+#   tests/e2e/migration-rehearsal/run.sh --stress      # Phase E: concurrency + queue-drain stress, same bge-768-local dependency as Phase D
+#
+# KNOWN COVERAGE GAP (nexus-f4apk): --comprehensive/--stress and --with-cloud are
+# mutually exclusive by construction (Phase D/E are bge-768 LOCAL; --with-cloud
+# boots a voyage-only service, and the guard below refuses the combination
+# rather than let it 422 downstream at the engine). NO invocation of this
+# harness therefore exercises the Phase D/E daily-driver surface against
+# Voyage — a bare --with-cloud run asserts nothing past Phase A's install-time
+# checks, and --comprehensive/--stress only ever run on onnx-local. Tracked as
+# a deliberate, not-yet-built follow-up: nexus-itxet (voyage-capable Phase-D
+# variant).
 #
 # Builds the wheel on the host and the LINUX native nexus-service binary in a
 # GraalVM container (RDR-161: the native binary is the sole launch artifact; the
@@ -245,6 +257,16 @@ fi
 # never run Phase D. Reject the incoherent combination loudly.
 [ "$COMPREHENSIVE" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ]; } && { echo "--comprehensive runs on the default rehearse path; it cannot combine with --cold/--guided (they override the entrypoint)" >&2; exit 2; }
 [ "$STRESS" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ]; } && { echo "--stress runs on the default rehearse path; it cannot combine with --cold/--guided (they override the entrypoint)" >&2; exit 2; }
+# nexus-f4apk: same incoherence class as the --guided+--with-cloud guard above
+# (nexus-gilf2) — Phase D is declared deterministic bge-768 LOCAL (rehearse.sh's
+# own Phase D banner), while --with-cloud boots a voyage-only service. Before
+# this guard the combination arg-parsed cleanly and only failed downstream at
+# the engine with HTTP 422 (correct cross-model-contamination refusal, not an
+# engine defect — v0.1.69 rehearsal, T2 conexus/[22073]). Phase E shares the
+# same dependency: its store/memory puts land in the identical
+# bge-768-vs-voyage-serving-mode collision, so it gets the identical guard.
+[ "$COMPREHENSIVE" = 1 ] && [ "$WITH_CLOUD" = 1 ] && { echo "--comprehensive and --with-cloud are incoherent (Phase D is deterministic bge-768 local; --with-cloud boots a voyage-only service — the engine correctly 422s the cross-model write); run --comprehensive alone" >&2; exit 2; }
+[ "$STRESS" = 1 ] && [ "$WITH_CLOUD" = 1 ] && { echo "--stress and --with-cloud are incoherent (Phase E's store/memory puts hit the same bge-768-vs-voyage-serving-mode collision as Phase D); run --stress alone" >&2; exit 2; }
 [ "$FULLSTACK" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ]; } && { echo "--fullstack is a standalone full-topology run (its own entrypoint); do not combine with other legs" >&2; exit 2; }
 # --hole-punch is a standalone journey: it reuses the --cold box's staging
 # internally (cheapest to compose — no native GraalVM build) but drives its
