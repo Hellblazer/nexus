@@ -1636,6 +1636,15 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # accounting, not any cloud-mode embedder behavior.
     "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_retries_transient_failure_then_succeeds",
     #
+    # nexus-3mwuo (2026-08-09, C1-residual from the wxjr6 delta re-review,
+    # T2 review-wxjr6-client-2026-08-09 [22014]): shared-chash both-paths
+    # fix test — same "string-literal-as-name" class as the sibling pair
+    # above. The voyage token is the same collection-NAME fixture literal
+    # passed to the mocked flush closure; the test asserts the shared
+    # chash rides both the combined write and the legacy orphan upsert
+    # call, not any cloud-mode embedder behavior.
+    "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_shared_chash_orphan_copy_survives_identity_doc_failure",
+    #
     # nexus-te885.8.1 (pg-source reconcile leg for verify-fill): builds a
     # mocked /v1/vectors/collections response using conformant collection-
     # NAME strings (code__nexus-1-1__voyage-code-3__v1,

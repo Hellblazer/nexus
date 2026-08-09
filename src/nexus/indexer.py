@@ -3050,14 +3050,31 @@ def _build_combined_write_payload(
       cost paid) then silently discarded server-side — no log, no
       counter, no error, and a REGRESSION vs pre-commit behavior (that
       content used to land in T3 via the old direct upsert-chunks call,
-      orphaned-but-searchable). A chash claimed by BOTH an identity file
-      and an identity-less file (duplicate content across files, routine
-      boilerplate) is NOT treated as orphan — it is safely covered by the
-      identity file's manifest reference, so it stays in
-      ``chunks_payload``. The caller (``_batch_flush``) sends these
+      orphaned-but-searchable). The caller (``_batch_flush``) sends these
       through the OLD ``db.upsert_chunks_with_embeddings`` call, exactly
       preserving the pre-commit orphaned-but-searchable behavior for
       files this function cannot manifest.
+
+      A chash claimed by BOTH an identity file and an identity-less file
+      (duplicate content across files, routine boilerplate) rides BOTH
+      paths (nexus-3mwuo, C1-residual from the wxjr6 delta re-review, T2
+      review-wxjr6-client-2026-08-09 [22014]): it stays in
+      ``chunks_payload`` (the cheap, common-case-correct path — safely
+      covered by the identity file's manifest reference IF that file's
+      per-doc write succeeds) AND is ALSO included in
+      ``orphan_ids``/``orphan_docs``/``orphan_metas``. This split is
+      computed client-side, before the request is sent, so it cannot
+      react to what happens to any individual doc's per-doc transaction
+      server-side — if the identity file's doc lands in the response's
+      ``failed_doc_ids`` (a real, already-modeled outcome), a chash
+      staked ONLY on that doc's manifest reference would be embedded
+      (cost paid) then referenced by no committed doc, lost for both
+      files with no recovery path. Duplicating the shared chash into the
+      legacy upsert call closes that corner: the legacy path is
+      idempotent server-side (``ON CONFLICT`` per chash/collection), so
+      the redundant write in the common case (identity doc succeeds) is
+      a cheap, safe cost, and the orphan copy survives regardless of the
+      identity doc's outcome.
 
     Raises :class:`_CombinedWritePositionZeroViolation` if any
     identified doc's batch lacks position 0 — a DEFENDED invariant, not
@@ -3076,9 +3093,10 @@ def _build_combined_write_payload(
     from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 — deferred: avoid module-load cross-import
 
     # Split by catalog identity FIRST (code review Critical C1): a chash
-    # is orphan-eligible only if EVERY file that stages it lacks catalog
-    # identity — a chash claimed by an identity-having file anywhere in
-    # this flush is safely referenceable and stays in chunks_payload.
+    # is orphan-eligible if ANY file that stages it lacks catalog
+    # identity — a chash claimed EXCLUSIVELY by identity-having files
+    # never touches the orphan path (it's cheaply, safely referenceable
+    # via chunks_payload alone).
     identity_ids: set[str] = set()
     orphan_candidate_ids: set[str] = set()
     for _path, _c in file_contexts:
@@ -3087,8 +3105,21 @@ def _build_combined_write_payload(
         target = identity_ids if _c.get("catalog_doc_id") else orphan_candidate_ids
         target.update(_c.get("ids") or [])
     orphan_only_ids = orphan_candidate_ids - identity_ids
+    # nexus-3mwuo: a chash claimed by BOTH an identity file and an
+    # identity-less file — rides BOTH paths (see docstring). Distinct
+    # from orphan_only_ids: those chashes skip chunks_payload entirely;
+    # shared_ids stay in chunks_payload too.
+    shared_ids = orphan_candidate_ids & identity_ids
 
     seen_chash: set[str] = set()
+    # Dedup ONLY the shared-chash orphan copy (first occurrence wins,
+    # mirroring chunks_payload's own dedup) — a shared chash necessarily
+    # appears once per claiming file (once from its identity file, once
+    # from its orphan file), and one legacy-upsert copy is enough to
+    # close the recovery gap. orphan_only_ids intentionally keeps its
+    # pre-existing no-dedup behavior (unchanged by nexus-3mwuo; out of
+    # this fix's scope).
+    seen_shared_orphan: set[str] = set()
     chunks_payload: list[dict] = []
     orphan_ids: list[str] = []
     orphan_docs: list[str] = []
@@ -3099,6 +3130,11 @@ def _build_combined_write_payload(
             orphan_docs.append(_cdoc)
             orphan_metas.append(_cmeta)
             continue
+        if _cid in shared_ids and _cid not in seen_shared_orphan:
+            seen_shared_orphan.add(_cid)
+            orphan_ids.append(_cid)
+            orphan_docs.append(_cdoc)
+            orphan_metas.append(_cmeta)
         if _cid in seen_chash:
             continue
         seen_chash.add(_cid)
@@ -3115,6 +3151,21 @@ def _build_combined_write_payload(
     for _doc_id, _indexed_metas in by_doc.items():
         _chunks = _manifest_chunk_rows(_indexed_metas)
         if not any(_c["chash"] for _c in _chunks):
+            # Review Suggestion (T2 review-wxjr6-client-2026-08-09
+            # [22014]): this exclusion isn't mirrored by the identity/
+            # orphan split above — the split only checks
+            # ``catalog_doc_id`` truthiness, not chash validity, so a
+            # doc WITH catalog identity but zero non-empty chashes here
+            # would still have its file classified ``identity`` (not
+            # ``orphan``) by the split. Structurally unreachable via the
+            # real call path today: ``chunk_text_hash`` is populated
+            # unconditionally per chunk (``code_indexer.py``:
+            # ``chunk_text_hash=chunk_text_hash_full``), so ``_chunks``
+            # cannot be all-empty for a doc that actually staged
+            # content. Not defended with a raise (unlike the position-0
+            # invariant below) since this branch legitimately fires for
+            # an empty ``_indexed_metas`` group, which is not itself a
+            # bug.
             continue
         if not any(_c["position"] == 0 for _c in _chunks):
             raise _CombinedWritePositionZeroViolation(

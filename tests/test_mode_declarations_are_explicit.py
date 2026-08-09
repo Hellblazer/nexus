@@ -298,7 +298,14 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 58
 # collect the whole session, so this lint's `request.session.items` census
 # is blind to it until a full run — see the module docstring). Rationale
 # in conftest.py beside the entry.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 40
+# 40 -> 41 (nexus-3mwuo, 2026-08-09, C1-residual from the wxjr6 delta
+# re-review, T2 review-wxjr6-client-2026-08-09 [22014]): +1,
+# test_indexer_seam_b_cutover.py::test_run_index_batch_flush_shared_chash_
+# orphan_copy_survives_identity_doc_failure — same "string-literal-as-name"
+# class as the I1 sibling immediately above, same file, same blind spot
+# (a targeted battery run doesn't collect the whole session). Rationale in
+# conftest.py beside the entry.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 41
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

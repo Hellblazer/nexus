@@ -266,11 +266,22 @@ class TestMixedIdentityBatch:
         # The identity-having file's doc is unaffected.
         assert dict(full_docs)["1.1"][0]["chash"] == ids[0]
 
-    def test_shared_chash_across_identity_and_orphan_file_stays_in_combined_payload(self) -> None:
-        # A chash claimed by BOTH an identity file and an identity-less
-        # file (duplicate chunk text across files, routine boilerplate)
-        # is SAFELY referenceable via the identity file's manifest row —
-        # it must stay in chunks_payload, not be treated as orphan.
+    def test_shared_chash_across_identity_and_orphan_file_rides_both_paths(self) -> None:
+        # nexus-3mwuo (P3, C1-residual from the wxjr6 delta re-review,
+        # T2 review-wxjr6-client-2026-08-09 [22014]): a chash claimed by
+        # BOTH an identity file and an identity-less file (duplicate
+        # chunk text across files, routine boilerplate) is safely
+        # referenceable via the identity file's manifest row IF that
+        # file's own per-doc write succeeds server-side — but the split
+        # is computed client-side, BEFORE the request, so it cannot know
+        # that in advance. Fix direction (a): route shared chashes
+        # through BOTH paths — the combined payload (cheap, common-case
+        # correct) AND the orphan slice (legacy upsert_chunks_with_
+        # embeddings, idempotent server-side via ON CONFLICT), so an
+        # orphan copy survives even if the identity doc's write later
+        # lands in failed_doc_ids. Duplication in the common (identity
+        # doc succeeds) case is an accepted, cheap cost for closing the
+        # no-recovery-path corner.
         shared_id = "f" * 64
         fctx = [
             ("has_id.py", {"ids": [shared_id], "documents": ["shared"], "metadatas": [{"content_hash": "h1" * 32, "chunk_text_hash": shared_id}], "catalog_doc_id": "1.1"}),
@@ -280,9 +291,37 @@ class TestMixedIdentityBatch:
         chunks, full_docs, complete, orphan_ids, orphan_docs, orphan_metas = (
             _build_combined_write_payload(ids, docs, metas, fctx)
         )
+        # Still in the combined payload (unchanged, common-case path).
         assert {c["chash"] for c in chunks} == {shared_id}
-        assert orphan_ids == []
         assert dict(full_docs)["1.1"][0]["chash"] == shared_id
+        # NEW: also rides the orphan slice, so the legacy upsert call
+        # persists an orphaned-but-searchable copy regardless of what
+        # happens to doc "1.1"'s per-doc write server-side. Deduped
+        # first-occurrence-wins (mirrors chunks_payload's own dedup) —
+        # the shared chash appears once per claiming file in the raw
+        # flush, one orphan copy is enough to close the recovery gap.
+        assert orphan_ids == [shared_id]
+        assert orphan_docs == ["shared"]
+        assert orphan_metas == [{"content_hash": "h1" * 32, "chunk_text_hash": shared_id}]
+
+    def test_orphan_only_chash_not_duplicated_into_orphan_slice(self) -> None:
+        # Sanity companion to the shared-chash test above: a chash
+        # claimed ONLY by orphan (identity-less) files must still appear
+        # exactly once per occurrence in the orphan slice (unchanged
+        # behavior) and must NEVER appear in chunks_payload — the
+        # both-paths fix only affects chashes claimed by an identity
+        # file too.
+        fctx = [
+            _file_ctx("has_id.py", "1.1", 1, prefix="a"),
+            _file_ctx("no_id.py", "", 1, prefix="b"),
+        ]
+        ids, docs, metas = _mk_flush(fctx)
+        orphan_chash = ids[1]
+        chunks, full_docs, complete, orphan_ids, orphan_docs, orphan_metas = (
+            _build_combined_write_payload(ids, docs, metas, fctx)
+        )
+        assert orphan_chash not in {c["chash"] for c in chunks}
+        assert orphan_ids == [orphan_chash]
 
     def test_multiple_orphan_files_all_accounted(self) -> None:
         fctx = [

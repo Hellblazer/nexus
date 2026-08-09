@@ -372,6 +372,126 @@ def test_run_index_batch_flush_retries_transient_failure_then_succeeds(tmp_path,
     reset_superseded_sweep_stats()
 
 
+def test_run_index_batch_flush_shared_chash_orphan_copy_survives_identity_doc_failure(
+    tmp_path, monkeypatch,
+):
+    """nexus-3mwuo (P3, C1-residual from the wxjr6 delta re-review, T2
+    review-wxjr6-client-2026-08-09 [22014]): a chash shared by an
+    identity file ("has_id.py", catalog_doc_id="1.1") and an orphan
+    file ("no_id.py", no catalog identity) must survive even when the
+    identity doc's OWN per-doc write lands in the combined-write
+    response's ``failed_doc_ids`` — a real, already-modeled server-side
+    outcome. Fix direction (a): the shared chash rides BOTH paths, so
+    ``db.upsert_chunks_with_embeddings`` (the legacy, idempotent-via-
+    ON-CONFLICT orphan route) carries it regardless of what the combined
+    write's response says about doc "1.1". This test is fake-level (the
+    engine-side idempotency of the legacy upsert is already proven
+    elsewhere) — it only asserts the CLIENT unconditionally sends the
+    orphan copy.
+    """
+    from nexus.db.http_vector_client import HttpVectorClient
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "hello.py").write_text("x = 1\n")
+    reg = _reg()
+
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
+    monkeypatch.setenv("NX_LOCAL", "0")
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
+    monkeypatch.setenv("CHROMA_API_KEY", "fake")
+
+    shared_chash = "f" * 64
+    db = MagicMock(spec=HttpVectorClient)
+    catalog_writer = MagicMock()
+    # The identity doc's ("1.1") own per-doc write FAILS server-side —
+    # the corner this bead closes. A well-formed response still reports
+    # chunks_written/swept for whatever DID land.
+    catalog_writer.write_manifest_many.return_value = {
+        "failed_doc_ids": ["1.1"], "chunks_written": 0,
+    }
+    captured: dict = {}
+
+    class _CapturingBatcher:
+        def __init__(self, *, flush, **_kw):
+            captured["flush"] = flush
+
+        def add(self, *_a, **_kw):
+            return False
+
+        def drain(self, on_progress=None) -> int:
+            return 0
+
+        @property
+        def pending_summary(self) -> dict:
+            return {"chunks": 0, "collections": 0, "in_flight": 0}
+
+        @property
+        def failed_files(self) -> dict:
+            return {}
+
+        @property
+        def stats(self) -> dict:
+            return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
+
+    fctx = [
+        (
+            "has_id.py",
+            {
+                "ids": [shared_chash],
+                "documents": ["shared"],
+                "metadatas": [{"chunk_text_hash": shared_chash, "content_hash": "c" * 64}],
+                "catalog_doc_id": "1.1",
+            },
+        ),
+        (
+            "no_id.py",
+            {
+                "ids": [shared_chash],
+                "documents": ["shared"],
+                "metadatas": [{"chunk_text_hash": shared_chash, "content_hash": "d" * 64}],
+                "catalog_doc_id": "",
+            },
+        ),
+    ]
+
+    with _service_mode_patches(
+        db, extra={"nexus.mcp_infra.get_catalog_writer": {"return_value": catalog_writer}},
+    ), patch("nexus.chunk_batcher.ChunkBatcher", _CapturingBatcher):
+        _run_index(repo, reg, force=False)
+
+        # Flatten fctx into the (ids, docs, metas) shape a real
+        # ChunkBatcher flush would carry — one entry per claiming file.
+        captured["flush"](
+            "code__repo__voyage-code-3__v1",
+            [shared_chash, shared_chash],
+            ["shared", "shared"],
+            [
+                {"chunk_text_hash": shared_chash, "content_hash": "c" * 64},
+                {"chunk_text_hash": shared_chash, "content_hash": "d" * 64},
+            ],
+            fctx,
+        )
+
+    # The combined write still ran (and its response says doc "1.1"
+    # failed) — but that is orthogonal to whether the orphan copy landed.
+    assert catalog_writer.write_manifest_many.call_count == 1
+    # The legacy orphan-path upsert must have been called with the
+    # shared chash, UNCONDITIONALLY — it is dispatched before the
+    # combined write's response is even known, so it cannot react to
+    # (and does not need to wait for) doc "1.1"'s outcome.
+    db.upsert_chunks_with_embeddings.assert_called_once()
+    upsert_kwargs = db.upsert_chunks_with_embeddings.call_args.kwargs
+    assert upsert_kwargs["ids"] == [shared_chash], (
+        "shared chash did not ride the orphan (legacy upsert) path — "
+        "if doc 1.1's per-doc write fails server-side (as simulated by "
+        "failed_doc_ids above), this chash would be lost for BOTH "
+        "has_id.py and no_id.py with no recovery path (nexus-3mwuo)"
+    )
+    assert upsert_kwargs["documents"] == ["shared"]
+
+
 def test_run_index_service_mode_uses_get_t3_not_make_t3(tmp_path, monkeypatch):
     """In service mode, _run_index must use mcp_infra.get_t3() to obtain the
     T3 handle rather than make_t3() — so HttpVectorClient is the write target."""
