@@ -18,15 +18,27 @@ engine identity).
 
 ### Added
 - **`nx index repo` lands chunks and their catalog manifest atomically, one
-  call per flush** (nexus-wxjr6/nexus-kl2z6, requires engine v0.1.69): the
-  ChunkBatcher-driven ingest path (code/prose/pdf via `nx index repo`) now
-  sends one combined `POST /v1/catalog/manifest/write_many` per flush
-  (chunks + docs + completion-stamp + sweep) instead of a chunk-upsert POST
-  followed by a separate manifest-write POST — each document's chunks and
-  manifest land in one engine-side transaction, and sweep accounting
-  (`swept`/`sweep_skipped`) comes from the engine's own response. Every
-  other ingest path (`doc_indexer.py`, MCP `store_put`, the exporter,
-  `pipeline_stages.py`) is unchanged and still uses the two-call shape.
+  call per flush — for whole-document flushes** (nexus-wxjr6/nexus-kl2z6,
+  requires engine v0.1.69): the ChunkBatcher-driven ingest path (code/
+  prose/pdf via `nx index repo`) now sends one combined
+  `POST /v1/catalog/manifest/write_many` per flush (chunks + docs +
+  completion-stamp + sweep) instead of a chunk-upsert POST followed by a
+  separate manifest-write POST — each WHOLE document's chunks and manifest
+  land in one engine-side transaction, and sweep accounting
+  (`swept`/`sweep_skipped`) comes from the engine's own response. **Scope:
+  this one-call atomic shape covers whole-document flushes on the
+  ChunkBatcher path only.** Continuation-sliced documents (a batch whose
+  first chunk is not position 0 — e.g. an oversized file split across
+  flushes) still take the old two-call append path and retain the
+  pre-existing non-atomic window; closing that residual is tracked
+  separately (nexus-7t86z, open). Every other ingest path (`doc_indexer.py`,
+  MCP `store_put`, the exporter, `pipeline_stages.py`, and `nx index repo`'s
+  own oversize-file fallbacks) is unchanged and still uses the two-call
+  shape throughout. On an engine below v0.1.69, the combined-write call
+  fails LOUD, not gracefully: the client refuses to treat chunk content as
+  durably written and raises rather than silently falling back to the old
+  shape — do not point a v7.5.0+ client's `nx index repo` at a pre-v0.1.69
+  engine.
 - **`nx stranded ack`** (nexus-cmtpa): the cloud-mode consented de-strand
   escape. Attests, with a machine-local marker fingerprinted to the actual
   pre-PG artifact files found (path/size/mtime, never content), that this
@@ -95,6 +107,72 @@ engine identity).
   worker, MinerU, storage service) instead of refusing outright, and the
   lockstep auto-upgrade hook now logs every swap attempt to
   `~/.config/nexus/lockstep.log` instead of routing output to `/dev/null`.
+
+### Performance
+- **`nx index repo` is substantially faster** (nexus-tgrgs/nexus-jk88j/
+  nexus-67qsd, nexus-itpdc/nexus-jb4pp, nexus-eslkl): three fixes on the
+  same investigation, landed together as one arc.
+  - `write_manifest_many`'s batched-flush fast path had been silently
+    DEAD in service mode since an earlier whitelist change — every flush
+    was falling back to a per-document call (measured: 327 catalog round
+    trips per run against 29 designed). Fixed by folding the sweep into
+    the fast branch first, then re-enabling the whitelist entry (the only
+    safe landing order — the reverse re-creates a superseded-vector leak).
+    Round trips per flush batch: 4 (was ~6 per document).
+  - A provably-empty post-store hook chain was still paying the cost of
+    the process-wide hook-registry lock on every file, measured at
+    ~53.9s/run of pure wait for zero actual work; a zero-registered-hooks
+    fire now returns without acquiring the lock at all (53.9s -> ~0.0s/run
+    for that bucket).
+  - The remaining lock contention — one process-wide mutex serializing
+    every hook fire, held for the duration of network-bound batch hooks
+    while multiple flush workers contend (~104-186s/run aggregate
+    measured wait) — is replaced with one lock per registered hook
+    (opt-out for hooks proven idempotent server-side), and the two
+    downstream singleton locks (`_service_catalog_lock`/`_service_t2_lock`)
+    now guard only resolve/evict instead of being held across network
+    round trips.
+
+### Engine (engine-service-v0.1.69 — cut, gated, deployed and cloud-gated green 2026-08-09, pinned here)
+- **Closes a real concurrent index-vs-sweep write-skew** (nexus-11gh6,
+  nexus-3wtku): every writer that inserts catalog manifest chunk rows now
+  takes a per-`(tenant, collection)` advisory gate SHARED before writing,
+  and the superseded-vector sweep takes the same gate EXCLUSIVE in its own
+  transaction — closing a race where a concurrent sweep could delete
+  content a manifest write was still in the middle of landing. Sweeping
+  now happens only after a document's manifest transaction commits, so a
+  rolled-back write can no longer report swept counts.
+- **RekeyOps' full mutation span is gated, not just the final manifest
+  repoint** (nexus-t76bp): the multi-minute rekey/collapse operation now
+  acquires its sweep gates before the long content-moving steps run
+  (previously only the last step was gated, leaving the middle of the
+  operation exposed to a concurrent sweep); a dangling-reference count
+  found at the operation's last step now aborts the transaction instead of
+  only being reported after the fact.
+- **Combined write**: `POST /v1/catalog/manifest/write_many` accepts
+  chunks + docs + a completion map + `sweep=true` in one request and lands
+  each document's chunks and manifest atomically inside one per-doc
+  transaction, with the superseded-vector sweep folded into that same
+  transaction (nexus-kl2z6) — the engine half of the client change
+  described under Added above. A new staging guard keeps the sweep from
+  deleting a chunk a paused guided-migration's staging table still
+  references (nexus-vc6dh), backed by a new btree index on
+  `staging.document_chunks(chash)` that turns the guard's lookup from a
+  ~1s full scan into a sub-millisecond indexed probe.
+- **Sweep outcomes are classified, not just counted**: the manifest-write
+  response's per-doc `sweep_detail` now carries a closed `reason`
+  vocabulary (`before_read_failed`, `gate_timeout`, `statement_timeout`,
+  `sweep_failed`) instead of collapsing every non-swept case into an
+  opaque skip (nexus-nl3fn, nexus-kl2z6) — this is what the client's CLI
+  summary reporting now surfaces.
+- **Engine half of `nx memory search`'s degenerate-query 400** (nexus-senub):
+  `MemoryRepository`/`MemoryHandler` reject a stopword-only or
+  punctuation-only search with `400 {"code": "no_searchable_terms"}`
+  instead of a silent empty result — see Changed above for the client
+  side.
+- **Engine half of the tier-write per-row read route** (nexus-onjvy):
+  `GET /v1/telemetry/tier_writes/list` — see Changed above for the client
+  side.
 
 ### Internal
 - Engine-side raw-SQL-to-jOOQ conversion continues (nexus-4okz4 increments
