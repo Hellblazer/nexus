@@ -443,12 +443,39 @@ class ChashRekeyRung:
         rather than a new state: a False here is ``RungOutcome.VERIFY_FAILED``
         — nothing recorded, the derived position stays put (the RDR-142
         guard), the walk stops, and ``nx upgrade`` exits non-zero naming the
-        reason. Both remedies for an unmeasurable store already run on this
-        same upgrade path (``backfill_diag_role_best_effort`` for absent
-        credentials, ``reprovision_diag_view_best_effort`` inside this rung's
-        own converge for an absent view), and the rekey is idempotent, so
-        the next run converges — the stop costs a re-run, never the store.
-        Managed installs never reach here: ``applicable_fn`` skips them.
+        reason. Managed installs never reach here at all
+        (``applicable_fn`` skips them).
+
+        THE TWO REMEDIES ARE NOT EQUALLY REACHABLE — do not state otherwise
+        (nexus-ueshf; an earlier draft of this docstring claimed both "already
+        run on this same upgrade path", which is false for the role):
+
+        - VIEW (``reprovision_diag_view_best_effort``): runs inside THIS
+          rung's own ``converge``, so it is automatic on the pending path —
+          the path that produces a first-run stop. It does NOT run on the
+          crash-resume path, where ``detect`` reports converged and the
+          runner skips ``converge`` entirely.
+        - ROLE (``backfill_diag_role_best_effort``): reachable ONLY through
+          the engine-convergence finisher's poison-probe leg
+          (``upgrade_finish`` ~L1159), behind TWO gates. (1) That finisher
+          returns early when the engine is already converged (its
+          ``status.converged and integrity.ok`` branch) and never reaches the
+          probe — so on a steady-state box it never runs, on ANY caller.
+          (2) From the precondition stage it additionally needs
+          ``allow_engine_install`` (``preconditions.py`` L377), which is
+          ``not auto_mode and not skip_t3`` — i.e. it is OFF under
+          ``nx upgrade --auto``, the hook-driven form. A box with a missing
+          diag ROLE therefore gets NO automatic role remedy, which is why the
+          UNAVAILABLE message below names ``nx init --service`` as the
+          escalation and says outright that re-running ``nx upgrade`` will not
+          create the role. (Symbol names for the finisher are deliberately not
+          spelled here: the RDR-185 P3 engine-trigger census in
+          ``tests/upgrade/test_gap4_two_mechanisms.py`` is a text scan that
+          cannot tell a prose mention from a third converge trigger, and this
+          rung must not be allowlisted as a caller — it is not one.)
+
+        The rekey is idempotent, so once the diagnostic is restored the next
+        run converges — the stop costs a re-run, never the store.
         """
         probe = self._detect_probe_fn()
         if probe.conformant:
@@ -460,14 +487,36 @@ class ChashRekeyRung:
                 "the rekey — completion NOT recorded"
             )
             return False
+        # The escalation differs by arm, and leading with the ineffective
+        # retry is a real UX defect for the worst-case user (nexus-ueshf):
+        # UNAVAILABLE means the diag ROLE is missing, and `nx upgrade` alone
+        # will NOT create it — the automatic role backfill is gated behind an
+        # engine that is BOTH applicable-and-unconverged AND (from the
+        # precondition stage) `allow_engine_install`, which `--auto` turns
+        # off. Name the remedy that actually works, FIRST.
+        if probe.state is ProbeState.UNAVAILABLE:
+            remedy = (
+                "Run `nx init --service` — it provisions the nexus_diag role "
+                "(and the nexus.diag_chash_conformance view) directly. Do NOT "
+                "just re-run `nx upgrade`: the automatic role backfill is "
+                "gated behind engine convergence and is disabled entirely "
+                "under `--auto`, so on a converged box it will never run and "
+                "the ladder will stop here again."
+            )
+        else:
+            remedy = (
+                "The diagnostic path exists but could not execute. Check the "
+                "local service PG is up and that nexus_diag can read either "
+                "nexus.diag_chash_conformance or the chunk tables, then "
+                "re-run `nx upgrade`; `nx init --service` re-provisions both "
+                "the role and the view if the grants have drifted."
+            )
         self._verify_detail = (
             f"chash conformance could not be verified: the diagnostic is "
             f"{probe.state.value} ({probe.reason}). This is NOT a clean-store "
             "verdict — the rekey may well have succeeded, but nothing measured "
-            "it, so no completion is recorded. Restore the diagnostic path "
-            "(`nx init --service` backfills the nexus_diag role and recreates "
-            "nexus.diag_chash_conformance), then re-run `nx upgrade` — the "
-            "rekey is idempotent."
+            f"it, so no completion is recorded. {remedy} The rekey is "
+            "idempotent, so a re-run after the fix converges."
         )
         _log.warning(
             "chash_rekey_verify_unmeasurable",

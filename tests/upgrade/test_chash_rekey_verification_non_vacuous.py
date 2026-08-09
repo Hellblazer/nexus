@@ -23,11 +23,15 @@ from __future__ import annotations
 
 import pytest
 
+import nexus.db.diag_connection as diag
 from nexus.db.chash_tables import ConformanceProbe, ProbeState
+from nexus.db.diag_connection import DiagCredentials
+from nexus.remediation.sql_lint import DiagnosticSqlViolation
 from nexus.upgrade_ladder.protocol import ConvergeOutcome
 from nexus.upgrade_ladder.registry import LadderRegistry
 from nexus.upgrade_ladder.rungs.chash_rekey import (
     ChashRekeyRung,
+    default_chash_rekey_rung,
     probe_from_diagnostic_output,
 )
 from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
@@ -155,6 +159,41 @@ def test_the_failure_detail_names_the_diagnostic_reason():
     )
 
 
+def test_the_UNAVAILABLE_remedy_leads_with_the_escalation_that_actually_works():
+    """nexus-ueshf. UNAVAILABLE means the diag ROLE is missing, and the
+    automatic role backfill (backfill_diag_role_best_effort) is reachable ONLY
+    via converge_engine's poison-probe leg — which returns early on a
+    converged engine, and which the precondition stage additionally gates
+    behind allow_engine_install = (not auto_mode and not skip_t3). So under
+    `nx upgrade --auto`, the hook-driven form, it NEVER runs. A message that
+    leads with "re-run nx upgrade" sends the worst-case user to the one
+    action that cannot help."""
+    rung = _rung(ConformanceProbe.unavailable("no nexus_diag credentials"))
+    assert rung.verify() is False
+    detail = rung.verify_detail()
+
+    assert "nx init --service" in detail
+    assert detail.index("nx init --service") < detail.index("nx upgrade"), (
+        "the ineffective retry is named before the working escalation"
+    )
+    assert "--auto" in detail, (
+        "the message must say WHY re-running nx upgrade will not help, or the "
+        "user has no reason to believe the stronger instruction"
+    )
+
+
+def test_the_FAILED_remedy_does_not_misdiagnose_a_present_role_as_missing():
+    """The other arm: the role/view exist but the diagnostic blew up. Telling
+    that user their role is missing sends them re-provisioning something that
+    is already there."""
+    rung = _rung(ConformanceProbe.failed("psql exit 1: could not connect"))
+    assert rung.verify() is False
+    detail = rung.verify_detail()
+
+    assert "could not execute" in detail
+    assert "Do NOT just re-run" not in detail
+
+
 # ── unit-grain: verify() itself ──────────────────────────────────────────────
 
 
@@ -223,17 +262,11 @@ class TestProductionProbeWiring:
 
     @staticmethod
     def _probe(monkeypatch, run_impl):
-        import nexus.db.diag_connection as diag
-
-        from nexus.db.diag_connection import DiagCredentials
-
         monkeypatch.setattr(
             diag, "resolve_diag_credentials",
             lambda *_a, **_k: DiagCredentials(port=1, user="d", password="p"),
         )
         monkeypatch.setattr(diag, "run_diagnostic_sql", run_impl)
-        from nexus.upgrade_ladder.rungs.chash_rekey import default_chash_rekey_rung
-
         return default_chash_rekey_rung()._detect_probe_fn()  # noqa: SLF001 — the seam under test
 
     def test_absent_view_falls_back_to_legacy_and_MEASURES(self, monkeypatch):
@@ -282,8 +315,6 @@ class TestProductionProbeWiring:
         skew. health.py re-raises it rather than falling back; the rung's old
         bare ``except Exception`` retried the legacy statements and mislabeled
         it as a stale-view fallback."""
-        from nexus.remediation.sql_lint import DiagnosticSqlViolation
-
         seen: list[str] = []
 
         def run(statements, _creds, **_kw):
@@ -301,11 +332,7 @@ class TestProductionProbeWiring:
         """The two non-measurement arms stay distinguishable: 'this box has no
         diagnostic role' is a different operator action from 'the diagnostic
         blew up'. Both refuse verification; only the wording differs."""
-        import nexus.db.diag_connection as diag
-
         monkeypatch.setattr(diag, "resolve_diag_credentials", lambda *_a, **_k: None)
-        from nexus.upgrade_ladder.rungs.chash_rekey import default_chash_rekey_rung
-
         probe = default_chash_rekey_rung()._detect_probe_fn()  # noqa: SLF001 — the seam under test
         assert probe.state is ProbeState.UNAVAILABLE
         assert "nx init --service" in probe.reason
