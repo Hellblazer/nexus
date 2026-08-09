@@ -10,6 +10,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_STATS;
+import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_CONFORMANCE_REPORT;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
@@ -4223,7 +4224,8 @@ public final class CatalogRepository {
                             // as an honest errored=true outcome, never silently
                             // absorbed into "nothing to sweep".
                             sweepOutcome[0] = Map.of("doc_id", docId, "dropped", 0,
-                                "swept", 0, "kept", 0, "errored", true);
+                                "swept", 0, "kept", 0, "errored", true,
+                                "reason", "before_read_failed");
                         } else if (sweep) {
                             // nexus-11gh6 rev 2 §2.3: capture `before` for the
                             // POST-COMMIT dropped-chash computation below — this
@@ -4487,9 +4489,16 @@ public final class CatalogRepository {
         try {
             return tenantScope.withTenant(tenant, ctx -> {
                 acquireSweepGateExclusive(ctx, tenant, collection);
-                int swept = sweepChunks384(ctx, tenant, collection, dropped)
-                          + sweepChunks768(ctx, tenant, collection, dropped)
-                          + sweepChunks1024(ctx, tenant, collection, dropped);
+                // nexus-kl2z6 increment 2 / nexus-vc6dh: checked ONCE per sweep
+                // transaction, not per dim — a tenant with no active guided
+                // migration has an EMPTY staging.document_chunks, so the three
+                // per-dim DELETEs below add NO staging predicates at all and
+                // their plan stays byte-identical to pre-staging-guard behaviour
+                // (design memo §4.2's conditional-skip requirement).
+                boolean stagingActive = stagingHasRowsForTenant(ctx, tenant);
+                int swept = sweepChunks384(ctx, tenant, collection, dropped, stagingActive)
+                          + sweepChunks768(ctx, tenant, collection, dropped, stagingActive)
+                          + sweepChunks1024(ctx, tenant, collection, dropped, stagingActive);
                 if (swept > 0) {
                     log.info("event=write_manifest_many_swept tenant={} doc_id={} collection={} dropped={} swept={}",
                               tenant, docId, collection, dropped.size(), swept);
@@ -4503,16 +4512,111 @@ public final class CatalogRepository {
                 return out;
             });
         } catch (Exception e) {
-            log.warn("event=write_manifest_many_sweep_gate_failed tenant={} doc_id={} collection={} dropped={} error={}",
-                      tenant, docId, collection, dropped.size(), e.toString());
+            String reason = classifySweepFailureReason(e);
+            log.warn("event=write_manifest_many_sweep_gate_failed tenant={} doc_id={} collection={} dropped={} reason={} error={}",
+                      tenant, docId, collection, dropped.size(), reason, e.toString());
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("doc_id", docId);
             out.put("dropped", dropped.size());
             out.put("swept", 0);
             out.put("kept", dropped.size());
             out.put("errored", true);
+            out.put("reason", reason);
             return out;
         }
+    }
+
+    /**
+     * {@code sweep_detail.reason} closed vocabulary (design memo §3/§5.3,
+     * nexus-kl2z6 increment 2): classifies {@link #runSweepTransaction}'s
+     * catch-all failure by walking the cause chain for a {@link
+     * java.sql.SQLException} SQLState, mirroring {@link #failureDetail}'s
+     * walk. {@code gate_timeout} ({@code 55P03}) is {@link
+     * #acquireSweepGateExclusive}'s {@code lock_timeout} expiring while
+     * acquiring the EXCLUSIVE gate; {@code statement_timeout} ({@code
+     * 57014}) is the DELETE itself exceeding {@link
+     * #SWEEP_STATEMENT_TIMEOUT_MS}; anything else DB/runtime-shaped is
+     * {@code sweep_failed}. {@code before_read_failed} is a SEPARATE case,
+     * stamped directly at its own call site in {@link #writeManifestMany}
+     * (the before-read runs BEFORE this method is ever invoked, so it is
+     * never reached via this classifier).
+     */
+    private static String classifySweepFailureReason(Throwable e) {
+        Throwable c = e;
+        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
+            if (c instanceof java.sql.SQLException se && se.getSQLState() != null) {
+                return switch (se.getSQLState()) {
+                    case "55P03" -> "gate_timeout";
+                    case "57014" -> "statement_timeout";
+                    default -> "sweep_failed";
+                };
+            }
+        }
+        return "sweep_failed";
+    }
+
+    /**
+     * True when {@code staging.document_chunks} has ANY row for {@code
+     * tenant} (nexus-kl2z6 increment 2 / nexus-vc6dh). Checked ONCE per
+     * sweep transaction (by {@link #runSweepTransaction}), not once per
+     * dim, so the answer is shared across all three per-dim DELETEs and a
+     * tenant with no active guided migration pays no per-dim staging
+     * predicate at all — design memo §4.2's conditional-skip requirement,
+     * keeping the steady-state DELETE plan byte-identical to pre-staging-
+     * guard behaviour. {@code staging.document_chunks} carries no
+     * generated jOOQ class (codegen does not cover the {@code staging}
+     * schema — landing area, never serving-path), so it is referenced via
+     * the house pattern {@code StagingPromoteOps} already established:
+     * {@code DSL.table(DSL.name(schema, table)).as(alias)} +
+     * {@code DSL.field(DSL.name(alias, col), Type.class)}.
+     */
+    private static boolean stagingHasRowsForTenant(DSLContext ctx, String tenant) {
+        var s = DSL.table(DSL.name("staging", "document_chunks")).as("s");
+        Field<String> sTenantId = DSL.field(DSL.name("s", "tenant_id"), String.class);
+        return ctx.fetchExists(ctx.selectOne().from(s).where(sTenantId.eq(tenant)));
+    }
+
+    /**
+     * The THIRD sweep guard (design memo §4.2 REV 2 corrected shape,
+     * nexus-vc6dh) — refuses to delete any chash a STAGED manifest row
+     * will reference. Mirrors {@code StagingPromoteOps.finalizeTenant}'s
+     * OWN chash resolution exactly — direct 64-hex admission
+     * ({@code StagingPromoteOps.java} {@code manifestResolvable}'s
+     * {@code sChash.likeRegex("^[0-9a-f]{64}$")} arm) plus {@code
+     * chash_alias} mapping ({@code CHASH_ALIAS.OLD_REF} join) — so guard
+     * and promote cannot diverge (coextensive-by-construction, the same
+     * discipline {@code StagingPromoteOps} already applies to its own
+     * target-collection gating query). Keep this pair in lockstep with
+     * that resolution expression if either ever changes.
+     *
+     * <p>REV 1's shape (a single {@code LEFT JOIN staging.document_chunks}
+     * + {@code COALESCE}, function applied to the STAGING side) is
+     * REJECTED — nexus-vc6dh proved empirically (300K-row repro,
+     * {@code EXPLAIN ANALYZE}) that no index can accelerate it: the join
+     * forces a full Hash Anti Join materializing the resolved expression
+     * for EVERY staging row, ~1s per sweep at migration scale, paid UNDER
+     * the sweep's own EXCLUSIVE gate as pure writer stall. This shape
+     * instead keeps the function on the BOUNDED OUTER side ({@code
+     * candidateChash} — the per-doc dropped-chash candidate set, capped by
+     * the flush chunk cap), so with the accompanying Liquibase index on
+     * {@code staging.document_chunks(chash)} it plans as a genuine Nested
+     * Loop Anti Join / Index Scan — empirically ~600x faster on the same
+     * fixture. Two independent {@code NOT EXISTS} clauses, not one LEFT
+     * JOIN + COALESCE: direct-hex and chash_alias arms are each proven
+     * live independently in {@code CatalogManifestSweepRepositoryTest}
+     * (falsified by deleting each clause in turn).
+     */
+    private static Condition stagingGuardCondition(DSLContext ctx, String tenant, Field<byte[]> candidateChash) {
+        var s = DSL.table(DSL.name("staging", "document_chunks")).as("s");
+        Field<String> sChash = DSL.field(DSL.name("s", "chash"), String.class);
+        var s2 = DSL.table(DSL.name("staging", "document_chunks")).as("s2");
+        Field<String> s2Chash = DSL.field(DSL.name("s2", "chash"), String.class);
+        Field<String> hexCandidate = DSL.function("encode", String.class, candidateChash, DSL.val("hex"));
+        return DSL.notExists(ctx.selectOne().from(s).where(sChash.eq(hexCandidate)))
+            .and(DSL.notExists(ctx.selectOne().from(CHASH_ALIAS)
+                .join(s2).on(s2Chash.eq(CHASH_ALIAS.OLD_REF))
+                .where(CHASH_ALIAS.TENANT_ID.eq(tenant))
+                .and(CHASH_ALIAS.NEW_CHASH.eq(candidateChash))));
     }
 
     /**
@@ -4523,8 +4627,15 @@ public final class CatalogRepository {
      * reference the OUTER delete target's own row ({@code CHUNKS_384.TENANT_ID}/
      * {@code CHUNKS_384.CHASH}) — a standard correlated-subquery DELETE, the
      * same shape {@code purge_trash}'s raw SQL uses with an explicit alias.
+     *
+     * @param stagingActive {@link #stagingHasRowsForTenant} for this sweep
+     *        transaction — when {@code false} the staging guard
+     *        ({@link #stagingGuardCondition}) is skipped entirely via
+     *        {@link DSL#noCondition()}, so the rendered SQL (and plan)
+     *        matches pre-staging-guard behaviour exactly.
      */
-    private static int sweepChunks384(DSLContext ctx, String tenant, String collection, List<String> dropped) {
+    private static int sweepChunks384(DSLContext ctx, String tenant, String collection, List<String> dropped,
+                                       boolean stagingActive) {
         return ctx.deleteFrom(CHUNKS_384)
             .where(CHUNKS_384.TENANT_ID.eq(tenant))
             .and(CHUNKS_384.COLLECTION.eq(collection))
@@ -4545,11 +4656,14 @@ public final class CatalogRepository {
                 .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
                 .and(CATALOG_DOCUMENTS.FILE_PATH.isNull().or(CATALOG_DOCUMENTS.FILE_PATH.eq("")))
                 .and(DOC_META_DOC_ID.eq(DSL.field("encode({0}, 'hex')", String.class, CHUNKS_384.CHASH)))))
+            // nexus-kl2z6 increment 2 / nexus-vc6dh STAGING GUARD (§4.2).
+            .and(stagingActive ? stagingGuardCondition(ctx, tenant, CHUNKS_384.CHASH) : DSL.noCondition())
             .execute();
     }
 
     /** Per-dim sweep DELETE against {@code chunks_768} — see {@link #sweepChunks384}. */
-    private static int sweepChunks768(DSLContext ctx, String tenant, String collection, List<String> dropped) {
+    private static int sweepChunks768(DSLContext ctx, String tenant, String collection, List<String> dropped,
+                                       boolean stagingActive) {
         return ctx.deleteFrom(CHUNKS_768)
             .where(CHUNKS_768.TENANT_ID.eq(tenant))
             .and(CHUNKS_768.COLLECTION.eq(collection))
@@ -4567,11 +4681,13 @@ public final class CatalogRepository {
                 .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
                 .and(CATALOG_DOCUMENTS.FILE_PATH.isNull().or(CATALOG_DOCUMENTS.FILE_PATH.eq("")))
                 .and(DOC_META_DOC_ID.eq(DSL.field("encode({0}, 'hex')", String.class, CHUNKS_768.CHASH)))))
+            .and(stagingActive ? stagingGuardCondition(ctx, tenant, CHUNKS_768.CHASH) : DSL.noCondition())
             .execute();
     }
 
     /** Per-dim sweep DELETE against {@code chunks_1024} — see {@link #sweepChunks384}. */
-    private static int sweepChunks1024(DSLContext ctx, String tenant, String collection, List<String> dropped) {
+    private static int sweepChunks1024(DSLContext ctx, String tenant, String collection, List<String> dropped,
+                                        boolean stagingActive) {
         return ctx.deleteFrom(CHUNKS_1024)
             .where(CHUNKS_1024.TENANT_ID.eq(tenant))
             .and(CHUNKS_1024.COLLECTION.eq(collection))
@@ -4589,6 +4705,7 @@ public final class CatalogRepository {
                 .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
                 .and(CATALOG_DOCUMENTS.FILE_PATH.isNull().or(CATALOG_DOCUMENTS.FILE_PATH.eq("")))
                 .and(DOC_META_DOC_ID.eq(DSL.field("encode({0}, 'hex')", String.class, CHUNKS_1024.CHASH)))))
+            .and(stagingActive ? stagingGuardCondition(ctx, tenant, CHUNKS_1024.CHASH) : DSL.noCondition())
             .execute();
     }
 

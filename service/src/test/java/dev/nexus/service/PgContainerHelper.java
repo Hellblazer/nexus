@@ -7,6 +7,7 @@ import com.zaxxer.hikari.HikariDataSource;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
+import java.sql.Connection;
 import java.sql.SQLException;
 
 
@@ -190,5 +191,51 @@ public final class PgContainerHelper {
         cfg.setMaximumPoolSize(5);
         cfg.setAutoCommit(true);
         return new HikariDataSource(cfg);
+    }
+
+    /**
+     * Grants a test-local service role the SAME schema access production
+     * {@code nexus_svc} gets — {@code nexus} DML/sequences PLUS {@code
+     * staging} DML (nexus-kl2z6 increment 2, nexus-vc6dh). Call AFTER the
+     * master changelog has run (needs both schemas to exist) and BEFORE
+     * building the role's own {@code DataSource}.
+     *
+     * <p><b>Why this exists</b>: {@link
+     * dev.nexus.service.db.CatalogRepository#stagingHasRowsForTenant}
+     * reads {@code staging.document_chunks} inside EVERY sweep
+     * transaction now, unconditionally — a test-local role that only
+     * mirrors the OLD (pre-kl2z6) minimal {@code nexus}-only grant set
+     * fails that read with {@code permission denied for schema staging},
+     * which the sweep's fail-open discipline (by design, correctly)
+     * swallows into a silent {@code sweep_skipped}/{@code
+     * reason=sweep_failed} outcome rather than a loud test error —
+     * exactly the kind of masked signal nexus-vc6dh exists to keep
+     * honest. Confirmed NOT a production gap: production's {@code
+     * NX_DB_USER} is {@code nexus_svc} (default, {@code
+     * src/nexus/db/pg_provision.py}), and {@code nexus_svc} already gets
+     * this exact staging grant set from {@code staging-001-landing-
+     * tables.xml}'s {@code staging-4-svc-grants} changeset ({@code
+     * runAlways="true"}, unconditionally in the master changelog) — this
+     * helper exists purely because hand-rolled test-local roles
+     * (predating nexus-kl2z6) never mirrored that changeset. Found
+     * independently by two test classes
+     * ({@code CatalogManifestSweepRepositoryTest},
+     * {@code CatalogHandlerSweepAndChashesManyTest}) before this helper
+     * centralized the fix; a THIRD ({@code CombinedWriteRepositoryTest})
+     * carried the same latent gap without yet tripping over it.
+     *
+     * @param su      superuser connection (the role owner / grantor)
+     * @param svcRole the test-local service role name to grant
+     */
+    public static void grantServiceSchemaAccess(Connection su, String svcRole) throws SQLException {
+        su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + svcRole);
+        su.createStatement().execute(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + svcRole);
+        su.createStatement().execute(
+            "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO " + svcRole);
+        su.createStatement().execute("GRANT USAGE ON SCHEMA staging TO " + svcRole);
+        su.createStatement().execute(
+            "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA staging TO " + svcRole);
+        su.createStatement().execute("ALTER ROLE " + svcRole + " SET search_path TO nexus, public");
     }
 }

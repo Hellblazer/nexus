@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-kl2z6 increment 2 / nexus-vc6dh — plain btree index on
+    staging.document_chunks(chash).
+
+    Design of record: T2 nexus/design-kl2z6-combined-write [21804] REV 2
+    §4.2 (the third sweep guard — "the sweep may delete a chunk only when
+    no live declaration of intent references it"). The guard's two NOT
+    EXISTS clauses (CatalogRepository.stagingGuardCondition) keep the
+    function on the BOUNDED OUTER side (the per-doc dropped-chash
+    candidate set, capped by the flush chunk cap) and probe
+    staging.document_chunks BY chash — a probe the table's PK
+    (tenant_id, doc_id, position) cannot serve at all (chash is not a
+    prefix of that key). Without this index the guard's two NOT EXISTS
+    subqueries force a full Seq Scan of staging.document_chunks per
+    candidate row; nexus-vc6dh's 300K-row repro measured a REV-1 shape
+    (function on the staging side, no usable index) at ~1s per sweep under
+    the sweep's own EXCLUSIVE gate. WITH this index, the REV-2 corrected
+    guard shape (function on the bounded outer side) plans as a genuine
+    Index Scan on this index, ~600x faster on the same fixture (nexus-vc6dh).
+
+    Zero cost outside an active guided migration: staging.document_chunks
+    is empty in steady state (staging-001-landing-tables.xml's own
+    javadoc — TRUNCATE-after-verify via /v1/staging/clear), so this index
+    stays tiny and the sweep's own conditional-skip
+    (CatalogRepository.stagingHasRowsForTenant) means the guard predicates
+    referencing it are not even added to the DELETE unless staging holds
+    rows for the sweeping tenant.
+
+    PRECONDITION DISCIPLINE (catalog-013 / vectors-003 lineage): whole-
+    changeset <preConditions onFail="MARK_RAN"> gated on a sqlCheck
+    counting only VALID indexes of the target name — a manually pre-built
+    valid index marks ran; an INVALID leftover does not satisfy the check,
+    so CREATE INDEX runs, collides with the leftover's name, and halts the
+    migration loudly (no silent masking). onError stays HALT (unset).
+
+    BUILD-WINDOW: plain CREATE INDEX, not CONCURRENTLY — staging tables are
+    a one-shot landing area (never serving-path) and, per the zero-cost
+    note above, are empty at every fresh boot; even a populated store's
+    staging table is bounded by one migration wave's chunk count, not the
+    corpus at large. Liquibase runs in the boot-time migration window
+    before the engine serves traffic; a narrow single-column btree over
+    that row count builds well within the window.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="staging-2-document-chunks-chash-index" author="nexus-kl2z6.2">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="0">SELECT COUNT(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'staging' AND c.relname = 'idx_staging_document_chunks_chash' AND i.indisvalid</sqlCheck>
+        </preConditions>
+        <comment>staging.document_chunks(chash) — the nexus-kl2z6/vc6dh sweep staging-guard probe index; the table's PK leads with (tenant_id, doc_id, position) and cannot serve a chash-only lookup</comment>
+        <sql>
+CREATE INDEX idx_staging_document_chunks_chash
+    ON staging.document_chunks (chash);
+        </sql>
+        <rollback>DROP INDEX IF EXISTS staging.idx_staging_document_chunks_chash</rollback>
+    </changeSet>
+
+</databaseChangeLog>
