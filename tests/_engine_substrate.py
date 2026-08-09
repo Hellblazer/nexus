@@ -47,14 +47,21 @@ import tempfile
 import threading
 import time
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import structlog
+
+from nexus._locking import lock_file, unlock_file
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     jar_freshness_skip_reason,
     pg_bin_dir,
 )
+
+_log = structlog.get_logger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _JAR = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
@@ -217,6 +224,134 @@ def _wait_tcp(host: str, port: int, timeout: float) -> None:
     raise TimeoutError(f"engine substrate: port {port} not reachable after {timeout}s")
 
 
+#: Cross-process bound on concurrent PG *boot* operations (initdb +
+#: pg_ctl start), NOT on concurrent LIVE substrate PG instances
+#: (nexus-ui654). macOS's SysV shared-memory budget is small and
+#: MACHINE-WIDE -- shared with Docker Desktop, browsers, every other
+#: process on the box, not just this suite (``sysctl kern.sysv.shmmni``
+#: read 32 on the box this was diagnosed on). initdb's bootstrap
+#: standalone backend and pg_ctl start's postmaster each transiently
+#: allocate SysV shm segments during the startup sequence; under
+#: ``pytest -n auto`` every xdist worker independently boots its own
+#: substrate (see the worker-sharding comment above
+#: ``_WORKER_SHARD_WIDTH`` -- one boot per WORKER process, not one per
+#: session), so N concurrent pytest sessions x M workers-per-session can
+#: spike well past 32 in-flight segments even though the STEADY-STATE
+#: running-cluster count is fine afterward -- this is what produced the
+#: observed "could not create shared memory segment: No space left on
+#: device" setup-error storms (bead comment, REFINED PICTURE:
+#: postgres process count self-resolved once concurrent sessions
+#: finished -- the acute failure is the concurrency WINDOW, not
+#: permanent leakage). Bounding concurrent BOOTS (not concurrent live
+#: PGs, and not the whole test session) to a small number leaves
+#: headroom for everything else on the machine that also touches SysV
+#: shm. 4 is conservative: 1-2 segments were the actual observed cost
+#: per boot, so 4 concurrent boots stays well inside a 32-segment
+#: budget with margin left for the rest of the box.
+_MAX_CONCURRENT_PG_BOOTS = 4
+
+#: Fixed pool of N lockfiles under the process tempdir root -- try-acquire
+#: in slot order (0, 1, 2, ...), never a per-boot-named file, so this
+#: directory itself never accumulates debris the way a per-boot tempdir
+#: would.
+_BOOT_SEMAPHORE_DIR = Path(tempfile.gettempdir()) / "nexus_t2_substrate_boot_locks"
+
+#: Generous: a slow/loaded box waiting out a genuine queue of concurrent
+#: boots is expected, not a hang. Failing loud after this window (rather
+#: than blocking forever) is what makes contention diagnosable instead of
+#: looking like an unrelated stall.
+_BOOT_SEMAPHORE_ACQUIRE_TIMEOUT_S = 300.0
+_BOOT_SEMAPHORE_POLL_S = 1.0
+_BOOT_SEMAPHORE_LOG_EVERY_S = 10.0
+
+
+def _try_acquire_boot_slot(lock_dir: Path, max_concurrent: int):
+    """Non-blocking: try every slot in order (0, 1, ..., max_concurrent-1),
+    return the held-and-locked file handle for the first free one, or
+    ``None`` if every slot is currently held elsewhere. Side-effect-free on
+    failure -- every opened-but-unlocked fd is closed before moving to the
+    next slot or returning.
+    """
+    for slot in range(max_concurrent):
+        path = lock_dir / f"slot-{slot}.lock"
+        fh = open(path, "a+")  # noqa: SIM115 - lifetime is the caller's held slot, closed by _boot_semaphore_slot
+        try:
+            lock_file(fh, blocking=False)
+        except BlockingIOError:
+            fh.close()
+            continue
+        return fh
+    return None
+
+
+@contextmanager
+def _boot_semaphore_slot(
+    *,
+    max_concurrent: int = _MAX_CONCURRENT_PG_BOOTS,
+    lock_dir: Path = _BOOT_SEMAPHORE_DIR,
+    timeout_s: float = _BOOT_SEMAPHORE_ACQUIRE_TIMEOUT_S,
+    poll_s: float = _BOOT_SEMAPHORE_POLL_S,
+) -> Iterator[None]:
+    """Hold one of *max_concurrent* cross-process boot slots for the
+    duration of the context.
+
+    Bounds how many PG boot sequences (initdb + pg_ctl start) can run
+    CONCURRENTLY across every pytest process on the machine (nexus-ui654)
+    -- deliberately NOT the substrate's full session lifetime; callers
+    wrap only the shm-heavy initdb/pg_ctl-start window and release
+    immediately after, so a booted-and-running substrate never occupies a
+    slot for the rest of its session.
+
+    Waits LOUDLY: a structlog line every ``_BOOT_SEMAPHORE_LOG_EVERY_S``
+    while contended, and a fail-loud ``RuntimeError`` naming this bead if
+    *timeout_s* elapses with no slot free -- never a silent hang.
+    """
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    start = time.monotonic()
+    deadline = start + timeout_s
+    last_log = start
+    fh = _try_acquire_boot_slot(lock_dir, max_concurrent)
+    waited = False
+    while fh is None:
+        waited = True
+        now = time.monotonic()
+        if now >= deadline:
+            raise RuntimeError(
+                f"T2 engine substrate: timed out after {timeout_s}s waiting "
+                f"for a boot slot -- all {max_concurrent} concurrent-PG-boot "
+                f"slots busy under {lock_dir} (nexus-ui654: concurrent PG "
+                "boots are bounded to protect macOS's tiny SysV shm "
+                "budget). If this many pytest sessions are genuinely "
+                "booting substrates at once, wait for one to finish; if the "
+                "bound itself is wrong for this machine, raise "
+                "_MAX_CONCURRENT_PG_BOOTS deliberately -- this is not a "
+                "silent hang, it is the semaphore doing its job."
+            )
+        if now - last_log >= _BOOT_SEMAPHORE_LOG_EVERY_S:
+            _log.info(
+                "nexus_t2_substrate.boot_semaphore_wait",
+                max_concurrent=max_concurrent,
+                lock_dir=str(lock_dir),
+                waited_s=round(now - start, 1),
+                timeout_s=timeout_s,
+                bead="nexus-ui654",
+            )
+            last_log = now
+        time.sleep(poll_s)
+        fh = _try_acquire_boot_slot(lock_dir, max_concurrent)
+    if waited:
+        _log.info(
+            "nexus_t2_substrate.boot_semaphore_acquired",
+            waited_s=round(time.monotonic() - start, 1),
+            bead="nexus-ui654",
+        )
+    try:
+        yield
+    finally:
+        unlock_file(fh)
+        fh.close()
+
+
 def _boot() -> dict:
     """Boot hermetic PG + the shaded service JAR. Called once, under _lock."""
     try:
@@ -245,22 +380,27 @@ def _boot() -> dict:
     pgdata = tempfile.mkdtemp(prefix="nexus_t2_substrate_pg_")
     pg_port = _free_port()
     pg_user = os.environ["USER"]
-    subprocess.run(
-        [str(bin_dir / "initdb"), "-D", pgdata, "--no-locale", "-E", "UTF8",
-         "--auth=trust"],
-        check=True, capture_output=True,
-    )
-    with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
-        f.write(f"\nport = {pg_port}\nlisten_addresses = '127.0.0.1'\n")
-        # The suite issues thousands of tiny transactions; keep fsync off
-        # for the throwaway test cluster.
-        f.write("fsync = off\nsynchronous_commit = off\nfull_page_writes = off\n")
-    subprocess.run(
-        [str(bin_dir / "pg_ctl"), "-D", pgdata, "-l",
-         os.path.join(pgdata, "pg.log"),
-         "-o", f"-p {pg_port} -k {pgdata}", "start", "-w"],
-        check=True, capture_output=True,
-    )
+    # Concurrency-window control (nexus-ui654): only the shm-heavy
+    # initdb + pg_ctl-start sequence is bounded -- once the postmaster is
+    # up, the slot is released immediately so a long-lived running
+    # substrate never blocks another process's boot.
+    with _boot_semaphore_slot():
+        subprocess.run(
+            [str(bin_dir / "initdb"), "-D", pgdata, "--no-locale", "-E", "UTF8",
+             "--auth=trust"],
+            check=True, capture_output=True,
+        )
+        with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
+            f.write(f"\nport = {pg_port}\nlisten_addresses = '127.0.0.1'\n")
+            # The suite issues thousands of tiny transactions; keep fsync off
+            # for the throwaway test cluster.
+            f.write("fsync = off\nsynchronous_commit = off\nfull_page_writes = off\n")
+        subprocess.run(
+            [str(bin_dir / "pg_ctl"), "-D", pgdata, "-l",
+             os.path.join(pgdata, "pg.log"),
+             "-o", f"-p {pg_port} -k {pgdata}", "start", "-w"],
+            check=True, capture_output=True,
+        )
     postmaster_pid = _read_postmaster_pid(pgdata)
 
     def _kill_pg() -> None:
