@@ -44,7 +44,21 @@ def _init_repo(path: Path) -> None:
 def _commit(path: Path, message: str, fname: str = "f.txt", content: str | None = None) -> str:
     (path / fname).write_text(content if content is not None else message)
     _git(path, "add", fname)
-    _git(path, "commit", "-q", "-m", message)
+    # Identity inline: clones do not inherit _init_repo's per-repo config, and
+    # CI runners have no ambient git identity to auto-detect (hostname yields
+    # "(none)" -> git refuses with exit 128), so a bare commit in a cloned
+    # fixture repo is environment-dependent without this.
+    _git(
+        path,
+        "-c",
+        "user.email=preflight-test@example.com",
+        "-c",
+        "user.name=Preflight Test",
+        "commit",
+        "-q",
+        "-m",
+        message,
+    )
     return _git(path, "rev-parse", "HEAD")
 
 
