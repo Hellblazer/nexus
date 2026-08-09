@@ -338,7 +338,7 @@ from __future__ import annotations
 #: deletes the client-side compute_assignments/persist_assignments dance the
 #: route replaces for THIS call site — no fallback, an engine below this
 #: floor 404s and the hook fails loud via the RDR-172 tripwire.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 68)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 69)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

@@ -109,7 +109,7 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # but harmless — see the ACQUIRE staging comment) and a future un-retirement
 # of --cold would want this constant already tracking the floor. Bumping it
 # further is a no-op; do not "fix" it at the next floor bump.
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.68}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.69}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
@@ -127,8 +127,8 @@ COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.68}"
 # collapses to zero (equals the current floor), but does NOT itself detect
 # "two releases behind" — that still needs a human/agent check at the next
 # floor bump.
-PREV_RELEASE="${NEXUS_PREV_RELEASE:-7.3.0}"
-PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.65}"
+PREV_RELEASE="${NEXUS_PREV_RELEASE:-7.4.0}"
+PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.68}"
 # RDR-185 P4.3 (nexus-n7u38.30): the ERA-HOP's starting point. Deliberately NOT
 # "one release back" like PREV_RELEASE — this leg's whole claim is that an
 # ANCIENT install converges, so the default is the OLDEST install the product

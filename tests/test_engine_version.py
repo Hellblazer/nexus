@@ -245,7 +245,19 @@ class TestRequiredEngineVersion:
         # chashes. Published + acquire-gated + deployed + edge-gated ahead of
         # this bump (paired-release choreography). Client half nexus-yu9w5
         # switches taxonomy_assign_batch_hook to the route with no fallback.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 68)
+        # ->(0,1,69) 2026-08-09 (7.5.0 paired release): engine-service-v0.1.69
+        # — kl2z6 combined write (chunks+manifest atomic in write_many's
+        # per-doc transaction) + the vc6dh-corrected staging guard and its
+        # Liquibase index + the sweep_detail.reason vocabulary, plus the
+        # 11gh6/3wtku manifest-insert-vs-sweep write-skew closure and the
+        # 4okz4 chash/staging jOOQ conversion. Cut, shakeout-gated,
+        # acquire-gated on the published bytes, DEPLOYED and cloud-gated
+        # green (STEP-6 PASS, 0 failures/0 advisories, no parity
+        # regressions) BEFORE this bump. Client halves ship here: nexus-wxjr6
+        # (flush path sends the combined call; ack-echo RAISES against an
+        # engine below this identity, so the floor bump is mandatory, not
+        # optional).
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 69)
 
 
 class TestParseEngineVersion:

@@ -6,11 +6,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [7.5.0] - 2026-08-09
 
-> **DRAFT — release-prep, not yet cut.** Drawn from
-> `conexus/PENDING_RELEASE.md`'s "Awaiting the next release (pinned:
-> v7.4.0)" ledger. nexus-hdumg (P1) is still in flight and may add its own
-> entry here before cut.
-
 ### Activated by this pin advance (from PENDING_RELEASE.md)
 - **SessionStart guidance moves off the plugin-release cadence**
   (nexus-h33x8.4): the `cat $CLAUDE_PLUGIN_ROOT/skills/using-nx-skills/SKILL.md`
@@ -34,18 +29,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   any `PREFLIGHT_FAIL` — closes the gap where a fresh worktree could be
   silently stale relative to `develop` (the harness cuts worktrees from
   the default branch's tip, not the dispatching session's own branch).
-- **Owes-report credit accounting hardening** (nexus-7z7rj, nexus-plycy):
-  <!-- PLACEHOLDER — nexus-7z7rj is tracked as still in flight per the
-       release-prep brief; do not invent final wording here. The
-       develop tree at prep time (2026-08-09) already carries a
-       corresponding commit (58fad215, "owes-report credit decisions
-       happen only under the lock, per-type") and PENDING_RELEASE.md
-       already documents both nexus-7z7rj and nexus-plycy in full detail
-       under "Awaiting the next release". Reconcile at cut time: either
-       fold PENDING_RELEASE.md's existing wording in here (if that
-       commit IS the fix), or replace this placeholder with whatever
-       additional round actually lands. Do not ship this placeholder
-       verbatim. -->
+- **Owes-report credit accounting is now correct under contention**
+  (nexus-7z7rj, nexus-plycy, nexus-ols6a): the SubagentStop guard that
+  blocks a background agent from stopping without reporting could spend
+  the same unit of credit twice under load. Two earlier rounds hardened
+  the critical section; the actual defect was in the stale-lock reap that
+  runs *before* the lock is taken — `[[ -d ]]`, `find`, `rmdir` are three
+  steps, and the lock can be released and legitimately re-acquired
+  between them, so the `rmdir` deleted a live holder's lock and let two
+  racers in. Safely stealing a name-based lock needs an atomic
+  compare-and-delete that POSIX does not offer, so this was never a
+  tuning problem. Credit is now claimed by creating a slot symlink, which
+  `symlink(2)` makes atomic (`EEXIST`), so the ceiling holds even with no
+  mutual exclusion at all. Why it mattered: a spurious credit spend is a
+  debit against a shared per-type pool, so it silently absorbed the
+  credit of the *next* background agent of that type, which then stopped
+  unblocked with no record — work completed and its report never
+  delivered. A hook killed between claiming a slot and recording it now
+  blocks the next agent with a disclosed `credit-slot-orphan` cause
+  instead of waving it through; that kill is routine rather than rare,
+  since the SubagentStop hook has a 10-second timeout while the lock
+  budget runs longer. Scope, stated precisely: the over-count is closed
+  at the source; the orphaned slot itself is disclosed but not yet
+  reclaimed (deliberately — a bounded-age reclaim is the same
+  check-then-act shape that caused the original bug), and the identical
+  reap pattern remains in `agent-dispatch-expect.sh`, where its direction
+  is a surplus credit that over-blocks rather than misses (nexus-ma5tg).
 
 ## [7.4.0] - 2026-08-08
 
