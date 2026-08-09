@@ -243,7 +243,7 @@ class CatalogWriter(Protocol):
     def atomic_manifest_replace(self, doc_id, chunks) -> object:  # canonical
         ...
 
-    def write_manifest_many(self, docs, complete=...) -> object:  # canonical (nexus-u2kwq batch write; nexus-67qsd/jk88j whitelisted 2026-08-08)
+    def write_manifest_many(self, docs, complete=..., *, sweep=..., chunks=..., collection=..., force_re_embed=...) -> object:  # canonical (nexus-u2kwq batch write; nexus-67qsd/jk88j whitelisted 2026-08-08; nexus-wxjr6 combined-write kwargs 2026-08-09)
         ...
 
     def resync_chunk_count_cache(self, doc_id) -> object:  # canonical

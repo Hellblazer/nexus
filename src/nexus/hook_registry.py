@@ -210,6 +210,7 @@ class HookRegistry:
         manifest_complete: dict[str, str] | None = None,
         hook_timings: dict[str, float] | None = None,
         invoke: Callable[[Callable, tuple, dict], Any] | None = None,
+        skip_hooks: "set[Callable] | None" = None,
     ) -> None:
         """Invoke every batch hook with the recorded call shape.
 
@@ -264,11 +265,24 @@ class HookRegistry:
         registered hook under its OWN lock (rather than one lock around the
         whole dispatch) without duplicating this method's kwarg-shape and
         per-hook-failure-isolation logic.
+
+        *skip_hooks* (nexus-wxjr6) — optional set of hook CALLABLES
+        (identity, not name) to exclude from this dispatch. Lets a caller
+        that already handled a specific hook's work through a different
+        path skip it here rather than double-firing — the flush-grain
+        combined-write path (``indexer.py``'s ``_fire_flush_grain_hooks``)
+        uses this to exclude ``manifest_write_batch_hook`` once the manifest
+        write has already happened atomically alongside the chunk upload,
+        while still firing every OTHER ``grain="flush"`` hook (taxonomy)
+        unchanged. ``None`` (default) skips nothing — every pre-existing
+        caller is behaviorally unchanged.
         """
         if not doc_ids:
             return
         for hook in self._batch:
             if grain != "all" and getattr(hook, "batch_grain", "file") != grain:
+                continue
+            if skip_hooks and hook in skip_hooks:
                 continue
             hook_name = getattr(hook, "__name__", "?")
             _t0 = time.monotonic() if hook_timings is not None else 0.0

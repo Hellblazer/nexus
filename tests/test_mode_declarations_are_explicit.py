@@ -282,7 +282,14 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 58
 # client-embedding leg); the voyage-code-3 string it still references is a
 # fabricated metadata literal for a seeded fake chunk, never a real
 # embedder call. Rationale in conftest.py beside the entry.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 37
+# 37 -> 39 (nexus-wxjr6, 2026-08-09): +2, test_manifest_write_many.py::
+# TestWriteManifestManyCombined::{test_combined_wire_shape,
+# test_ack_echo_raises_when_chunks_written_absent} — reason
+# "string-literal-as-name". Both assert the kl2z6 combined-write request
+# body carries a conformant collection-name string verbatim against a
+# monkeypatched `_post`; no embedder runs. Rationale in conftest.py beside
+# the entries.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 39
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

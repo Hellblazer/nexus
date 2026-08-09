@@ -58,6 +58,49 @@ class TestGrainDispatch:
         assert calls == [["d1"]]
 
 
+class TestSkipHooks:
+    """nexus-wxjr6: fire_batch's skip_hooks= excludes specific hooks by
+    IDENTITY from one dispatch — lets a caller that already handled a
+    hook's work through a different path (the ChunkBatcher combined-write
+    flush skipping manifest_write_batch_hook) avoid double-firing it,
+    while every other hook at that grain still fires unchanged."""
+
+    def test_skip_hooks_excludes_by_identity(self) -> None:
+        reg = HookRegistry()
+        a_calls: list = []
+        b_calls: list = []
+        hook_a = _mk_hook(a_calls, grain="flush")
+        hook_b = _mk_hook(b_calls, grain="flush")
+        reg.register_batch(hook_a)
+        reg.register_batch(hook_b)
+        reg.fire_batch(["d1"], "code__x", ["t"], grain="flush", skip_hooks={hook_a})
+        assert a_calls == []
+        assert b_calls == [["d1"]]
+
+    def test_skip_hooks_none_fires_everything(self) -> None:
+        # Default: every pre-existing caller (skip_hooks unset) is
+        # behaviorally unchanged.
+        reg = HookRegistry()
+        a_calls: list = []
+        hook_a = _mk_hook(a_calls, grain="flush")
+        reg.register_batch(hook_a)
+        reg.fire_batch(["d1"], "code__x", ["t"], grain="flush")
+        assert a_calls == [["d1"]]
+
+    def test_skip_hooks_does_not_match_a_different_function_object(self) -> None:
+        # Identity, not name/behavior — a callable that merely LOOKS like
+        # the skipped hook (same signature, different object) still fires.
+        reg = HookRegistry()
+        a_calls: list = []
+        hook_a = _mk_hook(a_calls, grain="flush")
+        other_hook = _mk_hook([], grain="flush")
+        reg.register_batch(hook_a)
+        reg.fire_batch(
+            ["d1"], "code__x", ["t"], grain="flush", skip_hooks={other_hook},
+        )
+        assert a_calls == [["d1"]]
+
+
 class TestHookTimings:
     """nexus-lde88 G4: fire_batch's optional hook_timings= accumulates
     per-hook-name wall seconds, so a caller firing multiple batch_grain

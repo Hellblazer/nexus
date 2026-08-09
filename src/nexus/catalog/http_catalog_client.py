@@ -2860,6 +2860,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def write_manifest_many(
         self, docs: "list[tuple[str, list[dict]]]",
         complete: dict[str, str] | None = None,
+        *,
+        sweep: bool = False,
+        chunks: "list[dict] | None" = None,
+        collection: str | None = None,
+        force_re_embed: bool = False,
     ) -> dict:
         """Atomic per-doc manifest REPLACE for many docs in one POST.
 
@@ -2883,19 +2888,72 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         page containing their doc; a pre-fence engine ignores the unknown
         key, so refusals simply never appear (fence unstamped, 'unknown').
 
+        *sweep* (nexus-eslkl) folds the superseded-vector sweep into each
+        doc's own transaction server-side. Response gains ``swept``/
+        ``sweep_skipped``/``sweep_detail`` (zero/empty when ``sweep`` is
+        False — same request-gated shape the engine already implements).
+
+        *chunks*/*collection*/*force_re_embed* (nexus-wxjr6, the CLIENT
+        half of nexus-kl2z6's combined write; design memo T2
+        design-kl2z6-combined-write §1.1) — optional top-level ``chunks``
+        (``[{chash, text, metadata}, ...]``) folds the chunk VECTOR upload
+        into the SAME per-doc transaction as the manifest write.
+        *collection* is REQUIRED whenever *chunks* is provided (raises
+        ``ValueError`` locally — same shape the engine 400s on, checked
+        client-side first so a caller gets an immediate, specific error
+        instead of a round trip). *chunks* is sent on the FIRST page
+        only — it is a FLUSH-wide payload (the caller's whole upload
+        batch), not a per-page one, and a flush's doc count is bounded by
+        its own chunk cap (<=300), always far under
+        ``_MANIFEST_GET_MANY_PAGE`` (1000), so the real caller (the
+        ChunkBatcher flush path) never pages. *force_re_embed* mirrors
+        ``/v1/vectors/upsert-chunks``' escape from the RDR-181
+        existence-partition.
+
+        ACK-ECHO (design memo §5.2): a request that sent *chunks* and gets
+        back a response with NO ``chunks_written`` key means the engine
+        silently dropped the unknown field — the route already exists on
+        every pre-kl2z6 engine (only the field is new), so no 404 signals
+        this the way ``chashes_many``-style capability probes do. This
+        follows the ``upsert-chunks`` ack-mismatch RAISE precedent
+        (:meth:`nexus.db.http_vector_client.HttpVectorClient.upsert_chunks`,
+        ``http_vector_client.py:1348-1354`: ``raise RuntimeError(f"upsert-chunks
+        ack mismatch for {collection!r}: sent ...")``), explicitly NOT the
+        ``complete_refused_count_mismatch`` WARN-and-conservative-fallback
+        precedent (``mcp_infra.py``'s ``_manifest_write_loop``, ~:1690-1697)
+        — that shape is correct for a RECONCILABLE count inside an
+        otherwise-successful response, but ``chunks_written`` absence
+        signals undetectable silent content loss, which is never
+        reconcilable after the fact. Raises ``RuntimeError``, never a
+        silent proceed.
+
         Returns ``{"failed_doc_ids": [...], "complete_refused": [{doc_id,
         referenced, missing, chunk_count}, ...], "complete_refused_count":
-        int}`` — the scalar count is carried separately so a truncated
-        refusal list is detectable (bead-amendment MUST).
+        int, "swept": int, "sweep_skipped": int, "sweep_detail": [...]}``
+        plus ``chunks_written`` when *chunks* was provided — the scalar
+        counts are carried separately so a truncated list is detectable
+        (bead-amendment MUST, same discipline ``complete_refused_count``
+        already established).
         """
+        if chunks is not None and not collection:
+            raise ValueError(
+                "write_manifest_many: 'collection' is required when 'chunks' "
+                "is provided (design memo §1.1 — the engine 400s on this "
+                "same combination; checked here so the caller gets an "
+                "immediate, specific error)"
+            )
         failed: list[str] = []
         refused: list[dict] = []
         refused_count = 0
-        for start in range(0, len(docs), _MANIFEST_GET_MANY_PAGE):
+        swept_total = 0
+        sweep_skipped_total = 0
+        sweep_detail: list[dict] = []
+        chunks_written: int | None = None
+        for page_num, start in enumerate(range(0, len(docs), _MANIFEST_GET_MANY_PAGE)):
             page = docs[start : start + _MANIFEST_GET_MANY_PAGE]
             body: dict = {"docs": [
-                {"doc_id": d, "rows": self._manifest_rows(chunks)}
-                for d, chunks in page
+                {"doc_id": d, "rows": self._manifest_rows(page_chunks)}
+                for d, page_chunks in page
             ]}
             if complete:
                 page_complete = {
@@ -2903,26 +2961,56 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 }
                 if page_complete:
                     body["complete"] = page_complete
+            if sweep:
+                body["sweep"] = True
+            page_carries_chunks = chunks is not None and page_num == 0
+            if page_carries_chunks:
+                body["collection"] = collection
+                body["chunks"] = chunks
+                if force_re_embed:
+                    body["force_re_embed"] = True
             result = self._post("/manifest/write_many", body)
-            failed.extend((result or {}).get("failed_doc_ids", []))
-            refused.extend((result or {}).get("complete_refused") or [])
-            refused_count += int((result or {}).get("complete_refused_count") or 0)
+            result = result if isinstance(result, dict) else {}
+            if page_carries_chunks:
+                # nexus-wxjr6 ack-echo (design memo §5.2) — see docstring.
+                if "chunks_written" not in result:
+                    raise RuntimeError(
+                        f"write_many ack mismatch for {collection!r}: sent "
+                        f"{len(chunks)} chunks but the response carried no "
+                        "'chunks_written' key — the engine may not "
+                        "understand the combined write (pre-nexus-kl2z6); "
+                        "refusing to treat the chunk content as durably "
+                        "written"
+                    )
+                chunks_written = int(result.get("chunks_written") or 0)
+            failed.extend(result.get("failed_doc_ids", []))
+            refused.extend(result.get("complete_refused") or [])
+            refused_count += int(result.get("complete_refused_count") or 0)
+            swept_total += int(result.get("swept") or 0)
+            sweep_skipped_total += int(result.get("sweep_skipped") or 0)
+            sweep_detail.extend(result.get("sweep_detail") or [])
             # nexus-fhhwf: the engine (v0.1.33+) returns a structured
             # per-doc reason alongside the bare id list — surface it so a
             # failed doc is diagnosable from the client log instead of
             # requiring three deploy-gate iterations (the v0.1.24 lesson).
-            for f in (result or {}).get("failed") or []:
+            for f in result.get("failed") or []:
                 _log.warning(
                     "manifest_write_many_doc_failed",
                     doc_id=f.get("doc_id", ""),
                     reason=f.get("reason", ""),
                     sqlstate=f.get("sqlstate", ""),
                 )
-        return {
+        out: dict = {
             "failed_doc_ids": failed,
             "complete_refused": refused,
             "complete_refused_count": refused_count,
+            "swept": swept_total,
+            "sweep_skipped": sweep_skipped_total,
+            "sweep_detail": sweep_detail,
         }
+        if chunks is not None:
+            out["chunks_written"] = chunks_written or 0
+        return out
 
     def resync_chunk_count_cache(self, doc_id: str) -> None:
         """Recompute ``documents.chunk_count`` from the true manifest row count.

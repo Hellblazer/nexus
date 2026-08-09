@@ -115,6 +115,112 @@ class TestWriteManifestMany:
             [("1.9.9", [{"chash": "a" * 64, "position": 0}])]
         )["failed_doc_ids"] == ["1.9.9"]
 
+    def test_no_chunks_no_sweep_body_unchanged(self, monkeypatch) -> None:
+        # Backward compatibility (design memo §5.1): an absent `chunks`
+        # field and sweep=False (the default) must be byte-for-byte the
+        # pre-wxjr6 request body — no `collection`, `chunks`, `sweep`, or
+        # `force_re_embed` keys at all.
+        c = _client()
+        posts: list[dict] = []
+        monkeypatch.setattr(
+            c, "_post",
+            lambda path, body: posts.append(body) or {"docs": 1, "rows": 1, "failed_doc_ids": []},
+            raising=False,
+        )
+        c.write_manifest_many([("1.9.10", [{"chash": "a" * 64, "position": 0}])])
+        assert set(posts[0]) == {"docs"}
+
+
+class TestWriteManifestManyCombined:
+    """nexus-wxjr6: the client half of the kl2z6 combined write."""
+
+    def test_chunks_requires_collection(self) -> None:
+        c = _client()
+        with pytest.raises(ValueError, match="collection.*required"):
+            c.write_manifest_many(
+                [("1.9.11", [{"chash": "a" * 64, "position": 0}])],
+                chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
+            )
+
+    def test_combined_wire_shape(self, monkeypatch) -> None:
+        c = _client()
+        posts: list[dict] = []
+        chunks = [{"chash": "a" * 64, "text": "hi", "metadata": {"k": "v"}}]
+        monkeypatch.setattr(
+            c, "_post",
+            lambda path, body: posts.append(body) or {
+                "docs": 1, "rows": 1, "failed_doc_ids": [], "chunks_written": 1,
+            },
+            raising=False,
+        )
+        result = c.write_manifest_many(
+            [("1.9.12", [{"chash": "a" * 64, "position": 0}])],
+            sweep=True,
+            chunks=chunks,
+            collection="code__nexus-1-1__voyage-code-3__v1",
+            force_re_embed=True,
+        )
+        assert len(posts) == 1
+        body = posts[0]
+        assert body["collection"] == "code__nexus-1-1__voyage-code-3__v1"
+        assert body["chunks"] == chunks
+        assert body["sweep"] is True
+        assert body["force_re_embed"] is True
+        assert result["chunks_written"] == 1
+
+    def test_ack_echo_raises_when_chunks_written_absent(self, monkeypatch) -> None:
+        # design memo §5.2: the ONLY runtime capability signal — an old
+        # engine silently drops the unknown `chunks` field with no error,
+        # so absence of `chunks_written` must RAISE, not warn-and-proceed
+        # (the upsert_chunks ack-mismatch precedent, not the
+        # complete_refused_count_mismatch WARN fallback).
+        c = _client()
+        monkeypatch.setattr(
+            c, "_post",
+            lambda path, body: {"docs": 1, "rows": 1, "failed_doc_ids": []},
+            raising=False,
+        )
+        with pytest.raises(RuntimeError, match="ack mismatch"):
+            c.write_manifest_many(
+                [("1.9.13", [{"chash": "a" * 64, "position": 0}])],
+                chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
+                collection="code__nexus-1-1__voyage-code-3__v1",
+            )
+
+    def test_no_chunks_sent_never_checks_ack(self, monkeypatch) -> None:
+        # A call that never sends `chunks` must not raise even though the
+        # response also lacks `chunks_written` — that key is only
+        # meaningful (and only checked) when this call actually carried
+        # content.
+        c = _client()
+        monkeypatch.setattr(
+            c, "_post",
+            lambda path, body: {"docs": 1, "rows": 1, "failed_doc_ids": []},
+            raising=False,
+        )
+        result = c.write_manifest_many(
+            [("1.9.14", [{"chash": "a" * 64, "position": 0}])],
+        )
+        assert "chunks_written" not in result
+
+    def test_sweep_fields_forwarded(self, monkeypatch) -> None:
+        c = _client()
+        monkeypatch.setattr(
+            c, "_post",
+            lambda path, body: {
+                "docs": 1, "rows": 1, "failed_doc_ids": [],
+                "swept": 2, "sweep_skipped": 1,
+                "sweep_detail": [{"doc_id": "1.9.15", "errored": True, "reason": "sweep_failed"}],
+            },
+            raising=False,
+        )
+        result = c.write_manifest_many(
+            [("1.9.15", [{"chash": "a" * 64, "position": 0}])], sweep=True,
+        )
+        assert result["swept"] == 2
+        assert result["sweep_skipped"] == 1
+        assert result["sweep_detail"][0]["reason"] == "sweep_failed"
+
 
 class _FakeCat:
     """Catalog test double capturing which write path the loop takes."""

@@ -1706,6 +1706,17 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # (indexer.py's CredentialsMissingError). The prune/migration
     # behaviour under test is embedding-model-independent.
     "tests/test_indexer_e2e.py::test_migration_moves_prose_from_code_to_docs",
+    #
+    # nexus-wxjr6 (2026-08-09, kl2z6 combined write client half):
+    # "string-literal-as-name". Both tests assert the combined write's
+    # request BODY carries the "collection" field verbatim
+    # ("code__nexus-1-1__voyage-code-3__v1") against a monkeypatched
+    # `_post` — no embedder runs, no mode-dependent path executes. The
+    # voyage token is a conformant collection-name fixture the wire-shape
+    # assertion happens to need, not a behavior assertion about which
+    # embedder ran.
+    "tests/catalog/test_manifest_write_many.py::TestWriteManifestManyCombined::test_combined_wire_shape",
+    "tests/catalog/test_manifest_write_many.py::TestWriteManifestManyCombined::test_ack_echo_raises_when_chunks_written_absent",
 })
 
 

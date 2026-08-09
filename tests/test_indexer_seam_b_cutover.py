@@ -121,14 +121,32 @@ def test_run_index_service_mode_skips_voyageai_client(tmp_path, monkeypatch):
         )
 
 
+def _flush_ctx(doc_id: str = "1.1", chash: str = "a" * 64) -> list:
+    """One nexus-wxjr6 combined-write-shaped file_contexts entry — the
+    (path, context) pair _batch_flush needs to build full_docs (a
+    catalog_doc_id and metadatas carrying chunk_text_hash/position 0)."""
+    return [(
+        "hello.py",
+        {
+            "ids": [chash],
+            "documents": ["doc1"],
+            "metadatas": [{"chunk_text_hash": chash, "content_hash": "c" * 64}],
+            "catalog_doc_id": doc_id,
+        },
+    )]
+
+
 def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
-    """RDR-181 §Approach step 3: the ChunkBatcher flush closure defined
-    inside _run_index (the batched cross-file write path for code/prose/pdf
-    chunks, duoak 2C) must forward --force to force_re_embed on the
-    HttpVectorClient upsert. Without this, a forced reindex whose chunks
-    land via the shared batcher (rather than the per-file oversize-fallback
-    path) would silently keep the server-side embed-skip — the same gap
-    the per-file fallback fix closes, but for the dominant batched path.
+    """RDR-181 §Approach step 3 / nexus-wxjr6: the ChunkBatcher flush
+    closure defined inside _run_index (the batched cross-file write path
+    for code/prose/pdf chunks, duoak 2C) must forward --force to
+    force_re_embed on the combined write's write_manifest_many call
+    (nexus-wxjr6 replaced the old direct upsert_chunks_with_embeddings
+    call with the combined write — see _build_combined_write_payload /
+    _batch_flush). Without this, a forced reindex whose chunks land via
+    the shared batcher (rather than the per-file oversize-fallback path)
+    would silently keep the server-side embed-skip — the same gap the
+    per-file fallback fix closes, but for the dominant batched path.
     """
     from nexus.db.http_vector_client import HttpVectorClient
     from nexus.indexer import _run_index
@@ -144,6 +162,10 @@ def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
     monkeypatch.setenv("CHROMA_API_KEY", "fake")
 
     db = MagicMock(spec=HttpVectorClient)
+    catalog_writer = MagicMock()
+    catalog_writer.write_manifest_many.return_value = {
+        "failed_doc_ids": [], "chunks_written": 1,
+    }
     captured: dict = {}
 
     class _CapturingBatcher:
@@ -170,21 +192,26 @@ def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
         def stats(self) -> dict:
             return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
 
-    with _service_mode_patches(db), \
-         patch("nexus.chunk_batcher.ChunkBatcher", _CapturingBatcher):
+    with _service_mode_patches(
+        db, extra={"nexus.mcp_infra.get_catalog_writer": {"return_value": catalog_writer}},
+    ), patch("nexus.chunk_batcher.ChunkBatcher", _CapturingBatcher):
         _run_index(repo, reg, force=True)
 
-    assert "flush" in captured, (
-        "ChunkBatcher must be constructed when db is an HttpVectorClient"
-    )
-    captured["flush"]("code__repo__voyage-code-3__v1", ["id1"], ["doc1"], [{"m": 1}])
-    db.upsert_chunks_with_embeddings.assert_called_once_with(
-        collection_name="code__repo__voyage-code-3__v1",
-        ids=["id1"], documents=["doc1"],
-        embeddings=[[]],
-        metadatas=[{"m": 1}],
-        force_re_embed=True,
-    )
+        assert "flush" in captured, (
+            "ChunkBatcher must be constructed when db is an HttpVectorClient"
+        )
+        # nexus-wxjr6: _batch_flush deferred-imports get_catalog_writer
+        # INSIDE the closure, resolved fresh on every call — so the flush
+        # invocation must happen INSIDE this patch context (not after it
+        # exits), or the deferred import resolves to the REAL
+        # get_catalog_writer and attempts a real HTTP call.
+        captured["flush"](
+            "code__repo__voyage-code-3__v1", ["a" * 64], ["doc1"], [{"m": 1}],
+            _flush_ctx(),
+        )
+    assert catalog_writer.write_manifest_many.call_count == 1
+    kwargs = catalog_writer.write_manifest_many.call_args.kwargs
+    assert kwargs["force_re_embed"] is True
 
 
 def test_run_index_batch_flush_force_false_omits_force_re_embed(tmp_path, monkeypatch):
@@ -206,6 +233,10 @@ def test_run_index_batch_flush_force_false_omits_force_re_embed(tmp_path, monkey
     monkeypatch.setenv("CHROMA_API_KEY", "fake")
 
     db = MagicMock(spec=HttpVectorClient)
+    catalog_writer = MagicMock()
+    catalog_writer.write_manifest_many.return_value = {
+        "failed_doc_ids": [], "chunks_written": 1,
+    }
     captured: dict = {}
 
     class _CapturingBatcher:
@@ -232,18 +263,20 @@ def test_run_index_batch_flush_force_false_omits_force_re_embed(tmp_path, monkey
         def stats(self) -> dict:
             return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
 
-    with _service_mode_patches(db), \
-         patch("nexus.chunk_batcher.ChunkBatcher", _CapturingBatcher):
+    with _service_mode_patches(
+        db, extra={"nexus.mcp_infra.get_catalog_writer": {"return_value": catalog_writer}},
+    ), patch("nexus.chunk_batcher.ChunkBatcher", _CapturingBatcher):
         _run_index(repo, reg, force=False)
 
-    captured["flush"]("code__repo__voyage-code-3__v1", ["id1"], ["doc1"], [{"m": 1}])
-    db.upsert_chunks_with_embeddings.assert_called_once_with(
-        collection_name="code__repo__voyage-code-3__v1",
-        ids=["id1"], documents=["doc1"],
-        embeddings=[[]],
-        metadatas=[{"m": 1}],
-        force_re_embed=False,
-    )
+        # nexus-wxjr6: flush() must be invoked INSIDE this patch context —
+        # see the sibling test's comment.
+        captured["flush"](
+            "code__repo__voyage-code-3__v1", ["a" * 64], ["doc1"], [{"m": 1}],
+            _flush_ctx(),
+        )
+    assert catalog_writer.write_manifest_many.call_count == 1
+    kwargs = catalog_writer.write_manifest_many.call_args.kwargs
+    assert kwargs["force_re_embed"] is False
 
 
 def test_run_index_service_mode_uses_get_t3_not_make_t3(tmp_path, monkeypatch):

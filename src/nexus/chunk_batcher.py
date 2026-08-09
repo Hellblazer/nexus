@@ -43,7 +43,14 @@ _log = structlog.get_logger(__name__)
 #: Service write cap (nexus.db.limits MAX_RECORDS_PER_WRITE parity).
 DEFAULT_MAX_CHUNKS: int = 300
 
-FlushFn = Callable[[str, list[str], list[str], list[dict]], None]
+#: (collection, ids, documents, metadatas, file_contexts) -> None.
+#: nexus-wxjr6: file_contexts (the same (path, context) pairs
+#: on_batch_begin/on_batch_complete already receive) is threaded into the
+#: flush closure itself so a combined-write flush fn can build per-doc
+#: manifest rows in the SAME call that uploads chunk content — no new
+#: plumbing, this is the identical shape computed once per flush at
+#: _flush_batch's top (see the call site below).
+FlushFn = Callable[[str, list[str], list[str], list[dict], "list[tuple[str, object]]"], None]
 
 #: (path, error-or-None, context) settled-file record awaiting callback.
 _Settled = tuple[str, "str | None", object]
@@ -435,7 +442,10 @@ class ChunkBatcher:
         error: str | None = None
         t0 = time.monotonic()
         try:
-            self._flush(collection, pend.ids, pend.documents, pend.metadatas)
+            self._flush(
+                collection, pend.ids, pend.documents, pend.metadatas,
+                file_contexts,
+            )
         except Exception as exc:  # noqa: BLE001 — attribution boundary: convert to per-file failure or bisect
             if len(pend.file_counts) >= 2:
                 _log.warning(

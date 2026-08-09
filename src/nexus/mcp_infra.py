@@ -1258,6 +1258,87 @@ def _manifest_chunk_rows(indexed_metas) -> list[dict]:
     ]
 
 
+def _apply_combined_write_response(
+    res: dict, complete_map: dict[str, str], collection: str | None,
+) -> list[str]:
+    """Record accounting from a nexus-kl2z6/nexus-wxjr6 combined write's
+    response: failed docs, completion refusals, and — the flush-grain
+    path's whole reason for existing — the ENGINE's own sweep accounting.
+
+    Deliberately NOT a reuse of :func:`_manifest_write_loop`'s write_many
+    branch parsing: that block ALSO computes a local before/after chash
+    diff and calls :func:`_sweep_superseded_vectors_many` — the client-side
+    sweep this function's caller (the ChunkBatcher combined-write flush
+    path) no longer needs, because the combined write's atomicity means
+    the engine already did the sweep INSIDE the same per-doc transaction
+    that wrote the manifest (design memo T2 design-kl2z6-combined-write
+    §3: "This closes kl2z6 for the flush-grain indexing path by
+    construction"). Building a fresh, smaller function here — rather than
+    threading a flag through the 200-line existing branch — keeps that
+    well-tested branch (still load-bearing for every OTHER
+    ``manifest_write_batch_hook`` caller, see the module docstring update
+    below) completely untouched.
+
+    Sweep accounting (nexus-39upx: skips are never silent) —
+    ``res["swept"]`` -> :func:`_record_superseded_swept`; each
+    ``res["sweep_detail"]`` entry with ``errored`` true ->
+    :func:`_record_superseded_sweep_skip` with the engine's closed
+    ``reason`` vocabulary (``gate_timeout`` / ``statement_timeout`` /
+    ``before_read_failed`` / ``sweep_failed`` — CatalogRepository.java's
+    ``classifySweepFailureReason``). A missing ``reason`` on an errored
+    entry (a shape a well-behaved engine never sends, but ``.get`` never
+    KeyErrors) is recorded as ``sweep_failed`` rather than silently
+    dropped, matching the closed vocabulary's catch-all bucket.
+
+    Returns the list of failed doc_ids so the caller can log/record them
+    the same way the write_many branch's own failure handling does.
+    """
+    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+
+    failed = list(res.get("failed_doc_ids") or [])
+    for doc_id in failed:
+        _record_manifest_write_failure(doc_id)
+    refused = res.get("complete_refused") or []
+    refused_count = int(res.get("complete_refused_count") or 0)
+    if refused_count != len(refused):
+        structlog.get_logger().warning(
+            "complete_refused_count_mismatch",
+            count_field=refused_count,
+            list_len=len(refused),
+            path="write_many_combined",
+            note="refusal list truncated or shape drift — treating "
+                 "every claimed doc as unstamped",
+        )
+        # Conservative direction (over-work, never under-report — same as
+        # _manifest_write_loop's identical mismatch handling): a stamp we
+        # cannot CONFIRM is a stamp we do not claim.
+        listed = {str(r.get("doc_id", "")) for r in refused}
+        for cid in complete_map:
+            if cid not in listed:
+                _record_complete_refusal(cid)
+    for r in refused:
+        rid = str(r.get("doc_id", ""))
+        structlog.get_logger().warning(
+            "write_manifest_many_complete_refused",
+            doc_id=rid,
+            path="write_many_combined",
+            referenced=r.get("referenced"),
+            missing=r.get("missing"),
+            chunk_count=r.get("chunk_count"),
+        )
+        if rid:
+            _record_complete_refusal(rid)
+    _record_superseded_swept(int(res.get("swept") or 0))
+    for outcome in res.get("sweep_detail") or []:
+        if not isinstance(outcome, dict) or not outcome.get("errored"):
+            continue
+        _record_superseded_sweep_skip(
+            str(outcome.get("doc_id", "")), collection,
+            str(outcome.get("reason") or "sweep_failed"),
+        )
+    return failed
+
+
 def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
                               collection: str | None, *, reader, notes_provider) -> None:
     """Delete T3 rows this document's manifest no longer references (nexus-39upx).
@@ -1428,6 +1509,24 @@ def _sweep_superseded_vectors_many(
     failure (reverse lookup or note lookup) deletes nothing and records a
     named skip for every document whose candidates were in flight, never
     silently. Over-retention is recoverable; over-deletion is not.
+
+    RETIREMENT SCOPE (nexus-wxjr6, 2026-08-09): this function is NOT
+    deleted. It retires only for the ChunkBatcher-driven flush-grain call
+    site — that path now goes through the combined write
+    (:meth:`nexus.catalog.http_catalog_client.HttpCatalogClient.write_manifest_many`
+    with ``chunks``/``sweep=True``) directly from ``indexer.py``'s
+    ``_batch_flush``, bypassing ``manifest_write_batch_hook`` entirely for
+    ``grain="flush"`` dispatch (see :func:`_apply_combined_write_response`
+    and ``HookRegistry.fire_batch``'s ``skip_hooks``). Every OTHER caller
+    of ``manifest_write_batch_hook`` (``grain="all"``, the default —
+    ``mcp/core.py``'s ``store_put``, ``doc_indexer.py``'s per-file and
+    streaming paths, ``pipeline_stages.py``, ``prose_indexer.py``,
+    ``code_indexer.py``'s oversize-per-file fallback) still reaches
+    ``_manifest_write_loop``'s write_many branch below UNCHANGED, and this
+    function remains the ONLY sweep mechanism for those callers until
+    THEY are also converted to the combined write — see nexus-wxjr6's
+    §7.2 per-caller residual table. Deleting this function now would
+    silently reopen nexus-39upx for every one of them.
     """
     import structlog  # noqa: PLC0415 — deferred to function scope (lazy logger init)
 
