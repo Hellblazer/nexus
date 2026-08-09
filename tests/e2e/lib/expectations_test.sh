@@ -26,6 +26,26 @@ bad() {
     FAIL=$((FAIL + 1))
 }
 
+# Portable octal file-permission read (nexus-3zu8g): `stat -f '%Lp' X
+# 2>/dev/null || stat -c '%a' X` looks portable but is not — on GNU
+# coreutils `-f` is a REAL flag ("display filesystem status instead of
+# file status"), not BSD's "-f FORMAT". `stat -f '%Lp' X` on GNU treats
+# '%Lp' and X as two FILE arguments: it fails on the nonexistent file
+# '%Lp' (stderr, suppressed by 2>/dev/null) but SUCCEEDS on X, printing a
+# multi-line "File: ..." filesystem-info block to STDOUT — which is not
+# suppressed. The compound command's exit is still non-zero (the '%Lp'
+# arg failed), so the `||` fallback fires too, but by then the garbage
+# block is already part of the captured output, e.g. "parent dir perms
+# are   File: \"...\"\n  ID: ...\n...\n0700" instead of a clean "700".
+# Detect the platform explicitly instead of probing syntax and hoping for
+# a clean failure.
+_stat_perms() {
+    case "$(uname -s)" in
+        Darwin) stat -f '%Lp' "$1" ;;
+        *) stat -c '%a' "$1" ;;
+    esac
+}
+
 SID="sess-1e9c9a90"
 
 # ── Test 1: file path shape + private parent dir ─────────────────────────
@@ -38,7 +58,7 @@ else
 fi
 if [[ -d "$WORKDIR/state/nexus/orchestration" ]]; then
     ok "parent dir created on first use"
-    perms="$(stat -f '%Lp' "$WORKDIR/state/nexus/orchestration" 2>/dev/null || stat -c '%a' "$WORKDIR/state/nexus/orchestration")"
+    perms="$(_stat_perms "$WORKDIR/state/nexus/orchestration")"
     if [[ "$perms" == "700" ]]; then
         ok "parent dir is 0700 (private)"
     else
@@ -67,7 +87,7 @@ if [[ "$ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
 else
     bad "timestamp malformed: '$ts'"
 fi
-perms="$(stat -f '%Lp' "$f" 2>/dev/null || stat -c '%a' "$f")"
+perms="$(_stat_perms "$f")"
 if [[ "$perms" == "600" ]]; then
     ok "expectations file is 0600"
 else
