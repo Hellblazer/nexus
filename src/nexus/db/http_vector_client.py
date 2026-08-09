@@ -502,6 +502,11 @@ _GATEWAY_RETRY_CODES = frozenset({502, 503, 504})
 #: per-collection flush cap (live 504 at 172 CCE chunks, 2026-07-04).
 _CCE_UPSERT_CHUNK_CAP = 64
 _CODE_UPSERT_CHUNK_CAP = 300
+
+#: onnx-local memory-bounded cap (nexus-33hpq), applies to EVERY prefix once
+#: the serving engine is onnx-local — see :func:`per_collection_chunk_cap`'s
+#: docstring for the memory arithmetic behind the number 16.
+_ONNX_LOCAL_UPSERT_CHUNK_CAP = 16
 _CCE_COLLECTION_PREFIXES = frozenset({"docs", "knowledge", "rdr"})
 
 
@@ -516,28 +521,110 @@ def per_collection_chunk_cap(collection: str) -> int:
         of <=cap; and
       * this client's oversize paging: :meth:`HttpVectorClient.upsert_chunks`
         pages a too-large id set into <=cap sub-POSTs.
-    Both emit POSTs bounded by the SAME timeout, so tuning this value changes both
-    BY DESIGN — and any change must be validated against the CP timeout, never
-    raised for cross-file batching throughput alone.
+    Both emit POSTs bounded by the SAME timeout, so tuning the VOYAGE values below
+    changes both BY DESIGN — and any change to them must be validated against the
+    CP timeout, never raised for cross-file batching throughput alone. The
+    onnx-local branch below is a SEPARATE, memory-derived bound (see below) that
+    happens to reuse the same choke point rather than a third independent knob —
+    that reuse is deliberate: it is still the ONE cap the ChunkBatcher flush and
+    the oversize-paging fallback both obey, just keyed on a different binding
+    constraint for this mode.
 
-    Value: 64 for CCE (docs/knowledge/rdr — voyage-context-3, slow server-side
-    embed; live 504 at 172 CCE chunks 2026-07-04) is the CONSERVATIVE proven-safe
-    cap. conexus's root-cause relay suggested ~128 for the direct path pending a
-    re-gate p99 — a throughput optimization tracked in nexus-o1mbu / nexus-9mzkd,
-    not taken here without that measurement. Code (voyage-code-3) sustains 300.
+    Voyage/cloud values (unchanged by nexus-33hpq — Voyage embedding is a NETWORK
+    call, not local process memory, so the timeout reasoning below still applies
+    unmodified): 64 for CCE (docs/knowledge/rdr — voyage-context-3, slow
+    server-side embed; live 504 at 172 CCE chunks 2026-07-04) is the CONSERVATIVE
+    proven-safe cap. conexus's root-cause relay suggested ~128 for the direct path
+    pending a re-gate p99 — a throughput optimization tracked in nexus-o1mbu /
+    nexus-9mzkd, not taken here without that measurement. Code (voyage-code-3)
+    sustains 300.
+
+    onnx-local value — MEMORY-derived, not timeout-derived (nexus-33hpq,
+    2026-08-09): nexus-w3hzw (pre-v7.4.0) widened the CCE prefixes to 300 under
+    onnx-local on the reasoning that local bge has no 30s gateway to blow through
+    — true, but it silently inherited 300's OTHER justification (the control-plane
+    timeout) for a mode where the timeout was never the binding constraint.
+    MECHANISM (read from the engine source, not inferred): a local batch is
+    embedded by ``Bge768Embedder.embed()`` -> ``embedBatch(texts)`` in ONE ONNX
+    forward pass with no sub-batching (``EmbedderRouter`` does not sub-batch
+    either), ``.optPadding(false)`` padding EVERY row to a RECTANGULAR
+    ``[batchSize, maxLen]`` tensor where ``maxLen = min(longest chunk in the
+    batch, MAX_SEQ_LEN=512)``. Attention is therefore O(batch * heads * seq^2).
+    This shape is NOT new in v7.5.0 — the pre-combined-write path also embedded
+    server-side (``upsert_chunks_with_embeddings`` forwards chunk TEXT and
+    ignores the caller's embeddings, as its own docstring says).
+
+    MEASURED — all on the same 36-file shakedown fixture, same box. NOTE the
+    ACTUAL batch sizes: that fixture yields only ~92 chunks in total, so a
+    cap=300 run never assembles a 300-chunk batch — the observed flushes were
+    bounded by the corpus (bisect events at 82 chunks for ``code``, 28 for
+    ``docs``), not by the cap. The cap is the CEILING, not the batch size.
+        cap=300, this tree -> 77.4 GB peak RSS from a batch of AT MOST ~92,
+                              ~15 cores pegged, /livez starved, supervisor
+                              stuck-exit. Reproduced 3/3.
+        cap=300, v7.4.0    -> ~30 GB peak; survived the step.
+        cap=16,  this tree -> 3.03 GB peak; step cleared, 11/11 gate green.
+    The cap=16 figure is the real observed peak WITH ``flush_concurrency=3``
+    (see ``indexer.py``) actually active — it already covers up to three
+    concurrent in-flight flushes and is NOT a single-flush budget.
+
+    OPEN, deliberately NOT asserted: why v7.4.0 survives at the same 300 cap is
+    unexplained. That comparison also moves a SECOND variable — v7.4.0 pins
+    engine v0.1.68, this tree pins v0.1.69 — so it does not isolate a
+    client-side cause, and no causal story should be read into it. Tracked in
+    nexus-b32rx; do not treat the delta as understood.
+
+    Choosing 16 — and why NO closed-form model is offered here: the attention
+    arithmetic (``batch * 12 * 512^2 * 4 B``) accounts for only ~5% of the
+    observed peak, and the two real datapoints do not fit a linear law. Going
+    from a ~92-chunk batch to a 16-chunk one (~5.75x) cut peak RSS from 77.4 GB
+    to 3.03 GB (~25x) — SUPER-linear, so any through-the-origin extrapolation
+    (in either direction) is unsound and none is given. 16 was chosen as a
+    deliberately conservative starting point and then VALIDATED end-to-end by
+    the measurement above; that measurement, not a model, is the whole basis
+    for this value. Raising it is a throughput optimization that REQUIRES
+    re-measuring peak RSS at the new value on a corpus large enough to actually
+    reach the new ceiling — note the current shakedown fixture is NOT such a
+    corpus (its largest flush at cap=16 is 15 chunks, so the cap never binds;
+    gate-adequacy tracked in nexus-97dp4).
+
+    Why row-count alone is not a crude proxy, and why no separate token-budget
+    cap is added here: one long chunk pads EVERY row in its batch up to that
+    chunk's length, so a batch of 16 short chunks is far cheaper than 16 chunks
+    each near the 512-token ceiling. The arithmetic above already assumes the
+    WORST case (every row at ``maxLen=512``) — a token-budget bound could only
+    let batches grow bigger on the (common) case where chunks are shorter than
+    512 tokens; it cannot tighten the worst-case guarantee this cap already
+    provides. Treated as a throughput optimization for a future pass, not a
+    correctness gap: nothing above assumes chunks average anywhere near 512
+    tokens, it only bounds what happens if they do.
+
+    Applies to EVERY prefix, not just CCE: nexus-w3hzw's mistake generalizes —
+    ``code`` collections return 300 unconditionally (see below) and reach the
+    SAME local embedder once onnx-local is serving, so reverting only the CCE
+    widening would leave ``code__*`` reproducing the identical 77.4 GB blowup.
+
+    This is the CLIENT-side half of nexus-33hpq's fix (option A/C in the bead).
+    It reduces the blast radius but does not by itself make the engine safe
+    against a large batch arriving some other way — engine-side sub-batching in
+    ``Bge768Embedder`` (nexus-zu4ma, next engine cut) is the defense-in-depth
+    half (option B): a client sending 300 must never be able to OOM the engine.
+    Trade-off, stated plainly: a smaller onnx-local batch means ~19x more round
+    trips than the old 300 cap for the same corpus, so local-mode `nx index repo`
+    is measurably slower. That is the correct trade against an unusable (wedged)
+    install.
     """
     prefix = collection.split("__", 1)[0]
+    # nexus-33hpq: onnx-local is a MEMORY-bound mode, not a timeout-bound one —
+    # apply the memory-derived cap to every prefix (code included) before the
+    # CCE-vs-code split below, which is Voyage-cloud-specific reasoning.
+    if _serving_embedding_mode() == "onnx-local":
+        return _ONNX_LOCAL_UPSERT_CHUNK_CAP
     if prefix not in _CCE_COLLECTION_PREFIXES:
         return _CODE_UPSERT_CHUNK_CAP
-    # nexus-w3hzw (oub13 profile run 2): the 64 cap exists for VOYAGE CCE —
-    # slow server-side contextual embedding behind the managed 30s gateway.
-    # When the engine reports it serves onnx-local (bge embeds every prefix,
-    # no gateway in the topology), the CCE-prefixed collections sustain the
-    # same 300 the code prefix does; keeping them at 64 only multiplied
-    # round trips 3-5x. Unknown mode (no probe answer yet) stays on the
-    # conservative voyage split — never widen a batch on a guess.
-    if _serving_embedding_mode() == "onnx-local":
-        return _CODE_UPSERT_CHUNK_CAP
+    # Voyage CCE (or unknown mode, which stays on the conservative voyage
+    # split — never widen a batch on a guess): slow server-side contextual
+    # embedding behind the managed 30s gateway.
     return _CCE_UPSERT_CHUNK_CAP
 
 

@@ -1998,14 +1998,27 @@ class TestGatewayTransientRetry:
 
 
 def test_per_collection_chunk_cap_values(monkeypatch):
-    """nexus-w3hzw: the 64 CCE cap is VOYAGE-cloud-specific (slow CCE embed
-    behind the managed 30s gateway). Keyed on the SERVING embedder family:
-    unknown/voyage keeps the conservative split; onnx-local flushes every
-    prefix at 300 (same embedder as code; no gateway — the 64 cap only
-    multiplied round trips 3-5x, oub13 profile run 2)."""
+    """nexus-w3hzw (pre-v7.4.0) keyed the cap on the SERVING embedder family:
+    unknown/voyage keeps the conservative timeout-derived split (64 CCE / 300
+    code); onnx-local used to flush every prefix at 300, matching code's
+    throughput cap.
+
+    nexus-33hpq (2026-08-09): that onnx-local widening was timeout-calibrated
+    reasoning applied to a MEMORY-bound problem. The v7.5.0 combined write
+    (nexus-wxjr6/kl2z6) exposed it — a 300-chunk batch reaching
+    Bge768Embedder.embedBatch() (no sub-batching, no partitioning) drove the
+    local engine to 77.4 GB RSS / ~15 cores pegged and wedged the supervisor.
+    ONE onnx-local cap now applies to EVERY prefix (CCE and code alike — both
+    reach the same local embedder once the engine reports onnx-local), sized
+    by the memory arithmetic in :func:`per_collection_chunk_cap`'s docstring.
+    Voyage/unknown-mode is untouched: that path is a network call, not local
+    memory, and the 64/300 split there is still timeout-derived and correct."""
     from nexus.db import http_vector_client as hvc
 
     # Unknown serving mode (no probe answer) -> conservative voyage split.
+    # NON-VACUITY: this must stay red if per_collection_chunk_cap is
+    # "simplified" to apply the onnx-local memory cap unconditionally —
+    # cloud/Voyage callers must keep their timeout-derived throughput.
     monkeypatch.setattr(hvc, "_serving_embedding_mode", lambda: None)
     assert hvc.per_collection_chunk_cap("docs__o__x__v1") == 64
     assert hvc.per_collection_chunk_cap("knowledge__x__x__v1") == 64
@@ -2013,17 +2026,23 @@ def test_per_collection_chunk_cap_values(monkeypatch):
     assert hvc.per_collection_chunk_cap("code__x__x__v1") == 300
     assert hvc.per_collection_chunk_cap("weird-no-prefix") == 300
 
-    # Voyage serving -> identical conservative split.
+    # Voyage serving -> identical conservative split (non-vacuity, as above).
     monkeypatch.setattr(hvc, "_serving_embedding_mode", lambda: "voyage")
     assert hvc.per_collection_chunk_cap("docs__o__x__v1") == 64
     assert hvc.per_collection_chunk_cap("code__x__x__v1") == 300
 
-    # Local bge serving -> every prefix at the 300 cap.
+    # Local bge serving -> EVERY prefix at the memory-bounded onnx-local cap
+    # (nexus-33hpq), CCE and code alike — both share the one local embedder.
     monkeypatch.setattr(hvc, "_serving_embedding_mode", lambda: "onnx-local")
-    assert hvc.per_collection_chunk_cap("docs__o__x__v1") == 300
-    assert hvc.per_collection_chunk_cap("knowledge__x__x__v1") == 300
-    assert hvc.per_collection_chunk_cap("rdr__x__x__v1") == 300
-    assert hvc.per_collection_chunk_cap("code__x__x__v1") == 300
+    assert hvc.per_collection_chunk_cap("docs__o__x__v1") == hvc._ONNX_LOCAL_UPSERT_CHUNK_CAP
+    assert hvc.per_collection_chunk_cap("knowledge__x__x__v1") == hvc._ONNX_LOCAL_UPSERT_CHUNK_CAP
+    assert hvc.per_collection_chunk_cap("rdr__x__x__v1") == hvc._ONNX_LOCAL_UPSERT_CHUNK_CAP
+    assert hvc.per_collection_chunk_cap("code__x__x__v1") == hvc._ONNX_LOCAL_UPSERT_CHUNK_CAP
+    assert hvc.per_collection_chunk_cap("weird-no-prefix") == hvc._ONNX_LOCAL_UPSERT_CHUNK_CAP
+    # Pin the actual number too — a memory-bounded cap that silently regrows
+    # back toward 300 is exactly the nexus-33hpq regression recurring.
+    assert hvc._ONNX_LOCAL_UPSERT_CHUNK_CAP == 16
+    assert hvc.per_collection_chunk_cap("code__x__x__v1") != 300
 
 
 def test_serving_embedding_mode_reads_singleton_best_effort(monkeypatch):

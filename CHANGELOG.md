@@ -6,11 +6,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [7.5.0] - 2026-08-09
 
-> **DRAFT — release-prep, not yet cut.** Two P1 blockers (nexus-7z7rj,
-> nexus-hdumg) are still in flight and will land more commits before the
-> actual tag; the version number and date above are provisional and this
-> section will need review/appending at cut time, not a fresh section.
-
 Paired release with engine-service-v0.1.69 (cut, gated, deployed and
 cloud-gated green 2026-08-09; `REQUIRED_ENGINE_VERSION` bumps to it in this
 release — fresh local installs and package upgrades converge to the same
@@ -72,6 +67,43 @@ engine identity).
   in this release; no new CLI flag.
 
 ### Fixed
+- **`nx index repo` no longer drives a local engine into a multi-tens-of-GB
+  memory blowup** (nexus-33hpq) — **local-mode indexing is slower in this
+  release, deliberately.** Indexing a 36-file corpus against a local
+  (`onnx-local`) engine could take the service to **77.4 GB resident** with
+  every core pegged, until it stopped answering health checks and its
+  supervisor killed it as wedged; the client then retried against a service
+  that was no longer there. Cause: the per-collection upsert batch cap was
+  300 in local mode, but that number was derived from the managed
+  control-plane's 30s request timeout — a *latency* budget — while a local
+  ONNX embedder is bound by *memory*. The engine embeds a whole batch in one
+  forward pass over a rectangular `[batch, sequence]` tensor, so attention
+  memory grows with `batch x sequence^2`. Local mode now uses a
+  memory-derived cap of 16 for every collection prefix, which measured a
+  **3.03 GB** peak on the same corpus (with three concurrent flushes in
+  flight). The trade is real and intended: roughly 19x more round trips, so
+  a local `nx index repo` takes noticeably longer than in 7.4.x. Cloud and
+  managed (Voyage) mode are **unchanged** — there the embed is a network
+  call and the original timeout-derived caps still apply. This bounds what
+  the client sends; a matching engine-side limit so no caller can trigger
+  the blowup is tracked separately (nexus-zu4ma).
+- **`nx upgrade` no longer reports a migration step as verified when it
+  could not actually check** (nexus-hdumg) — **behaviour change worth
+  reading before you upgrade.** The chash-rekey step of the upgrade ladder
+  decided success by the *absence* of a problem signal, so when its
+  conformance diagnostic could not run at all (missing diagnostic view,
+  missing role, an errored query) the step still recorded itself as
+  "converged and verified" and the ladder advanced past it. It now reports
+  the step as failed-to-verify, stops the ladder there, and exits non-zero
+  naming the reason. The practical consequence: on a machine whose
+  diagnostic path is broken, `nx upgrade` now fails where it previously
+  appeared to succeed. That is the point — the previous silence meant an
+  unverified migration looked identical to a verified one — but it is a
+  real change in what you will see. The message names the concrete remedy
+  (`nx init --service`, which provisions the diagnostic role and view
+  directly) and distinguishes "could not verify" from "verified as not
+  migrated", since those want different responses. The rekey itself is
+  idempotent, so a stopped ladder costs a re-run, never data.
 - **The two-hop pre-PG upgrade redirect is now genuinely followable start
   to finish, in both local and cloud mode** (nexus-4922x): the third leg
   (upgrading back to current after migrating on the pinned 6.18.1 release)
