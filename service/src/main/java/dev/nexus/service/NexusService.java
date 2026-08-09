@@ -345,8 +345,16 @@ public final class NexusService {
         var pipelineCtx = server.createContext("/v1/pipeline", new PipelineHandler(pipelineRepo));
         pipelineCtx.getFilters().addAll(authFilter);
 
-        // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18)
-        var catalogCtx = server.createContext("/v1/catalog", new CatalogHandler(catalogRepo));
+        // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18). The
+        // combined-write orchestration seam (nexus-kl2z6 increment 1) rides
+        // the SAME embedder router VectorHandler/PgVectorRepository use —
+        // null when no router is wired (matches every other embed-dependent
+        // capability's absent-backend 503, never a partially-wired NPE).
+        var combinedWriteService = docEmbedderRouter != null
+            ? new dev.nexus.service.db.CombinedWriteService(tenantScope, catalogRepo, docEmbedderRouter)
+            : null;
+        var catalogCtx = server.createContext("/v1/catalog",
+                new CatalogHandler(catalogRepo, combinedWriteService));
         catalogCtx.getFilters().addAll(authFilter);
 
         // /v1/tenants/* + /v1/service-tokens/* — token lifecycle admin (bead nexus-gmiaf.32.3).

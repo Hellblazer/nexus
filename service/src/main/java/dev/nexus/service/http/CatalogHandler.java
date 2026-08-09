@@ -106,9 +106,23 @@ public final class CatalogHandler implements HttpHandler {
     private static final int MAX_BATCH_DOC_IDS = 1000;
 
     private final CatalogRepository repo;
+    private final dev.nexus.service.db.CombinedWriteService combinedWriteService;
 
     public CatalogHandler(CatalogRepository repo) {
+        this(repo, null);
+    }
+
+    /**
+     * nexus-kl2z6 increment 1: {@code combinedWriteService} may be null — a
+     * request carrying {@code chunks} then answers 503 (matches {@link
+     * VectorHandler}'s absent-backend pattern: refuse explicitly, never
+     * NPE). Every EXISTING call site keeps the 1-arg constructor and gets
+     * byte-for-byte the pre-kl2z6 behaviour.
+     */
+    public CatalogHandler(CatalogRepository repo,
+                           dev.nexus.service.db.CombinedWriteService combinedWriteService) {
         this.repo = repo;
+        this.combinedWriteService = combinedWriteService;
     }
 
     @Override
@@ -799,6 +813,24 @@ public final class CatalogHandler implements HttpHandler {
      * for the exact guard. Adds {@code swept}/{@code sweep_skipped}/
      * {@code sweep_detail} to the response, zero/empty when
      * {@code sweep=false}.
+     *
+     * <p><b>nexus-kl2z6 increment 1 — the COMBINED WRITE.</b> Optional
+     * top-level {@code "collection"} (required when {@code chunks} is
+     * present) and {@code "chunks": [{"chash", "text", "metadata"}, ...]}.
+     * When {@code chunks} is present, each doc's manifest write AND the
+     * chunk VECTOR rows its own manifest references land in the SAME
+     * per-doc transaction (T2 {@code design-kl2z6-combined-write} §0) via
+     * {@link dev.nexus.service.db.CombinedWriteService}. Absent {@code
+     * chunks} is BACKWARD COMPATIBLE, byte-for-byte the pre-kl2z6 path
+     * (design memo §5.1) — including the response shape: {@code
+     * chunks_written} appears ONLY when this call carried {@code chunks}
+     * (design memo §5.2 — the ONLY runtime signal a client has that this
+     * engine understands the combined write; an old engine silently drops
+     * the unknown {@code chunks} field with no error). Optional {@code
+     * "force_re_embed"} mirrors {@code /v1/vectors/upsert-chunks}' escape
+     * from the RDR-181 existence-partition. 503 when no {@link
+     * dev.nexus.service.db.CombinedWriteService} is wired (matches {@link
+     * VectorHandler}'s absent-backend pattern).
      */
     @SuppressWarnings("unchecked")
     private void handleManifestWriteMany(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -856,6 +888,60 @@ public final class CatalogHandler implements HttpHandler {
         // is opt-IN, cross_collection is opt-OUT), so an in-flight client
         // built against the pre-eslkl 3-arg shape gets identical behaviour.
         boolean sweep = Boolean.TRUE.equals(body.get("sweep"));
+
+        // nexus-kl2z6 increment 1: optional combined-write payload. `chunks`
+        // ABSENT (the common case, and every pre-kl2z6 caller) takes the
+        // untouched byte-for-byte-compatible path below.
+        Object rawChunks = body.get("chunks");
+        if (rawChunks != null) {
+            if (combinedWriteService == null) {
+                HttpUtil.send(exchange, 503, "{\"error\":\"combined write not configured"
+                    + " (no CombinedWriteService)\"}");
+                return;
+            }
+            if (!(rawChunks instanceof List<?> cl)) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"'chunks' must be a list\"}"); return;
+            }
+            Object rawCollection = body.get("collection");
+            if (!(rawCollection instanceof String collection) || collection.isBlank()) {
+                HttpUtil.send(exchange, 400,
+                    "{\"error\":\"'collection' required when 'chunks' is present\"}"); return;
+            }
+            List<Map<String, Object>> chunks = new ArrayList<>(cl.size());
+            for (int i = 0; i < cl.size(); i++) {
+                if (!(cl.get(i) instanceof Map)) {
+                    HttpUtil.send(exchange, 400,
+                        "{\"error\":\"chunks[" + i + "]: every element must be an object\"}"); return;
+                }
+                Map<String, Object> chunk = new LinkedHashMap<>((Map<String, Object>) cl.get(i));
+                Object chashObj = chunk.get("chash");
+                if (!(chashObj instanceof String chashStr)) {
+                    HttpUtil.send(exchange, 400,
+                        "{\"error\":\"chunks[" + i + "]: 'chash' required (string)\"}"); return;
+                }
+                try {
+                    chunk.put("chash", dev.nexus.service.db.Chash.requireCanonical(chashStr, "chunks[" + i + "]"));
+                } catch (IllegalArgumentException e) {
+                    HttpUtil.send(exchange, 400,
+                        "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}"); return;
+                }
+                if (!(chunk.get("text") instanceof String)) {
+                    HttpUtil.send(exchange, 400,
+                        "{\"error\":\"chunks[" + i + "]: 'text' required (string)\"}"); return;
+                }
+                chunks.add(chunk);
+            }
+            boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
+            var combined = combinedWriteService.writeManyCombined(
+                tenant, collection, chunks, docs, complete, sweep, forceReEmbed);
+            if (combined.tokens() > 0) {
+                exchange.getResponseHeaders().set(
+                    VectorHandler.USAGE_TOKENS_HEADER, Long.toString(combined.tokens()));
+            }
+            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(combined.response()));
+            return;
+        }
+
         var result = repo.writeManifestMany(tenant, docs, complete, sweep);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }

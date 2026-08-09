@@ -36,10 +36,13 @@ import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.DimTables;
+import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
+import org.jooq.JSONB;
 import org.jooq.Query;
 import org.jooq.SelectField;
 import org.jooq.Table;
@@ -51,7 +54,9 @@ import org.slf4j.LoggerFactory;
 
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -3779,6 +3784,43 @@ public final class CatalogRepository {
 
     private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
                                           List<Map<String, Object>> rows) {
+        return writeManifestRows(ctx, tenant, docId, rows, null, null, null);
+    }
+
+    /**
+     * nexus-kl2z6 increment 1 (design memo §0 transaction structure): same
+     * per-doc REPLACE as the 4-arg overload, with ONE addition — when {@code
+     * resolvedChunks} is non-null (the combined-write path,
+     * {@link #writeManifestMany(String, List, Map, boolean, String, Map)}),
+     * this doc's chunk VECTOR rows are upserted into {@code chunks_<dim>}
+     * INSIDE this SAME per-doc transaction, under the sweep gate SHARED
+     * already held below, BEFORE the manifest DELETE+INSERT — so a chunk row
+     * from this path can never be observed committed without the manifest
+     * row that references it (and vice versa).
+     *
+     * @param chunkCollection the combined-write request's top-level {@code
+     *        collection} (drives {@code chunks_<dim>} table dispatch) —
+     *        required and used only when {@code resolvedChunks != null}.
+     * @param resolvedChunks  pre-embedded, pre-sanitized (chash -> content)
+     *        tuples from THIS call's {@code chunks} payload, resolved by
+     *        {@code CombinedWriteService} entirely OUTSIDE any transaction
+     *        before the first per-doc transaction opens (design memo §0). A
+     *        manifest chash absent from this map is expected to already
+     *        exist in the store (§1.2: "send the text for every chunk in
+     *        the flush", not a delta) — verified in-transaction and, if
+     *        missing there too, fails this doc loud (never a silent
+     *        dangling reference). {@code null} means "no combined write" —
+     *        byte-for-byte the pre-kl2z6 behaviour (§5.1).
+     * @param chunksWrittenOut single-cell output: set to the count of chash
+     *        rows actually written for this doc (the {@code chunks_written}
+     *        response echo's per-doc contribution). Untouched when {@code
+     *        resolvedChunks} is null.
+     */
+    private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
+                                          List<Map<String, Object>> rows,
+                                          String chunkCollection,
+                                          Map<String, ResolvedChunk> resolvedChunks,
+                                          int[] chunksWrittenOut) {
         // nexus-11gh6 rev 2 §2.2: the sweep gate's SHARED half is taken
         // BEFORE acquireIndexRunLock (table in acquireSweepGateShared's
         // javadoc) — future-proofing ordering, not load-bearing under the
@@ -3794,6 +3836,18 @@ public final class CatalogRepository {
         // so a concurrent completeIndexRun for the same doc either runs entirely
         // before or entirely after this manifest mutation, never interleaved.
         acquireIndexRunLock(ctx, tenant, docId);
+        // nexus-kl2z6 increment 1 (design memo §0): the chunk-vector UPSERT
+        // runs BEFORE the manifest DELETE+INSERT below — a chash lands in
+        // chunks_<dim> before (in this same, still-open transaction) the
+        // manifest row that references it is even written, so a concurrent
+        // reader can only ever observe both or neither, never one without
+        // the other.
+        if (resolvedChunks != null) {
+            int written = upsertManifestChunkVectors(ctx, tenant, chunkCollection, rows, resolvedChunks);
+            if (chunksWrittenOut != null) {
+                chunksWrittenOut[0] = written;
+            }
+        }
         ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
         if (!rows.isEmpty()) {
             stampIndexedAt(ctx, tenant, docId);
@@ -3825,6 +3879,121 @@ public final class CatalogRepository {
                 "writeManifest refused: document is tombstoned: " + docId);
         }
         return coll;
+    }
+
+    /**
+     * nexus-kl2z6 increment 1: one resolved (already embedded, already
+     * NUL-sanitized) chunk from a combined write's top-level {@code chunks}
+     * payload. Built by {@code CombinedWriteService} entirely OUTSIDE any
+     * transaction (design memo §0 — embedding never happens inside a
+     * {@code writeManifestMany} transaction) and handed in as a {@code
+     * chash -> ResolvedChunk} map for {@link #writeManifestMany(String,
+     * List, Map, boolean, String, Map)} to consume, one doc's transaction
+     * at a time.
+     *
+     * @param metadataJson pre-serialized JSON (mirrors {@code
+     *        PgVectorRepository}'s {@code toJson} convention — serialized
+     *        once by the caller, not re-serialized per doc that references
+     *        a shared chash).
+     */
+    public record ResolvedChunk(String text, float[] embedding, String metadataJson) {}
+
+    /**
+     * nexus-kl2z6 increment 1 (design memo §0/§1.4): upsert THIS doc's chunk
+     * VECTOR rows into {@code chunks_<dim>}, sharing the CALLER's already-open
+     * transaction — cannot call {@link PgVectorRepository#upsertChunksWithVectors},
+     * which opens its OWN transaction, so this replicates ONLY the two
+     * hard-required disciplines from that method (design memo §1.4) since
+     * embedding itself already happened, outside every transaction, in the
+     * caller's orchestration seam:
+     * <ol>
+     *   <li>Dedupe the doc's OWN chash set (first occurrence wins) before
+     *       building the VALUES list — a doc referencing the same chash at
+     *       two positions (repeated boilerplate, routine) would otherwise
+     *       pass a duplicate ON CONFLICT key to ONE multi-row INSERT, which
+     *       PostgreSQL rejects ({@code ERROR 21000}).</li>
+     *   <li>Iterate in GLOBAL lexicographic chash order (nexus-ps9wb) — the
+     *       same deadlock discipline {@code PgVectorRepository}'s upsert
+     *       already applies at the top-level-batch grain, replicated here at
+     *       the new per-doc-transaction grain (two concurrent per-doc
+     *       transactions from different flush workers whose chash sets
+     *       overlap could otherwise lock rows in opposite orders).</li>
+     * </ol>
+     *
+     * <p>A manifest chash NOT present in {@code resolved} (this call's
+     * {@code chunks} payload) is expected to ALREADY exist in {@code
+     * chunks_<dim>} — the client resends full text for every chunk in a
+     * flush rather than a content delta (design memo §1.2). Verified with
+     * one existence SELECT inside THIS transaction; a chash missing from
+     * BOTH {@code chunks} and the store fails this doc loud (propagates,
+     * rolling back this doc's whole transaction via {@link
+     * TenantScope#withTenant} — caught by {@link #writeManifestMany}'s
+     * per-doc catch, landing in {@code failed}/{@code failed_doc_ids}) —
+     * a manifest row must never reference a chunk that does not exist.
+     *
+     * @return count of chash rows actually written (INSERT ... ON CONFLICT)
+     *         — this doc's contribution to the {@code chunks_written}
+     *         response echo.
+     */
+    private static int upsertManifestChunkVectors(DSLContext ctx, String tenant, String collection,
+                                                   List<Map<String, Object>> rows,
+                                                   Map<String, ResolvedChunk> resolved) {
+        if (rows == null || rows.isEmpty()) return 0;
+        // (1.4.1) dedupe — first occurrence wins, matches
+        // PgVectorRepository.upsertChunksInternal's `Set<String> seen` discipline.
+        LinkedHashSet<String> chashes = new LinkedHashSet<>();
+        for (var row : rows) {
+            String c = s(row, "chash");
+            if (c != null && !c.isBlank()) chashes.add(c);
+        }
+        if (chashes.isEmpty()) return 0;
+
+        List<String> toWrite = new ArrayList<>();
+        List<String> mustAlreadyExist = new ArrayList<>();
+        for (String c : chashes) {
+            if (resolved.containsKey(c)) toWrite.add(c); else mustAlreadyExist.add(c);
+        }
+
+        int dim = PgVectorRepository.dimForCollection(collection);
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+
+        if (!mustAlreadyExist.isEmpty()) {
+            Set<String> present = new HashSet<>();
+            ctx.select(ch.chash()).from(ch.table())
+               .where(ch.tenantId().eq(tenant)
+                      .and(ch.collection().eq(collection))
+                      .and(ch.chash().in(mustAlreadyExist)))
+               .fetch()
+               .forEach(r -> present.add(r.value1()));
+            for (String c : mustAlreadyExist) {
+                if (!present.contains(c)) {
+                    throw new IllegalArgumentException(
+                        "manifest references chash '" + c + "' absent from 'chunks' and not"
+                        + " already present in collection '" + collection + "'");
+                }
+            }
+        }
+        if (toWrite.isEmpty()) return 0;
+
+        // (1.4.2) nexus-ps9wb: GLOBAL lexicographic order — same lock-acquisition
+        // discipline PgVectorRepository's chash sort already applies, at this new
+        // per-doc transaction grain.
+        Collections.sort(toWrite);
+
+        var insert = ctx.insertInto(ch.table(),
+                ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(), ch.embedding(), ch.metadata());
+        for (String c : toWrite) {
+            ResolvedChunk rc = resolved.get(c);
+            insert = insert.values(tenant, collection, c, rc.text(),
+                    Vector.of(rc.embedding()), JSONB.jsonb(rc.metadataJson()));
+        }
+        insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
+              .doUpdate()
+              .set(ch.chunkText(), DSL.excluded(ch.chunkText()))
+              .set(ch.embedding(), DSL.excluded(ch.embedding()))
+              .set(ch.metadata(),  DSL.excluded(ch.metadata()))
+              .execute();
+        return toWrite.size();
     }
 
     /**
@@ -3917,10 +4086,55 @@ public final class CatalogRepository {
      */
     public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs,
                                                   Map<String, String> complete, boolean sweep) {
+        return writeManifestMany(tenant, docs, complete, sweep, null, null);
+    }
+
+    /**
+     * nexus-kl2z6 increment 1 — the COMBINED WRITE: extends the {@code
+     * sweep}-flagged overload with the design memo's §0 recommendation.
+     * When {@code resolvedChunks} is non-null, each doc's chunk VECTOR rows
+     * are upserted into {@code chunks_<dim>} INSIDE that doc's OWN per-doc
+     * transaction (see {@link #writeManifestRows(DSLContext, String,
+     * String, List, String, Map, int[])}), BEFORE the manifest
+     * DELETE+INSERT, under the SAME sweep gate SHARED that transaction
+     * already takes. A chunk row from this path can therefore never be
+     * observed committed without the manifest row that references it (and
+     * vice versa) — there is no window to size, because there is no
+     * interval (design memo §0).
+     *
+     * <p>{@code resolvedChunks} MUST already be fully resolved — embedded,
+     * NUL-sanitized, existence-partitioned against RDR-181 (known chashes
+     * never re-embedded) — by the caller ({@code CombinedWriteService})
+     * entirely OUTSIDE any transaction, BEFORE this method's first per-doc
+     * transaction opens. No embedding work ever runs inside a
+     * {@code writeManifestMany} transaction.
+     *
+     * <p>{@code null} for both {@code collection} and {@code
+     * resolvedChunks} is "no combined write" — BACKWARD COMPATIBLE,
+     * byte-for-byte the pre-kl2z6 behaviour (design memo §5.1): every other
+     * overload above delegates here with both null, and the response omits
+     * {@code chunks_written} entirely in that case (adding an always-present
+     * key, even zero-valued, would NOT be byte-for-byte identical).
+     *
+     * @param collection      the combined-write request's top-level {@code
+     *        collection} (drives {@code chunks_<dim>} table dispatch).
+     *        Required (non-null) when {@code resolvedChunks} is non-null.
+     * @param resolvedChunks  pre-resolved {@code chash -> ResolvedChunk}
+     *        map from this call's {@code chunks} payload, or {@code null}
+     *        for no combined write.
+     * @return {@code {docs, rows, failed_doc_ids, failed, complete_refused,
+     *         complete_refused_count, swept, sweep_skipped, sweep_detail}}
+     *         plus {@code chunks_written} when {@code resolvedChunks !=
+     *         null}.
+     */
+    public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs,
+                                                  Map<String, String> complete, boolean sweep,
+                                                  String collection, Map<String, ResolvedChunk> resolvedChunks) {
         int okDocs = 0;
         int totalRows = 0;
         int totalSwept = 0;
         int sweepSkipped = 0;
+        int totalChunksWritten = 0;
         List<String> failed = new ArrayList<>();
         List<Map<String, Object>> failedDetail = new ArrayList<>();
         List<Map<String, Object>> completeRefused = new ArrayList<>();
@@ -3943,6 +4157,7 @@ public final class CatalogRepository {
                 Map<String, Object>[] sweepOutcome = new Map[1];
                 String[] collHolder = new String[1];
                 Set<String>[] beforeHolder = new Set[1];
+                int[] chunksWrittenHolder = new int[1];
                 try {
                     if (docId == null || docId.isBlank()) {
                         throw new IllegalArgumentException("'doc_id' required");
@@ -3973,7 +4188,8 @@ public final class CatalogRepository {
                                   tenant, docId, () -> currentManifestChashes(ctx, tenant, docId), null)
                             : Set.of();
                         boolean beforeReadFailed = sweep && beforeRead == null;
-                        collHolder[0] = writeManifestRows(ctx, tenant, docId, rows);
+                        collHolder[0] = writeManifestRows(ctx, tenant, docId, rows,
+                                collection, resolvedChunks, chunksWrittenHolder);
                         if (beforeReadFailed) {
                             // Nothing to compute — the before-read itself is what
                             // failed, so `dropped` was never determined. Reported
@@ -3995,6 +4211,7 @@ public final class CatalogRepository {
                     });
                     okDocs++;
                     totalRows += rows.size();
+                    totalChunksWritten += chunksWrittenHolder[0];
                     // nexus-11gh6 rev 2 §2.3: fired ONLY after the manifest
                     // transaction above has COMMITTED (this line is unreachable
                     // if that transaction threw or failed to commit — control
@@ -4064,6 +4281,17 @@ public final class CatalogRepository {
         result.put("swept", totalSwept);
         result.put("sweep_skipped", sweepSkipped);
         result.put("sweep_detail", sweepDetail);
+        // nexus-kl2z6 increment 1 (design memo §5.1/§5.2): ONLY present when
+        // this call actually carried `chunks` — an absent field is what
+        // makes the no-chunks path byte-for-byte identical to pre-kl2z6
+        // behaviour, and its PRESENCE is the client's only runtime signal
+        // that this engine understands the combined write (an old engine
+        // silently drops the unknown `chunks` request field with no error,
+        // so the client checks for this key's absence to fail loud instead
+        // of silently losing content).
+        if (resolvedChunks != null) {
+            result.put("chunks_written", totalChunksWritten);
+        }
         return result;
     }
 
