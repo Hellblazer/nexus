@@ -28,16 +28,19 @@ THE LOAD-BEARING REQUIREMENT. An abort produces NEITHER a "[FAIL]" line nor
 a complete "N passed, M failed" summary line — a wrapper that greps stdout
 for "failed" or "FAIL" would have stayed green through the entire two-day
 blind window described above (it would see nothing, and "nothing" is not
-the same as "clean"). This gate therefore asserts on the PROCESS EXIT CODE
-first (the suite's own ``set -u -o pipefail`` plus its explicit
-``exit 1``/``exit 0`` tail makes rc the honest signal an abort cannot fake),
-and separately requires the summary line to be present with an EXACT pinned
-count as a non-vacuity floor, so a hypothetical truncated-but-rc-0 run would
-still fail. ``expectations_test.sh`` has no randomness in its assertion
-COUNT (Test 2b races 40 concurrent writers but always asserts exactly 40
-rows, never a variable number), so the count is pinned exactly rather than
-via an inequality floor — matching this repo's "exact fixture assertions"
-convention for deterministic fixtures.
+the same as "clean"). This gate checks, IN ORDER: (1) the summary line is
+present at all — its absence alone is a hard failure, independent of rc,
+covering a hypothetical truncated-but-rc-0 run; (2) the subprocess RETURN
+CODE is 0 — the suite's own ``set -u -o pipefail`` plus its explicit
+``exit 1``/``exit 0`` tail makes rc the honest signal an abort cannot fake,
+and is what actually fires for every abort observed so far (an abort has no
+summary line either, so check (1) already catches it — the rc check is the
+second, independent tripwire, not a fallback); (3) the reported counts match
+an EXACT pinned (passed, failed) pair. ``expectations_test.sh`` has no
+randomness in its assertion COUNT (Test 2b races 40 concurrent writers but
+always asserts exactly 40 rows, never a variable number), so the count is
+pinned exactly rather than via an inequality floor — matching this repo's
+"exact fixture assertions" convention for deterministic fixtures.
 """
 from __future__ import annotations
 
@@ -63,12 +66,14 @@ def test_expectations_shellib_suite_is_green() -> None:
     """The RDR-184 ledger shellib's own unit suite must run to completion
     and report zero failures.
 
-    Gates on the subprocess return code, not on grepping stdout for a
-    failure marker (see module docstring for why that distinction is the
-    entire point of this test). A future edit to expectations.sh that
-    reintroduces an unguarded ``set -u`` deref, or any other early-abort
-    defect, fails THIS test via the rc assertion even though it would
-    print no "[FAIL]" line at all.
+    Checks the summary-line presence, then the subprocess return code, then
+    the exact reported counts — never a stdout grep for a failure marker
+    (see module docstring for why that distinction is the entire point of
+    this test). A future edit to expectations.sh that reintroduces an
+    unguarded ``set -u`` deref, or any other early-abort defect, fails THIS
+    test at the FIRST assertion (no summary line at all) even though it
+    would print no "[FAIL]" line; the rc assertion right after it is an
+    independent, redundant tripwire for the same class of failure.
     """
     result = subprocess.run(
         ["bash", str(SUITE)],
