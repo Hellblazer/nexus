@@ -609,10 +609,17 @@ def per_collection_chunk_cap(collection: str) -> int:
     against a large batch arriving some other way — engine-side sub-batching in
     ``Bge768Embedder`` (nexus-zu4ma, next engine cut) is the defense-in-depth
     half (option B): a client sending 300 must never be able to OOM the engine.
-    Trade-off, stated plainly: a smaller onnx-local batch means ~19x more round
-    trips than the old 300 cap for the same corpus, so local-mode `nx index repo`
-    is measurably slower. That is the correct trade against an unusable (wedged)
-    install.
+    Trade-off, stated only as far as it was measured: a smaller batch means more
+    round trips, and the increase grows with corpus size — it approaches the cap
+    ratio (300/16) only for a corpus large enough that flushes actually REACH the
+    cap. It is far smaller for anything that flushes on file-grain boundaries
+    first. NO throughput regression has been measured: on the shakedown fixture
+    the whole indexing step ran 3m20s for 92 chunks / 8 flushes with ~29s of that
+    in upload, and the full gate finished inside its documented cold-run band.
+    There is no clean before/after to quote, because the cap=300 case WEDGED
+    rather than completing. Do not restate a speed cost as fact without measuring
+    it (nexus-fdn1c); the correct trade here is against an unusable install, and
+    that argument does not need a throughput number to stand up.
     """
     prefix = collection.split("__", 1)[0]
     # nexus-33hpq: onnx-local is a MEMORY-bound mode, not a timeout-bound one —

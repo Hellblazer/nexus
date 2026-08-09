@@ -4,6 +4,24 @@ All notable changes to Nexus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Corrected
+- **The 7.5.0 note for `nx index repo` overstated a throughput cost that was
+  never measured** (nexus-fdn1c). It said the memory-derived local batch cap
+  means "roughly 19x more round trips, so a local `nx index repo` takes
+  noticeably longer than in 7.4.x". The 19x is only the cap ratio (300/16) —
+  an upper bound reached solely on a corpus large enough for flushes to hit
+  the ceiling, which the release gate's own fixture never does. No slowdown
+  was measured, and none could be: the pre-fix case wedged rather than
+  completing, so there is no baseline to compare against. For the record, the
+  indexing step ran 3m20s for 92 chunks across 8 flushes (~29s of it upload),
+  and the full gate finished inside its documented cold-run band. A smaller
+  batch does mean more round trips and may cost throughput on a large corpus;
+  measuring that properly is nexus-fdn1c. The published 7.5.0 release notes
+  are frozen with the original wording; the docstring in
+  `per_collection_chunk_cap` has been corrected alongside this entry.
+
 ## [7.5.0] - 2026-08-09
 
 Paired release with engine-service-v0.1.69 (cut, gated, deployed and
@@ -68,8 +86,7 @@ engine identity).
 
 ### Fixed
 - **`nx index repo` no longer drives a local engine into a multi-tens-of-GB
-  memory blowup** (nexus-33hpq) — **local-mode indexing is slower in this
-  release, deliberately.** Indexing a 36-file corpus against a local
+  memory blowup** (nexus-33hpq). Indexing a 36-file corpus against a local
   (`onnx-local`) engine could take the service to **77.4 GB resident** with
   every core pegged, until it stopped answering health checks and its
   supervisor killed it as wedged; the client then retried against a service
@@ -81,12 +98,14 @@ engine identity).
   memory grows with `batch x sequence^2`. Local mode now uses a
   memory-derived cap of 16 for every collection prefix, which measured a
   **3.03 GB** peak on the same corpus (with three concurrent flushes in
-  flight). The trade is real and intended: roughly 19x more round trips, so
-  a local `nx index repo` takes noticeably longer than in 7.4.x. Cloud and
-  managed (Voyage) mode are **unchanged** — there the embed is a network
-  call and the original timeout-derived caps still apply. This bounds what
-  the client sends; a matching engine-side limit so no caller can trigger
-  the blowup is tracked separately (nexus-zu4ma).
+  flight). A smaller batch does mean more round trips, and on a large enough
+  corpus that could cost throughput — but no slowdown was measured, and the
+  originally-published note for this release overstated it. See the
+  correction under [Unreleased]. Cloud and managed (Voyage) mode are
+  **unchanged** — there the embed is a network call and the original
+  timeout-derived caps still apply. This bounds what the client sends; a
+  matching engine-side limit so no caller can trigger the blowup is tracked
+  separately (nexus-zu4ma).
 - **`nx upgrade` no longer reports a migration step as verified when it
   could not actually check** (nexus-hdumg) — **behaviour change worth
   reading before you upgrade.** The chash-rekey step of the upgrade ladder
