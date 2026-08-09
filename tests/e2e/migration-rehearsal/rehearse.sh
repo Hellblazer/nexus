@@ -450,6 +450,22 @@ for p in "${RAN_PHASES[@]}"; do
   d="$(_phase_desc "$p")"
   PHASES_DESC="${PHASES_DESC:+$PHASES_DESC; }$d"
 done
+
+# nexus-f4apk(b): the coverage gap made visible at RUNTIME, not only in a
+# source comment a reader choosing flags may never open (review [22094]).
+# run.sh guards --with-cloud combined with --comprehensive/--stress as
+# mutually exclusive (Phase D/E are declared deterministic bge-768 LOCAL), so
+# whenever the voyage leg is live inside THIS script, Phase D provably did
+# not run against it — check RAN_PHASES directly (not the run.sh guard, which
+# this script cannot see if invoked standalone) so the note stays correct even
+# if rehearse.sh is ever driven without going through run.sh's arg parser.
+if [ "${WITH_CLOUD:-0}" = 1 ]; then
+  case " ${RAN_PHASES[*]:-} " in
+    *" D "*) : ;;  # defensive: unreachable while run.sh's guard holds
+    *) note "coverage note (nexus-f4apk / nexus-itxet): --with-cloud ran without Phase D — the daily-driver surface (T2/T1/T3/catalog/doctor) was NOT exercised against Voyage this run." ;;
+  esac
+fi
+
 if [ "$FAILS" -eq 0 ]; then
   printf '\033[32mREHEARSAL PASSED\033[0m — phases executed: %s\n' "$PHASES_DESC"
   exit 0
