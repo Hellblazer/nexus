@@ -114,3 +114,16 @@ mechanize, it matters enough to ship.
   Installed sessions keep the pre-round-1 racy-unlocked-fallback
   behavior (rare, load-dependent, undisclosed over-block of the
   owes-report SubagentStop guard) until the next plugin release.
+- `conexus/hooks/scripts/subagent-start.sh` — nexus-5kwkf: a new
+  `Preflight` row in the injected Orchestration table tells every
+  worktree-isolated dispatch to run `scripts/agent-worktree-preflight.sh`
+  as its FIRST action and stop on any `PREFLIGHT_FAIL` line, closing the
+  delivery gap the substantive-critic flagged (guidance existed only as
+  prose a relay author had to retype; the harness cuts `isolation:worktree`
+  worktrees from the default branch's tip, not the session's branch, so a
+  fresh worktree can be silently stale — see `scripts/agent-worktree-
+  preflight.sh` and `AGENTS.md` Hot rules). Installed sessions get no
+  Preflight row until the next plugin release; this repo's own AGENTS.md
+  bullet is the interim delivery path for THIS repo's own top-level
+  session. Residual left open on nexus-5kwkf: item (c) (harness-internal
+  root cause) is tracked separately as nexus-vzjps.
