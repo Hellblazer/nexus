@@ -8,8 +8,15 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.StagingPromoteOps;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.binding.VectorBinding;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.Field;
+import org.jooq.JSONB;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -19,6 +26,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+
+import static org.jooq.impl.DSL.excluded;
 
 /**
  * RDR-180 LAND-THEN-TRANSFORM HTTP surface (nexus-jxizy.10.4).
@@ -33,7 +42,7 @@ import java.util.Map;
  *                                   per-(tenant,collection) promote txn
  *   POST /v1/staging/finalize       {orphan_policy?} — the IDEMPOTENT
  *                                   re-runnable tenant finalize
- *   POST /v1/staging/clear          per-tenant DELETE across all 8 tables
+ *   POST /v1/staging/clear          per-tenant DELETE across all 7 tables
  *   GET  /v1/staging/counts         per-store staged counts (parity checks)
  * </pre>
  *
@@ -57,42 +66,130 @@ public final class StagingHandler implements HttpHandler {
     /** Embed-fill batch size (matches the serving upsert's embed batching). */
     private static final int EMBED_BATCH = 64;
 
-    /** Per-store landing spec: staged columns in wire order + conflict clause. */
-    private record StoreSpec(String table, List<String> columns, String conflict) {
+    /**
+     * Per-store landing spec: staged columns in wire order, the ON CONFLICT
+     * target columns, and the update-set columns (empty = DO NOTHING).
+     * nexus-4okz4 increment 4: replaces the former opaque raw-SQL
+     * {@code conflict} string with typed metadata so {@code handleLoad}
+     * composes the INSERT via jOOQ's {@code onConflict(...).doUpdate()}
+     * DSL instead of string concatenation.
+     */
+    private record StoreSpec(String table, List<String> columns,
+                              List<String> conflictColumns, List<String> updateColumns) {
+        /**
+         * Typed table reference for a runtime-known (but not codegen-known —
+         * staging is transient landing state, outside jOOQ's nexus/t1
+         * inputSchema scope) table name. Same {@code DSL.table(DSL.name(...))}
+         * idiom as {@code VersionHandler.DATABASECHANGELOG} / {@code
+         * ChashCensus}'s dynamic table references.
+         */
+        Table<?> dslTable() {
+            int dot = table.indexOf('.');
+            return DSL.table(DSL.name(table.substring(0, dot), table.substring(dot + 1)));
+        }
     }
 
     private static final Map<String, StoreSpec> STORES = Map.of(
         "chunks", new StoreSpec("staging.chunks",
             List.of("collection", "dim", "legacy_ref", "chunk_text", "embedding", "model", "chunk_meta"),
-            "ON CONFLICT (tenant_id, collection, legacy_ref) DO UPDATE SET "
-            + "dim = excluded.dim, chunk_text = excluded.chunk_text, "
-            + "embedding = excluded.embedding, model = excluded.model, "
-            + "chunk_meta = excluded.chunk_meta"),
+            List.of("tenant_id", "collection", "legacy_ref"),
+            List.of("dim", "chunk_text", "embedding", "model", "chunk_meta")),
         "document_chunks", new StoreSpec("staging.document_chunks",
             List.of("doc_id", "position", "chash", "chunk_index", "line_start", "line_end", "char_start", "char_end"),
-            "ON CONFLICT (tenant_id, doc_id, position) DO UPDATE SET chash = excluded.chash"),
+            List.of("tenant_id", "doc_id", "position"),
+            List.of("chash")),
         "topic_assignments", new StoreSpec("staging.topic_assignments",
             // topic_label + topic_collection are the CROSS-STORE topic
             // identity (critic-p1 Critical): the landing client sends the
             // SQLite topic_assignments JOIN topics projection; the legacy
             // integer id is audit-only (BIGSERIAL spaces never align).
             List.of("doc_id", "topic_id", "topic_label", "topic_collection"),
-            "ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING"),
+            List.of("tenant_id", "doc_id", "topic_id"),
+            List.of()),
         "frecency", new StoreSpec("staging.frecency",
             List.of("chunk_id", "embedded_at", "ttl_days", "frecency_score", "miss_count", "last_hit_at"),
-            "ON CONFLICT (tenant_id, chunk_id) DO NOTHING"),
+            List.of("tenant_id", "chunk_id"),
+            List.of()),
         "relevance_log", new StoreSpec("staging.relevance_log",
             List.of("id", "query", "chunk_id", "collection", "action", "session_id", "ts"),
-            "ON CONFLICT (tenant_id, id) DO NOTHING"),
+            List.of("tenant_id", "id"),
+            List.of()),
         "document_aspects", new StoreSpec("staging.document_aspects",
             List.of("doc_id", "collection", "source_path", "problem_formulation", "proposed_method",
                     "experimental_datasets", "experimental_baselines", "experimental_results",
                     "extras", "confidence", "extracted_at", "model_version", "extractor_name", "source_uri"),
-            "ON CONFLICT (tenant_id, collection, source_path) DO NOTHING"),
+            List.of("tenant_id", "collection", "source_path"),
+            List.of()),
         "aspect_extraction_queue", new StoreSpec("staging.aspect_extraction_queue",
             List.of("collection", "source_path", "doc_id", "content_hash", "content", "status",
                     "retry_count", "enqueued_at", "last_attempt_at", "last_error"),
-            "ON CONFLICT (tenant_id, collection, source_path) DO NOTHING"));
+            List.of("tenant_id", "collection", "source_path"),
+            List.of()));
+
+    /**
+     * Typed ad-hoc {@code Field} for a staging column by name (nexus-4okz4
+     * increment 4). {@code embedding} carries the same {@link VectorBinding}
+     * generated {@code chunks_&lt;dim&gt;.embedding} columns use (renders
+     * the {@code ::vector} cast automatically); {@code chunk_meta} is a
+     * jOOQ {@link JSONB} field (renders {@code ::jsonb} automatically, same
+     * as every generated {@code metadata} column). Every other column is a
+     * plain {@code Object} field — same runtime-type-driven bind jOOQ used
+     * for the former plain-SQL {@code ?} placeholders, just routed through
+     * the typed DSL instead of string concatenation.
+     */
+    @SuppressWarnings("unchecked")
+    private static Field<Object> dynField(String name) {
+        if ("embedding".equals(name)) {
+            return (Field<Object>) (Field<?>) DSL.field(DSL.name(name),
+                SQLDataType.OTHER.asConvertedDataType(new VectorBinding()));
+        }
+        if ("chunk_meta".equals(name)) {
+            return (Field<Object>) (Field<?>) DSL.field(DSL.name(name), JSONB.class);
+        }
+        return DSL.field(DSL.name(name), Object.class);
+    }
+
+    /**
+     * Wire-JSON value -&gt; bind value for one staging column (nexus-4okz4
+     * increment 4). {@code embedding} (a JSON number array) becomes a
+     * {@link Vector}; {@code chunk_meta} (an arbitrary JSON value) becomes
+     * a {@link JSONB} literal (mirrors the original {@code ?::jsonb} cast —
+     * every OTHER column, {@code document_aspects.extras} included, passes
+     * through verbatim, exactly as the original code's plain {@code ?}
+     * branch did (relying on PostgreSQL's assignment-context implicit
+     * cast for any column that happens to be jsonb without an explicit
+     * cast) — this conversion does not change that behavior either way.
+     */
+    @SuppressWarnings("unchecked")
+    private static Object columnValue(String column, Object raw) throws IOException {
+        if (raw == null) {
+            return null;
+        }
+        if ("embedding".equals(column)) {
+            List<Number> nums = (List<Number>) raw;
+            float[] floats = new float[nums.size()];
+            for (int i = 0; i < floats.length; i++) {
+                floats[i] = nums.get(i).floatValue();
+            }
+            return Vector.of(floats);
+        }
+        if ("chunk_meta".equals(column)) {
+            return JSONB.valueOf(MAPPER.writeValueAsString(raw));
+        }
+        return raw;
+    }
+
+    // Fixed-shape typed handles for staging.chunks (nexus-4okz4 increment 4):
+    // handleEmbedFill's queries target this ONE, compile-time-known table with
+    // compile-time-known columns — not the per-store dynamic shape handleLoad
+    // deals with — so class-level constants read better than re-deriving
+    // dynField(...) calls at every use site.
+    private static final Table<?> STAGING_CHUNKS = DSL.table(DSL.name("staging", "chunks"));
+    private static final Field<String> SC_LEGACY_REF = DSL.field(DSL.name("legacy_ref"), String.class);
+    private static final Field<String> SC_CHUNK_TEXT = DSL.field(DSL.name("chunk_text"), String.class);
+    private static final Field<String> SC_COLLECTION = DSL.field(DSL.name("collection"), String.class);
+    private static final Field<Vector> SC_EMBEDDING = DSL.field(DSL.name("embedding"),
+        SQLDataType.OTHER.asConvertedDataType(new VectorBinding()));
 
     private final TenantScope tenantScope;
     private final StagingPromoteOps promoteOps;
@@ -163,48 +260,53 @@ public final class StagingHandler implements HttpHandler {
                 "rows exceeds the per-load cap (" + rows.size() + " > " + MAX_ROWS_PER_LOAD + ")");
         }
 
-        StringBuilder sql = new StringBuilder("INSERT INTO ").append(spec.table())
-            .append(" (tenant_id");
-        for (String c : spec.columns()) {
-            // `ts` is the staged rename of relevance_log's reserved-ish
-            // `timestamp`; everything else maps 1:1.
-            sql.append(", ").append(c);
-        }
-        sql.append(") VALUES ");
-        List<Object> binds = new ArrayList<>();
-        for (int i = 0; i < rows.size(); i++) {
-            Map<String, Object> row = (Map<String, Object>) rows.get(i);
-            sql.append(i > 0 ? ", (" : "(").append("?");
-            binds.add(tenant);
-            for (String c : spec.columns()) {
-                Object v = row.get(c);
-                if ("embedding".equals(c)) {
-                    sql.append(", ?::vector");
-                    binds.add(v == null ? null : vectorLiteral((List<Number>) v));
-                } else if ("chunk_meta".equals(c)) {
-                    sql.append(", ?::jsonb");
-                    binds.add(v == null ? null : MAPPER.writeValueAsString(v));
-                } else {
-                    sql.append(", ?");
-                    binds.add(v);
-                }
+        // `ts` is the staged rename of relevance_log's reserved-ish
+        // `timestamp`; everything else maps 1:1 (nexus-4okz4 increment 4:
+        // typed-DSL columns/values below, no more raw INSERT string).
+        List<String> allColumns = new ArrayList<>(spec.columns().size() + 1);
+        allColumns.add("tenant_id");
+        allColumns.addAll(spec.columns());
+        Field<?>[] fieldArray = allColumns.stream()
+            .map(StagingHandler::dynField).toArray(Field<?>[]::new);
+
+        List<Object[]> rowValues = new ArrayList<>(rows.size());
+        for (Object rowObj : rows) {
+            Map<String, Object> row = (Map<String, Object>) rowObj;
+            Object[] values = new Object[fieldArray.length];
+            values[0] = tenant;
+            for (int i = 0; i < spec.columns().size(); i++) {
+                String c = spec.columns().get(i);
+                values[i + 1] = columnValue(c, row.get(c));
             }
-            sql.append(")");
+            rowValues.add(values);
         }
-        sql.append(" ").append(spec.conflict());
 
-        int landed = tenantScope.withTenant(tenant, ctx ->
-            ctx.execute(sql.toString(), binds.toArray()));
+        Field<?>[] conflictFields = spec.conflictColumns().stream()
+            .map(StagingHandler::dynField).toArray(Field<?>[]::new);
+
+        int landed = tenantScope.withTenant(tenant, ctx -> {
+            var insert = ctx.insertInto(spec.dslTable(), fieldArray);
+            for (Object[] values : rowValues) {
+                insert = insert.values(values);
+            }
+            if (spec.updateColumns().isEmpty()) {
+                return insert.onConflict(conflictFields).doNothing().execute();
+            }
+            // Map-based set(...) (nexus-4okz4 increment 4): the per-field
+            // set(Field<T>, T) / set(Field<T>, Field<T>) overloads are
+            // genuinely ambiguous to javac once T is erased to Object (an
+            // excluded(f) Field value is itself a valid Object, so both
+            // overloads apply) — the Map<?, ?> overload sidesteps generic
+            // dispatch entirely and reads better for a variable-length
+            // column set besides.
+            Map<Field<?>, Field<?>> updateSet = new LinkedHashMap<>();
+            for (String c : spec.updateColumns()) {
+                Field<Object> f = dynField(c);
+                updateSet.put(f, excluded(f));
+            }
+            return insert.onConflict(conflictFields).doUpdate().set(updateSet).execute();
+        });
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("landed", landed)));
-    }
-
-    private static String vectorLiteral(List<Number> values) {
-        StringBuilder sb = new StringBuilder("[");
-        for (int i = 0; i < values.size(); i++) {
-            if (i > 0) sb.append(',');
-            sb.append(values.get(i).floatValue());
-        }
-        return sb.append(']').toString();
     }
 
     // ── POST /v1/staging/embed_fill ──────────────────────────────────────────
@@ -229,10 +331,13 @@ public final class StagingHandler implements HttpHandler {
         int filled = 0;
         while (true) {
             List<Map<String, Object>> batch = tenantScope.withTenant(tenant, ctx ->
-                ctx.resultQuery(
-                    "SELECT legacy_ref, chunk_text FROM staging.chunks "
-                    + "WHERE collection = ? AND chunk_text <> '' AND embedding IS NULL "
-                    + "ORDER BY legacy_ref LIMIT " + EMBED_BATCH, collection)
+                ctx.select(SC_LEGACY_REF, SC_CHUNK_TEXT)
+                   .from(STAGING_CHUNKS)
+                   .where(SC_COLLECTION.eq(collection))
+                   .and(SC_CHUNK_TEXT.ne(""))
+                   .and(SC_EMBEDDING.isNull())
+                   .orderBy(SC_LEGACY_REF)
+                   .limit(EMBED_BATCH)
                    .fetchMaps());
             if (batch.isEmpty()) break;
             List<String> texts = new ArrayList<>(batch.size());
@@ -240,24 +345,21 @@ public final class StagingHandler implements HttpHandler {
             List<float[]> vectors = docEmbedderRouter.embedForCollection(collection, texts);
             for (int i = 0; i < batch.size(); i++) {
                 String ref = (String) batch.get(i).get("legacy_ref");
-                StringBuilder lit = new StringBuilder("[");
-                float[] v = vectors.get(i);
-                for (int j = 0; j < v.length; j++) {
-                    if (j > 0) lit.append(',');
-                    lit.append(v[j]);
-                }
-                lit.append(']');
-                tenantScope.withTenant(tenant, ctx -> ctx.execute(
-                    "UPDATE staging.chunks SET embedding = ?::vector "
-                    + "WHERE collection = ? AND legacy_ref = ?",
-                    lit.toString(), collection, ref));
+                Vector v = Vector.of(vectors.get(i));
+                tenantScope.withTenant(tenant, ctx -> ctx.update(STAGING_CHUNKS)
+                    .set(SC_EMBEDDING, v)
+                    .where(SC_COLLECTION.eq(collection))
+                    .and(SC_LEGACY_REF.eq(ref))
+                    .execute());
                 filled++;
             }
         }
-        Integer remaining = tenantScope.withTenant(tenant, ctx -> ctx.fetchOne(
-            "SELECT count(*) FROM staging.chunks "
-            + "WHERE collection = ? AND chunk_text <> '' AND embedding IS NULL", collection)
-            .get(0, Integer.class));
+        Integer remaining = tenantScope.withTenant(tenant, ctx -> ctx.selectCount()
+            .from(STAGING_CHUNKS)
+            .where(SC_COLLECTION.eq(collection))
+            .and(SC_CHUNK_TEXT.ne(""))
+            .and(SC_EMBEDDING.isNull())
+            .fetchOne(0, Integer.class));
         HttpUtil.send(exchange, 200,
             MAPPER.writeValueAsString(Map.of("filled", filled, "remaining", remaining)));
     }
@@ -300,7 +402,7 @@ public final class StagingHandler implements HttpHandler {
         Map<String, Object> deleted = new LinkedHashMap<>();
         for (Map.Entry<String, StoreSpec> e : STORES.entrySet()) {
             int n = tenantScope.withTenant(tenant, ctx ->
-                ctx.execute("DELETE FROM " + e.getValue().table()));
+                ctx.deleteFrom(e.getValue().dslTable()).execute());
             deleted.put(e.getKey(), n);
         }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("cleared", deleted)));
@@ -313,8 +415,7 @@ public final class StagingHandler implements HttpHandler {
         Map<String, Object> counts = new LinkedHashMap<>();
         for (Map.Entry<String, StoreSpec> e : STORES.entrySet()) {
             Integer n = tenantScope.withTenant(tenant, ctx ->
-                ctx.fetchOne("SELECT count(*) FROM " + e.getValue().table())
-                   .get(0, Integer.class));
+                ctx.selectCount().from(e.getValue().dslTable()).fetchOne(0, Integer.class));
             counts.put(e.getKey(), n);
         }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(counts));

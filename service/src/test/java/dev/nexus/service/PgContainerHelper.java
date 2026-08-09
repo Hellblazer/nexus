@@ -7,6 +7,9 @@ import com.zaxxer.hikari.HikariDataSource;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
+import java.sql.Connection;
+import java.sql.SQLException;
+
 
 /**
  * Shared factory for per-class Testcontainers PostgreSQL containers.
@@ -88,12 +91,84 @@ public final class PgContainerHelper {
     }
 
     /**
-     * Create and start a fresh container.
+     * System property opt-out for the nexus-yhmav shared-cluster reuse below
+     * ({@code -Dnexus.test.pg.shared=false}). Debugging escape hatch only -- the
+     * default (unset / any value other than the literal {@code "false"}) is shared
+     * reuse ON, since it is a strict subset of what a fresh container already
+     * guarantees (see {@link SharedCluster}'s javadoc for the safety argument).
+     */
+    private static final String SHARED_PROPERTY = "nexus.test.pg.shared";
+
+    /**
+     * Create and start a container.
+     *
+     * <p><b>nexus-yhmav (per-fork container reuse):</b> by default this returns a
+     * {@link SharedDatabaseHandle} onto a fresh, already-migrated database cloned
+     * from a per-fork shared cluster (one real container boot per surefire fork,
+     * not one per class) -- see {@link SharedCluster} for the full design and the
+     * safety argument. Set {@code -Dnexus.test.pg.shared=false} to fall back to the
+     * pre-yhmav behavior (a genuinely fresh container every call), e.g. while
+     * debugging a suspected cross-class interference report.
      *
      * <p>Replaces {@code EmbeddedPostgres.builder().start()}.
      */
     @SuppressWarnings("resource")
     public static PostgreSQLContainer<?> start() {
+        if ("false".equals(System.getProperty(SHARED_PROPERTY))) {
+            return startDedicated();
+        }
+        try {
+            return SharedCluster.acquireDatabase();
+        } catch (SQLException e) {
+            throw new IllegalStateException("nexus-yhmav shared-cluster acquire failed", e);
+        }
+    }
+
+    /**
+     * Always boots a genuinely fresh, independently-managed container -- the
+     * explicit opt-out from {@link #start()}'s shared-cluster reuse.
+     *
+     * <p>Required by any class whose test asserts on the migration PROCESS itself
+     * (not just an already-migrated schema's shape) -- ownership of relations
+     * created "from scratch" by a non-superuser admin role, changeset-count deltas
+     * across successive {@code migrate()} calls, rollback depth/order, or a bare
+     * (non-{@code IF NOT EXISTS}) {@code CREATE ROLE} that would collide against a
+     * cluster another class already bootstrapped. Roster, as of nexus-yhmav
+     * (2026-08-09), each confirmed via a hardcoded {@code GRANT CREATE ON DATABASE
+     * postgres} and/or a bare {@code CREATE ROLE} in a repo-wide sweep:
+     * <ul>
+     *   <li>{@code SchemaMigratorIntegrationTest} -- two-phase DBA-then-Liquibase
+     *       provisioning from an unmigrated cluster; "aged box" divergence tests
+     *       that must inject a defect BEFORE a changeset first executes.</li>
+     *   <li>{@code SchemaRollbackRoundTripIntegrationTest} -- rollback-to-zero and
+     *       {@code runAlways}-changeset execution-order assertions that depend on a
+     *       specific, fresh single-pass apply history.</li>
+     *   <li>{@code SchemaUpgradeRehearsalIntegrationTest} -- old-changelog-tree to
+     *       HEAD upgrade rehearsal; asserts changeset counts applied by each leg.</li>
+     *   <li>{@code GrantsSvcForeignOwnedRelationTest} -- GH #1402 replay: the
+     *       non-superuser admin role must OWN every relation it creates, which
+     *       requires it to create them all itself against a virgin database.</li>
+     *   <li>{@code ServiceTokenScopeBackfillTest} -- hand-builds the PRE-003
+     *       {@code nexus.service_tokens} shape and applies ONLY {@code
+     *       service-tokens-003-scope-column.xml} (not the master changelog) to assert
+     *       backfill behavior; a template already migrated to HEAD collides with the
+     *       bare {@code CREATE TABLE} this test uses to reconstruct that pre-migration
+     *       state.</li>
+     *   <li>{@code ServiceIntegrationTest} -- a deliberately minimal "skeleton" harness
+     *       that documents (in its own {@code @BeforeAll} comment) that it does NOT run
+     *       the master changelog; a shared, already-fully-migrated cluster would
+     *       silently contradict that hermeticity premise even where column shapes
+     *       happen to overlap.</li>
+     * </ul>
+     *
+     * <p>{@code PgBouncerTenantIsolationTest} (network-attached, multi-container)
+     * is ALREADY excluded from shared-cluster reuse without needing this method --
+     * it calls {@link #newContainer()} directly and attaches its own
+     * {@code Network}/{@code withNetworkAliases} before starting, bypassing
+     * {@link #start()} entirely.
+     */
+    @SuppressWarnings("resource")
+    public static PostgreSQLContainer<?> startDedicated() {
         PostgreSQLContainer<?> c = newContainer();
         c.start();
         return c;
@@ -116,5 +191,51 @@ public final class PgContainerHelper {
         cfg.setMaximumPoolSize(5);
         cfg.setAutoCommit(true);
         return new HikariDataSource(cfg);
+    }
+
+    /**
+     * Grants a test-local service role the SAME schema access production
+     * {@code nexus_svc} gets — {@code nexus} DML/sequences PLUS {@code
+     * staging} DML (nexus-kl2z6 increment 2, nexus-vc6dh). Call AFTER the
+     * master changelog has run (needs both schemas to exist) and BEFORE
+     * building the role's own {@code DataSource}.
+     *
+     * <p><b>Why this exists</b>: {@link
+     * dev.nexus.service.db.CatalogRepository#stagingHasRowsForTenant}
+     * reads {@code staging.document_chunks} inside EVERY sweep
+     * transaction now, unconditionally — a test-local role that only
+     * mirrors the OLD (pre-kl2z6) minimal {@code nexus}-only grant set
+     * fails that read with {@code permission denied for schema staging},
+     * which the sweep's fail-open discipline (by design, correctly)
+     * swallows into a silent {@code sweep_skipped}/{@code
+     * reason=sweep_failed} outcome rather than a loud test error —
+     * exactly the kind of masked signal nexus-vc6dh exists to keep
+     * honest. Confirmed NOT a production gap: production's {@code
+     * NX_DB_USER} is {@code nexus_svc} (default, {@code
+     * src/nexus/db/pg_provision.py}), and {@code nexus_svc} already gets
+     * this exact staging grant set from {@code staging-001-landing-
+     * tables.xml}'s {@code staging-4-svc-grants} changeset ({@code
+     * runAlways="true"}, unconditionally in the master changelog) — this
+     * helper exists purely because hand-rolled test-local roles
+     * (predating nexus-kl2z6) never mirrored that changeset. Found
+     * independently by two test classes
+     * ({@code CatalogManifestSweepRepositoryTest},
+     * {@code CatalogHandlerSweepAndChashesManyTest}) before this helper
+     * centralized the fix; a THIRD ({@code CombinedWriteRepositoryTest})
+     * carried the same latent gap without yet tripping over it.
+     *
+     * @param su      superuser connection (the role owner / grantor)
+     * @param svcRole the test-local service role name to grant
+     */
+    public static void grantServiceSchemaAccess(Connection su, String svcRole) throws SQLException {
+        su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + svcRole);
+        su.createStatement().execute(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + svcRole);
+        su.createStatement().execute(
+            "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO " + svcRole);
+        su.createStatement().execute("GRANT USAGE ON SCHEMA staging TO " + svcRole);
+        su.createStatement().execute(
+            "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA staging TO " + svcRole);
+        su.createStatement().execute("ALTER ROLE " + svcRole + " SET search_path TO nexus, public");
     }
 }

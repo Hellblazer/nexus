@@ -1,0 +1,68 @@
+name: Stranded-redirect rehearsal (weekly)
+
+# nexus-8nlj4 — RDR-185 acceptance-harness reshape, the two-hop
+# stranded-redirect leg. `stranded_install.LAST_MIGRATION_CAPABLE` armed on
+# 2026-08-01 (the 7.0.0 cut) — every entry point (`nx init`, CLI startup,
+# MCP, `nx doctor`) refuses a box carrying unmigrated pre-PG data with the
+# literal two-hop redirect. It ran UNREHEARSED for 7 days before this
+# workflow existed: any real pre-PG user landing on this path in production
+# hit it with zero E2E coverage (bead comment, 2026-08-08).
+#
+# `tests/e2e/migration-rehearsal/run.sh --stranded` is the only thing that
+# exercises the detector against REAL package installs rather than the unit
+# suite's synthetic file writes (tests/test_stranded_install.py already
+# covers the pure-file-stats logic thoroughly — this leg's marginal value is
+# proving the wiring survives a real `pip install` + real CLI invocation,
+# and that the redirect it prints is genuinely followable): a box seeded
+# with real pre-PG artifacts (via seed_legacy.py, the same raw-sqlite/
+# chromadb seeder era-hop/chash-window/fullstack already use) package-
+# upgrades straight to the working tree, must trip the armed detector with
+# the exact message, then downgrades BACK to the pin the message names and
+# runs `nx init` + `nx upgrade` there for real — the RDR-185 ladder's
+# substrate-etl rung must actually converge the same on-disk data.
+#
+# Two non-vacuity controls run INSIDE the same leg (bead's own acceptance
+# language: "never assert against a disarmed detector"): a fresh box with
+# no artifacts must stay silent, and the SAME real artifacts with the
+# constant monkeypatched to None (disarmed, in-process) must also stay
+# silent. See rehearse_stranded.sh's own header for the full contract.
+#
+# CI-cost discipline (CLAUDE.md DIRECTIVES): NO native GraalVM build (both
+# the pin release and the working tree are pip/wheel installs; both engines
+# are acquired at runtime by the product's own code), but it does pull a PG
+# bundle + bge-768 ONNX + cross-encoder once (hop 2's real provisioning), so
+# it runs on a WEEKLY heartbeat and manual dispatch only — never per-PR,
+# never daily. ubuntu-only. Secret-free: local bge-768 mode end to end.
+
+on:
+  schedule:
+    - cron: "17 10 * * 1"   # 10:17 UTC Mondays — off the release/nightly/other-Monday-gate hours
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stranded-redirect-rehearsal
+  cancel-in-progress: true
+
+jobs:
+  stranded-redirect:
+    name: Two-hop stranded-redirect (container-isolated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+
+      - name: Run the two-hop stranded-redirect rehearsal
+        # run.sh --stranded builds the working-tree wheel on the host,
+        # builds Dockerfile.stranded (debian-slim: no PG, no binary, no
+        # ONNX pre-staged), and runs rehearse_stranded.sh inside it. The
+        # pin release is derived from LAST_MIGRATION_CAPABLE
+        # (src/nexus/stranded_install.py) at run.sh's own build time — no
+        # override needed, and the leg fails loud pre-build if that
+        # constant is ever rotated forward without leaving a distinct pin.
+        run: bash tests/e2e/migration-rehearsal/run.sh --stranded

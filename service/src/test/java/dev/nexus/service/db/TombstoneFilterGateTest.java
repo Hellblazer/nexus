@@ -359,16 +359,20 @@ class TombstoneFilterGateTest {
     record Finding(String file, String kind, int line, String snippet, boolean excused, String exemptMethod) {}
 
     /** Every candidate site examined (excused or not) — the corpus this gate
-     * actually walked, for the non-vacuity floors. */
+     * actually walked, for the non-vacuity floors.
+     *
+     * <p>nexus-4okz4 increment 3: {@code rawSqlSites} (fed by the retired
+     * {@code scanRawSqlSites}) is GONE, not merely emptied — see that
+     * method's former javadoc, preserved below at its old call site, for
+     * why removal (not a floor adjustment) is the correct response. */
     record ScanResult(List<Finding> docSites, List<Finding> chunkSites,
-                       List<Finding> setDeletedSites, List<Finding> rawSqlSites,
+                       List<Finding> setDeletedSites,
                        List<Finding> rawChunksSites, List<Finding> typedChunksSites) {}
 
     static ScanResult scan() throws IOException {
         List<Finding> docSites = new ArrayList<>();
         List<Finding> chunkSites = new ArrayList<>();
         List<Finding> setDeletedSites = new ArrayList<>();
-        List<Finding> rawSqlSites = new ArrayList<>();
         List<Finding> rawChunksSites = new ArrayList<>();
         List<Finding> typedChunksSites = new ArrayList<>();
 
@@ -383,11 +387,8 @@ class TombstoneFilterGateTest {
             scanSetDeletedSites(fname, blanked, exemptRegions, setDeletedSites);
             scanRawChunksSites(fname, blanked, exemptRegions, rawChunksSites);
             scanTypedChunksSites(fname, blanked, exemptRegions, typedChunksSites);
-            if (fname.equals("StagingPromoteOps.java")) {
-                scanRawSqlSites(fname, src, blanked, exemptRegions, rawSqlSites);
-            }
         }
-        return new ScanResult(docSites, chunkSites, setDeletedSites, rawSqlSites, rawChunksSites, typedChunksSites);
+        return new ScanResult(docSites, chunkSites, setDeletedSites, rawChunksSites, typedChunksSites);
     }
 
     /** Exposed separately for the statement-vs-method-level meta-test, which
@@ -520,68 +521,57 @@ class TombstoneFilterGateTest {
         }
     }
 
-    private static final Pattern CATALOG_DOCUMENTS_RAW =
-        Pattern.compile("catalog_documents", Pattern.CASE_INSENSITIVE);
-
-    /**
-     * Raw-SQL string sub-scan, restricted to {@code StagingPromoteOps.java}:
-     * {@link RawSqlGateTest#SANCTIONED_METHODS} proves {@code
-     * CatalogRepository.java} / {@code PgVectorRepository.java} contain no
-     * raw string-SQL execute()/fetch() at all — a {@code "catalog_documents"}
-     * match inside a STRING literal there is {@code DSL.name(...)} /
-     * error-message text, not executed SQL, and would be pure noise here.
-     * Reads a STRING-LITERAL-ONLY view of the source (the inverse of {@link
-     * RawSqlGateTest#blank}: keep string/char contents, blank out code and
-     * comments) so a prose mention in a javadoc comment cannot masquerade as
-     * a real SQL reference — the exact comment/string non-excusal discipline
-     * this gate's meta-test enforces in the other direction.
-     */
-    static void scanRawSqlSites(String fname, String src, String blanked, List<NamedRegion> exemptRegions, List<Finding> out) {
-        String strView = stringLiteralView(src);
-        Matcher m = CATALOG_DOCUMENTS_RAW.matcher(strView);
-        while (m.find()) {
-            int pos = m.start();
-            int line = lineOf(blanked, pos);
-            String exemptMethod = methodAt(exemptRegions, pos);
-            String snippet = strView.substring(Math.max(0, pos - 40), Math.min(strView.length(), pos + 40))
-                .replace('\n', ' ').trim();
-            out.add(new Finding(fname, "raw_sql", line, snippet, exemptMethod != null, exemptMethod));
-        }
-    }
-
-    /** Inverse of {@link RawSqlGateTest#blank}: blank out code and comments,
-     * KEEP string/char literal contents (with delimiters) — length- and
-     * newline-preserving, same offset contract as {@code blank()}. */
-    static String stringLiteralView(String src) {
-        char[] out = src.toCharArray();
-        int i = 0;
-        int n = out.length;
-        while (i < n) {
-            char c = out[i];
-            if (c == '/' && i + 1 < n && out[i + 1] == '*') {
-                int end = src.indexOf("*/", i + 2);
-                end = (end < 0) ? n : end + 2;
-                for (int j = i; j < end; j++) if (out[j] != '\n') out[j] = ' ';
-                i = end;
-            } else if (c == '/' && i + 1 < n && out[i + 1] == '/') {
-                while (i < n && out[i] != '\n') out[i++] = ' ';
-            } else if (c == '"' || c == '\'') {
-                char q = c;
-                out[i] = ' ';
-                i++;
-                while (i < n && out[i] != q) {
-                    if (src.charAt(i) == '\\' && i + 1 < n) i++;
-                    i++;
-                }
-                if (i < n) out[i] = ' ';  // closing quote blanked too (content-only view)
-                i++;
-            } else {
-                if (out[i] != '\n') out[i] = ' ';
-                i++;
-            }
-        }
-        return new String(out);
-    }
+    // RETIRED (nexus-4okz4 increment 3): scanRawSqlSites / CATALOG_DOCUMENTS_RAW /
+    // stringLiteralView, and the floor_stagingPromoteOpsRawSqlSites floor that
+    // consumed their output, are DELETED — not adjusted, not zeroed-and-kept.
+    //
+    // What this sub-scan was FOR (preserved for the historical record):
+    // StagingPromoteOps.java was, before increment 3, the ONE file this gate's
+    // TARGET_FILES covers that carried raw string-SQL under a RawSqlGateTest
+    // SANCTIONED_METHODS entry — its statements were built as Java String
+    // concatenation (`"UPDATE nexus.catalog_documents d " + ...`), so the
+    // primary token scan (scanDocAndChunkSites, which recognizes the JAVA
+    // IDENTIFIER `CATALOG_DOCUMENTS` and jOOQ initiators like `.update(`) was
+    // STRUCTURALLY BLIND to them: a raw SQL string literal contains the
+    // lowercase SQL keyword `catalog_documents`, never the Java constant
+    // token, and blank() (the primary scan's source view) erases string
+    // literal CONTENTS entirely. scanRawSqlSites existed as the dedicated
+    // counterpart: an INVERTED view (stringLiteralView — keep string
+    // contents, blank code+comments) matched literally on `catalog_documents`
+    // text, so those two raw statements (chunk_count_resynced's UPDATE,
+    // unresolvedKnowledgeTitles's SELECT — both inside finalizeTenant, both
+    // pre-existing TOMBSTONE-EXEMPT migration-leg statements with no
+    // deleted_at filter by design) stayed visible to SOME scan instead of
+    // falling through both mechanisms unseen.
+    //
+    // Why deletion, not a floor adjustment or a reworked DSL-form counter:
+    // nexus-4okz4 increment 3 converted StagingPromoteOps.java to typed jOOQ
+    // DSL end to end (RawSqlGateTest's SANCTIONED_METHODS entry for this file
+    // is gone too — zero raw execute()/fetch() strings remain). The two
+    // statements this sub-scan used to catch now read
+    // `ctx.update(CATALOG_DOCUMENTS)...` / `ctx.selectDistinct(CATALOG_DOCUMENTS.TITLE)...`
+    // — the Java IDENTIFIER `CATALOG_DOCUMENTS` and a `.update(`/`.selectDistinct(`
+    // initiator, in the SAME statement — which is EXACTLY what scanDocAndChunkSites
+    // (the primary scan, the same mechanism that already covers
+    // CatalogRepository.java's and PgVectorRepository.java's 100%-typed-DSL
+    // sites with no sub-scan of their own) natively recognizes. Verified, not
+    // assumed: (a) noUnguardedTombstoneReadsOrWrites passes with ZERO
+    // violations post-conversion — the two ex-raw sites AND the
+    // manifest_promoted INSERT (whose subquery trips the `.select(` initiator
+    // token) all now surface as docSites/chunkSites findings, each correctly
+    // excused via the SAME pre-existing `StagingPromoteOps.java::finalizeTenant`
+    // TOMBSTONE_EXEMPT entry (still consumed — see
+    // test_realTree_zeroUnusedExemptEntries, which does not special-case
+    // rawSqlSites and never needed to); (b) grepping the converted file for
+    // "catalog_document" confirms every remaining occurrence is Java code
+    // (imports, generated-Tables identifiers) or a comment, zero string
+    // literals. A dedicated sub-scan whose precondition (raw SQL strings
+    // existing in this file) is now permanently false is the exact
+    // "un-falsifiable, always-vacuous" class the class javadoc's own
+    // philosophy rejects — same disposition RawSqlGateTest gives a
+    // SANCTIONED_METHODS entry once its raw form is deleted outright (see
+    // that class's ChashSqlIdioms.java entry history): remove it, don't
+    // enshrine a floor that can never again be anything but its own minimum.
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -620,7 +610,7 @@ class TombstoneFilterGateTest {
         var consumed = new java.util.LinkedHashSet<String>();  // "file::method"
 
         for (var f : List.of(result.docSites(), result.chunkSites(), result.setDeletedSites(),
-                              result.rawSqlSites(), result.rawChunksSites(), result.typedChunksSites())) {
+                              result.rawChunksSites(), result.typedChunksSites())) {
             for (Finding fnd : f) {
                 if (!fnd.excused()) violations.add(fnd);
                 if (fnd.exemptMethod() != null) consumed.add(fnd.file() + "::" + fnd.exemptMethod());
@@ -700,11 +690,15 @@ class TombstoneFilterGateTest {
             .isGreaterThanOrEqualTo(5);
     }
 
-    @Test
-    void floor_stagingPromoteOpsRawSqlSites() throws IOException {
-        var result = scan();
-        assertThat(result.rawSqlSites().size()).isGreaterThanOrEqualTo(2);
-    }
+    // floor_stagingPromoteOpsRawSqlSites: RETIRED (nexus-4okz4 increment 3),
+    // not adjusted — see the retirement comment at the old scanRawSqlSites
+    // call site (above ScanResult) for the full rationale. Its corpus
+    // (raw-SQL string literals in StagingPromoteOps.java) is now permanently
+    // empty by construction; the invariant it defended is subsumed by
+    // scanDocAndChunkSites, covered by noUnguardedTombstoneReadsOrWrites and
+    // floor_catalogDocumentsOrViewSites/floor_catalogDocumentChunksReadSites
+    // above (which count the SAME statements natively once they moved from
+    // raw string SQL to typed DSL).
 
     @Test
     void floor_liveParentDocCallSites() throws IOException {
@@ -1080,7 +1074,7 @@ class TombstoneFilterGateTest {
         var result = scan();
         var consumed = new java.util.LinkedHashSet<String>();
         for (var f : List.of(result.docSites(), result.chunkSites(), result.setDeletedSites(),
-                              result.rawSqlSites(), result.rawChunksSites(), result.typedChunksSites())) {
+                              result.rawChunksSites(), result.typedChunksSites())) {
             for (Finding fnd : f) if (fnd.exemptMethod() != null) consumed.add(fnd.file() + "::" + fnd.exemptMethod());
         }
         var allExemptKeys = new java.util.LinkedHashSet<String>();

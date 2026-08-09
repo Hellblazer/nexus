@@ -22,9 +22,15 @@ import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.HexFormat;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -134,7 +140,19 @@ class RekeyOpsIntegrationTest {
         config.setJdbcUrl(pg.getJdbcUrl());
         config.setUsername(SVC_ROLE);
         config.setPassword(SVC_PASS);
-        config.setMaximumPoolSize(3);
+        // nexus-t76bp: bumped from 3 to 4 -- this class's own peak
+        // concurrent-connection usage (code-review-expert T2
+        // review-11gh6-gate-2026-08-08 [21797], T76BP SECTION "MINOR" note:
+        // the original comment's justification was half-inaccurate -- it
+        // cited StagingPromoteOpsIntegrationTest "for the same reason," but
+        // that sibling runs the IDENTICAL external-holds-gate-then-blocks-
+        // then-proceeds shape at pool=3, unbumped, so "matching the
+        // sibling" was not the real driver). The actual driver: the gate
+        // tests below (Order 20-22) each hold one EXTERNAL connection open
+        // on this same svcDs pool while rekeyOps.rekey blocks on a SECOND,
+        // borrowed connection from the same pool -- 2 concurrent, a small
+        // margin over this class's own prior peak.
+        config.setMaximumPoolSize(4);
         config.setAutoCommit(true);
         svcDs = new com.zaxxer.hikari.HikariDataSource(config);
         rekeyOps = new RekeyOps(new TenantScope(svcDs));
@@ -244,6 +262,43 @@ class RekeyOpsIntegrationTest {
                 insertChunk(su, TA, "nexus.chunks_384", 384, "code__k", legacyA, "");
                 // (c) orphan: empty text, no content sibling anywhere
                 insertChunk(su, TA, "nexus.chunks_384", 384, "code__k", orphanKey, "");
+                // nexus-4okz4 increment 2 REWORK (code-review-expert C1, T2
+                // review [21863] / critique [21864]): adjudicating fixture for
+                // orphanCond's same-dim (384) content-sibling NOT EXISTS
+                // clause. Every content-bearing row seeded above for TA lives
+                // in chunks_768 -- this tenant previously had ZERO
+                // content-bearing rows in chunks_384 itself, so a
+                // de-correlated same-dim subquery (self-shadowed unaliased
+                // table reference, degenerating "chash = c.chash AND
+                // chunk_text <> ''" to just "chunk_text <> ''" -- "does this
+                // dim have ANY content") was indistinguishable from the
+                // correlated form. This row is digest-matching (chash =
+                // sha256(text)) so it is inert to rekey's own mismatch/
+                // collapse predicates (rehashed/collapsed_duplicates counts
+                // below are unaffected) -- its only job is to make chunks_384
+                // non-empty for TA so a de-correlated same-dim clause and the
+                // correlated one disagree.
+                String sameDimContentText =
+                    "rekey same-dim orphanCond correlation fixture ta " + System.nanoTime();
+                byte[] sameDimChash = sha256(sameDimContentText);
+                insertChunk(su, TA, "nexus.chunks_384", 384, "code__k",
+                    sameDimChash, sameDimContentText);
+                // this row is digest-matching so rekey never touches it (see
+                // above) -- stamp metadata.chunk_text_hash here to mirror
+                // what a real producer already does, so it does not trip the
+                // "every row mirrors its chash into metadata" parity sweep
+                // below (that sweep scans the WHOLE table for the tenant,
+                // not just rows rekey actually rewrote).
+                try (PreparedStatement mps = su.prepareStatement(
+                        "UPDATE nexus.chunks_384 SET metadata = "
+                        + "jsonb_build_object('chunk_text_hash', encode(chash, 'hex')) "
+                        + "WHERE tenant_id = ? AND chash = ?")) {
+                    mps.setString(1, TA);
+                    mps.setBytes(2, sameDimChash);
+                    mps.executeUpdate();
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
                 try {
                     // pointers at the orphan key (manifest; the chash_index
                     // twin died with the router, RDR-187) — must cascade on drop
@@ -366,6 +421,17 @@ class RekeyOpsIntegrationTest {
                 + "VALUES ('" + TB + "', '2.1', 'doc') ON CONFLICT DO NOTHING");
             withChecksDropped(su, () -> {
                 insertChunk(su, TB, "nexus.chunks_384", 384, "code__s", orphanKey, "");
+                // nexus-4okz4 increment 2 REWORK (code-review-expert C1, T2
+                // review [21863] / critique [21864]): same adjudicating
+                // fixture as rekey_fullPass_dispositionsAtoC_andCascade,
+                // digest-matching so it is inert to rekey's own predicates --
+                // makes chunks_384 non-empty for TB so orphanCond's same-dim
+                // NOT EXISTS clause is actually exercised for the SYNTHESIZE
+                // policy too, not just DROP.
+                String sameDimContentText =
+                    "rekey same-dim orphanCond correlation fixture tb " + System.nanoTime();
+                insertChunk(su, TB, "nexus.chunks_384", 384, "code__s",
+                    sha256(sameDimContentText), sameDimContentText);
                 try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.catalog_document_chunks "
                     + "(tenant_id, doc_id, position, chash, collection) VALUES ('"
@@ -659,5 +725,376 @@ class RekeyOpsIntegrationTest {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+    }
+
+    // ── nexus-t76bp: RekeyOps' manifest-cascade UPDATE (step 5,
+    //    "manifest_repointed") must take the SAME sweep gate every other
+    //    catalog_document_chunks writer does — the coordinator's
+    //    investigation found no code-enforced exclusivity between RekeyOps
+    //    and live serving writers (the only lock RekeyOps takes,
+    //    'staging:<tenant>', is shared with StagingPromoteOps ONLY; no
+    //    serving-path manifest writer ever acquires or checks it), so this
+    //    is a fix, not a documented exemption.
+    //
+    //    REWORKED (critic-p1 Critical, T2 nexus/critique-t76bp-rekey-gate-
+    //    2026-08-08 [21807]): round 1's gate sat immediately before step 5
+    //    only, leaving steps 3-4 (content rekey -- the step that makes
+    //    rekeyed content physically live) entirely ungated. The gate now
+    //    acquires before step 3 begins (RekeyOps.rekey step 2b); Order(20)
+    //    below still proves the observable behavior (blocks, then
+    //    completes with manifest_repointed=1) is unchanged. Order(21)
+    //    discriminates the NEW, earlier block point from round 1's via the
+    //    physical row's LOCK state (FOR UPDATE NOWAIT), not its content --
+    //    a content/count pin cannot discriminate placement at all, since
+    //    PostgreSQL has no dirty reads at any isolation level and an
+    //    external connection sees the identical pre-rekey committed
+    //    snapshot under EITHER placement (code-review-expert T2 review-
+    //    11gh6-gate-2026-08-08 [21797] R1: an earlier, content-pinned
+    //    version of this test was vacuous for exactly that reason). Order
+    //    (22) pins the combined fix's detection half (critic Option 2): a
+    //    pre-existing dangling manifest row now aborts the whole rekey
+    //    loud, rather than being silently reported in the envelope. ──
+
+    /** Raw connection to the service role's own pool (test-controlled transaction). */
+    private Connection dsConnection() throws SQLException {
+        return svcDs.getConnection();
+    }
+
+    /** Hand-drives {@code CatalogRepository.acquireSweepGateExclusive}'s exact
+     *  SQL shape on a raw connection, for tests needing manual transaction control. */
+    private static void acquireGateExclusive(Connection conn, String tenant, String collection, int lockTimeoutMs)
+            throws SQLException {
+        try (var ps = conn.prepareStatement("SELECT set_config('lock_timeout', ?, true)")) {
+            ps.setString(1, String.valueOf(lockTimeoutMs));
+            ps.execute();
+        }
+        try (var ps = conn.prepareStatement("SELECT pg_advisory_xact_lock(hashtext(?))")) {
+            ps.setString(1, "sweepgate:" + tenant + "/" + collection);
+            ps.execute();
+        }
+    }
+
+    /** Polls {@code pg_stat_activity} until a backend owned by {@code usename}
+     *  is OBSERVABLY waiting on an advisory lock ({@code wait_event='advisory'}) --
+     *  proof the rekey has genuinely reached its gate, rather than trusting a
+     *  fixed {@code future.get(timeout)} window alone to mean "it got there"
+     *  (a race on a loaded CI runner: not-yet-blocked and blocked-forever both
+     *  look identical to a bare timeout). Used before Order(21)'s lock probe so
+     *  that probe cannot race the executor's own startup. */
+    private void waitForAdvisoryLockWait(String usename, java.time.Duration timeout) throws Exception {
+        long deadlineNanos = System.nanoTime() + timeout.toNanos();
+        while (System.nanoTime() < deadlineNanos) {
+            int waiting = count("SELECT count(*) FROM pg_stat_activity WHERE usename = '"
+                + usename + "' AND wait_event_type = 'Lock' AND wait_event = 'advisory'");
+            if (waiting > 0) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        throw new AssertionError(
+            "rekey backend never reached wait_event='advisory' within " + timeout);
+    }
+
+    @Test
+    @Order(20)
+    void rekey_manifestRepoint_blocksOnExternalExclusiveGate_thenProceeds() throws Exception {
+        String tenant = "t-rekey-gate";
+        String col = "gate-rekey-col";
+        String text = "rekey gate test content " + System.nanoTime();
+        byte[] trueChash = sha256(text);
+        // A 32-byte value that is NOT sha256(text) -- deliberately mismatched
+        // so the rekey pipeline's own predicate ("chash IS DISTINCT FROM
+        // sha256(chunk_text)") picks this row up and drives it through the
+        // full alias-build + content-rekey + manifest-repoint sequence,
+        // exactly like a real digest-mismatch row. MUST be valid UTF-8 (the
+        // ETL-era "32-byte-ASCII id" shape, per OLD_REF_LEMMA's
+        // convert_from(chash, 'UTF8') branch for any non-16-byte key) --
+        // raw sha256 output is NOT valid UTF-8 and would fail that
+        // conversion; a plain 32-char ASCII string sidesteps both that AND
+        // the octet_length=32 check constraint with no legacy-16-byte
+        // juggling needed.
+        String bogusOldSeed = ("gate-old-" + System.nanoTime() + "00000000000000000000000000000000")
+            .substring(0, 32);
+        byte[] bogusOldChash = bogusOldSeed.getBytes(StandardCharsets.UTF_8);
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                + tenant + "', '" + col + "') ON CONFLICT DO NOTHING");
+            insertChunk(su, tenant, "nexus.chunks_768", 768, col, bogusOldChash, text);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES ('"
+                + tenant + "', 'gate-doc', 'gate doc') ON CONFLICT DO NOTHING");
+            try (PreparedStatement ps = su.prepareStatement(
+                    "INSERT INTO nexus.catalog_document_chunks "
+                    + "(tenant_id, doc_id, position, chash, collection) VALUES (?, ?, 0, ?, ?)")) {
+                ps.setString(1, tenant);
+                ps.setString(2, "gate-doc");
+                ps.setBytes(3, bogusOldChash);
+                ps.setString(4, col);
+                ps.executeUpdate();
+            }
+        }
+
+        try (Connection external = dsConnection()) {
+            external.setAutoCommit(false);
+            try (var st = external.prepareStatement("SET nexus.tenant = '" + tenant + "'")) {
+                st.execute();
+            }
+            // Generous lock_timeout on the EXTERNAL holder's own acquire --
+            // uncontended, returns immediately; never bounds rekey's own
+            // wait (writers take the gate SHARED with no timeout at all).
+            acquireGateExclusive(external, tenant, col, 60_000);
+
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                Future<Map<String, Object>> future = executor.submit(() -> rekeyOps.rekey(tenant, false));
+                assertThatThrownBy(() -> future.get(750, TimeUnit.MILLISECONDS))
+                    .as("rekey's manifest-repoint UPDATE must BLOCK while the target collection's "
+                        + "gate is held EXCLUSIVE externally -- a missing/broken gate call would "
+                        + "let this complete immediately and this assertion would fail")
+                    .isInstanceOf(TimeoutException.class);
+
+                external.rollback();
+
+                Map<String, Object> counts = future.get(15, TimeUnit.SECONDS);
+                assertThat(counts.get("manifest_repointed"))
+                    .as("gate released -- the manifest repoint completes").isEqualTo(1);
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+
+        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
+            + "WHERE tenant_id = '" + tenant + "' AND doc_id = 'gate-doc' "
+            + "AND chash = decode('" + HexFormat.of().formatHex(trueChash) + "', 'hex')"))
+            .as("the manifest row now points at the rekeyed (true) digest").isEqualTo(1);
+    }
+
+    // ── nexus-t76bp REWORK falsification (critic-p1 Critical, T2
+    //    nexus/critique-t76bp-rekey-gate-2026-08-08 [21807]): round 1 gated
+    //    ONLY step 5's manifest UPDATE, so a rekey blocked externally had
+    //    ALREADY rewritten chunks_768's physical chash via step 4 (content
+    //    rekey) by the time it blocked -- Order(20) above cannot see this,
+    //    since it only observes step 5's OUTCOME after the gate releases.
+    //    THIS test observes state WHILE still blocked.
+    //
+    //    DISCRIMINATION ARGUMENT (code-review-expert T2 review-11gh6-gate-
+    //    2026-08-08 [21797] R1): an earlier version of this test pinned the
+    //    physical row's CONTENT (a count() query on a fresh connection) and
+    //    claimed round 1's placement would fail that pin. That claim was
+    //    FALSE: PostgreSQL has no dirty reads at any isolation level, so a
+    //    separate connection can never observe another transaction's
+    //    uncommitted writes. Under round 1's placement, step 4's UPDATE
+    //    would still be uncommitted at the blocked point, so the OLD tuple
+    //    version stays the one an external snapshot sees -- the external
+    //    count() reports the SAME pre-rekey state under EITHER placement,
+    //    discriminating nothing.
+    //
+    //    Row LOCKS, unlike row VALUES, ARE externally observable under READ
+    //    COMMITTED: an UPDATE sets the old tuple's xmax to the updating
+    //    transaction, and any other backend requesting that row {@code FOR
+    //    UPDATE} must wait for (or, with NOWAIT, immediately fail on) that
+    //    xact to resolve, whether or not it has committed. So this test
+    //    probes the row with {@code FOR UPDATE NOWAIT} from a separate
+    //    connection instead of reading its content. Under the REWORK (gate
+    //    at step 2b, before step 3) the row is untouched while blocked --
+    //    unlocked, NOWAIT succeeds, which is what this test runs and
+    //    asserts against the actual reworked code. Under round 1's
+    //    placement (not re-run here -- reverting the gate call order in a
+    //    scratch copy to actually falsify this is out of scope for this
+    //    fix-up; this is the reasoned argument in its place), step 4's
+    //    contentRekeyUpdate would already hold that exact tuple's row lock
+    //    -- NOWAIT would raise 55P03 lock_not_available immediately instead
+    //    of returning a row, so the assertion below would fail. The
+    //    wait_event poll before the probe confirms the rekey backend has
+    //    genuinely reached the gate (not merely "hasn't returned within
+    //    750ms yet"), so the probe cannot race the executor's own
+    //    startup. ──
+
+    @Test
+    @Order(21)
+    void rekey_gateBlocksBeforeContentRekey_notJustBeforeManifestUpdate() throws Exception {
+        String tenant = "t-rekey-gate-b";
+        String col = "gate-rekey-col-b";
+        String text = "rekey gate content-rekey test " + System.nanoTime();
+        byte[] trueChash = sha256(text);
+        String trueHex = HexFormat.of().formatHex(trueChash);
+        // Same ETL-era 32-byte-ASCII shape as Order(20) -- valid UTF-8 (the
+        // OLD_REF_LEMMA convert_from branch), sidesteps the octet-length
+        // check with no legacy-16-byte juggling needed.
+        String bogusOldSeed = ("gate-b-old-" + System.nanoTime() + "00000000000000000000000000000000")
+            .substring(0, 32);
+        byte[] bogusOldChash = bogusOldSeed.getBytes(StandardCharsets.UTF_8);
+        String bogusOldHex = HexFormat.of().formatHex(bogusOldChash);
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                + tenant + "', '" + col + "') ON CONFLICT DO NOTHING");
+            insertChunk(su, tenant, "nexus.chunks_768", 768, col, bogusOldChash, text);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES ('"
+                + tenant + "', 'gate-b-doc', 'gate doc b') ON CONFLICT DO NOTHING");
+            try (PreparedStatement ps = su.prepareStatement(
+                    "INSERT INTO nexus.catalog_document_chunks "
+                    + "(tenant_id, doc_id, position, chash, collection) VALUES (?, ?, 0, ?, ?)")) {
+                ps.setString(1, tenant);
+                ps.setString(2, "gate-b-doc");
+                ps.setBytes(3, bogusOldChash);
+                ps.setString(4, col);
+                ps.executeUpdate();
+            }
+        }
+
+        try (Connection external = dsConnection()) {
+            external.setAutoCommit(false);
+            try (var st = external.prepareStatement("SET nexus.tenant = '" + tenant + "'")) {
+                st.execute();
+            }
+            acquireGateExclusive(external, tenant, col, 60_000);
+
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                Future<Map<String, Object>> future = executor.submit(() -> rekeyOps.rekey(tenant, false));
+                assertThatThrownBy(() -> future.get(750, TimeUnit.MILLISECONDS))
+                    .as("rekey must block BEFORE step 4's content rekey (step 2b's gate "
+                        + "resolution), not just before step 5's manifest UPDATE")
+                    .isInstanceOf(TimeoutException.class);
+
+                // Confirm the rekey backend has genuinely reached the gate --
+                // see the class-level comment above this test for why this
+                // poll, and the lock probe below, are the discriminators
+                // (a row-content pin cannot discriminate placement at all).
+                waitForAdvisoryLockWait(SVC_ROLE, java.time.Duration.ofSeconds(5));
+
+                // THE DISCRIMINATOR, taken WHILE still blocked: probe the
+                // physical row's LOCK state, not its content, via FOR UPDATE
+                // NOWAIT on a separate connection. Under the REWORK (this
+                // code) the row is untouched at step 2b's block point --
+                // unlocked, NOWAIT succeeds and returns the row.
+                try (Connection probe = pg.createConnection("")) {
+                    probe.setAutoCommit(false);
+                    try {
+                        try (PreparedStatement ps = probe.prepareStatement(
+                                "SELECT 1 FROM nexus.chunks_768 WHERE tenant_id = ? "
+                                + "AND chash = decode(?, 'hex') FOR UPDATE NOWAIT")) {
+                            ps.setString(1, tenant);
+                            ps.setString(2, bogusOldHex);
+                            try (ResultSet rs = ps.executeQuery()) {
+                                assertThat(rs.next())
+                                    .as("content rekey (step 4) must NOT have run while blocked "
+                                        + "at step 2b's gate -- the row must be UNLOCKED (FOR "
+                                        + "UPDATE NOWAIT succeeds); under round 1's placement "
+                                        + "step 4 would already hold this row's lock, raising "
+                                        + "55P03 lock_not_available instead")
+                                    .isTrue();
+                            }
+                        }
+                    } finally {
+                        probe.rollback();
+                    }
+                }
+
+                external.rollback();
+
+                Map<String, Object> counts = future.get(15, TimeUnit.SECONDS);
+                assertThat(counts.get("manifest_repointed"))
+                    .as("gate released -- the manifest repoint completes").isEqualTo(1);
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+
+        assertThat(count("SELECT count(*) FROM nexus.chunks_768 WHERE tenant_id='" + tenant
+            + "' AND chash = decode('" + trueHex + "', 'hex')"))
+            .as("after the gate releases, content rekey completes too").isEqualTo(1);
+        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks WHERE tenant_id='" + tenant
+            + "' AND doc_id = 'gate-b-doc' AND chash = decode('" + trueHex + "', 'hex')"))
+            .as("and the manifest points at the rekeyed digest").isEqualTo(1);
+    }
+
+    // ── nexus-t76bp REWORK falsification of the DETECTION half (critic
+    //    Option 2): the counts were computed pre-rework too, but never
+    //    enforced -- delete the throw in RekeyOps.rekey's step 6 and THIS
+    //    test fails. Mirrors StagingPromoteOpsIntegrationTest's
+    //    preExistingDanglingManifestRow_abortsFinalizeLoud exactly. ──
+
+    @Test
+    @Order(22)
+    void preExistingDanglingManifestRow_abortsRekeyLoud() throws Exception {
+        String tenant = "t-rekey-dangling";
+        byte[] ghost = sha256("rekey pre-existing dangling ghost " + System.nanoTime());
+        // nexus-4okz4 increment 2 critic follow-up (critic nit, costless —
+        // T2 critique-4okz4-increment2 [21864]): distinct collection name
+        // per dim (one-collection-one-dim convention), rather than the same
+        // "gate-dangling-col" reused across all three dim inserts.
+        String col384 = "gate-dangling-col-384";
+        String col768 = "gate-dangling-col-768";
+        String col1024 = "gate-dangling-col-1024";
+        // nexus-4okz4 increment 1, critic ROUND 3 pin-sensitivity finding
+        // (T2 critique-t76bp-rekey-gate-2026-08-08 [21807], "Site 2
+        // correlation is unpinned"): ChashSqlIdioms.danglingManifestCountDsl
+        // is THREE correlated NOT EXISTS subqueries (m.chash matched against
+        // each dim table's own chash). A de-correlated rewrite (e.g. a
+        // dropped .where() turning "NOT EXISTS(SELECT 1 FROM chunks_768
+        // WHERE chash = m.chash)" into the unconditional "NOT EXISTS(SELECT
+        // 1 FROM chunks_768)") passed every fixture that predates this row:
+        // this tenant previously had ZERO content rows in any dim table, so
+        // the de-correlated form's "table is empty" check was ALSO true,
+        // giving the identical count=1/abort-fires result as the correlated
+        // form -- no discrimination. Inserting one UNRELATED, live content
+        // row into chunks_768 for this tenant changes nothing for the
+        // CORRELATED form (the ghost chash still matches no row in any dim,
+        // by construction -- it is never referenced by any INSERT here) but
+        // flips the DE-CORRELATED form: chunks_768 is no longer empty, so
+        // its NOT EXISTS(SELECT 1 FROM chunks_768) collapses to false, the
+        // three-way AND goes false, the ghost is no longer counted, and the
+        // abort would silently stop firing.
+        //
+        // nexus-4okz4 increment 2 critic follow-up (T2 critique-4okz4-
+        // increment1-2026-08-08 [21850], nit 1 — "honest partial"): the
+        // ORIGINAL fixture inserted the unrelated row into chunks_768 ONLY,
+        // so it pinned correlation for that ONE dim's NOT EXISTS clause —
+        // a regression de-correlating solely the chunks_384 or chunks_1024
+        // subquery (while 768 stayed correlated) would still pass, since
+        // those tables remained empty for this tenant. One unrelated row
+        // per dim closes that gap: EVERY dim's NOT EXISTS clause is now
+        // exercised against a non-empty table, so a single-dim copy-paste
+        // regression in danglingManifestCountDsl is caught regardless of
+        // which dim it hits.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            for (String c : new String[] {col384, col768, col1024}) {
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                    + tenant + "', '" + c + "') ON CONFLICT DO NOTHING");
+            }
+            String unrelatedText = "rekey dangling-count correlation fixture " + System.nanoTime();
+            insertChunk(su, tenant, "nexus.chunks_384", 384, col384, sha256(unrelatedText), unrelatedText);
+            insertChunk(su, tenant, "nexus.chunks_768", 768, col768, sha256(unrelatedText), unrelatedText);
+            insertChunk(su, tenant, "nexus.chunks_1024", 1024, col1024, sha256(unrelatedText), unrelatedText);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES ('"
+                + tenant + "', 'ghost-doc', 'ghost') ON CONFLICT DO NOTHING");
+            try (PreparedStatement ps = su.prepareStatement(
+                    "INSERT INTO nexus.catalog_document_chunks "
+                    + "(tenant_id, doc_id, position, chash) VALUES (?, 'ghost-doc', 0, ?)")) {
+                ps.setString(1, tenant);
+                ps.setBytes(2, ghost);
+                ps.executeUpdate();
+            }
+        }
+
+        assertThatThrownBy(() -> rekeyOps.rekey(tenant, false))
+            .as("the step-6 detection must be ENFORCED, not merely computed and returned in the "
+                + "envelope -- a caller that never inspects the envelope must not be able to miss "
+                + "this, AND the count must be CORRELATED per row in EVERY dim (an unrelated "
+                + "content row in chunks_384/768/1024 must not mask the ghost manifest row's "
+                + "dangling reference)")
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("dangling manifest");
     }
 }

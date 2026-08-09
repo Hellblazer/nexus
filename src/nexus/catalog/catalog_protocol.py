@@ -243,6 +243,9 @@ class CatalogWriter(Protocol):
     def atomic_manifest_replace(self, doc_id, chunks) -> object:  # canonical
         ...
 
+    def write_manifest_many(self, docs, complete=..., *, sweep=..., chunks=..., collection=..., force_re_embed=...) -> object:  # canonical (nexus-u2kwq batch write; nexus-67qsd/jk88j whitelisted 2026-08-08; nexus-wxjr6 combined-write kwargs 2026-08-09)
+        ...
+
     def resync_chunk_count_cache(self, doc_id) -> object:  # canonical
         ...
 
@@ -309,6 +312,20 @@ CATALOG_WRITE_OPS: tuple[str, ...] = (
     "write_manifest",
     "append_manifest_chunks",
     "atomic_manifest_replace",
+    # nexus-67qsd/nexus-jk88j (2026-08-08): same kgos1-class trap as the
+    # RUNFENCE quartet below — write_manifest_many was reachable on
+    # HttpCatalogClient since nexus-u2kwq but ABSENT from this whitelist,
+    # so _ServiceCatalogWriter.__getattr__ raised AttributeError on every
+    # access and _manifest_write_loop's bare
+    # `callable(getattr(cat, "write_manifest_many", None))` capability
+    # check silently read False forever — the per-doc fallback ran on
+    # every real (service-mode) write, 327 round trips where the design
+    # intended 29 (measured, T2 nexus/flush-tail-investigation-2026-08-08).
+    # Landed together with (never before) nexus-tgrgs's fast-branch sweep
+    # fold-in: whitelisting this alone, sweep-less, would silently
+    # re-disable the nexus-39upx superseded-vector sweep for the batch
+    # path (nexus-jk88j LANDMINE).
+    "write_manifest_many",
     "resync_chunk_count_cache",
     # P1.2 admin/maintenance additions:
     "rename_collection",

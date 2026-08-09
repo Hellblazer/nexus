@@ -1588,6 +1588,8 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 
 **`search` flags:** `--project NAME`
 
+**Degenerate queries now fail loud instead of returning a silent empty result** (nexus-senub, engine v0.1.69+): a query with no searchable terms — every word an English stopword (`nx memory search AND`) or punctuation-only — used to come back as an ordinary `No results found.`, indistinguishable from a real empty result. The engine now returns `400 {"code": "no_searchable_terms", ...}` for this case and `nx memory search`/`search_glob`/`search_by_tag` exit non-zero with a clean error message instead. This is corpus-dependent, not a blanket rejection: a stopword-only query can still resolve a real hit through the title/tag index (which doesn't strip stopwords) and return normally — only a search that finds nothing AND has no searchable content-side term hits the 400. Older engines fail open to the prior silent-empty-result behavior (no version gate).
+
 **`delete` flags:**
 
 | Flag | Description |
@@ -2629,6 +2631,32 @@ precondition does not touch), `nx init` (fresh install), `nx hooks install`
 
 ---
 
+## nx stranded
+
+The cloud-mode consented de-strand escape (nexus-cmtpa). The stranded-install
+detector's primary migrated signal is the engine-side upgrade-ladder
+completion record, which is sound in local mode (one bundled PG per install)
+but tenant-scoped rather than machine-scoped in managed/cloud mode — a shared
+tenant across two machines could otherwise let one machine's migration falsely
+clear the refusal for another machine's own, distinct, unmigrated pre-PG data.
+`nx stranded ack` is the explicit, local, machine-scoped alternative for that
+case only; it has no effect in local mode, where the engine-verified ladder
+signal already governs.
+
+```
+nx stranded ack             # Attest this machine's pre-PG data is migrated (prompts for confirmation)
+nx stranded ack --yes       # Same, unattended
+```
+
+`nx stranded ack` fingerprints the pre-PG artifact files found on this
+machine (path, size, mtime — never content) and records a local marker
+attesting the two-hop migration was completed for exactly that set. If those
+files later change, the fingerprint no longer matches and the stranded-install
+refusal returns. It never deletes anything — deletion of pre-PG artifacts
+remains a separate, independently consented act.
+
+---
+
 ## nx uninstall
 
 First-class agent teardown (RDR-165). See
@@ -2907,6 +2935,22 @@ The split is the point, not a detail: the same instruction delivered at Subagent
 **Exits non-zero when the run measured *nothing*.** An empty, unreadable, unparseable, or tool-call-free scope reports `UNMEASURABLE` with a reason rather than a clean zero; a zero row inside a measurable run is a real zero. Sessions that legitimately carry no tool call are the majority of transcripts — they are counted, listed by reason, and reported as a share, but they do not fail the run. The exit code answers "did this measure anything at all", **not** "is this corpus healthy"; a caller needing a health threshold must read `unmeasurable_share`, not `$?`.
 
 **It reports counts and refuses a verdict.** Non-use of a capability may be a forgotten affordance or a correct rejection, and nothing in the transcript distinguishes them; `--json` carries a `verdict: null` field and per-tool counts so narrower slices stay derivable. The refusal governs what this command renders — it is not, and cannot be, an enforcement boundary against verdicts computed downstream from these numbers.
+
+```
+nx census dispatches [--session SESSION_ID] [--project-dir PATH] [--json]
+```
+
+Recognizes every `Agent` tool_use block in a transcript — `(subagent_type, ordinal, description)` — as `(subagent_type, ordinal)` (nexus-h33x8.2). This is the transcript-based recognizer nexus-nu7fo's RDR-184 Gap-1 ledger could never build for itself: the guard keyed dispatches on a `a<name>-<hash>` name-morphology, but the `Agent` tool has no `name` parameter, so `recognized` was structurally pinned at 0 across four consecutive sessions (0/6, 0/10, 0/7, 0/2). Every `Agent` block already carries `input.subagent_type` and `input.description` — this command reads exactly that, reusing `nx census capability`'s transcript walk and roll-up rule rather than re-deriving them.
+
+Each row carries **two ordinals**: `session_ordinal` numbers every dispatch in the session in transcript order; `type_ordinal` numbers only the occurrences of that row's own `subagent_type` (so the second `conexus:code-review-expert` dispatch in a session is `type_ordinal=2`). **Neither ordinal is a ledger pairing key** — `tests/e2e/lib/expectations.sh` documents why an ordinal invented on the recognizer's side can never be paired against what the `SubagentStart` hook writes (no per-instance identifier survives that far). The ledger's own credit matching is N-of-type (N `EXPECT` rows of a type against N `START`s of that type); this command's `type_counts` is that same N, and the ordinals exist as a human "which one was #2" display aid, not a join key.
+
+`subagent_type` in each row is the **sanitized, ledger-consumable form** — pass it straight to `expectations_expect`. For a plugin-namespaced type like `conexus:substantive-critic` this is the value UNCHANGED, colon included: per AGENTS.md's hot-rule convention ("keyed on the subagent type verbatim, colon included — never an invented name"), the ledger's charset already accepts the colon, and sanitizing it away would recreate the exact pairing failure nexus-nu7fo spent four sessions diagnosing. Sanitization only transforms a value the ledger's charset would otherwise reject outright (a leading non-alphanumeric character, an interior character outside `[A-Za-z0-9_:-]`, an empty string, or over 64 characters); a row whose value changed is marked with `subagent_type_sanitized_changed: true` (`*` in the text table). If two *distinct* raw values sanitize to the same key, that is reported under `sanitize_collisions` rather than silently merged — a downstream consumer must not double-credit two different agent types as one. An `Agent` block with no `input.subagent_type` at all is still enumerated (dropping it would break the recognized-count-equals-raw-count property), flagged `subagent_type_missing: true` (with `subagent_type_raw: null`), and keyed as `general-purpose` — **not** an invented placeholder: `conexus/hooks/scripts/agent-dispatch-expect.sh` (nexus-a795d) computes its own EXPECT-row name identically for the same omitted field (`str(ti.get("subagent_type") or "general-purpose")`), because the harness genuinely starts a `general-purpose` agent when the field is absent. Keying these rows any other way would make "pass `subagent_type` straight to `expectations_expect`" false for exactly the rows that most need it (28 of 1304 dispatches in the live corpus at last count).
+
+A non-`Agent` tool_use block that nonetheless carries `input.subagent_type` is flagged as a **suspect block** (`suspect_blocks` per session, `suspect_blocks_total` at the top level) — the signature of an Agent-block-specific rename or restructure that would otherwise silently zero out recognition while every other tool_use in the same transcript keeps parsing normally, so nothing would go `UNMEASURABLE`. This is warn-only and never affects `exit_code`; the precedent is `agent-dispatch-expect.sh` itself still special-casing `"Task"` as "the pre-rename spelling of the same tool" alongside `"Agent"`.
+
+A session that dispatched nothing is a **measured zero**, not unmeasurable — dispatch non-use is not the defect class this command exists to catch. The UNMEASURABLE-vs-zero contract is otherwise identical to `nx census capability`: an empty, unreadable, unparseable, or genuinely tool-call-free transcript reports `UNMEASURABLE` and a nonzero exit; a session with tool calls but zero `Agent` blocks reports zero dispatches and a zero exit. A session with unparseable trailing lines is still measurable but reported `PARTIAL` (text and JSON both) — the dispatch count above it may be an undercount, never a silently clean total.
+
+**Scope fence (binding):** this command supplies the recognizer only. It does not read or write `tests/e2e/lib/expectations.sh`, does not compute `undeclared`/`BLINDSPOT`, and does not decide how (or whether) the ledger adopts its output — that is nexus-nu7fo's resolution, already closed via the dispatch-expect hook + the AGENTS.md convention above.
 
 ---
 

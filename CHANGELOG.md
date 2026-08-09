@@ -4,6 +4,220 @@ All notable changes to Nexus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.5.0] - 2026-08-09
+
+Paired release with engine-service-v0.1.69 (cut, gated, deployed and
+cloud-gated green 2026-08-09; `REQUIRED_ENGINE_VERSION` bumps to it in this
+release — fresh local installs and package upgrades converge to the same
+engine identity).
+
+### Added
+- **`nx index repo` lands chunks and their catalog manifest atomically, one
+  call per flush — for whole-document flushes** (nexus-wxjr6/nexus-kl2z6,
+  requires engine v0.1.69): the ChunkBatcher-driven ingest path (code/
+  prose/pdf via `nx index repo`) now sends one combined
+  `POST /v1/catalog/manifest/write_many` per flush (chunks + docs +
+  completion-stamp + sweep) instead of a chunk-upsert POST followed by a
+  separate manifest-write POST — each WHOLE document's chunks and manifest
+  land in one engine-side transaction, and sweep accounting
+  (`swept`/`sweep_skipped`) comes from the engine's own response. **Scope:
+  this one-call atomic shape covers whole-document flushes on the
+  ChunkBatcher path only.** Continuation-sliced documents (a batch whose
+  first chunk is not position 0 — e.g. an oversized file split across
+  flushes) still take the old two-call append path and retain the
+  pre-existing non-atomic window; closing that residual is tracked
+  separately (nexus-7t86z, open). Every other ingest path (`doc_indexer.py`,
+  MCP `store_put`, the exporter, `pipeline_stages.py`, and `nx index repo`'s
+  own oversize-file fallbacks) is unchanged and still uses the two-call
+  shape throughout. On an engine below v0.1.69, the combined-write call
+  fails LOUD, not gracefully: the client refuses to treat chunk content as
+  durably written and raises rather than silently falling back to the old
+  shape — do not point a v7.5.0+ client's `nx index repo` at a pre-v0.1.69
+  engine.
+- **`nx stranded ack`** (nexus-cmtpa): the cloud-mode consented de-strand
+  escape. Attests, with a machine-local marker fingerprinted to the actual
+  pre-PG artifact files found (path/size/mtime, never content), that this
+  machine's data was already migrated via the two-hop path — for the one
+  case the engine-verified ladder signal can't cover on its own (a shared
+  tenant across two machines in managed/cloud mode). No effect in local
+  mode, where the ladder signal already governs.
+- **`nx census dispatches`** (nexus-h33x8.2): recognizes every `Agent`
+  tool_use block in a session transcript as `(subagent_type, ordinal)` —
+  the transcript-based recognizer the RDR-184 orchestration ledger could
+  never build for itself (the `Agent` tool carries no `name` parameter, so
+  the old name-morphology guard was structurally pinned at 0 recognized).
+  Read-only recognizer; does not touch `tests/e2e/lib/expectations.sh` or
+  compute undeclared/BLINDSPOT counts itself.
+
+### Changed
+- **`nx memory search` (and `search_glob`/`search_by_tag`) now fail loud on
+  a degenerate query instead of silently returning nothing** (nexus-senub,
+  engine v0.1.69+): a query with no searchable terms — every word an
+  English stopword, or punctuation-only — used to come back as an ordinary
+  empty result, indistinguishable from a real "no matches." The engine now
+  returns `400 {"code": "no_searchable_terms"}` for this specific case and
+  the CLI exits non-zero with a clean message. Corpus-dependent: a
+  stopword-only query that still resolves a real title/tag hit returns
+  normally. Older engines fail open to the prior silent-empty behavior.
+- **Tier-write rows become readable per-row, not just aggregated**
+  (nexus-onjvy): `HttpTelemetryStore.list_tier_writes` adds a capped,
+  totaled read path (`GET /v1/telemetry/tier_writes/list`) for the
+  `target_title` column, which was write-only until now — the existing
+  `nx tier-status` aggregate route is unaffected. Python-API surface only
+  in this release; no new CLI flag.
+
+### Fixed
+- **`nx index repo` no longer drives a local engine into a multi-tens-of-GB
+  memory blowup** (nexus-33hpq) — **local-mode indexing is slower in this
+  release, deliberately.** Indexing a 36-file corpus against a local
+  (`onnx-local`) engine could take the service to **77.4 GB resident** with
+  every core pegged, until it stopped answering health checks and its
+  supervisor killed it as wedged; the client then retried against a service
+  that was no longer there. Cause: the per-collection upsert batch cap was
+  300 in local mode, but that number was derived from the managed
+  control-plane's 30s request timeout — a *latency* budget — while a local
+  ONNX embedder is bound by *memory*. The engine embeds a whole batch in one
+  forward pass over a rectangular `[batch, sequence]` tensor, so attention
+  memory grows with `batch x sequence^2`. Local mode now uses a
+  memory-derived cap of 16 for every collection prefix, which measured a
+  **3.03 GB** peak on the same corpus (with three concurrent flushes in
+  flight). The trade is real and intended: roughly 19x more round trips, so
+  a local `nx index repo` takes noticeably longer than in 7.4.x. Cloud and
+  managed (Voyage) mode are **unchanged** — there the embed is a network
+  call and the original timeout-derived caps still apply. This bounds what
+  the client sends; a matching engine-side limit so no caller can trigger
+  the blowup is tracked separately (nexus-zu4ma).
+- **`nx upgrade` no longer reports a migration step as verified when it
+  could not actually check** (nexus-hdumg) — **behaviour change worth
+  reading before you upgrade.** The chash-rekey step of the upgrade ladder
+  decided success by the *absence* of a problem signal, so when its
+  conformance diagnostic could not run at all (missing diagnostic view,
+  missing role, an errored query) the step still recorded itself as
+  "converged and verified" and the ladder advanced past it. It now reports
+  the step as failed-to-verify, stops the ladder there, and exits non-zero
+  naming the reason. The practical consequence: on a machine whose
+  diagnostic path is broken, `nx upgrade` now fails where it previously
+  appeared to succeed. That is the point — the previous silence meant an
+  unverified migration looked identical to a verified one — but it is a
+  real change in what you will see. The message names the concrete remedy
+  (`nx init --service`, which provisions the diagnostic role and view
+  directly) and distinguishes "could not verify" from "verified as not
+  migrated", since those want different responses. The rekey itself is
+  idempotent, so a stopped ladder costs a re-run, never data.
+- **The two-hop pre-PG upgrade redirect is now genuinely followable start
+  to finish, in both local and cloud mode** (nexus-4922x): the third leg
+  (upgrading back to current after migrating on the pinned 6.18.1 release)
+  previously could re-trip the stranded-install refusal because the
+  de-strand check read a migration-report format nothing writes. It now
+  keys off the engine-side upgrade-ladder's own completion record in local
+  mode, with an indeterminate-vs-confirmed distinction when the ladder
+  can't be reached, and the cloud-mode gap is covered by `nx stranded ack`
+  above. Proven end-to-end by a new Docker rehearsal harness
+  (nexus-8nlj4, `tests/e2e/migration-rehearsal/rehearse_stranded.sh`).
+- **Combined-write flush no longer silently drops content from
+  mixed-identity batches** (nexus-wxjr6, nexus-3mwuo): a flush containing
+  both files with catalog identity and files without it used to embed the
+  identity-less content (paying the Voyage cost) and then silently discard
+  it server-side, since the engine's manifest write only persists chashes
+  a referencing document actually names. Identity-less chunks — and any
+  chash shared between an identity and a non-identity file — now also ride
+  the pre-existing orphaned-but-searchable upsert path as a safety copy.
+- **`nx index` completion-refusal messages no longer assert a cause the
+  engine never checked** (nexus-nb3yg, nexus-2t63u): a `--corpus`-only
+  invocation (no explicit `--collection`) used to skip the live
+  stale-collection lookup entirely and print the "may be a stale
+  --collection mismatch" hint unconditionally. The lookup now runs
+  whenever the run's target collection can be derived at all (explicit or
+  corpus-derived), and the message states one of three honest outcomes —
+  confirmed match, confirmed mismatch, or unknown — never a guessed cause.
+- **`scripts/reinstall-tool.sh` handles the canonical post-release
+  scenario by default** (nexus-e1m2v, nexus-otnvr, nexus-103v2): the live
+  process classifier now matches `uv tool`-shimmed MCP server commands
+  (previously missed because the shim execs via shebang, pushing the real
+  command to argv[2]); the default reinstall now cycles all four
+  known-safe holder classes (session MCP servers, standalone aspect
+  worker, MinerU, storage service) instead of refusing outright, and the
+  lockstep auto-upgrade hook now logs every swap attempt to
+  `~/.config/nexus/lockstep.log` instead of routing output to `/dev/null`.
+
+### Performance
+- **`nx index repo` is substantially faster** (nexus-tgrgs/nexus-jk88j/
+  nexus-67qsd, nexus-itpdc/nexus-jb4pp, nexus-eslkl): three fixes on the
+  same investigation, landed together as one arc.
+  - `write_manifest_many`'s batched-flush fast path had been silently
+    DEAD in service mode since an earlier whitelist change — every flush
+    was falling back to a per-document call (measured: 327 catalog round
+    trips per run against 29 designed). Fixed by folding the sweep into
+    the fast branch first, then re-enabling the whitelist entry (the only
+    safe landing order — the reverse re-creates a superseded-vector leak).
+    Round trips per flush batch: 4 (was ~6 per document).
+  - A provably-empty post-store hook chain was still paying the cost of
+    the process-wide hook-registry lock on every file, measured at
+    ~53.9s/run of pure wait for zero actual work; a zero-registered-hooks
+    fire now returns without acquiring the lock at all (53.9s -> ~0.0s/run
+    for that bucket).
+  - The remaining lock contention — one process-wide mutex serializing
+    every hook fire, held for the duration of network-bound batch hooks
+    while multiple flush workers contend (~104-186s/run aggregate
+    measured wait) — is replaced with one lock per registered hook
+    (opt-out for hooks proven idempotent server-side), and the two
+    downstream singleton locks (`_service_catalog_lock`/`_service_t2_lock`)
+    now guard only resolve/evict instead of being held across network
+    round trips.
+
+### Engine (engine-service-v0.1.69 — cut, gated, deployed and cloud-gated green 2026-08-09, pinned here)
+- **Closes a real concurrent index-vs-sweep write-skew** (nexus-11gh6,
+  nexus-3wtku): every writer that inserts catalog manifest chunk rows now
+  takes a per-`(tenant, collection)` advisory gate SHARED before writing,
+  and the superseded-vector sweep takes the same gate EXCLUSIVE in its own
+  transaction — closing a race where a concurrent sweep could delete
+  content a manifest write was still in the middle of landing. Sweeping
+  now happens only after a document's manifest transaction commits, so a
+  rolled-back write can no longer report swept counts.
+- **RekeyOps' full mutation span is gated, not just the final manifest
+  repoint** (nexus-t76bp): the multi-minute rekey/collapse operation now
+  acquires its sweep gates before the long content-moving steps run
+  (previously only the last step was gated, leaving the middle of the
+  operation exposed to a concurrent sweep); a dangling-reference count
+  found at the operation's last step now aborts the transaction instead of
+  only being reported after the fact.
+- **Combined write**: `POST /v1/catalog/manifest/write_many` accepts
+  chunks + docs + a completion map + `sweep=true` in one request and lands
+  each document's chunks and manifest atomically inside one per-doc
+  transaction, with the superseded-vector sweep folded into that same
+  transaction (nexus-kl2z6) — the engine half of the client change
+  described under Added above. A new staging guard keeps the sweep from
+  deleting a chunk a paused guided-migration's staging table still
+  references (nexus-vc6dh), backed by a new btree index on
+  `staging.document_chunks(chash)` that turns the guard's lookup from a
+  ~1s full scan into a sub-millisecond indexed probe.
+- **Sweep outcomes are classified, not just counted**: the manifest-write
+  response's per-doc `sweep_detail` now carries a closed `reason`
+  vocabulary (`before_read_failed`, `gate_timeout`, `statement_timeout`,
+  `sweep_failed`) instead of collapsing every non-swept case into an
+  opaque skip (nexus-nl3fn, nexus-kl2z6) — this is what the client's CLI
+  summary reporting now surfaces.
+- **Engine half of `nx memory search`'s degenerate-query 400** (nexus-senub):
+  `MemoryRepository`/`MemoryHandler` reject a stopword-only or
+  punctuation-only search with `400 {"code": "no_searchable_terms"}`
+  instead of a silent empty result — see Changed above for the client
+  side.
+- **Engine half of the tier-write per-row read route** (nexus-onjvy):
+  `GET /v1/telemetry/tier_writes/list` — see Changed above for the client
+  side.
+
+### Internal
+- Engine-side raw-SQL-to-jOOQ conversion continues (nexus-4okz4 increments
+  1-5: `RekeyOps`, `StagingPromoteOps`, `StagingHandler`/`ChashCensus`,
+  statement-granular raw-SQL gate) alongside gate hardening
+  (nexus-rfx2j/nexus-ajt86) and per-fork Postgres template-database reuse
+  for the local engine test suite (nexus-yhmav/nexus-tyiht/nexus-13eb0).
+- Worktree-dispatched agents now self-verify their base commit as their
+  first action (nexus-5kwkf, `scripts/agent-worktree-preflight.sh`) —
+  closes a class of silently-stale-worktree dispatch.
+- Test-substrate PG-boot hardening (nexus-ui654): bounded concurrent boots,
+  dead-owner reap, and a sweep script for orphaned containers.
+
 ## [7.4.0] - 2026-08-08
 
 Paired release with engine-service-v0.1.68 (cloud-deployed 2026-08-07;

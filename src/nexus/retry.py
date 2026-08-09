@@ -534,9 +534,9 @@ def _etl_batch_with_breaker(
 _MANIFEST_WRITE_RETRY_DELAYS: tuple[float, ...] = (0.5, 1.0, 2.0)
 
 
-def _is_retryable_manifest_connection_error(exc: BaseException) -> bool:
-    """Return True if *exc* is a transient connection-level failure worth
-    retrying a catalog manifest write.
+def _is_connectivity_error(exc: BaseException) -> bool:
+    """Return True if *exc* is a transient connection-level failure — the
+    network/transport layer, not a business-domain response.
 
     Checks ``httpx.TransportError`` (covers ``ConnectError``,
     ``ConnectTimeout``, ``ReadTimeout``, etc.), the stdlib
@@ -544,8 +544,28 @@ def _is_retryable_manifest_connection_error(exc: BaseException) -> bool:
     HTTP clients sometimes reframe a transport drop as an application
     error via ``raise ... from e`` — the chained ``__cause__``/
     ``__context__``. Does NOT inspect HTTP status codes: an
-    ``httpx.HTTPStatusError`` (a real 4xx/5xx response) is never retried
-    here, unlike the migration-scoped ``_is_retryable_etl_error``.
+    ``httpx.HTTPStatusError`` (a real 4xx/5xx response, including a
+    documented business refusal like ``IndexRunVerifyRefused``'s 409) is
+    never classified as connectivity here, unlike the migration-scoped
+    ``_is_retryable_etl_error``.
+
+    RENAMED from ``_is_retryable_manifest_connection_error`` (nexus-0dpli):
+    originally scoped to catalog manifest-write retries
+    (:func:`_manifest_write_with_retry`, below), now also reused as the
+    EVICTION TRIGGER for the process-lifetime shared-client singletons in
+    ``catalog/factory.py`` and ``mcp_infra.py`` — deciding whether a
+    call's failure means the singleton's underlying connections are
+    broken badly enough to warrant closing and rebuilding the whole
+    instance, versus a routine domain outcome (a 409 refusal, a
+    validation error) that must propagate without touching the shared
+    client at all. Authentication / lease-rotation failures do NOT need a
+    separate branch here: ``RefreshableHttpStoreMixin``
+    (``db/t2/_refreshable_client.py``) already retries a 401 and
+    re-resolves the endpoint INSIDE each store instance before an
+    exception would ever reach a caller of this function — by the time
+    any caller sees an exception at all, the mixin's own internal
+    recovery has already been exhausted for that failure class, so a
+    singleton-level eviction is neither necessary nor sufficient for it.
     """
     if isinstance(exc, (httpx.TransportError, ConnectionError, TimeoutError)):
         return True
@@ -577,7 +597,7 @@ def _manifest_write_with_retry(
         except Exception as exc:
             if (
                 attempt > len(_MANIFEST_WRITE_RETRY_DELAYS)
-                or not _is_retryable_manifest_connection_error(exc)
+                or not _is_connectivity_error(exc)
             ):
                 raise
             delay = _MANIFEST_WRITE_RETRY_DELAYS[attempt - 1]

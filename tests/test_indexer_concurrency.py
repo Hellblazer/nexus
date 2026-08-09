@@ -341,6 +341,397 @@ class TestLockedHookRegistry:
         assert overlaps == []
         assert sorted(fired) == [f"/p{i}" for i in range(6)]
 
+    def test_zero_match_fires_never_take_the_lock(self):
+        """nexus-itpdc / nexus-eslkl: a fire that would invoke NO hook must
+        not acquire ANY per-hook lock — including one held by a DIFFERENT,
+        registered hook.
+
+        Post-eslkl there is no longer a single process-wide mutex (each
+        registered hook gets its OWN lock, keyed by callable identity), so
+        this is asserted by holding the REGISTERED hook's own lock (via the
+        internal ``_lock_for`` accessor) from another thread and requiring
+        each empty fire to return anyway; a fire that (incorrectly)
+        acquired that same lock would block until the timeout and fail."""
+        from nexus.hook_registry import HookRegistry, LockedHookRegistry
+
+        registry = HookRegistry()
+        # Only a FLUSH-grain batch hook — exactly the default hook set's
+        # shape (taxonomy + manifest are both batch_grain="flush").
+        def flush_hook(ids, col, docs, embs, metas):
+            pass
+        flush_hook.batch_grain = "flush"
+        registry.register_batch(flush_hook)
+
+        locked = LockedHookRegistry(registry)
+        held = threading.Event()
+        release = threading.Event()
+
+        def hog():
+            with locked._lock_for(flush_hook):
+                held.set()
+                release.wait(5)
+
+        t = threading.Thread(target=hog)
+        t.start()
+        assert held.wait(5)
+        try:
+            done = threading.Event()
+
+            def empty_fires():
+                # file-grain batch: no hook declares it -> zero match.
+                locked.fire_batch(["d1"], "col", ["x"], None, [{}], grain="file")
+                # single chain: nothing registered at all.
+                locked.fire_single("d1", "col", "x")
+                # document chain: nothing registered at all.
+                locked.fire_document("/p", "col", "x")
+                done.set()
+
+            probe = threading.Thread(target=empty_fires)
+            probe.start()
+            assert done.wait(3), (
+                "an empty hook chain blocked on a registered hook's lock — "
+                "the zero-match fast path regressed"
+            )
+            probe.join(3)
+        finally:
+            release.set()
+            t.join(5)
+
+    def test_different_hooks_do_not_serialize_against_each_other(self):
+        """T3 (nexus-eslkl): per-chain locking means TWO DIFFERENT
+        registered hooks never wait on each other — only concurrent fires
+        of the SAME hook do. Holding hook A's lock from another thread
+        must not block a fire that dispatches only hook B.
+
+        Non-vacuity mirror (required by the same design memo): the
+        analogous fire that DOES dispatch A while A's lock is held must
+        block until release — proving the probe thread's completion above
+        is a real "did not need this lock" result, not a fluke of a
+        fast/no-op dispatch path.
+        """
+        from nexus.hook_registry import HookRegistry, LockedHookRegistry
+
+        registry = HookRegistry()
+
+        def hook_a(ids, col, docs, embs, metas):
+            pass
+        hook_a.batch_grain = "flush"
+
+        def hook_b(source_path, collection, content):
+            pass
+
+        registry.register_batch(hook_a)
+        registry.register_document(hook_b)
+        locked = LockedHookRegistry(registry)
+
+        held = threading.Event()
+        release = threading.Event()
+
+        def hold_a():
+            with locked._lock_for(hook_a):
+                held.set()
+                release.wait(5)
+
+        t = threading.Thread(target=hold_a)
+        t.start()
+        try:
+            assert held.wait(5)
+
+            # B is unrelated to A's lock -> must complete without waiting.
+            done_b = threading.Event()
+
+            def fire_b():
+                locked.fire_document("/p", "col", "x")
+                done_b.set()
+
+            probe_b = threading.Thread(target=fire_b)
+            probe_b.start()
+            assert done_b.wait(3), (
+                "firing hook B blocked on hook A's lock — chains that "
+                "should be independent are still serializing"
+            )
+            probe_b.join(3)
+
+            # Non-vacuity mirror: firing A itself, while A's lock is held,
+            # MUST block until release — otherwise the predicate above is
+            # meaningless (nothing was actually exclusive).
+            done_a = threading.Event()
+
+            def fire_a():
+                locked.fire_batch(["d1"], "col", ["x"], None, [{}], grain="flush")
+                done_a.set()
+
+            probe_a = threading.Thread(target=fire_a)
+            probe_a.start()
+            assert not done_a.wait(0.2), (
+                "firing hook A completed while A's own lock was held — "
+                "self-serialization is broken"
+            )
+        finally:
+            release.set()
+            t.join(5)
+        probe_a.join(5)
+        assert done_a.wait(5)
+
+    def test_self_serialization_no_interleaved_enter(self):
+        """T4 (nexus-eslkl): concurrent fires of the SAME hook must never
+        interleave — no ``enter, enter`` pair without an intervening
+        ``exit``. Deterministic via a barrier the hook body waits on
+        (bounded rendezvous), not a sleep-based race window."""
+        from nexus.hook_registry import HookRegistry, LockedHookRegistry
+
+        registry = HookRegistry()
+        ordinals: list[str] = []
+        ordinals_lock = threading.Lock()
+        in_hook = threading.Event()
+        release = threading.Event()
+
+        def hook(source_path, collection, content):
+            with ordinals_lock:
+                assert not in_hook.is_set(), "interleaved enter,enter observed"
+                in_hook.set()
+                ordinals.append(f"enter:{source_path}")
+            release.wait(5)
+            with ordinals_lock:
+                ordinals.append(f"exit:{source_path}")
+                in_hook.clear()
+
+        registry.register_document(hook)
+        locked = LockedHookRegistry(registry)
+
+        # First thread enters and parks on `release`; the second must be
+        # BLOCKED (not interleaved) until the first exits.
+        t1 = threading.Thread(target=locked.fire_document, args=("/a", "col", "x"))
+        t1.start()
+        assert in_hook.wait(5), "first fire never entered the hook"
+
+        entered_while_first_held = threading.Event()
+
+        def second():
+            locked.fire_document("/b", "col", "x")
+            entered_while_first_held.set()
+
+        t2 = threading.Thread(target=second)
+        t2.start()
+        # The second thread must NOT complete yet — it should be queued on
+        # the same per-hook lock the first thread is holding.
+        assert not entered_while_first_held.wait(0.2), (
+            "second fire completed before the first released the lock"
+        )
+
+        release.set()
+        t1.join(5)
+        t2.join(5)
+        assert entered_while_first_held.is_set()
+        assert ordinals == ["enter:/a", "exit:/a", "enter:/b", "exit:/b"]
+
+    def test_serialize_false_opts_out_of_the_lock_entirely(self):
+        """A hook declaring ``serialize = False`` must run completely
+        unlocked — concurrent fires of THAT hook may interleave (the
+        opt-out is a no-op on locking, not a narrower lock).
+
+        nexus-s3mhu (mutation-confirmed vacuous, FIXED): the original
+        version asserted ``not errors`` where ``errors`` was populated
+        only if ``locked.fire_batch(...)`` itself raised. But
+        ``HookRegistry.fire_batch`` has its own per-hook
+        ``except Exception: log + persist hook_failures`` wrapper that
+        NEVER re-raises — so when the opt-out was broken (every hook
+        always locks), thread 1 entered the hook and blocked forever on
+        the barrier (thread 2 was queued behind the SAME lock and never
+        reached its own ``barrier.wait()``); the eventual
+        ``BrokenBarrierError`` was swallowed by ``fire_batch``, and
+        ``errors`` stayed empty either way — genuinely-concurrent
+        (correct) and serialized-then-silently-broken (should fail) were
+        indistinguishable to that assertion. Falsified by deleting the
+        opt-out check from ``LockedHookRegistry._invoke`` — the old
+        version passed unmodified.
+
+        Fixed by asserting on a signal ``fire_batch``'s exception
+        swallowing CANNOT intercept: each thread records its own
+        ``barrier.wait()`` outcome (rendezvous success, or the
+        ``BrokenBarrierError`` itself) directly into a shared list FROM
+        INSIDE the hook body, before control ever returns to
+        ``fire_batch``. A silently-swallowed timeout now shows up as a
+        recorded ``"broken"`` entry, not as an empty error list. Re-ran
+        the same falsify-by-deleting-the-code check against this version:
+        it correctly FAILS when the opt-out is removed.
+        """
+        from nexus.hook_registry import HookRegistry, LockedHookRegistry
+
+        registry = HookRegistry()
+        barrier = threading.Barrier(2, timeout=2)
+        outcomes: list[str] = []
+        outcomes_lock = threading.Lock()
+
+        def unlocked_hook(ids, col, docs, embs, metas):
+            # Only satisfiable AS "rendezvous" for BOTH threads if they
+            # are inside the hook body AT THE SAME TIME — impossible if
+            # this hook were still serialized under a lock (the second
+            # thread would never reach barrier.wait() until the first's
+            # 2s timeout breaks the barrier for both).
+            try:
+                barrier.wait()
+                outcome = "rendezvous"
+            except threading.BrokenBarrierError:
+                outcome = "broken"
+            with outcomes_lock:
+                outcomes.append(outcome)
+        unlocked_hook.batch_grain = "flush"
+        unlocked_hook.serialize = False
+        registry.register_batch(unlocked_hook)
+        locked = LockedHookRegistry(registry)
+
+        threads = [
+            threading.Thread(
+                target=locked.fire_batch,
+                args=([f"d{i}"], "col", ["x"], None, [{}]),
+                kwargs={"grain": "flush"},
+            )
+            for i in range(2)
+        ]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(5)
+
+        assert outcomes == ["rendezvous", "rendezvous"], (
+            f"expected both threads to rendezvous concurrently, got "
+            f"{outcomes} — a 'broken' entry means the barrier timed out, "
+            "i.e. the hooks were actually serialized (the opt-out is not "
+            "working)"
+        )
+
+    def test_non_empty_chains_still_serialize_and_fire(self):
+        """The fast path must not become a correctness hole: a chain with
+        a registered hook still takes the lock (so cfc72's interleaving
+        guarantee holds) and still fires."""
+        from nexus.hook_registry import HookRegistry, LockedHookRegistry
+
+        registry = HookRegistry()
+        fired: list[str] = []
+        overlaps: list[str] = []
+        in_hook = threading.Event()
+
+        def batch_hook(ids, col, docs, embs, metas):
+            if in_hook.is_set():
+                overlaps.append(ids[0])
+            in_hook.set()
+            time.sleep(0.01)
+            in_hook.clear()
+            fired.append(ids[0])
+        batch_hook.batch_grain = "file"
+        registry.register_batch(batch_hook)
+        locked = LockedHookRegistry(registry)
+
+        threads = [
+            threading.Thread(
+                target=locked.fire_batch,
+                args=([f"d{i}"], "col", ["x"], None, [{}]),
+                kwargs={"grain": "file"},
+            )
+            for i in range(6)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert overlaps == []
+        assert sorted(fired) == [f"d{i}" for i in range(6)]
+
+    def test_lock_wait_seconds_measures_contention(self):
+        """nexus-itpdc: the wait must be MEASURABLE, not inferred.
+
+        Without this counter the convoy is billed to whichever caller's
+        timer brackets the fire, which is how ~53s/run of pure lock wait
+        was mis-attributed to GIL starvation for a full investigation
+        cycle."""
+        from nexus.hook_registry import HookRegistry, LockedHookRegistry
+
+        registry = HookRegistry()
+
+        def slow(source_path, collection, content):
+            time.sleep(0.05)
+        registry.register_document(slow)
+        locked = LockedHookRegistry(registry)
+        assert locked.lock_wait_seconds == 0.0
+
+        threads = [
+            threading.Thread(target=locked.fire_document,
+                             args=(f"/p{i}", "col", "x"))
+            for i in range(3)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Three 0.05s serialized hooks => the two losers wait ~0.05 and
+        # ~0.10s. Assert only the direction, generously, so a loaded CI
+        # box cannot flake it.
+        assert locked.lock_wait_seconds > 0.02
+
+    def test_has_batch_hooks_mirrors_the_fire_batch_grain_filter(self):
+        """The fast-path predicate and the dispatch filter must agree —
+        a predicate that said 'no hooks' where fire_batch would have
+        fired one would silently DROP hooks, which is a correctness bug,
+        not a perf regression."""
+        from nexus.hook_registry import HookRegistry
+
+        registry = HookRegistry()
+        assert registry.has_batch_hooks("file") is False
+        assert registry.has_batch_hooks("flush") is False
+        assert registry.has_batch_hooks("all") is False
+
+        def default_grain(ids, col, docs, embs, metas):
+            pass
+        registry.register_batch(default_grain)
+        # No batch_grain attribute => "file" default, same as fire_batch's.
+        assert registry.has_batch_hooks("file") is True
+        assert registry.has_batch_hooks("flush") is False
+        assert registry.has_batch_hooks("all") is True
+
+        def flush_grain(ids, col, docs, embs, metas):
+            pass
+        flush_grain.batch_grain = "flush"
+        registry.register_batch(flush_grain)
+        assert registry.has_batch_hooks("flush") is True
+
+        # Cross-check against the real dispatcher rather than trusting
+        # two independent readings of the same rule.
+        for grain in ("file", "flush", "all", "unknown"):
+            seen: list[str] = []
+
+            def spy(ids, col, docs, embs, metas, _s=seen):
+                _s.append("x")
+            registry2 = HookRegistry()
+            registry2.register_batch(default_grain)
+            registry2.register_batch(flush_grain)
+            registry2.fire_batch(["d"], "col", ["x"], None, [{}], grain=grain)
+            fired_any = registry2.has_batch_hooks(grain)
+            # has_batch_hooks is the PREDICTION; a False must never
+            # accompany a dispatch that would have matched something.
+            matched = [
+                h for h in registry2._batch
+                if grain == "all" or getattr(h, "batch_grain", "file") == grain
+            ]
+            assert fired_any == bool(matched), grain
+
+    def test_default_hook_set_registers_no_file_grain_batch_hook(self):
+        """Pins the premise the fast path exploits in production.
+
+        If a future default hook registers at file grain, the indexer's
+        per-file fire stops being a no-op — this test is what tells the
+        author that the itpdc measurements no longer describe reality."""
+        from nexus.hook_registry import HookRegistry, install_default_hooks
+
+        registry = HookRegistry()
+        install_default_hooks(registry)
+        assert registry.has_batch_hooks("file") is False
+        assert registry.has_batch_hooks("flush") is True
+        assert registry.has_single_hooks() is False
+        assert registry.has_document_hooks() is True
+
     def test_getattr_falls_through_to_registry(self):
         from nexus.hook_registry import HookRegistry, LockedHookRegistry
 

@@ -2980,6 +2980,215 @@ def _drain_batcher_with_markers(
     return flushed
 
 
+def _aggregate_flush_metas(file_contexts: list) -> list[dict]:
+    """Rebuild a flush's chunk metadata with doc_id + file-local
+    chunk_index injected (post-RDR-108 chunk metadata carries neither).
+
+    Shared, module-level (nexus-wxjr6 — moved out of ``_run_index``'s
+    nested closures so it is independently testable), by
+    ``_fire_flush_grain_hooks`` (taxonomy/manifest dispatch) and
+    ``_build_combined_write_payload`` below (the combined-write's
+    manifest-row grouping) — both closures need the IDENTICAL
+    doc_id/position assignment. Pure: no closure state, only
+    ``file_contexts`` (the same ``(path, context)`` pairs
+    ``on_batch_begin``/``on_batch_complete`` already receive).
+    """
+    agg: list[dict] = []
+    for _path, _c in file_contexts:
+        if not isinstance(_c, dict):
+            continue
+        for _j, _m in enumerate(_c["metadatas"]):
+            agg.append({
+                **_m,
+                "doc_id": _c["catalog_doc_id"],
+                "chunk_index": _j,
+            })
+    return agg
+
+
+class _CombinedWritePositionZeroViolation(RuntimeError):
+    """Raised by :func:`_build_combined_write_payload` when a doc's batch
+    lacks position 0 — see that function's docstring for why this is a
+    defended invariant, not a routed branch."""
+
+
+def _build_combined_write_payload(
+    ids: list, docs: list, metas: list, file_contexts: list,
+) -> "tuple[list[dict], list[tuple[str, list[dict]]], dict[str, str], list[str], list[str], list[dict]]":
+    """Build the nexus-wxjr6 combined-write request pieces from one
+    ChunkBatcher flush. Pure — no network calls, no catalog dependency —
+    so it is unit-testable independent of ``_batch_flush``'s I/O.
+
+    Returns ``(chunks_payload, full_docs, complete_map, orphan_ids,
+    orphan_docs, orphan_metas)``:
+
+    * ``chunks_payload`` — ``[{chash, text, metadata}, ...]`` for chunks
+      belonging to a file that HAS catalog identity, deduped by chash
+      (=id for T3, RDR-180), first occurrence wins — matches the engine's
+      own dedup discipline (design memo §1.1: "chunk text is carried ONCE
+      at the top level, keyed by chash").
+    * ``full_docs`` — ``[(doc_id, rows), ...]`` for every doc in this
+      flush whose batch includes position 0 (ChunkBatcher's file-atomic
+      contract guarantees this for every REAL doc — see the
+      ``_CombinedWritePositionZeroViolation`` raise below).
+    * ``complete_map`` — ``{doc_id: content_hash}`` restricted to
+      ``full_docs``' own ids, for the completion-stamp ride-along
+      (nexus-5xn3k.4).
+    * ``orphan_ids``/``orphan_docs``/``orphan_metas`` — chunks belonging
+      EXCLUSIVELY to files with NO catalog identity (code review Critical
+      C1, 2026-08-09, review T2 [22014]): the engine's
+      ``upsertManifestChunkVectors`` (``CatalogRepository.java`` ~3966-
+      3984) only persists chashes referenced by a doc's OWN manifest
+      ``rows`` — the ``resolved`` chash map it receives is the FULL
+      flush-wide set, but only entries a REFERENCING doc names ever get
+      written. Before this fix, a mixed flush (some files with catalog
+      identity, some without — routine: ``code_indexer.py`` resolves
+      ``catalog_doc_id`` per FILE and stages the file into the batcher
+      regardless of whether resolution succeeded) sent EVERY file's
+      content in ``chunks_payload`` while ``full_docs`` only ever covered
+      identity-having docs: identity-less content was embedded (Voyage
+      cost paid) then silently discarded server-side — no log, no
+      counter, no error, and a REGRESSION vs pre-commit behavior (that
+      content used to land in T3 via the old direct upsert-chunks call,
+      orphaned-but-searchable). The caller (``_batch_flush``) sends these
+      through the OLD ``db.upsert_chunks_with_embeddings`` call, exactly
+      preserving the pre-commit orphaned-but-searchable behavior for
+      files this function cannot manifest.
+
+      A chash claimed by BOTH an identity file and an identity-less file
+      (duplicate content across files, routine boilerplate) rides BOTH
+      paths (nexus-3mwuo, C1-residual from the wxjr6 delta re-review, T2
+      review-wxjr6-client-2026-08-09 [22014]): it stays in
+      ``chunks_payload`` (the cheap, common-case-correct path — safely
+      covered by the identity file's manifest reference IF that file's
+      per-doc write succeeds) AND is ALSO included in
+      ``orphan_ids``/``orphan_docs``/``orphan_metas``. This split is
+      computed client-side, before the request is sent, so it cannot
+      react to what happens to any individual doc's per-doc transaction
+      server-side — if the identity file's doc lands in the response's
+      ``failed_doc_ids`` (a real, already-modeled outcome), a chash
+      staked ONLY on that doc's manifest reference would be embedded
+      (cost paid) then referenced by no committed doc, lost for both
+      files with no recovery path. Duplicating the shared chash into the
+      legacy upsert call closes that corner: the legacy path is
+      idempotent server-side (``ON CONFLICT`` per chash/collection), so
+      the redundant write in the common case (identity doc succeeds) is
+      a cheap, safe cost, and the orphan copy survives regardless of the
+      identity doc's outcome.
+
+    Raises :class:`_CombinedWritePositionZeroViolation` if any
+    identified doc's batch lacks position 0 — a DEFENDED invariant, not
+    a routed branch: unlike ``_manifest_write_loop`` (also called for
+    streaming producers that genuinely emit continuation slices), the
+    ChunkBatcher flush path has exactly one producer and that producer
+    guarantees the invariant by construction (module docstring — "a
+    file's chunks never straddle a flush boundary"). A violation here is
+    a real bug upstream, not routine continuation traffic, so this fails
+    loud rather than silently routing it onto a path this function does
+    not implement (nexus-wxjr6 non-goal guard; no silent fallbacks for
+    correctness, CLAUDE.md).
+    """
+    from collections import defaultdict  # noqa: PLC0415 — stdlib deferred to function scope
+
+    from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 — deferred: avoid module-load cross-import
+
+    # Split by catalog identity FIRST (code review Critical C1): a chash
+    # is orphan-eligible if ANY file that stages it lacks catalog
+    # identity — a chash claimed EXCLUSIVELY by identity-having files
+    # never touches the orphan path (it's cheaply, safely referenceable
+    # via chunks_payload alone).
+    identity_ids: set[str] = set()
+    orphan_candidate_ids: set[str] = set()
+    for _path, _c in file_contexts:
+        if not isinstance(_c, dict):
+            continue
+        target = identity_ids if _c.get("catalog_doc_id") else orphan_candidate_ids
+        target.update(_c.get("ids") or [])
+    orphan_only_ids = orphan_candidate_ids - identity_ids
+    # nexus-3mwuo: a chash claimed by BOTH an identity file and an
+    # identity-less file — rides BOTH paths (see docstring). Distinct
+    # from orphan_only_ids: those chashes skip chunks_payload entirely;
+    # shared_ids stay in chunks_payload too.
+    shared_ids = orphan_candidate_ids & identity_ids
+
+    seen_chash: set[str] = set()
+    # Dedup ONLY the shared-chash orphan copy (first occurrence wins,
+    # mirroring chunks_payload's own dedup) — a shared chash necessarily
+    # appears once per claiming file (once from its identity file, once
+    # from its orphan file), and one legacy-upsert copy is enough to
+    # close the recovery gap. orphan_only_ids intentionally keeps its
+    # pre-existing no-dedup behavior (unchanged by nexus-3mwuo; out of
+    # this fix's scope).
+    seen_shared_orphan: set[str] = set()
+    chunks_payload: list[dict] = []
+    orphan_ids: list[str] = []
+    orphan_docs: list[str] = []
+    orphan_metas: list[dict] = []
+    for _cid, _cdoc, _cmeta in zip(ids, docs, metas):
+        if _cid in orphan_only_ids:
+            orphan_ids.append(_cid)
+            orphan_docs.append(_cdoc)
+            orphan_metas.append(_cmeta)
+            continue
+        if _cid in shared_ids and _cid not in seen_shared_orphan:
+            seen_shared_orphan.add(_cid)
+            orphan_ids.append(_cid)
+            orphan_docs.append(_cdoc)
+            orphan_metas.append(_cmeta)
+        if _cid in seen_chash:
+            continue
+        seen_chash.add(_cid)
+        chunks_payload.append({"chash": _cid, "text": _cdoc, "metadata": _cmeta})
+
+    agg_metas = _aggregate_flush_metas(file_contexts)
+    by_doc: dict[str, list[tuple[int, dict]]] = defaultdict(list)
+    for _i, _meta in enumerate(agg_metas):
+        _doc_id = _meta.get("doc_id", "")
+        if _doc_id:
+            by_doc[_doc_id].append((_i, _meta))
+
+    full_docs: list[tuple[str, list[dict]]] = []
+    for _doc_id, _indexed_metas in by_doc.items():
+        _chunks = _manifest_chunk_rows(_indexed_metas)
+        if not any(_c["chash"] for _c in _chunks):
+            # Review Suggestion (T2 review-wxjr6-client-2026-08-09
+            # [22014]): this exclusion isn't mirrored by the identity/
+            # orphan split above — the split only checks
+            # ``catalog_doc_id`` truthiness, not chash validity, so a
+            # doc WITH catalog identity but zero non-empty chashes here
+            # would still have its file classified ``identity`` (not
+            # ``orphan``) by the split. Structurally unreachable via the
+            # real call path today: ``chunk_text_hash`` is populated
+            # unconditionally per chunk (``code_indexer.py``:
+            # ``chunk_text_hash=chunk_text_hash_full``), so ``_chunks``
+            # cannot be all-empty for a doc that actually staged
+            # content. Not defended with a raise (unlike the position-0
+            # invariant below) since this branch legitimately fires for
+            # an empty ``_indexed_metas`` group, which is not itself a
+            # bug.
+            continue
+        if not any(_c["position"] == 0 for _c in _chunks):
+            raise _CombinedWritePositionZeroViolation(
+                f"combined-write flush: doc {_doc_id!r} batch lacks "
+                "position 0 — ChunkBatcher's file-atomic contract "
+                "guarantees every flushed file is whole; this violates "
+                "that invariant and must not be silently routed onto "
+                "the continuation-append path (nexus-wxjr6 non-goal "
+                "guard)"
+            )
+        full_docs.append((_doc_id, _chunks))
+
+    full_ids = {d for d, _ in full_docs}
+    complete_map = {
+        _c["catalog_doc_id"]: _c["metadatas"][0].get("content_hash", "")
+        for _path, _c in file_contexts
+        if isinstance(_c, dict) and _c.get("catalog_doc_id") in full_ids
+        and _c.get("metadatas")
+        and _c["metadatas"][0].get("content_hash")
+    }
+    return chunks_payload, full_docs, complete_map, orphan_ids, orphan_docs, orphan_metas
+
+
 def _run_index(
     repo: Path,
     registry: "object",
@@ -3015,6 +3224,20 @@ def _run_index(
     info = registry.get(repo)
     if info is None:
         return {}
+
+    # The per-op catalog counters are a process-lifetime global; zero them
+    # here so the end-of-run index_catalog_op_stats event covers exactly
+    # THIS run, not cumulative-since-process-start (review finding,
+    # nexus-jb4pp — the multi-index-per-process mis-attribution class).
+    from nexus.catalog.factory import reset_service_catalog_op_stats  # noqa: PLC0415 — deferred to avoid circular import (catalog.factory)
+
+    reset_service_catalog_op_stats()
+    # nexus-ldab2: mirrors the catalog reset immediately above — same
+    # process-lifetime-global-must-not-accumulate-across-runs rationale,
+    # now for the service-T2 singleton's per-op counters.
+    from nexus.mcp_infra import reset_service_t2_op_stats  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
+
+    reset_service_t2_op_stats()
 
     # RDR-103 Phase 3a: registry value preserves the legacy name when
     # the repo was added before the migration; fallback queries the
@@ -3604,20 +3827,118 @@ def _run_index(
     if isinstance(db, HttpVectorClient):
         from nexus.chunk_batcher import ChunkBatcher  # noqa: PLC0415 — deferred to avoid circular import
 
-        def _batch_flush(collection: str, _ids: list, _docs: list, _metas: list) -> None:
+        def _batch_flush(
+            collection: str, _ids: list, _docs: list, _metas: list,
+            _file_contexts: list,
+        ) -> None:
+            # nexus-wxjr6 (kl2z6 combined write, client half): ONE POST
+            # carries chunk content AND manifest rows for every full-file
+            # doc in this flush, landing atomically per-doc server-side
+            # (design memo T2 design-kl2z6-combined-write §0). Replaces
+            # the old two-call shape (an upsert-chunks POST here, then a
+            # SEPARATE write_many POST later from
+            # _fire_flush_grain_hooks's manifest_write_batch_hook
+            # dispatch) for THIS flush-grain path only — see
+            # mcp_infra._apply_combined_write_response's RETIREMENT SCOPE
+            # docstring and the nexus-wxjr6 §7.2 per-caller table for
+            # which OTHER upsert-chunks callers stay on the old shape.
+            # Payload construction (dedup, by_doc grouping, the
+            # position-0 defended invariant) lives in the module-level,
+            # independently-tested _build_combined_write_payload.
+            #
             # RDR-181 §Approach step 3: force_re_embed closes over the
             # enclosing _run_index's ``force`` (constant for the whole
             # run, like ``db`` above) so ``--force`` reaches the server's
             # forceReEmbed escape for the batched flush path too, not
             # just the per-file fallback below.
-            db.upsert_chunks_with_embeddings(
-                collection_name=collection,
-                ids=_ids,
-                documents=_docs,
-                embeddings=[[] for _ in _ids],  # Seam B: server embeds
-                metadatas=_metas,
-                force_re_embed=force,
+            (
+                chunks_payload, full_docs, complete_map,
+                orphan_ids, orphan_docs, orphan_metas,
+            ) = _build_combined_write_payload(_ids, _docs, _metas, _file_contexts)
+
+            if orphan_ids:
+                # Code review Critical C1 (2026-08-09, review T2 [22014]):
+                # chunks whose file has NO catalog identity can never be
+                # referenced by any doc's manifest rows, so the engine
+                # would embed them (Voyage cost paid) and then silently
+                # discard them (upsertManifestChunkVectors only persists
+                # chashes a doc's OWN rows name). Route them through the
+                # OLD direct upsert-chunks call instead — preserves the
+                # pre-nexus-wxjr6 behavior EXACTLY (content lands in T3,
+                # orphaned but searchable, no manifest) rather than either
+                # silently losing it or changing what "orphaned" means.
+                # INFO, not WARNING: this is the SAME state the pre-commit
+                # code produced silently for identity-less chunks; logging
+                # it is strictly better observability, not a new failure.
+                _log.info(
+                    "combined_write_orphan_chunks_routed_to_legacy_upsert",
+                    collection=collection,
+                    count=len(orphan_ids),
+                )
+                db.upsert_chunks_with_embeddings(
+                    collection_name=collection,
+                    ids=orphan_ids,
+                    documents=orphan_docs,
+                    embeddings=[[] for _ in orphan_ids],  # Seam B: server embeds
+                    metadatas=orphan_metas,
+                    force_re_embed=force,
+                )
+
+            if not full_docs:
+                # Mirrors manifest_write_batch_hook's identical early-out
+                # (GH #1397 / nexus-94fxl): no file in this flush carries
+                # catalog identity — record it the same way, but do NOT
+                # attempt the old T3-write-without-manifest fallback: the
+                # combined write's whole point is that content and
+                # manifest land together or not at all (design memo §0).
+                # Structurally this should not happen for the
+                # ChunkBatcher path (catalog registration precedes
+                # indexing), so this is a defended invariant, not routine
+                # traffic. (A MIXED flush with SOME identity-having files
+                # already got its combined write above/below this branch
+                # — this is the ALL-orphan case, already fully handled by
+                # the orphan routing above.)
+                from nexus.mcp_infra import _record_manifest_identity_drop  # noqa: PLC0415 — deferred (lazy import, rare path)
+                _record_manifest_identity_drop(collection, len(_ids))
+                _log.warning(
+                    "combined_write_batch_missing_doc_identity",
+                    collection=collection,
+                    batch_size=len(_ids),
+                )
+                return
+
+            from nexus.mcp_infra import (  # noqa: PLC0415 — deferred: avoid module-load cross-import
+                _apply_combined_write_response,
+                get_catalog_writer,
             )
+            from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred (leaf module, avoid import cost on the no-op path)
+
+            cat = get_catalog_writer()
+            try:
+                # Bounded backoff against a flapping connection, matching
+                # every other catalog write in this module (_manifest_write_
+                # loop's write_many branch, atomic_manifest_replace, etc.)
+                # — safe to retry: the combined write is idempotent
+                # (ON CONFLICT DO UPDATE per chash/doc; design memo §0),
+                # and _manifest_write_with_retry raises immediately (no
+                # retry) on a non-connection error, so a genuine 4xx/
+                # validation failure or the ack-echo RuntimeError still
+                # propagates on the first attempt.
+                res = _manifest_write_with_retry(
+                    cat.write_manifest_many,
+                    full_docs,
+                    complete=complete_map or None,
+                    sweep=True,
+                    chunks=chunks_payload,
+                    collection=collection,
+                    force_re_embed=force,
+                )
+            finally:
+                _close = getattr(cat, "close", None)
+                if callable(_close):
+                    _close()
+
+            _apply_combined_write_response(res, complete_map, collection)
 
         # nexus-duoak follow-up: split "file" into its 3 constituent calls
         # for diagnosis. manifest_write_batch_hook/taxonomy_assign_batch_hook
@@ -3748,20 +4069,18 @@ def _run_index(
             # carries neither, and the manifest hook's enumeration
             # fallback would otherwise assign batch-global positions
             # (manifest corruption). taxonomy/chash ignore both keys.
+            # agg_metas is built via the SHARED, module-level
+            # _aggregate_flush_metas helper (nexus-wxjr6) so this closure
+            # and _build_combined_write_payload's combined write compute
+            # the identical doc_id/position assignment.
             agg_ids: list = []
             agg_docs: list = []
-            agg_metas: list = []
             for _path, _c in _file_contexts:
                 if not isinstance(_c, dict):
                     continue
                 agg_ids.extend(_c["ids"])
                 agg_docs.extend(_c["documents"])
-                for _j, _m in enumerate(_c["metadatas"]):
-                    agg_metas.append({
-                        **_m,
-                        "doc_id": _c["catalog_doc_id"],
-                        "chunk_index": _j,
-                    })
+            agg_metas = _aggregate_flush_metas(_file_contexts)
             if not agg_ids:
                 return
             # nexus-5xn3k.4 RUNFENCE C2: ChunkBatcher is file-atomic (every
@@ -3790,12 +4109,22 @@ def _run_index(
             # __name__ for its failure-logging path; this just times around
             # the same call instead of merging both into one bucket.
             _batch_hook_timings: dict[str, float] = {}
+            # nexus-wxjr6: manifest_write_batch_hook is excluded from this
+            # dispatch — _batch_flush already wrote (and swept) this
+            # flush's manifest atomically alongside the chunk upload via
+            # the combined write, BEFORE this hook chain even fires.
+            # Re-firing it here would double-write the manifest (wasted
+            # round trip at best, a duplicate/conflicting write at worst)
+            # and double-count sweep accounting. taxonomy_assign_batch_hook
+            # (the OTHER grain="flush" hook) is unaffected and still fires.
+            from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred: avoid module-load cross-import
             reg.fire_batch(
                 agg_ids, collection, agg_docs,
                 [[] for _ in agg_ids], agg_metas,
                 grain="flush",
                 manifest_complete=_manifest_complete or None,
                 hook_timings=_batch_hook_timings,
+                skip_hooks={manifest_write_batch_hook},
             )
             with _hook_seconds_lock:
                 _hook_seconds["flush"] += time.monotonic() - _t0
@@ -3832,7 +4161,10 @@ def _run_index(
             _t_aspect = time.monotonic()
             try:
                 from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
-                t2_index_write(lambda t2: t2.aspect_queue.enqueue_many(rows))
+                t2_index_write(
+                    lambda t2: t2.aspect_queue.enqueue_many(rows),
+                    op="aspect_enqueue",
+                )
             except Exception:  # noqa: BLE001 — enqueue is best-effort; ingest must never block on it (RDR-089 P0.1)
                 _log.warning(
                     "aspect_enqueue_many_batch_failed",
@@ -4071,23 +4403,62 @@ def _run_index(
         _taxonomy_s = _flush_hook_by_name.get("taxonomy_assign_batch_hook", 0.0)
         _manifest_s = _flush_hook_by_name.get("manifest_write_batch_hook", 0.0)
         _aspect_s = _flush_hook_by_name.get("aspect_enqueue", 0.0)
+        # nexus-jb4pp: the pre-upload RUNFENCE stamp (on_batch_begin ->
+        # _fence_begin_many). A real round trip per flush that no timer
+        # covered — not upload, not any file/flush hook bucket — so the
+        # per-grain report could not be made to sum honestly.
+        _fence_s = _bstats.get("begin_hook_seconds", 0.0)
+        # nexus-itpdc: seconds threads spent WAITING for the
+        # LockedHookRegistry mutex. Reported separately because it is NOT
+        # a sixth kind of work — it is already inside the file_*/flush_*
+        # buckets above, inflating whichever grain happened to queue. It
+        # is the difference between "the taxonomy hook is slow" and "the
+        # taxonomy hook is BLOCKING the other workers".
+        _lock_wait_s = float(getattr(hooks, "lock_wait_seconds", 0.0) or 0.0)
         _log.info(
             "index_chunk_batch_stats",
             flushes=int(_bstats["flushes"]),
             upload_seconds=round(_upload_s, 1),
             flush_wall_seconds=round(_flush_wall_s, 1),
+            flush_fence_seconds=round(_fence_s, 1),
             file_batch_seconds=round(_hook_seconds["file_batch"], 1),
             file_single_seconds=round(_hook_seconds["file_single"], 1),
             file_document_seconds=round(_hook_seconds["file_document"], 1),
             flush_taxonomy_seconds=round(_taxonomy_s, 1),
             flush_manifest_seconds=round(_manifest_s, 1),
             flush_aspect_seconds=round(_aspect_s, 1),
+            hook_lock_wait_seconds=round(_lock_wait_s, 1),
         )
+        # nexus-jb4pp: per-op split for the SHARED service-catalog handle
+        # (manifest write_many, RUNFENCE begin_index_run_many, ...). Its
+        # module lock is held across the network call, so a hook's measured
+        # cost silently includes other threads' catalog traffic; this is
+        # the only place the two are separable.
+        from nexus.catalog.factory import service_catalog_op_stats  # noqa: PLC0415 — deferred to avoid circular import (catalog.factory)
+        for _op, _st in sorted(service_catalog_op_stats().items()):
+            _log.info(
+                "index_catalog_op_stats",
+                op=_op,
+                calls=int(_st["calls"]),
+                lock_wait_seconds=round(_st["lock_wait_s"], 1),
+                call_seconds=round(_st["call_s"], 1),
+            )
+        # nexus-ldab2: mirrors the catalog per-op report immediately above,
+        # for the service-T2 singleton (taxonomy_assign, aspect_enqueue).
+        from nexus.mcp_infra import service_t2_op_stats  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
+        for _op, _st in sorted(service_t2_op_stats().items()):
+            _log.info(
+                "index_t2_op_stats",
+                op=_op,
+                calls=int(_st["calls"]),
+                lock_wait_seconds=round(_st["lock_wait_s"], 1),
+                call_seconds=round(_st["call_s"], 1),
+            )
         if on_phase is not None and _bstats["flushes"]:
             on_phase(
                 f"Chunk batching: {int(_bstats['flushes'])} upload batches, "
                 f"{_upload_s:.1f}s upload ({_flush_wall_s:.1f}s full flush "
-                f"wall); hooks "
+                f"wall); fence {_fence_s:.1f}s; hooks "
                 f"{_hook_seconds['file']:.1f}s file-grain "
                 f"(batch={_hook_seconds['file_batch']:.1f}s "
                 f"single={_hook_seconds['file_single']:.1f}s "
@@ -4096,6 +4467,8 @@ def _run_index(
                 f"(taxonomy={_taxonomy_s:.1f}s "
                 f"manifest={_manifest_s:.1f}s "
                 f"aspect={_aspect_s:.1f}s)"
+                + (f"; hook lock wait {_lock_wait_s:.1f}s (included above)"
+                   if _lock_wait_s else "")
             )
         _batch_failures = _batcher.failed_files
         if _batch_failures:

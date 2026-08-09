@@ -201,7 +201,7 @@ class SchemaRollbackRoundTripIntegrationTest {
      */
     @Test
     void runAlwaysChangesetsFloatToTheExecutionTail() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.start();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
         try {
             try (Connection su = pg.createConnection("")) {
                 dbaBootstrap(su);
@@ -288,7 +288,7 @@ class SchemaRollbackRoundTripIntegrationTest {
      */
     @Test
     void eraTransitionRevokesTableSelectWithoutGrowingTheChangelog() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.start();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
         try {
             try (Connection su = pg.createConnection("")) {
                 dbaBootstrap(su);
@@ -366,7 +366,7 @@ class SchemaRollbackRoundTripIntegrationTest {
      */
     @Test
     void fullChangelog_rollsBackCompletely_andReappliesToTheSameSchema() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.start();
+        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
         try {
             try (Connection su = pg.createConnection("")) {
                 dbaBootstrap(su);

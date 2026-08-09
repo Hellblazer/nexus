@@ -146,43 +146,40 @@ def test_memory_list_by_project(db: T2Database) -> None:
 # ── query grammar: plain text, and the empty-tsquery gap ─────────────────────
 
 
-def test_stopword_only_query_is_indistinguishable_from_no_match(
+def test_stopword_only_query_raises_instead_of_silent_empty(
     db: T2Database,
 ) -> None:
-    """A query of only stopwords returns [] even when the corpus CONTAINS it.
+    """A query of only stopwords raises, rather than returning [] silently.
 
-    nexus-senub, re-scoped 2026-07-31. The bead was filed as "malformed query
+    nexus-senub, FIXED 2026-08-08. The bead was filed as "malformed query
     silently returns 0 rows where SQLite raised". That mechanism died with
     SQLite: FTS5 treated AND/NOT as OPERATORS (bare = syntax error), while the
     engine uses PostgreSQL plainto_tsquery, whose whole purpose is accepting
     arbitrary text WITHOUT a syntax error. There is no malformed-query class.
 
-    But re-measuring found a REAL and narrower silent false negative in the
-    same place. plainto_tsquery strips English stopwords, so a query made
-    ENTIRELY of them reduces to an EMPTY tsquery, which matches nothing — not
-    "nothing relevant", but nothing, unconditionally. This test proves it is
-    unconditional by seeding a row that literally contains the word and
-    showing it still does not match.
+    The REAL, narrower gap: plainto_tsquery strips English stopwords, so a
+    query made ENTIRELY of them reduces to an EMPTY tsquery on the 'english'
+    leg — the only leg that reaches ``content`` — which matches nothing not
+    "nothing relevant", but nothing, unconditionally. Proven here by seeding a
+    row that literally contains the word and showing it is still unreachable
+    by content search.
 
-    The caller cannot tell that from a genuine empty store, which is the
-    no-silent-fallbacks class: a human concludes the entry is absent, and an
-    agent treats it as evidence of absence and re-derives from scratch.
-
-    ASSERTED AT THE BROKEN VALUE so fixing nexus-senub fails here loudly. The
-    fix is to detect an empty effective tsquery and SAY so ("no searchable
-    terms — 'and' is a stopword") rather than returning []. When that lands,
-    replace the assertion below with the raise/report the fix introduces.
+    The engine (``MemoryRepository.guardAgainstDegenerateQuery``) now detects
+    this AFTER a search comes back empty and returns a 400 naming the query,
+    rather than 200-with-``[]``; ``HttpMemoryStore.search`` converts that 400
+    to a ``ValueError`` matching the retired SQLite arm's contract in spirit.
+    A query that resolves a REAL hit through the 'simple' title/tag leg still
+    returns normally — the guard only replaces an AMBIGUOUS ``[]`` with a
+    named reason, it never discards a result (covered at the Java level by
+    ``MemoryRepositoryTest.search_stopwordQuery_stillFindsRealTitleHit_doesNotRaise``).
     """
     db.put(project="proj_rdr", title="operators.md", content="clause and clause")
 
-    assert db.search("and") == [], (
-        "nexus-senub looks FIXED: 'and' now matches a row that contains it, or "
-        "the call reported the empty-tsquery condition. Replace this "
-        "broken-value assertion with the real contract."
-    )
+    with pytest.raises(ValueError, match="and"):
+        db.search("and")
 
     # NON-VACUITY: the search path itself works — a non-stopword term in the
-    # same row matches. So the [] above is the stopword reduction, not a
+    # same row matches. So the raise above is the stopword reduction, not a
     # broken fixture or a dead search.
     hits = db.search("clause")
     assert {row["title"] for row in hits} == {"operators.md"}, (
@@ -419,6 +416,44 @@ def test_delete_cmd_not_found(runner: CliRunner, mem_home: Path, db: T2Database)
     with patch("nexus.commands.memory.t2_handle", return_value=_t2_cm(db)):
         result = runner.invoke(main, ["memory", "delete", "--project", "no", "--title", "such.md", "--yes"])
     assert result.exit_code != 0 and "not found" in result.output
+
+
+# ── Search CLI command: nexus-senub degenerate-query error path ────────────
+
+
+def test_search_cmd_stopwordOnlyQuery_exitsNonZeroWithCleanMessage(
+    runner: CliRunner, mem_home: Path, db: T2Database,
+) -> None:
+    """A stopword-only query must exit non-zero with the engine's message,
+    not crash with an uncaught traceback.
+
+    nexus-senub: HttpMemoryStore.search raises ValueError on the engine's 400
+    for a degenerate query; the CLI command must catch it and re-raise as a
+    click.ClickException (clean "Error: ..." message, exit code 1) rather
+    than letting the ValueError propagate as a bare traceback.
+    """
+    db.put(project="proj_rdr", title="operators.md", content="clause and clause")
+    with patch("nexus.commands.memory.t2_handle", return_value=_t2_cm(db)):
+        result = runner.invoke(main, ["memory", "search", "and"])
+    assert result.exit_code != 0, (
+        "a stopword-only query must fail loudly, not exit 0 with 'No results found.'"
+    )
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        "must be a clean click error, not an uncaught traceback: "
+        f"{result.exception!r}"
+    )
+    assert "and" in result.output
+
+
+def test_search_cmd_realQuery_stillWorks(
+    runner: CliRunner, mem_home: Path, db: T2Database,
+) -> None:
+    # NON-VACUITY companion: a normal query still exits 0 with a result line.
+    db.put(project="proj_rdr", title="operators.md", content="clause and clause")
+    with patch("nexus.commands.memory.t2_handle", return_value=_t2_cm(db)):
+        result = runner.invoke(main, ["memory", "search", "clause"])
+    assert result.exit_code == 0
+    assert "operators.md" in result.output
 
 
 # ── Get CLI command: prefix-match UX (nexus-e59o) ───────────────────────────

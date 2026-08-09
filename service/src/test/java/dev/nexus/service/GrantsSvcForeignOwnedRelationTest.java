@@ -45,7 +45,7 @@ class GrantsSvcForeignOwnedRelationTest {
 
     @Test
     void changelogReplaysCleanly_withForeignOwnedDiagView() throws Exception {
-        try (var pg = PgContainerHelper.start();
+        try (var pg = PgContainerHelper.startDedicated();
              Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
 

@@ -205,6 +205,35 @@ def effective_embedding_model_for_writes(content_type: str) -> str:
     return canonical_embedding_model(content_type)
 
 
+def docs_leaf_fallback_collection_name(corpus: str) -> str:
+    """Return the conformant ``docs__<corpus>__<model>__v1`` collection
+    name for the RDR-103 Phase 5 leaf fallback: an ad-hoc/dry-run/
+    diagnostic call site that has no ``collection_name``/``--collection``
+    to work with and must reconstruct the name the production write path
+    would have used.
+
+    Single source of truth for this derivation. Prior to this helper the
+    formula (``corpus.replace("_", "-")`` folded into
+    ``f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"``)
+    was hand-duplicated at five call sites (three in ``doc_indexer.py``,
+    two in ``commands/index.py``) — including ``index.py``'s
+    ``_index_run_refused_message`` diagnostic, which derives this name
+    specifically to compare it against the catalog's stamped
+    ``physical_collection`` and name a genuine mismatch (nexus-2t63u). A
+    silent drift between copies would reintroduce that defect class in
+    the diagnostic path (a wrong derived "expected" name falsely accusing
+    a healthy document of a stale-collection mismatch) while the
+    production write path stayed correct — asymmetric enough to go
+    unnoticed. ``content_type`` is hardcoded to ``'docs'``: this fallback
+    only ever fires from docs/PDF/markdown indexing paths.
+
+    The owner segment is the corpus tag with underscores rewritten to
+    hyphens (``_`` is the conformant grammar's segment separator).
+    """
+    owner_segment = corpus.replace("_", "-")
+    return f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
+
+
 def embedding_model_for_collection_name(collection_name: str) -> str | None:
     """Return the embedding-model token parsed from a conformant
     collection name, or ``None`` if *collection_name* is not conformant.

@@ -628,6 +628,93 @@ public final class TelemetryRepository {
     }
 
     /**
+     * Per-row tier-write detail (nexus-onjvy gap 4 — {@code target_title} was
+     * accepted by {@link #recordTierWrite} and stored, but readable through NO
+     * route: {@link #queryTierWrites} is an AGGREGATE grouped by
+     * (tool, tier, agent, project) with no target slot, and a per-row title
+     * carried on an aggregated group would be incoherent (which of N rows'
+     * titles would it be?). This is a SEPARATE, unaggregated read path, not a
+     * widened projection on the aggregate.
+     *
+     * <p>Same filter precedence as {@link #queryTierWrites}: {@code lastN} (last
+     * N distinct sessions by most-recent write) &gt; {@code sessionId} &gt;
+     * {@code sinceIso}; empty/zero filters mean "no additional predicate" —
+     * NOT "all rows unbounded", since {@code limit} still caps the page (review
+     * finding: this route was the sole per-row list route in this handler with
+     * no limit/pagination, unlike {@link #getHookFailures} et al.). Same
+     * capped-page-plus-exact-total envelope discipline as
+     * {@link #getHookFailures}: {@code total} is computed over the FULL
+     * {@code cond}-filtered set, independent of {@code limit}, so a caller
+     * asking for the last 20 rows never sees a total of 20.
+     *
+     * <p>Ordered most-recent-first ({@code ts desc, id desc}). Returns
+     * {@code {rows: [{session_id, ts, tool, tier, agent, project,
+     * target_title}, ...], total: N}} — unlike the aggregate, NULL
+     * {@code agent}/{@code project}/{@code target_title} cross the wire as
+     * JSON {@code null}, not {@code ""}: there is no ambiguity to paper over
+     * on a per-row read the way there is when grouping collapses many NULLs
+     * into one bucket.
+     */
+    public Map<String, Object> listTierWrites(String tenant,
+                                               String sessionId,
+                                               String sinceIso,
+                                               int lastN,
+                                               int limit) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = noCondition();
+            if (lastN > 0) {
+                List<String> sids = ctx.select(TIER_WRITES.SESSION_ID)
+                    .from(TIER_WRITES)
+                    .groupBy(TIER_WRITES.SESSION_ID)
+                    .orderBy(max(TIER_WRITES.TS).desc())
+                    .limit(lastN)
+                    .fetch(TIER_WRITES.SESSION_ID);
+                if (sids.isEmpty()) {
+                    return Map.of("rows", List.of(), "total", 0);
+                }
+                cond = TIER_WRITES.SESSION_ID.in(sids);
+            } else if (sessionId != null && !sessionId.isEmpty()) {
+                cond = TIER_WRITES.SESSION_ID.eq(sessionId);
+            } else if (sinceIso != null && !sinceIso.isEmpty()) {
+                cond = TIER_WRITES.TS.ge(parseTs(sinceIso));
+            }
+
+            int total = ctx.fetchCount(TIER_WRITES, cond);
+
+            List<Map<String, Object>> rows = ctx.select(
+                    TIER_WRITES.ID,
+                    TIER_WRITES.SESSION_ID,
+                    TIER_WRITES.TS,
+                    TIER_WRITES.TOOL,
+                    TIER_WRITES.TIER,
+                    TIER_WRITES.AGENT,
+                    TIER_WRITES.PROJECT,
+                    TIER_WRITES.TARGET_TITLE)
+                .from(TIER_WRITES)
+                .where(cond)
+                .orderBy(TIER_WRITES.TS.desc(), TIER_WRITES.ID.desc())
+                .limit(limit)
+                .fetch()
+                .map(r -> {
+                    Map<String, Object> m = new java.util.LinkedHashMap<>();
+                    m.put("session_id",   r.value2());
+                    m.put("ts",           utcIso(r.value3()));
+                    m.put("tool",         r.value4());
+                    m.put("tier",         r.value5());
+                    m.put("agent",        r.value6());
+                    m.put("project",      r.value7());
+                    m.put("target_title", r.value8());
+                    return m;
+                });
+
+            Map<String, Object> out = new java.util.LinkedHashMap<>();
+            out.put("rows", rows);
+            out.put("total", total);
+            return out;
+        });
+    }
+
+    /**
      * Record a consent event (RDR-182 P1.2 / nexus-ng2sy — service-mode
      * parity for {@code Telemetry.record_consent}). Append-only: a grant AND
      * a revoke are each their own row ({@code granted} distinguishes them).

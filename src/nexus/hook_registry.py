@@ -102,13 +102,40 @@ class HookRegistry:
         ``register_post_store_hook``."""
         self._single.append(fn)
 
-    def fire_single(self, doc_id: str, collection: str, content: str) -> None:
+    def has_single_hooks(self) -> bool:
+        """Would :meth:`fire_single` invoke any hook? (nexus-itpdc)"""
+        return bool(self._single)
+
+    def has_document_hooks(self) -> bool:
+        """Would :meth:`fire_document` invoke any hook? (nexus-itpdc)"""
+        return bool(self._document)
+
+    def fire_single(
+        self,
+        doc_id: str,
+        collection: str,
+        content: str,
+        *,
+        invoke: Callable[[Callable, tuple, dict], Any] | None = None,
+    ) -> None:
         """Invoke every single-doc hook. Per-hook exceptions are caught,
         logged at WARNING, and persisted to T2 ``hook_failures``; never
-        propagated to the caller."""
+        propagated to the caller.
+
+        *invoke* (nexus-eslkl) — optional interception seam. When supplied,
+        each hook is called as ``invoke(hook, (doc_id, collection, content),
+        {})`` instead of directly; :class:`LockedHookRegistry` uses this to
+        wrap each hook's own invocation in a per-hook lock without this
+        class needing to know anything about locking. ``None`` (default)
+        preserves the exact prior direct-call behavior.
+        """
         for hook in self._single:
             try:
-                hook(doc_id, collection, content)
+                call_args = (doc_id, collection, content)
+                if invoke is not None:
+                    invoke(hook, call_args, {})
+                else:
+                    hook(*call_args)
             except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
                 hook_name = getattr(hook, "__name__", "?")
                 _log.warning(
@@ -154,6 +181,22 @@ class HookRegistry:
                 hook=getattr(fn, "__name__", repr(fn)),
             )
 
+    def has_batch_hooks(self, grain: str = "all") -> bool:
+        """Would :meth:`fire_batch` invoke ANY hook at this *grain*?
+
+        Mirrors :meth:`fire_batch`'s grain filter exactly (same
+        ``getattr(hook, "batch_grain", "file")`` default, same ``"all"``
+        wildcard). Lets a caller skip work that a zero-match dispatch
+        would make pointless — notably :class:`LockedHookRegistry`,
+        which must not serialize a call that fires nothing (nexus-itpdc).
+        """
+        if grain == "all":
+            return bool(self._batch)
+        return any(
+            getattr(hook, "batch_grain", "file") == grain
+            for hook in self._batch
+        )
+
     def fire_batch(
         self,
         doc_ids: list[str],
@@ -166,6 +209,8 @@ class HookRegistry:
         grain: str = "all",
         manifest_complete: dict[str, str] | None = None,
         hook_timings: dict[str, float] | None = None,
+        invoke: Callable[[Callable, tuple, dict], Any] | None = None,
+        skip_hooks: "set[Callable] | None" = None,
     ) -> None:
         """Invoke every batch hook with the recorded call shape.
 
@@ -212,26 +257,47 @@ class HookRegistry:
         flush-grain bucket (taxonomy + manifest, both ``batch_grain =
         "flush"``) can be split back out by hook name instead of staying
         one merged total.
+
+        *invoke* (nexus-eslkl) — optional interception seam, same contract
+        as :meth:`fire_single`'s. Called as ``invoke(hook, call_args,
+        kwargs)`` in place of ``hook(*call_args, **kwargs)`` when supplied.
+        This is what lets :class:`LockedHookRegistry` serialize each
+        registered hook under its OWN lock (rather than one lock around the
+        whole dispatch) without duplicating this method's kwarg-shape and
+        per-hook-failure-isolation logic.
+
+        *skip_hooks* (nexus-wxjr6) — optional set of hook CALLABLES
+        (identity, not name) to exclude from this dispatch. Lets a caller
+        that already handled a specific hook's work through a different
+        path skip it here rather than double-firing — the flush-grain
+        combined-write path (``indexer.py``'s ``_fire_flush_grain_hooks``)
+        uses this to exclude ``manifest_write_batch_hook`` once the manifest
+        write has already happened atomically alongside the chunk upload,
+        while still firing every OTHER ``grain="flush"`` hook (taxonomy)
+        unchanged. ``None`` (default) skips nothing — every pre-existing
+        caller is behaviorally unchanged.
         """
         if not doc_ids:
             return
         for hook in self._batch:
             if grain != "all" and getattr(hook, "batch_grain", "file") != grain:
                 continue
+            if skip_hooks and hook in skip_hooks:
+                continue
             hook_name = getattr(hook, "__name__", "?")
             _t0 = time.monotonic() if hook_timings is not None else 0.0
             try:
+                call_args = (doc_ids, collection, contents, embeddings, metadatas)
                 kwargs: dict = {}
                 if id(hook) in self._batch_with_catalog_doc_id:
                     kwargs["catalog_doc_id"] = catalog_doc_id
                 if (manifest_complete is not None
                         and id(hook) in self._batch_with_manifest_complete):
                     kwargs["manifest_complete"] = manifest_complete
-                if kwargs:
-                    hook(doc_ids, collection, contents, embeddings, metadatas,
-                         **kwargs)
+                if invoke is not None:
+                    invoke(hook, call_args, kwargs)
                 else:
-                    hook(doc_ids, collection, contents, embeddings, metadatas)
+                    hook(*call_args, **kwargs)
             except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
                 _log.warning(
                     "post_store_batch_hook_failed",
@@ -292,17 +358,24 @@ class HookRegistry:
         content: str,
         *,
         doc_id: str = "",
+        invoke: Callable[[Callable, tuple, dict], Any] | None = None,
     ) -> None:
         """Invoke every document hook. Synchronous dispatch — no
         ``asyncio.to_thread``, no ``await``. Per-hook exceptions caught,
         logged, and persisted to T2 ``hook_failures`` with
-        ``chain='document'``; never propagated."""
+        ``chain='document'``; never propagated.
+
+        *invoke* (nexus-eslkl) — optional interception seam, same contract
+        as :meth:`fire_single`'s.
+        """
         for hook in self._document:
             try:
-                if id(hook) in self._document_with_doc_id:
-                    hook(source_path, collection, content, doc_id=doc_id)
+                call_args = (source_path, collection, content)
+                kwargs = {"doc_id": doc_id} if id(hook) in self._document_with_doc_id else {}
+                if invoke is not None:
+                    invoke(hook, call_args, kwargs)
                 else:
-                    hook(source_path, collection, content)
+                    hook(*call_args, **kwargs)
             except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
                 hook_name = getattr(hook, "__name__", "?")
                 _log.warning(
@@ -332,10 +405,14 @@ class HookRegistry:
         metadatas: list[dict] | None = None,
         catalog_doc_id: str = "",
         manifest_complete: dict[str, str] | None = None,
+        invoke: Callable[[Callable, tuple, dict], Any] | None = None,
     ) -> None:
         """Fire all three post-store hook chains for a batch of just-stored
         docs. Single, batch, and document-grain chains run in that order.
         Errors caught per-hook and persisted; nothing propagated.
+
+        *invoke* (nexus-eslkl) — threaded through unchanged to all three
+        internal fire_* calls; see :meth:`fire_single`'s docstring.
 
         Used by MCP ``store_put`` and the CLI store-path entry points
         (``nx store put``, ``nx memory promote``, ``nx store import``).
@@ -377,7 +454,7 @@ class HookRegistry:
             )
 
         for doc_id, content in zip(doc_ids, contents):
-            self.fire_single(doc_id, collection, content)
+            self.fire_single(doc_id, collection, content, invoke=invoke)
 
         # Conditional kwarg (never passed as an explicit ``None``):
         # ``self.fire_batch`` is a virtual dispatch — a caller-installed
@@ -396,6 +473,7 @@ class HookRegistry:
             doc_ids, collection, contents,
             embeddings=embeddings, metadatas=metadatas,
             catalog_doc_id=catalog_doc_id,
+            invoke=invoke,
             **batch_kwargs,
         )
 
@@ -409,7 +487,7 @@ class HookRegistry:
         # which the nullable FK accepts. ``doc_ids`` is intentionally
         # unused here — chunk ids belong to the single/batch chains only.
         for sp, content in zip(source_paths, contents):
-            self.fire_document(sp, collection, content, doc_id=catalog_doc_id)
+            self.fire_document(sp, collection, content, doc_id=catalog_doc_id, invoke=invoke)
 
 
 # ── Default-hooks factory ────────────────────────────────────────────────────
@@ -593,39 +671,146 @@ def _record_document_hook_failure(
 
 
 class LockedHookRegistry:
-    """Serialize the fire methods of a :class:`HookRegistry` under one lock.
+    """Serialize the fire methods of a :class:`HookRegistry` under PER-HOOK
+    locks (nexus-eslkl narrowing of the nexus-cfc72 single process-wide
+    mutex this class used to hold).
 
-    The nexus-cfc72 bounded file-level indexing concurrency runs 2+ file
-    pipelines at once; the hook chains they fire (manifest writes, chash
-    ledger, taxonomy assign, aspect enqueue) were written for the
-    sequential loop and are not audited for interleaving. Hooks are
-    milliseconds against the multi-second embed/upsert work, so
-    serializing them costs ~nothing and removes the question. Everything
-    else (registration, attribute access) delegates to the wrapped
-    registry unchanged.
+    The nexus-cfc72 bounded file-level indexing concurrency runs 2+ flush
+    workers at once; the hook chains they fire (manifest write, taxonomy
+    assign, aspect enqueue) were written for the sequential loop and are
+    not all safe under interleaving. The ORIGINAL fix serialized every
+    hook's fire behind ONE lock — correct, but coarser than the hazard: it
+    also serialized hooks that do not interleave with each other at all
+    (measured: ~90s of a 104s wait was queueing behind a DIFFERENT hook's
+    round trip, not the same one — see the nexus-eslkl design memo, T2
+    ``nexus/design-eslkl-hook-lock-narrowing``).
+
+    Per-hook locking (keyed on the hook callable's identity) means two
+    DIFFERENT registered hooks never wait on each other, while concurrent
+    fires of the SAME hook still fully serialize — exactly the granularity
+    the interleaving audit found necessary: cross-hook interleaving is
+    either provably safe (taxonomy: server-side idempotent, transactional
+    ``assignFromChashes``) or the single remaining live hazard (manifest:
+    ``_sweep_superseded_vectors``'s client-side read-modify-write over
+    globally-shared chashes, tracked open at nexus-11gh6 / nexus-wxjr6 —
+    the engine-side fold narrows but does not yet close the TOCTOU window,
+    so the manifest hook keeps its lock).
+
+    A hook opts OUT of serialization entirely by declaring
+    ``hook.serialize = False`` at the module level, next to its
+    ``batch_grain`` declaration — the same idiom, so the safety claim sits
+    beside the evidence for it. Declaring nothing defaults to LOCKED: a
+    new hook is safe by construction, never silently unserialized. Do NOT
+    set this on a hook whose safety argument is not written down at its
+    declaration site.
+
+    CORRECTED (nexus-eslkl, was stale on ``resolve_index_concurrency``):
+    the prior "this lock is what makes a diverging T2 memory backend safe"
+    rationale is dead code-provably — ``storage_backend_for()`` has
+    resolved to exactly one backend (``StorageBackend.SERVICE``) since
+    RDR-158 P3, so no supported configuration produces a divergent T2
+    backend, and every T2 write from every hook goes through
+    ``mcp_infra._service_t2_lock`` regardless of this class. The real
+    remaining constraint this class protects is the manifest hook's
+    client-side sweep sequence, not the T2 backend question.
+
+    Two consequences are load-bearing (unchanged from the coarse-lock
+    version, now applied per-hook rather than per-dispatch):
+
+    * A fire that would invoke ZERO matching hooks touches no lock at
+      all — the dispatch loop in :meth:`HookRegistry.fire_batch` /
+      ``fire_single`` / ``fire_document`` simply has nothing to iterate,
+      so :meth:`_invoke` is never called. :meth:`fire_batch` still
+      pre-checks the grain via :meth:`HookRegistry.has_batch_hooks`
+      OUTSIDE any lock so a zero-match dispatch skips even the delegate
+      call (nexus-itpdc); with per-hook locks this is a minor efficiency
+      nicety rather than a correctness requirement, since an empty match
+      set can never acquire a lock regardless.
+    * Concurrent fires of the SAME hook still fully serialize via that
+      hook's own lock — :attr:`lock_wait_seconds` aggregates the wait
+      across every hook's lock (not just one), so the existing
+      ``index_chunk_batch_stats`` consumer (``indexer.py``, reads this
+      attribute via ``getattr(hooks, "lock_wait_seconds", 0.0)``) keeps
+      working unchanged.
     """
 
     def __init__(self, registry: HookRegistry) -> None:
         import threading  # noqa: PLC0415 — only needed by this concurrency proxy
 
         self._registry = registry
-        self._lock = threading.Lock()
+        # One lock per registered hook, keyed on the hook callable's
+        # identity. Lazily created (a hook may be registered after this
+        # wrapper is constructed — install_default_hooks(locked) passes
+        # register_* straight through via __getattr__), guarded by
+        # _locks_meta_lock so two threads racing to create the FIRST lock
+        # for the same hook cannot install two different Lock objects.
+        self._hook_locks: dict[int, threading.Lock] = {}
+        self._locks_meta_lock = threading.Lock()
+        # Seconds spent WAITING to acquire a hook's lock, summed across
+        # every contending thread AND every hook (so it can exceed wall
+        # clock, like the other per-grain hook totals). Mutated under
+        # _stats_lock rather than under whichever hook's lock happened to
+        # be acquired, since two DIFFERENT hooks' locks can be held by two
+        # different threads at once now — unlike the single-lock version,
+        # where the lock being measured was also the lock protecting the
+        # measurement.
+        self._stats_lock = threading.Lock()
+        self.lock_wait_seconds = 0.0
+
+    def _lock_for(self, hook: Callable) -> "threading.Lock":
+        import threading  # noqa: PLC0415 — only needed by this concurrency proxy
+
+        key = id(hook)
+        lock = self._hook_locks.get(key)
+        if lock is not None:
+            return lock
+        with self._locks_meta_lock:
+            lock = self._hook_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._hook_locks[key] = lock
+            return lock
+
+    def _invoke(self, hook: Callable, args: tuple, kwargs: dict) -> Any:
+        """The ``invoke`` seam :class:`HookRegistry`'s fire_* methods call
+        instead of ``hook(*args, **kwargs)`` directly. Opted-out hooks
+        (``hook.serialize is False``) run completely unlocked; every other
+        hook serializes against concurrent fires of ITSELF only."""
+        if getattr(hook, "serialize", True) is False:
+            return hook(*args, **kwargs)
+        lock = self._lock_for(hook)
+        _t0 = time.monotonic()
+        lock.acquire()
+        try:
+            with self._stats_lock:
+                self.lock_wait_seconds += time.monotonic() - _t0
+            return hook(*args, **kwargs)
+        finally:
+            lock.release()
 
     def fire_single(self, *args: Any, **kwargs: Any) -> None:
-        with self._lock:
-            self._registry.fire_single(*args, **kwargs)
+        # Zero-match fast path — and the one that matters MOST by call
+        # count: the batched indexer fires this once per CHUNK (~2000 per
+        # run), and the default hook set registers no single-grain hook
+        # at all.
+        if not self._registry.has_single_hooks():
+            return
+        self._registry.fire_single(*args, invoke=self._invoke, **kwargs)
 
     def fire_batch(self, *args: Any, **kwargs: Any) -> None:
-        with self._lock:
-            self._registry.fire_batch(*args, **kwargs)
+        # Zero-match fast path (nexus-itpdc): a grain with no registered
+        # hook fires nothing, so there is nothing to lock or dispatch.
+        if not self._registry.has_batch_hooks(kwargs.get("grain", "all")):
+            return
+        self._registry.fire_batch(*args, invoke=self._invoke, **kwargs)
 
     def fire_document(self, *args: Any, **kwargs: Any) -> None:
-        with self._lock:
-            self._registry.fire_document(*args, **kwargs)
+        if not self._registry.has_document_hooks():
+            return
+        self._registry.fire_document(*args, invoke=self._invoke, **kwargs)
 
     def fire_store_chains(self, *args: Any, **kwargs: Any) -> None:
-        with self._lock:
-            self._registry.fire_store_chains(*args, **kwargs)
+        self._registry.fire_store_chains(*args, invoke=self._invoke, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._registry, name)

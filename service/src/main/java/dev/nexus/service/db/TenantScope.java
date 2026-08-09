@@ -3,6 +3,7 @@ package dev.nexus.service.db;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,8 +35,10 @@ import java.util.function.Function;
  *   <li>Borrow a pooled {@link Connection} from the {@link DataSource}.</li>
  *   <li>Set {@code autoCommit=false} — mandatory because {@code SET LOCAL} (GUC
  *       {@code is_local=true}) is a no-op outside a transaction.</li>
- *   <li>Execute {@code SELECT set_config('nexus.tenant', ?, true)} with the tenant
- *       bound as a parameter (injection-safe).</li>
+ *   <li>Execute {@code SELECT set_config(?, ?, true)} with both the GUC name and the
+ *       tenant bound as parameters (injection-safe; nexus-4okz4 increment 4 — the name
+ *       was concatenated pre-increment-4 on a since-corrected belief that set_config
+ *       could not bind it).</li>
  *   <li>Pass the stamped connection to the caller as a {@link DSLContext}.</li>
  *   <li>Commit on success, rollback on exception.</li>
  *   <li>Restore {@code autoCommit=true} and return the connection to the pool.</li>
@@ -64,12 +67,14 @@ public final class TenantScope {
 
     /**
      * Allowlist of GUC names {@link #withTenant(String, String, Function)} may stamp
-     * (nexus-utnjt). The GUC name is interpolated into the {@code set_config(...)} SQL
-     * (PostgreSQL does not accept a bind parameter for the setting name), so it is NOT
-     * injection-safe by parameterization the way the tenant VALUE is. Today every caller
-     * passes a {@code static final} literal, but an allowlist is the only durable guard
-     * against a future caller passing a request-derived name. This set is the single
-     * source of truth — the two literals above are members of it.
+     * (nexus-utnjt). The GUC name is now BOUND, not interpolated (nexus-4okz4 increment
+     * 4 — {@code set_config(...)} is a regular function; every argument, including the
+     * setting name, accepts a bind parameter, correcting the pre-increment-4 belief
+     * that it could not). The allowlist stays: today every caller passes a
+     * {@code static final} literal, and this is the only durable guard against a
+     * future caller passing a request-derived name straight through as a live GUC —
+     * a programming-error guard now, not an injection necessity. This set is the
+     * single source of truth — the two literals above are members of it.
      */
     private static final Set<String> PERMITTED_GUCS = Set.of(DEFAULT_TENANT_GUC, T1_TENANT_GUC);
 
@@ -220,17 +225,21 @@ public final class TenantScope {
             // Pool default is autoCommit=true; we toggle to false for the txn.
             conn.setAutoCommit(false);
 
-            // Stamp the GUC — bind-safe parameterized call (S0.1 pattern verbatim).
-            // The GUC name is concatenated (PG takes no bind param for the setting name)
-            // but has been validated against PERMITTED_GUCS above (nexus-utnjt), so it is
-            // an allowlisted name, not arbitrary input; the value is always parameterized.
-            try (var ps = conn.prepareStatement("SELECT set_config('" + gucName + "', ?, true)")) {
-                ps.setString(1, tenant);
-                ps.execute();
-            }
-
             // Hand stamped context to caller — the ONLY DSLContext path
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+
+            // Stamp the GUC via the set_config(...) FUNCTION (nexus-4okz4 increment 4):
+            // unlike the `SET LOCAL x = y` STATEMENT syntax (which cannot bind the
+            // setting name — no parameter placeholder is legal there), set_config is a
+            // regular SQL function and ALL THREE arguments bind, including the name —
+            // PgSession.setLocal already established this exact idiom for the same
+            // function. The PERMITTED_GUCS allowlist check above stays as defense in
+            // depth (a programming-error guard, not an injection necessity now that the
+            // name is bound rather than concatenated).
+            ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
+                    DSL.val(gucName), DSL.val(tenant), DSL.inline(true)))
+               .fetch();
+
             T result = work.apply(ctx);
 
             conn.commit();

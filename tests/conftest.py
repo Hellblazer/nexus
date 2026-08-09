@@ -416,6 +416,26 @@ _SESSION_ITEMS_CENSUS_TEST_NODEIDS: frozenset[str] = frozenset({
 })
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> None:
+    """Stash each phase's TestReport on the item (``rep_setup`` /
+    ``rep_call`` / ``rep_teardown`` -- the standard pytest idiom, e.g. the
+    ``pytest-html``/``pytest-rerunfailures`` "did this test fail" pattern).
+
+    Zero-cost on a green run: a plain attribute set per phase, no I/O, no
+    behavior change to the report itself. Added so any fixture in the suite
+    can check ``request.node.rep_call.failed`` in its own teardown without
+    each one re-registering this hook -- the FIRST consumer is
+    ``tests/test_scenario_journeys.py``'s ``_engine_log_on_failure``
+    fixture (substantive-critic Q1: the engine's nexus-c8hl7 refusal WARN
+    otherwise dies with the substrate's mkdtemp'd pgdata at session
+    teardown, unread).
+    """
+    outcome = yield
+    rep = outcome.get_result()
+    setattr(item, "rep_" + rep.when, rep)
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item: pytest.Item) -> None:
     """Evaluate the partial-view guard BEFORE any fixture -- including the
@@ -1607,6 +1627,24 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_forwards_force_re_embed",
     "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_force_false_omits_force_re_embed",
     #
+    # nexus-wxjr6 (2026-08-09, code review Important I1 follow-up):
+    # test_run_index_batch_flush_retries_transient_failure_then_succeeds —
+    # "string-literal-as-name", same class as the sibling pair immediately
+    # above. The voyage token is the same collection-NAME fixture literal
+    # passed to the mocked flush closure; the test asserts retry-after-
+    # transient-failure control flow and single-side-effect sweep
+    # accounting, not any cloud-mode embedder behavior.
+    "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_retries_transient_failure_then_succeeds",
+    #
+    # nexus-3mwuo (2026-08-09, C1-residual from the wxjr6 delta re-review,
+    # T2 review-wxjr6-client-2026-08-09 [22014]): shared-chash both-paths
+    # fix test — same "string-literal-as-name" class as the sibling pair
+    # above. The voyage token is the same collection-NAME fixture literal
+    # passed to the mocked flush closure; the test asserts the shared
+    # chash rides both the combined write and the legacy orphan upsert
+    # call, not any cloud-mode embedder behavior.
+    "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_shared_chash_orphan_copy_survives_identity_doc_failure",
+    #
     # nexus-te885.8.1 (pg-source reconcile leg for verify-fill): builds a
     # mocked /v1/vectors/collections response using conformant collection-
     # NAME strings (code__nexus-1-1__voyage-code-3__v1,
@@ -1686,12 +1724,31 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # (indexer.py's CredentialsMissingError). The prune/migration
     # behaviour under test is embedding-model-independent.
     "tests/test_indexer_e2e.py::test_migration_moves_prose_from_code_to_docs",
+    #
+    # nexus-wxjr6 (2026-08-09, kl2z6 combined write client half):
+    # "string-literal-as-name". Both tests assert the combined write's
+    # request BODY carries the "collection" field verbatim
+    # ("code__nexus-1-1__voyage-code-3__v1") against a monkeypatched
+    # `_post` — no embedder runs, no mode-dependent path executes. The
+    # voyage token is a conformant collection-name fixture the wire-shape
+    # assertion happens to need, not a behavior assertion about which
+    # embedder ran.
+    "tests/catalog/test_manifest_write_many.py::TestWriteManifestManyCombined::test_combined_wire_shape",
+    "tests/catalog/test_manifest_write_many.py::TestWriteManifestManyCombined::test_ack_echo_raises_when_chunks_written_absent",
 })
 
 
 @pytest.fixture
 def db(tmp_path: Path) -> T2Database:
-    """Provide a T2Database backed by a temporary SQLite file."""
+    """Provide a T2Database backed by the engine test substrate (all-HTTP).
+
+    ``path`` is RETAINED-AND-IGNORED for signature stability (RDR-158 P4,
+    SQLite retirement) — see ``T2Database.__init__``'s own docstring. Every
+    domain store is an HTTP client over the engine's PG tables; there is no
+    local ``.db`` file backing this fixture despite the path-shaped
+    argument. The engine substrate self-provisions (or skips) via
+    ``ensure_engine``/``mint_test_tenant`` elsewhere in this module.
+    """
     database = T2Database(tmp_path / "memory.db")
     yield database
     database.close()

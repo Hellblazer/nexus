@@ -32,23 +32,55 @@ import pytest
 from click.testing import CliRunner
 
 import nexus.commands.init as init_mod
+import nexus.config as config_mod
 import nexus.stranded_install as stranded_install
 import nexus.upgrade_finish as upgrade_finish
+import nexus.upgrade_ladder.http_store as http_store_mod
+from nexus.commands.stranded_cmd import stranded_group
 from nexus.mcp._first_run import apply_stranded_notice
 from nexus.cli import main
 from nexus.commands.init import init_cmd
 from nexus.config import detect_stranded_install_default
 from nexus.health import _check_stranded_install
 from nexus.stranded_install import (
+    ACK_CONSENT_TEXT,
     LAST_MIGRATION_CAPABLE,
     STAMP_FILENAME,
     StrandedInstall,
+    _has_matching_ack,
+    artifact_fingerprint,
     detect_stranded_install,
+    discover_artifacts,
+    write_ack_marker,
 )
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent / "src" / "nexus"
 
 _PIN = "6.16.0"  # an arbitrary armed value for tests — NOT the real constant
+
+#: Captured BEFORE the module-scoped autouse fixture below ever patches
+#: ``config_mod._ladder_migration_verified`` -- ``TestConfigLadderProbe``
+#: calls this direct function reference (bypassing the attribute lookup the
+#: fixture stubs) so it can test the REAL implementation while every other
+#: test in this file gets the hermetic stub.
+_REAL_LADDER_MIGRATION_VERIFIED = config_mod._ladder_migration_verified
+
+
+@pytest.fixture(autouse=True)
+def _no_live_ladder_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-4922x: every test in this module exercises the pure file-stat
+    detector (directly, or indirectly through ``detect_stranded_install_default``
+    at the CLI/init/doctor/MCP wiring layer). ``_ladder_migration_verified``
+    is the production probe and reaches out to a REAL engine over HTTP —
+    this file must stay a hermetic unit suite (no live substrate, per
+    AGENTS.md), so stub it to the "indeterminate" return (``None``)
+    everywhere by default. ``None`` reproduces the exact legacy-report-only
+    behavior every pre-existing test in this file was written against.
+    ``TestLadderMigrationSignal`` / ``TestConfigLadderProbe`` below override
+    this per-test to exercise the new signal explicitly (both the injected-
+    callable contract and the production probe's own HttpLadderStore
+    plumbing, with HttpLadderStore itself faked)."""
+    monkeypatch.setattr(config_mod, "_ladder_migration_verified", lambda: None)
 
 
 @pytest.fixture()
@@ -548,3 +580,637 @@ class TestAssemblerScopeConsistency:
         monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(chroma))
         result = detect_stranded_install_default()
         assert result is not None, "NX_LOCAL_CHROMA_PATH is always honored"
+
+
+class TestLadderMigrationSignal:
+    """nexus-4922x: the engine-side ladder-completion signal is now the
+    PRIMARY de-strand check — the legacy migration-reports/*.json file
+    (``_has_verified_migration_report``) is SECONDARY. Root cause: neither
+    of the two remedy paths the two-hop message can name at the pin release
+    (the advertised ``nx upgrade``, or the hidden ``nx guided-upgrade``)
+    ever wrote that file format (verified against the v6.18.1 tag's own
+    source: only the separate, unadvertised ``nx storage migrate*``
+    family calls ``_write_report`` — see the bead's T2 write-up) — so
+    relying on it alone left every real user re-tripping hop 3 forever."""
+
+    def _detect_with_artifact(
+        self, dirs: tuple[Path, Path, Path], ladder_result: bool | None,
+    ) -> StrandedInstall | None:
+        config, chroma, catalog = dirs
+        (config / "memory.db").write_bytes(b"x")
+        return detect_stranded_install(
+            config, chroma, catalog,
+            last_migration_capable=_PIN,
+            ladder_migration_verified=lambda: ladder_result,
+        )
+
+    def test_ladder_verified_true_destrands_without_report_file(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """No legacy report file anywhere -- the ladder signal alone is
+        sufficient to de-strand."""
+        assert self._detect_with_artifact(dirs, True) is None
+
+    def test_ladder_verified_false_stays_stranded_without_report(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """Engine reachable, rung genuinely not recorded, no legacy report
+        either -- correctly stays stranded."""
+        assert self._detect_with_artifact(dirs, False) is not None
+
+    def test_ladder_indeterminate_none_stays_stranded_without_report(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """DESIGN DECISION (nexus-4922x): an unreachable/indeterminate
+        engine degrades to 'stay stranded, loud reason' -- NEVER a silent
+        de-strand. This is the expected state at nx init time on a
+        genuinely stranded box (the engine has not been provisioned yet):
+        treating 'can't tell' as 'verified' would silently wave through a
+        box that was never migrated at all."""
+        assert self._detect_with_artifact(dirs, None) is not None
+
+    def test_ladder_false_falls_through_to_legacy_report_secondary(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """A box migrated via the OLDER nx storage migrate* report-writing
+        path (pre-dates the ladder becoming the documented remedy) must
+        still de-strand even when the ladder signal itself says no --
+        constraint (b) from the bead: the legacy check is preserved as a
+        secondary signal, not removed."""
+        config, chroma, catalog = dirs
+        (config / "memory.db").write_bytes(b"x")
+        _write_report(config, verification="verified", total_failed=0)
+        result = detect_stranded_install(
+            config, chroma, catalog,
+            last_migration_capable=_PIN,
+            ladder_migration_verified=lambda: False,
+        )
+        assert result is None
+
+    def test_ladder_none_also_falls_through_to_legacy_report_secondary(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """Same as above but with an indeterminate (engine-unreachable)
+        ladder result -- the legacy report is still consulted, not
+        short-circuited into a stranded verdict."""
+        config, chroma, catalog = dirs
+        (config / "memory.db").write_bytes(b"x")
+        _write_report(config, verification="verified", total_failed=0)
+        result = detect_stranded_install(
+            config, chroma, catalog,
+            last_migration_capable=_PIN,
+            ladder_migration_verified=lambda: None,
+        )
+        assert result is None
+
+    def test_no_ladder_probe_supplied_is_legacy_only(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """The default (``ladder_migration_verified=None``) reproduces the
+        EXACT prior behavior -- callers that never opt in (this module's
+        pre-existing tests, historical callers) see no new dependency and
+        no behavior change."""
+        config, chroma, catalog = dirs
+        (config / "memory.db").write_bytes(b"x")
+        assert detect_stranded_install(
+            config, chroma, catalog, last_migration_capable=_PIN,
+        ) is not None
+
+    def test_indeterminate_ladder_result_yields_distinguishable_message(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """nexus-cmtpa (critique [22009] Significant): a transiently
+        unreachable engine (``ladder_migration_verified() -> None``) must
+        NOT read to the user identically to a confirmed-unmigrated box --
+        an already-migrated LOCAL user hitting a supervisor restart or
+        brief unresponsiveness deserves a message that says verification
+        could not be CONFIRMED this run, not a flat "this is unmigrated"
+        claim."""
+        result = self._detect_with_artifact(dirs, None)
+        assert result is not None
+        assert result.verification_unavailable is True
+        assert "could NOT be verified against the engine this run" in result.message
+        assert "start it (`nx daemon service start`)" in result.message
+        # The base two-hop redirect must STILL be present -- this is an
+        # ADDED clause, not a replacement of the actionable remedy.
+        assert "Two-hop upgrade:" in result.message
+
+    def test_confirmed_not_verified_does_not_get_the_indeterminate_clause(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """A confirmed ``False`` (engine reachable, rung genuinely absent)
+        is a DIFFERENT state from indeterminate -- no false reassurance
+        that verification merely "couldn't be checked"."""
+        result = self._detect_with_artifact(dirs, False)
+        assert result is not None
+        assert result.verification_unavailable is False
+        assert "could NOT be verified" not in result.message
+
+    def test_no_ladder_probe_supplied_does_not_get_the_indeterminate_clause(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """The signal never being consulted at all (callable is None --
+        e.g. cloud mode post-nexus-cmtpa gating) is ALSO distinct from a
+        consulted-but-indeterminate probe -- no clause either way."""
+        config, chroma, catalog = dirs
+        (config / "memory.db").write_bytes(b"x")
+        result = detect_stranded_install(
+            config, chroma, catalog, last_migration_capable=_PIN,
+        )
+        assert result is not None
+        assert result.verification_unavailable is False
+        assert "could NOT be verified" not in result.message
+
+
+class TestConfigLadderProbe:
+    """nexus-4922x: ``nexus.config._ladder_migration_verified`` -- the
+    production probe that queries the REAL engine-side ladder store
+    (``HttpLadderStore``, faked here at its import site so these stay
+    hermetic unit tests, no live engine)."""
+
+    class _FakeLadderStore:
+        def __init__(self, verified: frozenset[str]) -> None:
+            self._verified = verified
+
+        def verified_rungs(self) -> frozenset[str]:
+            return self._verified
+
+        def __enter__(self) -> "TestConfigLadderProbe._FakeLadderStore":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    def test_verified_rung_present_returns_true(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            http_store_mod, "HttpLadderStore",
+            lambda **kw: self._FakeLadderStore(frozenset({"substrate-etl", "chash-rekey"})),
+        )
+        assert _REAL_LADDER_MIGRATION_VERIFIED() is True
+
+    def test_rung_absent_returns_false(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            http_store_mod, "HttpLadderStore",
+            lambda **kw: self._FakeLadderStore(frozenset({"chash-rekey"})),
+        )
+        assert _REAL_LADDER_MIGRATION_VERIFIED() is False
+
+    def test_no_completions_at_all_returns_false(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            http_store_mod, "HttpLadderStore",
+            lambda **kw: self._FakeLadderStore(frozenset()),
+        )
+        assert _REAL_LADDER_MIGRATION_VERIFIED() is False
+
+    def test_engine_unreachable_returns_none_never_raises(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Construction-time failure (e.g. ServiceEndpointUnresolvableError,
+        the expected shape when nothing has been provisioned yet)."""
+
+        def _boom(**kw: object) -> "TestConfigLadderProbe._FakeLadderStore":
+            raise RuntimeError("nexus-service endpoint is not resolvable")
+
+        monkeypatch.setattr(http_store_mod, "HttpLadderStore", _boom)
+        assert _REAL_LADDER_MIGRATION_VERIFIED() is None
+
+    def test_query_failure_returns_none_never_raises(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Construction succeeds (endpoint resolvable) but the GET itself
+        fails (e.g. connection refused mid-restart) -- also degrades to
+        None, never propagates."""
+
+        class _RaisingStore:
+            def __init__(self, **kw: object) -> None:
+                pass
+
+            def verified_rungs(self) -> frozenset[str]:
+                raise ConnectionRefusedError("connection refused")
+
+            def __enter__(self) -> "_RaisingStore":
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                return None
+
+        monkeypatch.setattr(http_store_mod, "HttpLadderStore", _RaisingStore)
+        assert _REAL_LADDER_MIGRATION_VERIFIED() is None
+
+    def test_short_explicit_timeout_is_passed(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-4922x code-review [22008] Important: without an explicit
+        SHORT timeout, HttpLadderStore inherits RefreshableHttpStoreMixin's
+        30.0s data-operation default (~60s worst case with the mixin's
+        self-heal retry) -- at CLI STARTUP, for every box that ever carried
+        pre-PG artifacts, whenever the engine is resolvable-but-unresponsive.
+        Pins that the probe passes a short explicit ``timeout`` kwarg
+        (matching health.py's 2-5s best-effort-diagnostic convention), not
+        the mixin's bare default."""
+        calls: list[dict[str, object]] = []
+
+        def _capturing_factory(**kw: object) -> "TestConfigLadderProbe._FakeLadderStore":
+            calls.append(kw)
+            return self._FakeLadderStore(frozenset({"substrate-etl"}))
+
+        monkeypatch.setattr(http_store_mod, "HttpLadderStore", _capturing_factory)
+        assert _REAL_LADDER_MIGRATION_VERIFIED() is True
+        assert len(calls) == 1
+        assert calls[0].get("timeout") == config_mod._LADDER_PROBE_TIMEOUT_S
+        # The pin itself must actually BE short -- a future regression that
+        # widens the constant back toward the 30.0s data-operation default
+        # would pass this test's "some timeout was passed" half while
+        # reintroducing the startup-hang exposure; assert the magnitude too.
+        assert config_mod._LADDER_PROBE_TIMEOUT_S <= 5.0
+
+
+class TestCloudModeGate:
+    """nexus-cmtpa (critique [22009] Critical): the ladder-completion
+    signal is keyed ``(tenant_id, rung_name)`` engine-side (verified
+    against ``service/.../ladder-001-baseline.xml``) -- NOT machine-scoped.
+    In managed/cloud mode a tenant can be shared across machines, so
+    trusting it there would let machine A's migration falsely de-strand
+    machine B's own, distinct, never-migrated pre-PG data (silent data
+    loss -- the exact class this detector exists to prevent). The signal
+    is therefore sound ONLY in local mode (one bundled PG per install) and
+    MUST be gated to ``is_local_mode()``. House testing memory: pin
+    ``is_local_mode`` explicitly in these tests, never rely on ambient
+    detection."""
+
+    def _armed_dirs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = tmp_path / "cfg"
+        config.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
+        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma-none"))
+        monkeypatch.delenv("NEXUS_CATALOG_PATH", raising=False)
+        (config / "memory.db").write_bytes(b"x")
+        monkeypatch.setattr(stranded_install, "LAST_MIGRATION_CAPABLE", _PIN)
+
+    def test_cloud_mode_never_consults_the_tenant_scoped_ladder_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PINNED cloud mode (``is_local_mode`` explicitly False): even a
+        probe that WOULD say "verified" must never be called at all -- the
+        gate prevents the network round-trip, not just the trust
+        decision."""
+        calls: list[int] = []
+
+        def _would_say_verified() -> bool:
+            calls.append(1)
+            return True
+
+        monkeypatch.setattr(config_mod, "_ladder_migration_verified", _would_say_verified)
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: False)
+        self._armed_dirs(tmp_path, monkeypatch)
+
+        result = detect_stranded_install_default()
+        assert calls == [], "cloud mode must NEVER consult the tenant-scoped ladder probe"
+        assert result is not None, (
+            "cloud mode falls back to the legacy-only signal -- no report "
+            "file exists here, so it correctly stays stranded"
+        )
+        assert result.verification_unavailable is False, (
+            "the probe was never consulted, so this is NOT the "
+            "indeterminate-verification case"
+        )
+
+    def test_local_mode_still_consults_and_trusts_the_ladder_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PINNED local mode (``is_local_mode`` explicitly True): the exact
+        nexus-4922x behavior -- the probe IS consulted and a True result
+        de-strands."""
+        calls: list[int] = []
+
+        def _says_verified() -> bool:
+            calls.append(1)
+            return True
+
+        monkeypatch.setattr(config_mod, "_ladder_migration_verified", _says_verified)
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: True)
+        self._armed_dirs(tmp_path, monkeypatch)
+
+        result = detect_stranded_install_default()
+        assert calls == [1]
+        assert result is None
+
+    def test_cloud_mode_consults_a_matching_local_ack_marker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PINNED cloud mode: check_local_ack is wired True, so a matching
+        `nx stranded ack` marker de-strands even though the ladder probe
+        is never consulted at all."""
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: False)
+        self._armed_dirs(tmp_path, monkeypatch)
+        config_dir = Path(os.environ["NEXUS_CONFIG_DIR"])
+        chroma_dir = Path(os.environ["NX_LOCAL_CHROMA_PATH"])
+        artifacts = discover_artifacts(config_dir, chroma_dir, config_dir / "catalog")
+        write_ack_marker(config_dir, artifacts)
+
+        result = detect_stranded_install_default()
+        assert result is None
+
+    def test_local_mode_ignores_a_matching_ack_marker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PINNED local mode: even a matching ack marker on disk must NOT
+        de-strand -- local mode's ONLY signal is the engine-verified
+        ladder; a weaker self-attestation must never override it (a local
+        user could otherwise `nx stranded ack` their way past a genuinely
+        unmigrated box)."""
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: True)
+        monkeypatch.setattr(config_mod, "_ladder_migration_verified", lambda: False)
+        self._armed_dirs(tmp_path, monkeypatch)
+        config_dir = Path(os.environ["NEXUS_CONFIG_DIR"])
+        chroma_dir = Path(os.environ["NX_LOCAL_CHROMA_PATH"])
+        artifacts = discover_artifacts(config_dir, chroma_dir, config_dir / "catalog")
+        write_ack_marker(config_dir, artifacts)
+
+        result = detect_stranded_install_default()
+        assert result is not None, (
+            "a matching ack marker must be IGNORED in local mode -- only "
+            "the ladder signal governs there"
+        )
+        assert result.ack_eligible is False
+
+
+class TestArtifactFingerprint:
+    """nexus-cmtpa: :func:`artifact_fingerprint` -- stability across
+    reboots (path+size+mtime, never content), sensitivity to real
+    changes, order-independence."""
+
+    def test_stable_across_repeated_calls(self, tmp_path: Path) -> None:
+        f = tmp_path / "a.db"
+        f.write_bytes(b"hello")
+        p = (str(f),)
+        assert artifact_fingerprint(p) == artifact_fingerprint(p)
+
+    def test_order_independent(self, tmp_path: Path) -> None:
+        f1 = tmp_path / "a.db"
+        f2 = tmp_path / "b.db"
+        f1.write_bytes(b"one")
+        f2.write_bytes(b"two")
+        assert artifact_fingerprint((str(f1), str(f2))) == artifact_fingerprint((str(f2), str(f1)))
+
+    def test_changes_on_size_change(self, tmp_path: Path) -> None:
+        f = tmp_path / "a.db"
+        f.write_bytes(b"hello")
+        before = artifact_fingerprint((str(f),))
+        f.write_bytes(b"hello world, now much longer")
+        after = artifact_fingerprint((str(f),))
+        assert before != after
+
+    def test_changes_on_mtime_change_same_size(self, tmp_path: Path) -> None:
+        f = tmp_path / "a.db"
+        f.write_bytes(b"hello")
+        before = artifact_fingerprint((str(f),))
+        os.utime(f, (1_000_000, 1_000_000))
+        after = artifact_fingerprint((str(f),))
+        assert before != after
+
+    def test_changes_when_a_file_disappears(self, tmp_path: Path) -> None:
+        f1 = tmp_path / "a.db"
+        f2 = tmp_path / "b.db"
+        f1.write_bytes(b"one")
+        f2.write_bytes(b"two")
+        before = artifact_fingerprint((str(f1), str(f2)))
+        f2.unlink()
+        after = artifact_fingerprint((str(f1), str(f2)))
+        assert before != after
+
+    def test_missing_file_does_not_raise(self, tmp_path: Path) -> None:
+        missing = tmp_path / "never-existed.db"
+        # Must not raise -- a MISSING sentinel keeps the digest computable.
+        artifact_fingerprint((str(missing),))
+
+
+class TestAckMarkerRoundtrip:
+    """nexus-cmtpa: :func:`write_ack_marker` / :func:`_has_matching_ack` --
+    the local, file-based, fingerprint-bound consent record."""
+
+    def test_no_marker_is_no_match(self, dirs: tuple[Path, Path, Path]) -> None:
+        config, _chroma, _catalog = dirs
+        assert _has_matching_ack(config, ("x",)) is False
+
+    def test_written_marker_matches_the_same_artifact_set(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        config, chroma, catalog = dirs
+        f = config / "memory.db"
+        f.write_bytes(b"x")
+        artifacts = (str(f),)
+        record = write_ack_marker(config, artifacts)
+        assert record["consent"] == ACK_CONSENT_TEXT
+        assert record["artifacts"] == list(artifacts)
+        assert "acked_at" in record
+        assert _has_matching_ack(config, artifacts) is True
+
+    def test_mismatch_after_artifact_changes_re_strands(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """The core safety property: an ack does NOT survive the acked
+        files actually changing afterward."""
+        config, _chroma, _catalog = dirs
+        f = config / "memory.db"
+        f.write_bytes(b"x")
+        artifacts = (str(f),)
+        write_ack_marker(config, artifacts)
+        assert _has_matching_ack(config, artifacts) is True
+
+        os.utime(f, (1_000_000, 1_000_000))  # simulate the file changing later
+        assert _has_matching_ack(config, artifacts) is False
+
+    def test_malformed_marker_is_no_match(self, dirs: tuple[Path, Path, Path]) -> None:
+        config, _chroma, _catalog = dirs
+        (config / stranded_install._ACK_MARKER_FILENAME).write_text("{not json")
+        assert _has_matching_ack(config, ("x",)) is False
+
+    def test_marker_missing_fingerprint_key_is_no_match(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        config, _chroma, _catalog = dirs
+        (config / stranded_install._ACK_MARKER_FILENAME).write_text('{"consent": "hi"}')
+        assert _has_matching_ack(config, ("x",)) is False
+
+
+class TestCheckLocalAckSignal:
+    """nexus-cmtpa: :func:`detect_stranded_install`'s ``check_local_ack``
+    parameter and the ``ack_eligible`` message-clause wiring it drives."""
+
+    def test_matching_ack_destrands(self, dirs: tuple[Path, Path, Path]) -> None:
+        config, chroma, catalog = dirs
+        f = config / "memory.db"
+        f.write_bytes(b"x")
+        artifacts = (str(f),)
+        write_ack_marker(config, artifacts)
+        result = detect_stranded_install(
+            config, chroma, catalog, last_migration_capable=_PIN,
+            check_local_ack=True,
+        )
+        assert result is None
+
+    def test_no_ack_stays_stranded_with_ack_eligible_message(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        config, chroma, catalog = dirs
+        (config / "memory.db").write_bytes(b"x")
+        result = detect_stranded_install(
+            config, chroma, catalog, last_migration_capable=_PIN,
+            check_local_ack=True,
+        )
+        assert result is not None
+        assert result.ack_eligible is True
+        assert "nx stranded ack" in result.message
+
+    def test_check_local_ack_false_never_advertises_ack(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """Default (``check_local_ack=False``): no ack clause, even if a
+        marker happens to be sitting on disk -- the signal is opt-in per
+        call, not auto-detected."""
+        config, chroma, catalog = dirs
+        f = config / "memory.db"
+        f.write_bytes(b"x")
+        write_ack_marker(config, (str(f),))
+        result = detect_stranded_install(
+            config, chroma, catalog, last_migration_capable=_PIN,
+        )
+        assert result is not None
+        assert result.ack_eligible is False
+        assert "nx stranded ack" not in result.message
+
+    def test_message_ordering_two_hop_before_ack_escape(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """Hal's explicit ordering requirement: the two-hop remedy leads;
+        the ack escape is the 'if you have already completed this'
+        clause, never advertised first."""
+        config, chroma, catalog = dirs
+        (config / "memory.db").write_bytes(b"x")
+        result = detect_stranded_install(
+            config, chroma, catalog, last_migration_capable=_PIN,
+            check_local_ack=True,
+        )
+        assert result is not None
+        two_hop_idx = result.message.index("Two-hop upgrade:")
+        ack_idx = result.message.index("nx stranded ack")
+        assert two_hop_idx < ack_idx
+
+    def test_mismatched_ack_stays_stranded(self, dirs: tuple[Path, Path, Path]) -> None:
+        config, chroma, catalog = dirs
+        f = config / "memory.db"
+        f.write_bytes(b"x")
+        artifacts = (str(f),)
+        write_ack_marker(config, artifacts)
+        os.utime(f, (1_000_000, 1_000_000))  # artifact changed since ack
+        result = detect_stranded_install(
+            config, chroma, catalog, last_migration_capable=_PIN,
+            check_local_ack=True,
+        )
+        assert result is not None
+        assert result.ack_eligible is True
+        # nexus-cmtpa round-3 critique: name the benign mtime-drift
+        # triggers so a re-strand after a real ack does not read as data
+        # loss -- a backup restore / volume remount / non-timestamp-
+        # preserving copy is the likely cause, not new unmigrated data.
+        assert "backup restore" in result.message
+        assert "re-run `nx stranded ack`" in result.message
+
+
+class TestAckCommand:
+    """nexus-cmtpa: ``nx stranded ack`` end-to-end via ``CliRunner``."""
+
+    def _env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        config = tmp_path / "cfg"
+        config.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
+        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma-none"))
+        monkeypatch.delenv("NEXUS_CATALOG_PATH", raising=False)
+        monkeypatch.setattr(stranded_install, "LAST_MIGRATION_CAPABLE", _PIN)
+        return config
+
+    def test_disarmed_detector_is_a_noop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = self._env(tmp_path, monkeypatch)
+        monkeypatch.setattr(stranded_install, "LAST_MIGRATION_CAPABLE", None)
+        result = CliRunner().invoke(stranded_group, ["ack", "--yes"], obj={})
+        assert result.exit_code == 0
+        assert "nothing to ack" in result.output
+        assert not (config / stranded_install._ACK_MARKER_FILENAME).exists()
+
+    def test_local_mode_is_a_noop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = self._env(tmp_path, monkeypatch)
+        (config / "memory.db").write_bytes(b"x")
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: True)
+        result = CliRunner().invoke(stranded_group, ["ack", "--yes"], obj={})
+        assert result.exit_code == 0
+        assert "LOCAL mode" in result.output
+        assert "has no effect" in result.output
+        assert not (config / stranded_install._ACK_MARKER_FILENAME).exists()
+
+    def test_no_artifacts_is_a_noop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = self._env(tmp_path, monkeypatch)
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: False)
+        result = CliRunner().invoke(stranded_group, ["ack", "--yes"], obj={})
+        assert result.exit_code == 0
+        assert "nothing to attest" in result.output
+        assert not (config / stranded_install._ACK_MARKER_FILENAME).exists()
+
+    def test_declining_confirmation_writes_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = self._env(tmp_path, monkeypatch)
+        (config / "memory.db").write_bytes(b"x")
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: False)
+        result = CliRunner().invoke(stranded_group, ["ack"], input="n\n", obj={})
+        assert result.exit_code == 0
+        assert "Aborted" in result.output
+        assert not (config / stranded_install._ACK_MARKER_FILENAME).exists()
+
+    def test_yes_flag_writes_the_marker_with_consent_shown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = self._env(tmp_path, monkeypatch)
+        (config / "memory.db").write_bytes(b"x")
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: False)
+        result = CliRunner().invoke(stranded_group, ["ack", "--yes"], obj={})
+        assert result.exit_code == 0
+        assert ACK_CONSENT_TEXT in result.output
+        # nexus-cmtpa round-3 critique: the stakes of a false attestation
+        # must be stated before the confirm (--yes skips the prompt itself
+        # but the stakes line is unconditional output either way).
+        assert "If you have NOT completed the migration, do not proceed" in result.output
+        assert "Recorded:" in result.output
+        marker = config / stranded_install._ACK_MARKER_FILENAME
+        assert marker.exists()
+        data = json.loads(marker.read_text())
+        assert data["consent"] == ACK_CONSENT_TEXT
+        assert str(config / "memory.db") in data["artifacts"]
+
+    def test_written_marker_actually_destrands_via_the_full_assembler(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End-to-end: ack via the CLI, then confirm
+        ``detect_stranded_install_default`` (the real production
+        assembler, not a hand-built call) sees the marker and de-strands."""
+        config = self._env(tmp_path, monkeypatch)
+        (config / "memory.db").write_bytes(b"x")
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: False)
+        result = CliRunner().invoke(stranded_group, ["ack", "--yes"], obj={})
+        assert result.exit_code == 0
+
+        assert detect_stranded_install_default() is None

@@ -48,6 +48,7 @@ import java.util.*;
  *   POST  /v1/catalog/manifest/write_many batch replace manifests for multiple docs (+chunk_count)
  *   GET   /v1/catalog/manifest/get       get manifest for doc_id
  *   POST  /v1/catalog/manifest/get_many  batch-fetch manifests for multiple doc_ids (nexus-7lm3q)
+ *   POST  /v1/catalog/manifest/chashes_many batch-fetch just the chash list for multiple doc_ids (nexus-eslkl)
  *   POST  /v1/catalog/manifest/purge     purge manifest for doc_id
  *   GET   /v1/catalog/manifest/chashes   chashes for collection
  *   POST  /v1/catalog/manifest/resync    recompute chunk_count from manifest row count
@@ -105,9 +106,23 @@ public final class CatalogHandler implements HttpHandler {
     private static final int MAX_BATCH_DOC_IDS = 1000;
 
     private final CatalogRepository repo;
+    private final dev.nexus.service.db.CombinedWriteService combinedWriteService;
 
     public CatalogHandler(CatalogRepository repo) {
+        this(repo, null);
+    }
+
+    /**
+     * nexus-kl2z6 increment 1: {@code combinedWriteService} may be null — a
+     * request carrying {@code chunks} then answers 503 (matches {@link
+     * VectorHandler}'s absent-backend pattern: refuse explicitly, never
+     * NPE). Every EXISTING call site keeps the 1-arg constructor and gets
+     * byte-for-byte the pre-kl2z6 behaviour.
+     */
+    public CatalogHandler(CatalogRepository repo,
+                           dev.nexus.service.db.CombinedWriteService combinedWriteService) {
         this.repo = repo;
+        this.combinedWriteService = combinedWriteService;
     }
 
     @Override
@@ -150,6 +165,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/write_many"   -> handleManifestWriteMany(exchange, tenant, method);
                 case "/manifest/get"          -> handleManifestGet(exchange, tenant, method);
                 case "/manifest/get_many"     -> handleManifestGetMany(exchange, tenant, method);
+                case "/manifest/chashes_many" -> handleManifestChashesMany(exchange, tenant, method);
                 case "/manifest/purge"        -> handleManifestPurge(exchange, tenant, method);
                 case "/manifest/chashes"      -> handleManifestChashes(exchange, tenant, method);
                 case "/manifest/docs_for_chashes" -> handleDocsForChashes(exchange, tenant, method);
@@ -787,6 +803,34 @@ public final class CatalogHandler implements HttpHandler {
      * per-doc atomicity, cross-doc isolation) via
      * {@link CatalogRepository#writeManifestMany}. Cap {@value #MAX_BATCH_DOC_IDS}
      * docs. Response 200 {@code {docs: N_ok, rows: M_total, failed_doc_ids: [...]}}.
+     *
+     * <p>Optional {@code "sweep": true} (nexus-eslkl / T2
+     * nexus/design-eslkl-hook-lock-narrowing §8.1, default {@code false} —
+     * BACKWARD COMPATIBLE, an omitted field is byte-for-byte the pre-eslkl
+     * behaviour): folds nexus-39upx's superseded-vector sweep into each
+     * doc's own transaction server-side. See
+     * {@link CatalogRepository#writeManifestMany(String, List, Map, boolean)}
+     * for the exact guard. Adds {@code swept}/{@code sweep_skipped}/
+     * {@code sweep_detail} to the response, zero/empty when
+     * {@code sweep=false}.
+     *
+     * <p><b>nexus-kl2z6 increment 1 — the COMBINED WRITE.</b> Optional
+     * top-level {@code "collection"} (required when {@code chunks} is
+     * present) and {@code "chunks": [{"chash", "text", "metadata"}, ...]}.
+     * When {@code chunks} is present, each doc's manifest write AND the
+     * chunk VECTOR rows its own manifest references land in the SAME
+     * per-doc transaction (T2 {@code design-kl2z6-combined-write} §0) via
+     * {@link dev.nexus.service.db.CombinedWriteService}. Absent {@code
+     * chunks} is BACKWARD COMPATIBLE, byte-for-byte the pre-kl2z6 path
+     * (design memo §5.1) — including the response shape: {@code
+     * chunks_written} appears ONLY when this call carried {@code chunks}
+     * (design memo §5.2 — the ONLY runtime signal a client has that this
+     * engine understands the combined write; an old engine silently drops
+     * the unknown {@code chunks} field with no error). Optional {@code
+     * "force_re_embed"} mirrors {@code /v1/vectors/upsert-chunks}' escape
+     * from the RDR-181 existence-partition. 503 when no {@link
+     * dev.nexus.service.db.CombinedWriteService} is wired (matches {@link
+     * VectorHandler}'s absent-backend pattern).
      */
     @SuppressWarnings("unchecked")
     private void handleManifestWriteMany(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -839,7 +883,66 @@ public final class CatalogHandler implements HttpHandler {
                 complete.put(String.valueOf(e.getKey()), String.valueOf(e.getValue()));
             }
         }
-        var result = repo.writeManifestMany(tenant, docs, complete);
+        // ABSENT/null/non-Boolean means false — same "explicit true only" idiom
+        // as handleAssignMany's cross_collection default (only inverted: sweep
+        // is opt-IN, cross_collection is opt-OUT), so an in-flight client
+        // built against the pre-eslkl 3-arg shape gets identical behaviour.
+        boolean sweep = Boolean.TRUE.equals(body.get("sweep"));
+
+        // nexus-kl2z6 increment 1: optional combined-write payload. `chunks`
+        // ABSENT (the common case, and every pre-kl2z6 caller) takes the
+        // untouched byte-for-byte-compatible path below.
+        Object rawChunks = body.get("chunks");
+        if (rawChunks != null) {
+            if (combinedWriteService == null) {
+                HttpUtil.send(exchange, 503, "{\"error\":\"combined write not configured"
+                    + " (no CombinedWriteService)\"}");
+                return;
+            }
+            if (!(rawChunks instanceof List<?> cl)) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"'chunks' must be a list\"}"); return;
+            }
+            Object rawCollection = body.get("collection");
+            if (!(rawCollection instanceof String collection) || collection.isBlank()) {
+                HttpUtil.send(exchange, 400,
+                    "{\"error\":\"'collection' required when 'chunks' is present\"}"); return;
+            }
+            List<Map<String, Object>> chunks = new ArrayList<>(cl.size());
+            for (int i = 0; i < cl.size(); i++) {
+                if (!(cl.get(i) instanceof Map)) {
+                    HttpUtil.send(exchange, 400,
+                        "{\"error\":\"chunks[" + i + "]: every element must be an object\"}"); return;
+                }
+                Map<String, Object> chunk = new LinkedHashMap<>((Map<String, Object>) cl.get(i));
+                Object chashObj = chunk.get("chash");
+                if (!(chashObj instanceof String chashStr)) {
+                    HttpUtil.send(exchange, 400,
+                        "{\"error\":\"chunks[" + i + "]: 'chash' required (string)\"}"); return;
+                }
+                try {
+                    chunk.put("chash", dev.nexus.service.db.Chash.requireCanonical(chashStr, "chunks[" + i + "]"));
+                } catch (IllegalArgumentException e) {
+                    HttpUtil.send(exchange, 400,
+                        "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}"); return;
+                }
+                if (!(chunk.get("text") instanceof String)) {
+                    HttpUtil.send(exchange, 400,
+                        "{\"error\":\"chunks[" + i + "]: 'text' required (string)\"}"); return;
+                }
+                chunks.add(chunk);
+            }
+            boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
+            var combined = combinedWriteService.writeManyCombined(
+                tenant, collection, chunks, docs, complete, sweep, forceReEmbed);
+            if (combined.tokens() > 0) {
+                exchange.getResponseHeaders().set(
+                    VectorHandler.USAGE_TOKENS_HEADER, Long.toString(combined.tokens()));
+            }
+            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(combined.response()));
+            return;
+        }
+
+        var result = repo.writeManifestMany(tenant, docs, complete, sweep);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
@@ -953,6 +1056,48 @@ public final class CatalogHandler implements HttpHandler {
         // reconcile manifests.size() == count before trusting a page as complete.
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
             Map.of("manifests", manifests, "count", manifests.size())));
+    }
+
+    /**
+     * POST /v1/catalog/manifest/chashes_many (nexus-eslkl / T2
+     * nexus/design-eslkl-hook-lock-narrowing §8.1)
+     *
+     * <p>Batch-fetch just the chash list for multiple doc_ids in ONE round
+     * trip — the batched twin of the superseded-vector sweep's per-doc
+     * "before" read ({@code reader.get_chunk_chashes(doc_id)},
+     * {@code mcp_infra.py:1465}). Same shape as {@link #handleManifestGetMany}
+     * but chash-only (no position/line/char payload) — the sweep needs
+     * nothing else, and the lighter response collapses the client's N
+     * before-reads (one per flushed doc) to 1 call per flush.
+     *
+     * <p>Request body:  {@code {"doc_ids": ["tumbler1", "tumbler2", ...]}}
+     * Response body:   {@code {"chashes": {"tumbler1": [chash...], "tumbler2": [chash...]}, "count": N}}
+     *
+     * <p>Doc_ids with no manifest rows are absent from the response map.
+     * {@code count} is the number of doc_ids present in the map (same
+     * truncation-defense convention as {@code handleManifestGetMany}'s
+     * {@code manifests.size()}), not the total chash count.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleManifestChashesMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("doc_ids");
+        List<String> docIds = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
+            : List.of();
+        if (docIds.isEmpty()) {
+            HttpUtil.send(exchange, 200, "{\"chashes\":{},\"count\":0}"); return;
+        }
+        // Same cap + rationale as handleManifestGetMany/handleResolveMany: well under
+        // PostgreSQL's 32767-parameter Bind limit.
+        if (docIds.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many doc_ids (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        var chashesByDoc = repo.getChunkChashesMany(tenant, docIds);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("chashes", chashesByDoc, "count", chashesByDoc.size())));
     }
 
     /**

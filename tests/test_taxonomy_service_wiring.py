@@ -310,7 +310,7 @@ def test_assign_batch_hook_routes_through_assign_from_chashes(monkeypatch):
     # is_local_mode is a local import from nexus.config inside the hook.
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
     # t2_index_write just runs the fn with our fake db (no daemon).
-    monkeypatch.setattr(mi, "t2_index_write", lambda fn: fn(_DB()))
+    monkeypatch.setattr(mi, "t2_index_write", lambda fn, **_kw: fn(_DB()))
 
     # embeddings=None (the MCP store_put shape) — must reach the route
     # unchanged; embeddings/contents/metadatas are accepted but not read.
@@ -361,7 +361,7 @@ def test_assign_batch_hook_ignores_embeddings_entirely(monkeypatch, embeddings):
 
     monkeypatch.setattr(mi, "get_t3", lambda: _SvcT3())
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-    monkeypatch.setattr(mi, "t2_index_write", lambda fn: fn(_DB()))
+    monkeypatch.setattr(mi, "t2_index_write", lambda fn, **_kw: fn(_DB()))
 
     # Must not raise regardless of embeddings= shape (no more ValueError
     # 'truth value of an array ... is ambiguous', no more None-vs-empty
@@ -411,7 +411,7 @@ def test_assign_batch_hook_no_fallback_when_route_errors(monkeypatch):
 
     monkeypatch.setattr(mi, "get_t3", lambda: _SvcT3())
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-    monkeypatch.setattr(mi, "t2_index_write", lambda fn: fn(_DB()))
+    monkeypatch.setattr(mi, "t2_index_write", lambda fn, **_kw: fn(_DB()))
 
     tripwired: list[dict] = []
 
@@ -454,7 +454,7 @@ def test_assign_batch_hook_reports_unmatched_chashes_via_tripwire(monkeypatch):
 
     monkeypatch.setattr(mi, "get_t3", lambda: _SvcT3())
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-    monkeypatch.setattr(mi, "t2_index_write", lambda fn: fn(_DB()))
+    monkeypatch.setattr(mi, "t2_index_write", lambda fn, **_kw: fn(_DB()))
 
     tripwired: list[dict] = []
 
@@ -491,7 +491,7 @@ def test_assign_batch_hook_no_tripwire_when_nothing_unmatched(monkeypatch):
 
     monkeypatch.setattr(mi, "get_t3", lambda: _SvcT3())
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-    monkeypatch.setattr(mi, "t2_index_write", lambda fn: fn(_DB()))
+    monkeypatch.setattr(mi, "t2_index_write", lambda fn, **_kw: fn(_DB()))
 
     tripwired: list[dict] = []
     monkeypatch.setattr(

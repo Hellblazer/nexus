@@ -313,6 +313,13 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         'list_hook_failures': ['days', 'hook_names', 'limit'],
         'query_tier_writes': ['session_id', 'since', 'last_n'],
         'query_tier_writes_once': ['session_id', 'timeout'],
+        # nexus-onjvy gap 4: tier_writes.target_title was WRITE-ONLY over HTTP
+        # — recordTierWrite/importTierWritesBatch stored it, but the only read
+        # route, query_tier_writes, is an AGGREGATE with no target slot, and a
+        # per-row title on an aggregated group would be incoherent. Same
+        # no-twin shape as list_hook_failures: this is the read surface's
+        # first and only home, not a port of a SQLite reader.
+        'list_tier_writes': ['session_id', 'since', 'last_n', 'limit'],
         # nexus-eho3u: nx_answer_runs was WRITE-ONLY over HTTP (/record only,
         # no read route) — every nx_answer call wrote a row and nothing ever
         # read one back. Same no-twin shape as list_hook_failures: this is

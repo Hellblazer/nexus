@@ -32,6 +32,44 @@ OWNER PID is dead (never PPID-based: ``pg_ctl start`` daemonizes even for
 a live session, so a fresh postmaster's PPID is 1 within moments of
 boot — only the sidecar's owner-pid check tells stale from live). See
 :func:`sweep_stale_substrate_clusters`.
+
+Sidecar-write TIMING (nexus-ui654 follow-up, round 2 — critic Q1/Q3): the
+sidecar is written THREE times per boot, not once at the end — (1) a
+PLACEHOLDER immediately after ``initdb`` succeeds, still inside the boot
+semaphore (postmaster/engine fields ``None`` — nothing is running yet, so
+nothing to KILL, but the DIRECTORY itself is reapable debris from the
+instant it exists); (2) updated once the postmaster is confirmed up
+(postmaster identity added; engine fields still ``None``); (3) updated
+again once the JVM ``Popen`` call returns (engine PID added — known
+synchronously, well before the up-to-60s ``_wait_tcp`` call that
+follows it). The original nexus-lgdy1 shape wrote the sidecar only once,
+at the very END of ``_boot()`` — after createdb, role bootstrap, JVM
+spawn, and the full TCP-wait — leaving a real, observed (not
+hypothetical) window in which a kill produced a SIDECAR-LESS cluster that
+``_sweep_legacy_cluster`` permanently refuses to auto-reap.
+
+Round 1 of this follow-up moved the first sidecar write to right after
+the postmaster comes up and claimed this shrank the un-reapable window to
+"milliseconds" — WRONG under the exact contention this bead targets: the
+boot semaphore sits BEFORE that write in program order, and its own wait
+can legitimately run up to ``_BOOT_SEMAPHORE_ACQUIRE_TIMEOUT_S`` (300s)
+under N-session x M-worker contention, so the true window was bounded by
+THAT wait, not by milliseconds. Round 2's first attempt at a fix --
+writing a placeholder sidecar immediately after ``mkdtemp()``, before
+even acquiring the semaphore -- was tried and is WRONG for a different
+reason: ``initdb`` refuses to initialize a non-empty target directory, so
+a sidecar file landing inside pgdata before ``initdb`` runs breaks the
+boot outright (verified directly against a real ``initdb`` invocation).
+The actual fix: ``tempfile.mkdtemp()`` itself moved INSIDE the semaphore
+(the directory does not exist at all while a boot is merely queued behind
+others), and the first sidecar write happens immediately after ``initdb``
+succeeds -- bounded by ``initdb``'s own runtime (critic-measured ~0.62s
+uncontended), never by the semaphore's queue-wait, because directory
+creation only happens once the wait is already over. Concurrency-window
+control (``_boot_semaphore_slot`` itself) is a separate, complementary
+mechanism — it bounds how many boots run at once; this fix bounds how
+LONG each boot's own un-reapable window lasts (now: initdb's own runtime,
+not the semaphore's wait).
 """
 from __future__ import annotations
 
@@ -47,14 +85,21 @@ import tempfile
 import threading
 import time
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import structlog
+
+from nexus._locking import lock_file, unlock_file
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     jar_freshness_skip_reason,
     pg_bin_dir,
 )
+
+_log = structlog.get_logger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _JAR = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
@@ -217,6 +262,134 @@ def _wait_tcp(host: str, port: int, timeout: float) -> None:
     raise TimeoutError(f"engine substrate: port {port} not reachable after {timeout}s")
 
 
+#: Cross-process bound on concurrent PG *boot* operations (initdb +
+#: pg_ctl start), NOT on concurrent LIVE substrate PG instances
+#: (nexus-ui654). macOS's SysV shared-memory budget is small and
+#: MACHINE-WIDE -- shared with Docker Desktop, browsers, every other
+#: process on the box, not just this suite (``sysctl kern.sysv.shmmni``
+#: read 32 on the box this was diagnosed on). initdb's bootstrap
+#: standalone backend and pg_ctl start's postmaster each transiently
+#: allocate SysV shm segments during the startup sequence; under
+#: ``pytest -n auto`` every xdist worker independently boots its own
+#: substrate (see the worker-sharding comment above
+#: ``_WORKER_SHARD_WIDTH`` -- one boot per WORKER process, not one per
+#: session), so N concurrent pytest sessions x M workers-per-session can
+#: spike well past 32 in-flight segments even though the STEADY-STATE
+#: running-cluster count is fine afterward -- this is what produced the
+#: observed "could not create shared memory segment: No space left on
+#: device" setup-error storms (bead comment, REFINED PICTURE:
+#: postgres process count self-resolved once concurrent sessions
+#: finished -- the acute failure is the concurrency WINDOW, not
+#: permanent leakage). Bounding concurrent BOOTS (not concurrent live
+#: PGs, and not the whole test session) to a small number leaves
+#: headroom for everything else on the machine that also touches SysV
+#: shm. 4 is conservative: 1-2 segments were the actual observed cost
+#: per boot, so 4 concurrent boots stays well inside a 32-segment
+#: budget with margin left for the rest of the box.
+_MAX_CONCURRENT_PG_BOOTS = 4
+
+#: Fixed pool of N lockfiles under the process tempdir root -- try-acquire
+#: in slot order (0, 1, 2, ...), never a per-boot-named file, so this
+#: directory itself never accumulates debris the way a per-boot tempdir
+#: would.
+_BOOT_SEMAPHORE_DIR = Path(tempfile.gettempdir()) / "nexus_t2_substrate_boot_locks"
+
+#: Generous: a slow/loaded box waiting out a genuine queue of concurrent
+#: boots is expected, not a hang. Failing loud after this window (rather
+#: than blocking forever) is what makes contention diagnosable instead of
+#: looking like an unrelated stall.
+_BOOT_SEMAPHORE_ACQUIRE_TIMEOUT_S = 300.0
+_BOOT_SEMAPHORE_POLL_S = 1.0
+_BOOT_SEMAPHORE_LOG_EVERY_S = 10.0
+
+
+def _try_acquire_boot_slot(lock_dir: Path, max_concurrent: int):
+    """Non-blocking: try every slot in order (0, 1, ..., max_concurrent-1),
+    return the held-and-locked file handle for the first free one, or
+    ``None`` if every slot is currently held elsewhere. Side-effect-free on
+    failure -- every opened-but-unlocked fd is closed before moving to the
+    next slot or returning.
+    """
+    for slot in range(max_concurrent):
+        path = lock_dir / f"slot-{slot}.lock"
+        fh = open(path, "a+")  # noqa: SIM115 - lifetime is the caller's held slot, closed by _boot_semaphore_slot
+        try:
+            lock_file(fh, blocking=False)
+        except BlockingIOError:
+            fh.close()
+            continue
+        return fh
+    return None
+
+
+@contextmanager
+def _boot_semaphore_slot(
+    *,
+    max_concurrent: int = _MAX_CONCURRENT_PG_BOOTS,
+    lock_dir: Path = _BOOT_SEMAPHORE_DIR,
+    timeout_s: float = _BOOT_SEMAPHORE_ACQUIRE_TIMEOUT_S,
+    poll_s: float = _BOOT_SEMAPHORE_POLL_S,
+) -> Iterator[None]:
+    """Hold one of *max_concurrent* cross-process boot slots for the
+    duration of the context.
+
+    Bounds how many PG boot sequences (initdb + pg_ctl start) can run
+    CONCURRENTLY across every pytest process on the machine (nexus-ui654)
+    -- deliberately NOT the substrate's full session lifetime; callers
+    wrap only the shm-heavy initdb/pg_ctl-start window and release
+    immediately after, so a booted-and-running substrate never occupies a
+    slot for the rest of its session.
+
+    Waits LOUDLY: a structlog line every ``_BOOT_SEMAPHORE_LOG_EVERY_S``
+    while contended, and a fail-loud ``RuntimeError`` naming this bead if
+    *timeout_s* elapses with no slot free -- never a silent hang.
+    """
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    start = time.monotonic()
+    deadline = start + timeout_s
+    last_log = start
+    fh = _try_acquire_boot_slot(lock_dir, max_concurrent)
+    waited = False
+    while fh is None:
+        waited = True
+        now = time.monotonic()
+        if now >= deadline:
+            raise RuntimeError(
+                f"T2 engine substrate: timed out after {timeout_s}s waiting "
+                f"for a boot slot -- all {max_concurrent} concurrent-PG-boot "
+                f"slots busy under {lock_dir} (nexus-ui654: concurrent PG "
+                "boots are bounded to protect macOS's tiny SysV shm "
+                "budget). If this many pytest sessions are genuinely "
+                "booting substrates at once, wait for one to finish; if the "
+                "bound itself is wrong for this machine, raise "
+                "_MAX_CONCURRENT_PG_BOOTS deliberately -- this is not a "
+                "silent hang, it is the semaphore doing its job."
+            )
+        if now - last_log >= _BOOT_SEMAPHORE_LOG_EVERY_S:
+            _log.info(
+                "nexus_t2_substrate.boot_semaphore_wait",
+                max_concurrent=max_concurrent,
+                lock_dir=str(lock_dir),
+                waited_s=round(now - start, 1),
+                timeout_s=timeout_s,
+                bead="nexus-ui654",
+            )
+            last_log = now
+        time.sleep(poll_s)
+        fh = _try_acquire_boot_slot(lock_dir, max_concurrent)
+    if waited:
+        _log.info(
+            "nexus_t2_substrate.boot_semaphore_acquired",
+            waited_s=round(time.monotonic() - start, 1),
+            bead="nexus-ui654",
+        )
+    try:
+        yield
+    finally:
+        unlock_file(fh)
+        fh.close()
+
+
 def _boot() -> dict:
     """Boot hermetic PG + the shaded service JAR. Called once, under _lock."""
     try:
@@ -242,26 +415,83 @@ def _boot() -> dict:
             "PATH). Install the PG bundle (nx init) or set NEXUS_PG_BIN."
         )
 
-    pgdata = tempfile.mkdtemp(prefix="nexus_t2_substrate_pg_")
     pg_port = _free_port()
     pg_user = os.environ["USER"]
-    subprocess.run(
-        [str(bin_dir / "initdb"), "-D", pgdata, "--no-locale", "-E", "UTF8",
-         "--auth=trust"],
-        check=True, capture_output=True,
-    )
-    with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
-        f.write(f"\nport = {pg_port}\nlisten_addresses = '127.0.0.1'\n")
-        # The suite issues thousands of tiny transactions; keep fsync off
-        # for the throwaway test cluster.
-        f.write("fsync = off\nsynchronous_commit = off\nfull_page_writes = off\n")
-    subprocess.run(
-        [str(bin_dir / "pg_ctl"), "-D", pgdata, "-l",
-         os.path.join(pgdata, "pg.log"),
-         "-o", f"-p {pg_port} -k {pgdata}", "start", "-w"],
-        check=True, capture_output=True,
-    )
+    # Concurrency-window control's EARLIEST checkpoint (nexus-ui654
+    # follow-up round 2, critic Q1/Q3 -- corrects round 1's "millisecond
+    # window" docstring claim, which the critic showed was wrong under
+    # real contention: round 1 wrote the first sidecar right after the
+    # postmaster came up, but the boot semaphore's own WAIT to even start
+    # sits before that point and can legitimately run up to
+    # `_BOOT_SEMAPHORE_ACQUIRE_TIMEOUT_S` (300s) under N-session x
+    # M-worker contention).
+    #
+    # A naive fix -- writing a placeholder sidecar immediately after
+    # ``mkdtemp()``, before the semaphore -- was TRIED and is WRONG:
+    # ``initdb`` refuses to initialize a non-empty target directory
+    # (verified directly: "initdb: error: directory ... exists but is not
+    # empty" the instant a sidecar file lands inside pgdata first). So
+    # ``mkdtemp()`` itself moves INSIDE the semaphore below, and the FIRST
+    # sidecar write happens immediately after ``initdb`` succeeds (pgdata
+    # is no longer empty at that point regardless -- initdb has already
+    # populated it) but still well before ``pg_ctl start``. This closes
+    # the gap correctly: the cluster directory now never exists without a
+    # sidecar for longer than ``initdb``'s own runtime (critic-measured
+    # ~0.62s uncontended), because directory creation and the first
+    # sidecar write both happen only AFTER the semaphore wait is already
+    # over, not before or during it.
+    #
+    # Nothing is running yet at first-write time (no postmaster, no
+    # engine), so a sweep that reaps this placeholder has nothing to
+    # kill -- but an unreapable directory (even a PG-data-only one) is
+    # still exactly the debris shape the bead was filed about (31 stale
+    # dirs manually swept in one day). Verified (not assumed) against
+    # `_reap_cluster`: with every leg `None`, its per-leg
+    # `isinstance(pid, int)` guard produces an EMPTY `legs` list,
+    # `"mismatch" in {}.values()` is `False`, the kill loop over zero legs
+    # is a no-op, and the function falls straight through to
+    # `shutil.rmtree(cluster_dir, ...)` -- i.e. a fully-placeholder
+    # sidecar IS swept and counted as `reaped`, not silently skipped by
+    # any earlier candidate filter. Updated (not re-created) at each
+    # later checkpoint below as more identity becomes known.
+    with _boot_semaphore_slot():
+        pgdata = tempfile.mkdtemp(prefix="nexus_t2_substrate_pg_")
+        subprocess.run(
+            [str(bin_dir / "initdb"), "-D", pgdata, "--no-locale", "-E", "UTF8",
+             "--auth=trust"],
+            check=True, capture_output=True,
+        )
+        sidecar_started_at = _write_sidecar(
+            pgdata, pg_port=pg_port, svc_port=None,
+            postmaster_pid=None, engine_pid=None,
+        )
+        with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
+            f.write(f"\nport = {pg_port}\nlisten_addresses = '127.0.0.1'\n")
+            # The suite issues thousands of tiny transactions; keep fsync off
+            # for the throwaway test cluster.
+            f.write("fsync = off\nsynchronous_commit = off\nfull_page_writes = off\n")
+        subprocess.run(
+            [str(bin_dir / "pg_ctl"), "-D", pgdata, "-l",
+             os.path.join(pgdata, "pg.log"),
+             "-o", f"-p {pg_port} -k {pgdata}", "start", "-w"],
+            check=True, capture_output=True,
+        )
     postmaster_pid = _read_postmaster_pid(pgdata)
+    # Checkpoint 2 of 3 (nexus-ui654 follow-up, critic Q3): UPDATE the
+    # sidecar (not re-create -- `started_at` stays pinned to the earliest
+    # write above) now that the postmaster identity is known -- still well
+    # before createdb + role bootstrap + JVM spawn + up to 60s of
+    # TCP-wait, which is where the ORIGINAL nexus-lgdy1 shape wrote the
+    # sidecar for the first and only time. engine_pid/svc_port are
+    # genuinely not known yet -- still None; the reaper skips a None leg
+    # rather than treating it as dead or mismatched (verified above), so
+    # this partial sidecar is fully reapable for the postmaster leg it
+    # does record.
+    _write_sidecar(
+        pgdata, pg_port=pg_port, svc_port=None,
+        postmaster_pid=postmaster_pid, engine_pid=None,
+        started_at=sidecar_started_at,
+    )
 
     def _kill_pg() -> None:
         # Review finding (P0 remainder, Important 1): any failure after
@@ -326,6 +556,16 @@ def _boot() -> dict:
         stdout=svc_log, stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
     )
+    # Checkpoint 3 of 3: svc.pid is known SYNCHRONOUSLY the instant Popen
+    # returns -- no reason to defer recording it until _wait_tcp succeeds
+    # (which can legitimately take up to 60s). Update the sidecar now,
+    # before the wait, so a kill during the wait still leaves a complete,
+    # reapable sidecar (nexus-ui654 follow-up, critic Q3).
+    _write_sidecar(
+        pgdata, pg_port=pg_port, svc_port=svc_port,
+        postmaster_pid=postmaster_pid, engine_pid=svc.pid,
+        started_at=sidecar_started_at,
+    )
     try:
         _wait_tcp("127.0.0.1", svc_port, timeout=60.0)
     except TimeoutError:
@@ -341,11 +581,6 @@ def _boot() -> dict:
             f"T2 engine substrate: service did not bind port {svc_port}. "
             f"Tail of engine log ({svc_log_path}):\n{out}"
         ) from None
-
-    _write_sidecar(
-        pgdata, pg_port=pg_port, svc_port=svc_port,
-        postmaster_pid=postmaster_pid, engine_pid=svc.pid,
-    )
 
     state = {
         "base_url": f"http://127.0.0.1:{svc_port}",
@@ -409,20 +644,48 @@ def _teardown() -> None:
 
 
 def _write_sidecar(
-    pgdata: str, *, pg_port: int, svc_port: int,
-    postmaster_pid: int | None, engine_pid: int,
-) -> None:
+    pgdata: str, *, pg_port: int, svc_port: int | None,
+    postmaster_pid: int | None, engine_pid: int | None,
+    started_at: float | None = None,
+) -> float:
     """Record enough identity to re-verify both children before a future
     sweep ever signals them: PID + full expected cmdline for each, plus
     the owning pytest PID whose liveness is the sole staleness signal.
 
-    Written LAST, only once both children are confirmed up (after
-    ``_wait_tcp`` succeeds) — a half-booted cluster has no sidecar and is
-    swept via the (non-killing) legacy path if it is ever orphaned, which
-    is the conservative direction to fail in.
+    Written THREE times per boot (nexus-ui654 follow-up round 2, critic
+    Q1/Q3 -- see ``_boot()``'s call sites, all inside/after the boot
+    semaphore): (1) a PLACEHOLDER immediately after ``initdb`` succeeds
+    (``postmaster_pid``/``engine_pid``/``svc_port`` all ``None`` -- none
+    of it is known yet; a write BEFORE ``initdb`` was tried and rejected
+    -- ``initdb`` refuses a non-empty target directory, so the sidecar
+    cannot land inside pgdata until initdb has already populated it);
+    (2) updated immediately once the postmaster is confirmed up
+    (postmaster identity added); (3) updated again immediately after the
+    JVM ``Popen`` call returns (engine identity added -- known
+    synchronously, well before ``_wait_tcp`` ever gets a chance to time
+    out). A leg recorded as ``None`` here is skipped by the reaper
+    (``_reap_cluster``'s ``isinstance(pid, int)`` guard -- verified
+    directly: an all-``None`` sidecar produces an EMPTY ``legs`` list,
+    which short-circuits straight to ``shutil.rmtree`` and is reported as
+    ``reaped``, never silently dropped by an earlier candidate filter),
+    never mistaken for "dead" or "mismatch" -- so even the earliest,
+    fully-placeholder sidecar is immediately reapable once its owner dies.
+    ``mkdtemp()`` itself happens inside the boot semaphore (see
+    ``_boot()``), so the cluster directory never exists at all during the
+    semaphore's own (up to 300s) queue-wait -- only during ``initdb``'s
+    own runtime (critic-measured ~0.62s uncontended) is there ever a
+    directory with no sidecar in it.
+
+    *started_at*: pass the value returned by an earlier call to keep it
+    stable across all three writes for the same boot; omitted (``None``)
+    captures a fresh timestamp -- used only by the first, placeholder call.
+
+    Returns the ``started_at`` value actually written, so the caller can
+    thread it into the later calls.
     """
     from nexus.daemon.service_registry import process_command
 
+    resolved_started_at = started_at if started_at is not None else time.time()
     payload = {
         "owner_pytest_pid": os.getpid(),
         "owner_cmdline": process_command(os.getpid()),
@@ -431,16 +694,17 @@ def _write_sidecar(
             process_command(postmaster_pid) if postmaster_pid else ""
         ),
         "engine_pid": engine_pid,
-        "engine_cmdline": process_command(engine_pid),
+        "engine_cmdline": process_command(engine_pid) if engine_pid else "",
         "pg_port": pg_port,
         "svc_port": svc_port,
         "pgdata": pgdata,
-        "started_at": time.time(),
+        "started_at": resolved_started_at,
     }
     path = Path(pgdata) / _SIDECAR_FILENAME
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2))
     tmp.replace(path)  # atomic: a reader never sees a torn sidecar
+    return resolved_started_at
 
 
 @dataclass
@@ -748,8 +1012,30 @@ def _sweep_legacy_cluster(cluster_dir: Path, result: SweepResult) -> None:
     serving a concurrently running OLD-code pytest session (e.g. a
     still-running job from a commit predating this fix).
 
-    This is a one-time, shrinking population: every cluster created after
-    this fix ships carries a sidecar and is swept automatically above.
+    NOT a one-time, shrinking population (correction, nexus-ui654
+    follow-up round 1: the original "shrinking population" claim here was
+    empirically FALSE — a critic run observed this exact warning firing
+    repeatedly long after nexus-lgdy1 shipped; round 1's own replacement
+    text was ALSO corrected in round 2 after the critic showed the
+    "millisecond window" it described was actually bounded by the boot
+    semaphore's own up-to-300s wait under real contention, not
+    milliseconds). Round 2's fix: ``tempfile.mkdtemp()`` moved INSIDE the
+    boot semaphore, and the first sidecar write happens immediately after
+    ``initdb`` succeeds (a write attempt BEFORE ``initdb`` was tried and
+    rejected -- ``initdb`` refuses a non-empty target directory) -- see
+    ``_boot()``'s three-checkpoint sidecar writes. One residual source
+    remains after round 2's fix: any cluster created by an OLDER pytest
+    process (a build predating this fix, or predating nexus-lgdy1
+    entirely) that is still on disk — the live-code window left in
+    ``_boot()`` itself that can produce a fresh sidecar-less cluster is
+    now bounded by ``initdb``'s own runtime (critic-measured ~0.62s
+    uncontended), never by the semaphore's queue-wait, since directory
+    creation only happens once a boot already holds its slot. This
+    function's own conservative refusal is exactly why old-build clusters
+    keep accumulating as reported-not-reaped debris rather than being
+    silently dropped — reap them manually via
+    ``scripts/sweep-test-substrates.sh`` or the ``pg_ctl``/``rm -rf`` line
+    in the warning below once you've confirmed they're genuinely orphaned.
     """
     postmaster_pid = _read_postmaster_pid(str(cluster_dir))
     detail = (

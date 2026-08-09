@@ -376,6 +376,12 @@
          already included above; before the runAlways grants below. -->
     <include file="db/changelog/taxonomy-006-assign-from-chashes.xml"/>
 
+    <!-- nexus-kl2z6 increment 2 / nexus-vc6dh: staging.document_chunks(chash)
+         probe index for the sweep's third guard (design memo §4.2 REV 2
+         corrected shape). Needs staging.document_chunks (staging-001);
+         before the runAlways grants below for file-order clarity. -->
+    <include file="db/changelog/staging-002-document-chunks-chash-index.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

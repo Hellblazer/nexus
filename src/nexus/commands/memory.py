@@ -132,7 +132,15 @@ def get_cmd(entry_id: int | None, project: str | None, title: str | None) -> Non
 def search_cmd(query: str, project: str | None) -> None:
     """FTS5 keyword search across T2 memory entries."""
     with t2_handle() as db:
-        results = db.memory.search(query=query, project=project)
+        try:
+            results = db.memory.search(query=query, project=project)
+        except ValueError as exc:
+            # nexus-senub: a query with no searchable terms (e.g. entirely
+            # English stopwords) is rejected by the engine rather than
+            # silently returning zero results — surface it as a clean error,
+            # not a traceback (matches the retired SQLite arm's ValueError
+            # contract: a loud message, non-zero exit, no stack trace).
+            raise click.ClickException(str(exc)) from exc
     if not results:
         click.echo("No results found.")
         return

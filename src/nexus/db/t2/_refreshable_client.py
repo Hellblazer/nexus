@@ -515,8 +515,13 @@ class RefreshableHttpStoreMixin:
         merge appending the same content twice). The caller sees the raise
         and owns recovery — every production call site of the opted-out
         verbs already sits under ``mcp_infra._service_t2_write_locked``,
-        which evicts + rebuilds the store singleton on any raise, so no
-        supervisor-restart resilience is lost by opting out.
+        which evicts + rebuilds the store singleton on a genuine
+        connectivity failure (``nexus.retry._is_connectivity_error`` —
+        ``httpx.TransportError``/``ConnectionError``/``TimeoutError``, not
+        "any raise": nexus-0dpli narrowed this so a routine business
+        exception no longer evicts a healthy singleton out from under
+        concurrent sibling callers), so no supervisor-restart resilience
+        is lost by opting out.
 
         Mirrors ``http_vector_client._request``'s FULL two-axis shape
         (nexus-1ytp6 — the original port carried only the first axis):

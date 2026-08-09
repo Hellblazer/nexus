@@ -148,10 +148,11 @@ class TestHookConfigWiresPreflightEarly:
             f"{sessionstart[1]['command']!r}"
         )
 
-    def test_hook_config_preflight_runs_before_using_nx_skills_cat(self) -> None:
-        """The cat of using-nx-skills SKILL.md must come AFTER the
-        preflight so the FAILED counter-signal appears above the
-        routing it counters.
+    def test_hook_config_preflight_runs_before_guidance_emission(self) -> None:
+        """The guidance emission (`nx hook session-start`, the
+        nexus-h33x8.4 wheel channel that replaced the using-nx-skills
+        cat entry) must come AFTER the preflight so the FAILED
+        counter-signal appears above the routing it counters.
         """
         cfg = (
             Path(__file__).resolve().parent.parent
@@ -163,23 +164,32 @@ class TestHookConfigWiresPreflightEarly:
         preflight_idx = next(
             (i for i, c in enumerate(cmds) if "preflight.py" in c), -1,
         )
-        skill_idx = next(
-            (i for i, c in enumerate(cmds) if "using-nx-skills" in c), -1,
+        guidance_idx = next(
+            (i for i, c in enumerate(cmds) if "nx hook session-start" in c), -1,
         )
         assert preflight_idx >= 0, "preflight hook missing"
-        assert skill_idx >= 0, "using-nx-skills cat hook missing"
-        assert preflight_idx < skill_idx, (
-            f"preflight (index {preflight_idx}) must run before "
-            f"using-nx-skills cat (index {skill_idx}); otherwise "
+        assert guidance_idx >= 0, (
+            "guidance emission hook (`nx hook session-start`) missing — "
+            "the nexus-h33x8.4 channel that replaced the using-nx-skills "
+            "cat entry"
+        )
+        assert preflight_idx < guidance_idx, (
+            f"preflight (index {preflight_idx}) must run before the "
+            f"guidance emission (index {guidance_idx}); otherwise "
             f"the FAILED marker lands AFTER the routing it "
             f"counters and the model sees the routing first."
         )
 
-    def test_hook_config_still_cats_using_nx_skills(self) -> None:
-        """The using-nx-skills routing is still injected; the
-        preflight FAILED marker is a counter-signal, not a
-        replacement. Test guards against accidental removal of the
-        cat hook.
+    def test_hook_config_emits_guidance_without_legacy_cat(self) -> None:
+        """The using-nx-skills routing is still injected — now via
+        `nx hook session-start` (nexus-h33x8.4: GUIDANCE_IMPERATIVE in
+        the wheel, session-cadence) — and the legacy `cat SKILL.md`
+        entry must stay REMOVED. Re-adding the cat would lean on the
+        interim legacy_cat_channel_active() self-suppression seam
+        instead of the intended end-state (single wheel channel), and
+        would re-freeze guidance edits to plugin-release cadence.
+        The preflight FAILED marker remains a counter-signal, not a
+        replacement, so the emission hook itself must stay present.
         """
         cfg = (
             Path(__file__).resolve().parent.parent
@@ -188,4 +198,11 @@ class TestHookConfigWiresPreflightEarly:
         data = json.loads(cfg.read_text())
         sessionstart = data["hooks"]["SessionStart"][0]["hooks"]
         commands = " ".join(h["command"] for h in sessionstart)
-        assert "using-nx-skills" in commands
+        assert "nx hook session-start" in commands, (
+            "guidance emission channel missing from SessionStart"
+        )
+        assert "using-nx-skills" not in commands, (
+            "legacy using-nx-skills cat entry resurrected in "
+            "hooks.json — nexus-h33x8.4 removed it deliberately; "
+            "guidance ships via `nx hook session-start` (wheel)"
+        )

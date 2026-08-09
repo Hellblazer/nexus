@@ -1216,7 +1216,7 @@ def run_collection_postprocessing(
         _log.debug("taxonomy_discover_failed", exc_info=True)
 
 
-def _index_run_refused_message(exc, *, target_collection: str = "") -> str:
+def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str = "") -> str:
     """Render a :class:`~nexus.errors.IndexRunVerifyRefused` as the clean,
     fail-loud wording nexus-5xn3k.6's summary contract requires (code-
     review-expert IMPORTANT, 2026-08-02).
@@ -1228,11 +1228,12 @@ def _index_run_refused_message(exc, *, target_collection: str = "") -> str:
     pre-fix behaviour: the exception isn't an ``ImportError``/
     ``RuntimeError``, so it fell through every existing catch clause) and
     must never be folded into a success summary line. Shared by
-    ``index_pdf_cmd``'s two single-file branches and the ``--dir`` batch
-    loop's failure entry so the wording (and the counts it carries) stays
-    identical everywhere a refusal surfaces. Duck-typed (no import of
-    ``nexus.errors`` at module scope) — callers pass the caught exception,
-    which carries ``.doc_id``/``.referenced``/``.present``/``.missing``.
+    ``index_pdf_cmd``'s two single-file branches, the ``--dir`` batch
+    loop's failure entry, and ``index_md_cmd`` so the wording (and the
+    counts it carries) stays identical everywhere a refusal surfaces.
+    Duck-typed (no import of ``nexus.errors`` at module scope) — callers
+    pass the caught exception, which carries
+    ``.doc_id``/``.referenced``/``.present``/``.missing``.
 
     nexus-2t63u: the raw counts alone are DISHONEST for one real cause —
     a stale ``catalog_documents.physical_collection`` from a PRIOR run
@@ -1244,24 +1245,52 @@ def _index_run_refused_message(exc, *, target_collection: str = "") -> str:
     ``manifest_verify`` joins the manifest's stamped collection, not this
     run's — a document whose 107/107 chunks are all live under the
     correct collection can still show ``missing=89`` because the manifest
-    rows are checked against the WRONG (stale) collection. When
-    *target_collection* is supplied, best-effort look up the document's
-    CURRENT ``physical_collection`` and name the mismatch explicitly
-    instead of leaving the reader to infer chunk loss from the counts
-    alone. The lookup never raises — any failure (catalog unreachable,
-    doc_id unresolvable) falls back to the generic hint below the counts,
-    never to a raw traceback.
+    rows are checked against the WRONG (stale) collection. Best-effort
+    look up the document's CURRENT ``physical_collection`` and name the
+    mismatch explicitly instead of leaving the reader to infer chunk loss
+    from the counts alone. The lookup never raises — any failure (catalog
+    unreachable, doc_id unresolvable) states the check as UNKNOWN, never a
+    raw traceback and never an assertion of a cause the lookup could not
+    confirm.
 
-    Round 2 (reviewer #3, cheap pre-merge finding): when the live lookup
-    CONFIRMS the stamped collection already agrees with *target_collection*,
-    collection-mismatch is positively ruled out as the cause — the generic
-    "may be stale" hint must be SUPPRESSED in that case, not printed anyway.
-    Printing it after the lookup just disproved it is exactly the
-    misdirection this whole message exists to kill (the "89/107 present
-    but reported missing" incident cost a day of mis-framing as chunk
-    loss). The hint remains for the two cases where the lookup could not
-    positively confirm anything either way (no *target_collection* supplied,
-    the lookup failed, or the document could not be resolved).
+    nexus-nb3yg (2026-08-08): every ``--corpus``-only invocation (no
+    explicit ``--collection``) used to call this with
+    ``target_collection=""`` — the live lookup was SKIPPED ENTIRELY and
+    the generic hint below printed UNCONDITIONALLY, asserting an unchecked
+    cause on the CLI's most common invocation shape (a 2026-08-08
+    scenario-journey investigation lost real time to this misdirection —
+    T2 debug-scenario-journeys-parallel-red-2026-08-08). Fix: when
+    *target_collection* is empty, derive the same conformant
+    ``docs__<corpus>__<model>__v1`` name ``index_markdown``/``index_pdf``
+    compute internally (``doc_indexer.py``) from *corpus*, so the lookup —
+    and the honest stamped-vs-derived comparison below — runs whenever
+    *doc_id* resolves, REGARDLESS of whether the collection was named
+    explicitly or left to the corpus default.
+
+    Three outcomes, always stated plainly (never a bare, silent counts
+    line once a comparison target exists):
+
+    1. CONFIRMED MATCH — the live lookup shows the document's stamped
+       collection already agrees with this run's (explicit or derived)
+       target. Collection mismatch is positively ruled out; the missing
+       chunks are reported as genuinely absent, no nexus-2t63u hint (round
+       2, reviewer #3: printing the hint here — after the lookup just
+       disproved it — is exactly the misdirection this message exists to
+       kill; the "89/107 present but reported missing" incident cost a
+       day of mis-framing as chunk loss).
+    2. CONFIRMED MISMATCH — the live lookup finds a genuine mismatch; the
+       NAMED-cause nexus-2t63u hint fires, quoting both collections.
+    3. UNKNOWN — the lookup could not run or could not resolve the
+       document (catalog unreachable, transient error, doc_id doesn't
+       resolve). States the check as unknown and names both the
+       uncertainty and the target compared against — never asserts
+       collection mismatch as the "likely cause" when it was never
+       confirmed.
+
+    When neither *target_collection* nor *corpus* is supplied (a caller
+    with genuinely nothing to compare against), the lookup is skipped and
+    the bare counts line is returned — there is nothing to confirm or
+    refute.
     """
     base = (
         f"completion REFUSED — document is NOT fully indexed "
@@ -1272,42 +1301,64 @@ def _index_run_refused_message(exc, *, target_collection: str = "") -> str:
     if not doc_id:
         return base
 
+    expected_collection = target_collection
+    if not expected_collection and corpus:
+        from nexus.corpus import docs_leaf_fallback_collection_name  # noqa: PLC0415 — deliberate function-local import (rare error-rendering path)
+
+        expected_collection = docs_leaf_fallback_collection_name(corpus)
+    if not expected_collection:
+        return base
+
     stamped_collection = ""
-    if target_collection:
-        try:
-            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-local import (rare error-rendering path)
+    lookup_confirmed = False
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-local import (rare error-rendering path)
 
-            reader = make_catalog_reader()
-            entry = reader.resolve(doc_id) if reader is not None else None
-            if entry is not None:
-                stamped_collection = entry.physical_collection
-        except Exception:  # noqa: BLE001 — best-effort diagnostic hint; must never break error rendering
-            _log.debug("index_run_refused_collection_lookup_failed", doc_id=doc_id, exc_info=True)
-            stamped_collection = ""
+        reader = make_catalog_reader()
+        entry = reader.resolve(doc_id) if reader is not None else None
+        if entry is not None:
+            stamped_collection = entry.physical_collection
+            # nexus reviewer M1 (2026-08-08): HttpCatalogClient._to_entry
+            # coerces a missing/None physical_collection to "" (the
+            # non-optional CatalogEntry field default) for a ghost/
+            # unstamped document. An empty string is NOT a confirmed
+            # collection — it means the lookup resolved the document but
+            # learned nothing comparable, which must route to the UNKNOWN
+            # variant below, never the CONFIRMED-MISMATCH branch (that
+            # branch would otherwise assert "... is ''" as the likely
+            # cause on evidence that doesn't support it).
+            lookup_confirmed = bool(stamped_collection)
+    except Exception:  # noqa: BLE001 — best-effort diagnostic hint; must never break error rendering
+        _log.debug("index_run_refused_collection_lookup_failed", doc_id=doc_id, exc_info=True)
 
-    if stamped_collection and stamped_collection == target_collection:
+    if not lookup_confirmed:
+        return (
+            f"{base} — collection check: unknown (could not confirm "
+            f"document {doc_id}'s current catalog collection against this "
+            f"run's target {expected_collection!r}); cannot confirm OR "
+            f"rule out a stale --collection mismatch (nexus-2t63u) — "
+            f"check via 'nx catalog show {doc_id}'."
+        )
+
+    if stamped_collection == expected_collection:
         # Confirmed CURRENT: the live lookup shows the document is already
         # stamped to this run's own target collection, so collection
         # mismatch is definitively ruled out — never hint at a cause the
         # lookup just disproved.
-        return base
-
-    if stamped_collection and stamped_collection != target_collection:
         return (
-            f"{base} — likely cause: the catalog's physical_collection "
-            f"for {doc_id} is {stamped_collection!r}, but this run "
-            f"targeted {target_collection!r}. The manifest was stamped "
-            f"under the OLD collection, so chunks already present under "
-            f"the new collection are misreported as missing (nexus-2t63u). "
-            f"Re-run the same command again — the collection has now been "
-            f"reconciled — or check 'nx catalog show {doc_id}'."
+            f"{base} — collection check: confirmed {stamped_collection!r} "
+            f"matches this run's target; the missing chunks are genuinely "
+            f"absent, not a stale-collection mismatch."
         )
+
     return (
-        f"{base} — if this document was previously indexed into a "
-        f"DIFFERENT --collection, its catalog physical_collection may "
-        f"still be stale, which makes manifest_verify check the wrong "
-        f"collection and misreport present chunks as missing "
-        f"(nexus-2t63u); check via 'nx catalog show {doc_id}'."
+        f"{base} — likely cause: the catalog's physical_collection "
+        f"for {doc_id} is {stamped_collection!r}, but this run "
+        f"targeted {expected_collection!r}. The manifest was stamped "
+        f"under the OLD collection, so chunks already present under "
+        f"the new collection are misreported as missing (nexus-2t63u). "
+        f"Re-run the same command again — the collection has now been "
+        f"reconciled — or check 'nx catalog show {doc_id}'."
     )
 
 
@@ -1604,7 +1655,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                 # give it the same dedicated wording as the single-file
                 # branches instead of the raw exception text.
                 msg = (
-                    _index_run_refused_message(exc, target_collection=collection or "")
+                    _index_run_refused_message(exc, target_collection=collection or "", corpus=corpus)
                     if isinstance(exc, IndexRunVerifyRefused) else str(exc)
                 )
                 failures.append((pdf, msg))
@@ -1734,11 +1785,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         if collection:
             col_name = collection
         else:
-            from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.corpus)
-            owner_segment = corpus.replace("_", "-")
-            col_name = (
-                f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
-            )
+            from nexus.corpus import docs_leaf_fallback_collection_name  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.corpus)
+            col_name = docs_leaf_fallback_collection_name(corpus)
         col = local_t3.get_or_create_collection(col_name)
         result = col.get(include=["documents", "metadatas"])
         docs: list[str] = result.get("documents") or []
@@ -1799,7 +1847,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # (no data loss); the engine's fail-closed verify refused the
             # completion stamp. Clean fail-loud ClickException, never
             # folded into a success summary.
-            raise click.ClickException(_index_run_refused_message(e, target_collection=collection or "")) from e
+            raise click.ClickException(_index_run_refused_message(e, target_collection=collection or "", corpus=corpus)) from e
         except (ImportError, RuntimeError, ExtractionQualityError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
@@ -1826,7 +1874,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         except IndexRunVerifyRefused as e:
             # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): see
             # the identical rationale on the monitor branch above.
-            raise click.ClickException(_index_run_refused_message(e, target_collection=collection or "")) from e
+            raise click.ClickException(_index_run_refused_message(e, target_collection=collection or "", corpus=corpus)) from e
         except (ImportError, RuntimeError, ExtractionQualityError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
@@ -1984,7 +2032,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
         # was missed. Pre-fix a refusal here fell through as a raw
         # traceback instead of the clean, actionable wording every other
         # CLI surface renders for the identical exception.
-        raise click.ClickException(_index_run_refused_message(exc, target_collection=collection or "")) from exc
+        raise click.ClickException(_index_run_refused_message(exc, target_collection=collection or "", corpus=corpus)) from exc
     except ChunkLandingUnverifiedError as exc:
         # nexus-tp8yk D1 substantive-critic SIGNIFICANT (2026-08-04): see
         # the identical rationale on index_pdf_cmd's wrapper. The

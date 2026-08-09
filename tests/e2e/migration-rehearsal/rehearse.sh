@@ -5,13 +5,28 @@
 #                                          provisions PG+pgvector; the native
 #                                          nexus-service binary migrates 64
 #                                          changesets and serves /health)
+#          — always runs.
 # Phase B  seed legacy Chroma + migrate  (nx migrate-to-service: detect → ETL →
 #                                          validate; parity assertion)
+#          — RETIRED (RDR-155 P4b): nx migrate-to-service was deleted;
+#            self-guarded dead branch, see nexus-8nlj4.
 # Phase C  rollback rehearsal            (Chroma source intact; degrade-loud, no
 #                                          bare-empty-index)
+#          — RETIRED alongside Phase B, same guard.
+# Phase D  daily-driver surface (T2/T1/T3/catalog/doctor, deterministic
+#          bge-768 LOCAL) — requires COMPREHENSIVE=1 (run.sh --comprehensive).
+#          OFF by default.
+# Phase E  concurrency + queue-drain stress (tandem load on the same bge-768
+#          local service) — requires STRESS=1 (run.sh --stress). OFF by
+#          default.
 #
 # CHROMA_LOCAL: the legacy on-disk Chroma store (the migration SOURCE).
-# WITH_CLOUD=1 adds the voyage-context-3 leg (needs NX_VOYAGE_API_KEY in env).
+# WITH_CLOUD=1 adds the voyage-context-3 leg (needs NX_VOYAGE_API_KEY in env);
+# run.sh refuses WITH_CLOUD combined with COMPREHENSIVE/STRESS (nexus-f4apk —
+# Phase D/E are bge-768 LOCAL by construction, incoherent with a voyage-only
+# service). Consequently NO invocation of this harness exercises Phase D/E's
+# daily-driver surface against Voyage; see run.sh's own header for the
+# tracked gap.
 set -uo pipefail
 
 CHROMA_LOCAL="${CHROMA_LOCAL:-/home/nexus/legacy-chroma}"
@@ -24,8 +39,29 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAILS=$((FAILS+1)); }
 note() { printf '       %s\n' "$*"; }
 
+# nexus-elt26: the closing banner must say what actually ran, never a fixed
+# literal — a bare invocation (Phase A only) must not read like the full
+# seed->migrate->validate->rollback journey. Each phase pushes its own letter
+# onto this array the moment it is ENTERED (not only on success — "executed"
+# includes a phase that ran and failed, per the bead), and the Summary section
+# below renders it into the banner text. _phase_desc is the single mapping
+# from letter to human description, kept next to the phases themselves so a
+# future phase can't be added without updating both.
+declare -a RAN_PHASES=()
+_phase_desc() {
+  case "$1" in
+    A) printf 'A: install → provision → serve' ;;
+    B) printf 'B: seed legacy Chroma + migrate-to-service' ;;
+    C) printf 'C: rollback-safety validate (copy-not-move)' ;;
+    D) printf 'D: daily-driver surface (T2/T1/T3/catalog/doctor, bge-768 local)' ;;
+    E) printf 'E: concurrency + queue-drain stress' ;;
+    *) printf '%s: (no description registered)' "$1" ;;
+  esac
+}
+
 # ── Phase A: install + provision + serve ─────────────────────────────────────
 say "Phase A — install + provision + serve"
+RAN_PHASES+=("A")
 
 # RDR-161: the native nexus-service binary is the SOLE launch artifact (no JRE,
 # no java -jar). The image ships it + its native-image .so siblings under
@@ -115,6 +151,7 @@ unset NX_SERVICE_URL NX_SERVICE_PORT NX_SERVICE_HOST 2>/dev/null || true
 # faked green. Runs on the clean service BEFORE the migration phases mutate it.
 if [ "${COMPREHENSIVE:-0}" = 1 ]; then
   say "Phase D — daily-driver surface (deterministic bge-768 local; no API creds)"
+  RAN_PHASES+=("D")
   MARK="ddmark$$"
   DD=/tmp/dd.out
   _why() { note "↳ $(tail -4 "$DD" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g')"; }
@@ -187,6 +224,7 @@ fi
 # backoff) drains airtight at full speed under load — content fake, contention real.
 if [ "${STRESS:-0}" = 1 ]; then
   say "Phase E — concurrency + queue-drain stress (tandem; stubbed extractor)"
+  RAN_PHASES+=("E")
   errlog=/tmp/stress_err.log; : > "$errlog"
 
   # Stub `claude` on PATH: instant valid empty aspect record -> rows mark_done.
@@ -268,6 +306,7 @@ fi
 # ── Phase B: seed legacy Chroma + migrate-to-service ─────────────────────────
 say "Phase B — seed legacy Chroma + migrate-to-service"
 if nx migrate-to-service --help >/dev/null 2>&1; then  # RDR-155 P4b guard (nexus-8nlj4)
+RAN_PHASES+=("B" "C")
 
 # Legacy-era catalog code (and, on era legs, the era release's own nx) may run
 # `git init`/commits in the catalog dir; give git an identity. The current
@@ -389,15 +428,48 @@ sys.exit(1 if bad else 0)
 PY
 
 else
-  say "Phase B/C — RETIRED (RDR-155 P4b): nx migrate-to-service deleted; the Chroma->PG migration + rollback-safety legs are superseded by the two-hop stranded-redirect rehearsal (nexus-8nlj4). Skipped; Phases A/D/E (daily-driver) remain the live gate."
+  # nexus-elt26 finding 2: this notice previously read "Phases A/D/E
+  # (daily-driver) remain the live gate", which is false on the very run that
+  # prints it — a bare invocation runs Phase A alone; D and E are each gated
+  # behind their own flag and neither is live by default. State the flags a
+  # reader needs, not a claim that the daily-driver surface is already gated.
+  say "Phase B/C — RETIRED (RDR-155 P4b): nx migrate-to-service deleted; the Chroma->PG migration + rollback-safety legs are superseded by the two-hop stranded-redirect rehearsal (nexus-8nlj4). Skipped; Phase A (install/provision/serve) always runs. Phase D (daily-driver surface) requires run.sh --comprehensive; Phase E (concurrency/stress) requires run.sh --stress — neither runs on a bare invocation."
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 say "RESULT"
+# nexus-elt26 finding 1: this used to be a hardcoded literal naming the full
+# journey ("install → provision → serve → seed → migrate → validate →
+# rollback-safe") UNCONDITIONALLY, so a bare --with-cloud run (Phase A only —
+# B/C retired, D/E off by default) printed the exact same banner as a genuine
+# full-journey pass. Derive the phase list from RAN_PHASES (populated as each
+# phase is actually entered, above) so the banner can never claim more than
+# this run did.
+PHASES_DESC=""
+for p in "${RAN_PHASES[@]}"; do
+  d="$(_phase_desc "$p")"
+  PHASES_DESC="${PHASES_DESC:+$PHASES_DESC; }$d"
+done
+
+# nexus-f4apk(b): the coverage gap made visible at RUNTIME, not only in a
+# source comment a reader choosing flags may never open (review [22094]).
+# run.sh guards --with-cloud combined with --comprehensive/--stress as
+# mutually exclusive (Phase D/E are declared deterministic bge-768 LOCAL), so
+# whenever the voyage leg is live inside THIS script, Phase D provably did
+# not run against it — check RAN_PHASES directly (not the run.sh guard, which
+# this script cannot see if invoked standalone) so the note stays correct even
+# if rehearse.sh is ever driven without going through run.sh's arg parser.
+if [ "${WITH_CLOUD:-0}" = 1 ]; then
+  case " ${RAN_PHASES[*]:-} " in
+    *" D "*) : ;;  # defensive: unreachable while run.sh's guard holds
+    *) note "coverage note (nexus-f4apk / nexus-itxet): --with-cloud ran without Phase D — the daily-driver surface (T2/T1/T3/catalog/doctor) was NOT exercised against Voyage this run." ;;
+  esac
+fi
+
 if [ "$FAILS" -eq 0 ]; then
-  printf '\033[32mSOUP-TO-NUTS REHEARSAL PASSED\033[0m — install → provision → serve → seed → migrate → validate → rollback-safe\n'
+  printf '\033[32mREHEARSAL PASSED\033[0m — phases executed: %s\n' "$PHASES_DESC"
   exit 0
 else
-  printf '\033[31mREHEARSAL FAILED — %d check(s) failed\033[0m\n' "$FAILS"
+  printf '\033[31mREHEARSAL FAILED — %d check(s) failed\033[0m — phases executed: %s\n' "$FAILS" "$PHASES_DESC"
   exit 1
 fi

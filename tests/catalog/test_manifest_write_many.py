@@ -11,7 +11,7 @@ collector instead of only logging a WARNING (see TestManifestWriteFailureSurfaci
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -115,6 +115,112 @@ class TestWriteManifestMany:
             [("1.9.9", [{"chash": "a" * 64, "position": 0}])]
         )["failed_doc_ids"] == ["1.9.9"]
 
+    def test_no_chunks_no_sweep_body_unchanged(self, monkeypatch) -> None:
+        # Backward compatibility (design memo §5.1): an absent `chunks`
+        # field and sweep=False (the default) must be byte-for-byte the
+        # pre-wxjr6 request body — no `collection`, `chunks`, `sweep`, or
+        # `force_re_embed` keys at all.
+        c = _client()
+        posts: list[dict] = []
+        monkeypatch.setattr(
+            c, "_post",
+            lambda path, body: posts.append(body) or {"docs": 1, "rows": 1, "failed_doc_ids": []},
+            raising=False,
+        )
+        c.write_manifest_many([("1.9.10", [{"chash": "a" * 64, "position": 0}])])
+        assert set(posts[0]) == {"docs"}
+
+
+class TestWriteManifestManyCombined:
+    """nexus-wxjr6: the client half of the kl2z6 combined write."""
+
+    def test_chunks_requires_collection(self) -> None:
+        c = _client()
+        with pytest.raises(ValueError, match="collection.*required"):
+            c.write_manifest_many(
+                [("1.9.11", [{"chash": "a" * 64, "position": 0}])],
+                chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
+            )
+
+    def test_combined_wire_shape(self, monkeypatch) -> None:
+        c = _client()
+        posts: list[dict] = []
+        chunks = [{"chash": "a" * 64, "text": "hi", "metadata": {"k": "v"}}]
+        monkeypatch.setattr(
+            c, "_post",
+            lambda path, body: posts.append(body) or {
+                "docs": 1, "rows": 1, "failed_doc_ids": [], "chunks_written": 1,
+            },
+            raising=False,
+        )
+        result = c.write_manifest_many(
+            [("1.9.12", [{"chash": "a" * 64, "position": 0}])],
+            sweep=True,
+            chunks=chunks,
+            collection="code__nexus-1-1__voyage-code-3__v1",
+            force_re_embed=True,
+        )
+        assert len(posts) == 1
+        body = posts[0]
+        assert body["collection"] == "code__nexus-1-1__voyage-code-3__v1"
+        assert body["chunks"] == chunks
+        assert body["sweep"] is True
+        assert body["force_re_embed"] is True
+        assert result["chunks_written"] == 1
+
+    def test_ack_echo_raises_when_chunks_written_absent(self, monkeypatch) -> None:
+        # design memo §5.2: the ONLY runtime capability signal — an old
+        # engine silently drops the unknown `chunks` field with no error,
+        # so absence of `chunks_written` must RAISE, not warn-and-proceed
+        # (the upsert_chunks ack-mismatch precedent, not the
+        # complete_refused_count_mismatch WARN fallback).
+        c = _client()
+        monkeypatch.setattr(
+            c, "_post",
+            lambda path, body: {"docs": 1, "rows": 1, "failed_doc_ids": []},
+            raising=False,
+        )
+        with pytest.raises(RuntimeError, match="ack mismatch"):
+            c.write_manifest_many(
+                [("1.9.13", [{"chash": "a" * 64, "position": 0}])],
+                chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
+                collection="code__nexus-1-1__voyage-code-3__v1",
+            )
+
+    def test_no_chunks_sent_never_checks_ack(self, monkeypatch) -> None:
+        # A call that never sends `chunks` must not raise even though the
+        # response also lacks `chunks_written` — that key is only
+        # meaningful (and only checked) when this call actually carried
+        # content.
+        c = _client()
+        monkeypatch.setattr(
+            c, "_post",
+            lambda path, body: {"docs": 1, "rows": 1, "failed_doc_ids": []},
+            raising=False,
+        )
+        result = c.write_manifest_many(
+            [("1.9.14", [{"chash": "a" * 64, "position": 0}])],
+        )
+        assert "chunks_written" not in result
+
+    def test_sweep_fields_forwarded(self, monkeypatch) -> None:
+        c = _client()
+        monkeypatch.setattr(
+            c, "_post",
+            lambda path, body: {
+                "docs": 1, "rows": 1, "failed_doc_ids": [],
+                "swept": 2, "sweep_skipped": 1,
+                "sweep_detail": [{"doc_id": "1.9.15", "errored": True, "reason": "sweep_failed"}],
+            },
+            raising=False,
+        )
+        result = c.write_manifest_many(
+            [("1.9.15", [{"chash": "a" * 64, "position": 0}])], sweep=True,
+        )
+        assert result["swept"] == 2
+        assert result["sweep_skipped"] == 1
+        assert result["sweep_detail"][0]["reason"] == "sweep_failed"
+
 
 class _FakeCat:
     """Catalog test double capturing which write path the loop takes."""
@@ -136,6 +242,13 @@ class _FakeCat:
         return []
 
     def docs_for_chashes(self, chashes):
+        return {}
+
+    # nexus-tgrgs: the fast branch's batched "before" read. Empty for every
+    # doc_id by default (matches "nothing dropped" — the tests in this file
+    # exercise write-path ROUTING, not sweep behaviour; see
+    # TestFastBranchSweep below for the sweep-specific fakes).
+    def get_manifests(self, doc_ids):
         return {}
 
     def write_manifest_many(self, docs):  # type: ignore[no-redef]
@@ -401,3 +514,227 @@ class TestManifestNeverOutrunsConfirmedChunks:
             f"_upsert_skip_reembed could not confirm landed — got "
             f"{len(calls)} call(s)"
         )
+
+
+# ── nexus-tgrgs / nexus-jk88j (2026-08-08): the fast branch's sweep ────────
+#
+# jk88j's own tripwire proposal: "assert that IF write_manifest_many is
+# reachable through the writer THEN the fast branch performs the sweep."
+# TestFastBranchSweep.test_jk88j_tripwire below is that test, written as a
+# falsify-by-construction trap — reverting the sweep call in
+# _manifest_write_loop's write_many branch (the exact landmine jk88j warns
+# about: whitelisting write_manifest_many alone, without folding the sweep
+# in, silently re-disables nexus-39upx for the batch path) turns it red.
+#
+# The remaining tests in this class prove the batch-safe guards the design
+# memo (T2 nexus/design-eslkl-hook-lock-narrowing §2b/§7 T1-T2) requires:
+# the shared-chash union across the WHOLE batch (a chash any doc in this
+# same write_many POST still references — successfully or via an unchanged
+# prior manifest on write failure — must never be swept), on top of the
+# existing per-doc union guard (docs_for_chashes) and note guard.
+
+
+class _FakeManyReaderWriter:
+    """Stands in for the real writer AFTER nexus-67qsd's whitelist: exposes
+    ``write_manifest_many`` (so the fast branch is taken), plus the batched
+    reader surface (``get_manifests``) and reverse-lookup (``docs_for_chashes``)
+    the fast branch's sweep needs. Same reader/writer double shape as
+    ``_FakeCatalogHTTP`` in test_superseded_vector_sweep.py's kgos1 section,
+    extended for the batch write path.
+    """
+
+    def __init__(
+        self,
+        *,
+        before: dict[str, list[str]] | None = None,
+        refs: dict[str, list[str]] | None = None,
+        notes: list | None = None,
+        failed_doc_ids: list[str] | None = None,
+    ) -> None:
+        from nexus.catalog.types import ManifestRow
+
+        self._ManifestRow = ManifestRow
+        self._before = before or {}
+        self._refs = refs or {}
+        self._notes = notes or []
+        self._failed_doc_ids = failed_doc_ids or []
+        self.replaced_many: list[tuple[str, list[dict]]] = []
+        self.docs_for_chashes_calls: list[list[str]] = []
+        self.get_manifests_calls: list[list[str]] = []
+
+    # -- batched "before" read (nexus-tgrgs) --
+    def get_manifests(self, doc_ids):
+        self.get_manifests_calls.append(list(doc_ids))
+        return {
+            d: [self._ManifestRow(position=i, chash=h) for i, h in enumerate(self._before.get(d, []))]
+            for d in doc_ids
+        }
+
+    # -- reverse lookup (union guard) --
+    def docs_for_chashes(self, chashes):
+        self.docs_for_chashes_calls.append(list(chashes))
+        return {h: self._refs.get(h, []) for h in chashes}
+
+    # -- note guard --
+    def list_by_collection(self, collection: str) -> list:
+        return list(self._notes)
+
+    # -- the batch write itself --
+    def write_manifest_many(self, docs, complete=None):
+        for doc_id, chunks in docs:
+            if doc_id not in self._failed_doc_ids:
+                self.replaced_many.append((doc_id, chunks))
+        return {"failed_doc_ids": list(self._failed_doc_ids)}
+
+    def resync_chunk_count_cache(self, doc_id):
+        pass
+
+
+class TestFastBranchSweep:
+    def test_jk88j_tripwire_fast_branch_sweeps_when_write_many_is_reachable(self) -> None:
+        """THE tripwire. A doc whose batch drops a chash referenced by
+        nothing else must have that chash deleted from T3 via the FAST
+        (write_many) branch — not just the per-doc fallback. Reverting the
+        sweep-fold-in fix (calling write_manifest_many without the sweep
+        that follows it) makes this go red."""
+        fake = _FakeManyReaderWriter(before={"doc-A": ["old1", "keep"]}, refs={})
+        col = MagicMock()
+        with patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+            _manifest_write_loop(fake, _metas_by_doc({"doc-A": ["keep"]}), "coll", reader=fake)
+
+        assert fake.replaced_many, "the batch write must still happen"
+        col.delete.assert_called_once()
+        assert col.delete.call_args.kwargs["ids"] == ["old1"]
+
+    def test_batch_union_guard_protects_a_chash_another_doc_in_the_SAME_batch_still_needs(self) -> None:
+        """The design memo's concrete race (§2b): doc A drops chash X in
+        the same write_many POST where doc B's NEW manifest still
+        references X. Both writes commit in the SAME call — the fast
+        branch must never sweep X, even though nothing OUTSIDE this batch
+        references it either (docs_for_chashes returns {})."""
+        fake = _FakeManyReaderWriter(
+            before={"doc-A": ["X", "keep-a"], "doc-B": []},
+            refs={},  # no external reference at all — only the batch-union guard can save X
+        )
+        col = MagicMock()
+        with patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+            _manifest_write_loop(
+                fake,
+                _metas_by_doc({"doc-A": ["keep-a"], "doc-B": ["X", "keep-b"]}),
+                "coll", reader=fake,
+            )
+
+        assert len(fake.replaced_many) == 2
+        col.delete.assert_not_called(), "X is still live via doc-B's new manifest in the same batch"
+
+    def test_batch_union_guard_still_deletes_a_genuine_cross_doc_orphan(self) -> None:
+        """Non-vacuity for the guard above: it must not become a blanket
+        refusal that hides a real orphan sharing the sweep call."""
+        fake = _FakeManyReaderWriter(
+            before={"doc-A": ["X", "keep-a"], "doc-B": ["Y", "keep-b"]},
+            refs={},
+        )
+        col = MagicMock()
+        with patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+            _manifest_write_loop(
+                fake,
+                _metas_by_doc({"doc-A": ["keep-a"], "doc-B": ["keep-b"]}),
+                "coll", reader=fake,
+            )
+
+        col.delete.assert_called_once()
+        assert sorted(col.delete.call_args.kwargs["ids"]) == ["X", "Y"]
+
+    def test_failed_doc_write_protects_its_unchanged_prior_chash(self) -> None:
+        """A doc in `failed_doc_ids` never actually replaced its manifest —
+        its CURRENT live truth is still its `before` set, not the attempted
+        `new` one. If doc B (failed) still has chash Y in its (unchanged)
+        manifest, doc A dropping Y in the same batch must not sweep it."""
+        fake = _FakeManyReaderWriter(
+            before={"doc-A": ["Y", "keep-a"], "doc-B": ["Y", "keep-b"]},
+            refs={},
+            failed_doc_ids=["doc-B"],
+        )
+        col = MagicMock()
+        with patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+            _manifest_write_loop(
+                fake,
+                _metas_by_doc({"doc-A": ["keep-a"], "doc-B": ["keep-b"]}),
+                "coll", reader=fake,
+            )
+
+        # doc-B's write failed: only doc-A actually replaced.
+        assert [d for d, _ in fake.replaced_many] == ["doc-A"]
+        col.delete.assert_not_called(), "doc-B's unchanged manifest still references Y"
+
+    def test_note_guard_still_applies_on_the_fast_branch(self) -> None:
+        """The manifest-less-note guard (RDR-145) must protect a note chash
+        on the batch path too, not just the per-doc fallback."""
+        from types import SimpleNamespace
+
+        note = SimpleNamespace(file_path="", meta={"doc_id": "note-chash"})
+        fake = _FakeManyReaderWriter(
+            before={"doc-A": ["note-chash", "keep"]}, refs={}, notes=[note],
+        )
+        col = MagicMock()
+        with patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+            _manifest_write_loop(fake, _metas_by_doc({"doc-A": ["keep"]}), "coll", reader=fake)
+
+        col.delete.assert_not_called()
+
+    def test_before_read_is_batched_into_one_get_manifests_call(self) -> None:
+        """nexus-tgrgs: the before-read must be ONE batched round trip
+        (get_manifests), not one get_chunk_chashes call per document."""
+        fake = _FakeManyReaderWriter(
+            before={"doc-A": [], "doc-B": [], "doc-C": []}, refs={},
+        )
+        col = MagicMock()
+        with patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+            _manifest_write_loop(
+                fake,
+                _metas_by_doc({"doc-A": ["a"], "doc-B": ["b"], "doc-C": ["c"]}),
+                "coll", reader=fake,
+            )
+
+        assert len(fake.get_manifests_calls) == 1
+        assert sorted(fake.get_manifests_calls[0]) == ["doc-A", "doc-B", "doc-C"]
+
+    def test_reverse_lookup_is_one_call_across_the_whole_batch(self) -> None:
+        """Round-trip discipline: the union-guard reverse lookup must be
+        ONE docs_for_chashes call across every dropped candidate in the
+        batch, not one per document."""
+        fake = _FakeManyReaderWriter(
+            before={"doc-A": ["old-a", "keep-a"], "doc-B": ["old-b", "keep-b"]},
+            refs={},
+        )
+        col = MagicMock()
+        with patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+            _manifest_write_loop(
+                fake,
+                _metas_by_doc({"doc-A": ["keep-a"], "doc-B": ["keep-b"]}),
+                "coll", reader=fake,
+            )
+
+        assert len(fake.docs_for_chashes_calls) == 1
+        assert sorted(fake.docs_for_chashes_calls[0]) == ["old-a", "old-b"]
+        col.delete.assert_called_once()
+        assert sorted(col.delete.call_args.kwargs["ids"]) == ["old-a", "old-b"]
+
+
+def _metas_by_doc(new_chashes_by_doc: dict[str, list[str]]) -> dict:
+    """Build a ``by_doc`` batch (position-0-bearing, single-chunk-per-chash
+    for simplicity) for the fast-branch sweep tests above."""
+    return {
+        doc_id: [
+            (i, {"chunk_text_hash": h, "chunk_index": i})
+            for i, h in enumerate(chashes)
+        ]
+        for doc_id, chashes in new_chashes_by_doc.items()
+    }

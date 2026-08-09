@@ -491,4 +491,122 @@ class MemoryRepositoryTest {
                 + "behaviour the baseline does not have")
             .isEmpty();
     }
+
+    // ── nexus-senub: stopword-only / degenerate queries must not silently
+    //    return [] indistinguishably from a genuine empty result ──────────────
+
+    /**
+     * MEASURED cases from the bead (both the original 2026-07-26 table and the
+     * 2026-07-31 re-scope): {@code 'AND'} and bare {@code 'NOT'} are English
+     * stopwords, so {@code plainto_tsquery('english', ...)} strips them to an
+     * empty tsquery that can never match {@code content} — corpus-independent,
+     * proven here by seeding a row that literally contains the word and
+     * showing search still cannot find it via content.
+     */
+    @Test
+    void search_stopwordOnlyQuery_raisesInsteadOfSilentEmpty() {
+        String proj = "senub-stopword-" + System.nanoTime();
+        repo.upsert(TENANT_A, proj, "operators.md",
+                "clause and clause", "t", null, null, 30);
+
+        assertThatThrownBy(() -> repo.search(TENANT_A, "and", proj))
+            .as("a query made entirely of English stopwords must raise, not "
+                + "silently return [] indistinguishable from a genuine no-match")
+            .isInstanceOf(MemoryRepository.DegenerateQueryException.class)
+            .hasMessageContaining("and");
+
+        assertThatThrownBy(() -> repo.search(TENANT_A, "NOT", proj))
+            .as("bare NOT is also a pure English stopword on this substrate — "
+                + "not an FTS5-style operator syntax error, but the same "
+                + "silent-content-miss class")
+            .isInstanceOf(MemoryRepository.DegenerateQueryException.class)
+            .hasMessageContaining("NOT");
+
+        // NON-VACUITY: the search path itself works — a non-stopword term in
+        // the same row matches normally. So the raises above are the stopword
+        // reduction, not a broken fixture or a dead search path.
+        assertThat(repo.search(TENANT_A, "clause", proj))
+            .as("the control term must match, or this test proves nothing "
+                + "about stopwords")
+            .extracting(r -> r.getTitle()).contains("operators.md");
+    }
+
+    /**
+     * A query that is real (parses to a non-empty english tsquery) but simply
+     * matches no row must stay a normal, silent {@code []} — the guard must
+     * never turn a genuine "nothing here" into a spurious 400.
+     */
+    @Test
+    void search_realQueryNoMatch_staysEmptyNotAnException() {
+        String proj = "senub-realquery-nomatch-" + System.nanoTime();
+        repo.upsert(TENANT_A, proj, "unrelated.md", "something else entirely", "t", null, null, 30);
+
+        assertThat(repo.search(TENANT_A, "zzznotpresent", proj))
+            .as("a real, non-stopword query that matches nothing is a genuine "
+                + "empty result, not a degenerate-query error")
+            .isEmpty();
+    }
+
+    /**
+     * A query whose english leg is empty but that still resolves a REAL hit
+     * through the 'simple' title-separator leg (memory-002) must return that
+     * hit, not raise — the guard only fires when there is truly nothing to
+     * return, never as a blanket rejection of stopword-shaped input.
+     */
+    @Test
+    void search_stopwordQuery_stillFindsRealTitleHit_doesNotRaise() {
+        String proj = "senub-stopword-title-hit-" + System.nanoTime();
+        // separator-normalized title segment (memory-002) tokenizes
+        // "and-design.md" into "and" / "design" / "md" under the 'simple'
+        // config, so this row IS a real hit for the query "and".
+        repo.upsert(TENANT_A, proj, "and-design.md",
+                "body text with no shared words", "t", null, null, 30);
+
+        assertThat(repo.search(TENANT_A, "and", proj))
+            .as("a stopword-shaped query that resolves a REAL title hit must "
+                + "return it, not raise — the guard only replaces an "
+                + "ambiguous [] with a loud reason, it never discards a hit")
+            .extracting(r -> r.getTitle()).contains("and-design.md");
+    }
+
+    /**
+     * A query that parses to a real tsquery on a NON-stopword mechanism
+     * ({@code 'foo"bar'} — the quote is punctuation, not an operator on this
+     * substrate) matches the client's own historical fixture from the
+     * original bead measurement. It must not raise: english leg is non-empty
+     * ('foo' & 'bar').
+     */
+    @Test
+    void search_quotedQuery_parsesToRealTsQuery_doesNotRaise() {
+        String proj = "senub-quoted-" + System.nanoTime();
+        repo.upsert(TENANT_A, proj, "quoted.md", "foo bar baz", "t", null, null, 30);
+
+        assertThat(repo.search(TENANT_A, "foo\"bar", proj))
+            .as("'foo\"bar' parses to a real tsquery ('foo' & 'bar') on this "
+                + "substrate — must not raise, whatever it does or doesn't match")
+            .extracting(r -> r.getTitle()).contains("quoted.md");
+    }
+
+    /**
+     * The same stopword-degenerate-query guard must hold on searchGlob and
+     * searchByTag too — they share {@link #ftsQuery} with search, and fixing
+     * only the surface that was noticed is exactly how nexus-22r1f's dotted-
+     * title bug survived on nexus.memory after catalog-015 already fixed the
+     * identical shape on catalog_documents.
+     */
+    @Test
+    void searchGlob_and_searchByTag_alsoRaiseOnStopwordOnlyQuery() {
+        String proj = "senub-stopword-glob-" + System.nanoTime();
+        repo.upsert(TENANT_A, proj, "glob-op.md", "clause and clause", "andtag", null, null, 30);
+
+        assertThatThrownBy(() -> repo.searchGlob(TENANT_A, "and", proj.substring(0, 10) + "*"))
+            .as("searchGlob shares ftsQuery with search — same degenerate-query gap")
+            .isInstanceOf(MemoryRepository.DegenerateQueryException.class)
+            .hasMessageContaining("and");
+
+        assertThatThrownBy(() -> repo.searchByTag(TENANT_A, "and", "zzz-no-such-tag"))
+            .as("searchByTag shares ftsQuery with search — same degenerate-query gap")
+            .isInstanceOf(MemoryRepository.DegenerateQueryException.class)
+            .hasMessageContaining("and");
+    }
 }

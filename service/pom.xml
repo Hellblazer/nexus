@@ -70,6 +70,23 @@
         <!-- Surefire tag exclusion: skip @Tag("integration") by default -->
         <!-- Override with: mvn test -Dtest.excluded.groups="" -Dgroups=integration -->
         <test.excluded.groups>integration</test.excluded.groups>
+
+        <!-- nexus-13eb0: surefire fork-level parallelism. Each fork is a
+             separate JVM, so per-class Testcontainers PG containers
+             (PgContainerHelper.newContainer(), pgvector:pg17) are isolated
+             across forks by construction: no shared statics, no fixed
+             host ports (Testcontainers dynamic port mapping throughout).
+             4 is the MEASURED CEILING, not a conservative floor (timing
+             matrix, T2 nexus-13eb0-maven-parallel-2026-08-08): the suite
+             is bottlenecked on per-class container boot serialized through
+             the Docker daemon, so forks=8 measured flat vs 4, forks=12
+             REGRESSED to near-serial, and forks=8 CRASHED the Docker
+             daemon outright on a 16-core/32GiB-VM box. Do not raise this
+             past 4 as a bigger-number experiment — it cannot help until
+             nexus-yhmav (per-fork container reuse) removes the boot
+             bottleneck. -Dnexus.test.forks=1 recovers the old fully-serial
+             behavior. -->
+        <nexus.test.forks>4</nexus.test.forks>
     </properties>
 
     <dependencies>
@@ -241,6 +258,16 @@
                          withStartupAttempts, container-scoped). If a new
                          transient class appears, root-cause it there too
                          (Hal, 2026-07-22). -->
+
+                    <!-- nexus-13eb0: fork-level parallelism, not same-JVM
+                         JUnit-5 parallelism. reuseForks=true keeps per-fork
+                         JVM startup cost amortized across the classes that
+                         land in that fork; each fork gets its own Docker
+                         Testcontainers PG (per-class container lifecycle,
+                         see PgContainerHelper), so isolation is by process
+                         boundary, not by test-framework bookkeeping. -->
+                    <forkCount>${nexus.test.forks}</forkCount>
+                    <reuseForks>true</reuseForks>
                 </configuration>
             </plugin>
 

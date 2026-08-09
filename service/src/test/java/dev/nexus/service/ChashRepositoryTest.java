@@ -16,9 +16,15 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -96,7 +102,9 @@ class ChashRepositoryTest {
         config.setJdbcUrl(pg.getJdbcUrl());
         config.setUsername(PgContainerHelper.SVC_USERNAME);
         config.setPassword(PgContainerHelper.SVC_PASSWORD);
-        config.setMaximumPoolSize(3);
+        // nexus-11gh6: bumped from 3 -- the new gate tests hold one external
+        // connection open while a repo call blocks on the same pool.
+        config.setMaximumPoolSize(5);
         config.setAutoCommit(true);
         svcDs = new com.zaxxer.hikari.HikariDataSource(config);
 
@@ -343,6 +351,106 @@ class ChashRepositoryTest {
             .containsExactly("coll-b-384");
         assertThat(repo.countForCollection(TENANT_B, "coll-a-384")).isZero();
         assertThat(repo.registeredChashesForCollection(TENANT_B, "coll-a-384")).isEmpty();
+    }
+
+    // ── nexus-11gh6 post-review (T2 nexus/review-11gh6-gate-2026-08-08
+    //    [21797] Important finding): renameCollection is a SECOND,
+    //    independently-reachable (via /v1/chash/*) re-home implementation
+    //    doing the same mutation class as CatalogRepository.renameCollectionTxn
+    //    -- it must take the SAME sweep gate, on BOTH endpoints, sorted. ──
+
+    /** Raw connection to the service role's own pool (test-controlled transaction). */
+    private Connection dsConnection() throws SQLException {
+        return svcDs.getConnection();
+    }
+
+    /** Hand-drives {@code CatalogRepository.acquireSweepGateExclusive}'s exact
+     *  SQL shape on a raw connection, for tests needing manual transaction control. */
+    private static void acquireGateExclusive(Connection conn, String tenant, String collection, int lockTimeoutMs)
+            throws SQLException {
+        try (var ps = conn.prepareStatement("SELECT set_config('lock_timeout', ?, true)")) {
+            ps.setString(1, String.valueOf(lockTimeoutMs));
+            ps.execute();
+        }
+        try (var ps = conn.prepareStatement("SELECT pg_advisory_xact_lock(hashtext(?))")) {
+            ps.setString(1, "sweepgate:" + tenant + "/" + collection);
+            ps.execute();
+        }
+    }
+
+    private void assertRenameBlocksOnExternalExclusiveGate(String gatedCollection,
+            String oldCollection, String newCollection) throws Exception {
+        try (Connection external = dsConnection()) {
+            external.setAutoCommit(false);
+            try (var st = external.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
+                st.execute();
+            }
+            acquireGateExclusive(external, TENANT_A, gatedCollection, 60_000);
+
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                Future<Integer> future = executor.submit(
+                    () -> repo.renameCollection(TENANT_A, oldCollection, newCollection));
+                assertThatThrownBy(() -> future.get(750, TimeUnit.MILLISECONDS))
+                    .as("renameCollection must BLOCK while '" + gatedCollection
+                        + "' is held EXCLUSIVE externally")
+                    .isInstanceOf(TimeoutException.class);
+
+                external.rollback();
+
+                future.get(15, TimeUnit.SECONDS);
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    void renameCollection_blocksOnExternalExclusiveGate_onOldCollection_thenProceeds() throws Exception {
+        assertRenameBlocksOnExternalExclusiveGate(
+            "gate-rename-old-1", "gate-rename-old-1", "gate-rename-old-1-dst");
+    }
+
+    @Test
+    void renameCollection_blocksOnExternalExclusiveGate_onNewCollection_thenProceeds() throws Exception {
+        assertRenameBlocksOnExternalExclusiveGate(
+            "gate-rename-new-1-dst", "gate-rename-new-1", "gate-rename-new-1-dst");
+    }
+
+    /**
+     * SANITY CHECK, NOT A DISCRIMINATING REGRESSION TEST (renamed post-review
+     * — T2 nexus/critique-11gh6-gate-impl-2026-08-08 [21798] REWORK DELTA
+     * item (d)): both endpoints are taken SHARED, never upgraded, and shared
+     * locks never conflict with EACH OTHER regardless of acquisition order —
+     * there is, structurally, NO deadlock possible here today whether or not
+     * the two collection names are sorted before acquisition. The critic
+     * confirmed this test would pass IDENTICALLY whether or not the
+     * {@code sorted().distinct()} call in {@link
+     * dev.nexus.service.db.ChashRepository#renameCollection} were removed —
+     * it cannot falsify a hypothetical "sorting regression" given the
+     * current all-SHARED lock set (mirrors {@code
+     * CatalogRepository.renameCollectionTxn}'s own §5.1 deadlock analysis,
+     * T2 nexus/design-11gh6-sweep-write-skew-closure [21768]). What it DOES
+     * legitimately prove: two opposite-direction renames sharing both
+     * endpoints, run concurrently, complete without a PostgreSQL deadlock
+     * abort (which WOULD surface as a thrown exception from one of the
+     * futures) — a real, if non-discriminating, sanity check. The sort call
+     * remains pure future-proofing for a hypothetical later EXCLUSIVE
+     * acquisition on this path, not a defense this test can verify.
+     */
+    @Test
+    void renameCollection_concurrentOppositeDirectionRenames_completeWithoutIncident() throws Exception {
+        String a = "gate-deadlock-a";
+        String b = "gate-deadlock-b";
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Integer> f1 = executor.submit(() -> repo.renameCollection(TENANT_A, a, b));
+            Future<Integer> f2 = executor.submit(() -> repo.renameCollection(TENANT_A, b, a));
+            assertThat(f1.get(15, TimeUnit.SECONDS)).isGreaterThanOrEqualTo(0);
+            assertThat(f2.get(15, TimeUnit.SECONDS)).isGreaterThanOrEqualTo(0);
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

@@ -176,12 +176,41 @@ class TestRepoIndexKilledMidflushLeavesIndexing:
     patch removed, the doctor check does NOT fire (the row is real but
     not yet old enough), confirming the threshold patch — not test
     fixture leakage — is what makes the assertion meaningful.
+
+    INJECTION-POINT RETARGET (2026-08-09, nexus-vw594 release-blocker
+    follow-up): nexus-wxjr6/nexus-kl2z6 (this same release) replaced the
+    ChunkBatcher flush's two-call shape (an ``upsert_chunks_with_
+    embeddings`` POST here, then a SEPARATE ``write_many`` POST later
+    from the flush-grain manifest hook) with ONE combined
+    ``cat.write_manifest_many(..., chunks=...)`` call that carries chunk
+    content AND manifest rows atomically per-doc, server-side (see
+    ``indexer.py``'s ``_batch_flush``). ``upsert_chunks_with_embeddings``
+    is no longer on this path for files that HAVE catalog identity (the
+    normal case — every file `nx index repo` registers before indexing),
+    so a raise injected there no longer intercepts anything: the flush
+    genuinely succeeds and the fence genuinely reaches 'complete'. The
+    kill injector below targets ``HttpCatalogClient.write_manifest_many``
+    instead — the ACTUAL network call ``_batch_flush`` makes for this
+    file, reached via ``get_catalog_writer()`` -> ``_ServiceCatalogWriter``
+    -> ``_SharedServiceCatalogHandle`` -> the shared ``HttpCatalogClient``
+    singleton (both proxies forward via plain ``getattr``, so patching
+    the class method intercepts through both layers). This still fires
+    AFTER ``_fence_begin_many`` (a distinct method, ``begin_index_run_
+    many``, unaffected by this patch) and BEFORE the completion stamp,
+    which rides IN the same ``write_manifest_many`` call via its
+    ``complete=`` kwarg — so raising here still lands squarely between
+    begin and completion. IF THIS SEAM CHANGES AGAIN: this test will
+    fail LOUDLY (fence reads 'complete' instead of 'indexing') rather
+    than silently passing vacuous, per the F1 kill-control discipline —
+    grep ``_batch_flush`` in ``indexer.py`` for the current upload call
+    before assuming this patch target is still correct.
     """
 
     def test_repo_index_killed_midflush_leaves_indexing(
         self, t2_service_env, tmp_path, monkeypatch,
     ) -> None:
         from nexus.catalog.factory import make_catalog_reader, reset_shared_service_catalog_client_for_tests
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
         from nexus.db.http_vector_client import reset_http_vector_client_for_tests
         from nexus.mcp_infra import reset_singletons
 
@@ -191,19 +220,20 @@ class TestRepoIndexKilledMidflushLeavesIndexing:
 
         repo = _git_repo(tmp_path, {"a.py": "def foo():\n    return 1\n"})
 
-        # Kill mid-flush: raise from inside the vector client's upsert
-        # call, AFTER _fence_begin/_fence_begin_many has already fired
-        # (both call sites precede the upsert — memo §3.5 T0 ordering)
-        # but before the upload (and therefore before any completion
-        # stamp) lands.
-        import nexus.db.http_vector_client as hvc
-
-        real_upsert = hvc.HttpVectorClient.upsert_chunks_with_embeddings
+        # Kill mid-flush: raise from inside the catalog client's combined
+        # write call — the CURRENT upload seam for a file WITH catalog
+        # identity (see class docstring "INJECTION-POINT RETARGET" above).
+        # This fires AFTER _fence_begin_many has already stamped
+        # 'indexing' (a separate begin_index_run_many round trip,
+        # untouched by this patch — memo §3.5 T0 ordering) but before the
+        # completion stamp, which rides inside this very call's
+        # ``complete=`` kwarg and therefore never lands.
+        real_write_manifest_many = HttpCatalogClient.write_manifest_many
 
         def _boom(self, *a, **kw):  # noqa: ANN001, ANN002, ANN003 — test-local kill injector
             raise RuntimeError("nexus-vw594 kill-control: injected mid-flush failure")
 
-        monkeypatch.setattr(hvc.HttpVectorClient, "upsert_chunks_with_embeddings", _boom)
+        monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", _boom)
 
         from click.testing import CliRunner
 
@@ -215,7 +245,7 @@ class TestRepoIndexKilledMidflushLeavesIndexing:
         # report success.
         assert result.exit_code != 0 or "fail" in result.output.lower() or "error" in result.output.lower()
 
-        monkeypatch.setattr(hvc.HttpVectorClient, "upsert_chunks_with_embeddings", real_upsert)
+        monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", real_write_manifest_many)
 
         cat = make_catalog_reader()
         assert cat is not None
@@ -252,3 +282,147 @@ class TestRepoIndexKilledMidflushLeavesIndexing:
             f"stranded-indexing row: {r}"
         )
         assert "a.py" in r.detail or entry.tumbler and str(entry.tumbler) in r.detail
+
+
+class TestRepoIndexOrphanSeamFailureDoesNotStrandBatchmateFence:
+    """Production test #4 (nexus-vw594 F1 follow-up, task item 3, 2026-08-09):
+    a kill on the OTHER upload seam that survives in ``_batch_flush`` —
+    the legacy ``db.upsert_chunks_with_embeddings`` call for chunks
+    belonging to a file with NO catalog identity (the "orphan" slice,
+    code review Critical C1 2026-08-09 / nexus-3mwuo) — must NOT strand
+    a co-batched, identity-HAVING file's fence.
+
+    COVERAGE DECISION (task item 3), including a CORRECTED hypothesis:
+    the task asked whether a kill on the orphan seam should ALSO be
+    covered, since ``_batch_flush`` calls the orphan upsert BEFORE the
+    combined write (``indexer.py`` — ``if orphan_ids: db.upsert_chunks_
+    with_embeddings(...)`` precedes ``cat.write_manifest_many`` for
+    ``full_docs``), so a naive reading suggests an orphan-slice failure
+    could propagate out of the whole flush closure and prevent an
+    unrelated batch-mate's combined write from ever being attempted —
+    collateral stranding. EMPIRICALLY THIS DOES NOT HAPPEN: this test
+    originally asserted collateral stranding and went RED against real
+    production code (structlog showed ``chunk_batch_flush_bisect`` firing
+    before the failure ever reached settlement). ``ChunkBatcher._flush_
+    batch`` bisects ANY failed flush with >= 2 files, retrying each file
+    as its OWN independent flush (``_split``, file-boundary halves,
+    recursing to file granularity) — so a poisoned file's failure is
+    ALWAYS isolated to itself once 2+ files are involved, and a lone
+    orphan-only flush (1 file, no bisect possible) has no ``full_docs``
+    at all (``_batch_flush``'s early-return), so there is no co-located
+    identity-having document in that flush to strand either. There is no
+    reachable production configuration where an orphan-seam failure
+    strands a DIFFERENT file's fence — this test now asserts the
+    ISOLATION property instead (the corrected, verified expectation),
+    which is the real invariant worth protecting: a future change that
+    weakens or removes the bisect-on-failure retry would silently
+    reintroduce the collateral-stranding hazard, and this test would
+    catch it (``a.py`` would stop reaching 'complete').
+
+    Orphan chunks carry no catalog ``doc_id`` and therefore no
+    ``index_state`` column to observe — this test asserts on the
+    IDENTITY-HAVING batch-mate (``a.py``) only.
+
+    KILL CONTROL: temporarily removing (or narrowing) the bisect branch
+    in ``ChunkBatcher._flush_batch`` (the ``if len(pend.file_counts) >=
+    2:`` split) would make this test fail — ``a.py`` would no longer
+    reach 'complete' once its flush is no longer retried in isolation
+    from ``b.py``'s failure. Not exercised via source mutation here
+    (that block is shared production logic with its own dedicated
+    ``chunk_batcher`` unit tests); the ORIGINAL version of this test
+    (asserting stranding) already serves as the falsification record —
+    it went red against the real bisect behavior, which is exactly how
+    this corrected expectation was discovered.
+    """
+
+    def test_orphan_upsert_failure_isolated_from_batchmate_fence(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        from nexus.catalog.factory import make_catalog_reader, reset_shared_service_catalog_client_for_tests
+        from nexus.db.http_vector_client import reset_http_vector_client_for_tests
+        from nexus.mcp_infra import reset_singletons
+
+        reset_http_vector_client_for_tests()
+        reset_singletons()
+        reset_shared_service_catalog_client_for_tests()
+
+        repo = _git_repo(tmp_path, {
+            "a.py": "def foo():\n    return 1\n",
+            "b.py": "def bar():\n    return 2\n",
+        })
+
+        # Force b.py's flush-time catalog-identity resolution to "" —
+        # simulates code_indexer.py's documented "stages the file into
+        # the batcher regardless of whether resolution succeeded" case
+        # (_build_combined_write_payload docstring) — so b.py's chunks
+        # route through the orphan slice of _batch_flush while a.py
+        # keeps its real catalog identity and goes through the combined
+        # write. Both tiny single-chunk files land in the SAME initial
+        # flush (well under the chunk cap) — verified via structlog:
+        # ``chunk_batch_flush_bisect chunks=2 files=2`` fires before the
+        # per-file retry.
+        import nexus.indexer as indexer_mod
+
+        real_build_resolver = indexer_mod.build_doc_id_resolver
+
+        def _resolver_forcing_b_orphan(file_to_doc_id):
+            real_resolver = real_build_resolver(file_to_doc_id)
+
+            def _resolver(path):
+                if path.name == "b.py":
+                    return ""
+                return real_resolver(path)
+
+            return _resolver
+
+        monkeypatch.setattr(indexer_mod, "build_doc_id_resolver", _resolver_forcing_b_orphan)
+
+        # Kill ONLY the orphan seam: raise from db.upsert_chunks_with_
+        # embeddings, the call _batch_flush makes FIRST (before the
+        # combined write) for chunks belonging to identity-less files.
+        # a.py's own combined write (cat.write_manifest_many) is left
+        # untouched — this test is about whether b.py's failure reaches
+        # a.py, not about killing a.py's own seam (class above covers
+        # that).
+        import nexus.db.http_vector_client as hvc
+
+        real_upsert = hvc.HttpVectorClient.upsert_chunks_with_embeddings
+
+        def _boom(self, *a, **kw):  # noqa: ANN001, ANN002, ANN003 — test-local kill injector
+            raise RuntimeError("nexus-vw594 kill-control: injected orphan-seam failure")
+
+        monkeypatch.setattr(hvc.HttpVectorClient, "upsert_chunks_with_embeddings", _boom)
+
+        from click.testing import CliRunner
+
+        from nexus.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["index", "repo", str(repo)])
+        # The CLI must surface b.py's upload failure — it must not
+        # silently report full success while a file failed.
+        assert result.exit_code != 0 or "fail" in result.output.lower() or "error" in result.output.lower(), result.output
+
+        monkeypatch.setattr(hvc.HttpVectorClient, "upsert_chunks_with_embeddings", real_upsert)
+
+        cat = make_catalog_reader()
+        assert cat is not None
+        entries = [
+            e for e in cat.all_documents(limit=0)
+            if str(getattr(e, "file_path", "")).endswith("a.py")
+        ]
+        assert len(entries) == 1, entries
+        entry = entries[0]
+        state, run_id, started_at = _fence_fields(entry)
+        # ISOLATION, not stranding: bisect-on-failure retries a.py's
+        # flush independently of b.py's poisoned one, so a.py's own
+        # combined write DOES land and its fence reaches 'complete' —
+        # b.py's failure must never leak into a.py's fence state.
+        assert state == "complete", (
+            f"expected a.py's fence to reach 'complete' — its combined "
+            f"write is independent of the co-batched orphan (b.py) "
+            f"failure once ChunkBatcher bisects the flush by file, got "
+            f"{state!r} (bisect-on-failure isolation may have broken)"
+        )
+        assert run_id != ""
+        assert started_at != ""

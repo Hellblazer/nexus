@@ -43,7 +43,14 @@ _log = structlog.get_logger(__name__)
 #: Service write cap (nexus.db.limits MAX_RECORDS_PER_WRITE parity).
 DEFAULT_MAX_CHUNKS: int = 300
 
-FlushFn = Callable[[str, list[str], list[str], list[dict]], None]
+#: (collection, ids, documents, metadatas, file_contexts) -> None.
+#: nexus-wxjr6: file_contexts (the same (path, context) pairs
+#: on_batch_begin/on_batch_complete already receive) is threaded into the
+#: flush closure itself so a combined-write flush fn can build per-doc
+#: manifest rows in the SAME call that uploads chunk content — no new
+#: plumbing, this is the identical shape computed once per flush at
+#: _flush_batch's top (see the call site below).
+FlushFn = Callable[[str, list[str], list[str], list[dict], "list[tuple[str, object]]"], None]
 
 #: (path, error-or-None, context) settled-file record awaiting callback.
 _Settled = tuple[str, "str | None", object]
@@ -140,6 +147,15 @@ class ChunkBatcher:
         #: there showed up as 0.0000s across every other bucket AND in
         #: flush_seconds). Its own counter closes that gap.
         self._settle_seconds = 0.0
+        #: The ``on_batch_begin`` callback (nexus-vw594 F1's RUNFENCE
+        #: ``_fence_begin_many`` stamp) — a real network round trip that
+        #: fires BEFORE the upload timer starts, so until nexus-jb4pp it
+        #: was excluded from ``upload_s``/``flush_hook_s``/``settle_s``/
+        #: ``file_hook_s``, from ``flush_seconds``, AND from the indexer's
+        #: end-of-run per-grain report: a whole leg attributed nowhere,
+        #: which is why the flush-grain split could not be made to sum.
+        #: Same class of gap ``settle_seconds`` closed in lde88 round 2.
+        self._begin_hook_seconds = 0.0
         #: duoak follow-up: >1 dispatches flushes to a bounded pool so
         #: neither staging workers nor drain() serialize the network
         #: calls. 1 (default) = synchronous v1 behavior. Ceiling should
@@ -183,6 +199,8 @@ class ChunkBatcher:
         name that only ever measured the upload leg). ``settle_seconds``
         is the file-settlement bookkeeping block alone (review round 2 —
         previously silently excluded from ``flush_seconds`` entirely).
+        ``begin_hook_seconds`` is the pre-upload ``on_batch_begin``
+        callback alone (nexus-jb4pp — same silent-exclusion class).
         """
         with self._lock:
             return {
@@ -190,6 +208,7 @@ class ChunkBatcher:
                 "flush_seconds": self._flush_seconds,
                 "upload_seconds": self._upload_seconds,
                 "settle_seconds": self._settle_seconds,
+                "begin_hook_seconds": self._begin_hook_seconds,
             }
 
     @property
@@ -375,13 +394,16 @@ class ChunkBatcher:
 
         Emits ONE ``chunk_flush_complete`` structlog event per completed
         flush (nexus-lde88 G1) with complete per-flush attribution —
-        ``upload_s`` (the network write alone), ``flush_hook_s``
+        ``begin_hook_s`` (``on_batch_begin``, the pre-upload RUNFENCE
+        stamp), ``upload_s`` (the network write alone), ``flush_hook_s``
         (``on_batch_complete`` — taxonomy/manifest/aspect), ``settle_s``
         (the file-settlement bookkeeping block — review round 2), and
-        ``file_hook_s`` (the per-file completion callbacks). These four
+        ``file_hook_s`` (the per-file completion callbacks). These five
         SUM to the full flush wall — no attribution gap between them (the
         round-2 fix: settle_s used to be silently excluded from all four
-        AND from ``flush_seconds``, see ``test_partition_sums_to_wall``).
+        AND from ``flush_seconds``, see ``test_partition_sums_to_wall``;
+        nexus-jb4pp closed the identical gap for begin_hook_s, which
+        vw594 F1 introduced by inserting a round trip ahead of ``t0``).
         No event fires on the bisect path (a bisected batch never
         completes as itself; each half fires its own event when IT
         completes).
@@ -399,7 +421,13 @@ class ChunkBatcher:
                 for path in pend.file_counts
                 if path in self._files
             ]
+        # nexus-jb4pp: TIMED. This callback makes a real round trip
+        # (_fence_begin_many) and used to sit outside every timer — see
+        # _begin_hook_seconds. Measured before ``t0`` so it is not
+        # mis-billed as upload.
+        begin_hook_elapsed = 0.0
         if file_contexts:
+            _begin_t0 = time.monotonic()
             try:
                 self._on_batch_begin(collection, file_contexts)
             except Exception:  # noqa: BLE001 — advisory: the fence begin stamp must never block the upload
@@ -409,11 +437,15 @@ class ChunkBatcher:
                     chunks=len(pend.ids),
                     exc_info=True,
                 )
+            begin_hook_elapsed = time.monotonic() - _begin_t0
 
         error: str | None = None
         t0 = time.monotonic()
         try:
-            self._flush(collection, pend.ids, pend.documents, pend.metadatas)
+            self._flush(
+                collection, pend.ids, pend.documents, pend.metadatas,
+                file_contexts,
+            )
         except Exception as exc:  # noqa: BLE001 — attribution boundary: convert to per-file failure or bisect
             if len(pend.file_counts) >= 2:
                 _log.warning(
@@ -427,7 +459,8 @@ class ChunkBatcher:
                 with self._lock:
                     self._flush_count += 1
                     self._upload_seconds += upload_elapsed
-                    self._flush_seconds += upload_elapsed
+                    self._begin_hook_seconds += begin_hook_elapsed
+                    self._flush_seconds += upload_elapsed + begin_hook_elapsed
                 for half in self._split(pend):
                     self._flush_batch(collection, half)
                 return
@@ -487,8 +520,10 @@ class ChunkBatcher:
         with self._lock:
             self._upload_seconds += upload_elapsed
             self._settle_seconds += settle_elapsed
+            self._begin_hook_seconds += begin_hook_elapsed
             self._flush_seconds += (
-                upload_elapsed + flush_hook_elapsed + settle_elapsed + file_hook_elapsed
+                begin_hook_elapsed + upload_elapsed + flush_hook_elapsed
+                + settle_elapsed + file_hook_elapsed
             )
 
         _log.info(
@@ -496,6 +531,7 @@ class ChunkBatcher:
             collection=collection,
             chunks=len(pend.ids),
             files=len(pend.file_counts),
+            begin_hook_s=round(begin_hook_elapsed, 3),
             upload_s=round(upload_elapsed, 3),
             flush_hook_s=round(flush_hook_elapsed, 3),
             settle_s=round(settle_elapsed, 3),

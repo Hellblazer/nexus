@@ -36,7 +36,8 @@ Client-composed (pure-Python logic over server-side data):
 
 from __future__ import annotations
 
-from typing import Any
+import contextlib
+from typing import Any, Callable
 
 import httpx
 
@@ -298,11 +299,37 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             access:  Access tracking policy: ``"track"`` (default) increments
                      access_count on returned rows; ``"silent"`` skips it
                      (for internal consolidation scans).
+
+        Raises:
+            ValueError: the query has no searchable terms — e.g. every word
+                is an English stopword (``"and"``, bare ``"NOT"``) or the
+                query is punctuation-only. The engine returns a 400 for this
+                case instead of a 200 with ``[]``, so an empty memory search
+                is never ambiguous with a query the engine could not use at
+                all (nexus-senub). Matches the retired SQLite arm's
+                ``ValueError`` contract in spirit, though the underlying
+                substrate mechanism differs (stopword reduction, not FTS5
+                operator syntax — there is no operator grammar here).
+
+                This is CORPUS-DEPENDENT, not a blanket rejection of
+                stopword-shaped queries: a query whose every word is a
+                stopword can still resolve a REAL hit through the title/tag
+                index (which does not strip stopwords) and return normally —
+                e.g. searching ``"and"`` finds a title like
+                ``"and-design.md"``. What is stable, corpus-independent, and
+                the actual subject of this exception is narrower:
+                ``content`` specifically can never be reached by a
+                stopword-only query, because content is indexed only through
+                the leg that strips them. The raise fires only when a search
+                already came back completely empty; it never discards a
+                real result to "purify" the response.
         """
         payload: dict[str, Any] = {"query": query, "access": access}
         if project:
             payload["project"] = project
-        resp = self._post("/v1/memory/search", payload)
+        resp = self._raise_degenerate_query_as_value_error(
+            lambda: self._post("/v1/memory/search", payload), query
+        )
         if isinstance(resp, list):
             return [_normalize(r) for r in resp]
         return []
@@ -328,18 +355,99 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         return self._get("/v1/memory/projects", params={"prefix": prefix})
 
     def search_glob(self, query: str, project_glob: str) -> list[dict[str, Any]]:
-        """FTS search scoped to projects matching a GLOB pattern."""
-        resp = self._post("/v1/memory/search_glob", {"query": query, "project_glob": project_glob})
+        """FTS search scoped to projects matching a GLOB pattern.
+
+        Raises:
+            ValueError: see :meth:`search` — the same degenerate-query 400
+                (nexus-senub) applies here; both surfaces share the engine's
+                ``ftsQuery``.
+        """
+        resp = self._raise_degenerate_query_as_value_error(
+            lambda: self._post(
+                "/v1/memory/search_glob", {"query": query, "project_glob": project_glob}
+            ),
+            query,
+        )
         if isinstance(resp, list):
             return [_normalize(r) for r in resp]
         return []
 
     def search_by_tag(self, query: str, tag: str) -> list[dict[str, Any]]:
-        """FTS search scoped to entries whose tags contain *tag*."""
-        resp = self._post("/v1/memory/search_by_tag", {"query": query, "tag": tag})
+        """FTS search scoped to entries whose tags contain *tag*.
+
+        Raises:
+            ValueError: see :meth:`search` — the same degenerate-query 400
+                (nexus-senub) applies here; both surfaces share the engine's
+                ``ftsQuery``.
+        """
+        resp = self._raise_degenerate_query_as_value_error(
+            lambda: self._post("/v1/memory/search_by_tag", {"query": query, "tag": tag}),
+            query,
+        )
         if isinstance(resp, list):
             return [_normalize(r) for r in resp]
         return []
+
+    #: The engine's discriminator for the nexus-senub degenerate-query 400
+    #: (``MemoryRepository.DegenerateQueryException`` /
+    #: ``MemoryHandler.sendDegenerateQueryError``). Matches the house
+    #: convention already used by ``http_catalog_client``'s
+    #: ``"dangling_endpoint"`` code — a structured ``"code"`` field on the
+    #: JSON error body, not the bare HTTP status.
+    _DEGENERATE_QUERY_CODE = "no_searchable_terms"
+
+    @staticmethod
+    def _raise_degenerate_query_as_value_error(
+        call: Callable[[], Any], query: str
+    ) -> Any:
+        """Run *call*; convert ONLY the degenerate-query 400 to ``ValueError``.
+
+        nexus-senub, critic follow-up (review [21909]): all three memory FTS
+        surfaces (``search``, ``search_glob``, ``search_by_tag``) share the
+        engine's ``MemoryRepository.ftsQuery`` and, with it, the same
+        ``guardAgainstDegenerateQuery`` 400 for a query with no searchable
+        terms. Centralising the conversion here is the client-side twin of
+        ``ftsQuery`` being one owner on the engine side (nexus-22r1f) — three
+        independent try/except copies is exactly how a future divergence
+        hides in the surface nobody re-checked.
+
+        The 400 is discriminated on the ``"code"`` field
+        (:data:`_DEGENERATE_QUERY_CODE`), NEVER on the bare status code.
+        ``MemoryHandler.requireString`` (missing/blank ``query`` or other
+        required field) ALSO returns a 400 with the identical
+        ``{"error": ...}`` shape and no ``"code"`` key — a bare-400 check
+        would mislabel that caller bug as "your query has no searchable
+        terms" and, worse, ``nexus/db/t1.py``'s pre-existing
+        ``except ValueError: return []`` around this exact call would then
+        silently swallow it, recreating the exact caller-cannot-distinguish
+        ambiguity this bead exists to eliminate. Any 400 WITHOUT the
+        discriminator propagates untouched as its natural
+        ``httpx.HTTPStatusError`` — fail loud, never mislabeled.
+        """
+        try:
+            return call()
+        except httpx.HTTPStatusError as exc:
+            if exc.response is None or exc.response.status_code != 400:
+                raise
+            code = ""
+            detail = exc.response.text
+            with contextlib.suppress(Exception):
+                body = exc.response.json()
+                if isinstance(body, dict):
+                    code = str(body.get("code", ""))
+                    if body.get("error"):
+                        detail = body["error"]
+            if code != HttpMemoryStore._DEGENERATE_QUERY_CODE:
+                # A different (or discriminator-less) 400 — a caller bug or
+                # some other validation failure. Propagate as-is; do not
+                # relabel it as a degenerate-query rejection.
+                raise
+            raise ValueError(
+                f"memory search query {query!r} rejected: {detail} "
+                "(content is unreachable by a stopword-only query regardless "
+                "of corpus — but a title/tag hit can still exist and would "
+                "have been returned instead of this error)"
+            ) from exc
 
     def get_all(self, project: str) -> list[dict[str, Any]]:
         """Return all entries for *project* with full column data."""

@@ -241,3 +241,77 @@ class TestSessionStartCmdSourcePassthrough:
         assert marker is not None
         assert marker.new_session_id == "new-sess"
         assert marker.claude_pid == 777
+
+
+# ── nexus-h33x8.4: guidance imperative reaches the real CLI output ─────────
+
+
+class TestSessionStartCmdGuidanceImperative:
+    """True end-to-end: no mocking of ``hooks.session_start`` or
+    ``session_start_guidance`` — pins that ``nx hook session-start`` (Tier
+    B) is the channel the guidance imperative actually flows through,
+    not just that ``hooks.session_start()`` includes it in isolation."""
+
+    def test_guidance_imperative_present_with_no_plugin_root(self, monkeypatch):
+        from unittest.mock import patch as _patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.hook import hook_group
+        from nexus.session_start_guidance import GUIDANCE_IMPERATIVE
+
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+        runner = CliRunner()
+        with _patch("nexus.hooks.write_claude_session_id"):
+            result = runner.invoke(
+                hook_group, ["session-start"],
+                input='{"session_id": "s-h33x8-4-cli"}',
+            )
+        assert result.exit_code == 0
+        assert "Nexus ready" in result.output
+        assert GUIDANCE_IMPERATIVE in result.output
+
+    def test_guidance_imperative_absent_when_legacy_plugin_channel_live(
+        self, tmp_path, monkeypatch,
+    ):
+        """Interim-window behavior: an installed plugin whose own
+        hooks.json still carries the legacy cat entry suppresses this
+        module's emission, so the CLI does not double it up."""
+        import json as _json
+        from unittest.mock import patch as _patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.hook import hook_group
+        from nexus.session_start_guidance import GUIDANCE_IMPERATIVE
+
+        plugin_root = tmp_path / "plugin"
+        hooks_dir = plugin_root / "hooks"
+        hooks_dir.mkdir(parents=True)
+        (hooks_dir / "hooks.json").write_text(_json.dumps({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "matcher": "startup",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "cat $CLAUDE_PLUGIN_ROOT/skills/using-nx-skills/SKILL.md",
+                                "timeout": 5,
+                            },
+                        ],
+                    },
+                ],
+            },
+        }))
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        runner = CliRunner()
+        with _patch("nexus.hooks.write_claude_session_id"):
+            result = runner.invoke(
+                hook_group, ["session-start"],
+                input='{"session_id": "s-h33x8-4-interim"}',
+            )
+        assert result.exit_code == 0
+        assert "Nexus ready" in result.output
+        assert GUIDANCE_IMPERATIVE not in result.output

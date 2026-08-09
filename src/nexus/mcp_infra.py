@@ -116,11 +116,76 @@ _COLLECTIONS_CACHE_TTL = 60.0
 # the recover-on-error pattern already used by http_token_store/
 # http_scratch_store (`recover_endpoint_from_lease`).
 #
-# `_service_t2_lock` is held for the full checkout-through-use span (not just
-# the get-or-build decision) so a concurrent caller can never close() the
-# instance while another thread is still inside write_fn(db) against it.
+# `_service_t2_lock` (nexus-ldab2, CAS-narrowed): held only long enough to
+# RESOLVE the singleton, never across write_fn's own network round trip. See
+# `t2_index_write`'s docstring for the compare-and-swap eviction shape this
+# replaced the old checkout-through-use span with — identical narrowing to
+# `catalog/factory.py`'s `_service_catalog_lock` (nexus-u2u0n).
 _service_t2_db: object | None = None
 _service_t2_lock = threading.Lock()
+
+#: nexus-0dpli: in-flight caller count per instance, keyed by ``id(db)``.
+#: Same refcounted-eviction shape as ``catalog/factory.py``'s
+#: ``_service_catalog_refcounts`` — see that module's comment for the full
+#: rationale. Load-bearing here specifically because THIS bundle's own
+#: ``taxonomy_assign_batch_hook.serialize = False`` is what first makes
+#: genuinely concurrent ``t2_index_write`` calls against the shared
+#: ``T2Database`` routine in production.
+_service_t2_refcounts: dict[int, int] = {}
+
+#: nexus-0dpli: ids of ``T2Database`` instances evicted from the shared slot
+#: but still in flight for at least one caller — see
+#: ``_release_shared_t2_ref``.
+_service_t2_pending_close: set[int] = set()
+
+#: nexus-ldab2: per-op ``{op: [calls, lock_wait_s, call_s]}`` for the
+#: service-backed T2 singleton, mirroring
+#: ``catalog/factory.service_catalog_op_stats()`` (nexus-jb4pp). *op* is the
+#: caller-supplied label passed to :func:`t2_index_write` (defaults to
+#: ``"t2_write"`` when the caller does not name one — most ``write_fn``
+#: callables are anonymous lambdas, so a name has to be supplied explicitly
+#: to be meaningful; see the ``taxonomy_assign``/``aspect_enqueue`` call
+#: sites for the pattern). Counters are plain floats mutated under
+#: ``_service_t2_stats_lock``, a DIFFERENT lock from ``_service_t2_lock``
+#: itself — CAS narrowing means the singleton lock is no longer held across
+#: the round trip, so the stats mutation needs its own guard rather than
+#: piggybacking on whichever lock happened to be held.
+_service_t2_op_stats: dict[str, list[float]] = {}
+_service_t2_stats_lock = threading.Lock()
+
+
+def _record_t2_op(op: str, wait_s: float, call_s: float) -> None:
+    """Accumulate one op's timings, guarded by ``_service_t2_stats_lock``
+    (not ``_service_t2_lock`` — see that dict's module comment)."""
+    with _service_t2_stats_lock:
+        row = _service_t2_op_stats.setdefault(op, [0.0, 0.0, 0.0])
+        row[0] += 1
+        row[1] += wait_s
+        row[2] += call_s
+
+
+def service_t2_op_stats() -> dict[str, dict[str, float]]:
+    """Snapshot of per-op service-T2-singleton timings (nexus-ldab2).
+
+    ``{op: {"calls": n, "lock_wait_s": s, "call_s": s}}`` — ``lock_wait_s``
+    is time blocked on ``_service_t2_lock`` resolving the singleton (now a
+    narrow, non-round-trip critical section); ``call_s`` is ``write_fn``
+    itself (client serialization + network + server), run OUTSIDE the lock.
+    Cumulative across threads, so both may exceed wall clock. Mirrors
+    ``nexus.catalog.factory.service_catalog_op_stats()``.
+    """
+    with _service_t2_stats_lock:
+        return {
+            op: {"calls": v[0], "lock_wait_s": v[1], "call_s": v[2]}
+            for op, v in _service_t2_op_stats.items()
+        }
+
+
+def reset_service_t2_op_stats() -> None:
+    """Zero the per-op counters (test / per-run reset, mirrors
+    ``nexus.catalog.factory.reset_service_catalog_op_stats()``)."""
+    with _service_t2_stats_lock:
+        _service_t2_op_stats.clear()
 
 # ── Search trace cache (RDR-061 E2) ──────────────────────────────────────────
 # Session-keyed cache of recent search results. Populated by the search tool,
@@ -335,36 +400,130 @@ def t2_ctx():
 
 
 
-def _service_t2_write_locked(write_fn):
-    """Run ``write_fn`` against the process-lifetime service ``T2Database``
-    singleton (nexus-53x7s), building it on first use and evicting it if
-    ``write_fn`` raises (reactive recovery against a rotated
-    ``storage_service`` lease -- see ``_service_t2_db``'s module docstring).
+def _acquire_shared_t2_ref(db: object) -> None:
+    """Record one more in-flight caller against *db*. Callers MUST hold
+    ``_service_t2_lock`` and call this immediately after resolving the
+    instance, in the SAME critical section (nexus-0dpli — identical
+    contract to ``catalog/factory._acquire_shared_catalog_ref``)."""
+    key = id(db)
+    _service_t2_refcounts[key] = _service_t2_refcounts.get(key, 0) + 1
 
-    Callers MUST hold ``_service_t2_lock`` for the full call so a concurrent
-    caller can never ``close()`` the instance out from under an in-flight
-    ``write_fn(db)``.
+
+def _release_shared_t2_ref(db: object, *, evict: bool) -> bool:
+    """Release this caller's in-flight reference to *db*. Callers MUST hold
+    ``_service_t2_lock``. Identical contract to
+    ``catalog/factory._release_shared_catalog_ref`` — see that function's
+    docstring for the full CAS-plus-refcount reasoning. Returns True
+    exactly when the CALLER must run ``db.close()`` itself after releasing
+    the lock."""
+    global _service_t2_db
+    if evict and _service_t2_db is db:
+        _service_t2_db = None
+    key = id(db)
+    remaining = _service_t2_refcounts.get(key, 1) - 1
+    if remaining > 0:
+        _service_t2_refcounts[key] = remaining
+        if evict:
+            _service_t2_pending_close.add(key)
+        return False
+    _service_t2_refcounts.pop(key, None)
+    was_pending = key in _service_t2_pending_close
+    _service_t2_pending_close.discard(key)
+    return evict or was_pending
+
+
+def _service_t2_write_locked(write_fn, *, op: str = "t2_write"):
+    """Resolve the process-lifetime service ``T2Database`` singleton
+    (nexus-53x7s) and run ``write_fn`` against it.
+
+    CAS-NARROWED (nexus-ldab2, identical shape to
+    ``catalog/factory.py``'s ``_SharedServiceCatalogHandle._call``,
+    nexus-u2u0n): ``_service_t2_lock`` is held ONLY to resolve (get-or-build)
+    the singleton — never across ``write_fn``'s own network round trip.
+
+    REFCOUNTED EVICTION (nexus-0dpli, critique finding on the first cut of
+    this narrowing): releasing the lock around the round trip means
+    MULTIPLE threads can be genuinely mid-``write_fn`` against the SAME
+    shared ``T2Database`` at once — this bundle's own
+    ``taxonomy_assign_batch_hook.serialize = False`` is what first makes
+    that routine in production. Blast radius if an eviction naively
+    ``close()``s the instance it evicts: ``T2Database.close()`` tears down
+    ALL its substores' own httpx clients (memory, plans, taxonomy,
+    telemetry, chash_index, document_aspects, aspect_queue,
+    document_highlights), so one failing call (e.g. a routine
+    aspect-enqueue conflict) could abort an unrelated, healthy, concurrent
+    ``taxonomy_assign`` call sharing the same singleton. Fixed identically
+    to the catalog handle:
+
+    1. Eviction fires ONLY on a genuine connectivity failure
+       (:func:`nexus.retry._is_connectivity_error`) — never on a routine
+       domain/business exception. Under-evict, never over-evict (see
+       ``catalog/factory.py``'s docstring for the full asymmetry argument).
+    2. Every caller acquires an in-flight reference on the instance it
+       resolved (:func:`_acquire_shared_t2_ref`) and releases it
+       (:func:`_release_shared_t2_ref`) once its own call returns or
+       raises, both under ``_service_t2_lock``. An eviction clears the
+       shared slot immediately (new callers always build fresh) but only
+       physically closes the OLD instance once its reference count drains
+       to zero — the evicting caller if no one else was using it, or
+       whichever sibling's release happens to be the last one out.
+
+    RELEASE IS UNCONDITIONAL (nexus-0dpli round 3, delta-review touch-up):
+    the reference release lives in a single ``finally``, not duplicated
+    across ``except``/``else`` branches — a ``BaseException`` that is not
+    a plain ``Exception`` (``KeyboardInterrupt``/``SystemExit`` mid-call)
+    must still release this call's reference, or it leaks forever and can
+    strand a sibling's already-evicted, pending-close instance with no one
+    left to drain it to zero. ``_evict`` defaults to ``False`` and is set
+    ``True`` only inside ``except Exception``, so a non-``Exception``
+    ``BaseException`` correctly releases WITHOUT evicting — the same safe
+    default as no exception at all.
+
+    *op* differentiates :func:`service_t2_op_stats`'s timing buckets the
+    same way ``catalog/factory.service_catalog_op_stats()`` differentiates
+    by attribute name — most ``write_fn`` callables are anonymous lambdas,
+    so a caller that wants a meaningful bucket (e.g. ``"taxonomy_assign"``)
+    must pass it explicitly; unnamed callers share the ``"t2_write"``
+    default bucket.
     """
     global _service_t2_db
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
 
-    if _service_t2_db is None:
-        _service_t2_db = T2Database(default_db_path(), run_migrations=False)  # boundary-allow: service mode, PG is the arbiter
+    _w0 = time.monotonic()
+    with _service_t2_lock:
+        _wait = time.monotonic() - _w0
+        if _service_t2_db is None:
+            _service_t2_db = T2Database(default_db_path(), run_migrations=False)  # boundary-allow: service mode, PG is the arbiter
+        current = _service_t2_db
+        _acquire_shared_t2_ref(current)
+    _c0 = time.monotonic()
+    _evict = False
     try:
-        return write_fn(_service_t2_db)
-    except Exception:
-        # Reactive invalidation: the failure may be a rotated/expired
-        # storage_service lease baked into this instance's Http*Store
-        # clients at construction time; evict so the NEXT call resolves a
-        # fresh endpoint instead of retrying the same broken connections
-        # for the rest of the process's lifetime.
-        stale_db = _service_t2_db
-        _service_t2_db = None
-        stale_db.close()  # error-triggered eviction, not per-call teardown
+        return write_fn(current)
+    except Exception as exc:
+        # Only a genuine connectivity failure evicts — see the docstring's
+        # point 1. ``_evict`` stays False (the safe default) for any OTHER
+        # exception, including a BaseException that skips this clause
+        # entirely (KeyboardInterrupt/SystemExit — see the docstring's
+        # "RELEASE IS UNCONDITIONAL" note).
+        from nexus.retry import _is_connectivity_error  # noqa: PLC0415 — deferred to avoid import cost on the happy path
+        _evict = _is_connectivity_error(exc)
         raise
+    finally:
+        # nexus-0dpli round 3: release lives in ONE unconditional finally,
+        # not duplicated across except/else — a BaseException that
+        # _is_connectivity_error never sees (KeyboardInterrupt/SystemExit)
+        # must still release this call's reference, or it leaks and can
+        # strand a sibling's already-evicted, pending-close instance
+        # forever.
+        with _service_t2_lock:
+            _close_now = _release_shared_t2_ref(current, evict=_evict)
+        if _close_now:
+            current.close()  # error-triggered eviction, not per-call teardown
+        _record_t2_op(op, _wait, time.monotonic() - _c0)
 
 
-def t2_index_write(write_fn):
+def t2_index_write(write_fn, *, op: str = "t2_write"):
     """Run one T2 write against the service-backed :class:`T2Database`.
 
     ``write_fn(db)`` receives the writer and its return value is passed back,
@@ -379,9 +538,13 @@ def t2_index_write(write_fn):
     version-skew arm are gone (nexus-i711w Stage 2 sub-stage B), and the
     direct-SQLite arm that outlived them went with the ``=sqlite`` opt-out
     (RDR-158 P3, nexus-7bomn).
+
+    CAS-NARROWED (nexus-ldab2): see :func:`_service_t2_write_locked`'s
+    docstring — ``_service_t2_lock`` no longer spans this call's network
+    round trip, only the singleton's get-or-build decision. *op* is threaded
+    straight through for :func:`service_t2_op_stats` attribution.
     """
-    with _service_t2_lock:
-        return _service_t2_write_locked(write_fn)
+    return _service_t2_write_locked(write_fn, op=op)
 
 
 # ── T1 plan session cache (RDR-078) ──────────────────────────────────────────
@@ -676,7 +839,8 @@ def taxonomy_assign_batch_hook(
             result = t2_index_write(
                 lambda db: db.taxonomy.assign_from_chashes(
                     collection, doc_ids, cross_collection=True,
-                )
+                ),
+                op="taxonomy_assign",
             )
         except Exception as exc:  # noqa: BLE001 — taxonomy service path best-effort; tripwire-recorded, returns
             _record_taxonomy_tripwire(
@@ -718,6 +882,20 @@ def taxonomy_assign_batch_hook(
 # frequency without changing any behaviour the deletion was about. Restored,
 # and pinned by tests/test_hook_grain.py.
 taxonomy_assign_batch_hook.batch_grain = "flush"
+
+# nexus-eslkl: opts OUT of LockedHookRegistry's per-hook serialization.
+# Sole justification (corrected from the design memo's original framing,
+# which also cited _service_t2_lock — that leg is REMOVED by nexus-ldab2's
+# CAS narrowing of the very same lock, so it cannot be part of this claim
+# any more): server-side idempotency ALONE. TaxonomyRepository.assignFromChashes
+# runs in ONE tenantScope transaction; the own-collection pass is
+# `ON CONFLICT DO NOTHING` and the cross-collection pass is `GREATEST`-wins —
+# both commutative and safely re-runnable under any interleaving. Per-flush
+# chash sets are disjoint by construction (ChunkBatcher is file-atomic), so
+# concurrent fires of this hook never contend for the same row. Nothing else
+# about this hook's execution needs mutual exclusion with itself or with any
+# other registered hook.
+taxonomy_assign_batch_hook.serialize = False
 
 
 # _fetch_or_embed lived here. It fetched T3 embeddings for a batch and fell
@@ -1080,6 +1258,87 @@ def _manifest_chunk_rows(indexed_metas) -> list[dict]:
     ]
 
 
+def _apply_combined_write_response(
+    res: dict, complete_map: dict[str, str], collection: str | None,
+) -> list[str]:
+    """Record accounting from a nexus-kl2z6/nexus-wxjr6 combined write's
+    response: failed docs, completion refusals, and — the flush-grain
+    path's whole reason for existing — the ENGINE's own sweep accounting.
+
+    Deliberately NOT a reuse of :func:`_manifest_write_loop`'s write_many
+    branch parsing: that block ALSO computes a local before/after chash
+    diff and calls :func:`_sweep_superseded_vectors_many` — the client-side
+    sweep this function's caller (the ChunkBatcher combined-write flush
+    path) no longer needs, because the combined write's atomicity means
+    the engine already did the sweep INSIDE the same per-doc transaction
+    that wrote the manifest (design memo T2 design-kl2z6-combined-write
+    §3: "This closes kl2z6 for the flush-grain indexing path by
+    construction"). Building a fresh, smaller function here — rather than
+    threading a flag through the 200-line existing branch — keeps that
+    well-tested branch (still load-bearing for every OTHER
+    ``manifest_write_batch_hook`` caller, see the module docstring update
+    below) completely untouched.
+
+    Sweep accounting (nexus-39upx: skips are never silent) —
+    ``res["swept"]`` -> :func:`_record_superseded_swept`; each
+    ``res["sweep_detail"]`` entry with ``errored`` true ->
+    :func:`_record_superseded_sweep_skip` with the engine's closed
+    ``reason`` vocabulary (``gate_timeout`` / ``statement_timeout`` /
+    ``before_read_failed`` / ``sweep_failed`` — CatalogRepository.java's
+    ``classifySweepFailureReason``). A missing ``reason`` on an errored
+    entry (a shape a well-behaved engine never sends, but ``.get`` never
+    KeyErrors) is recorded as ``sweep_failed`` rather than silently
+    dropped, matching the closed vocabulary's catch-all bucket.
+
+    Returns the list of failed doc_ids so the caller can log/record them
+    the same way the write_many branch's own failure handling does.
+    """
+    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+
+    failed = list(res.get("failed_doc_ids") or [])
+    for doc_id in failed:
+        _record_manifest_write_failure(doc_id)
+    refused = res.get("complete_refused") or []
+    refused_count = int(res.get("complete_refused_count") or 0)
+    if refused_count != len(refused):
+        structlog.get_logger().warning(
+            "complete_refused_count_mismatch",
+            count_field=refused_count,
+            list_len=len(refused),
+            path="write_many_combined",
+            note="refusal list truncated or shape drift — treating "
+                 "every claimed doc as unstamped",
+        )
+        # Conservative direction (over-work, never under-report — same as
+        # _manifest_write_loop's identical mismatch handling): a stamp we
+        # cannot CONFIRM is a stamp we do not claim.
+        listed = {str(r.get("doc_id", "")) for r in refused}
+        for cid in complete_map:
+            if cid not in listed:
+                _record_complete_refusal(cid)
+    for r in refused:
+        rid = str(r.get("doc_id", ""))
+        structlog.get_logger().warning(
+            "write_manifest_many_complete_refused",
+            doc_id=rid,
+            path="write_many_combined",
+            referenced=r.get("referenced"),
+            missing=r.get("missing"),
+            chunk_count=r.get("chunk_count"),
+        )
+        if rid:
+            _record_complete_refusal(rid)
+    _record_superseded_swept(int(res.get("swept") or 0))
+    for outcome in res.get("sweep_detail") or []:
+        if not isinstance(outcome, dict) or not outcome.get("errored"):
+            continue
+        _record_superseded_sweep_skip(
+            str(outcome.get("doc_id", "")), collection,
+            str(outcome.get("reason") or "sweep_failed"),
+        )
+    return failed
+
+
 def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
                               collection: str | None, *, reader, notes_provider) -> None:
     """Delete T3 rows this document's manifest no longer references (nexus-39upx).
@@ -1181,20 +1440,162 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     _record_superseded_swept(len(orphaned))
 
 
+def _sweep_superseded_vectors_many(
+    cat, dropped_by_doc: dict[str, set[str]], collection: str | None, *,
+    reader, notes_provider,
+) -> None:
+    """Batch-safe sibling of :func:`_sweep_superseded_vectors` for the
+    ``write_manifest_many`` fast branch (nexus-tgrgs / nexus-jk88j,
+    2026-08-08).
+
+    ``_manifest_write_loop`` calls this ONLY after ``write_manifest_many``'s
+    POST has returned — every doc in the batch has therefore already
+    committed (or is known-failed and excluded) server-side by the time any
+    candidate is considered, and every candidate handed in here has ALREADY
+    had every chash any document in THIS SAME BATCH still references
+    subtracted (successful docs via their new manifest, failed docs via
+    their unchanged prior manifest — see ``_manifest_write_loop``'s
+    ``_live_union``). That two-part ordering is what closes the intra-batch
+    TOCTOU the design memo documents (T2
+    ``nexus/design-eslkl-hook-lock-narrowing`` §2b): sweeping doc A's drop
+    before doc B's write of the identical chash had committed could delete
+    a row B's manifest still needs. Deferring every sweep decision until
+    the WHOLE batch has settled, and pre-subtracting the batch's own live
+    set before any network read, removes that window by construction
+    rather than by locking. The cross-FIRE race (two DIFFERENT flush-grain
+    hook fires, i.e. two separate calls to this function/its caller,
+    running concurrently) is a separate, still-open hazard.
+
+    UPDATED post-nexus-eslkl (the hook-lock narrowing LANDED, not "before"
+    as this comment previously read): ``LockedHookRegistry`` now locks
+    PER HOOK rather than around the whole flush-grain dispatch.
+    ``manifest_write_batch_hook`` (this function's caller, via
+    ``_manifest_write_loop``) keeps its lock — it has NO ``serialize =
+    False`` declaration — so manifest(A) || manifest(B) cross-fire races
+    remain closed exactly as before, just via a narrower per-hook critical
+    section. What changed: ``taxonomy_assign_batch_hook`` now opts OUT of
+    locking entirely (server-side idempotency is sufficient for
+    taxonomy||taxonomy and taxonomy||itself), which means manifest(A)'s
+    sweep and taxonomy(B)'s ``assign_from_chashes`` probe (a DIFFERENT
+    flush's chain) can now interleave for the first time on the
+    ``LockedHookRegistry``-wrapped path — the design memo's §2c hazard.
+    Accepted deliberately: 2c's failure mode is a loud, already-instrumented
+    ``unmatched_chashes`` tripwire (RDR-172), not silent corruption like
+    2b, and shares the identical root cause and fix (the engine-side
+    per-doc-txn sweep fold, tracked at nexus-11gh6 / nexus-wxjr6 — kept
+    open by design, write-skew not yet closed at READ COMMITTED). CAVEAT
+    (nexus-uxkq5, critic finding, still applies unchanged): serialization
+    of the hooks that DO keep a lock is CONDITIONAL —
+    ``LockedHookRegistry`` wraps the registry only when
+    ``resolve_index_concurrency() > 1``, while ``ChunkBatcher``'s
+    ``flush_concurrency=3`` is unconditional, so under
+    ``NX_INDEX_CONCURRENCY=1`` flush fires run on a BARE registry and the
+    cross-fire window is live there regardless of any hook's lock
+    declaration; batching also widens it there (every doc's before-read
+    now spans the whole batch's write, not just its own). The real closure
+    for both 2b and 2c is the engine-side per-doc-txn sweep fold; tracked
+    in nexus-uxkq5 / nexus-11gh6 / nexus-wxjr6.
+
+    One ``docs_for_chashes`` round trip (via the shared
+    :func:`nexus.indexer_utils.orphaned_chashes` union guard, reused
+    unmodified — passing a synthetic non-doc-id ``doc_id`` disables its
+    single-document self-exclusion, which is exactly what a
+    multi-document candidate set needs: ANY live reference, from ANY
+    document, protects the candidate) and one T3 ``delete`` for the WHOLE
+    BATCH, versus one of each per document in the per-doc path — the same
+    round-trip-count discipline nexus-67qsd applies to the write half.
+
+    Same fail-open contract as :func:`_sweep_superseded_vectors`: any read
+    failure (reverse lookup or note lookup) deletes nothing and records a
+    named skip for every document whose candidates were in flight, never
+    silently. Over-retention is recoverable; over-deletion is not.
+
+    RETIREMENT SCOPE (nexus-wxjr6, 2026-08-09): this function is NOT
+    deleted. It retires only for the ChunkBatcher-driven flush-grain call
+    site — that path now goes through the combined write
+    (:meth:`nexus.catalog.http_catalog_client.HttpCatalogClient.write_manifest_many`
+    with ``chunks``/``sweep=True``) directly from ``indexer.py``'s
+    ``_batch_flush``, bypassing ``manifest_write_batch_hook`` entirely for
+    ``grain="flush"`` dispatch (see :func:`_apply_combined_write_response`
+    and ``HookRegistry.fire_batch``'s ``skip_hooks``). Every OTHER caller
+    of ``manifest_write_batch_hook`` (``grain="all"``, the default —
+    ``mcp/core.py``'s ``store_put``, ``doc_indexer.py``'s per-file and
+    streaming paths, ``pipeline_stages.py``, ``prose_indexer.py``,
+    ``code_indexer.py``'s oversize-per-file fallback) still reaches
+    ``_manifest_write_loop``'s write_many branch below UNCHANGED, and this
+    function remains the ONLY sweep mechanism for those callers until
+    THEY are also converted to the combined write — see nexus-wxjr6's
+    §7.2 per-caller residual table. Deleting this function now would
+    silently reopen nexus-39upx for every one of them.
+    """
+    import structlog  # noqa: PLC0415 — deferred to function scope (lazy logger init)
+
+    if not collection:
+        return
+    candidates: set[str] = set()
+    for s in dropped_by_doc.values():
+        candidates |= s
+    if not candidates:
+        return
+    from nexus.indexer_utils import orphaned_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+
+    _batch_label = f"write_many_batch[{len(dropped_by_doc)}_docs]"
+    orphaned = orphaned_chashes(reader, _batch_label, candidates)
+    shared = len(candidates) - len(orphaned)
+    if not orphaned:
+        return
+    try:
+        notes = notes_provider()
+    except Exception as exc:  # noqa: BLE001 — cannot prove note-safety: keep everything, same fail-open direction as orphaned_chashes
+        structlog.get_logger().warning(
+            "superseded_sweep_skipped_note_lookup_failed",
+            doc_id=_batch_label, collection=collection, candidates=len(orphaned),
+            error=str(exc))
+        for doc_id in dropped_by_doc:
+            _record_superseded_sweep_skip(doc_id, collection, "note_lookup_failed")
+        return
+    kept_notes = len(orphaned)
+    orphaned = [h for h in orphaned if h not in notes]
+    kept_notes -= len(orphaned)
+    if not orphaned:
+        return
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred: hot path
+
+        make_t3().get_collection(collection).delete(ids=orphaned)
+    except Exception as exc:  # noqa: BLE001 — the index must not fail on cleanup
+        structlog.get_logger().warning(
+            "superseded_sweep_failed", doc_id=_batch_label, collection=collection,
+            orphans=len(orphaned), error=str(exc))
+        for doc_id in dropped_by_doc:
+            _record_superseded_sweep_skip(doc_id, collection, "delete_failed")
+        return
+    structlog.get_logger().info(
+        "superseded_vectors_swept_batch", doc_count=len(dropped_by_doc),
+        collection=collection, deleted=len(orphaned), kept_shared=shared,
+        kept_notes=kept_notes)
+    _record_superseded_swept(len(orphaned))
+
+
 def _stamp_index_run_complete(cat, doc_id: str, content_hash: str,
                               chunk_count: int) -> None:
     """Fail-closed completion stamp on the PER-DOC manifest path (nexus-dcv2k).
 
     ``write_manifest_many``'s ``complete`` map (nexus-5xn3k.4) rides the batch
-    POST and is the zero-extra-round-trip form — but it is only reachable when
-    the writer actually exposes ``write_manifest_many``, and the production
-    writer (``_ServiceCatalogWriter``) does NOT: the op is absent from both
-    ``CATALOG_WRITE_OPS`` and ``_SERVICE_ONLY_WRITE_OPS``, so the capability
-    check one frame up is False on every real run and the ride never fires.
-    The per-doc branch below is the path production takes, so the stamp has to
-    land there too or the fence stays ``'indexing'`` forever and every
-    subsequent index re-embeds the document (the .3 three-way reads
-    ``'indexing'`` as stale-definitively, by design).
+    POST and is the zero-extra-round-trip form. Until nexus-67qsd (2026-08-08)
+    it was UNREACHABLE in service mode: ``write_manifest_many`` was absent
+    from both ``CATALOG_WRITE_OPS`` and ``_SERVICE_ONLY_WRITE_OPS``, so the
+    capability check one frame up was False on every real run and the ride
+    never fired — this per-doc branch was the ONLY path production actually
+    took. ``write_manifest_many`` is now whitelisted and IS the hot path for
+    a full-file flush-grain batch (see ``_manifest_write_loop``); this
+    per-doc stamp remains load-bearing belt-and-braces for the paths that
+    still bypass the fast branch — a 404 (pre-v0.1.24 engine), an
+    all-continuation batch, or a writer double lacking the capability — so
+    the fence still lands (never stays ``'indexing'`` forever, forcing every
+    subsequent index to re-embed the document; the .3 three-way reads
+    ``'indexing'`` as stale-definitively, by design) on every path, not only
+    the common one.
 
     Contract parity with ``stampCompleteIfVerified``'s ride, deliberately:
 
@@ -1259,7 +1660,28 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
     # (engine < v0.1.24) or missing capability falls back to the per-doc
     # loop below. Flush-grain batches always carry complete files
     # (position 0 present), matching write_many's replace semantics.
+    #
+    # nexus-tgrgs/jk88j (2026-08-08): this is now the HOT path in service
+    # mode (nexus-67qsd's whitelist add makes write_manifest_many reachable
+    # through the production writer for the first time) — the per-doc loop
+    # below is the fallback (404 / missing capability / continuation
+    # slices), not the common case it was when write_many was dead.
     _warned_partial_claims = False
+    # nexus-39upx round 2 SIGNIFICANT 1: ONE cache per call (per collection),
+    # shared across every doc_id below (both the write_many fast path's
+    # batch sweep and the per-doc fallback loop) — not one catalog-documents
+    # fetch per orphan-triggering document. Hoisted to the top of the
+    # function (nexus-tgrgs) so the fast branch can share it too; cheap to
+    # construct even when nothing ever triggers a sweep — the underlying
+    # fetch is fully lazy (CollectionDocumentsCache.get() is never called
+    # unless something actually has surviving union-guard candidates).
+    from nexus.indexer_utils import CollectionDocumentsCache, live_note_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+
+    _notes_cache = CollectionDocumentsCache(reader, collection or "")
+
+    def _notes_provider() -> set[str]:
+        return live_note_chashes(_notes_cache.get())
+
     if callable(getattr(cat, "write_manifest_many", None)):
         # No len(by_doc) gate (critique Critical, nexus-u2kwq): write_many
         # handles N=1 fine, and single-doc batches MUST take it — the
@@ -1316,6 +1738,32 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
             _complete_map = {
                 d: h for d, h in (manifest_complete or {}).items() if d in _full_ids
             }
+            # nexus-tgrgs/jk88j (2026-08-08): the 39upx sweep's "before" read,
+            # batched via the existing get_manifests (already paged/count-
+            # reconciled client-side — no new engine endpoint needed here;
+            # see the design memo for why a dedicated get_chunk_chashes_many
+            # was considered and found unnecessary). MUST happen before the
+            # write below: it captures what each doc's manifest referenced
+            # PRE-replace. Fail-open per doc — a read failure means that
+            # doc's sweep is skipped, never that the whole batch's write is
+            # blocked (no sweep beats a wrong sweep, but the manifest write
+            # itself is unrelated and must proceed regardless).
+            _before_by_doc: dict[str, set[str]] = {}
+            try:
+                _manifests_before = reader.get_manifests(list(_full_ids)) or {}
+                for _d in _full_ids:
+                    _before_by_doc[_d] = {
+                        row.chash for row in _manifests_before.get(_d, []) if row.chash
+                    }
+            except Exception as _exc:  # noqa: BLE001 — no sweep beats a wrong sweep
+                import structlog  # noqa: PLC0415 — deferred: hot path
+                structlog.get_logger().warning(
+                    "superseded_sweep_before_read_failed",
+                    doc_ids=sorted(_full_ids), collection=collection,
+                    error=str(_exc), path="write_many")
+                for _d in _full_ids:
+                    _before_by_doc[_d] = set()
+                    _record_superseded_sweep_skip(_d, collection, "before_read_failed")
             try:
                 if _complete_map:
                     res = _manifest_write_with_retry(
@@ -1380,6 +1828,41 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
                     )
                     for doc_id in failed:
                         _record_manifest_write_failure(doc_id)
+                # nexus-tgrgs/jk88j (2026-08-08): the 39upx sweep, folded
+                # into the fast branch. Runs only here — after the POST has
+                # returned — because every doc's write has now committed
+                # (or is known-failed, in `failed`). Computing dropped sets
+                # and the batch-wide "still live" union BEFORE any network
+                # read is what closes the intra-batch TOCTOU (design memo
+                # §2b): a chash any doc in this batch currently references —
+                # successes via their NEW manifest, failures via their
+                # UNCHANGED prior manifest (their write did not land, so
+                # `before` is still their truth, not `new`) — is subtracted
+                # before the reverse-lookup ever asks the network, so no
+                # sibling write in this same POST can race the check.
+                _failed_ids = set(failed)
+                _new_by_doc = {
+                    _d: {c["chash"] for c in _chunks if c["chash"]}
+                    for _d, _chunks in full_docs
+                }
+                _live_union: set[str] = set()
+                for _d in _full_ids:
+                    _live_union |= (
+                        _new_by_doc[_d] if _d not in _failed_ids
+                        else _before_by_doc.get(_d, set())
+                    )
+                _dropped_by_doc: dict[str, set[str]] = {}
+                for _d in _full_ids:
+                    if _d in _failed_ids:
+                        continue  # unknown write outcome: no sweep beats a wrong sweep
+                    _dropped = _before_by_doc.get(_d, set()) - _new_by_doc[_d]
+                    _dropped -= _live_union
+                    if _dropped:
+                        _dropped_by_doc[_d] = _dropped
+                if _dropped_by_doc:
+                    _sweep_superseded_vectors_many(
+                        cat, _dropped_by_doc, collection,
+                        reader=reader, notes_provider=_notes_provider)
             except Exception as exc:  # noqa: BLE001 — GH #1371: non-propagating by contract; 404 falls back per-doc, anything else is recorded+swallowed here
                 status = getattr(
                     getattr(exc, "response", None), "status_code", None
@@ -1414,19 +1897,9 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
             return
     from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred (leaf module, avoid import cost on the no-op path)
 
-    # nexus-39upx round 2 SIGNIFICANT 1: ONE cache per call (per collection),
-    # shared across every doc_id below — not one catalog-documents fetch per
-    # orphan-triggering document. Cheap to construct even when this batch
-    # never triggers a sweep at all: the underlying fetch is fully lazy
-    # (CollectionDocumentsCache.get() is never called unless a document in
-    # this batch actually has surviving union-guard candidates to check).
-    from nexus.indexer_utils import CollectionDocumentsCache, live_note_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
-
-    _notes_cache = CollectionDocumentsCache(reader, collection or "")
-
-    def _notes_provider() -> set[str]:
-        return live_note_chashes(_notes_cache.get())
-
+    # (_notes_cache / _notes_provider constructed once, at the top of this
+    # function — nexus-tgrgs hoisted them so the write_many fast branch's
+    # batch sweep above shares the same memoized cache.)
     for doc_id, indexed_metas in by_doc.items():
         chunks = _manifest_chunk_rows(indexed_metas)
         if all(not c["chash"] for c in chunks):
@@ -1481,12 +1954,16 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
                 if callable(_resync):
                     _manifest_write_with_retry(_resync, doc_id)
                 # nexus-dcv2k (RUNFENCE .4 regression): the completion stamp
-                # rides write_manifest_many — which the production writer does
-                # not expose, so on every real run control reaches HERE with the
-                # claim unstamped. Stamp after the rows, the sweep and the
-                # chunk_count resync have settled: the engine's verify reads the
-                # manifest this doc just wrote. Position-0 only — a continuation
-                # slice is not a whole document (handled in the else branch).
+                # normally rides write_manifest_many's `complete` map — but a
+                # doc that reached THIS per-doc branch (404 fallback,
+                # capability-less writer, or a continuation slice claimed
+                # complete in error) never went through that POST, so it
+                # would land here unstamped if this fallback did not stamp
+                # it too. Stamp after the rows, the sweep and the
+                # chunk_count resync have settled: the engine's verify reads
+                # the manifest this doc just wrote. Position-0 only — a
+                # continuation slice is not a whole document (handled in the
+                # else branch).
                 _claimed_hash = (manifest_complete or {}).get(doc_id)
                 if _claimed_hash:
                     _stamp_index_run_complete(
@@ -1673,6 +2150,10 @@ def reset_singletons():
         if _service_t2_db is not None:
             _service_t2_db.close()
         _service_t2_db = None
+        # nexus-0dpli: a test that left in-flight refcount bookkeeping
+        # behind must not leak into the next test's assertions.
+        _service_t2_refcounts.clear()
+        _service_t2_pending_close.clear()
     clear_search_traces()
     reset_plan_cache_for_tests()
     # nexus-5en9j: also reset the shared SERVICE-mode catalog client singleton

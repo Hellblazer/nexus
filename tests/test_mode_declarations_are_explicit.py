@@ -282,7 +282,30 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 58
 # client-embedding leg); the voyage-code-3 string it still references is a
 # fabricated metadata literal for a seeded fake chunk, never a real
 # embedder call. Rationale in conftest.py beside the entry.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 37
+# 37 -> 39 (nexus-wxjr6, 2026-08-09): +2, test_manifest_write_many.py::
+# TestWriteManifestManyCombined::{test_combined_wire_shape,
+# test_ack_echo_raises_when_chunks_written_absent} — reason
+# "string-literal-as-name". Both assert the kl2z6 combined-write request
+# body carries a conformant collection-name string verbatim against a
+# monkeypatched `_post`; no embedder runs. Rationale in conftest.py beside
+# the entries.
+# 39 -> 40 (nexus-wxjr6, 2026-08-09, code review Important I1 follow-up):
+# +1, test_indexer_seam_b_cutover.py::test_run_index_batch_flush_retries_
+# transient_failure_then_succeeds — reason "string-literal-as-name", same
+# class as the two pre-existing force_re_embed siblings in the same file.
+# Missed in the I1 commit because the full suite ran BEFORE the mode-lint
+# census saw this specific new test (a targeted battery run doesn't
+# collect the whole session, so this lint's `request.session.items` census
+# is blind to it until a full run — see the module docstring). Rationale
+# in conftest.py beside the entry.
+# 40 -> 41 (nexus-3mwuo, 2026-08-09, C1-residual from the wxjr6 delta
+# re-review, T2 review-wxjr6-client-2026-08-09 [22014]): +1,
+# test_indexer_seam_b_cutover.py::test_run_index_batch_flush_shared_chash_
+# orphan_copy_survives_identity_doc_failure — same "string-literal-as-name"
+# class as the I1 sibling immediately above, same file, same blind spot
+# (a targeted battery run doesn't collect the whole session). Rationale in
+# conftest.py beside the entry.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 41
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

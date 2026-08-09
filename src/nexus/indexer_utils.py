@@ -1019,13 +1019,33 @@ def resolve_index_concurrency() -> int:
     opt-out.
 
     The gate deliberately does NOT check the T2 "memory" backend
-    (chash/taxonomy/aspect-queue writes): those routes only run inside
-    the hook chains, which ``LockedHookRegistry`` serializes whenever
-    concurrency > 1 — the lock, not this gate, is what makes a diverging
-    memory backend safe (critique finding, nexus-cfc72). Narrowing the
-    hook lock requires extending this gate. The local bge embedder is
-    also concurrency-safe: onnxruntime ``InferenceSession.run`` supports
-    concurrent calls on a shared session.
+    (chash/taxonomy/aspect-queue writes). CORRECTION (nexus-eslkl design
+    memo, 2026-08-08): the original rationale here — a diverging direct-
+    SQLite T2 backend that only ``LockedHookRegistry``'s process-wide lock
+    made safe — is dead code-provably. ``storage_backend_for()``
+    (``db/storage_mode.py``) has resolved to exactly one backend
+    (``StorageBackend.SERVICE``) since RDR-158 P3 (nexus-7bomn); a
+    ``=sqlite`` opt-out now fails loud with a stranded-install redirect
+    instead of selecting a divergent backend, so no supported
+    configuration can produce the hazard this gate was once extended for.
+    Every T2 write from every hook already goes through
+    ``mcp_infra._service_t2_lock`` regardless of this gate or the hook
+    lock, which is what actually protects the shared T2 client's
+    lifecycle. The real remaining constraint on narrowing
+    ``LockedHookRegistry`` is a DIFFERENT, still-live hazard: the manifest
+    hook's superseded-vector sweep did a client-side read-then-write-then-
+    read sequence across the catalog that a concurrent flush could race
+    (nexus-39upx TOCTOU). nexus-tgrgs/jk88j (2026-08-08) closed the
+    intra-batch instance of that race by deferring every sweep decision
+    until an entire flush-grain batch's ``write_manifest_many`` POST has
+    returned; the cross-FIRE instance (two *different* flush-grain hook
+    fires racing each other) remains open and is why flush-grain fires
+    still need ``LockedHookRegistry`` (or an equivalent per-chain lock) as
+    of this writing — see nexus-eslkl. This gate does not need extending
+    for that hazard: it is a hook-serialization question, not a
+    concurrency-safety-of-this-loop question. The local bge embedder is
+    concurrency-safe regardless: onnxruntime ``InferenceSession.run``
+    supports concurrent calls on a shared session.
     """
     import os  # noqa: PLC0415 — leaf module keeps import surface minimal
 

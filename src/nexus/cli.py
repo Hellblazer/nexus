@@ -63,6 +63,7 @@ from nexus.commands.scratch import scratch
 from nexus.commands.search_cmd import search_cmd
 from nexus.commands.service_cmd import service
 from nexus.commands.store import store
+from nexus.commands.stranded_cmd import stranded_group
 from nexus.commands.t3 import t3 as t3_group
 from nexus.commands.taxonomy_cmd import taxonomy
 from nexus.commands.tenant_cmd import tenant
@@ -173,6 +174,7 @@ main.add_command(scratch)
 main.add_command(search_cmd, name="search")
 main.add_command(service, name="service")
 main.add_command(store)
+main.add_command(stranded_group, name="stranded")
 main.add_command(t3_group, name="t3")
 main.add_command(taxonomy)
 main.add_command(tenant, name="tenant")

@@ -301,6 +301,78 @@ class MemoryHandlerTest {
         assertThat(entries.get(0).get("title")).isEqualTo("searchable");
     }
 
+    /**
+     * nexus-senub, HTTP-level: a query made entirely of English stopwords
+     * must surface as a 400 with a named reason through the endpoint, not a
+     * 200 with an empty JSON array indistinguishable from a genuine no-match.
+     * Seeds a row that literally contains the word, so the 400 cannot be
+     * blamed on a coincidentally empty corpus.
+     */
+    @Test
+    void search_stopwordOnlyQuery_returns400WithNamedReason() throws Exception {
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"search-stopword-proj\",\"title\":\"operators.md\",\"content\":\"clause and clause\",\"ttl\":30}");
+
+        var resp = post("/v1/memory/search", TENANT,
+            "{\"query\":\"and\",\"project\":\"search-stopword-proj\"}");
+        assertThat(resp.statusCode())
+            .as("a stopword-only query must 400, not 200-with-[]")
+            .isEqualTo(400);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat((String) body.get("error"))
+            .as("the error must name the offending query, matching the "
+                + "retired SQLite arm's ValueError contract in spirit")
+            .contains("and");
+        assertThat((String) body.get("code"))
+            .as("critic follow-up (nexus-senub review): the degenerate-query "
+                + "400 must carry a distinct machine-readable 'code' so the "
+                + "client can discriminate it from requireString's generic "
+                + "missing/blank-field 400 — same {\"error\":...} shape "
+                + "otherwise. Same house convention as CatalogHandler's "
+                + "'dangling_endpoint' code (nexus-9ssih).")
+            .isEqualTo("no_searchable_terms");
+    }
+
+    /**
+     * critic follow-up (nexus-senub review): a DIFFERENT 400 class from the
+     * SAME endpoint (a missing required field, via requireString) must NOT
+     * carry the degenerate-query 'code' — pins the discriminator in both
+     * directions, not just the positive case above.
+     */
+    @Test
+    void search_missingQueryField_returns400WithoutDegenerateQueryCode() throws Exception {
+        var resp = post("/v1/memory/search", TENANT,
+            "{\"project\":\"search-missing-field-proj\"}");
+        assertThat(resp.statusCode()).isEqualTo(400);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat((String) body.get("error")).contains("query");
+        assertThat(body.get("code"))
+            .as("a plain missing-field 400 must NOT carry "
+                + "'no_searchable_terms' — a client keying ValueError "
+                + "conversion on that code must never mislabel this as a "
+                + "degenerate-query rejection (the exact ambiguity this "
+                + "bead eliminates)")
+            .isNotEqualTo("no_searchable_terms");
+    }
+
+    /**
+     * NON-VACUITY companion: a real query against the same corpus still 200s
+     * with the match — the 400 above is the stopword reduction, not the
+     * endpoint being broken generally.
+     */
+    @Test
+    void search_realQuery_stillReturns200_afterStopwordGuardAdded() throws Exception {
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"search-stopword-control-proj\",\"title\":\"operators.md\",\"content\":\"clause and clause\",\"ttl\":30}");
+
+        var resp = post("/v1/memory/search", TENANT,
+            "{\"query\":\"clause\",\"project\":\"search-stopword-control-proj\"}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var entries = mapper.readValue(resp.body(), LIST_T);
+        assertThat(entries).isNotEmpty();
+        assertThat(entries.get(0).get("title")).isEqualTo("operators.md");
+    }
+
     // ── Test 6: LIST ──────────────────────────────────────────────────────────
 
     @Test

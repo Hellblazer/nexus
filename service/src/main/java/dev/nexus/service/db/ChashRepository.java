@@ -233,6 +233,24 @@ public final class ChashRepository {
             throw new IllegalArgumentException("old and new collection must not be empty");
         }
         int updated = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-11gh6 (post-review, T2 nexus/review-11gh6-gate-2026-08-08
+            // [21797] Important finding): this method is a SECOND,
+            // independently-reachable (via /v1/chash/*) implementation of the
+            // same re-home mutation CatalogRepository.renameCollectionTxn
+            // already gates — it bulk-UPDATEs chunks_<dim>.collection AND
+            // catalog_document_chunks.collection from oldCollection to
+            // newCollection below, which is functionally the same hazard
+            // class as a manifest INSERT: it can make a chash appear
+            // referenced in newCollection's scope (or vanish from
+            // oldCollection's) while a concurrent sweep of either collection
+            // is mid-guard. Gate BOTH endpoints SHARED, sorted alphabetically
+            // exactly like renameCollectionTxn, so two concurrent renames
+            // sharing an endpoint acquire in one consistent global order (no
+            // lock-order deadlock between the two implementations either,
+            // since both sort the same two-element set the same way).
+            for (String c : java.util.stream.Stream.of(oldCollection, newCollection).sorted().distinct().toList()) {
+                CatalogRepository.acquireSweepGateShared(ctx, tenant, c);
+            }
             ensureCollectionRegistered(ctx, tenant, newCollection);
             int total = 0;
             for (int dim : DIMS) {

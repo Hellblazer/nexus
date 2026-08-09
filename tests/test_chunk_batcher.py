@@ -30,10 +30,15 @@ class Recorder:
         self.completed: list[str] = []
         self.contexts: list[tuple[str, object]] = []
         self.failed: list[tuple[str, str]] = []
+        #: nexus-wxjr6: file_contexts as received by flush(), one entry
+        #: per flush call — lets tests assert it matches what
+        #: on_batch_begin/on_batch_complete see for the SAME flush.
+        self.flush_file_contexts: list[list] = []
 
-    def flush(self, collection: str, ids: list[str], docs: list[str], metas: list[dict]) -> None:
+    def flush(self, collection: str, ids: list[str], docs: list[str], metas: list[dict], file_contexts: list | None = None) -> None:
         idx = len(self.calls)
         self.calls.append((collection, list(ids)))
+        self.flush_file_contexts.append(list(file_contexts or []))
         if idx in self.fail_batches:
             raise RuntimeError(f"flush {idx} boom")
 
@@ -109,6 +114,52 @@ class TestFlushTriggers:
             assert all(i.startswith(prefix) for i in ids)
 
 
+class TestFlushReceivesFileContexts:
+    """nexus-wxjr6: flush() now receives file_contexts as its 5th arg —
+    the SAME (path, context) pairs on_batch_begin/on_batch_complete
+    already see, threaded into the flush closure itself so a
+    combined-write flush fn can build per-doc manifest rows in the same
+    call that uploads chunk content (design memo §2 client-side flush
+    restructure)."""
+
+    def test_flush_file_contexts_matches_on_batch_begin_and_complete(self) -> None:
+        begin_seen: list = []
+        complete_seen: list = []
+        rec = Recorder()
+        b = ChunkBatcher(
+            flush=rec.flush,
+            on_file_complete=rec.on_complete,
+            on_batch_begin=lambda coll, fcs: begin_seen.append(list(fcs)),
+            on_batch_complete=lambda coll, ids, docs, metas, fcs: complete_seen.append(list(fcs)),
+            max_chunks=10,
+        )
+        b.add("a.py", "code__x", *_mk(4, "a"), context={"catalog_doc_id": "1.1"})
+        b.add("b.py", "code__x", *_mk(4, "b"), context={"catalog_doc_id": "1.2"})
+        b.drain()
+        assert len(rec.flush_file_contexts) == 1
+        flushed = rec.flush_file_contexts[0]
+        paths = sorted(p for p, _ in flushed)
+        assert paths == ["a.py", "b.py"]
+        contexts = {p: c for p, c in flushed}
+        assert contexts["a.py"] == {"catalog_doc_id": "1.1"}
+        assert contexts["b.py"] == {"catalog_doc_id": "1.2"}
+        # Same shape (not necessarily same list identity) as the
+        # begin/complete callbacks for this exact flush.
+        assert sorted(p for p, _ in begin_seen[0]) == paths
+        assert sorted(p for p, _ in complete_seen[0]) == paths
+
+    def test_empty_file_contexts_when_no_context_supplied(self) -> None:
+        rec = Recorder()
+        b = _batcher(rec, max_chunks=5)
+        b.add("a.py", "code__x", *_mk(5, "a"))  # no context= kwarg
+        b.drain()
+        assert len(rec.flush_file_contexts) == 1
+        # file_contexts is still populated (path, None) — add() always
+        # records SOME context (default None), never drops the file
+        # entirely from the list.
+        assert [p for p, _ in rec.flush_file_contexts[0]] == ["a.py"]
+
+
 class TestCompletionAttribution:
     def test_file_completes_when_last_batch_lands(self) -> None:
         rec = Recorder()
@@ -147,7 +198,7 @@ class TestCompletionAttribution:
 
     def test_persistently_failing_single_file_batch_fails_that_file(self) -> None:
         class AlwaysFail(Recorder):
-            def flush(self, collection, ids, docs, metas):
+            def flush(self, collection, ids, docs, metas, file_contexts=None):
                 self.calls.append((collection, list(ids)))
                 raise RuntimeError("boom")
         rec = AlwaysFail()
@@ -163,7 +214,7 @@ class TestCompletionAttribution:
         # half retries -- a too-big-for-gateway batch self-tunes down,
         # and a genuinely poisoned file is isolated to itself.
         class BisectRec(Recorder):
-            def flush(self, collection, ids, docs, metas):
+            def flush(self, collection, ids, docs, metas, file_contexts=None):
                 self.calls.append((collection, list(ids)))
                 if any(i.startswith("bad") for i in ids):
                     raise RuntimeError("poison")
@@ -312,7 +363,7 @@ class TestBatchCompleteCallback:
 
     def test_not_fired_for_failed_flush(self) -> None:
         class AlwaysFail(Recorder):
-            def flush(self, collection, ids, docs, metas):
+            def flush(self, collection, ids, docs, metas, file_contexts=None):
                 self.calls.append((collection, list(ids)))
                 raise RuntimeError("boom")
         rec = AlwaysFail()
@@ -329,7 +380,7 @@ class TestBatchCompleteCallback:
 
     def test_bisected_halves_fire_batch_complete_each(self) -> None:
         class FailFirst(Recorder):
-            def flush(self, collection, ids, docs, metas):
+            def flush(self, collection, ids, docs, metas, file_contexts=None):
                 idx = len(self.calls)
                 self.calls.append((collection, list(ids)))
                 if idx == 0:
@@ -358,7 +409,7 @@ class TestConcurrentFlushes:
         peak = [0]
         lock = _t.Lock()
 
-        def slow_flush(collection, ids, docs, metas):
+        def slow_flush(collection, ids, docs, metas, file_contexts=None):
             with lock:
                 active.append(1)
                 peak[0] = max(peak[0], len(active))
@@ -377,7 +428,7 @@ class TestConcurrentFlushes:
         import time as _time
         completed: list[str] = []
 
-        def slow_flush(collection, ids, docs, metas):
+        def slow_flush(collection, ids, docs, metas, file_contexts=None):
             _time.sleep(0.02)
 
         b = ChunkBatcher(
@@ -419,7 +470,7 @@ class TestDrainProgress:
 
         gate = _t.Event()
 
-        def gated_flush(collection, ids, docs, metas):
+        def gated_flush(collection, ids, docs, metas, file_contexts=None):
             gate.wait(5.0)
 
         b = ChunkBatcher(flush=gated_flush, max_chunks=5, flush_concurrency=3)
@@ -450,7 +501,7 @@ class TestDrainProgress:
         # dispatch time and in_flight counts not-done only.
         import time as _time
 
-        def quick_flush(collection, ids, docs, metas):
+        def quick_flush(collection, ids, docs, metas, file_contexts=None):
             pass
 
         b = ChunkBatcher(flush=quick_flush, max_chunks=5, flush_concurrency=3)
@@ -523,7 +574,7 @@ class TestFlushInstrumentation:
 
         rec = Recorder()
 
-        def slow_flush(collection, ids, docs, metas):
+        def slow_flush(collection, ids, docs, metas, file_contexts=None):
             _time.sleep(0.02)
 
         b = ChunkBatcher(
@@ -561,7 +612,7 @@ class TestFlushInstrumentation:
 
         rec = Recorder()
 
-        def quick_flush(collection, ids, docs, metas):
+        def quick_flush(collection, ids, docs, metas, file_contexts=None):
             pass
 
         b = ChunkBatcher(
@@ -590,7 +641,7 @@ class TestFlushInstrumentation:
 
         rec = Recorder()
 
-        def quick_flush(collection, ids, docs, metas):
+        def quick_flush(collection, ids, docs, metas, file_contexts=None):
             pass
 
         b = ChunkBatcher(
@@ -616,7 +667,7 @@ class TestFlushInstrumentation:
 
         calls = {"n": 0}
 
-        def flaky_flush(collection, ids, docs, metas):
+        def flaky_flush(collection, ids, docs, metas, file_contexts=None):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("boom")
@@ -655,7 +706,7 @@ class TestFlushInstrumentation:
 
         rec = Recorder()
 
-        def quick_flush(collection, ids, docs, metas):
+        def quick_flush(collection, ids, docs, metas, file_contexts=None):
             pass
 
         orig_settle = _CB._settle_file_locked
@@ -685,12 +736,16 @@ class TestFlushInstrumentation:
 
     def test_partition_sums_to_wall_within_epsilon(self) -> None:
         """The exact test the critic's probe sketches: inject a distinct,
-        recognizable delay into EACH of the four attributed phases
-        (upload, flush_hook, settle, file_hook) and assert
-        upload_s + flush_hook_s + settle_s + file_hook_s reconstructs the
-        real wall clock of the flush within a small epsilon — the
-        partition-completeness check that would have caught both the
-        original G3 gap and this round's settle-bookkeeping recurrence."""
+        recognizable delay into EACH of the attributed phases
+        (begin_hook, upload, flush_hook, settle, file_hook) and assert
+        they reconstruct the real wall clock of the flush within a small
+        epsilon — the partition-completeness check that would have caught
+        the original G3 gap, this round's settle-bookkeeping recurrence,
+        and (nexus-jb4pp) the on_batch_begin gap that vw594 F1 opened by
+        inserting a round trip ahead of the upload timer. That last one
+        slipped through precisely because this test left on_batch_begin
+        at its no-op default, so the missing phase cost 0.0s here while
+        costing ~0.4s per flush in production."""
         import time as _time
         import unittest.mock as mock
 
@@ -701,7 +756,7 @@ class TestFlushInstrumentation:
         rec = Recorder()
         DELAY = 0.03
 
-        def slow_flush(collection, ids, docs, metas):
+        def slow_flush(collection, ids, docs, metas, file_contexts=None):
             _time.sleep(DELAY)
 
         def slow_on_complete(path, context=None):
@@ -719,6 +774,7 @@ class TestFlushInstrumentation:
             on_file_complete=slow_on_complete,
             on_file_failed=rec.on_failed,
             on_batch_complete=lambda *a: _time.sleep(DELAY),
+            on_batch_begin=lambda *a: _time.sleep(DELAY),
             max_chunks=100,
         )
         b.add("a.py", "code__x", *_mk(2, "a"))  # single file, single flush
@@ -730,11 +786,18 @@ class TestFlushInstrumentation:
                 wall = _time.monotonic() - wall_t0
 
         e = next(l for l in logs if l["event"] == "chunk_flush_complete")
-        total = e["upload_s"] + e["flush_hook_s"] + e["settle_s"] + e["file_hook_s"]
+        phases = ("begin_hook_s", "upload_s", "flush_hook_s", "settle_s",
+                  "file_hook_s")
+        total = sum(e[k] for k in phases)
         # Each phase carries its own DELAY; a real attribution gap would
         # show up as total < wall by roughly one DELAY (0.03s) or more —
         # epsilon well under that so a reintroduced gap still fails loud.
         assert total == pytest.approx(wall, abs=0.05), (
             f"total={total} wall={wall} — a phase is unattributed again"
         )
-        assert min(e["upload_s"], e["flush_hook_s"], e["settle_s"], e["file_hook_s"]) >= DELAY * 0.5
+        assert min(e[k] for k in phases) >= DELAY * 0.5
+        # ...and the batcher's own cumulative counter must agree, so the
+        # end-of-run report cannot drift from the per-flush event.
+        assert b.stats["flush_seconds"] == pytest.approx(wall, abs=0.05)
+        # abs=1e-3: the event rounds to 3dp, the counter does not.
+        assert b.stats["begin_hook_seconds"] == pytest.approx(e["begin_hook_s"], abs=1e-3)

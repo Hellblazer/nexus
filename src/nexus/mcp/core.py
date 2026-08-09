@@ -3788,11 +3788,16 @@ def memory_delete(project: str, title: str) -> str:
 def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 0) -> str:
     """Full-text search across T2 memory entries.
 
-    Searches title, content, and tags fields via FTS5.
+    Searches title, content, and tags fields via the engine's PostgreSQL
+    full-text search (SQLite/FTS5 is retired — RDR-158 P4). Plain natural-
+    language text, not a query grammar: there are no operators to learn.
     Results are paged. Use offset to retrieve subsequent pages.
 
     Args:
-        query: Search query (FTS5 syntax — matches tokens in title, content, and tags)
+        query: Search query (plain text — matches tokens in title, content,
+            and tags; a query made entirely of English stopwords, e.g.
+            "and", finds nothing in content specifically and is reported as
+            an error rather than a silent empty result, nexus-senub)
         project: Optional project filter
         limit: Page size (default 20)
         offset: Skip this many results (default 0). Use for pagination.

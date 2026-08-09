@@ -570,6 +570,78 @@ def catalog_path() -> Path:
     return nexus_config_dir() / "catalog"
 
 
+#: nexus-4922x: the historical ladder rung name that recorded the pre-PG
+#: data migration at the pinned last-migration-capable release
+#: (``stranded_install.LAST_MIGRATION_CAPABLE``, currently ``6.18.1``).
+#: ``RUNG_SUBSTRATE_ETL`` was deleted from ``upgrade_ladder.registry`` at
+#: RDR-155 P4b (the rung no longer WALKS on the current release), but the
+#: completion FACT it recorded is engine-side (``nexus.ladder_completions``
+#: via ``HttpLadderStore``, RDR-186 .12) and OUTLIVES the client package
+#: version: the SAME local PG database serves both the pin and the current
+#: release across a package-only up/downgrade, so a verified row survives
+#: hop 3. Hardcoded (not imported) because the registry constant naming it
+#: is gone — this string is frozen historical fact, not a live symbol.
+_MIGRATION_RUNG_NAME = "substrate-etl"
+
+#: nexus-4922x code-review [22008] Important: this probe runs at CLI
+#: STARTUP for every box that ever carried pre-PG artifacts (bounded
+#: population, but every invocation of theirs). ``HttpLadderStore``'s
+#: default (``RefreshableHttpStoreMixin._DEFAULT_TIMEOUT_S`` = 30.0s, with
+#: up to ~2x that on a self-heal retry) is sized for a foreground data
+#: operation, not a best-effort startup diagnostic — a resolvable-but-
+#: unresponsive engine would hang CLI startup for up to ~60s. Every
+#: comparable best-effort diagnostic probe in ``health.py`` uses a short
+#: explicit timeout (2.0-5.0s); 3.0s matches that convention.
+_LADDER_PROBE_TIMEOUT_S = 3.0
+
+
+def _ladder_migration_verified() -> bool | None:
+    """nexus-4922x: query the engine-side upgrade-ladder for a verified
+    record of the pre-PG data migration — the signal the CURRENT two-hop
+    remedy (``nx upgrade`` at the pin) actually produces, replacing the
+    legacy ``<config>/migration-reports/*.json`` format that neither ``nx
+    upgrade`` (the ladder) nor the hidden ``nx guided-upgrade`` writes any
+    more (see ``stranded_install._has_verified_migration_report``'s
+    docstring for the full trace — only the separate, unadvertised ``nx
+    storage migrate*`` family writes that format).
+
+    Returns ``True`` when the rung is present and verified: the caller
+    de-strands. Returns ``None`` on ANY failure to reach or query the
+    engine — unresolvable endpoint, connection error, HTTP error, timeout,
+    or any other exception — and on the ordinary "rung not recorded" case.
+    Deliberate fail-CLOSED degradation (no silent fallbacks for
+    correctness decisions): an unreachable engine is the EXPECTED state at
+    ``nx init`` time on a genuinely stranded box (nothing has been
+    provisioned yet), so treating "can't tell" as "verified" would
+    silently de-strand a box that was never migrated at all. The caller
+    (:func:`nexus.stranded_install.detect_stranded_install`) treats
+    ``None`` the same as ``False`` — stay stranded — and this function
+    logs a structured warning so the degradation is LOUD, not silent, even
+    though it never raises: a raise here would crash the UNWRAPPED ``nx
+    init`` call site (deliberately not try/except'd — see
+    ``commands/init.py``), which must abort loud only on a genuine
+    detector bug, never on the ordinary "engine isn't up yet" case.
+
+    ``timeout=_LADDER_PROBE_TIMEOUT_S`` (nexus-4922x review [22008]): a
+    SHORT explicit timeout — ``httpx.Client(timeout=<float>)`` applies a
+    scalar uniformly to connect/read/write/pool, so this bounds BOTH the
+    connect and the read/response phases, not just one. Without it,
+    ``RefreshableHttpStoreMixin``'s 30.0s default (sized for a foreground
+    data operation) would let a resolvable-but-unresponsive engine hang
+    this best-effort startup diagnostic for up to ~60s with the mixin's
+    self-heal retry — every comparable probe in ``health.py`` uses 2-5s.
+    """
+    try:
+        from nexus.upgrade_ladder.http_store import HttpLadderStore  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+        with HttpLadderStore(timeout=_LADDER_PROBE_TIMEOUT_S) as store:
+            verified = store.verified_rungs()
+    except Exception as exc:  # noqa: BLE001 — engine-down/unresolvable is the EXPECTED case at nx init time; must degrade, never raise or crash the caller
+        _log.warning("stranded_install_ladder_check_unreachable", error=str(exc))
+        return None
+    return _MIGRATION_RUNG_NAME in verified
+
+
 def detect_stranded_install_default() -> "StrandedInstall | None":
     """Run the stranded-install detector (nexus-gynt2) against the real
     path roots: config dir, local Chroma dir, catalog dir.
@@ -578,7 +650,8 @@ def detect_stranded_install_default() -> "StrandedInstall | None":
     startup, ``nx doctor``) calls, so the path-resolution knowledge stays
     here with the resolvers. Near-zero cost while the detector is
     disarmed (``stranded_install.LAST_MIGRATION_CAPABLE is None``): the
-    leaf short-circuits before touching the filesystem.
+    leaf short-circuits before touching the filesystem, and
+    ``_ladder_migration_verified`` (network) is never even referenced.
 
     SCOPE CONSISTENCY (nexus-rjod2, found at the 7.0.0 gate where it
     reddened 60 tests + two E2E legs): every probed root must resolve
@@ -591,17 +664,108 @@ def detect_stranded_install_default() -> "StrandedInstall | None":
     override the probe anchors at ``<override>/chroma``; a sandbox that
     wants to exercise detection seeds that path or sets
     ``NX_LOCAL_CHROMA_PATH`` explicitly.
+
+    PRIMARY de-strand signal (nexus-4922x), GATED to ``is_local_mode()``
+    (nexus-cmtpa, critique [22009] Critical): ``_ladder_migration_verified``
+    is wired in as ``detect_stranded_install``'s ``ladder_migration_verified``
+    probe ONLY in local mode. It only ever runs when pre-PG artifacts are
+    actually present on disk (``detect_stranded_install`` short-circuits
+    before it otherwise), so the added network round-trip is bounded to the
+    rare once-stranded LOCAL population, not every CLI invocation on a
+    healthy box.
+
+    WHY THE GATE (empirically investigated, not assumed): the engine-side
+    completion row is keyed ``(tenant_id, rung_name)`` ONLY — see
+    ``service/src/main/resources/db/changelog/ladder-001-baseline.xml``'s
+    ``ladder_completions`` table — with NO machine/host/config-dir identity.
+    In LOCAL mode there is exactly one bundled PG per install, so
+    "verified for this tenant" and "verified for this machine" coincide by
+    construction (the module docstring's "same local PG serves both pin
+    and current release" claim). In MANAGED/cloud mode, the SAME tenant can
+    be shared across multiple machines pointed at the SAME remote engine —
+    machine A migrating would flip the tenant-wide row, and an ungated
+    check would falsely de-strand machine B's own, distinct, genuinely
+    unmigrated local pre-PG files. This is NOT a hypothetical the fix can
+    paper over: it is exactly the silent-data-loss class the detector
+    exists to prevent, just shifted from "no signal" to "the WRONG signal".
+
+    NOT A DEAD END for cloud users, verified against the v6.18.1 pin's own
+    ``upgrade_ladder/rungs/substrate_etl.py``: ``SubstrateEtlRung.detect()``
+    classifies the LOCAL Chroma footprint via ``self._plan()`` — it does
+    NOT trust the tenant-wide completion row to decide "nothing to do".
+    ``LadderRunner._run_rung`` only short-circuits to ALREADY_RECORDED when
+    BOTH ``detect()`` says locally-converged AND the store has the rung —
+    machine B's own unmigrated files make ``detect()`` return
+    ``converged=False`` regardless of A's completion row, so ``nx upgrade``
+    at the pin on machine B still genuinely re-migrates B's own data (an
+    idempotent re-upsert of the same tenant-wide row, harmless). The
+    two-hop remedy itself is sound in cloud mode; only THIS detector's
+    de-strand SIGNAL was unsafe to trust there.
+
+    SCOPE OF THIS FIX, STATED HONESTLY: gating to ``is_local_mode()`` means
+    cloud/managed-mode installs fall back to EXACTLY the pre-nexus-4922x
+    behavior (the legacy ``_has_verified_migration_report`` file check
+    only) — i.e. the ORIGINAL nexus-4922x infinite-hop-3-loop bug remains
+    UNFIXED for cloud-mode users. nexus-4922x's own empirical proof (the
+    ``--stranded`` rehearsal) only ever exercised LOCAL mode (bundled PG at
+    the pin), so this gate aligns the fix's claimed scope with what was
+    actually tested rather than overclaiming a cloud-mode fix that was
+    never verified.
+
+    UPDATE (nexus-cmtpa, Hal decision 2026-08-09): the cloud-mode signal
+    ships in THIS function, not deferred — ``check_local_ack`` (below)
+    replaces the legacy-report-only fallback with an explicit consented
+    marker.
+
+    CLOUD-MODE primary signal (nexus-cmtpa): ``check_local_ack=True``
+    when NOT local mode — trusts a matching ``nx stranded ack`` consent
+    marker (:func:`nexus.stranded_install.write_ack_marker` /
+    :func:`nexus.stranded_install._has_matching_ack`), a LOCAL,
+    machine-scoped, EXPLICITLY CONSENTED signal independent of the
+    tenant-shared engine. Mutually exclusive with the ladder probe by
+    construction here (exactly one of ``ladder_probe`` /
+    ``check_local_ack`` is active, keyed on the same ``is_local_mode()``
+    read) — local mode keeps the stronger, engine-VERIFIED ladder signal
+    undiluted by a weaker self-attested one; cloud mode gets the
+    consent-marker escape instead of being stranded forever.
+    """
+    config_dir, chroma_dir, catalog_dir = _resolve_stranded_paths()
+    # nexus-cmtpa: the tenant-scoped ladder signal is sound ONLY when this
+    # install owns its own PG (local mode). Cloud/managed mode gets the
+    # consented local ack-marker signal instead -- see the docstring above.
+    local = is_local_mode()
+    ladder_probe = _ladder_migration_verified if local else None
+    from nexus.stranded_install import detect_stranded_install  # noqa: PLC0415 — leaf module, deferred to keep config import-light
+
+    return detect_stranded_install(
+        config_dir, chroma_dir, catalog_dir,
+        ladder_migration_verified=ladder_probe,
+        check_local_ack=not local,
+    )
+
+
+def _resolve_stranded_paths() -> tuple[Path, Path, Path]:
+    """The three path roots the stranded-install detector probes: config
+    dir, local Chroma dir, catalog dir.
+
+    Factored out of :func:`detect_stranded_install_default` (nexus-cmtpa)
+    so ``nx stranded ack`` (:mod:`nexus.commands.stranded_cmd`) resolves
+    the IDENTICAL roots detection uses -- the same nexus-rjod2 scope-
+    consistency contract applies to both: an ack computed against a
+    different scope than detection probes would fingerprint the wrong
+    files entirely. See :func:`detect_stranded_install_default`'s SCOPE
+    CONSISTENCY note for the override precedence this mirrors exactly.
     """
     import os  # noqa: PLC0415 — stdlib, branch-local
 
-    from nexus.stranded_install import detect_stranded_install, legacy_chroma_dir  # noqa: PLC0415 — leaf module, deferred to keep config import-light
+    from nexus.stranded_install import legacy_chroma_dir  # noqa: PLC0415 — leaf module, deferred to keep config import-light
 
     config_dir = nexus_config_dir()
     if os.environ.get("NX_LOCAL_CHROMA_PATH") or not os.environ.get("NEXUS_CONFIG_DIR"):
         chroma_dir = legacy_chroma_dir()
     else:
         chroma_dir = config_dir / "chroma"
-    return detect_stranded_install(config_dir, chroma_dir, catalog_path())
+    return config_dir, chroma_dir, catalog_path()
 
 
 def is_local_mode() -> bool:

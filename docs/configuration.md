@@ -351,6 +351,7 @@ If no marker file is found and no command is configured, the test check is skipp
 | `~/.config/nexus/sessions/` | JSON session records (T1 server address, session ID, `created_at`, `tmpdir`) + `session.lock` |
 | `~/.config/nexus/index.log` | Background indexing log (written by git hooks) |
 | `~/.config/nexus/cli_lockstep_marker` | Last CLI version confirmed in lockstep with the plugin (RDR-143). Written by the version-lockstep SessionStart hook only after a confirmed upgrade; absence or a stale value triggers a re-nudge next session. |
+| `~/.config/nexus/lockstep.log` | Durable, always-on (never gated behind `NX_HOOK_DEBUG`) append-only log of every RDR-143 lockstep venv-swap attempt — one `lockstep_upgrade_started` line and one `lockstep_upgrade_result` line (outcome: `success` / `uv_upgrade_failed` / `nx_upgrade_failed` / `version_still_mismatched`) per attempt (nexus-otnvr item 4: the detached action's own stdout/stderr are DEVNULL'd by the dispatching hook, so this file is the only durable record that a background swap happened at all). Capped at ~1MB with a single-generation manual rotate to `lockstep.log.1` (a plain `Path.replace()`, not `logging.handlers.RotatingFileHandler` — kept minimal-footprint like the rest of this bare-interpreter hook, which also cannot import the `nexus` package itself). |
 | `.nexus.yml` | Per-repo config overrides |
 
 ## Logging

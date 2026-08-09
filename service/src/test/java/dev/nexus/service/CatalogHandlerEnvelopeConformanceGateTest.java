@@ -183,8 +183,9 @@ class CatalogHandlerEnvelopeConformanceGateTest {
     }
 
     /** Enumerated honestly from the live switch (see {@link #everySwitchRouteIsClassified}),
-     * post {@code by_doc_id}-removal. 67 routes on the final tree (65 + {@code
-     * /purge-trash}, nexus-3ck2g E3; + {@code /chash/conformance}, nexus-du2dw). */
+     * post {@code by_doc_id}-removal. 68 routes on the final tree (65 + {@code
+     * /purge-trash}, nexus-3ck2g E3; + {@code /chash/conformance}, nexus-du2dw;
+     * + {@code /manifest/chashes_many}, nexus-eslkl). */
     private static final List<RouteSpec> ROUTES = List.of(
         // ── Documents ─────────────────────────────────────────────────────
         neither("/register", "handleRegister"),
@@ -217,6 +218,13 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         idListOk("/manifest/write_many", "handleManifestWriteMany"),
         collectionOk("/manifest/get", "handleManifestGet"),
         both("/manifest/get_many", "handleManifestGetMany", null),
+        // nexus-eslkl / T2 nexus/design-eslkl-hook-lock-narrowing §8.1: same
+        // shape as get_many immediately above (doc_ids in, MAX_BATCH_DOC_IDS
+        // enforced, {chashes: {doc_id: [...]}, count: N} out) — the
+        // chash-only twin, lighter payload for the superseded-vector sweep's
+        // before-read. Handler body contains a literal "count" key and
+        // references MAX_BATCH_DOC_IDS, same as its sibling.
+        both("/manifest/chashes_many", "handleManifestChashesMany", null),
         neither("/manifest/purge", "handleManifestPurge"),
         collectionOk("/manifest/chashes", "handleManifestChashes"),
         both("/manifest/docs_for_chashes", "handleDocsForChashes", null),

@@ -245,6 +245,61 @@ class IndexRunFenceTest {
             .isEqualTo("indexing");
     }
 
+    /**
+     * nexus-c8hl7: {@code completeIndexRun}'s refusal path logged nothing
+     * engine-side prior to this bead — {@code stampCompleteIfVerified}
+     * (write_manifest_many's ride) logged its refusal, this fence's own
+     * primary route did not, and CliRunner swallows client-side structlog
+     * for the identical event, so an intermittent completion refusal left
+     * zero evidence anywhere. Pin the new WARN: event name, tenant, doc_id,
+     * the collection manifest_verify actually checked (the STAMPED
+     * physical_collection), the counts, and a sample containing the
+     * specific missing chash.
+     */
+    @Test
+    void complete_refuses409_logsWarnWithCollectionAndMissingChashSample() throws Exception {
+        String docId = "irf-complete-missing-logged-doc-1";
+        registerDoc(docId);
+        String missingChash = chash("irf-missing-logged-chunk");
+        // Manifest row with NO matching chunks_1024 row -> missing = 1.
+        repo.writeManifest(TENANT, docId, List.of(
+            Map.<String, Object>of("position", 0, "chash", missingChash, "chunk_index", 0)));
+
+        beginViaHttp(docId, "h", "run-missing-logged-1");
+
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            var ex = postCatalog("/v1/catalog/index-run/complete",
+                "{\"doc_id\":\"" + docId + "\",\"content_hash\":\"h\",\"chunk_count\":1}");
+            handleCatalog(ex);
+            assertThat(ex.status).as(ex.bodyString()).isEqualTo(409);
+
+            var messages = logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .toList();
+            assertThat(messages)
+                .as("a refused /complete must WARN engine-side, naming the collection checked, "
+                    + "the counts, and a sample of the missing chash(es)")
+                .anyMatch(m -> m.startsWith("event=complete_index_run_refused")
+                    && m.contains("doc_id=" + docId)
+                    && m.contains("collection=" + COLLECTION)
+                    && m.contains("referenced=1")
+                    && m.contains("present=0")
+                    && m.contains("missing=1")
+                    && m.contains("claimed_chunk_count=1")
+                    && m.contains(missingChash));
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
     @Test
     void complete_refuses409_whenReferencedLowerThanClaimedChunkCount_zeroContentCase() throws Exception {
         // The critic's spec amendment case (T2 21350): a run whose manifest writes
@@ -266,6 +321,53 @@ class IndexRunFenceTest {
 
         var doc = repo.getDocument(TENANT, docId);
         assertThat(doc.get("index_state")).isEqualTo("indexing");
+    }
+
+    /**
+     * nexus-c8hl7 companion case: the zero-content refusal (missing==0,
+     * referenced != claimed chunk_count) must ALSO WARN — the sample-query
+     * guard ({@code counts.missing() > 0}) must not accidentally suppress
+     * the whole log line for this refusal shape, only the (here, correctly
+     * empty) chash sample.
+     */
+    @Test
+    void complete_refuses409_zeroContentCase_logsWarnWithEmptyMissingSample() throws Exception {
+        String docId = "irf-complete-zerocontent-logged-doc-1";
+        registerDoc(docId);
+        // No manifest rows written at all -> referenced = 0, missing = 0.
+
+        beginViaHttp(docId, "h", "run-zero-logged-1");
+
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            var ex = postCatalog("/v1/catalog/index-run/complete",
+                "{\"doc_id\":\"" + docId + "\",\"content_hash\":\"h\",\"chunk_count\":5}");
+            handleCatalog(ex);
+            assertThat(ex.status).as(ex.bodyString()).isEqualTo(409);
+
+            var messages = logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .toList();
+            assertThat(messages)
+                .as("the referenced!=chunk_count refusal shape must WARN too, with an empty "
+                    + "(not omitted) missing-chash sample since missing==0")
+                .anyMatch(m -> m.startsWith("event=complete_index_run_refused")
+                    && m.contains("doc_id=" + docId)
+                    && m.contains("referenced=0")
+                    && m.contains("present=0")
+                    && m.contains("missing=0")
+                    && m.contains("claimed_chunk_count=5")
+                    && m.contains("missing_chash_sample=[]"));
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
     }
 
     @Test

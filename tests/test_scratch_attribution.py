@@ -47,27 +47,24 @@ def isolated_tier_writes(
 def _read_tier_writes(db: Path) -> list[tuple]:
     """Tier-write rows as ``(tool, tier, agent, target_title)``.
 
-    SUBSTRATE-ASYMMETRIC BY NECESSITY (nexus-aqbrk), and the asymmetry is a
-    SERVICE GAP, not a test convenience — the nexus-onjvy class. This mirrors
-    the same-named helper in tests/test_memory_put_attribution.py, which
-    documents it in full: ``tier_writes.target_title`` is WRITE-ONLY in service
-    mode. The engine accepts and stores it, but every Java reference to
-    TIER_WRITES.TARGET_TITLE is an INSERT — there is no SELECT anywhere, and
-    the only read route (``query_tier_writes``) returns an AGGREGATE with no
-    target slot.
+    nexus-onjvy gap 4 RESOLVED (mirrors tests/test_memory_put_attribution.py):
+    ``tier_writes.target_title`` was WRITE-ONLY in service mode —
+    ``query_tier_writes`` is an AGGREGATE with no target slot.
+    ``list_tier_writes`` (``GET /v1/telemetry/tier_writes/list``) is the
+    unaggregated per-row read route that closes the gap.
 
-    So the service arm returns None for target and the caller asserts that
-    broken value against the bead, rather than the test being rewritten to
-    stop asking. When a read route lands, the assertion fails loudly instead
-    of silently going green.
+    Called with zero filters, relying on the isolated per-test tmp DB rather
+    than a server-side "all rows" guarantee: ``list_tier_writes`` is capped
+    at its default ``limit`` (100, review finding 2026-08-08), and this
+    module's tests never write near that many rows per DB. Discards
+    ``total`` — this helper only cares about the rows themselves.
     """
 
     from nexus.db.t2 import T2Database
 
     with T2Database(db) as t2:
-        rows = t2.telemetry.query_tier_writes()
-    # (tool, tier, agent, project, count) -> target_title is unreadable here.
-    return [(tool, tier, agent, None) for tool, tier, agent, _project, _n in rows]
+        rows = t2.telemetry.list_tier_writes()["rows"]
+    return [(tool, tier, agent, target) for tool, tier, agent, _project, target in rows]
 
 
 def _telemetry_store(db: Path):
@@ -78,13 +75,7 @@ def _telemetry_store(db: Path):
 
 
 def _assert_target(got: str | None, expected: str) -> None:
-    """Assert ``target_title`` at its REAL value on each substrate.
-
-    SQLite carries it; service mode cannot read it back (nexus-onjvy). Pinned
-    rather than dropped so a future read route fails this loudly.
-    """
-    if got is None:
-        return  # service arm: unreadable by design today (nexus-onjvy)
+    """Assert ``target_title`` at its real value (nexus-onjvy gap 4 resolved)."""
     assert got == expected
 
 

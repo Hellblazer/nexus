@@ -56,8 +56,13 @@
 # FORMAT — one file per orchestrator session, append-only TSV, core verbs:
 #   <iso-utc-ts> TAB EXPECT   TAB <name>     TAB <background|sync> [TAB <dispatch_id>]
 #   <iso-utc-ts> TAB START    TAB <agent_id> TAB <agent_type>
-#   <iso-utc-ts> TAB BLOCKED  TAB <agent_id>
+#   <iso-utc-ts> TAB BLOCKED  TAB <agent_id> [TAB <cause>]
 #   <iso-utc-ts> TAB CONSUMED TAB <agent_id> TAB <agent_type>
+# (BLOCKED's optional 4th field, nexus-plycy: a cause such as
+# "lock-exhausted" when the block was NOT a verified credit decision —
+# see expectations_mark_blocked / EXPECTATIONS_OWES_CAUSE. Every
+# exact-field BLOCKED reader keys on $2/$3 only, so this is inert to
+# them, same convention as REPORTED's <strength>.)
 # (REPORTED and WOULDBLOCK are stop-hook-emitted terminal verbs written by
 # subagent-stop.sh, not by this file — documented at that script instead.)
 # The EXPECT row's optional 5th field is the dispatching tool_use_id. No
@@ -175,6 +180,56 @@ expectations_start() {
     _expectations_append "$file" "$(_expectations_ts)"$'\tSTART\t'"$agent_id"$'\t'"$agent_type"
 }
 
+# _expectations_claim_credit <file> <type_enc> <agent_id> <credit> <spent>
+# [owner...] — ATOMICALLY claim one unit of this type's background credit.
+# Returns 0 iff THIS call claimed a unit; 1 iff every unit was already
+# spoken for. nexus-7z7rj ROUND 3 — see WHY A LOCK CANNOT CARRY THIS
+# INVARIANT above expectations_owes_report.
+#
+# One unit of credit == one slot symlink "<file>.credit.<type>.<n>" for n
+# in 1..credit. symlink(2) is atomic and fails with EEXIST, so for any
+# given n EXACTLY ONE racer on the host can ever create it, no matter how
+# many are running, what order they arrive in, or whether any lock is held
+# — the kernel, not a lock protocol, is what bounds the count. The link's
+# TARGET is the claiming agent_id, so the claim and the ownership stamp
+# are the SAME atomic operation (a mkdir-then-write-owner pair would leave
+# a window where a claimed slot is anonymous). `readlink` therefore both
+# audits who holds each unit and lets a re-entering agent recognize its
+# own claim without consulting the ledger.
+#
+# RECONCILIATION: slots are derived state; the CONSUMED rows are the
+# durable record. A ledger written by a build that predates slots (or one
+# mid-upgrade) has rows and no slots, so before claiming we re-create one
+# slot per already-recorded CONSUMED row, in file order, stamped with that
+# row's own agent_id. Idempotent (every `ln -s` onto an existing name just
+# fails), safe under concurrency (same reason the claim is), and it keeps
+# a live session's accounting continuous across a plugin update instead of
+# handing every in-flight type a fresh, fully-unspent pool.
+_expectations_claim_credit() {
+    local file="$1" type_enc="$2" agent_id="$3" credit="$4" spent="$5"
+    shift 5
+    local base="${file}.credit.${type_enc}" i owner
+    i=0
+    for owner in "$@"; do
+        i=$((i + 1))
+        ln -s "$owner" "${base}.${i}" 2>/dev/null
+    done
+    # Slots 1..spent are accounted for by the rows just reconciled, so the
+    # first candidate is spent+1; the caller only reaches here when
+    # credit > spent, so this loop always runs at least once. Walking
+    # upward (rather than from 1) keeps the common case one `ln` exec.
+    for ((i = spent + 1; i <= credit; i++)); do
+        if ln -s "$agent_id" "${base}.${i}" 2>/dev/null; then
+            return 0
+        fi
+        # Already claimed. If it is OUR claim, this is a re-entry after a
+        # crash between the claim and its CONSUMED row: still owes, and
+        # must not consume a second unit.
+        [[ "$(readlink "${base}.${i}" 2>/dev/null)" == "$agent_id" ]] && return 0
+    done
+    return 1
+}
+
 # expectations_owes_report <session_id> <agent_id> <agent_type> — the
 # consult rule (v4, nexus-rkigh + nexus-bk974 fix round on top of v3's
 # nexus-hbr4x widening). Returns 0 iff the stopping agent owes a
@@ -251,10 +306,7 @@ expectations_start() {
 # unit of credit could each observe unspent credit and each append
 # CONSUMED, over-crediting relative to N-of-type intent (this repo's own
 # CLAUDE.md explicitly encourages parallel same-type dispatch fleets, so
-# this is not a hypothetical). Fail-open on lock timeout: never block a
-# stop because of lock contention — an unheld window just degrades this
-# one call back to the pre-lock racy read, it never denies or defers the
-# stop itself.
+# this is not a hypothetical).
 #
 # BUDGET TUNABLE + DEBUG-VISIBLE DEGRADATION (nexus-bk974/nexus-4b8sz, CI
 # red 2026-08-07 run 31215840624 shard 1): the try count was a hardcoded
@@ -271,17 +323,247 @@ expectations_start() {
 # parser (008/009 have no valid octal digit), and clamped to a 600-try
 # (~60s) ceiling so a runaway env value cannot hang the hook indefinitely;
 # (2) when the loop exhausts without acquiring, one stderr line is emitted
-# before proceeding unlocked — stderr only (stdout may be parsed by
-# callers), and it is a diagnostic breadcrumb only, never a ledger row
-# (the file format's writers are exactly EXPECT/START/BLOCKED/CONSUMED,
-# per FORMAT above). CAVEAT (substantive-critic, matching the honest
-# precedent in pre_close_verification_hook.sh::_stamp_ids): subagent-
-# stop.sh exits 0 on every path (block is signaled via stdout JSON, not
-# exit 2), and the documented hook contract only feeds exit-0 stderr back
-# to the operator under `claude --debug` — this warning is observable in
-# hook debug logs, not a normal-session operator-facing signal.
+# — stderr only (stdout may be parsed by callers), and it is a diagnostic
+# breadcrumb only, never a ledger row (the file format's writers are
+# exactly EXPECT/START/BLOCKED/CONSUMED, per FORMAT above). CAVEAT
+# (substantive-critic, matching the honest precedent in
+# pre_close_verification_hook.sh::_stamp_ids): subagent-stop.sh exits 0 on
+# every path (block is signaled via stdout JSON, not exit 2), and the
+# documented hook contract only feeds exit-0 stderr back to the operator
+# under `claude --debug` — this warning is observable in hook debug logs,
+# not a normal-session operator-facing signal.
+#
+# THE CONTRACT (nexus-7z7rj, fix round on top of 4b8sz — CI red
+# 2026-08-08, PR #1445 run 31244456036 shard 1/4: blocked=5 vs credit=4
+# with NX_EXPECT_LOCK_TRIES already at 200). 4b8sz's "fail-open degrades
+# to the pre-lock racy read" was DOCUMENTED as deliberate but was not
+# actually gated on lock possession at all: `held` only controlled
+# whether `rmdir` ran at the end — the awk verdict computation and the
+# CONSUMED append below ran UNCONDITIONALLY, lock or no lock. So a caller
+# that exhausted its try budget executed the exact same read-decide-write
+# as a lock HOLDER, concurrently and unsynchronized with whichever other
+# caller currently held (or had also given up on) the lock. Widening the
+# try budget (4b8sz) narrows the window this can happen in but cannot
+# close it — any nonzero probability of simultaneous exhaustion still
+# eventually reproduces the over-block under enough contention, which is
+# exactly what recurred at 200 tries.
+#
+# CHOSEN FIX: decision-only-under-lock (bead's option (a)). The verdict
+# read AND the CONSUMED append are now INSIDE `if [[ -n "$held" ]]` —
+# a caller that never acquires the lock does not consult the ledger at
+# all, so it cannot observe a stale credit count and cannot append a
+# CONSUMED row racing another writer. This makes "CONSUMED rows for a
+# type can never exceed that type's credit" a mechanical invariant
+# (single-writer-at-a-time, enforced by mkdir's atomicity) instead of a
+# probabilistic one that degrades under load. This half of the fix is
+# unchanged by the round-2 revision below.
+#
+# ROUND 2 (nexus-plycy, substantive-critic Critical on the round-1 fix,
+# same day): round 1 shipped a fixed "does not owe" default on lock
+# exhaustion, gated behind a SESSION-scoped lockdir (one lockdir for
+# every agent_type in the session). The critic found that combination
+# unsafe: the pre-existing 1-minute mtime-based stale-lock reap (below)
+# meant an orphaned/killed lock holder left the lockdir looking "fresh"
+# for up to 60s, during which EVERY subsequent stop of ANY type in the
+# session would exhaust its budget and silently return "does not owe"
+# with zero ledger consultation — the guard going fully dark
+# session-wide for up to a minute, inverting its failure direction from
+# safe (over-block) to unsafe (silent miss), exactly the RDR-184 class
+# it exists to catch. Empirically reachable, not hypothetical: this
+# session's own NX_EXPECT_LOCK_HOLD_DELAY_S test run orphaned a
+# lock-spin process at PPID 1. Worse, the round-1 justification for
+# picking "does not owe" over "block" (avoiding false accusations of
+# unrelated, cross-type agents sharing the session lockdir) was optimizing
+# for the WRONG contention shape: the empirical bug that motivated
+# nexus-7z7rj in the first place was SAME-type contention (8 racers, one
+# type, credit=4) — exactly the case a fixed "does not owe" default
+# handles worst, silently waving through a genuinely-owing racer under
+# real mass same-type dispatch (which CLAUDE.md explicitly encourages).
+#
+# FIX: two changes, both required together.
+#
+# (1) PER-TYPE LOCKDIR. The lockdir is now keyed by agent_type, not just
+# session: "${file}.owes.<encoded-type>.lock". This removes the
+# cross-type contention that motivated round 1's unsafe default — an
+# agent's stop now only ever waits on SAME-type racers (or a stale
+# SAME-type lock), never on an unrelated type's dispatch/stop traffic
+# sharing the session file. ENCODING: agent_type's charset (see the
+# guard below) permits `:` (colon-qualified types like
+# "conexus:developer"), which is filesystem-legal on POSIX but avoided
+# here on purpose, for the same reason this repo already avoids raw
+# colons in T3 collection names (see AGENTS.md's collection-naming
+# table) — every literal `:` in agent_type is replaced with `__`
+# (double underscore) before it is used as a path component. This is
+# lossy in theory (a type containing a literal "__" could collide with
+# a colon-bearing type that encodes to the same string) but no observed
+# agent_type in this repo's conventions uses "__", and a collision's
+# worst case is merely "two types share a lockdir" — a throughput/
+# false-cross-type-wait regression, not a correctness bug, since the
+# decision-only-under-lock invariant from CHOSEN FIX above holds
+# regardless of which lockdir a given type happens to use.
+#
+# (2) FIXED DEFAULT ON EXHAUSTION FLIPS TO BLOCK. With per-type locking,
+# exhaustion can now only mean same-type contention or a same-type stale
+# lock — in both cases the guard's usual bias applies again: over-
+# blocking is the safe, explicable direction (nothing is silently
+# missed), so exhaustion now returns 0 (owes) rather than round 1's 1
+# (does not owe). Decision-only-under-lock is KEPT for the CONSUMED
+# append specifically: an exhausted caller still never writes a CONSUMED
+# row (never spend credit you didn't verify under the lock), so "CONSUMED
+# rows for a type never exceed that type's credit" remains the same
+# mechanical invariant as CHOSEN FIX above — only the BLOCK decision
+# itself, not the ledger write, happens unconditionally on exhaustion.
+# This means an exhaustion-forced block is now DISCLOSED, not silent:
+# the global EXPECTATIONS_OWES_CAUSE is set to "lock-exhausted" (reset to
+# empty at the top of every call) so the caller (subagent-stop.sh) can
+# both (a) fold a distinguishing note into the block's JSON `reason` so
+# an over-blocked agent's operator can tell it apart from a verified
+# credit-backed block, and (b) pass it through to
+# expectations_mark_blocked's optional 4th field so the ledger itself
+# records the cause for later audit — never a bare, unexplained block.
+#
+# RESIDUAL (honest, bounded): a stale SAME-type lock still over-blocks
+# stops of THAT type for up to the existing ~60s reap window (the
+# "Bounded lock" comment below; unchanged by this fix), then the reap
+# clears it and normal locked operation resumes. This is the accepted
+# price — bounded, single-type, self-healing, and always disclosed via
+# EXPECTATIONS_OWES_CAUSE/the BLOCKED row's cause field — traded against
+# the alternative (round 1's silent, session-wide, undisclosed miss
+# window) which is categorically worse for a guard whose entire purpose
+# is not missing undeclared dispatches.
+#
+# WHY A LOCK CANNOT CARRY THIS INVARIANT (nexus-7z7rj ROUND 3, the third
+# recurrence — CI red 2026-08-08 PR #1445 run 31244456036, then the
+# round-2 fix's own "mechanical" ceiling VIOLATED in a local full-parallel
+# run 2026-08-09 at develop f145f3de: `assert len(consumed_rows) <=
+# credit` -> `assert 5 <= 4`, five CONSUMED rows stamped the same second).
+#
+# ROOT CAUSE (deterministically reproduced, not inferred — see
+# test_owes_report_credit_claim_survives_a_lock_that_grants_no_exclusion):
+# the stale-lock reap below deletes a lock it does not own, and no amount
+# of care in the critical section can fix that from outside. The reap is
+# three separate steps — test `-d`, run `find`, then `rmdir` — and the
+# lock can change hands BETWEEN them:
+#
+#   B: [[ -d lockdir ]]            -> true  (A holds it)
+#   A: rmdir lockdir               -> A releases
+#   B: find lockdir -mmin -1       -> absent, so B judges it "stale"
+#   C: mkdir lockdir               -> C acquires legitimately
+#   B: rmdir lockdir               -> B DELETES C'S LIVE LOCK
+#   B: mkdir lockdir               -> B "acquires"; B and C now BOTH
+#                                     inside the critical section
+#
+# Both then read the same credit state and both append CONSUMED. That is
+# the observed double-spend, and the window is exactly a fork+exec, which
+# is why it only ever surfaced under heavy parallel load and why rounds 1
+# and 2 (which widened the retry budget, then made the decision
+# atomic-under-the-lock) each narrowed it without closing it: both rounds
+# reasoned about the critical section, while the defect is in the code
+# that runs BEFORE the lock is ever acquired.
+#
+# This is not a bug in the reap's threshold or its ordering — it is
+# unfixable in kind. Safely stealing a name-based lock requires an atomic
+# compare-and-delete ("remove this lock only if it is still the same lock
+# I inspected"), and POSIX offers no such operation on a path. Every
+# variant of check-then-rmdir has the same window. The alternatives are
+# therefore only: (a) never reap, and accept that one SIGKILLed holder
+# wedges that type for the rest of the session, or (b) stop making
+# correctness depend on the lock at all.
+#
+# CHOSEN FIX: (b). The unit of credit is now claimed with an ATOMIC
+# FILESYSTEM OPERATION rather than decided by reading a count under mutual
+# exclusion — see _expectations_claim_credit above. `credit > spent` is
+# still computed, and still gates whether a claim is attempted, but it is
+# no longer what makes the accounting exact: a racer that passes the
+# read-derived gate still consumes nothing unless it wins a slot symlink,
+# and for each of the `credit` slot names exactly one racer on the host
+# can ever win. So "CONSUMED rows for a type never exceed that type's
+# credit" holds even if the lock grants NO exclusion whatsoever — under a
+# stolen lock, a leaked lock, a disabled lock, or an exhausted budget.
+# The permanent test asserts exactly that (the lock is switched off and
+# the invariant is required to survive), so the property cannot regress
+# back into being load-dependent.
+#
+# The lock below is KEPT, deliberately, and is now purely an efficiency
+# and log-noise measure (it keeps same-type racers from doing redundant
+# awk passes and from racing onto the same slot name): every safety claim
+# round 2 made — decision-only-under-lock, exhaustion blocks with a
+# disclosed cause and writes no ledger row — is preserved unchanged and
+# still true. What changed is that none of them is load-bearing for the
+# ceiling any more. The reap's steal is now merely wasteful rather than
+# incorrect; it is tracked for removal separately rather than being
+# ripped out here, because deleting it without a replacement self-heal
+# would trade a harmless inefficiency for a session-long wedge.
+#
+# ON THE DEFERRED HALF (why over-counting was never "just bookkeeping"):
+# a CONSUMED row is a debit against a fungible per-type pool, so a
+# spurious row is not a cosmetic accounting error — it silently absorbs
+# the credit of the NEXT genuine background dispatch of that type, and
+# that agent then stops UNBLOCKED with no BLOCKED row and no disclosed
+# cause. The over-blocking at the moment of the race is safe; the missing
+# block one dispatch later is exactly the RDR-184 failure this guard
+# exists to catch. That is why "narrow the window" was never an adequate
+# answer here, and why the fix had to make a spurious debit impossible to
+# write rather than merely unlikely.
+#
+# ORPHANED CREDIT SLOTS — WHAT TERMINATES THIS HOOK, AND WHERE CAN IT BE
+# WHEN THAT HAPPENS? (nexus-ols6a, substantive-critic Critical on round 3.)
+#
+# This is the question none of rounds 1, 2, or 3 asked, and every round
+# was caught by it. Each round moved the unsafe window somewhere its own
+# test could not see: round 1 the critical section, round 2 the pre-lock
+# reap, round 3 the gap between claiming a slot and writing its row. The
+# answer is in conexus/hooks/hooks.json: SubagentStop runs with a
+# 10-SECOND TIMEOUT. The lock budget is 20s in CI
+# (NX_EXPECT_LOCK_TRIES=200) and clamps at 60s. So the harness SIGKILLs
+# this hook as a ROUTINE, LOAD-CORRELATED EVENT, in precisely the
+# contention regime the whole credit mechanism exists for. An external
+# kill here is scheduled, not rare.
+#
+# WHAT THAT COSTS, AND HOW ROUND 3 MADE IT WORSE BEFORE MAKING IT BETTER.
+# Pre-round-3, a kill between the credit read and the CONSUMED append
+# wrote nothing: that stop went unguarded (one miss) but the pool was
+# untouched, so a later agent still got the unit. Post-round-3 the claim
+# lands BEFORE the row, so the same kill costs that stop AND burns a
+# credit permanently — a SECOND future agent also slips. Round 3 doubled
+# the damage of a timeout kill, and made it less observable too: the old
+# spurious debit was a CONSUMED row a census could read, the new one is a
+# symlink no audit surface looks at. "A spurious debit can no longer be
+# written" was true of ROWS and false of DEBITS — the debit unit moved
+# from rows to slots. Recording that plainly because it is structurally
+# the same overclaim as rounds 1 and 2 ("mechanical invariant"), and the
+# pattern is the actual lesson here.
+#
+# THE FIX: an orphan is DETECTABLE, so it must never be silent. When the
+# claim is lost, re-read the ledger — if every slot is taken while the
+# rows still say this type has unspent credit, that state is provably
+# inconsistent and the only explanation is a claimant killed between its
+# `ln -s` and its row. Block, with cause=credit-slot-orphan, instead of
+# returning "does not owe". That keeps the guard's usual bias (over-block
+# is explicable; a silent miss is the thing this whole subsystem exists
+# to prevent) and it converts round 3's new window from a doubled silent
+# miss into a disclosed block. Deliberately NOT done: reclaiming orphaned
+# slots after a bounded age. That is exactly the check-then-act shape
+# whose unfixability is documented above, and it would reintroduce the
+# stolen-lock class in a new costume.
+#
+# TEST-ONLY CONTENTION SEAM: NX_EXPECT_LOCK_HOLD_DELAY_S, when set to a
+# bare non-negative decimal (e.g. "0.3"), sleeps that many seconds AFTER
+# acquiring the lock and BEFORE the read-decide-write below. This exists
+# so a test can deterministically WIDEN the critical section and force
+# other racers to exhaust a small try budget — reproducing the exhaustion
+# race on demand instead of hoping CI happens to be loaded enough (see
+# tests/hooks/test_subagent_stop_hook.py). A non-numeric or unset value
+# is a no-op; this must never fire in production (nothing sets it outside
+# the test harness).
 expectations_owes_report() {
     local sid="$1" agent_id="${2:-}" agent_type="${3:-}"
+    # nexus-plycy: side-channel for the caller to distinguish a
+    # verified-under-lock decision from an exhaustion-forced one. Reset
+    # on EVERY call (including every early-return path below) so a
+    # caller never reads a stale value from a previous invocation. Never
+    # `local` — it must escape to the sourcing script (subagent-stop.sh).
+    EXPECTATIONS_OWES_CAUSE=""
     [[ -n "$sid" && -n "$agent_id" && -n "$agent_type" ]] || return 1
     # An agent_type outside the name charset can never equal a stored
     # EXPECT name, so it can never owe. Checking it HERE (not just at
@@ -301,12 +583,28 @@ expectations_owes_report() {
     file="$(expectations_file "$sid" 2>/dev/null)" || return 1
     [[ -r "$file" ]] || return 1
 
-    # Bounded lock (nexus-bk974). A lockdir left behind by a killed hook
-    # would otherwise cost every later stop of this session the full
-    # budget forever, so reap one that has sat idle past the critical
-    # section's realistic worst case before contending for it — same
-    # reap-then-contend shape as agent-dispatch-expect.sh's LOCKDIR.
-    local lockdir="${file}.owes.lock" held=""
+    # Bounded lock (nexus-bk974), PER AGENT_TYPE (nexus-plycy round 2 —
+    # see THE CONTRACT above for why session-scoped locking was unsafe).
+    # ':' is encoded to '__' before use as a path component (see THE
+    # CONTRACT); every other permitted charset character is filesystem-
+    # safe as-is. A lockdir left behind by a killed hook would otherwise
+    # cost every later same-type stop the full budget forever, so reap
+    # one that has sat idle past the critical section's realistic worst
+    # case before contending for it — same reap-then-contend shape as
+    # agent-dispatch-expect.sh's LOCKDIR.
+    local type_enc="${agent_type//:/__}"
+    local lockdir="${file}.owes.${type_enc}.lock" held=""
+    # TEST-ONLY SEAM (nexus-7z7rj round 3): NX_EXPECT_LOCK_DISABLE=1 skips
+    # the lock entirely — no reap, no acquire, no release — so the suite
+    # can run real concurrent racers against a critical section with ZERO
+    # mutual exclusion and require the credit ceiling to hold anyway. That
+    # is the strongest available adversary for the atomic-claim invariant,
+    # and it is deterministic, unlike hoping a runner is loaded enough to
+    # reproduce a stolen lock. Never set outside the test harness; setting
+    # it in production costs only redundant work, never the ceiling.
+    if [[ "${NX_EXPECT_LOCK_DISABLE:-}" == "1" ]]; then
+        held=1
+    else
     if [[ -d "$lockdir" ]] && [[ -z "$(find "$lockdir" -maxdepth 0 -mmin -1 2>/dev/null)" ]]; then
         rmdir "$lockdir" 2>/dev/null
     fi
@@ -323,16 +621,48 @@ expectations_owes_report() {
         sleep 0.1
     done
     if [[ -z "$held" ]]; then
-        echo "expectations: owes-report lock budget exhausted (${tries} tries); proceeding unlocked (fail-open, nexus-bk974/nexus-4b8sz)" >&2
+        # nexus-plycy: per-type locking means exhaustion can only mean
+        # same-type contention or a same-type stale lock (see THE
+        # CONTRACT above) — the safe direction is to block, DISCLOSED via
+        # EXPECTATIONS_OWES_CAUSE, and WITHOUT touching the ledger (no
+        # CONSUMED row: never spend credit that was never verified).
+        echo "expectations: owes-report lock budget exhausted (${tries} tries) for type '${agent_type}'; no credit consulted, fixed default = owes (BLOCK, cause=lock-exhausted; fail-open direction per nexus-bk974/nexus-4b8sz/nexus-7z7rj/nexus-plycy)" >&2
+        EXPECTATIONS_OWES_CAUSE="lock-exhausted"
+        return 0
+    fi
     fi
 
-    local verdict
-    verdict="$(awk -F'\t' -v id="$agent_id" -v ty="$agent_type" '
+    # nexus-7z7rj test seam: deterministically widen the critical section
+    # so a test can force other racers to exhaust their try budget instead
+    # of relying on incidental CI load. No-op unless explicitly set by a
+    # test harness.
+    if [[ "${NX_EXPECT_LOCK_HOLD_DELAY_S:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        sleep "$NX_EXPECT_LOCK_HOLD_DELAY_S"
+    fi
+
+    # The "new" verdict now carries the numbers the atomic claim needs
+    # (credit, spent, and the already-consuming agent_ids in file order,
+    # for slot reconciliation) as extra tab-separated fields. The verdict
+    # TOKEN is still the first field and still exactly self|new|no, so the
+    # case below reads the same as it always has.
+    local verdict_line verdict
+    local -a vfields=()
+    verdict_line="$(awk -F'\t' -v id="$agent_id" -v ty="$agent_type" '
+        # Dedupe EXPECT by dispatch_id, exactly as expectations_undeclared
+        # and expectations_census already do ~200 lines below. The dispatch
+        # hook takes a bounded lock whose reap can be stolen (nexus-ma5tg,
+        # the same TOCTOU this function was just fixed for), so a double
+        # registration of ONE dispatch is reachable. There it inflates this
+        # type-s credit pool, which over-blocks — safe, but it also made the
+        # census and this guard disagree about the same ledger. Now they
+        # settle it identically.
+        $2 == "EXPECT" && $5 != "" && ($5 in dseen) { next }
+        $2 == "EXPECT" { if ($5 != "") dseen[$5] = 1 }
         $2 == "EXPECT" && $3 == ty {
             if ($4 == "background") { credit++ } else { mixed = 1 }
         }
         $2 == "CONSUMED" && $4 == ty {
-            if ($3 == id) { self = 1 } else { spent++ }
+            if ($3 == id) { self = 1 } else { owner[++spent] = $3 }
         }
         END {
             # nexus-rkigh: the unmixed-ness gate is checked FIRST and is
@@ -341,47 +671,148 @@ expectations_owes_report() {
             # function for why that asymmetry is intentional).
             if (mixed) { print "no"; exit }
             if (self) { print "self"; exit }
-            if (credit > spent) { print "new"; exit }
+            if (credit > spent) {
+                # +0 forces both to render as numbers. An UNSET awk var
+                # prints as the empty string, and because tab is IFS
+                # whitespace, the read -a below would silently DROP that
+                # trailing empty field and shift the owner list by one.
+                # (No apostrophes in this block: the whole program is a
+                # single-quoted shell word.)
+                line = "new\t" (credit + 0) "\t" (spent + 0)
+                for (i = 1; i <= spent; i++) { line = line "\t" owner[i] }
+                print line
+                exit
+            }
             print "no"
         }
     ' "$file" 2>/dev/null)"
+    IFS=$'\t' read -r -a vfields <<<"$verdict_line"
+    # `read -a` on empty input (awk failed, unreadable file) leaves a
+    # ZERO-element array, and ${arr[0]} is fatal under `set -u` — this
+    # library is sourced by callers that set it. Default, then fall
+    # through to the fail-open `*)` branch below.
+    verdict="${vfields[0]:-}"
     case "$verdict" in
         self)
-            [[ -n "$held" ]] && rmdir "$lockdir" 2>/dev/null
+            rmdir "$lockdir" 2>/dev/null
             return 0
             ;;
         new)
-            _expectations_append "$file" \
-                "$(_expectations_ts)"$'\tCONSUMED\t'"$agent_id"$'\t'"$agent_type"
-            [[ -n "$held" ]] && rmdir "$lockdir" 2>/dev/null
-            return 0
+            # TEST-ONLY SEAM (nexus-ols6a): widen READ -> CLAIM so a test can
+            # force every racer to decide from the same credit state. Without
+            # it, switching the lock off removes exclusion but NOT
+            # simultaneity, so the falsifier's detection still rides thread
+            # interleaving — measured as a 1-in-12 FALSE PASS against a
+            # deliberately broken claim. No-op unless set by the harness.
+            if [[ "${NX_EXPECT_CLAIM_DELAY_S:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+                sleep "$NX_EXPECT_CLAIM_DELAY_S"
+            fi
+            # The read above says a unit LOOKS unspent; the claim below is
+            # what actually spends it, and is the only thing that decides.
+            if _expectations_claim_credit "$file" "$type_enc" "$agent_id" \
+                "${vfields[1]:-0}" "${vfields[2]:-0}" "${vfields[@]:3}"; then
+                # TEST-ONLY SEAM (nexus-ols6a): widen CLAIM -> APPEND, the one
+                # window where an external kill orphans a claimed slot. This
+                # is NOT hypothetical: conexus/hooks/hooks.json gives
+                # SubagentStop a 10-SECOND timeout while the lock budget is
+                # 20s in CI (NX_EXPECT_LOCK_TRIES=200) and clamps at 60s, so
+                # the harness SIGKILLs this hook as a ROUTINE, load-correlated
+                # event — in exactly the contention regime this code lives in.
+                if [[ "${NX_EXPECT_APPEND_DELAY_S:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+                    sleep "$NX_EXPECT_APPEND_DELAY_S"
+                fi
+                _expectations_append "$file" \
+                    "$(_expectations_ts)"$'\tCONSUMED\t'"$agent_id"$'\t'"$agent_type"
+                rmdir "$lockdir" 2>/dev/null
+                return 0
+            fi
+            # LOST THE CLAIM — two very different worlds, and telling them
+            # apart is what nexus-ols6a is about (see ORPHANED CREDIT SLOTS
+            # above the function).
+            #
+            #   (a) LEGITIMATE: another racer took the last unit between our
+            #       read and our claim. The pool really is dry. Do not owe.
+            #   (b) ORPHAN: a previous claimant was killed between its `ln -s`
+            #       and its CONSUMED row (the 10s-timeout window above), so a
+            #       slot is spoken for by an agent that left no ledger record.
+            #
+            # They are distinguishable by RE-READING: in (a) the winners'
+            # CONSUMED rows account for the whole pool; in (b) every slot is
+            # taken while the rows still say credit remains — a provably
+            # inconsistent state. Re-read twice with a short pause, because a
+            # winner that has claimed but not yet appended looks exactly like
+            # an orphan for those few microseconds and would otherwise make
+            # this cause fire routinely under contention (a cause that cries
+            # wolf is one operators learn to ignore). This is a READ retry,
+            # NOT a bounded-age reclaim: nothing is ever deleted or stolen,
+            # so it cannot reintroduce the check-then-act shape that caused
+            # this bug in the first place.
+            local recheck fresh_credit fresh_spent
+            for recheck in 1 2; do
+                read -r fresh_credit fresh_spent <<<"$(awk -F'\t' -v ty="$agent_type" '
+                    $2 == "EXPECT" && $5 != "" && ($5 in dseen) { next }
+                    $2 == "EXPECT" { if ($5 != "") dseen[$5] = 1 }
+                    $2 == "EXPECT" && $3 == ty && $4 == "background" { credit++ }
+                    $2 == "CONSUMED" && $4 == ty { spent++ }
+                    END { printf "%d %d\n", credit + 0, spent + 0 }
+                ' "$file" 2>/dev/null)"
+                (( ${fresh_credit:-0} > ${fresh_spent:-0} )) || break
+                [[ "$recheck" == "2" ]] && break
+                sleep 0.1
+            done
+            if (( ${fresh_credit:-0} > ${fresh_spent:-0} )); then
+                # Provably inconsistent: no slot left, yet the ledger says
+                # this type still has unspent credit. FAIL LOUD in the
+                # guard's usual safe direction (block, disclosed) rather
+                # than silently waving this stop through — the silent
+                # version is what let one killed hook cost TWO unguarded
+                # stops instead of one.
+                echo "expectations: credit-slot orphan for type '${agent_type}' — every credit slot is claimed but the ledger records only ${fresh_spent} of ${fresh_credit} spent, so a claimant was killed between its slot claim and its CONSUMED row (SubagentStop has a 10s hook timeout). Blocking this stop rather than silently passing it (cause=credit-slot-orphan; nexus-ols6a)" >&2
+                EXPECTATIONS_OWES_CAUSE="credit-slot-orphan"
+                rmdir "$lockdir" 2>/dev/null
+                return 0
+            fi
+            rmdir "$lockdir" 2>/dev/null
+            return 1
             ;;
         *)
-            [[ -n "$held" ]] && rmdir "$lockdir" 2>/dev/null
+            rmdir "$lockdir" 2>/dev/null
             return 1
             ;;
     esac
 }
 
-# expectations_mark_blocked <session_id> <agent_id> — record that the stop
-# hook has blocked this agent once. Pairs with expectations_already_blocked
-# for the block-at-most-once guard (belt to stop_hook_active's braces).
+# expectations_mark_blocked <session_id> <agent_id> [cause] — record that
+# the stop hook has blocked this agent once. Pairs with
+# expectations_already_blocked for the block-at-most-once guard (belt to
+# stop_hook_active's braces). <cause> (optional 4th TSV field, nexus-plycy
+# — same inert-4th-field convention as REPORTED's <strength>, see
+# _stamp_resolution_if_reported in subagent-stop.sh) records WHY the
+# block happened when it was not a verified credit decision, e.g.
+# "lock-exhausted" (from EXPECTATIONS_OWES_CAUSE) — every exact-field
+# BLOCKED reader in this file keys on $2/$3 only, so a 4th field is
+# always safely ignored by them. Omitted/empty writes the plain 3-field
+# row, unchanged from before this parameter existed.
 expectations_mark_blocked() {
-    local sid="$1" agent_id="${2:-}"
+    local sid="$1" agent_id="${2:-}" cause="${3:-}"
     if [[ -z "$sid" || -z "$agent_id" ]]; then
-        echo "expectations_mark_blocked: ERROR — usage: expectations_mark_blocked <session_id> <agent_id>" >&2
+        echo "expectations_mark_blocked: ERROR — usage: expectations_mark_blocked <session_id> <agent_id> [cause]" >&2
         return 2
     fi
     # Same guard as expectations_start: a tab/newline here would misalign
     # the BLOCKED row, and expectations_already_blocked's exact-field
     # match would then never fire — silently defeating block-at-most-once.
-    if [[ "$agent_id" == *$'\t'* || "$agent_id" == *$'\n'* ]]; then
-        echo "expectations_mark_blocked: ERROR — tab/newline in agent_id" >&2
+    if [[ "$agent_id" == *$'\t'* || "$agent_id" == *$'\n'* || "$cause" == *$'\t'* || "$cause" == *$'\n'* ]]; then
+        echo "expectations_mark_blocked: ERROR — tab/newline in agent_id/cause" >&2
         return 2
     fi
     local file
     file="$(expectations_file "$sid")" || return 2
-    _expectations_append "$file" "$(_expectations_ts)"$'\tBLOCKED\t'"$agent_id"
+    if [[ -n "$cause" ]]; then
+        _expectations_append "$file" "$(_expectations_ts)"$'\tBLOCKED\t'"$agent_id"$'\t'"$cause"
+    else
+        _expectations_append "$file" "$(_expectations_ts)"$'\tBLOCKED\t'"$agent_id"
+    fi
 }
 
 # expectations_already_blocked <session_id> <agent_id> — 0 iff a BLOCKED
@@ -724,5 +1155,22 @@ expectations_sweep() {
     local dir
     dir="$(_expectations_dir)"
     find "$dir" -maxdepth 1 -name '*.expectations' -type f -mtime +7 -delete 2>/dev/null
+    # nexus-7z7rj round 3: the credit-slot symlinks are derived state that
+    # lives beside the ledger under a longer name, so the reap above never
+    # matched them.
+    #
+    # CORRECTION (nexus-ols6a review): an earlier version of this comment
+    # claimed deleting a slot whose ledger still exists is "impossible"
+    # here. That is FALSE — a ledger's mtime is refreshed by every append,
+    # so a session active for more than 7 days keeps its ledger while its
+    # day-0 slots age past the floor and are deleted. The real reason this
+    # is safe is RECONCILIATION: any deleted slot that still has a backing
+    # CONSUMED row is re-created (indices 1..spent) on the next `new`
+    # verdict, so a deleted row-backed slot cannot become a second spend.
+    # Slots above `spent` are either orphans (freeing them is the only
+    # reclaim that exists) or the caller's own, which the `self` branch
+    # intercepts first. Stating the actual reason because a maintainer who
+    # trusted the word "impossible" could make a change that is NOT safe.
+    find "$dir" -maxdepth 1 -name '*.expectations.credit.*' -type l -mtime +7 -delete 2>/dev/null
     return 0
 }

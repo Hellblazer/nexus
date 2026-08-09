@@ -65,10 +65,18 @@ name: Era-spanning upgrade hop (weekly + on ladder-path changes)
 #
 # So it runs on DISPATCH ONLY rather than being deleted: Stages 1-4 (era
 # install, old-engine pre-stage, package upgrade, engine-untouched assert) all
-# still PASS and are the raw material for the reshape. nexus-8nlj4 owns
-# rebuilding it at cut time; restoring the schedule/push block below is the
-# one-line revert. Left red on a schedule it would only have taught readers to
-# ignore red.
+# still PASS and are the raw material for the reshape. Left red on a schedule
+# it would only have taught readers to ignore red.
+#
+# ── RESOLVED 2026-08-08: nexus-8nlj4 LANDED via DIFFERENT files ─────────────
+# The stamp is armed (LAST_MIGRATION_CAPABLE = 6.18.1 since 7.0.0) and the
+# reshape shipped as .github/workflows/stranded-redirect-rehearsal.yml
+# (weekly) driving `run.sh --stranded`, which proves the armed-detector
+# refusal AND the pin-side migration against real seeded data. This file
+# stays dispatch-only as a parts-donor; do NOT restore its schedule — the
+# era-hop journey's substrate-etl rung is deleted for good. Residual:
+# nexus-4922x (hop 3, upgrade-back-after-migration, is uncovered and the
+# de-strand gate reads a report format nothing currently writes).
 on:
   workflow_dispatch:
 

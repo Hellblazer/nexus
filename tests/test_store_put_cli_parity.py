@@ -63,13 +63,19 @@ def _install_recording_registry(monkeypatch):
     doc: list = []
 
     class _RecordingRegistry(_hr.HookRegistry):
-        def fire_single(self, doc_id, collection, content):  # type: ignore[override]
+        # nexus-eslkl: keep in sync with HookRegistry's real signatures —
+        # each fire_* method now accepts an ``invoke`` interception seam
+        # (LockedHookRegistry's per-hook-lock hook), threaded through
+        # unconditionally by fire_store_chains. An override missing the
+        # parameter raises TypeError on every fire_store_chains call, not
+        # just ones that actually supply a non-None invoke.
+        def fire_single(self, doc_id, collection, content, *, invoke=None):  # type: ignore[override]
             single.append(doc_id)
-            super().fire_single(doc_id, collection, content)
+            super().fire_single(doc_id, collection, content, invoke=invoke)
 
         def fire_batch(self, doc_ids, collection, contents, embeddings=None,
                        metadatas=None, *, catalog_doc_id="",
-                       manifest_complete=None):  # type: ignore[override]
+                       manifest_complete=None, invoke=None):  # type: ignore[override]
             # nexus-cotmr: keep in sync with HookRegistry.fire_batch's real
             # signature (manifest_complete, nexus-5xn3k.4 RUNFENCE) — CLI
             # `nx store put` / `nx memory promote` now fence and pass this
@@ -79,11 +85,11 @@ def _install_recording_registry(monkeypatch):
             batch.append(list(doc_ids))
             super().fire_batch(doc_ids, collection, contents, embeddings,
                                metadatas, catalog_doc_id=catalog_doc_id,
-                               manifest_complete=manifest_complete)
+                               manifest_complete=manifest_complete, invoke=invoke)
 
-        def fire_document(self, source_path, collection, content, *, doc_id=""):  # type: ignore[override]
+        def fire_document(self, source_path, collection, content, *, doc_id="", invoke=None):  # type: ignore[override]
             doc.append(source_path)
-            super().fire_document(source_path, collection, content, doc_id=doc_id)
+            super().fire_document(source_path, collection, content, doc_id=doc_id, invoke=invoke)
 
     monkeypatch.setattr(_hr, "HookRegistry", _RecordingRegistry)
     return single, batch, doc

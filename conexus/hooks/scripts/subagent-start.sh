@@ -167,6 +167,14 @@ cat <<'ORCH'
 | Git | Shared tree: NEVER git add/commit (hook-ENFORCED; linked worktrees exempt). Hand back diffs+paths; orchestrator commits pathspec-limited |
 ORCH
 
+# nexus-5kwkf: worktree dispatches can be cut from the default branch's tip,
+# not the session's current branch, so a fresh worktree can be silently
+# stale. Split into its own <500-byte heredoc (bash 5.3.x pipe-deadlock
+# guard, see NX_TIERS comment above) rather than folded into ORCH's table.
+cat <<'WORKTREE_PREFLIGHT'
+| Preflight | If dispatched with isolation:worktree: run `scripts/agent-worktree-preflight.sh [required-sha]` as your FIRST action; stop on any PREFLIGHT_FAIL line (nexus-5kwkf) |
+WORKTREE_PREFLIGHT
+
 # Serena + Context7 guidance injected by sn plugin (sn/hooks/scripts/mcp-inject.sh).
 
 if [[ $SKIP_STORAGE_DOCS -eq 0 ]]; then

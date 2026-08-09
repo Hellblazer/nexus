@@ -29,6 +29,6 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release (pinned: v7.4.0)
+## Awaiting the next release (pinned: v7.5.0)
 
-(empty — v7.4.0 shipped everything; add entries as new plugin-surface changes land on develop)
+_(empty — everything previously listed here went live with the v7.5.0 pin advance; see `conexus/CHANGELOG.md` [7.5.0] for what activated.)_

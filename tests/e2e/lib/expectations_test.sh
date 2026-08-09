@@ -26,6 +26,26 @@ bad() {
     FAIL=$((FAIL + 1))
 }
 
+# Portable octal file-permission read (nexus-3zu8g): `stat -f '%Lp' X
+# 2>/dev/null || stat -c '%a' X` looks portable but is not — on GNU
+# coreutils `-f` is a REAL flag ("display filesystem status instead of
+# file status"), not BSD's "-f FORMAT". `stat -f '%Lp' X` on GNU treats
+# '%Lp' and X as two FILE arguments: it fails on the nonexistent file
+# '%Lp' (stderr, suppressed by 2>/dev/null) but SUCCEEDS on X, printing a
+# multi-line "File: ..." filesystem-info block to STDOUT — which is not
+# suppressed. The compound command's exit is still non-zero (the '%Lp'
+# arg failed), so the `||` fallback fires too, but by then the garbage
+# block is already part of the captured output, e.g. "parent dir perms
+# are   File: \"...\"\n  ID: ...\n...\n0700" instead of a clean "700".
+# Detect the platform explicitly instead of probing syntax and hoping for
+# a clean failure.
+_stat_perms() {
+    case "$(uname -s)" in
+        Darwin) stat -f '%Lp' "$1" ;;
+        *) stat -c '%a' "$1" ;;
+    esac
+}
+
 SID="sess-1e9c9a90"
 
 # ── Test 1: file path shape + private parent dir ─────────────────────────
@@ -38,7 +58,7 @@ else
 fi
 if [[ -d "$WORKDIR/state/nexus/orchestration" ]]; then
     ok "parent dir created on first use"
-    perms="$(stat -f '%Lp' "$WORKDIR/state/nexus/orchestration" 2>/dev/null || stat -c '%a' "$WORKDIR/state/nexus/orchestration")"
+    perms="$(_stat_perms "$WORKDIR/state/nexus/orchestration")"
     if [[ "$perms" == "700" ]]; then
         ok "parent dir is 0700 (private)"
     else
@@ -67,7 +87,7 @@ if [[ "$ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
 else
     bad "timestamp malformed: '$ts'"
 fi
-perms="$(stat -f '%Lp' "$f" 2>/dev/null || stat -c '%a' "$f")"
+perms="$(_stat_perms "$f")"
 if [[ "$perms" == "600" ]]; then
     ok "expectations file is 0600"
 else
@@ -171,19 +191,30 @@ else
     ok "no EXPECT row -> never owes"
 fi
 
-# ── Test 7: subagent_type collision immunity via morphology ──────────────
-# An UNNAMED dispatch (sync Task or background) has agent_id "a<hash>" (no
-# "a<name>-" prefix) and agent_type = the real subagent_type. Even if an
-# EXPECT(background) row exists for a name equal to that subagent_type,
-# the morphology check must refuse the match — otherwise every sync
-# general-purpose Task would be blockable the moment any background
-# general-purpose teammate was expected.
-echo "Test 7: unnamed agent never matches an EXPECT row for its subagent_type"
+# ── Test 7: unnamed dispatch matches by agent_type (morphology dropped) ──
+# STALE-ASSERTION FIX (nexus-a4nun / nexus-3zu8g, 2026-08-09): this test
+# originally asserted that the named-agent morphology gate ("a<name>-...")
+# must refuse an unnamed dispatch's match against an EXPECT row for its
+# bare subagent_type. That gate was deliberately REMOVED at nexus-hbr4x
+# (design T1 d40a5b53, 2026-08-03, see expectations_owes_report's own
+# header comment "WHY TYPE-KEYING AT ALL, NOT MORPHOLOGY"): neither
+# SubagentStart nor SubagentStop carries a name field (the Agent tool has
+# no name parameter), so the morphology check was UNREACHABLE from every
+# real dispatch and owes_report returned 1 (never owes) across 18/18 and
+# 19/19 measured sessions — the guard had literally never fired. Dropping
+# morphology and keying on agent_type alone (gated by the per-type
+# UNMIXED-ness check, nexus-rkigh) is what makes it fire at all; the
+# accepted price is documented in owes_report's "ACCEPTED PRICE" comment.
+# An UNNAMED dispatch (agent_id "a<hash>", no "a<name>-" prefix) now
+# correctly MATCHES an EXPECT(background) row for its bare agent_type when
+# no sync EXPECT of that type exists (unmixed) — this is the intended
+# current contract, not a regression.
+echo "Test 7: unnamed dispatch matches an EXPECT row for its subagent_type (morphology dropped, nexus-hbr4x)"
 expectations_expect "$SID" "general-purpose" "background"
 if expectations_owes_report "$SID" "a16b397f79df79c42" "general-purpose"; then
-    bad "unnamed agent (agent_id 'a<hash>') matched via bare agent_type — morphology check missing"
+    ok "unnamed dispatch (agent_id 'a<hash>') matches via bare agent_type -> owes (per-type consult, nexus-hbr4x)"
 else
-    ok "unnamed morphology (no 'a<name>-' prefix) -> never owes, even on name collision"
+    bad "unnamed dispatch failed to match its EXPECT row via agent_type — per-type consult regressed"
 fi
 
 # ── Test 8: name mismatch / prefix-substring immunity ────────────────────
@@ -593,13 +624,24 @@ else
 fi
 rm -f "$bsf"
 
-# ── control: mixed session (some recognized) must NOT hard-fail ─────────
+# ── control: mixed session (some recognized) must NOT blindspot-fail ────
 # Guards against the fix over-firing: one named+declared dispatch, one
 # named+undeclared dispatch (still caught by the pre-existing UNDECLARED
 # logic), and two unrecognized (blind-spotted) dispatches. recognized=2 >
-# 0, so this must stay exit 0 even though unrecognized > 0 — the hard
-# failure is reserved for the "recognised NOTHING" case, not "recognised
-# something".
+# 0, so this must NOT read as BLINDSPOT (rc=1, "recognised NOTHING") even
+# though unrecognized > 0.
+#
+# STALE-ASSERTION FIX (nexus-a4nun / nexus-3zu8g, 2026-08-09): this test
+# originally asserted rc==0 ("does not hard-fail"), written before the
+# UNDECLARED-DEFICIT exit code (nexus-suuja, see expectations_undeclared's
+# header) widened the rc contract to 0=clean / 1=BLINDSPOT / 2=undeclared
+# deficit / 3=no-ledger. This fixture deliberately includes a genuine
+# undeclared dispatch (rogue-bg — asserted below), so under the CURRENT
+# contract the correct, intended result is rc=2 (a real deficit, not a
+# blindspot false-clean) — rc==0 would mean "nothing to report", which is
+# false here. The guard this CONTROL exists to prove — recognized>0 must
+# not fall into the rc=1 BLINDSPOT branch — is captured by asserting
+# rc==2 specifically (rc=1 would also make this check fail).
 MSID="mk3tw-mixed"
 msf="$(expectations_file "$MSID")"
 rm -f "$msf"
@@ -612,10 +654,10 @@ rm -f "$msf"
 } >"$msf"
 mixed_undeclared_out="$(expectations_undeclared "$MSID")"
 mixed_undeclared_rc=$?
-if [[ "$mixed_undeclared_rc" -eq 0 ]]; then
-    ok "CONTROL: mixed session (recognized=2 > 0) does not hard-fail"
+if [[ "$mixed_undeclared_rc" -eq 2 ]]; then
+    ok "CONTROL: mixed session (recognized=2 > 0) reports the genuine undeclared-deficit (rc=2, nexus-suuja), not BLINDSPOT (rc=1)"
 else
-    bad "CONTROL: mixed session with 2 recognized dispatches wrongly hard-failed"
+    bad "CONTROL: mixed session with 2 recognized dispatches returned rc=$mixed_undeclared_rc, expected rc=2 (undeclared-deficit)"
 fi
 if grep -q $'UNDECLARED\tarogue-bg-abcdef1234567890\trogue-bg' <<<"$mixed_undeclared_out"; then
     ok "CONTROL: the genuinely undeclared named dispatch is still caught"

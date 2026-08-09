@@ -44,6 +44,7 @@ def test_all_command_modules_registered():
         "search_cmd": "search",
         "service_cmd": "service",
         "storage_cmd": "storage",
+        "stranded_cmd": "stranded",
         "taxonomy_cmd": "taxonomy",
         "tenant_cmd": "tenant",
         "tier_status": "tier-status",

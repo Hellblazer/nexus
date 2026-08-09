@@ -95,7 +95,7 @@ class SchemaMigratorIntegrationTest {
     @BeforeAll
     void bootstrap() throws Exception {
         // Start a completely schema-less embedded Postgres.
-        pg = PgContainerHelper.start();
+        pg = PgContainerHelper.startDedicated();
 
         // ── Phase A: provisioning (done by DBA / Phase-5 nx step, NOT by Liquibase) ──
         // Using the embedded postgres superuser to simulate the DBA bootstrap:
@@ -408,7 +408,7 @@ class SchemaMigratorIntegrationTest {
     @Test
     @Order(5)
     void agedBoxWithMissingChashConstraint_migrationDoesNotCrashLoop() throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.start();
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
         try {
             final String role = "nexus_admin_aged_test";
             final String pass = "nexus_admin_aged_test_pass";
@@ -551,7 +551,7 @@ class SchemaMigratorIntegrationTest {
     @Test
     @Order(6)
     void agedBoxWithMissingChashIndexConstraint_migrationDoesNotCrashLoop() throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.start();
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
         try {
             final String role = "nexus_admin_aged_ci_test";
             final String pass = "nexus_admin_aged_ci_test_pass";
@@ -720,7 +720,7 @@ class SchemaMigratorIntegrationTest {
     @Test
     @Order(8)
     void agedBoxWithMissingFk002CollectionFk_migrationDoesNotCrashLoop() throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.start();
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
         try {
             final String role = "nexus_admin_aged_fk002_test";
             final String pass = "nexus_admin_aged_fk002_test_pass";
@@ -901,7 +901,7 @@ class SchemaMigratorIntegrationTest {
     @Test
     @Order(10)
     void presentButViolatingChashIndexConstraint_migrationFailsCleanNotCrashLoop() throws Exception {
-        PostgreSQLContainer<?> agedPg = PgContainerHelper.start();
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
         try {
             final String role = "nexus_admin_aged_viol_test";
             final String pass = "nexus_admin_aged_viol_test_pass";

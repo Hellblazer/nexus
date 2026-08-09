@@ -980,7 +980,35 @@ def _upsert_skip_reembed(
     if not _hvc.is_vector_service_mode():
         db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
         return len(ids)
+    if not _hvc.is_service_backed(db):
+        # nexus-5lygi: NX_STORAGE_BACKEND_VECTORS says service mode (the
+        # ``is_vector_service_mode()`` gate above passed), but the db
+        # handle actually resolved here is not ``HttpVectorClient`` — env
+        # state and handle type CAN diverge (see
+        # ``is_vector_service_mode``'s own docstring), and this is exactly
+        # the shape a leaked test fixture produces by swapping
+        # ``mcp_infra._t3_instance`` to an in-process handle without
+        # restoring it (nexus-gtl01 root cause: T2
+        # nexus/gtl01-root-cause-2026-08-09). A WARNING, not a raise or a
+        # skip: tests legitimately inject non-service handles on purpose,
+        # and the branches below still need to run against whatever ``db``
+        # is. This single log line is the correlation that would have
+        # turned two days of gtl01 triage aimed at the engine into an
+        # immediate "the handle is wrong, not the engine" read — see the
+        # scoped comment below on what the ack-contract invariant does and
+        # does not prove for a handle like this.
+        _log.warning(
+            "upsert_skip_reembed_non_service_handle",
+            collection=collection_name,
+            handle_type=type(db).__name__,
+        )
     if force:
+        _log.debug(
+            "upsert_skip_reembed_branch",
+            collection=collection_name,
+            branch="force_full_upsert",
+            count=len(ids),
+        )
         db.upsert_chunks_with_embeddings(
             collection_name, ids, documents, embeddings, metadatas,
             force_re_embed=True,
@@ -995,11 +1023,80 @@ def _upsert_skip_reembed(
             collection=collection_name,
             error=str(exc),
         )
+    # nexus-gtl01: per-batch existing-probe verdict — counts only (bounded),
+    # never the chash lists themselves. This is the decision this whole
+    # function turns on (skip-reembed vs full upsert vs metadata-only), and
+    # prior to this bead only its FAILURE was logged — the routine verdict
+    # (including a probe that legitimately found nothing, which is
+    # indistinguishable in the logs from a probe that never ran) had no
+    # trace at all.
+    _log.debug(
+        "upsert_skip_reembed_probe",
+        collection=collection_name,
+        total=len(ids),
+        present=len(present),
+        new=len(ids) - len(present),
+    )
     if not present:
+        _log.debug(
+            "upsert_skip_reembed_branch",
+            collection=collection_name,
+            branch="full_upsert_no_existing",
+            count=len(ids),
+        )
         db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
+        # nexus-gtl01 (upsert-chunks ACK coverage): tie the outcome to the
+        # branch event above via collection + count. This is the branch the
+        # captured 2026-08-08 recurrence took (probe present=0, branch=
+        # full_upsert_no_existing, count=1) immediately before the chunk was
+        # found absent at verify, with no exception raised in between.
+        #
+        # nexus-5lygi: the claim that follows is SCOPED to ``db`` actually
+        # being an ``HttpVectorClient`` — it is a property of that ONE
+        # implementation of this duck-typed interface, not of "reaching
+        # this line" in general. For HttpVectorClient, reaching this line
+        # means ``upsert_chunks_with_embeddings`` RETURNED without raising
+        # — its ack-mismatch house pattern raises inside it on a missing/
+        # wrong count, so a normal return DOES rule out "the write call
+        # never completed" and "an exception was silently swallowed above
+        # this line" as explanations for a later-absent chunk, narrowing
+        # the healthy-shape residue to the engine-side commit-durability
+        # question logged alongside HttpVectorClient's own request/
+        # response events (see http_vector_upsert_chunks_response's
+        # comment for what remains undecidable from the client side
+        # alone).
+        #
+        # For any OTHER handle reachable here — e.g. a ``T3Database`` over
+        # ``InMemoryVectorClient``, the shape a leaked test fixture can
+        # swap into the ``mcp_infra._t3_instance`` singleton without
+        # restoring it — a normal return proves NONE of that. Such a
+        # handle returns having written to an in-process structure only;
+        # it says nothing about whether any bytes ever reached the engine,
+        # let alone whether the engine committed them. The WARNING logged
+        # above (``upsert_skip_reembed_non_service_handle``) fires exactly
+        # when this scoping matters: this comment's invariant held, but it
+        # was being read as if it covered the handle that was actually in
+        # play, which is precisely how two days of gtl01 triage got aimed
+        # at engine-side commit durability and cross-tenant RLS/GUC bleed
+        # while the real cause was upsert-never-sent from a non-service
+        # handle (root cause: T2 nexus/gtl01-root-cause-2026-08-09).
+        _log.debug(
+            "upsert_skip_reembed_upsert_outcome",
+            collection=collection_name,
+            branch="full_upsert_no_existing",
+            count=len(ids),
+            completed=True,
+        )
         return len(ids)
     new_idx = [i for i, cid in enumerate(ids) if cid not in present]
     old_idx = [i for i, cid in enumerate(ids) if cid in present]
+    _log.debug(
+        "upsert_skip_reembed_branch",
+        collection=collection_name,
+        branch="split",
+        content_write=len(new_idx),
+        metadata_only_candidate=len(old_idx),
+    )
     if new_idx:
         db.upsert_chunks_with_embeddings(
             collection_name,
@@ -1015,6 +1112,20 @@ def _upsert_skip_reembed(
             collection_name,
             [ids[i] for i in old_idx],
             [metadatas[i] for i in old_idx],
+        )
+        # nexus-gtl01: the update_chunks "missing"-list disposition, logged
+        # at the decision point regardless of which of the three branches
+        # below is taken (raise / reroute / clean) — prior to this bead the
+        # ONLY trace of this decision was the reroute WARNING (fires only
+        # when missing is truthy) and http_vector_client's own None-case
+        # WARNING; the routine "missing == []" outcome (engine positively
+        # confirmed every id, no reroute needed) had no trace anywhere.
+        _log.debug(
+            "upsert_skip_reembed_update_chunks_disposition",
+            collection=collection_name,
+            candidate_count=len(old_idx),
+            missing_reported=missing is not None,
+            missing_count=(len(missing) if missing is not None else None),
         )
         # nexus-5xn3k.5 (memo §3.6, AC6 client half): ``missing`` is None
         # when the engine's response omitted the "missing" field (a
@@ -1035,6 +1146,36 @@ def _upsert_skip_reembed(
         # wrapped in a fence-bracketed try/except (``_fence_fail`` then
         # re-raise), so this raise fails the run loudly instead of
         # minting an unconfirmed manifest.
+        #
+        # nexus-gtl01 DESIGN QUESTION (deliberately log-only, not a new
+        # fail-loud check): a "missing": [] response here means the engine
+        # POSITIVELY confirms every one of these ids exists — agreeing with
+        # our own existing_ids probe. This is not merely an agreeing signal
+        # that COULD both be wrong — it is demonstrably sound: engine-side,
+        # PgVectorRepository.updateMetadataWithMissing derives "missing"
+        # directly from each per-row UPDATE's own SQL rowcount (rows == 0
+        # -> missing.add(id); see the per-id loop around `affected += rows`
+        # in that method) — it is not a separate, independently-computable
+        # anti-join that could disagree with the UPDATE it describes.
+        # "missing": [] IS PostgreSQL's own statement rowcount asserting
+        # each row physically existed at update time, not a second opinion
+        # that happens to agree with our probe. The hypothesized double-
+        # fault (client probe false-positive AND engine missing-computation
+        # false-negative, simultaneously) would require that rowcount
+        # itself to lie about whether the UPDATE touched a row — there is
+        # no local information at this call site that could distinguish
+        # that from the true-positive case, and the discarded "affected"/
+        # "updated" count is not a hidden cheap cross-check either: it
+        # equals len(ids) - len(missing) by construction (both are summed
+        # from the same per-id rowcounts), so comparing them is vacuous.
+        # The only way to positively rule the double-fault out would be an
+        # extra read-verification per batch, which duplicates the
+        # /index-run/complete fail-closed fence's job (bead nexus-5xn3k.4)
+        # at per-batch cost for a case that fence already catches at
+        # completion time. Left to that fence rather than added here; the
+        # deferral is demonstrated by the above, not merely a judgment
+        # call — revisit only if the fence is ever found to miss this
+        # shape in practice.
         if missing is None:
             from nexus.errors import ChunkLandingUnverifiedError  # noqa: PLC0415 — deferred import: avoids import cycle at module load
             raise ChunkLandingUnverifiedError(
@@ -1192,12 +1333,9 @@ def _index_document(
         # rewritten to hyphens (``_`` is the conformant grammar's
         # segment separator); an explicit owner row is not required
         # for ad-hoc paths.
-        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
+        from nexus.corpus import docs_leaf_fallback_collection_name  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
 
-        owner_segment = corpus.replace("_", "-")
-        collection_name = (
-            f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
-        )
+        collection_name = docs_leaf_fallback_collection_name(corpus)
     # RDR-152 Seam B: when t3 is None, route through get_t3() in service mode
     # so HttpVectorClient is used instead of T3Database(daemon), preventing the
     # split-brain where indexing writes to daemon-Chroma but search reads
@@ -1947,11 +2085,8 @@ def index_pdf(
     if collection_name is not None:
         col_name = collection_name
     else:
-        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
-        owner_segment = corpus.replace("_", "-")
-        col_name = (
-            f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
-        )
+        from nexus.corpus import docs_leaf_fallback_collection_name  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
+        col_name = docs_leaf_fallback_collection_name(corpus)
     # RDR-152 Seam B: when t3 is None, route through get_t3() in service mode —
     # see _index_document for full rationale.  In non-service mode, use make_t3()
     # to preserve existing test mock contracts (patch 'nexus.doc_indexer.make_t3').
@@ -2667,11 +2802,8 @@ def index_markdown(
     if collection_name is not None:
         col_name = collection_name
     else:
-        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
-        owner_segment = corpus.replace("_", "-")
-        col_name = (
-            f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
-        )
+        from nexus.corpus import docs_leaf_fallback_collection_name  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
+        col_name = docs_leaf_fallback_collection_name(corpus)
     # RDR-102 Phase A: pre-flight catalog registration. Resolve doc_id BEFORE
     # _index_document's staleness check so a fresh index lands chunks with
     # doc_id populated at write time. Idempotent on re-index via
