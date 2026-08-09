@@ -4,6 +4,110 @@ All notable changes to Nexus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.5.0] - 2026-08-09
+
+> **DRAFT — release-prep, not yet cut.** Two P1 blockers (nexus-7z7rj,
+> nexus-hdumg) are still in flight and will land more commits before the
+> actual tag; the version number and date above are provisional and this
+> section will need review/appending at cut time, not a fresh section.
+
+Paired release with engine-service-v0.1.69 (cut, gated, deployed and
+cloud-gated green 2026-08-09; `REQUIRED_ENGINE_VERSION` bumps to it in this
+release — fresh local installs and package upgrades converge to the same
+engine identity).
+
+### Added
+- **`nx index repo` lands chunks and their catalog manifest atomically, one
+  call per flush** (nexus-wxjr6/nexus-kl2z6, requires engine v0.1.69): the
+  ChunkBatcher-driven ingest path (code/prose/pdf via `nx index repo`) now
+  sends one combined `POST /v1/catalog/manifest/write_many` per flush
+  (chunks + docs + completion-stamp + sweep) instead of a chunk-upsert POST
+  followed by a separate manifest-write POST — each document's chunks and
+  manifest land in one engine-side transaction, and sweep accounting
+  (`swept`/`sweep_skipped`) comes from the engine's own response. Every
+  other ingest path (`doc_indexer.py`, MCP `store_put`, the exporter,
+  `pipeline_stages.py`) is unchanged and still uses the two-call shape.
+- **`nx stranded ack`** (nexus-cmtpa): the cloud-mode consented de-strand
+  escape. Attests, with a machine-local marker fingerprinted to the actual
+  pre-PG artifact files found (path/size/mtime, never content), that this
+  machine's data was already migrated via the two-hop path — for the one
+  case the engine-verified ladder signal can't cover on its own (a shared
+  tenant across two machines in managed/cloud mode). No effect in local
+  mode, where the ladder signal already governs.
+- **`nx census dispatches`** (nexus-h33x8.2): recognizes every `Agent`
+  tool_use block in a session transcript as `(subagent_type, ordinal)` —
+  the transcript-based recognizer the RDR-184 orchestration ledger could
+  never build for itself (the `Agent` tool carries no `name` parameter, so
+  the old name-morphology guard was structurally pinned at 0 recognized).
+  Read-only recognizer; does not touch `tests/e2e/lib/expectations.sh` or
+  compute undeclared/BLINDSPOT counts itself.
+
+### Changed
+- **`nx memory search` (and `search_glob`/`search_by_tag`) now fail loud on
+  a degenerate query instead of silently returning nothing** (nexus-senub,
+  engine v0.1.69+): a query with no searchable terms — every word an
+  English stopword, or punctuation-only — used to come back as an ordinary
+  empty result, indistinguishable from a real "no matches." The engine now
+  returns `400 {"code": "no_searchable_terms"}` for this specific case and
+  the CLI exits non-zero with a clean message. Corpus-dependent: a
+  stopword-only query that still resolves a real title/tag hit returns
+  normally. Older engines fail open to the prior silent-empty behavior.
+- **Tier-write rows become readable per-row, not just aggregated**
+  (nexus-onjvy): `HttpTelemetryStore.list_tier_writes` adds a capped,
+  totaled read path (`GET /v1/telemetry/tier_writes/list`) for the
+  `target_title` column, which was write-only until now — the existing
+  `nx tier-status` aggregate route is unaffected. Python-API surface only
+  in this release; no new CLI flag.
+
+### Fixed
+- **The two-hop pre-PG upgrade redirect is now genuinely followable start
+  to finish, in both local and cloud mode** (nexus-4922x): the third leg
+  (upgrading back to current after migrating on the pinned 6.18.1 release)
+  previously could re-trip the stranded-install refusal because the
+  de-strand check read a migration-report format nothing writes. It now
+  keys off the engine-side upgrade-ladder's own completion record in local
+  mode, with an indeterminate-vs-confirmed distinction when the ladder
+  can't be reached, and the cloud-mode gap is covered by `nx stranded ack`
+  above. Proven end-to-end by a new Docker rehearsal harness
+  (nexus-8nlj4, `tests/e2e/migration-rehearsal/rehearse_stranded.sh`).
+- **Combined-write flush no longer silently drops content from
+  mixed-identity batches** (nexus-wxjr6, nexus-3mwuo): a flush containing
+  both files with catalog identity and files without it used to embed the
+  identity-less content (paying the Voyage cost) and then silently discard
+  it server-side, since the engine's manifest write only persists chashes
+  a referencing document actually names. Identity-less chunks — and any
+  chash shared between an identity and a non-identity file — now also ride
+  the pre-existing orphaned-but-searchable upsert path as a safety copy.
+- **`nx index` completion-refusal messages no longer assert a cause the
+  engine never checked** (nexus-nb3yg, nexus-2t63u): a `--corpus`-only
+  invocation (no explicit `--collection`) used to skip the live
+  stale-collection lookup entirely and print the "may be a stale
+  --collection mismatch" hint unconditionally. The lookup now runs
+  whenever the run's target collection can be derived at all (explicit or
+  corpus-derived), and the message states one of three honest outcomes —
+  confirmed match, confirmed mismatch, or unknown — never a guessed cause.
+- **`scripts/reinstall-tool.sh` handles the canonical post-release
+  scenario by default** (nexus-e1m2v, nexus-otnvr, nexus-103v2): the live
+  process classifier now matches `uv tool`-shimmed MCP server commands
+  (previously missed because the shim execs via shebang, pushing the real
+  command to argv[2]); the default reinstall now cycles all four
+  known-safe holder classes (session MCP servers, standalone aspect
+  worker, MinerU, storage service) instead of refusing outright, and the
+  lockstep auto-upgrade hook now logs every swap attempt to
+  `~/.config/nexus/lockstep.log` instead of routing output to `/dev/null`.
+
+### Internal
+- Engine-side raw-SQL-to-jOOQ conversion continues (nexus-4okz4 increments
+  1-5: `RekeyOps`, `StagingPromoteOps`, `StagingHandler`/`ChashCensus`,
+  statement-granular raw-SQL gate) alongside gate hardening
+  (nexus-rfx2j/nexus-ajt86) and per-fork Postgres template-database reuse
+  for the local engine test suite (nexus-yhmav/nexus-tyiht/nexus-13eb0).
+- Worktree-dispatched agents now self-verify their base commit as their
+  first action (nexus-5kwkf, `scripts/agent-worktree-preflight.sh`) —
+  closes a class of silently-stale-worktree dispatch.
+- Test-substrate PG-boot hardening (nexus-ui654): bounded concurrent boots,
+  dead-owner reap, and a sweep script for orphaned containers.
+
 ## [7.4.0] - 2026-08-08
 
 Paired release with engine-service-v0.1.68 (cloud-deployed 2026-08-07;

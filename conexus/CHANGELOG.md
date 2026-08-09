@@ -4,6 +4,49 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.5.0] - 2026-08-09
+
+> **DRAFT — release-prep, not yet cut.** Drawn from
+> `conexus/PENDING_RELEASE.md`'s "Awaiting the next release (pinned:
+> v7.4.0)" ledger. nexus-hdumg (P1) is still in flight and may add its own
+> entry here before cut.
+
+### Activated by this pin advance (from PENDING_RELEASE.md)
+- **SessionStart guidance moves off the plugin-release cadence**
+  (nexus-h33x8.4): the `cat $CLAUDE_PLUGIN_ROOT/skills/using-nx-skills/SKILL.md`
+  entry in `hooks.json` is removed; the same guidance imperative is now
+  emitted by `nx hook session-start` (the CLI wheel), so future edits to
+  the guidance text ship on the PyPI/reinstall cadence instead of waiting
+  for the next plugin release. A machine on a wheel that predates this
+  change self-heals within about one session via the existing
+  `nx upgrade --auto` + lockstep hook. `writing-nx-skills/SKILL.md` gets
+  the matching doc update explaining the split.
+- **Lockstep auto-upgrade swaps are now logged, not silent**
+  (nexus-otnvr item 4): every `uv tool upgrade` attempt the detached
+  version-lockstep hook makes writes an always-on
+  `lockstep_upgrade_started`/`lockstep_upgrade_result` line to
+  `~/.config/nexus/lockstep.log`, closing the blind spot where a venv
+  swap racing an MCP server boot left no trace.
+- **Worktree-dispatched agents get a mandatory preflight step**
+  (nexus-5kwkf): a new `Preflight` row in the injected Orchestration table
+  tells every `isolation:worktree` dispatch to run
+  `scripts/agent-worktree-preflight.sh` as its first action and stop on
+  any `PREFLIGHT_FAIL` — closes the gap where a fresh worktree could be
+  silently stale relative to `develop` (the harness cuts worktrees from
+  the default branch's tip, not the dispatching session's own branch).
+- **Owes-report credit accounting hardening** (nexus-7z7rj, nexus-plycy):
+  <!-- PLACEHOLDER — nexus-7z7rj is tracked as still in flight per the
+       release-prep brief; do not invent final wording here. The
+       develop tree at prep time (2026-08-09) already carries a
+       corresponding commit (58fad215, "owes-report credit decisions
+       happen only under the lock, per-type") and PENDING_RELEASE.md
+       already documents both nexus-7z7rj and nexus-plycy in full detail
+       under "Awaiting the next release". Reconcile at cut time: either
+       fold PENDING_RELEASE.md's existing wording in here (if that
+       commit IS the fix), or replace this placeholder with whatever
+       additional round actually lands. Do not ship this placeholder
+       verbatim. -->
+
 ## [7.4.0] - 2026-08-08
 
 ### Activated by this pin advance (from PENDING_RELEASE.md)
