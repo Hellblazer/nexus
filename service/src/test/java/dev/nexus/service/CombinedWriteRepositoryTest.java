@@ -160,6 +160,20 @@ class CombinedWriteRepositoryTest {
         }
     }
 
+    /** Raw stored {@code metadata} JSONB, as text, for a chunks_384 row. */
+    private String chunk384MetadataJson(String tenant, String collection, String hexChash) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            var ps = su.prepareStatement(
+                "SELECT metadata::text FROM nexus.chunks_384 WHERE tenant_id = ? AND collection = ? AND chash = ?");
+            ps.setString(1, tenant);
+            ps.setString(2, collection);
+            ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
+            var rs = ps.executeQuery();
+            return rs.next() ? rs.getString(1) : null;
+        }
+    }
+
     private void seedChunk384(String tenant, String collection, String hexChash, String text) throws Exception {
         repo.upsertCollection(tenant, Map.of(
             "name", collection, "content_type", "code", "owner_id", "combined-write-owner",
@@ -182,6 +196,10 @@ class CombinedWriteRepositoryTest {
 
     private static Map<String, Object> chunk(String chash, String text) {
         return Map.of("chash", chash, "text", text, "metadata", Map.of());
+    }
+
+    private static Map<String, Object> chunk(String chash, String text, Map<String, Object> metadata) {
+        return Map.of("chash", chash, "text", text, "metadata", metadata);
     }
 
     private static Map<String, Object> row(int position, String chash) {
@@ -416,6 +434,130 @@ class CombinedWriteRepositoryTest {
             .as("RDR-181: a chash already stored with IDENTICAL text must never be re-embedded")
             .isEqualTo(afterFirst);
         assertThat(repo.getManifest(TENANT_A, "cw.7b")).hasSize(1);
+    }
+
+    // ── nexus-awxhm adjudication (substantive-critic Critical, 2026-08-09): ──
+    //    byte-identical stored text AND metadata through the REAL combined- ──
+    //    write path. Falsified against the pre-fix code before any fix ────────
+    //    landed (see T2 nexus/nexus-kl2z6-engine-increment1-2026-08-09 §adjudication). ─
+
+    @Test @Order(8)
+    void combinedWrite_multiWordTextAndSpacedMetadata_storedByteIdentical() throws Exception {
+        String col = "code__cw8__minilm-l6-v2-384__v1";
+        String x = ch("cw8-x");
+        registerDoc(TENANT_A, "cw.8", col);
+
+        String text = "hello world this is a multi word chunk";
+        Map<String, Object> metadata = Map.of("title", "a b c title with spaces",
+                                               "path", "src/main/java/Foo Bar.java");
+        svc.writeManyCombined(TENANT_A, col,
+            List.of(chunk(x, text, metadata)),
+            List.of(doc("cw.8", List.of(row(0, x)))),
+            null, false, false);
+
+        assertThat(chunk384Text(TENANT_A, col, x))
+            .as("stored chunk_text must be BYTE-IDENTICAL to what was sent -- no space-stripping")
+            .isEqualTo(text);
+        String storedMeta = chunk384MetadataJson(TENANT_A, col, x);
+        assertThat(storedMeta).contains("a b c title with spaces");
+        assertThat(storedMeta).contains("src/main/java/Foo Bar.java");
+    }
+
+    // ── nexus-n7umy adjudication (code-review-expert Critical, 2026-08-09): ──
+    //    the gate held during the chunk-vector upsert must be the collection ─
+    //    being WRITTEN (chunkCollection), not merely the doc's OWN registered ─
+    //    collection -- proven by the SAME two-connection block/release ────────
+    //    technique 6a uses, this time asserting gate IDENTITY (which key ─────
+    //    blocks) rather than just atomicity. ────────────────────────────────
+
+    @Test @Order(9)
+    void combinedWrite_docRegisteredUnderDifferentCollection_gatesOnTheCollectionBeingWritten() throws Exception {
+        String registeredUnder = "code__cw9a__minilm-l6-v2-384__v1";
+        String writtenInto     = "code__cw9b__minilm-l6-v2-384__v1";
+        String x = ch("cw9-x");
+        // The doc is registered under A; the combined write targets B --
+        // divergence, deliberately, is what n7umy flags as unguarded.
+        registerDoc(TENANT_A, "cw.9", registeredUnder);
+
+        try (Connection external = dsConnection()) {
+            external.setAutoCommit(false);
+            try (var st = external.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
+                st.execute();
+            }
+            // Hold EXCLUSIVE on B (writtenInto), NOT A -- if the engine only
+            // ever gates on the doc's OWN collection (A), this acquire has no
+            // effect on the combined write at all and it proceeds unblocked,
+            // exposing the exact race n7umy describes.
+            acquireGateExclusive(external, TENANT_A, writtenInto, 60_000);
+
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                Future<?> future = executor.submit(() ->
+                    svc.writeManyCombined(TENANT_A, writtenInto,
+                        List.of(chunk(x, "cw9 text")),
+                        List.of(doc("cw.9", List.of(row(0, x)))),
+                        null, false, false));
+
+                assertThatThrownBy(() -> future.get(750, TimeUnit.MILLISECONDS))
+                    .as("the combined write must BLOCK on the gate for the collection it actually "
+                        + "WRITES INTO, even though the doc is registered under a different collection")
+                    .isInstanceOf(java.util.concurrent.TimeoutException.class);
+
+                assertThat(chunk384Exists(TENANT_A, writtenInto, x)).isFalse();
+
+                external.rollback();
+                future.get(15, TimeUnit.SECONDS);
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+
+        assertThat(chunk384Exists(TENANT_A, writtenInto, x)).isTrue();
+        assertThat(repo.getManifest(TENANT_A, "cw.9")).hasSize(1);
+    }
+
+    @Test @Order(10)
+    void combinedWrite_unregisteredGhostDoc_stillGatesOnTheCollectionBeingWritten() throws Exception {
+        String col = "code__cw10__minilm-l6-v2-384__v1";
+        String x = ch("cw10-x");
+        // No physical_collection at all -- physicalCollectionOf(docId) returns
+        // null for this doc, so the PRE-n7umy-fix code acquired NO gate at
+        // all on the writeManifestRows path (the `if (coll != null)` guard
+        // skips it entirely).
+        repo.upsertDocument(TENANT_A, Map.of(
+            "tumbler", "cw.10", "title", "combined-write-ghost-cw.10",
+            "content_type", "code", "corpus", "code", "chunk_count", 0));
+
+        try (Connection external = dsConnection()) {
+            external.setAutoCommit(false);
+            try (var st = external.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
+                st.execute();
+            }
+            acquireGateExclusive(external, TENANT_A, col, 60_000);
+
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                Future<?> future = executor.submit(() ->
+                    svc.writeManyCombined(TENANT_A, col,
+                        List.of(chunk(x, "cw10 text")),
+                        List.of(doc("cw.10", List.of(row(0, x)))),
+                        null, false, false));
+
+                assertThatThrownBy(() -> future.get(750, TimeUnit.MILLISECONDS))
+                    .as("an unregistered (null physical_collection) doc must still gate on the "
+                        + "collection the combined write actually targets")
+                    .isInstanceOf(java.util.concurrent.TimeoutException.class);
+
+                assertThat(chunk384Exists(TENANT_A, col, x)).isFalse();
+
+                external.rollback();
+                future.get(15, TimeUnit.SECONDS);
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+
+        assertThat(chunk384Exists(TENANT_A, col, x)).isTrue();
     }
 
     /** Deterministic, dim-384 embedder that counts every text it is asked to embed. */

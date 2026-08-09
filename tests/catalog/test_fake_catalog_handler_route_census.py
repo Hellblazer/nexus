@@ -208,7 +208,17 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
     "/manifest/write_many": (
         "backs HttpCatalogClient's manifest write-many batch path via raw "
         "_post — unit-tested against a mocked _post, not the live fake "
-        "server"
+        "server. nexus-kl2z6 increment 1 (2026-08-09) added the ENGINE-side "
+        "combined-write fields (optional `collection`/`chunks`/"
+        "`force_re_embed` request fields, `chunks_written` response field) "
+        "to this SAME route — this exclusion entry still applies to them: "
+        "no Python client method sends `chunks` yet (that is nexus-wxjr6, "
+        "the deferred CLIENT-face release — design memo T2 "
+        "design-kl2z6-combined-write §5.3), so there is nothing here for "
+        "the fake to grow until wxjr6 lands. When it does, this route "
+        "moves off raw `_post` onto a shape a live fake CAN back, and this "
+        "exclusion entry (or a `chunks`-aware replacement) needs revisiting "
+        "then, not before"
     ),
     "/manifest/resync": (
         "backs HttpCatalogClient.resync_chunk_count_cache() via raw _post "

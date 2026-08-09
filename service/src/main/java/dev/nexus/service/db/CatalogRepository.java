@@ -3830,6 +3830,33 @@ public final class CatalogRepository {
         if (coll != null) {
             acquireSweepGateShared(ctx, tenant, coll);
         }
+        // nexus-n7umy (code-review-expert Critical, adjudicated 2026-08-09):
+        // the gate above protects `coll` — the DOC's own registered
+        // collection, which the pre-existing (pre-kl2z6) sweep mechanics for
+        // THIS doc's dropped-chash union guard actually needs. It is NOT
+        // necessarily the collection the NEW chunk-vector upsert below
+        // writes into (`chunkCollection`, the combined-write request's
+        // top-level `collection`): a doc can be a ghost with no
+        // physical_collection at all (`coll == null`, gate above SKIPPED
+        // entirely), or — in principle, nothing in this method enforces
+        // otherwise — registered under a DIFFERENT collection than the one
+        // this call's `chunks` are being written into. Either way, without
+        // this second acquire, the chunk-vector upsert below would proceed
+        // UNGATED on `chunkCollection`, and a concurrent sweep on
+        // `chunkCollection` could delete the chash between
+        // `upsertManifestChunkVectors`'s mustAlreadyExist SELECT and this
+        // transaction's commit — the exact kl2z6 hazard this whole feature
+        // exists to close, reopened by a collection-identity gap. The
+        // combined write's own atomicity guarantee (design memo §0) is
+        // stated per (tenant, collection); the collection that guarantee
+        // must hold for HERE is the one being written, so gate on it
+        // explicitly whenever it is not already covered by the acquisition
+        // above (redundant-but-harmless when coll == chunkCollection, the
+        // common case: pg_advisory_xact_lock_shared is reentrant per
+        // transaction for the same key).
+        if (resolvedChunks != null && chunkCollection != null && !chunkCollection.equals(coll)) {
+            acquireSweepGateShared(ctx, tenant, chunkCollection);
+        }
         // nexus-5xn3k.2 (stacked-review item 1): the WRITE side of the
         // completeIndexRun/writeManifestRows advisory-lock pair — see
         // acquireIndexRunLock's javadoc. Acquired BEFORE the delete+insert below

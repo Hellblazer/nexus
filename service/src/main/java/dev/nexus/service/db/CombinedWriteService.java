@@ -242,7 +242,7 @@ public final class CombinedWriteService {
     /** Strip NUL (0x00) — unstorable in Postgres {@code text}/{@code jsonb} (nexus-rvfwj),
      *  mirrors {@code PgVectorRepository.stripNul}. */
     private static String stripNul(String s) {
-        return (s != null && s.indexOf(' ') >= 0) ? s.replace(" ", "") : s;
+        return (s != null && s.indexOf('\u0000') >= 0) ? s.replace("\u0000", "") : s;
     }
 
     /** Recursively strip NULs from metadata, mirrors {@code PgVectorRepository.sanitizeNulDeep}. */
