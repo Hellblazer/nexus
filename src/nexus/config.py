@@ -570,6 +570,58 @@ def catalog_path() -> Path:
     return nexus_config_dir() / "catalog"
 
 
+#: nexus-4922x: the historical ladder rung name that recorded the pre-PG
+#: data migration at the pinned last-migration-capable release
+#: (``stranded_install.LAST_MIGRATION_CAPABLE``, currently ``6.18.1``).
+#: ``RUNG_SUBSTRATE_ETL`` was deleted from ``upgrade_ladder.registry`` at
+#: RDR-155 P4b (the rung no longer WALKS on the current release), but the
+#: completion FACT it recorded is engine-side (``nexus.ladder_completions``
+#: via ``HttpLadderStore``, RDR-186 .12) and OUTLIVES the client package
+#: version: the SAME local PG database serves both the pin and the current
+#: release across a package-only up/downgrade, so a verified row survives
+#: hop 3. Hardcoded (not imported) because the registry constant naming it
+#: is gone — this string is frozen historical fact, not a live symbol.
+_MIGRATION_RUNG_NAME = "substrate-etl"
+
+
+def _ladder_migration_verified() -> bool | None:
+    """nexus-4922x: query the engine-side upgrade-ladder for a verified
+    record of the pre-PG data migration — the signal the CURRENT two-hop
+    remedy (``nx upgrade`` at the pin) actually produces, replacing the
+    legacy ``<config>/migration-reports/*.json`` format that neither ``nx
+    upgrade`` (the ladder) nor the hidden ``nx guided-upgrade`` writes any
+    more (see ``stranded_install._has_verified_migration_report``'s
+    docstring for the full trace — only the separate, unadvertised ``nx
+    storage migrate*`` family writes that format).
+
+    Returns ``True`` when the rung is present and verified: the caller
+    de-strands. Returns ``None`` on ANY failure to reach or query the
+    engine — unresolvable endpoint, connection error, HTTP error, or any
+    other exception — and on the ordinary "rung not recorded" case.
+    Deliberate fail-CLOSED degradation (no silent fallbacks for
+    correctness decisions): an unreachable engine is the EXPECTED state at
+    ``nx init`` time on a genuinely stranded box (nothing has been
+    provisioned yet), so treating "can't tell" as "verified" would
+    silently de-strand a box that was never migrated at all. The caller
+    (:func:`nexus.stranded_install.detect_stranded_install`) treats
+    ``None`` the same as ``False`` — stay stranded — and this function
+    logs a structured warning so the degradation is LOUD, not silent, even
+    though it never raises: a raise here would crash the UNWRAPPED ``nx
+    init`` call site (deliberately not try/except'd — see
+    ``commands/init.py``), which must abort loud only on a genuine
+    detector bug, never on the ordinary "engine isn't up yet" case.
+    """
+    try:
+        from nexus.upgrade_ladder.http_store import HttpLadderStore  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+        with HttpLadderStore() as store:
+            verified = store.verified_rungs()
+    except Exception as exc:  # noqa: BLE001 — engine-down/unresolvable is the EXPECTED case at nx init time; must degrade, never raise or crash the caller
+        _log.warning("stranded_install_ladder_check_unreachable", error=str(exc))
+        return None
+    return _MIGRATION_RUNG_NAME in verified
+
+
 def detect_stranded_install_default() -> "StrandedInstall | None":
     """Run the stranded-install detector (nexus-gynt2) against the real
     path roots: config dir, local Chroma dir, catalog dir.
@@ -578,7 +630,8 @@ def detect_stranded_install_default() -> "StrandedInstall | None":
     startup, ``nx doctor``) calls, so the path-resolution knowledge stays
     here with the resolvers. Near-zero cost while the detector is
     disarmed (``stranded_install.LAST_MIGRATION_CAPABLE is None``): the
-    leaf short-circuits before touching the filesystem.
+    leaf short-circuits before touching the filesystem, and
+    ``_ladder_migration_verified`` (network) is never even referenced.
 
     SCOPE CONSISTENCY (nexus-rjod2, found at the 7.0.0 gate where it
     reddened 60 tests + two E2E legs): every probed root must resolve
@@ -591,6 +644,13 @@ def detect_stranded_install_default() -> "StrandedInstall | None":
     override the probe anchors at ``<override>/chroma``; a sandbox that
     wants to exercise detection seeds that path or sets
     ``NX_LOCAL_CHROMA_PATH`` explicitly.
+
+    PRIMARY de-strand signal (nexus-4922x): ``_ladder_migration_verified``
+    is wired in as ``detect_stranded_install``'s ``ladder_migration_verified``
+    probe. It only ever runs when pre-PG artifacts are actually present on
+    disk (``detect_stranded_install`` short-circuits before it otherwise),
+    so the added network round-trip is bounded to the rare once-stranded
+    population, not every CLI invocation on a healthy box.
     """
     import os  # noqa: PLC0415 — stdlib, branch-local
 
@@ -601,7 +661,10 @@ def detect_stranded_install_default() -> "StrandedInstall | None":
         chroma_dir = legacy_chroma_dir()
     else:
         chroma_dir = config_dir / "chroma"
-    return detect_stranded_install(config_dir, chroma_dir, catalog_path())
+    return detect_stranded_install(
+        config_dir, chroma_dir, catalog_path(),
+        ladder_migration_verified=_ladder_migration_verified,
+    )
 
 
 def is_local_mode() -> bool:

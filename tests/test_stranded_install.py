@@ -32,8 +32,10 @@ import pytest
 from click.testing import CliRunner
 
 import nexus.commands.init as init_mod
+import nexus.config as config_mod
 import nexus.stranded_install as stranded_install
 import nexus.upgrade_finish as upgrade_finish
+import nexus.upgrade_ladder.http_store as http_store_mod
 from nexus.mcp._first_run import apply_stranded_notice
 from nexus.cli import main
 from nexus.commands.init import init_cmd
@@ -49,6 +51,30 @@ from nexus.stranded_install import (
 _SRC_ROOT = Path(__file__).resolve().parent.parent / "src" / "nexus"
 
 _PIN = "6.16.0"  # an arbitrary armed value for tests — NOT the real constant
+
+#: Captured BEFORE the module-scoped autouse fixture below ever patches
+#: ``config_mod._ladder_migration_verified`` -- ``TestConfigLadderProbe``
+#: calls this direct function reference (bypassing the attribute lookup the
+#: fixture stubs) so it can test the REAL implementation while every other
+#: test in this file gets the hermetic stub.
+_REAL_LADDER_MIGRATION_VERIFIED = config_mod._ladder_migration_verified
+
+
+@pytest.fixture(autouse=True)
+def _no_live_ladder_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-4922x: every test in this module exercises the pure file-stat
+    detector (directly, or indirectly through ``detect_stranded_install_default``
+    at the CLI/init/doctor/MCP wiring layer). ``_ladder_migration_verified``
+    is the production probe and reaches out to a REAL engine over HTTP —
+    this file must stay a hermetic unit suite (no live substrate, per
+    AGENTS.md), so stub it to the "indeterminate" return (``None``)
+    everywhere by default. ``None`` reproduces the exact legacy-report-only
+    behavior every pre-existing test in this file was written against.
+    ``TestLadderMigrationSignal`` / ``TestConfigLadderProbe`` below override
+    this per-test to exercise the new signal explicitly (both the injected-
+    callable contract and the production probe's own HttpLadderStore
+    plumbing, with HttpLadderStore itself faked)."""
+    monkeypatch.setattr(config_mod, "_ladder_migration_verified", lambda: None)
 
 
 @pytest.fixture()
@@ -548,3 +574,177 @@ class TestAssemblerScopeConsistency:
         monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(chroma))
         result = detect_stranded_install_default()
         assert result is not None, "NX_LOCAL_CHROMA_PATH is always honored"
+
+
+class TestLadderMigrationSignal:
+    """nexus-4922x: the engine-side ladder-completion signal is now the
+    PRIMARY de-strand check — the legacy migration-reports/*.json file
+    (``_has_verified_migration_report``) is SECONDARY. Root cause: neither
+    of the two remedy paths the two-hop message can name at the pin release
+    (the advertised ``nx upgrade``, or the hidden ``nx guided-upgrade``)
+    ever wrote that file format (verified against the v6.18.1 tag's own
+    source: only the separate, unadvertised ``nx storage migrate*``
+    family calls ``_write_report`` — see the bead's T2 write-up) — so
+    relying on it alone left every real user re-tripping hop 3 forever."""
+
+    def _detect_with_artifact(
+        self, dirs: tuple[Path, Path, Path], ladder_result: bool | None,
+    ) -> StrandedInstall | None:
+        config, chroma, catalog = dirs
+        (config / "memory.db").write_bytes(b"x")
+        return detect_stranded_install(
+            config, chroma, catalog,
+            last_migration_capable=_PIN,
+            ladder_migration_verified=lambda: ladder_result,
+        )
+
+    def test_ladder_verified_true_destrands_without_report_file(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """No legacy report file anywhere -- the ladder signal alone is
+        sufficient to de-strand."""
+        assert self._detect_with_artifact(dirs, True) is None
+
+    def test_ladder_verified_false_stays_stranded_without_report(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """Engine reachable, rung genuinely not recorded, no legacy report
+        either -- correctly stays stranded."""
+        assert self._detect_with_artifact(dirs, False) is not None
+
+    def test_ladder_indeterminate_none_stays_stranded_without_report(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """DESIGN DECISION (nexus-4922x): an unreachable/indeterminate
+        engine degrades to 'stay stranded, loud reason' -- NEVER a silent
+        de-strand. This is the expected state at nx init time on a
+        genuinely stranded box (the engine has not been provisioned yet):
+        treating 'can't tell' as 'verified' would silently wave through a
+        box that was never migrated at all."""
+        assert self._detect_with_artifact(dirs, None) is not None
+
+    def test_ladder_false_falls_through_to_legacy_report_secondary(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """A box migrated via the OLDER nx storage migrate* report-writing
+        path (pre-dates the ladder becoming the documented remedy) must
+        still de-strand even when the ladder signal itself says no --
+        constraint (b) from the bead: the legacy check is preserved as a
+        secondary signal, not removed."""
+        config, chroma, catalog = dirs
+        (config / "memory.db").write_bytes(b"x")
+        _write_report(config, verification="verified", total_failed=0)
+        result = detect_stranded_install(
+            config, chroma, catalog,
+            last_migration_capable=_PIN,
+            ladder_migration_verified=lambda: False,
+        )
+        assert result is None
+
+    def test_ladder_none_also_falls_through_to_legacy_report_secondary(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """Same as above but with an indeterminate (engine-unreachable)
+        ladder result -- the legacy report is still consulted, not
+        short-circuited into a stranded verdict."""
+        config, chroma, catalog = dirs
+        (config / "memory.db").write_bytes(b"x")
+        _write_report(config, verification="verified", total_failed=0)
+        result = detect_stranded_install(
+            config, chroma, catalog,
+            last_migration_capable=_PIN,
+            ladder_migration_verified=lambda: None,
+        )
+        assert result is None
+
+    def test_no_ladder_probe_supplied_is_legacy_only(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """The default (``ladder_migration_verified=None``) reproduces the
+        EXACT prior behavior -- callers that never opt in (this module's
+        pre-existing tests, historical callers) see no new dependency and
+        no behavior change."""
+        config, chroma, catalog = dirs
+        (config / "memory.db").write_bytes(b"x")
+        assert detect_stranded_install(
+            config, chroma, catalog, last_migration_capable=_PIN,
+        ) is not None
+
+
+class TestConfigLadderProbe:
+    """nexus-4922x: ``nexus.config._ladder_migration_verified`` -- the
+    production probe that queries the REAL engine-side ladder store
+    (``HttpLadderStore``, faked here at its import site so these stay
+    hermetic unit tests, no live engine)."""
+
+    class _FakeLadderStore:
+        def __init__(self, verified: frozenset[str]) -> None:
+            self._verified = verified
+
+        def verified_rungs(self) -> frozenset[str]:
+            return self._verified
+
+        def __enter__(self) -> "TestConfigLadderProbe._FakeLadderStore":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    def test_verified_rung_present_returns_true(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            http_store_mod, "HttpLadderStore",
+            lambda: self._FakeLadderStore(frozenset({"substrate-etl", "chash-rekey"})),
+        )
+        assert _REAL_LADDER_MIGRATION_VERIFIED() is True
+
+    def test_rung_absent_returns_false(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            http_store_mod, "HttpLadderStore",
+            lambda: self._FakeLadderStore(frozenset({"chash-rekey"})),
+        )
+        assert _REAL_LADDER_MIGRATION_VERIFIED() is False
+
+    def test_no_completions_at_all_returns_false(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            http_store_mod, "HttpLadderStore",
+            lambda: self._FakeLadderStore(frozenset()),
+        )
+        assert _REAL_LADDER_MIGRATION_VERIFIED() is False
+
+    def test_engine_unreachable_returns_none_never_raises(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Construction-time failure (e.g. ServiceEndpointUnresolvableError,
+        the expected shape when nothing has been provisioned yet)."""
+
+        def _boom() -> "TestConfigLadderProbe._FakeLadderStore":
+            raise RuntimeError("nexus-service endpoint is not resolvable")
+
+        monkeypatch.setattr(http_store_mod, "HttpLadderStore", _boom)
+        assert _REAL_LADDER_MIGRATION_VERIFIED() is None
+
+    def test_query_failure_returns_none_never_raises(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Construction succeeds (endpoint resolvable) but the GET itself
+        fails (e.g. connection refused mid-restart) -- also degrades to
+        None, never propagates."""
+
+        class _RaisingStore:
+            def verified_rungs(self) -> frozenset[str]:
+                raise ConnectionRefusedError("connection refused")
+
+            def __enter__(self) -> "_RaisingStore":
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                return None
+
+        monkeypatch.setattr(http_store_mod, "HttpLadderStore", _RaisingStore)
+        assert _REAL_LADDER_MIGRATION_VERIFIED() is None

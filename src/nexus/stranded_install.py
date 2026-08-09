@@ -43,10 +43,27 @@ at every wired entry point (``nx init``, CLI startup, MCP startup,
 by ``tests/test_stranded_install.py``). Callers resolve the three path
 roots; :func:`nexus.config.detect_stranded_install_default` is the shared
 assembler every entry point uses.
+
+**De-strand signal (nexus-4922x, 2026-08-09).** The PRIMARY signal is an
+injected ``ladder_migration_verified`` probe (see
+:func:`detect_stranded_install`'s docstring) querying the engine-side
+upgrade-ladder completion record — the actual output of the CURRENT
+documented remedy (``nx upgrade`` at the pin). The original
+``<config>/migration-reports/*.json`` file check
+(:func:`_has_verified_migration_report`) survives as a SECONDARY signal
+for users who migrated via the older, unadvertised ``nx storage
+migrate*`` command family — but neither of the two remedy paths the
+two-hop message has ever named (``nx upgrade``, and the hidden ``nx
+guided-upgrade``) writes that format, so relying on it alone left every
+real user re-tripping the detector forever on hop 3. Because this module
+stays a stdlib-only leaf, it cannot reach the engine itself; the probe is
+always caller-injected, built in production by
+:func:`nexus.config._ladder_migration_verified`.
 """
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
@@ -148,6 +165,19 @@ def _has_verified_migration_report(config_dir: Path) -> bool:
     closed (the nexus-r0esi never-silently-pass rule). Re-running the
     migration ladder on an actually-migrated box is a near-no-op re-verify;
     staying silent on an unmigrated one is indistinguishable from data loss.
+
+    SECONDARY signal only (nexus-4922x). Neither of the two remedy paths the
+    two-hop message can name at the pin release — the advertised ``nx
+    upgrade`` (the ladder; records completion engine-side via
+    ``HttpLadderStore``, never touches this directory) nor the hidden ``nx
+    guided-upgrade`` (delegates to ``nexus.migration.driver
+    .run_guided_upgrade``, which also never writes here) — produces this
+    format; only the separate, unadvertised ``nx storage migrate*`` family
+    does. This check survives for users who migrated via THAT older path
+    (pre-dates the ladder) and would otherwise lose their de-strand.
+    :func:`detect_stranded_install`'s ``ladder_migration_verified`` callback
+    is the PRIMARY signal — the one the documented remedy actually
+    produces.
     """
     reports_dir = config_dir / _REPORTS_DIRNAME
     try:
@@ -206,8 +236,10 @@ def detect_stranded_install(
     catalog_dir: Path,
     *,
     last_migration_capable: str | None | object = _USE_PINNED,
+    ladder_migration_verified: Callable[[], bool | None] | None = None,
 ) -> StrandedInstall | None:
-    """Detect a stranded pre-PG install. Pure file stats + stdlib json.
+    """Detect a stranded pre-PG install. Pure file stats + stdlib json (plus
+    one optional injected network probe — see ``ladder_migration_verified``).
 
     Returns ``None`` (the overwhelmingly common case) when any of:
 
@@ -215,12 +247,44 @@ def detect_stranded_install(
       the state of every migration-capable release), which short-circuits
       before any filesystem access;
     - none of the four pre-PG store files exist (fresh box);
-    - the newest migration report is verified-clean (migrated box — the
+    - ``ladder_migration_verified`` reports the CURRENT remedy path's
+      engine-side completion record as verified (see below — the PRIMARY
+      migrated signal, nexus-4922x);
+    - the newest legacy migration report is verified-clean (SECONDARY
+      signal — see :func:`_has_verified_migration_report`; migrated box,
       files legitimately remain as copy-not-move rollback sources).
 
     Otherwise returns a :class:`StrandedInstall` whose ``message`` is the
     literal two-hop redirect. Callers decide loudness per entry point
     (``nx init`` refuses; CLI banners; MCP logs; doctor fails).
+
+    ``ladder_migration_verified`` (nexus-4922x, replacing the dead
+    ``migration-reports/*.json`` primary check — nothing on the CURRENT
+    remedy path (``nx upgrade`` at the pin, the ladder) writes that format
+    any more; see :func:`_has_verified_migration_report`'s docstring for
+    the full trace). A zero-arg probe of the engine-side upgrade-ladder
+    completion record — the production implementation
+    (:func:`nexus.config._ladder_migration_verified`, wired in by
+    :func:`nexus.config.detect_stranded_install_default`) queries
+    ``HttpLadderStore`` for the historical ``substrate-etl`` rung, which is
+    what the pin's ``nx upgrade`` records on a real migration. Contract:
+
+    - ``True`` — the engine confirms the migration verified. De-strands
+      immediately, WITHOUT consulting the legacy report file.
+    - ``False`` — the engine is reachable and has no such record. Falls
+      through to the legacy report-file check (still may de-strand a user
+      who migrated via the older ``nx storage migrate*`` path).
+    - ``None`` — the probe could not reach or query the engine at all
+      (unresolvable endpoint, connection error, any exception the probe
+      itself caught). Treated IDENTICALLY to ``False`` — stay stranded,
+      never silently de-strand on "can't tell". This is the expected state
+      at ``nx init`` time on a genuinely stranded box, since the engine has
+      not been provisioned yet; the probe implementation logs a structured
+      warning so the degradation is loud even though it never raises here.
+    - ``None`` for this PARAMETER (the default) — no ladder check at all,
+      reproducing the exact pre-nexus-4922x behavior (legacy report file
+      only). Callers that never opt in (most existing tests) are
+      unaffected.
     """
     pin = (
         LAST_MIGRATION_CAPABLE
@@ -235,6 +299,8 @@ def detect_stranded_install(
         if p.is_file()
     )
     if not found:
+        return None
+    if ladder_migration_verified is not None and ladder_migration_verified():
         return None
     if _has_verified_migration_report(config_dir):
         return None

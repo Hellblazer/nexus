@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # nexus-8nlj4 — TWO-HOP STRANDED-REDIRECT rehearsal. Runs INSIDE the container.
+# HOP 3 (nexus-4922x) extends it below: hops 1-2 alone left the redirect's
+# own literal step 3 unverified, and it turned out to be unfollowable —
+# see the HOP 3 comment ahead of Stage 11 for the full root-cause trace.
 #
 # HOP 1 (the detector fires): a box carrying real pre-PG artifacts (written
 # by seed_legacy.py under the PIN release's own libraries, exactly as
@@ -14,6 +17,19 @@
 # message's own instruction) against the SAME on-disk artifacts, then
 # running `nx init` + `nx upgrade` there, must migrate the data for real —
 # the RDR-185 ladder's substrate-etl rung converges and verifies.
+#
+# HOP 3 (nexus-4922x, the redirect's own literal step 3 — "upgrade back to
+# this version"): package-upgrading from the pin BACK to the working tree a
+# SECOND time (Stage 11, below) must leave `nx doctor` / `nx init` / plain
+# CLI startup SILENT — no re-refusal. Found by substantive-critique of this
+# very rehearsal (2026-08-08): the original hops 1-2 never actually
+# exercised hop 3, and static analysis + the rehearsal's own observed
+# doctor output ("Migration reports: no migrations recorded") showed the
+# pre-nexus-4922x detector's only migrated-signal (a
+# <config>/migration-reports/*.json format neither remedy path the message
+# can name ever writes) would never be satisfied — an unfollowable infinite
+# two-hop loop for a real user doing exactly what the message told them to
+# do.
 #
 # NON-VACUITY (bead nexus-8nlj4's own acceptance language: "never assert
 # against a disarmed detector"), three legs:
@@ -292,9 +308,82 @@ printf '%s' "$POST_DOCTOR" | grep -qi "upgrade ladder: no pending rungs" \
 printf '%s' "$POST_DOCTOR" | grep -qi "migration reports" \
   && note "migration-reports check: $(printf '%s' "$POST_DOCTOR" | grep -i 'migration reports' | head -1)"
 
+# ── Stage 11 — HOP 3 (nexus-4922x): the redirect's own literal step 3
+#    ("upgrade back to this version"). Package-upgrade from the pin BACK to
+#    the working tree a SECOND time (the box already did this once at
+#    Stage 4, but that was BEFORE the pin ever migrated anything) and
+#    assert nx doctor / nx init / plain CLI startup all stay SILENT — no
+#    re-refusal, no [stranded-install] banner.
+#
+#    Root cause this is the adjudicating fixture for: pre-nexus-4922x,
+#    detect_stranded_install's ONLY migrated-signal was
+#    _has_verified_migration_report() reading <config>/migration-reports/
+#    *.json — a format NEITHER of the two remedy paths the redirect
+#    message can name ever writes (nx upgrade == the ladder, records
+#    completion engine-side via HttpLadderStore; nx guided-upgrade ==
+#    hidden, delegates to run_guided_upgrade, also never writes there —
+#    verified against the v6.18.1 tag's own source, see the bead's T2
+#    write-up). Pre-PG artifacts are copy-not-move and stay on disk
+#    forever, so on the OLD code this stage would find the SAME files
+#    present, no verified report anywhere, and re-trip the detector right
+#    here — an unfollowable infinite two-hop loop for a real user doing
+#    exactly what the message told them to do. The fix rekeys the primary
+#    de-strand signal off the engine-side ladder-completion record that
+#    Stage 10 (nx upgrade at the pin) actually wrote.
+say "Stage 11 — HOP 3 (nexus-4922x): upgrade back to the working tree a SECOND time; must stay SILENT"
+if uv pip install --python "$HOME/nxenv" --reinstall "$WHEEL" 2>&1 | tail -5 | sed 's/^/       /'; then
+  ok "package upgraded back to the working-tree build a second time ($WHEEL)"
+else
+  bad "hop-3 package upgrade failed"; say "ABORT"; exit 1
+fi
+GOT_VER3="$(nx --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+note "nx --version reports $GOT_VER3 (back on the working tree, post pin-migration)"
+
+# The FIRST invocation post-hop-3 is the load-bearing assertion (same
+# clobber-guard-order caveat as Stage 5): nx doctor is used first, before
+# anything else gets a chance to rewrite the last_seen_version stamp.
+HOP3_DOCTOR_OUT="$(nx doctor 2>&1)"; HOP3_DOCTOR_RC=$?
+printf '%s\n' "$HOP3_DOCTOR_OUT" | grep -i stranded | sed 's/^/       /'
+if printf '%s' "$HOP3_DOCTOR_OUT" | grep -qE '\[stranded-install\]|This install carries unmigrated'; then
+  printf '%s\n' "$HOP3_DOCTOR_OUT" | grep -E '\[stranded-install\]|This install carries unmigrated' | sed 's/^/       /'
+  bad "HOP 3: nx doctor RE-TRIPPED the stranded banner after a genuine pin migration — the two-hop redirect's own step 3 is unfollowable (nexus-4922x)"
+else
+  ok "HOP 3: nx doctor stays silent — no re-refusal after the real pin migration"
+fi
+[ "$HOP3_DOCTOR_RC" -eq 0 ] \
+  && ok "nx doctor exits 0 post-hop-3" \
+  || note "nx doctor rc=$HOP3_DOCTOR_RC post-hop-3 — check above whether this is the stranded check or something unrelated"
+
+# nx init a second time must ALSO stay silent — idempotent re-init per
+# commands/init.py's own "Installation is idempotent" contract, not a
+# stranded-install refusal and not a re-provision from scratch.
+HOP3_INIT_OUT="$(nx init --yes 2>&1)"; HOP3_INIT_RC=$?
+if printf '%s' "$HOP3_INIT_OUT" | grep -qE '\[stranded-install\]|This install carries unmigrated|Refusing to initialize'; then
+  printf '%s\n' "$HOP3_INIT_OUT" | tail -10 | sed 's/^/       /'
+  bad "HOP 3: nx init RE-REFUSED after a genuine pin migration (nexus-4922x)"
+else
+  ok "HOP 3: nx init stays silent — no re-refusal"
+fi
+if [ "$HOP3_INIT_RC" -ne 0 ]; then
+  printf '%s\n' "$HOP3_INIT_OUT" | tail -15 | sed 's/^/       /'
+  bad "HOP 3: nx init exited non-zero (rc=$HOP3_INIT_RC) post-hop-3 — see output above (may be unrelated to stranded-install, but idempotent re-init should exit 0)"
+else
+  ok "nx init exits 0 post-hop-3 (idempotent re-init)"
+fi
+
+# Plain CLI startup (the [stranded-install] banner specifically) — any
+# ordinary invocation must be clean, not just doctor/init.
+HOP3_CLI_OUT="$(nx doctor --help 2>&1)"
+if printf '%s' "$HOP3_CLI_OUT" | grep -qE '\[stranded-install\]'; then
+  printf '%s\n' "$HOP3_CLI_OUT" | grep -E '\[stranded-install\]' | sed 's/^/       /'
+  bad "HOP 3: CLI startup banner still fires post-migration (nexus-4922x)"
+else
+  ok "HOP 3: CLI startup banner stays silent"
+fi
+
 say "RESULT"
 if [ "$FAILS" -eq 0 ]; then
-  printf '\033[32mSTRANDED-REDIRECT MVV PASSED\033[0m — conexus %s carrying real pre-PG artifacts, package-upgraded straight to the working tree, tripped the armed detector with the exact two-hop message (pin=%s); both non-vacuity controls (fresh box, disarmed constant) stayed silent as required; downgrading back to conexus==%s and running nx init + nx upgrade there migrated the SAME data for real\n' \
+  printf '\033[32mSTRANDED-REDIRECT MVV PASSED\033[0m — conexus %s carrying real pre-PG artifacts, package-upgraded straight to the working tree, tripped the armed detector with the exact two-hop message (pin=%s); both non-vacuity controls (fresh box, disarmed constant) stayed silent as required; downgrading back to conexus==%s and running nx init + nx upgrade there migrated the SAME data for real; HOP 3 (upgrading back to the working tree a second time, nexus-4922x) stayed silent — no re-refusal, the two-hop redirect is genuinely followable end to end\n' \
     "$PIN_RELEASE" "$PIN_RELEASE" "$PIN_RELEASE"
   exit 0
 else
