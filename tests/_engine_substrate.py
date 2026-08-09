@@ -33,20 +33,43 @@ a live session, so a fresh postmaster's PPID is 1 within moments of
 boot — only the sidecar's owner-pid check tells stale from live). See
 :func:`sweep_stale_substrate_clusters`.
 
-Sidecar-write TIMING (nexus-ui654 follow-up, critic Q3): the sidecar is
-written TWICE per boot, not once at the end — immediately once the
-postmaster is confirmed up (postmaster identity only; engine fields
-``None``), then updated immediately once the JVM ``Popen`` call returns
-(which hands back the engine PID synchronously, well before the up-to-60s
-``_wait_tcp`` call that follows it). The original nexus-lgdy1 shape wrote
-the sidecar only once, at the very END of ``_boot()`` — after createdb,
-role bootstrap, JVM spawn, and the full TCP-wait — leaving a real,
-observed (not hypothetical) window in which a kill produced a
-SIDECAR-LESS cluster that ``_sweep_legacy_cluster`` permanently refuses
-to auto-reap. Concurrency-window control (nexus-ui654's own
-``_boot_semaphore_slot``) is a separate, complementary mechanism — it
-bounds how many boots run at once; this fix bounds how LONG each boot's
-own un-reapable window lasts.
+Sidecar-write TIMING (nexus-ui654 follow-up, round 2 — critic Q1/Q3): the
+sidecar is written THREE times per boot, not once at the end — (1) a
+PLACEHOLDER immediately after ``initdb`` succeeds, still inside the boot
+semaphore (postmaster/engine fields ``None`` — nothing is running yet, so
+nothing to KILL, but the DIRECTORY itself is reapable debris from the
+instant it exists); (2) updated once the postmaster is confirmed up
+(postmaster identity added; engine fields still ``None``); (3) updated
+again once the JVM ``Popen`` call returns (engine PID added — known
+synchronously, well before the up-to-60s ``_wait_tcp`` call that
+follows it). The original nexus-lgdy1 shape wrote the sidecar only once,
+at the very END of ``_boot()`` — after createdb, role bootstrap, JVM
+spawn, and the full TCP-wait — leaving a real, observed (not
+hypothetical) window in which a kill produced a SIDECAR-LESS cluster that
+``_sweep_legacy_cluster`` permanently refuses to auto-reap.
+
+Round 1 of this follow-up moved the first sidecar write to right after
+the postmaster comes up and claimed this shrank the un-reapable window to
+"milliseconds" — WRONG under the exact contention this bead targets: the
+boot semaphore sits BEFORE that write in program order, and its own wait
+can legitimately run up to ``_BOOT_SEMAPHORE_ACQUIRE_TIMEOUT_S`` (300s)
+under N-session x M-worker contention, so the true window was bounded by
+THAT wait, not by milliseconds. Round 2's first attempt at a fix --
+writing a placeholder sidecar immediately after ``mkdtemp()``, before
+even acquiring the semaphore -- was tried and is WRONG for a different
+reason: ``initdb`` refuses to initialize a non-empty target directory, so
+a sidecar file landing inside pgdata before ``initdb`` runs breaks the
+boot outright (verified directly against a real ``initdb`` invocation).
+The actual fix: ``tempfile.mkdtemp()`` itself moved INSIDE the semaphore
+(the directory does not exist at all while a boot is merely queued behind
+others), and the first sidecar write happens immediately after ``initdb``
+succeeds -- bounded by ``initdb``'s own runtime (critic-measured ~0.62s
+uncontended), never by the semaphore's queue-wait, because directory
+creation only happens once the wait is already over. Concurrency-window
+control (``_boot_semaphore_slot`` itself) is a separate, complementary
+mechanism — it bounds how many boots run at once; this fix bounds how
+LONG each boot's own un-reapable window lasts (now: initdb's own runtime,
+not the semaphore's wait).
 """
 from __future__ import annotations
 
@@ -392,18 +415,55 @@ def _boot() -> dict:
             "PATH). Install the PG bundle (nx init) or set NEXUS_PG_BIN."
         )
 
-    pgdata = tempfile.mkdtemp(prefix="nexus_t2_substrate_pg_")
     pg_port = _free_port()
     pg_user = os.environ["USER"]
-    # Concurrency-window control (nexus-ui654): only the shm-heavy
-    # initdb + pg_ctl-start sequence is bounded -- once the postmaster is
-    # up, the slot is released immediately so a long-lived running
-    # substrate never blocks another process's boot.
+    # Concurrency-window control's EARLIEST checkpoint (nexus-ui654
+    # follow-up round 2, critic Q1/Q3 -- corrects round 1's "millisecond
+    # window" docstring claim, which the critic showed was wrong under
+    # real contention: round 1 wrote the first sidecar right after the
+    # postmaster came up, but the boot semaphore's own WAIT to even start
+    # sits before that point and can legitimately run up to
+    # `_BOOT_SEMAPHORE_ACQUIRE_TIMEOUT_S` (300s) under N-session x
+    # M-worker contention).
+    #
+    # A naive fix -- writing a placeholder sidecar immediately after
+    # ``mkdtemp()``, before the semaphore -- was TRIED and is WRONG:
+    # ``initdb`` refuses to initialize a non-empty target directory
+    # (verified directly: "initdb: error: directory ... exists but is not
+    # empty" the instant a sidecar file lands inside pgdata first). So
+    # ``mkdtemp()`` itself moves INSIDE the semaphore below, and the FIRST
+    # sidecar write happens immediately after ``initdb`` succeeds (pgdata
+    # is no longer empty at that point regardless -- initdb has already
+    # populated it) but still well before ``pg_ctl start``. This closes
+    # the gap correctly: the cluster directory now never exists without a
+    # sidecar for longer than ``initdb``'s own runtime (critic-measured
+    # ~0.62s uncontended), because directory creation and the first
+    # sidecar write both happen only AFTER the semaphore wait is already
+    # over, not before or during it.
+    #
+    # Nothing is running yet at first-write time (no postmaster, no
+    # engine), so a sweep that reaps this placeholder has nothing to
+    # kill -- but an unreapable directory (even a PG-data-only one) is
+    # still exactly the debris shape the bead was filed about (31 stale
+    # dirs manually swept in one day). Verified (not assumed) against
+    # `_reap_cluster`: with every leg `None`, its per-leg
+    # `isinstance(pid, int)` guard produces an EMPTY `legs` list,
+    # `"mismatch" in {}.values()` is `False`, the kill loop over zero legs
+    # is a no-op, and the function falls straight through to
+    # `shutil.rmtree(cluster_dir, ...)` -- i.e. a fully-placeholder
+    # sidecar IS swept and counted as `reaped`, not silently skipped by
+    # any earlier candidate filter. Updated (not re-created) at each
+    # later checkpoint below as more identity becomes known.
     with _boot_semaphore_slot():
+        pgdata = tempfile.mkdtemp(prefix="nexus_t2_substrate_pg_")
         subprocess.run(
             [str(bin_dir / "initdb"), "-D", pgdata, "--no-locale", "-E", "UTF8",
              "--auth=trust"],
             check=True, capture_output=True,
+        )
+        sidecar_started_at = _write_sidecar(
+            pgdata, pg_port=pg_port, svc_port=None,
+            postmaster_pid=None, engine_pid=None,
         )
         with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
             f.write(f"\nport = {pg_port}\nlisten_addresses = '127.0.0.1'\n")
@@ -417,20 +477,20 @@ def _boot() -> dict:
             check=True, capture_output=True,
         )
     postmaster_pid = _read_postmaster_pid(pgdata)
-    # Concurrency-window control's OTHER half (nexus-ui654 follow-up,
-    # critic Q3): write the sidecar NOW, immediately once the postmaster
-    # identity is known -- not at the very end of _boot() after createdb +
-    # role bootstrap + JVM spawn + up to 60s of TCP-wait. A kill anywhere
-    # in that (formerly ~60s, now milliseconds) window used to leave a
-    # SIDECAR-LESS cluster that _sweep_legacy_cluster() permanently
-    # refuses to auto-reap. engine_pid/svc_port are genuinely not known
-    # yet at this point -- write None for both; the reaper skips a None
-    # leg rather than treating it as dead or mismatched, so this partial
-    # sidecar is still fully reapable for the postmaster leg. Updated
-    # (not re-created) once the engine identity is known, below.
-    sidecar_started_at = _write_sidecar(
+    # Checkpoint 2 of 3 (nexus-ui654 follow-up, critic Q3): UPDATE the
+    # sidecar (not re-create -- `started_at` stays pinned to the earliest
+    # write above) now that the postmaster identity is known -- still well
+    # before createdb + role bootstrap + JVM spawn + up to 60s of
+    # TCP-wait, which is where the ORIGINAL nexus-lgdy1 shape wrote the
+    # sidecar for the first and only time. engine_pid/svc_port are
+    # genuinely not known yet -- still None; the reaper skips a None leg
+    # rather than treating it as dead or mismatched (verified above), so
+    # this partial sidecar is fully reapable for the postmaster leg it
+    # does record.
+    _write_sidecar(
         pgdata, pg_port=pg_port, svc_port=None,
         postmaster_pid=postmaster_pid, engine_pid=None,
+        started_at=sidecar_started_at,
     )
 
     def _kill_pg() -> None:
@@ -496,11 +556,11 @@ def _boot() -> dict:
         stdout=svc_log, stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
     )
-    # svc.pid is known SYNCHRONOUSLY the instant Popen returns -- no reason
-    # to defer recording it until _wait_tcp succeeds (which can legitimately
-    # take up to 60s). Update the sidecar now, before the wait, so a kill
-    # during the wait still leaves a complete, reapable sidecar (nexus-ui654
-    # follow-up, critic Q3).
+    # Checkpoint 3 of 3: svc.pid is known SYNCHRONOUSLY the instant Popen
+    # returns -- no reason to defer recording it until _wait_tcp succeeds
+    # (which can legitimately take up to 60s). Update the sidecar now,
+    # before the wait, so a kill during the wait still leaves a complete,
+    # reapable sidecar (nexus-ui654 follow-up, critic Q3).
     _write_sidecar(
         pgdata, pg_port=pg_port, svc_port=svc_port,
         postmaster_pid=postmaster_pid, engine_pid=svc.pid,
@@ -592,25 +652,36 @@ def _write_sidecar(
     sweep ever signals them: PID + full expected cmdline for each, plus
     the owning pytest PID whose liveness is the sole staleness signal.
 
-    Written TWICE per boot (nexus-ui654 follow-up, critic Q3 -- see
-    ``_boot()``'s call sites): once immediately after the postmaster is
-    confirmed up (``engine_pid``/``svc_port`` still ``None`` -- not yet
-    known), and again immediately after the JVM ``Popen`` call returns
-    (which hands back ``engine_pid`` synchronously, well before
-    ``_wait_tcp`` ever gets a chance to time out). A leg recorded as
-    ``None`` here is skipped by the reaper (``_reap_cluster``'s
-    ``isinstance(pid, int)`` guard), never mistaken for "dead" or
-    "mismatch" -- so an EARLY sidecar with only the postmaster identity is
-    still fully reapable for that leg, closing the un-reapable window down
-    to the handful of milliseconds before the FIRST write (mkdtemp +
-    initdb + pg_ctl start, during which nothing is running yet to leak).
+    Written THREE times per boot (nexus-ui654 follow-up round 2, critic
+    Q1/Q3 -- see ``_boot()``'s call sites, all inside/after the boot
+    semaphore): (1) a PLACEHOLDER immediately after ``initdb`` succeeds
+    (``postmaster_pid``/``engine_pid``/``svc_port`` all ``None`` -- none
+    of it is known yet; a write BEFORE ``initdb`` was tried and rejected
+    -- ``initdb`` refuses a non-empty target directory, so the sidecar
+    cannot land inside pgdata until initdb has already populated it);
+    (2) updated immediately once the postmaster is confirmed up
+    (postmaster identity added); (3) updated again immediately after the
+    JVM ``Popen`` call returns (engine identity added -- known
+    synchronously, well before ``_wait_tcp`` ever gets a chance to time
+    out). A leg recorded as ``None`` here is skipped by the reaper
+    (``_reap_cluster``'s ``isinstance(pid, int)`` guard -- verified
+    directly: an all-``None`` sidecar produces an EMPTY ``legs`` list,
+    which short-circuits straight to ``shutil.rmtree`` and is reported as
+    ``reaped``, never silently dropped by an earlier candidate filter),
+    never mistaken for "dead" or "mismatch" -- so even the earliest,
+    fully-placeholder sidecar is immediately reapable once its owner dies.
+    ``mkdtemp()`` itself happens inside the boot semaphore (see
+    ``_boot()``), so the cluster directory never exists at all during the
+    semaphore's own (up to 300s) queue-wait -- only during ``initdb``'s
+    own runtime (critic-measured ~0.62s uncontended) is there ever a
+    directory with no sidecar in it.
 
     *started_at*: pass the value returned by an earlier call to keep it
-    stable across the two writes for the same boot; omitted (``None``)
-    captures a fresh timestamp -- used by the first, early call.
+    stable across all three writes for the same boot; omitted (``None``)
+    captures a fresh timestamp -- used only by the first, placeholder call.
 
     Returns the ``started_at`` value actually written, so the caller can
-    thread it into the second call.
+    thread it into the later calls.
     """
     from nexus.daemon.service_registry import process_command
 
@@ -942,24 +1013,29 @@ def _sweep_legacy_cluster(cluster_dir: Path, result: SweepResult) -> None:
     still-running job from a commit predating this fix).
 
     NOT a one-time, shrinking population (correction, nexus-ui654
-    follow-up: the original "shrinking population" claim here was
+    follow-up round 1: the original "shrinking population" claim here was
     empirically FALSE — a critic run observed this exact warning firing
-    repeatedly long after nexus-lgdy1 shipped). Two live, ongoing sources
-    still land here even after the sidecar-timing fix in ``_boot()``
-    (sidecar now written immediately once the postmaster is up, then
-    updated immediately once the JVM ``Popen`` returns — see that
-    function): (1) any cluster whose owning process was killed in the
-    now-millisecond window between ``tempfile.mkdtemp()`` and the FIRST
-    ``_write_sidecar`` call (mkdtemp + initdb + pg_ctl start) — narrow,
-    but not zero, and there is genuinely no live postgres to leak in that
-    specific window since the postmaster isn't up yet; and (2) any
-    cluster created by an OLDER pytest process (a build predating this
-    fix, or predating nexus-lgdy1 entirely) that is still on disk. This
-    function's own conservative refusal is exactly why such clusters keep
-    accumulating as reported-not-reaped debris rather than being silently
-    dropped — reap them manually via ``scripts/sweep-test-substrates.sh``
-    or the ``pg_ctl``/``rm -rf`` line in the warning below once you've
-    confirmed they're genuinely orphaned.
+    repeatedly long after nexus-lgdy1 shipped; round 1's own replacement
+    text was ALSO corrected in round 2 after the critic showed the
+    "millisecond window" it described was actually bounded by the boot
+    semaphore's own up-to-300s wait under real contention, not
+    milliseconds). Round 2's fix: ``tempfile.mkdtemp()`` moved INSIDE the
+    boot semaphore, and the first sidecar write happens immediately after
+    ``initdb`` succeeds (a write attempt BEFORE ``initdb`` was tried and
+    rejected -- ``initdb`` refuses a non-empty target directory) -- see
+    ``_boot()``'s three-checkpoint sidecar writes. One residual source
+    remains after round 2's fix: any cluster created by an OLDER pytest
+    process (a build predating this fix, or predating nexus-lgdy1
+    entirely) that is still on disk — the live-code window left in
+    ``_boot()`` itself that can produce a fresh sidecar-less cluster is
+    now bounded by ``initdb``'s own runtime (critic-measured ~0.62s
+    uncontended), never by the semaphore's queue-wait, since directory
+    creation only happens once a boot already holds its slot. This
+    function's own conservative refusal is exactly why old-build clusters
+    keep accumulating as reported-not-reaped debris rather than being
+    silently dropped — reap them manually via
+    ``scripts/sweep-test-substrates.sh`` or the ``pg_ctl``/``rm -rf`` line
+    in the warning below once you've confirmed they're genuinely orphaned.
     """
     postmaster_pid = _read_postmaster_pid(str(cluster_dir))
     detail = (
