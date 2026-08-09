@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -498,13 +499,32 @@ class TestBlockMode:
         interleaving: with NX_EXPECT_LOCK_DISABLE=1 the lock is switched
         off entirely — no reap, no acquire, no release, ZERO mutual
         exclusion, which is a strictly stronger adversary than any stolen
-        or leaked lock — and the ceiling must STILL hold. Pre-fix this
-        fails loudly and deterministically (8 racers all read spent=0 and
-        all append: 8 rows for 4 credits); post-fix exactly `credit` rows
-        exist. Both bounds are asserted: the upper bound is the
-        double-spend, and the lower bound is what keeps a
-        "concurrent path always returns no" regression from passing
-        silently."""
+        or leaked lock — and the ceiling must STILL hold.
+
+        DETERMINISM (nexus-ols6a, reviewer Important 3). Disabling the
+        lock removes EXCLUSION but not SIMULTANEITY: racers can still
+        happen to serialize, so an early version of this test — which
+        relied on 8 concurrent hooks colliding by luck — missed a
+        deliberately broken claim 1 run in 12, and the miss direction was
+        a FALSE PASS. That is the same load-dependent shape the test
+        exists to retire, in the one place it does the most damage: this
+        is the SOLE permanent falsification for a bug that has recurred
+        three times, and rounds 1 and 2 both shipped believing they were
+        verified. NX_EXPECT_CLAIM_DELAY_S closes it by widening the
+        read->claim gap so EVERY racer provably reads the same credit
+        state before ANY racer claims, making the collision structural
+        rather than incidental. Re-measured after the change: 0 misses
+        in 30 trials against the same neutered claim (was 1 in 12).
+
+        Asserted: exactly `credit` rows (upper bound = the double-spend;
+        lower bound = a "concurrent path always returns no" regression),
+        distinct claimants, and the disclosure invariant that every
+        BLOCKED row is either credit-backed or names its cause. Note the
+        blocked set is deliberately NOT required to equal the claimant
+        set: a racer that loses the claim while a winner is still
+        mid-append re-reads an inconsistent ledger and over-blocks with
+        cause=credit-slot-orphan, which is the safe, disclosed direction
+        (see ORPHANED CREDIT SLOTS in expectations.sh)."""
         import concurrent.futures
 
         agent_type = "worker-noexcl"
@@ -523,7 +543,11 @@ class TestBlockMode:
                 ),
                 tmp_path,
                 mode="block",
-                extra_env={"NX_EXPECT_LOCK_DISABLE": "1"},
+                extra_env={
+                    "NX_EXPECT_LOCK_DISABLE": "1",
+                    # every racer reads before any racer claims
+                    "NX_EXPECT_CLAIM_DELAY_S": "1.5",
+                },
             )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=racers) as pool:
@@ -534,14 +558,126 @@ class TestBlockMode:
         content = _expectations_file(tmp_path).read_text()
         consumed = [ln for ln in content.splitlines() if "\tCONSUMED\t" in ln]
         assert len(consumed) == credit, (
-            f"with the lock disabled, {racers} racers must still consume exactly "
+            f"with the lock disabled and every racer decided from the same "
+            f"credit state, {racers} racers must still consume exactly "
             f"{credit} units — got {len(consumed)}: {consumed}"
         )
         # Distinct claimants: one unit each, never one agent twice.
         assert len({ln.split("\t")[2] for ln in consumed}) == credit, consumed
-        # The claim is what blocks, so exactly the claimants are blocked.
-        blocked = {aid for aid, _cause in _blocked_rows(tmp_path)}
-        assert blocked == {ln.split("\t")[2] for ln in consumed}, (blocked, consumed)
+        consumed_ids = {ln.split("\t")[2] for ln in consumed}
+        blocked_rows = _blocked_rows(tmp_path)
+        assert consumed_ids <= {aid for aid, _c in blocked_rows}, (
+            "every credit-backed claimant must be blocked"
+        )
+        for agent_id, cause in blocked_rows:
+            assert agent_id in consumed_ids or cause == "credit-slot-orphan", (
+                f"BLOCKED row for {agent_id} has neither a matching CONSUMED "
+                f"row nor a disclosed cause (cause={cause!r})"
+            )
+
+    def test_credit_slot_orphaned_by_a_killed_hook_blocks_instead_of_silently_passing(
+        self, tmp_path: Path
+    ) -> None:
+        """nexus-ols6a — the falsifier for round 3's OWN failure mode,
+        which nothing in the suite covered: a hook KILLED between claiming
+        a credit slot and writing its CONSUMED row.
+
+        This is not a hypothetical window. conexus/hooks/hooks.json gives
+        SubagentStop a 10-SECOND timeout, while the lock budget is 20s in
+        CI (NX_EXPECT_LOCK_TRIES=200) and clamps at 60s — so the harness
+        SIGKILLs this hook as a routine, load-correlated event, in exactly
+        the contention regime the credit mechanism exists for.
+
+        The cost of that kill got WORSE at round 3 before it got better.
+        Pre-round-3, a kill in the read->append window wrote nothing: the
+        killed agent's stop went unguarded (one miss) but the pool was
+        untouched, so a later agent still got the unit. Post-round-3 the
+        claim lands BEFORE the row, so the same kill burns a credit
+        permanently and a SECOND future agent also slips — doubled damage,
+        and less observable, since the orphan is a symlink rather than a
+        CONSUMED row a census could read.
+
+        So this test kills a racer in that exact window (via the
+        NX_EXPECT_APPEND_DELAY_S seam), proves the orphan really exists
+        (slot claimed, no row), and then asserts the property that closes
+        it: the NEXT agent of that type must be BLOCKED with a disclosed
+        cause rather than silently waved through. Without the ols6a fix
+        this fails — the next agent loses its claim, returns "does not
+        owe", and stops unblocked with no ledger trace at all."""
+        agent_type = "worker-orphan"
+        for _ in range(1):  # exactly one unit of credit
+            _expect_row(tmp_path, name=agent_type, mode="background")
+        t = _transcript(tmp_path, with_sendmessage=False)
+
+        env = {
+            **os.environ,
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+            "NX_ORCH_STOP_GUARD": "block",
+            "NX_EXPECT_APPEND_DELAY_S": "10",
+        }
+        victim = subprocess.Popen(
+            ["bash", str(SCRIPT)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        assert victim.stdin is not None
+        victim.stdin.write(
+            _payload(agent_id="aorphan000000000", agent_type=agent_type, transcript=str(t))
+        )
+        victim.stdin.close()
+
+        # Wait for the slot claim to land, then kill INSIDE the window.
+        slot = Path(str(_expectations_file(tmp_path)) + f".credit.{agent_type}.1")
+        for _ in range(200):
+            if slot.is_symlink():
+                break
+            time.sleep(0.05)
+        assert slot.is_symlink(), "victim never claimed a credit slot; seam did not engage"
+        victim.kill()
+        victim.wait(timeout=10)
+
+        content = _expectations_file(tmp_path).read_text()
+        assert "\tCONSUMED\t" not in content, (
+            "victim must have been killed BEFORE its CONSUMED row — the orphan "
+            "window is what this test is about"
+        )
+        assert slot.is_symlink(), "the orphaned slot must survive the kill"
+
+        # A hook killed mid-claim orphans its LOCKDIR as well as its slot,
+        # and for the first ~60s the stale lock masks the orphaned slot:
+        # later stops of this type exhaust the budget and block with
+        # cause=lock-exhausted (safe, disclosed, and verified separately by
+        # test_owes_report_lock_exhaustion_*). The interesting state is the
+        # one AFTER the stale-lock reap clears that mask, because from then
+        # on the orphaned slot is permanent and nothing else stands between
+        # it and a silent miss. Removing the lockdir here is exactly what
+        # the reap does at 60s — it makes the test represent the steady
+        # state rather than the first minute.
+        stale_lock = Path(str(_expectations_file(tmp_path)) + f".owes.{agent_type}.lock")
+        if stale_lock.is_dir():
+            stale_lock.rmdir()
+
+        # The next agent of this type must NOT be silently waved through.
+        proc = _run_hook(
+            _payload(agent_id="anext0000000000", agent_type=agent_type, transcript=str(t)),
+            tmp_path,
+            mode="block",
+        )
+        assert proc.returncode == 0, proc.stderr
+        decision = _decision(proc)
+        assert decision is not None and decision["decision"] == "block", (
+            "an orphaned credit slot must BLOCK the next agent (disclosed), not "
+            f"silently pass it — that silent pass is how ONE killed hook costs "
+            f"TWO unguarded stops. stdout={proc.stdout!r}"
+        )
+        assert "credit-slot-orphan" in proc.stderr, proc.stderr
+        assert ("anext0000000000", "credit-slot-orphan") in _blocked_rows(tmp_path), (
+            "the block must be recorded with its cause so an operator can tell "
+            "it from a credit-verified block"
+        )
 
     def test_owes_report_lock_exhaustion_never_exceeds_credit_under_forced_contention(
         self, tmp_path: Path

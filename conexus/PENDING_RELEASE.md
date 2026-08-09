@@ -137,6 +137,45 @@ mechanize, it matters enough to ship.
   NEXT genuine background dispatch of that type, which then stops
   UNBLOCKED with no BLOCKED row and no disclosed cause. Safe at the
   instant of the race, a real RDR-184-class miss one dispatch later.
+  SCOPE OF THE CLOSURE — stated precisely, because rounds 1 and 2 each
+  shipped on a "mechanical invariant" that was later violated and this
+  entry should not make it three:
+    - CLOSED AT THE SOURCE: the OVER-count. Two racers can no longer both
+      spend the same unit, with or without a working lock.
+    - NARROWED BUT LIVE: the UNDER-count. A hook killed between its slot
+      claim and its CONSUMED row leaves a claimed slot with no ledger
+      record. Round 3 made this window's cost WORSE before ols6a fixed
+      it: pre-round-3 such a kill wrote nothing and cost one unguarded
+      stop, while post-round-3 it also burns a credit, so a second future
+      agent slips too. This is not exotic — hooks.json gives SubagentStop
+      a 10-SECOND timeout while the lock budget is 20s in CI and clamps
+      at 60s, so the harness SIGKILLs this hook as a routine,
+      load-correlated event. nexus-ols6a makes the resulting orphan
+      DISCLOSED rather than silent (the next agent blocks with
+      cause=credit-slot-orphan instead of being waved through), and adds
+      the falsifier that kills a racer in that exact window. The orphaned
+      slot itself is still not reclaimed — deliberately, since a
+      bounded-age reclaim is the same check-then-act shape that caused
+      this bug.
+    - ALSO IN THIS ROUND: an unguarded `$NX_EXPECT_LOCK_HOLD_DELAY_S`
+      deref had been aborting tests/e2e/lib/expectations_test.sh at Test 4
+      under `set -u` since round 2, so Tests 4-15 were DARK for two days
+      during the active fix round on this machinery (nexus-a4nun); fixed,
+      and restoring that coverage immediately caught a real defect in
+      round 3 before it shipped. A second `set -u` hazard introduced by
+      round 3 itself (`${vfields[0]}` on a zero-element array) is guarded.
+      "The tests passed" was NOT evidence in rounds 1-2 and should not be
+      read as evidence here either — what changed is that the detectors
+      are now measured (0 false passes in 30 and 60 trials against
+      deliberately broken fixes, where the first version of the ceiling
+      detector missed 1 in 12).
+    - STILL LIVE IN SHIPPED PLUGIN CODE: the identical reap TOCTOU in
+      `conexus/hooks/scripts/agent-dispatch-expect.sh` (nexus-ma5tg). Its
+      direction is a spurious CREDIT (surplus), which over-blocks and has
+      no deferred-miss analogue, so it is not a release blocker — but it
+      is the same defect, unfixed. This round does close its owes_report
+      blast radius by giving that function the dispatch_id dedupe the
+      census reader already had.
   Installed sessions keep the pre-round-1 racy-unlocked-fallback
   behavior (rare, load-dependent, undisclosed over-block of the
   owes-report SubagentStop guard) until the next plugin release.

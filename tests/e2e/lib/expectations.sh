@@ -506,6 +506,47 @@ _expectations_claim_credit() {
 # answer here, and why the fix had to make a spurious debit impossible to
 # write rather than merely unlikely.
 #
+# ORPHANED CREDIT SLOTS — WHAT TERMINATES THIS HOOK, AND WHERE CAN IT BE
+# WHEN THAT HAPPENS? (nexus-ols6a, substantive-critic Critical on round 3.)
+#
+# This is the question none of rounds 1, 2, or 3 asked, and every round
+# was caught by it. Each round moved the unsafe window somewhere its own
+# test could not see: round 1 the critical section, round 2 the pre-lock
+# reap, round 3 the gap between claiming a slot and writing its row. The
+# answer is in conexus/hooks/hooks.json: SubagentStop runs with a
+# 10-SECOND TIMEOUT. The lock budget is 20s in CI
+# (NX_EXPECT_LOCK_TRIES=200) and clamps at 60s. So the harness SIGKILLs
+# this hook as a ROUTINE, LOAD-CORRELATED EVENT, in precisely the
+# contention regime the whole credit mechanism exists for. An external
+# kill here is scheduled, not rare.
+#
+# WHAT THAT COSTS, AND HOW ROUND 3 MADE IT WORSE BEFORE MAKING IT BETTER.
+# Pre-round-3, a kill between the credit read and the CONSUMED append
+# wrote nothing: that stop went unguarded (one miss) but the pool was
+# untouched, so a later agent still got the unit. Post-round-3 the claim
+# lands BEFORE the row, so the same kill costs that stop AND burns a
+# credit permanently — a SECOND future agent also slips. Round 3 doubled
+# the damage of a timeout kill, and made it less observable too: the old
+# spurious debit was a CONSUMED row a census could read, the new one is a
+# symlink no audit surface looks at. "A spurious debit can no longer be
+# written" was true of ROWS and false of DEBITS — the debit unit moved
+# from rows to slots. Recording that plainly because it is structurally
+# the same overclaim as rounds 1 and 2 ("mechanical invariant"), and the
+# pattern is the actual lesson here.
+#
+# THE FIX: an orphan is DETECTABLE, so it must never be silent. When the
+# claim is lost, re-read the ledger — if every slot is taken while the
+# rows still say this type has unspent credit, that state is provably
+# inconsistent and the only explanation is a claimant killed between its
+# `ln -s` and its row. Block, with cause=credit-slot-orphan, instead of
+# returning "does not owe". That keeps the guard's usual bias (over-block
+# is explicable; a silent miss is the thing this whole subsystem exists
+# to prevent) and it converts round 3's new window from a doubled silent
+# miss into a disclosed block. Deliberately NOT done: reclaiming orphaned
+# slots after a bounded age. That is exactly the check-then-act shape
+# whose unfixability is documented above, and it would reintroduce the
+# stolen-lock class in a new costume.
+#
 # TEST-ONLY CONTENTION SEAM: NX_EXPECT_LOCK_HOLD_DELAY_S, when set to a
 # bare non-negative decimal (e.g. "0.3"), sleeps that many seconds AFTER
 # acquiring the lock and BEFORE the read-decide-write below. This exists
@@ -607,6 +648,16 @@ expectations_owes_report() {
     local verdict_line verdict
     local -a vfields=()
     verdict_line="$(awk -F'\t' -v id="$agent_id" -v ty="$agent_type" '
+        # Dedupe EXPECT by dispatch_id, exactly as expectations_undeclared
+        # and expectations_census already do ~200 lines below. The dispatch
+        # hook takes a bounded lock whose reap can be stolen (nexus-ma5tg,
+        # the same TOCTOU this function was just fixed for), so a double
+        # registration of ONE dispatch is reachable. There it inflates this
+        # type-s credit pool, which over-blocks — safe, but it also made the
+        # census and this guard disagree about the same ledger. Now they
+        # settle it identically.
+        $2 == "EXPECT" && $5 != "" && ($5 in dseen) { next }
+        $2 == "EXPECT" { if ($5 != "") dseen[$5] = 1 }
         $2 == "EXPECT" && $3 == ty {
             if ($4 == "background") { credit++ } else { mixed = 1 }
         }
@@ -636,22 +687,88 @@ expectations_owes_report() {
         }
     ' "$file" 2>/dev/null)"
     IFS=$'\t' read -r -a vfields <<<"$verdict_line"
-    verdict="${vfields[0]}"
+    # `read -a` on empty input (awk failed, unreadable file) leaves a
+    # ZERO-element array, and ${arr[0]} is fatal under `set -u` — this
+    # library is sourced by callers that set it. Default, then fall
+    # through to the fail-open `*)` branch below.
+    verdict="${vfields[0]:-}"
     case "$verdict" in
         self)
             rmdir "$lockdir" 2>/dev/null
             return 0
             ;;
         new)
+            # TEST-ONLY SEAM (nexus-ols6a): widen READ -> CLAIM so a test can
+            # force every racer to decide from the same credit state. Without
+            # it, switching the lock off removes exclusion but NOT
+            # simultaneity, so the falsifier's detection still rides thread
+            # interleaving — measured as a 1-in-12 FALSE PASS against a
+            # deliberately broken claim. No-op unless set by the harness.
+            if [[ "${NX_EXPECT_CLAIM_DELAY_S:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+                sleep "$NX_EXPECT_CLAIM_DELAY_S"
+            fi
             # The read above says a unit LOOKS unspent; the claim below is
             # what actually spends it, and is the only thing that decides.
-            # Losing the claim means another racer took the last unit
-            # between our read and our write — with or without a lock —
-            # so we consume nothing and do not owe.
             if _expectations_claim_credit "$file" "$type_enc" "$agent_id" \
-                "${vfields[1]}" "${vfields[2]}" "${vfields[@]:3}"; then
+                "${vfields[1]:-0}" "${vfields[2]:-0}" "${vfields[@]:3}"; then
+                # TEST-ONLY SEAM (nexus-ols6a): widen CLAIM -> APPEND, the one
+                # window where an external kill orphans a claimed slot. This
+                # is NOT hypothetical: conexus/hooks/hooks.json gives
+                # SubagentStop a 10-SECOND timeout while the lock budget is
+                # 20s in CI (NX_EXPECT_LOCK_TRIES=200) and clamps at 60s, so
+                # the harness SIGKILLs this hook as a ROUTINE, load-correlated
+                # event — in exactly the contention regime this code lives in.
+                if [[ "${NX_EXPECT_APPEND_DELAY_S:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+                    sleep "$NX_EXPECT_APPEND_DELAY_S"
+                fi
                 _expectations_append "$file" \
                     "$(_expectations_ts)"$'\tCONSUMED\t'"$agent_id"$'\t'"$agent_type"
+                rmdir "$lockdir" 2>/dev/null
+                return 0
+            fi
+            # LOST THE CLAIM — two very different worlds, and telling them
+            # apart is what nexus-ols6a is about (see ORPHANED CREDIT SLOTS
+            # above the function).
+            #
+            #   (a) LEGITIMATE: another racer took the last unit between our
+            #       read and our claim. The pool really is dry. Do not owe.
+            #   (b) ORPHAN: a previous claimant was killed between its `ln -s`
+            #       and its CONSUMED row (the 10s-timeout window above), so a
+            #       slot is spoken for by an agent that left no ledger record.
+            #
+            # They are distinguishable by RE-READING: in (a) the winners'
+            # CONSUMED rows account for the whole pool; in (b) every slot is
+            # taken while the rows still say credit remains — a provably
+            # inconsistent state. Re-read twice with a short pause, because a
+            # winner that has claimed but not yet appended looks exactly like
+            # an orphan for those few microseconds and would otherwise make
+            # this cause fire routinely under contention (a cause that cries
+            # wolf is one operators learn to ignore). This is a READ retry,
+            # NOT a bounded-age reclaim: nothing is ever deleted or stolen,
+            # so it cannot reintroduce the check-then-act shape that caused
+            # this bug in the first place.
+            local recheck fresh_credit fresh_spent
+            for recheck in 1 2; do
+                read -r fresh_credit fresh_spent <<<"$(awk -F'\t' -v ty="$agent_type" '
+                    $2 == "EXPECT" && $5 != "" && ($5 in dseen) { next }
+                    $2 == "EXPECT" { if ($5 != "") dseen[$5] = 1 }
+                    $2 == "EXPECT" && $3 == ty && $4 == "background" { credit++ }
+                    $2 == "CONSUMED" && $4 == ty { spent++ }
+                    END { printf "%d %d\n", credit + 0, spent + 0 }
+                ' "$file" 2>/dev/null)"
+                (( ${fresh_credit:-0} > ${fresh_spent:-0} )) || break
+                [[ "$recheck" == "2" ]] && break
+                sleep 0.1
+            done
+            if (( ${fresh_credit:-0} > ${fresh_spent:-0} )); then
+                # Provably inconsistent: no slot left, yet the ledger says
+                # this type still has unspent credit. FAIL LOUD in the
+                # guard's usual safe direction (block, disclosed) rather
+                # than silently waving this stop through — the silent
+                # version is what let one killed hook cost TWO unguarded
+                # stops instead of one.
+                echo "expectations: credit-slot orphan for type '${agent_type}' — every credit slot is claimed but the ledger records only ${fresh_spent} of ${fresh_credit} spent, so a claimant was killed between its slot claim and its CONSUMED row (SubagentStop has a 10s hook timeout). Blocking this stop rather than silently passing it (cause=credit-slot-orphan; nexus-ols6a)" >&2
+                EXPECTATIONS_OWES_CAUSE="credit-slot-orphan"
                 rmdir "$lockdir" 2>/dev/null
                 return 0
             fi
@@ -1040,11 +1157,20 @@ expectations_sweep() {
     find "$dir" -maxdepth 1 -name '*.expectations' -type f -mtime +7 -delete 2>/dev/null
     # nexus-7z7rj round 3: the credit-slot symlinks are derived state that
     # lives beside the ledger under a longer name, so the reap above never
-    # matched them. They are meaningless once their ledger is gone; same
-    # 7-day floor, and deleting a slot whose ledger still exists is
-    # impossible here because the ledger's own mtime gates only its own
-    # removal (a slot older than 7 days belongs to a session that has been
-    # idle at least that long).
+    # matched them.
+    #
+    # CORRECTION (nexus-ols6a review): an earlier version of this comment
+    # claimed deleting a slot whose ledger still exists is "impossible"
+    # here. That is FALSE — a ledger's mtime is refreshed by every append,
+    # so a session active for more than 7 days keeps its ledger while its
+    # day-0 slots age past the floor and are deleted. The real reason this
+    # is safe is RECONCILIATION: any deleted slot that still has a backing
+    # CONSUMED row is re-created (indices 1..spent) on the next `new`
+    # verdict, so a deleted row-backed slot cannot become a second spend.
+    # Slots above `spent` are either orphans (freeing them is the only
+    # reclaim that exists) or the caller's own, which the `self` branch
+    # intercepts first. Stating the actual reason because a maintainer who
+    # trusted the word "impossible" could make a change that is NOT safe.
     find "$dir" -maxdepth 1 -name '*.expectations.credit.*' -type l -mtime +7 -delete 2>/dev/null
     return 0
 }
