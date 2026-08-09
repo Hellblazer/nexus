@@ -468,6 +468,81 @@ class TestBlockMode:
                 f"row nor a disclosed cause (cause={cause!r})"
             )
 
+    def test_owes_report_credit_claim_survives_a_lock_that_grants_no_exclusion(
+        self, tmp_path: Path
+    ) -> None:
+        """nexus-7z7rj ROUND 3 — the permanent falsification for the
+        double-spend, replacing "hope the runner is loaded enough".
+
+        Rounds 1 and 2 both fixed the CRITICAL SECTION (widen the retry
+        budget; then decide only while holding the lock) and both declared
+        `CONSUMED <= credit` a mechanical invariant. It was violated again
+        on 2026-08-09 (develop f145f3de, local full-parallel run, gw11:
+        five CONSUMED rows for four credits, all stamped the same second)
+        because the defect is NOT in the critical section. It is in the
+        stale-lock reap that runs BEFORE the lock is acquired: `-d` test,
+        `find`, `rmdir` are three steps, the lock can be released and
+        legitimately re-acquired between them, and the `rmdir` then
+        deletes a LIVE holder's lock — putting two racers inside the
+        critical section, reading the same credit state, both appending.
+        (Deterministically reproduced with injected scheduling delay;
+        see the WHY A LOCK CANNOT CARRY THIS INVARIANT block in
+        expectations.sh.) Safely stealing a name-based lock needs an
+        atomic compare-and-delete that POSIX does not offer, so the fix
+        stops making the ceiling depend on the lock at all: a unit of
+        credit is claimed by creating a slot SYMLINK, and symlink(2) is
+        atomic and fails with EEXIST, so exactly one racer per slot name
+        can ever win.
+
+        This test therefore asserts the property rather than an
+        interleaving: with NX_EXPECT_LOCK_DISABLE=1 the lock is switched
+        off entirely — no reap, no acquire, no release, ZERO mutual
+        exclusion, which is a strictly stronger adversary than any stolen
+        or leaked lock — and the ceiling must STILL hold. Pre-fix this
+        fails loudly and deterministically (8 racers all read spent=0 and
+        all append: 8 rows for 4 credits); post-fix exactly `credit` rows
+        exist. Both bounds are asserted: the upper bound is the
+        double-spend, and the lower bound is what keeps a
+        "concurrent path always returns no" regression from passing
+        silently."""
+        import concurrent.futures
+
+        agent_type = "worker-noexcl"
+        credit = 4
+        racers = 8
+        for _ in range(credit):
+            _expect_row(tmp_path, name=agent_type, mode="background")
+        t = _transcript(tmp_path, with_sendmessage=False)
+
+        def _stop(i: int) -> subprocess.CompletedProcess[str]:
+            return _run_hook(
+                _payload(
+                    agent_id=f"anoexcl{i:02d}0000000000",
+                    agent_type=agent_type,
+                    transcript=str(t),
+                ),
+                tmp_path,
+                mode="block",
+                extra_env={"NX_EXPECT_LOCK_DISABLE": "1"},
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=racers) as pool:
+            results = list(pool.map(_stop, range(racers)))
+        for proc in results:
+            assert proc.returncode == 0, proc.stderr
+
+        content = _expectations_file(tmp_path).read_text()
+        consumed = [ln for ln in content.splitlines() if "\tCONSUMED\t" in ln]
+        assert len(consumed) == credit, (
+            f"with the lock disabled, {racers} racers must still consume exactly "
+            f"{credit} units — got {len(consumed)}: {consumed}"
+        )
+        # Distinct claimants: one unit each, never one agent twice.
+        assert len({ln.split("\t")[2] for ln in consumed}) == credit, consumed
+        # The claim is what blocks, so exactly the claimants are blocked.
+        blocked = {aid for aid, _cause in _blocked_rows(tmp_path)}
+        assert blocked == {ln.split("\t")[2] for ln in consumed}, (blocked, consumed)
+
     def test_owes_report_lock_exhaustion_never_exceeds_credit_under_forced_contention(
         self, tmp_path: Path
     ) -> None:

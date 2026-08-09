@@ -180,6 +180,56 @@ expectations_start() {
     _expectations_append "$file" "$(_expectations_ts)"$'\tSTART\t'"$agent_id"$'\t'"$agent_type"
 }
 
+# _expectations_claim_credit <file> <type_enc> <agent_id> <credit> <spent>
+# [owner...] — ATOMICALLY claim one unit of this type's background credit.
+# Returns 0 iff THIS call claimed a unit; 1 iff every unit was already
+# spoken for. nexus-7z7rj ROUND 3 — see WHY A LOCK CANNOT CARRY THIS
+# INVARIANT above expectations_owes_report.
+#
+# One unit of credit == one slot symlink "<file>.credit.<type>.<n>" for n
+# in 1..credit. symlink(2) is atomic and fails with EEXIST, so for any
+# given n EXACTLY ONE racer on the host can ever create it, no matter how
+# many are running, what order they arrive in, or whether any lock is held
+# — the kernel, not a lock protocol, is what bounds the count. The link's
+# TARGET is the claiming agent_id, so the claim and the ownership stamp
+# are the SAME atomic operation (a mkdir-then-write-owner pair would leave
+# a window where a claimed slot is anonymous). `readlink` therefore both
+# audits who holds each unit and lets a re-entering agent recognize its
+# own claim without consulting the ledger.
+#
+# RECONCILIATION: slots are derived state; the CONSUMED rows are the
+# durable record. A ledger written by a build that predates slots (or one
+# mid-upgrade) has rows and no slots, so before claiming we re-create one
+# slot per already-recorded CONSUMED row, in file order, stamped with that
+# row's own agent_id. Idempotent (every `ln -s` onto an existing name just
+# fails), safe under concurrency (same reason the claim is), and it keeps
+# a live session's accounting continuous across a plugin update instead of
+# handing every in-flight type a fresh, fully-unspent pool.
+_expectations_claim_credit() {
+    local file="$1" type_enc="$2" agent_id="$3" credit="$4" spent="$5"
+    shift 5
+    local base="${file}.credit.${type_enc}" i owner
+    i=0
+    for owner in "$@"; do
+        i=$((i + 1))
+        ln -s "$owner" "${base}.${i}" 2>/dev/null
+    done
+    # Slots 1..spent are accounted for by the rows just reconciled, so the
+    # first candidate is spent+1; the caller only reaches here when
+    # credit > spent, so this loop always runs at least once. Walking
+    # upward (rather than from 1) keeps the common case one `ln` exec.
+    for ((i = spent + 1; i <= credit; i++)); do
+        if ln -s "$agent_id" "${base}.${i}" 2>/dev/null; then
+            return 0
+        fi
+        # Already claimed. If it is OUR claim, this is a re-entry after a
+        # crash between the claim and its CONSUMED row: still owes, and
+        # must not consume a second unit.
+        [[ "$(readlink "${base}.${i}" 2>/dev/null)" == "$agent_id" ]] && return 0
+    done
+    return 1
+}
+
 # expectations_owes_report <session_id> <agent_id> <agent_type> — the
 # consult rule (v4, nexus-rkigh + nexus-bk974 fix round on top of v3's
 # nexus-hbr4x widening). Returns 0 iff the stopping agent owes a
@@ -382,6 +432,80 @@ expectations_start() {
 # window) which is categorically worse for a guard whose entire purpose
 # is not missing undeclared dispatches.
 #
+# WHY A LOCK CANNOT CARRY THIS INVARIANT (nexus-7z7rj ROUND 3, the third
+# recurrence — CI red 2026-08-08 PR #1445 run 31244456036, then the
+# round-2 fix's own "mechanical" ceiling VIOLATED in a local full-parallel
+# run 2026-08-09 at develop f145f3de: `assert len(consumed_rows) <=
+# credit` -> `assert 5 <= 4`, five CONSUMED rows stamped the same second).
+#
+# ROOT CAUSE (deterministically reproduced, not inferred — see
+# test_owes_report_credit_claim_survives_a_lock_that_grants_no_exclusion):
+# the stale-lock reap below deletes a lock it does not own, and no amount
+# of care in the critical section can fix that from outside. The reap is
+# three separate steps — test `-d`, run `find`, then `rmdir` — and the
+# lock can change hands BETWEEN them:
+#
+#   B: [[ -d lockdir ]]            -> true  (A holds it)
+#   A: rmdir lockdir               -> A releases
+#   B: find lockdir -mmin -1       -> absent, so B judges it "stale"
+#   C: mkdir lockdir               -> C acquires legitimately
+#   B: rmdir lockdir               -> B DELETES C'S LIVE LOCK
+#   B: mkdir lockdir               -> B "acquires"; B and C now BOTH
+#                                     inside the critical section
+#
+# Both then read the same credit state and both append CONSUMED. That is
+# the observed double-spend, and the window is exactly a fork+exec, which
+# is why it only ever surfaced under heavy parallel load and why rounds 1
+# and 2 (which widened the retry budget, then made the decision
+# atomic-under-the-lock) each narrowed it without closing it: both rounds
+# reasoned about the critical section, while the defect is in the code
+# that runs BEFORE the lock is ever acquired.
+#
+# This is not a bug in the reap's threshold or its ordering — it is
+# unfixable in kind. Safely stealing a name-based lock requires an atomic
+# compare-and-delete ("remove this lock only if it is still the same lock
+# I inspected"), and POSIX offers no such operation on a path. Every
+# variant of check-then-rmdir has the same window. The alternatives are
+# therefore only: (a) never reap, and accept that one SIGKILLed holder
+# wedges that type for the rest of the session, or (b) stop making
+# correctness depend on the lock at all.
+#
+# CHOSEN FIX: (b). The unit of credit is now claimed with an ATOMIC
+# FILESYSTEM OPERATION rather than decided by reading a count under mutual
+# exclusion — see _expectations_claim_credit above. `credit > spent` is
+# still computed, and still gates whether a claim is attempted, but it is
+# no longer what makes the accounting exact: a racer that passes the
+# read-derived gate still consumes nothing unless it wins a slot symlink,
+# and for each of the `credit` slot names exactly one racer on the host
+# can ever win. So "CONSUMED rows for a type never exceed that type's
+# credit" holds even if the lock grants NO exclusion whatsoever — under a
+# stolen lock, a leaked lock, a disabled lock, or an exhausted budget.
+# The permanent test asserts exactly that (the lock is switched off and
+# the invariant is required to survive), so the property cannot regress
+# back into being load-dependent.
+#
+# The lock below is KEPT, deliberately, and is now purely an efficiency
+# and log-noise measure (it keeps same-type racers from doing redundant
+# awk passes and from racing onto the same slot name): every safety claim
+# round 2 made — decision-only-under-lock, exhaustion blocks with a
+# disclosed cause and writes no ledger row — is preserved unchanged and
+# still true. What changed is that none of them is load-bearing for the
+# ceiling any more. The reap's steal is now merely wasteful rather than
+# incorrect; it is tracked for removal separately rather than being
+# ripped out here, because deleting it without a replacement self-heal
+# would trade a harmless inefficiency for a session-long wedge.
+#
+# ON THE DEFERRED HALF (why over-counting was never "just bookkeeping"):
+# a CONSUMED row is a debit against a fungible per-type pool, so a
+# spurious row is not a cosmetic accounting error — it silently absorbs
+# the credit of the NEXT genuine background dispatch of that type, and
+# that agent then stops UNBLOCKED with no BLOCKED row and no disclosed
+# cause. The over-blocking at the moment of the race is safe; the missing
+# block one dispatch later is exactly the RDR-184 failure this guard
+# exists to catch. That is why "narrow the window" was never an adequate
+# answer here, and why the fix had to make a spurious debit impossible to
+# write rather than merely unlikely.
+#
 # TEST-ONLY CONTENTION SEAM: NX_EXPECT_LOCK_HOLD_DELAY_S, when set to a
 # bare non-negative decimal (e.g. "0.3"), sleeps that many seconds AFTER
 # acquiring the lock and BEFORE the read-decide-write below. This exists
@@ -429,6 +553,17 @@ expectations_owes_report() {
     # agent-dispatch-expect.sh's LOCKDIR.
     local type_enc="${agent_type//:/__}"
     local lockdir="${file}.owes.${type_enc}.lock" held=""
+    # TEST-ONLY SEAM (nexus-7z7rj round 3): NX_EXPECT_LOCK_DISABLE=1 skips
+    # the lock entirely — no reap, no acquire, no release — so the suite
+    # can run real concurrent racers against a critical section with ZERO
+    # mutual exclusion and require the credit ceiling to hold anyway. That
+    # is the strongest available adversary for the atomic-claim invariant,
+    # and it is deterministic, unlike hoping a runner is loaded enough to
+    # reproduce a stolen lock. Never set outside the test harness; setting
+    # it in production costs only redundant work, never the ceiling.
+    if [[ "${NX_EXPECT_LOCK_DISABLE:-}" == "1" ]]; then
+        held=1
+    else
     if [[ -d "$lockdir" ]] && [[ -z "$(find "$lockdir" -maxdepth 0 -mmin -1 2>/dev/null)" ]]; then
         rmdir "$lockdir" 2>/dev/null
     fi
@@ -454,6 +589,7 @@ expectations_owes_report() {
         EXPECTATIONS_OWES_CAUSE="lock-exhausted"
         return 0
     fi
+    fi
 
     # nexus-7z7rj test seam: deterministically widen the critical section
     # so a test can force other racers to exhaust their try budget instead
@@ -463,13 +599,19 @@ expectations_owes_report() {
         sleep "$NX_EXPECT_LOCK_HOLD_DELAY_S"
     fi
 
-    local verdict
-    verdict="$(awk -F'\t' -v id="$agent_id" -v ty="$agent_type" '
+    # The "new" verdict now carries the numbers the atomic claim needs
+    # (credit, spent, and the already-consuming agent_ids in file order,
+    # for slot reconciliation) as extra tab-separated fields. The verdict
+    # TOKEN is still the first field and still exactly self|new|no, so the
+    # case below reads the same as it always has.
+    local verdict_line verdict
+    local -a vfields=()
+    verdict_line="$(awk -F'\t' -v id="$agent_id" -v ty="$agent_type" '
         $2 == "EXPECT" && $3 == ty {
             if ($4 == "background") { credit++ } else { mixed = 1 }
         }
         $2 == "CONSUMED" && $4 == ty {
-            if ($3 == id) { self = 1 } else { spent++ }
+            if ($3 == id) { self = 1 } else { owner[++spent] = $3 }
         }
         END {
             # nexus-rkigh: the unmixed-ness gate is checked FIRST and is
@@ -478,20 +620,43 @@ expectations_owes_report() {
             # function for why that asymmetry is intentional).
             if (mixed) { print "no"; exit }
             if (self) { print "self"; exit }
-            if (credit > spent) { print "new"; exit }
+            if (credit > spent) {
+                # +0 forces both to render as numbers. An UNSET awk var
+                # prints as the empty string, and because tab is IFS
+                # whitespace, the read -a below would silently DROP that
+                # trailing empty field and shift the owner list by one.
+                # (No apostrophes in this block: the whole program is a
+                # single-quoted shell word.)
+                line = "new\t" (credit + 0) "\t" (spent + 0)
+                for (i = 1; i <= spent; i++) { line = line "\t" owner[i] }
+                print line
+                exit
+            }
             print "no"
         }
     ' "$file" 2>/dev/null)"
+    IFS=$'\t' read -r -a vfields <<<"$verdict_line"
+    verdict="${vfields[0]}"
     case "$verdict" in
         self)
             rmdir "$lockdir" 2>/dev/null
             return 0
             ;;
         new)
-            _expectations_append "$file" \
-                "$(_expectations_ts)"$'\tCONSUMED\t'"$agent_id"$'\t'"$agent_type"
+            # The read above says a unit LOOKS unspent; the claim below is
+            # what actually spends it, and is the only thing that decides.
+            # Losing the claim means another racer took the last unit
+            # between our read and our write — with or without a lock —
+            # so we consume nothing and do not owe.
+            if _expectations_claim_credit "$file" "$type_enc" "$agent_id" \
+                "${vfields[1]}" "${vfields[2]}" "${vfields[@]:3}"; then
+                _expectations_append "$file" \
+                    "$(_expectations_ts)"$'\tCONSUMED\t'"$agent_id"$'\t'"$agent_type"
+                rmdir "$lockdir" 2>/dev/null
+                return 0
+            fi
             rmdir "$lockdir" 2>/dev/null
-            return 0
+            return 1
             ;;
         *)
             rmdir "$lockdir" 2>/dev/null
@@ -873,5 +1038,13 @@ expectations_sweep() {
     local dir
     dir="$(_expectations_dir)"
     find "$dir" -maxdepth 1 -name '*.expectations' -type f -mtime +7 -delete 2>/dev/null
+    # nexus-7z7rj round 3: the credit-slot symlinks are derived state that
+    # lives beside the ledger under a longer name, so the reap above never
+    # matched them. They are meaningless once their ledger is gone; same
+    # 7-day floor, and deleting a slot whose ledger still exists is
+    # impossible here because the ledger's own mtime gates only its own
+    # removal (a slot older than 7 days belongs to a session that has been
+    # idle at least that long).
+    find "$dir" -maxdepth 1 -name '*.expectations.credit.*' -type l -mtime +7 -delete 2>/dev/null
     return 0
 }

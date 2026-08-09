@@ -111,6 +111,32 @@ mechanize, it matters enough to ship.
   stops of that one type for up to the existing ~60s reap window before
   self-healing — the accepted price, always disclosed, never silent.
   Also adds the test-only `NX_EXPECT_LOCK_HOLD_DELAY_S` contention seam.
+  ROUND 3 (nexus-7z7rj reopened 2026-08-09 — round 2's "mechanical"
+  ceiling was itself violated: 5 CONSUMED rows for 4 credits, all in one
+  second, local full-parallel run at develop f145f3de). Rounds 1 and 2
+  both hardened the CRITICAL SECTION; the defect is in the stale-lock
+  reap that runs BEFORE the lock is acquired. `[[ -d ]]` / `find` /
+  `rmdir` are three steps, the lock can be released and legitimately
+  re-acquired between them, and the `rmdir` then deletes a LIVE holder's
+  lock — putting two racers inside the critical section, reading the
+  same credit state, both appending. Reproduced deterministically with
+  injected scheduling delay. Safely stealing a name-based lock needs an
+  atomic compare-and-delete on a path, which POSIX does not provide, so
+  this was never tunable. Round 3 stops making the ceiling depend on the
+  lock: one unit of credit is now claimed by creating a slot SYMLINK
+  (`<file>.credit.<type>.<n>`), and `symlink(2)` is atomic and fails
+  with EEXIST, so exactly one racer per slot name can ever win. The link
+  target is the claiming agent_id, so claim and ownership stamp are one
+  atomic operation. "CONSUMED rows never exceed credit" now holds even
+  with NO mutual exclusion at all, which is what the new permanent test
+  asserts (it switches the lock off outright rather than hoping a runner
+  is loaded enough). Round 2's guarantees are all preserved and still
+  tested. SEVERITY NOTE for reviewers: the over-count was never
+  bookkeeping-only — a CONSUMED row is a debit against a fungible
+  per-type pool, so each spurious row silently absorbs the credit of the
+  NEXT genuine background dispatch of that type, which then stops
+  UNBLOCKED with no BLOCKED row and no disclosed cause. Safe at the
+  instant of the race, a real RDR-184-class miss one dispatch later.
   Installed sessions keep the pre-round-1 racy-unlocked-fallback
   behavior (rare, load-dependent, undisclosed over-block of the
   owes-report SubagentStop guard) until the next plugin release.
