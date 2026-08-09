@@ -414,17 +414,26 @@ public final class ChashSqlIdioms {
     /**
      * The three-way {@code EXISTS} disjunction proving a chash is CANONICAL
      * (a content row for it exists in any of the three dim tables) —
-     * nexus-4okz4 increment 4 shared home for the idiom {@code
-     * StagingPromoteOps} privately carries as {@code canonExistsDsl}
-     * (increment 3, already reviewed/gated — left as-is rather than touched
-     * to converge, per the single-homed-for-NEW-callers discipline) and
-     * {@code ChashSqlIdioms.danglingManifestCountDsl} inlines as three
-     * explicit {@code NOT EXISTS} conjuncts above. {@code ChashCensus}'
-     * dangling-pointer scan is this method's first caller — new call sites
-     * reach for THIS one rather than re-deriving the disjunction locally.
-     * Same three-explicit-branches discipline as the fourth-dim checklist
-     * ({@code RawSqlGateTest.chunkTablesCanary_...}) — a fourth dim needs
-     * this method added to that checklist too.
+     * nexus-4okz4 increment 4 shared home for the idiom, with
+     * {@code ChashCensus}' dangling-pointer scan as its first caller.
+     * {@code ChashSqlIdioms.danglingManifestCountDsl} inlines the same
+     * predicate as three explicit {@code NOT EXISTS} conjuncts above
+     * (structurally different shape — a count query, not a boolean
+     * condition — so it stays its own rendering rather than composing this
+     * one). {@code StagingPromoteOps} privately carried a byte-for-byte
+     * identical copy ({@code canonExistsDsl}, increment 3) until increment
+     * 5 converged its three call sites onto this method and deleted the
+     * private copy outright — SINGLE-HOMED, same discipline as
+     * {@link #danglingManifestCountDsl}'s twin collapse in increment 1: no
+     * forked variant left behind for any caller. (The increment-4
+     * "single-homed-for-NEW-callers-only" carve-out that briefly justified
+     * leaving StagingPromoteOps unconverged had no prior precedent anywhere
+     * in this project and directly contradicted this very discipline one
+     * section away — see nexus-4okz4 bead history.) Every caller, old or
+     * new, reaches for THIS one rather than re-deriving the disjunction
+     * locally. Same three-explicit-branches discipline as the fourth-dim
+     * checklist ({@code RawSqlGateTest.chunkTablesCanary_...}) — a fourth
+     * dim needs this method added to that checklist too.
      */
     public static Condition existsInAnyDim(DSLContext ctx, Field<byte[]> chash) {
         return DSL.exists(ctx.selectOne().from(CHUNKS_384).where(CHUNKS_384.CHASH.eq(chash)))

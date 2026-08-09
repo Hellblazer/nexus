@@ -169,6 +169,15 @@ class StagingHandlerJourneyTest {
         return scope.withTenant(TENANT, ctx -> ctx.fetchOne(sql).get(0, Integer.class));
     }
 
+    /** nexus-4okz4 increment 5: read back a staged chunk's text by legacy_ref
+     *  (re-land regression coverage — proves update-in-place, not just row
+     *  count). */
+    private String fetchStagedChunkText(String legacyRef) {
+        return scope.withTenant(TENANT, ctx -> ctx.fetchOne(
+            "SELECT chunk_text FROM staging.chunks WHERE legacy_ref = '" + legacyRef + "'")
+            .get(0, String.class));
+    }
+
     private static List<Double> unitVec1024() {
         List<Double> v = new ArrayList<>(1024);
         v.add(1.0);
@@ -215,6 +224,46 @@ class StagingHandlerJourneyTest {
         assertThat(((Number) counts.get("chunks")).intValue()).isEqualTo(2);
         assertThat(((Number) counts.get("document_chunks")).intValue()).isEqualTo(1);
         assertThat(counts).doesNotContainKey("chash_index");
+
+        // nexus-4okz4 increment 5 (reviewer Significant, T2 review-4okz4-
+        // increment4-2026-08-09 [21970]): permanent regression coverage for
+        // the "chunks" store's ON CONFLICT DO UPDATE re-land path. Increment
+        // 4's gate proved this correct with a throwaway probe and left zero
+        // permanent coverage behind — re-land the SAME (tenant, collection,
+        // legacy_ref) conflict key with a CHANGED payload and assert
+        // update-in-place (exactly one row, new content wins), rather than
+        // trusting handleLoad's onConflict(...).doUpdate().set(Map) clause
+        // by inspection alone. Scaffolding, not migration product: this
+        // row is deleted before the method returns so Order(2)/(3) see
+        // exactly the 2-row baseline they were already written against.
+        String relandRef = "reland-regression-ref";
+        Map<String, Object> firstLand = postOk("/v1/staging/load/chunks", Map.of("rows", List.of(
+            Map.of("collection", COLL, "dim", 1024, "legacy_ref", relandRef,
+                   "chunk_text", "reland original text", "embedding", unitVec1024(),
+                   "model", "voyage-context-3"))));
+        assertThat(((Number) firstLand.get("landed")).intValue()).isEqualTo(1);
+        assertThat(count("SELECT count(*) FROM staging.chunks WHERE legacy_ref = '" + relandRef + "'"))
+            .as("initial land creates exactly one staged row").isEqualTo(1);
+        assertThat(fetchStagedChunkText(relandRef)).isEqualTo("reland original text");
+
+        Map<String, Object> secondLand = postOk("/v1/staging/load/chunks", Map.of("rows", List.of(
+            Map.of("collection", COLL, "dim", 1024, "legacy_ref", relandRef,
+                   "chunk_text", "reland UPDATED text", "embedding", unitVec1024(),
+                   "model", "voyage-context-3"))));
+        assertThat(((Number) secondLand.get("landed")).intValue())
+            .as("ON CONFLICT DO UPDATE affects exactly the one conflicting row").isEqualTo(1);
+        assertThat(count("SELECT count(*) FROM staging.chunks WHERE legacy_ref = '" + relandRef + "'"))
+            .as("re-land updates in place -- no duplicate row created").isEqualTo(1);
+        assertThat(fetchStagedChunkText(relandRef))
+            .as("re-land's new payload wins; the stale text is gone").isEqualTo("reland UPDATED text");
+
+        scope.withTenant(TENANT, ctx -> {
+            ctx.execute("DELETE FROM staging.chunks WHERE legacy_ref = '" + relandRef + "'");
+            return null;
+        });
+        Map<String, Object> countsAfterCleanup = getOk("/v1/staging/counts");
+        assertThat(((Number) countsAfterCleanup.get("chunks")).intValue())
+            .as("re-land scaffolding row removed; baseline restored for Order(2)/(3)").isEqualTo(2);
     }
 
     @Test

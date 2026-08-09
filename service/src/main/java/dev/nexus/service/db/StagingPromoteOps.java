@@ -185,22 +185,6 @@ public final class StagingPromoteOps {
     }
 
     /**
-     * The three-way {@code EXISTS} disjunction proving a chash is CANONICAL
-     * (a content row for it exists in any of the three dim tables) —
-     * nexus-4okz4 increment 3 typed rendering of the raw {@code canonExists}
-     * string fragment, reused across {@code manifest_promoted}'s INSERT
-     * WHERE, {@code manifest_unresolved}'s count, and
-     * {@code unresolvedKnowledgeTitles}' filter (three call sites, each
-     * against a DIFFERENT staged-row's decoded chash field — hence a
-     * parametrized method rather than a precomputed Condition).
-     */
-    private static Condition canonExistsDsl(DSLContext ctx, Field<byte[]> chashDecoded) {
-        return DSL.exists(ctx.selectOne().from(CHUNKS_384).where(CHUNKS_384.CHASH.eq(chashDecoded)))
-            .or(DSL.exists(ctx.selectOne().from(CHUNKS_768).where(CHUNKS_768.CHASH.eq(chashDecoded))))
-            .or(DSL.exists(ctx.selectOne().from(CHUNKS_1024).where(CHUNKS_1024.CHASH.eq(chashDecoded))));
-    }
-
-    /**
      * Per-dim content-table accessor for {@link #promoteCollection}'s
      * content INSERT (nexus-4okz4 increment 3) — same explicit-three-
      * branches discipline as {@code RekeyOps.DIMS} /
@@ -599,9 +583,12 @@ public final class StagingPromoteOps {
             // promoted yet stays STAGED (a later finalize converges it) so a
             // dangling manifest row can never be CREATED here, which is what
             // makes the fatal dangling gate below coherent mid-migration.
-            // jOOQ DSL rendering (nexus-4okz4 increment 3):
-            // canonExistsDsl(ctx, sChashDecoded) replaces the raw canonExists
-            // string, reused identically across all three call sites below.
+            // jOOQ DSL rendering (nexus-4okz4 increment 3, converged onto
+            // the shared home increment 5): ChashSqlIdioms.existsInAnyDim(
+            // ctx, sChashDecoded) replaces the raw canonExists string,
+            // reused identically across all three call sites below. This
+            // class no longer carries its own private copy of the
+            // three-way EXISTS disjunction (see ChashSqlIdioms' javadoc).
 
             // nexus-11gh6 (post-review Critical, T2 nexus/critique-11gh6-
             // gate-impl-2026-08-08 [21798]): the manifest INSERT below
@@ -693,7 +680,7 @@ public final class StagingPromoteOps {
             }
 
             Condition manifestResolvable = CHASH_ALIAS.NEW_CHASH.isNotNull()
-                .or(sChash.likeRegex("^[0-9a-f]{64}$").and(canonExistsDsl(ctx, sChashDecoded)));
+                .or(sChash.likeRegex("^[0-9a-f]{64}$").and(ChashSqlIdioms.existsInAnyDim(ctx, sChashDecoded)));
             counts.put("manifest_promoted", ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
@@ -714,7 +701,7 @@ public final class StagingPromoteOps {
             counts.put("manifest_unresolved", ctx.selectCount().from(sdc)
                 .where(DSL.notExists(ctx.selectOne().from(CHASH_ALIAS)
                     .where(CHASH_ALIAS.OLD_REF.eq(sChash))))
-                .and(DSL.not(sChash.likeRegex("^[0-9a-f]{64}$").and(canonExistsDsl(ctx, sChashDecoded))))
+                .and(DSL.not(sChash.likeRegex("^[0-9a-f]{64}$").and(ChashSqlIdioms.existsInAnyDim(ctx, sChashDecoded))))
                 .fetchOne(0, Integer.class));
 
             // (2b) nexus-b6enc F3: the promote above is RESOLVABLE-ONLY, so
@@ -763,7 +750,7 @@ public final class StagingPromoteOps {
                 .and(DSL.coalesce(CATALOG_DOCUMENTS.FILE_PATH, "").eq(""))
                 .and(DSL.notExists(ctx.selectOne().from(CHASH_ALIAS)
                     .where(CHASH_ALIAS.OLD_REF.eq(sChash))))
-                .and(DSL.not(sChash.likeRegex("^[0-9a-f]{64}$").and(canonExistsDsl(ctx, sChashDecoded))))
+                .and(DSL.not(sChash.likeRegex("^[0-9a-f]{64}$").and(ChashSqlIdioms.existsInAnyDim(ctx, sChashDecoded))))
                 .orderBy(CATALOG_DOCUMENTS.TITLE)
                 .limit(100)
                 .fetch(CATALOG_DOCUMENTS.TITLE);

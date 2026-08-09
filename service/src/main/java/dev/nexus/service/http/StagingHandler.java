@@ -42,7 +42,7 @@ import static org.jooq.impl.DSL.excluded;
  *                                   per-(tenant,collection) promote txn
  *   POST /v1/staging/finalize       {orphan_policy?} — the IDEMPOTENT
  *                                   re-runnable tenant finalize
- *   POST /v1/staging/clear          per-tenant DELETE across all 8 tables
+ *   POST /v1/staging/clear          per-tenant DELETE across all 7 tables
  *   GET  /v1/staging/counts         per-store staged counts (parity checks)
  * </pre>
  *

@@ -140,19 +140,22 @@ public final class RekeyOps {
      * Item8 policy for orphaned empty-text rows (default caller: drop).
      * Returns the disposition + per-table counts (the auditable envelope).
      */
-    // SANCTIONED RAW (nexus-jxizy.6 origin; narrowed nexus-4okz4 increment 2):
-    // the method-level RawSqlGateTest sanction remains — the gate is
-    // method-granular, not statement-granular (that tightening is a later
-    // increment) — but the raw-SQL surface actually remaining inside this
-    // method is now narrow: the in-transaction ANALYZE + privilege probe
-    // (ChashSqlIdioms.refreshAliasStats — pg_catalog system-catalog reads,
-    // no jOOQ DSL form) and the two-phase content rekey's phase-A collapse
-    // (ChashSqlIdioms.contentCollapseDelete — the ctid/array_agg ORDER BY
-    // keeper-selection idiom; array-subscript of an ordered array_agg has
-    // no jOOQ DSL form). Every other statement (advisory lock, conflict
-    // pre-check, alias INSERT...SELECT...ON CONFLICT, the step-3 Item8
-    // UPDATE/DELETE/INSERT statements, phase-B content rekey, and every
-    // step-5 cascade UPDATE/DELETE) is typed jOOQ DSL as of this increment.
+    // NOT SANCTIONED RAW (nexus-4okz4 increment 5 — REMOVED from
+    // RawSqlGateTest.SANCTIONED_STATEMENTS): this method contains no raw
+    // execute()/fetch() call of its OWN — every statement (advisory lock,
+    // conflict pre-check, alias INSERT...SELECT...ON CONFLICT, the step-3
+    // Item8 UPDATE/DELETE/INSERT statements, phase-B content rekey, and
+    // every step-5 cascade UPDATE/DELETE) is typed jOOQ DSL. The two
+    // raw-SQL-touching primitives this method calls — the in-transaction
+    // ANALYZE + privilege probe (ChashSqlIdioms.refreshAliasStats) and the
+    // two-phase content rekey's phase-A collapse (ChashSqlIdioms.
+    // contentCollapseDelete's ctid/array_agg ORDER BY keeper idiom) — are
+    // METHOD CALLS into ChashSqlIdioms, their single true home (registered
+    // there, not duplicated here). Empirically verified at increment 5:
+    // RawSqlGateTest's RAW_EXECUTE pattern matches nothing anywhere in this
+    // file (falsification: temporarily adding a raw ctx.execute("...")
+    // literal here fails the gate immediately, since this method carries no
+    // registration to shelter it — see RawSqlGateTest's own javadoc).
     public Map<String, Object> rekey(String tenant, boolean synthesizeOrphans) {
         Map<String, Object> out = tenantScope.withTenant(tenant, ctx -> {
             Map<String, Object> counts = new LinkedHashMap<>();
