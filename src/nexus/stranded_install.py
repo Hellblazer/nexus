@@ -103,15 +103,31 @@ class StrandedInstall:
     artifacts: tuple[str, ...]
     #: The ``LAST_MIGRATION_CAPABLE`` value detection ran under.
     pinned_release: str
+    #: nexus-cmtpa (critique [22009] Significant): True ONLY when the
+    #: PRIMARY (ladder) migration signal was consulted and returned
+    #: indeterminate (``None`` — engine unresolvable, connection error,
+    #: timeout, any exception the probe itself caught), as distinct from a
+    #: confirmed ``False`` (engine reachable, genuinely no verified rung)
+    #: or the signal never being consulted at all (``ladder_migration_
+    #: verified=None``, e.g. cloud mode post-nexus-cmtpa gating). Default
+    #: False reproduces the exact pre-cmtpa message for every existing
+    #: caller. When True, :attr:`message` appends a clause distinguishing
+    #: "could not verify this run" from "confirmed not migrated" — an
+    #: already-migrated LOCAL user hitting a transient engine hiccup
+    #: (supervisor restart, brief unresponsiveness) must not read the SAME
+    #: message a genuinely-never-migrated user gets.
+    verification_unavailable: bool = False
 
     @property
     def message(self) -> str:
-        """The literal two-hop redirect (bead nexus-gynt2 spec)."""
+        """The literal two-hop redirect (bead nexus-gynt2 spec), with an
+        appended distinguishing clause when ``verification_unavailable``
+        (see that field's docstring)."""
         era_clause = (
             f"conexus {self.era}" if self.era else "an earlier, pre-PG conexus release"
         )
         pin = self.pinned_release
-        return (
+        base = (
             f"This install carries unmigrated pre-PG data from {era_clause} "
             f"({', '.join(self.artifacts)}). This conexus version no longer ships the "
             f"migration tool, so it cannot read or migrate that data — proceeding "
@@ -121,6 +137,17 @@ class StrandedInstall:
             f"(2) run `nx upgrade` there to migrate the data, "
             f"(3) upgrade back to this version."
         )
+        if self.verification_unavailable:
+            base += (
+                " NOTE: migration status could NOT be verified against the "
+                "engine this run (unreachable, unresponsive, or timed out) — "
+                "this refusal does not confirm the data is unmigrated, only "
+                "that migration could not be CONFIRMED this run. If a local "
+                "engine should be running, start it "
+                "(`nx daemon service start`) and retry before following the "
+                "two-hop upgrade above."
+            )
+        return base
 
 
 def legacy_chroma_dir() -> Path:
@@ -300,12 +327,20 @@ def detect_stranded_install(
     )
     if not found:
         return None
-    if ladder_migration_verified is not None and ladder_migration_verified():
-        return None
+    ladder_indeterminate = False
+    if ladder_migration_verified is not None:
+        ladder_result = ladder_migration_verified()
+        if ladder_result:
+            return None
+        # nexus-cmtpa: None (indeterminate) is distinct from False
+        # (confirmed not verified) -- both stay stranded, but only the
+        # former gets the "could not verify" message clause below.
+        ladder_indeterminate = ladder_result is None
     if _has_verified_migration_report(config_dir):
         return None
     return StrandedInstall(
         era=_read_era(config_dir),
         artifacts=found,
         pinned_release=str(pin),
+        verification_unavailable=ladder_indeterminate,
     )

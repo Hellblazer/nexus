@@ -670,6 +670,51 @@ class TestLadderMigrationSignal:
             config, chroma, catalog, last_migration_capable=_PIN,
         ) is not None
 
+    def test_indeterminate_ladder_result_yields_distinguishable_message(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """nexus-cmtpa (critique [22009] Significant): a transiently
+        unreachable engine (``ladder_migration_verified() -> None``) must
+        NOT read to the user identically to a confirmed-unmigrated box --
+        an already-migrated LOCAL user hitting a supervisor restart or
+        brief unresponsiveness deserves a message that says verification
+        could not be CONFIRMED this run, not a flat "this is unmigrated"
+        claim."""
+        result = self._detect_with_artifact(dirs, None)
+        assert result is not None
+        assert result.verification_unavailable is True
+        assert "could NOT be verified against the engine this run" in result.message
+        assert "start it (`nx daemon service start`)" in result.message
+        # The base two-hop redirect must STILL be present -- this is an
+        # ADDED clause, not a replacement of the actionable remedy.
+        assert "Two-hop upgrade:" in result.message
+
+    def test_confirmed_not_verified_does_not_get_the_indeterminate_clause(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """A confirmed ``False`` (engine reachable, rung genuinely absent)
+        is a DIFFERENT state from indeterminate -- no false reassurance
+        that verification merely "couldn't be checked"."""
+        result = self._detect_with_artifact(dirs, False)
+        assert result is not None
+        assert result.verification_unavailable is False
+        assert "could NOT be verified" not in result.message
+
+    def test_no_ladder_probe_supplied_does_not_get_the_indeterminate_clause(
+        self, dirs: tuple[Path, Path, Path],
+    ) -> None:
+        """The signal never being consulted at all (callable is None --
+        e.g. cloud mode post-nexus-cmtpa gating) is ALSO distinct from a
+        consulted-but-indeterminate probe -- no clause either way."""
+        config, chroma, catalog = dirs
+        (config / "memory.db").write_bytes(b"x")
+        result = detect_stranded_install(
+            config, chroma, catalog, last_migration_capable=_PIN,
+        )
+        assert result is not None
+        assert result.verification_unavailable is False
+        assert "could NOT be verified" not in result.message
+
 
 class TestConfigLadderProbe:
     """nexus-4922x: ``nexus.config._ladder_migration_verified`` -- the
@@ -695,7 +740,7 @@ class TestConfigLadderProbe:
     ) -> None:
         monkeypatch.setattr(
             http_store_mod, "HttpLadderStore",
-            lambda: self._FakeLadderStore(frozenset({"substrate-etl", "chash-rekey"})),
+            lambda **kw: self._FakeLadderStore(frozenset({"substrate-etl", "chash-rekey"})),
         )
         assert _REAL_LADDER_MIGRATION_VERIFIED() is True
 
@@ -704,7 +749,7 @@ class TestConfigLadderProbe:
     ) -> None:
         monkeypatch.setattr(
             http_store_mod, "HttpLadderStore",
-            lambda: self._FakeLadderStore(frozenset({"chash-rekey"})),
+            lambda **kw: self._FakeLadderStore(frozenset({"chash-rekey"})),
         )
         assert _REAL_LADDER_MIGRATION_VERIFIED() is False
 
@@ -713,7 +758,7 @@ class TestConfigLadderProbe:
     ) -> None:
         monkeypatch.setattr(
             http_store_mod, "HttpLadderStore",
-            lambda: self._FakeLadderStore(frozenset()),
+            lambda **kw: self._FakeLadderStore(frozenset()),
         )
         assert _REAL_LADDER_MIGRATION_VERIFIED() is False
 
@@ -723,7 +768,7 @@ class TestConfigLadderProbe:
         """Construction-time failure (e.g. ServiceEndpointUnresolvableError,
         the expected shape when nothing has been provisioned yet)."""
 
-        def _boom() -> "TestConfigLadderProbe._FakeLadderStore":
+        def _boom(**kw: object) -> "TestConfigLadderProbe._FakeLadderStore":
             raise RuntimeError("nexus-service endpoint is not resolvable")
 
         monkeypatch.setattr(http_store_mod, "HttpLadderStore", _boom)
@@ -737,6 +782,9 @@ class TestConfigLadderProbe:
         None, never propagates."""
 
         class _RaisingStore:
+            def __init__(self, **kw: object) -> None:
+                pass
+
             def verified_rungs(self) -> frozenset[str]:
                 raise ConnectionRefusedError("connection refused")
 
@@ -748,3 +796,103 @@ class TestConfigLadderProbe:
 
         monkeypatch.setattr(http_store_mod, "HttpLadderStore", _RaisingStore)
         assert _REAL_LADDER_MIGRATION_VERIFIED() is None
+
+    def test_short_explicit_timeout_is_passed(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-4922x code-review [22008] Important: without an explicit
+        SHORT timeout, HttpLadderStore inherits RefreshableHttpStoreMixin's
+        30.0s data-operation default (~60s worst case with the mixin's
+        self-heal retry) -- at CLI STARTUP, for every box that ever carried
+        pre-PG artifacts, whenever the engine is resolvable-but-unresponsive.
+        Pins that the probe passes a short explicit ``timeout`` kwarg
+        (matching health.py's 2-5s best-effort-diagnostic convention), not
+        the mixin's bare default."""
+        calls: list[dict[str, object]] = []
+
+        def _capturing_factory(**kw: object) -> "TestConfigLadderProbe._FakeLadderStore":
+            calls.append(kw)
+            return self._FakeLadderStore(frozenset({"substrate-etl"}))
+
+        monkeypatch.setattr(http_store_mod, "HttpLadderStore", _capturing_factory)
+        assert _REAL_LADDER_MIGRATION_VERIFIED() is True
+        assert len(calls) == 1
+        assert calls[0].get("timeout") == config_mod._LADDER_PROBE_TIMEOUT_S
+        # The pin itself must actually BE short -- a future regression that
+        # widens the constant back toward the 30.0s data-operation default
+        # would pass this test's "some timeout was passed" half while
+        # reintroducing the startup-hang exposure; assert the magnitude too.
+        assert config_mod._LADDER_PROBE_TIMEOUT_S <= 5.0
+
+
+class TestCloudModeGate:
+    """nexus-cmtpa (critique [22009] Critical): the ladder-completion
+    signal is keyed ``(tenant_id, rung_name)`` engine-side (verified
+    against ``service/.../ladder-001-baseline.xml``) -- NOT machine-scoped.
+    In managed/cloud mode a tenant can be shared across machines, so
+    trusting it there would let machine A's migration falsely de-strand
+    machine B's own, distinct, never-migrated pre-PG data (silent data
+    loss -- the exact class this detector exists to prevent). The signal
+    is therefore sound ONLY in local mode (one bundled PG per install) and
+    MUST be gated to ``is_local_mode()``. House testing memory: pin
+    ``is_local_mode`` explicitly in these tests, never rely on ambient
+    detection."""
+
+    def _armed_dirs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = tmp_path / "cfg"
+        config.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
+        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma-none"))
+        monkeypatch.delenv("NEXUS_CATALOG_PATH", raising=False)
+        (config / "memory.db").write_bytes(b"x")
+        monkeypatch.setattr(stranded_install, "LAST_MIGRATION_CAPABLE", _PIN)
+
+    def test_cloud_mode_never_consults_the_tenant_scoped_ladder_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PINNED cloud mode (``is_local_mode`` explicitly False): even a
+        probe that WOULD say "verified" must never be called at all -- the
+        gate prevents the network round-trip, not just the trust
+        decision."""
+        calls: list[int] = []
+
+        def _would_say_verified() -> bool:
+            calls.append(1)
+            return True
+
+        monkeypatch.setattr(config_mod, "_ladder_migration_verified", _would_say_verified)
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: False)
+        self._armed_dirs(tmp_path, monkeypatch)
+
+        result = detect_stranded_install_default()
+        assert calls == [], "cloud mode must NEVER consult the tenant-scoped ladder probe"
+        assert result is not None, (
+            "cloud mode falls back to the legacy-only signal -- no report "
+            "file exists here, so it correctly stays stranded"
+        )
+        assert result.verification_unavailable is False, (
+            "the probe was never consulted, so this is NOT the "
+            "indeterminate-verification case"
+        )
+
+    def test_local_mode_still_consults_and_trusts_the_ladder_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PINNED local mode (``is_local_mode`` explicitly True): the exact
+        nexus-4922x behavior -- the probe IS consulted and a True result
+        de-strands."""
+        calls: list[int] = []
+
+        def _says_verified() -> bool:
+            calls.append(1)
+            return True
+
+        monkeypatch.setattr(config_mod, "_ladder_migration_verified", _says_verified)
+        monkeypatch.setattr(config_mod, "is_local_mode", lambda: True)
+        self._armed_dirs(tmp_path, monkeypatch)
+
+        result = detect_stranded_install_default()
+        assert calls == [1]
+        assert result is None
