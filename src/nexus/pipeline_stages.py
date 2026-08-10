@@ -699,6 +699,54 @@ def _catalog_pdf_hook(
             reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe
 
 
+def _force_t3_orphan_cleanup(t3: Any, collection: str, content_hash: str) -> int:
+    """Delete orphan T3 chunks for *content_hash* in *collection* — the
+    second half of the nexus-9ji ``--force`` deadlock-break.
+
+    The collection stub's ``delete()`` takes an explicit ``ids: list[str]``
+    only; it has never accepted a ``where=`` filter. The prior call site
+    here (``col.delete(where={"content_hash": content_hash})``) raised
+    ``TypeError`` on every single invocation in service mode, silently
+    swallowed by a bare ``except Exception`` into a ``force_t3_orphan_
+    cleanup_failed`` warning — so ``--force`` has never actually cleaned up
+    T3 orphan chunks in service mode. This resolves the matching ids first
+    (``get_all_metadata(where=...)``, the collection stub's metadata-filter
+    primitive) and deletes them by id.
+
+    Fail-loud by design (no ``except Exception`` swallow): a genuine
+    cleanup failure here means ``--force`` did NOT break the deadlock it
+    exists to break, and the caller's next re-ingest attempt would hit the
+    identical wall with no signal anything went wrong. Both the metadata
+    lookup and the delete call propagate their exceptions verbatim,
+    including a ``TypeError``-class programming error — it must never again
+    be indistinguishable from a transient service failure.
+
+    The *legitimately empty* case (no orphan chunks match) is not an
+    error: ``get_all_metadata`` returns an empty id list, ``delete`` is
+    never called, and this returns 0 quietly.
+
+    Returns the number of orphan chunks deleted.
+    """
+    col = t3.get_or_create_collection(collection)
+    orphan_meta = col.get_all_metadata(where={"content_hash": content_hash})
+    orphan_ids = orphan_meta.get("ids", []) or []
+    if not orphan_ids:
+        _log.info(
+            "force_t3_orphan_cleanup_none_found",
+            content_hash=content_hash,
+            collection=collection,
+        )
+        return 0
+    col.delete(orphan_ids)
+    _log.info(
+        "force_t3_orphan_cleanup_deleted",
+        content_hash=content_hash,
+        collection=collection,
+        orphan_count=len(orphan_ids),
+    )
+    return len(orphan_ids)
+
+
 def pipeline_index_pdf(
     pdf_path: Path,
     content_hash: str,
@@ -782,16 +830,7 @@ def pipeline_index_pdf(
     # re-ingest; wipe both before the pre-flight.
     if force:
         db.delete_pipeline_data(content_hash)
-        try:
-            col = t3.get_or_create_collection(collection)
-            col.delete(where={"content_hash": content_hash})
-        except Exception as exc:  # noqa: BLE001 - best-effort orphan cleanup; logged via log.warning
-            _log.warning(
-                "force_t3_orphan_cleanup_failed",
-                content_hash=content_hash,
-                collection=collection,
-                error=str(exc),
-            )
+        _force_t3_orphan_cleanup(t3, collection, content_hash)
 
     # Pre-flight: check if pipeline should run before resolving credentials.
     result = db.create_pipeline(content_hash, str(pdf_path), collection)

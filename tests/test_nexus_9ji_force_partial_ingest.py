@@ -28,6 +28,40 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+class _FakeServiceCollection:
+    """Test double matching the REAL ``_ServiceCollectionStub`` contract
+    exactly: ``delete(ids: list[str])`` positional-only, no ``where=``
+    kwarg; ``get_all_metadata(where: dict | None = None)`` filters an
+    in-memory row store.
+
+    A bare ``MagicMock()`` (what the pre-fix version of this test file
+    used) accepts ANY kwargs silently, including ``delete(where=...)`` --
+    so it could never catch that the production code was calling a
+    ``where=`` parameter the real client doesn't have. This double raises
+    ``TypeError`` on that call shape exactly like the real service client
+    does, and tracks real row state so tests can assert the POST-STATE of
+    a cleanup (rows actually gone) rather than merely "some method was
+    called with no exception."
+    """
+
+    def __init__(self, rows: dict[str, dict]) -> None:
+        self.rows = dict(rows)  # id -> metadata
+
+    def get_all_metadata(self, where: dict | None = None) -> dict:
+        if not where:
+            ids = list(self.rows)
+        else:
+            ids = [
+                i for i, m in self.rows.items()
+                if all(m.get(k) == v for k, v in where.items())
+            ]
+        return {"ids": ids, "metadatas": [self.rows[i] for i in ids]}
+
+    def delete(self, ids: list[str]) -> None:
+        for i in ids:
+            self.rows.pop(i, None)
+
+
 # ── pipeline.db "completed" state bypass ────────────────────────────────────
 
 
@@ -161,17 +195,34 @@ class TestPipelineIndexPdfForce:
     def test_force_true_deletes_t3_orphan_chunks(
         self, tmp_path: Path, fake_pdf: Path,
     ):
-        """force=True must delete T3 chunks matching this content_hash
-        before re-upload so orphans from a partial prior ingest don't
-        race with the new chunks."""
+        """force=True must ACTUALLY delete the T3 chunks matching this
+        content_hash before re-upload -- proven by POST-STATE (the rows
+        are gone from the collection), not merely "some method fired
+        without raising."
+
+        Uses ``_FakeServiceCollection``, whose ``delete()`` only accepts a
+        positional ``ids: list[str]`` (the REAL ``_ServiceCollectionStub``
+        contract). The pre-fix production code called
+        ``col.delete(where={"content_hash": content_hash})`` -- against
+        this double that raises ``TypeError`` exactly as it does against
+        the real service client, so this test is red on the pre-fix code
+        (the TypeError propagates instead of being silently swallowed,
+        since this test's own call is not wrapped in the production
+        try/except that used to exist) and green once the cleanup
+        resolves ids via ``get_all_metadata`` and deletes those ids.
+        """
         from nexus.pipeline_stages import pipeline_index_pdf
         from tests.pipeline_fake_engine import make_fake_engine_db
 
         db, _engine = make_fake_engine_db()
         h = "d" * 64
 
+        fake_col = _FakeServiceCollection({
+            "orphan_0": {"content_hash": h},
+            "orphan_1": {"content_hash": h},
+            "keep_0": {"content_hash": "unrelated" + h},
+        })
         fake_t3 = MagicMock()
-        fake_col = MagicMock()
         fake_t3.get_or_create_collection.return_value = fake_col
 
         # Return a mock ExtractionResult with a usable metadata dict so
@@ -198,19 +249,82 @@ class TestPipelineIndexPdfForce:
                 force=True,
             )
 
-        # The collection should have received a pre-flight delete scoped
-        # to this content_hash.
-        assert fake_col.delete.called, (
-            "force=True must call col.delete to purge T3 orphan chunks"
-        )
-        # The delete call should scope to this content_hash (via where
-        # clause) rather than wiping the whole collection.
-        delete_kwargs = fake_col.delete.call_args.kwargs
-        where = delete_kwargs.get("where") or {}
-        assert where.get("content_hash") == h, (
-            f"force delete should scope to content_hash={h!r}; "
-            f"got where={where!r}"
-        )
+        # Post-state: the two orphan chunks sharing this content_hash are
+        # GONE; the unrelated chunk (different content_hash) survives.
+        assert "orphan_0" not in fake_col.rows, "matching orphan chunk was not deleted"
+        assert "orphan_1" not in fake_col.rows, "matching orphan chunk was not deleted"
+        assert "keep_0" in fake_col.rows, "unrelated chunk must not be swept up"
+
+    def test_force_true_no_orphans_is_quiet_success(
+        self, tmp_path: Path, fake_pdf: Path,
+    ):
+        """force=True with NO matching T3 orphans must succeed quietly --
+        no exception, no chunks touched. A cleanup that raises on a
+        legitimately empty result would make every --force ingest of a
+        brand-new content_hash fail."""
+        from nexus.pipeline_stages import pipeline_index_pdf
+        from tests.pipeline_fake_engine import make_fake_engine_db
+
+        db, _engine = make_fake_engine_db()
+        h = "f" * 64
+
+        fake_col = _FakeServiceCollection({
+            "keep_0": {"content_hash": "unrelated" + h},
+        })
+        fake_t3 = MagicMock()
+        fake_t3.get_or_create_collection.return_value = fake_col
+
+        fake_extraction = MagicMock()
+        fake_extraction.metadata = {"table_regions": []}
+
+        with patch(
+            "nexus.pipeline_stages.extractor_loop", return_value=fake_extraction,
+        ), patch(
+            "nexus.pipeline_stages.chunker_loop", return_value=None,
+        ), patch(
+            "nexus.pipeline_stages.uploader_loop", return_value=0,
+        ), patch(
+            "nexus.pipeline_stages._enrich_metadata_from_extraction",
+            return_value=True,
+        ), patch(
+            "nexus.pipeline_stages._update_chunk_metadata",
+            return_value=None,
+        ):
+            # Must not raise.
+            pipeline_index_pdf(
+                fake_pdf, h, "knowledge__reproducer", fake_t3,
+                db=db, embed_fn=lambda t, m: ([[0.0] * 1024] * len(t), m),
+                force=True,
+            )
+
+        assert "keep_0" in fake_col.rows, "unrelated chunk must survive an empty cleanup"
+
+    def test_force_true_orphan_cleanup_failure_propagates(
+        self, tmp_path: Path, fake_pdf: Path,
+    ):
+        """A genuine T3 orphan-cleanup failure must be LOUD, not swallowed
+        into a warning. Pre-fix, a bare ``except Exception`` turned every
+        failure here (including a plain ``TypeError`` programming error)
+        into a ``force_t3_orphan_cleanup_failed`` warning and let the
+        pipeline continue -- so ``--force`` silently did NOT break the
+        deadlock it exists to break, with no signal to the caller."""
+        from nexus.pipeline_stages import pipeline_index_pdf
+        from tests.pipeline_fake_engine import make_fake_engine_db
+
+        db, _engine = make_fake_engine_db()
+        h = "g" * 64
+
+        fake_col = MagicMock()
+        fake_col.get_all_metadata.side_effect = RuntimeError("store service unreachable")
+        fake_t3 = MagicMock()
+        fake_t3.get_or_create_collection.return_value = fake_col
+
+        with pytest.raises(RuntimeError, match="store service unreachable"):
+            pipeline_index_pdf(
+                fake_pdf, h, "knowledge__reproducer", fake_t3,
+                db=db, embed_fn=lambda t, m: ([[0.0] * 1024] * len(t), m),
+                force=True,
+            )
 
 
 # ── CLI plumbing ────────────────────────────────────────────────────────────
