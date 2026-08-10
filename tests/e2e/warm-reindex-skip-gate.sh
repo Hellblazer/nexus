@@ -14,12 +14,14 @@
 # Three legs against one warm sandbox:
 #   A  pure warm reindex (zero changes)  -> minutes wall, ZERO server embeds
 #   B  one file perturbed (new trailing section) -> its unchanged sibling
-#      chunks upload but SKIP server-side (upsert_embed_skipped, embedded<=2)
+#      chunks upload but SKIP server-side (event=combined_write_embed_partition
+#      skipped>=1, embedded<=2)
 #   C  FALSIFICATION (non-vacuity): --force (the designed forceReEmbed
 #      escape, RDR-181 step 3 — NOT the env var, which loses to the batch
-#      path's explicit kwarg) -> everything uploads, ZERO skip lines. Proves
-#      leg B's skip-line signal is real, not spuriously always-present, and
-#      that the detector distinguishes skip-on from skip-off.
+#      path's explicit kwarg) -> everything uploads, ZERO chunks skipped,
+#      every partition line carries force_re_embed=true. Proves leg B's
+#      skip signal is real, not spuriously always-present, and that the
+#      detector distinguishes skip-on from skip-off.
 #
 # Self-provisioning (feedback_gates_scripted_not_ambient): builds the wheel
 # under test, virgin HOME, scrubbed env, synthetic deterministic corpus.
@@ -72,19 +74,56 @@ _nx() {
 
 ENGLOG="$HOME_DIR/.config/nexus/logs/storage_service_native.log"
 
-# Engine-side skip evidence: upsert_embed_skipped is the ONLY INFO-level
-# vector-upsert event on the clean path (upsert_chunks_done is DEBUG;
-# upsert_dedup_collapsed fires only when a batch has internal duplicates),
-# so upload volume must come from the CLIENT log, not the engine log.
-# Every grep stage is || true — a healthy leg can legitimately match ZERO
-# lines (leg A uploads nothing), and under set -e + pipefail a bare grep's
-# exit-1-on-no-match would kill the whole gate before its assertion runs.
-_skip_lines_since() { tail -n +"$(( $1 + 1 ))" "$ENGLOG" 2>/dev/null | { grep -c "upsert_embed_skipped" || true; }; }
-_embedded_since()   {
+# Engine-side skip evidence (nexus-acvi7 item 2 repoint, 2026-08-10): the
+# ChunkBatcher flush path (indexer.py's `_batch_flush`, wired as
+# `ChunkBatcher(flush=_batch_flush, ...)`) never reaches the OLD two-call
+# upsert path (PgVectorRepository.java:527, `upsert_embed_skipped`) —
+# `nx index repo` posts `chunks` on the combined-write manifest call, which
+# CatalogHandler routes to CombinedWriteService.writeManyCombined
+# (CatalogHandler.java's `rawChunks != null` branch), the ONLY engine path
+# this gate's corpus actually exercises. That method emits ONE INFO line
+# per call, UNCONDITIONALLY (unlike the retired line, which fired only
+# when skipped>0):
+#   event=combined_write_embed_partition collection=... deduped=... skipped=... embedded=... force_re_embed=...
+# Confirmed emitted on the ChunkBatcher path: (a) statically —
+# ChunkBatcher's `flush=_batch_flush` -> `_build_combined_write_payload` ->
+# `cat.write_manifest_many(..., chunks=chunks_payload, ...)` ->
+# `http_catalog_client.write_manifest_many` POSTs `chunks` to
+# `/manifest/write_many` -> CatalogHandler's `rawChunks != null` branch ->
+# `combinedWriteService.writeManyCombined(...)`, the sole call site of
+# `writeManyCombined`; (b) empirically — this gate's own leg B/C runs, see
+# the RED/GREEN falsification record in T2
+# `nexus/acvi7-warm-reindex-gate-repointed`.
+#
+# One line is emitted PER CALL (i.e. per flush), not per chunk, so a
+# leg with several flushes produces several lines — SUM the `skipped=`/
+# `embedded=` fields across all matching lines since the marker, do NOT
+# `grep -c` (line count conflates "one call, N skips" with "N calls, 1
+# skip each", and would also undercount when the field name changes).
+# Every grep/awk stage is || true — a healthy leg can legitimately match
+# ZERO lines or ZERO count (leg A uploads nothing), and under set -e +
+# pipefail a bare grep's exit-1-on-no-match would kill the whole gate
+# before its assertion runs.
+_partition_lines_since() {
     tail -n +"$(( $1 + 1 ))" "$ENGLOG" 2>/dev/null \
-        | { grep -oE "upsert_embed_skipped .* embedded=[0-9]+" || true; } \
-        | { grep -oE "embedded=[0-9]+" || true; } | cut -d= -f2 \
+        | { grep "event=combined_write_embed_partition" || true; }
+}
+_sum_field_since() {
+    _partition_lines_since "$1" \
+        | { grep -oE "$2=[0-9]+" || true; } | cut -d= -f2 \
         | awk '{s+=$1} END {print s+0}'
+}
+_skipped_since()   { _sum_field_since "$1" "skipped"; }
+_embedded_since()  { _sum_field_since "$1" "embedded"; }
+# Leg C non-vacuity: every matching line in the window must actually carry
+# force_re_embed=true — otherwise a zero-skip result could just mean no
+# partition lines fired at all, not that forceReEmbed disabled the skip.
+_all_forced_since() {
+    local total unforced
+    total=$(_partition_lines_since "$1" | wc -l | tr -d ' ')
+    [ "$total" -gt 0 ] || return 1
+    unforced=$(_partition_lines_since "$1" | { grep -vc "force_re_embed=true" || true; })
+    [ "$unforced" -eq 0 ]
 }
 # Chunks the client actually uploaded in one run: sum of "Flushing N staged
 # chunks" lines in that run's client log. Under forceReEmbed (leg C) every
@@ -144,11 +183,11 @@ echo "── 6/7 Leg B: one perturbed file — sibling chunks must SKIP server-s
 printf '## Section 9\n\nAppended perturbation section, leg B.\n' >> "$CORPUS/target.md"
 M2=$(_marker)
 _nx index repo "$CORPUS" >"$LOGS/warm-b.log" 2>&1 || { tail -20 "$LOGS/warm-b.log" >&2; _fail "leg B reindex failed"; }
-SKIP_B=$(_skip_lines_since "$M2"); EMB_B=$(_embedded_since "$M2")
+SKIP_B=$(_skipped_since "$M2"); EMB_B=$(_embedded_since "$M2")
 STAGED_B=$(_staged_in_log "$LOGS/warm-b.log")
-echo "  staged=$STAGED_B skip_lines=$SKIP_B embedded=$EMB_B"
+echo "  staged=$STAGED_B skipped=$SKIP_B embedded=$EMB_B"
 [ "$STAGED_B" -ge 6 ] || _fail "leg B staged only $STAGED_B chunks — the perturbed file's siblings never uploaded, skip assertion would be vacuous"
-[ "$SKIP_B" -ge 1 ] || _fail "leg B produced NO upsert_embed_skipped lines — server-side skip not firing on uploaded unchanged chunks"
+[ "$SKIP_B" -ge 1 ] || _fail "leg B produced NO skipped chunks in event=combined_write_embed_partition — server-side skip not firing on uploaded unchanged chunks"
 [ "$EMB_B" -le 2 ] || _fail "leg B embedded $EMB_B chunks — only the appended section (~1) should embed; siblings must skip"
 
 echo "── 7/7 Leg C: FALSIFICATION — --force (skip off by design) must show the broken-skip signature ──"
@@ -159,10 +198,11 @@ echo "── 7/7 Leg C: FALSIFICATION — --force (skip off by design) must show
 # the kwarg is unset, and the batch flush always passes it explicitly.
 M3=$(_marker)
 _nx index repo "$CORPUS" --force >"$LOGS/warm-c.log" 2>&1 || { tail -20 "$LOGS/warm-c.log" >&2; _fail "leg C reindex failed"; }
-SKIP_C=$(_skip_lines_since "$M3"); STAGED_C=$(_staged_in_log "$LOGS/warm-c.log")
-echo "  staged=$STAGED_C skip_lines=$SKIP_C"
+SKIP_C=$(_skipped_since "$M3"); STAGED_C=$(_staged_in_log "$LOGS/warm-c.log")
+echo "  staged=$STAGED_C skipped=$SKIP_C"
 [ "$STAGED_C" -ge 10 ] || _fail "leg C staged only $STAGED_C chunks — --force did not re-upload the corpus, falsification vacuous"
-[ "$SKIP_C" -eq 0 ] || _fail "leg C (--force, skip off by design) still logged skip lines — the skip-line signal is not trustworthy, leg B is vacuous"
+[ "$SKIP_C" -eq 0 ] || _fail "leg C (--force, skip off by design) still reported skipped chunks — the skip signal is not trustworthy, leg B is vacuous"
+_all_forced_since "$M3" || _fail "leg C event=combined_write_embed_partition lines did not all carry force_re_embed=true — either no partition events fired (vacuous) or --force did not thread through to the combined write"
 
 GATE_OK=1
 echo "WARM-REINDEX SKIP GATE PASSED — cold=$COLD_STAGED legA=${WALL_A}s/${STAGED_A}up legB=${STAGED_B}up/${SKIP_B}skip/${EMB_B}emb legC=${STAGED_C}forced"
