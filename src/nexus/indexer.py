@@ -4350,9 +4350,20 @@ def _run_index(
         _log.debug("indexing", file=str(file))
         # nexus-7yfe6: contain a transient upsert 5xx (gateway/pool) — defer the
         # file to staleness instead of failing (and, under concurrency, hanging)
-        # the whole run. Prose/PDF always take the direct upsert path (no
-        # ChunkBatcher involvement), so they need this wrapper unconditionally.
-        # CORRECTED (T2 22168, engine-w0-503-client-degradation): code files
+        # the whole run. CORRECTED (nexus-acvi7, 2026-08-10): "Prose/PDF always
+        # take the direct upsert path (no ChunkBatcher involvement)" — the
+        # prior wording here — is REFUTED by prose_indexer.py:255
+        # (`ctx.batcher.add(...)`): prose goes through the exact same
+        # ChunkBatcher every code file does. `add()` only falls through to
+        # the direct upsert (prose_indexer.py:282-290) when it REJECTS the
+        # file (oversize, chunk_batcher.py:253-260) — same trigger as code's.
+        # The wrapper's PLACEMENT here was never wrong despite that: it wraps
+        # the whole per-file call, so it transparently covers the fallback
+        # branch whenever `add()` rejects and is inert (no upsert call in
+        # this frame to catch) whenever `add()` accepts — either way the
+        # per-file call is correctly contained. What was wrong was only the
+        # STATED REASON, not the code.
+        # ALSO CORRECTED (T2 22168, engine-w0-503-client-degradation): code files
         # do NOT always get equivalent containment "via the ChunkBatcher" as
         # this comment used to claim — that was only true while
         # ChunkBatcher.add(...) accepts the file. It returns False (falling
