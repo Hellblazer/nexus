@@ -315,7 +315,17 @@ class _ETATicker:
         with self._lock:
             n, total, chunks = self._n, self._total, self._chunks
             elapsed = time.monotonic() - self._start_mono
-        if total <= 0:
+        if total <= 0 or n == 0:
+            # Mutual exclusion with _PhaseHeartbeat (heartbeat double-fire
+            # fix, T2 22168 follow-up): start() fires from on_start, which
+            # precedes the whole pre-file-loop window (catalog
+            # registration, staleness caches) — n stays 0 throughout that
+            # window. A meaningless "0/N files … pending" tick there would
+            # fire concurrently with _PhaseHeartbeat's own "still running"
+            # tick for whichever pre-loop phase is currently armed.
+            # Suppressing emission until the first file genuinely completes
+            # confines this ticker's live window to exactly the per-file
+            # loop, where _PhaseHeartbeat is disarmed (see on_file below).
             return
         self._emit(_format_eta(n, total, chunks, elapsed))
 
@@ -627,6 +637,21 @@ def index_repo_cmd(
             total_chunks += chunks
             if not chunks:
                 skipped_files += 1
+            if n == 1:
+                # Heartbeat double-fire fix (T2 22168 follow-up): the FIRST
+                # genuine per-file completion is real "still alive"
+                # evidence that supersedes whatever pre-loop phase
+                # heartbeat (catalog registration / staleness caches) is
+                # still armed from the last on_phase call — nothing
+                # disarms it otherwise until the NEXT on_phase call, which
+                # in production doesn't fire again until well after the
+                # code/prose/pdf loops finish (RDR phase announcement).
+                # From here through the end of the loop, _ETATicker's own
+                # "n/total files" ticks are the liveness signal, so the
+                # two background tickers must never both be live at once.
+                # Idempotent: disarm() on an already-disarmed heartbeat is
+                # a documented no-op.
+                phase_heartbeat.disarm()
             eta_ticker.record(chunks)
             if n >= total:
                 # The file-count ETA ticker's job ends when the per-file

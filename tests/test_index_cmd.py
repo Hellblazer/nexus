@@ -843,7 +843,17 @@ def test_eta_ticker_not_stopped_by_first_phase_marker(runner, repo_dir, mock_reg
     production the first phase marker fires BEFORE the per-file loop even
     starts (indexer.py on_start at :3496 precedes the first run_file_loop
     at :4252) — the fix must let the ticker survive phase markers and
-    still emit during a simulated long phase that follows one."""
+    still emit during a simulated long phase that follows one.
+
+    Heartbeat double-fire fix (T2 22168 follow-up): the ticker no longer
+    emits its ``0/N … pending`` tick during the pre-loop phase (mutual
+    exclusion with ``_PhaseHeartbeat`` — see
+    ``test_eta_ticker_and_phase_heartbeat_never_double_fire`` below), so
+    this test's "still emits" claim now needs a real per-file tick — a
+    sleep AFTER the first ``on_file`` call, before the loop completes —
+    rather than relying on a pending-state tick during the earlier phase
+    sleep.
+    """
     import nexus.commands.index as index_mod
 
     class _FastETATicker(index_mod._ETATicker):
@@ -858,8 +868,9 @@ def test_eta_ticker_not_stopped_by_first_phase_marker(runner, repo_dir, mock_reg
         on_file = kwargs.get("on_file")
         on_start(2)
         on_phase("Registering 1 catalog entries…")  # fires pre-loop in production
-        time.sleep(0.06)  # simulated long phase: let the ticker tick >= once
+        time.sleep(0.06)  # simulated long phase: ticker must survive it
         on_file(Path("a.py"), 3, 0.1)
+        time.sleep(0.06)  # real per-file progress now exists — ticker may tick
         on_file(Path("b.py"), 2, 0.1)
         return {}
 
@@ -904,6 +915,69 @@ def test_eta_ticker_stops_when_file_loop_completes_not_on_phase(
         runner, [str(repo_dir)], mock_reg, index_side_effect=fake_index,
     )
     assert result.exit_code == 0, result.output
+
+
+# ── heartbeat double-fire fix (T2 22168 engine-w0-503 follow-up) ───────────
+
+
+def test_eta_ticker_and_phase_heartbeat_never_double_fire(runner, repo_dir, mock_reg, monkeypatch):
+    """Regression for the double-fire gap left by
+    ``test_eta_ticker_not_stopped_by_first_phase_marker`` above: that test's
+    sleep (0.06s) was shorter than ``_PhaseHeartbeat``'s REAL 10s/30s
+    interval, so the heartbeat never actually got a chance to tick during
+    it — it only proved the ETA ticker survives a phase marker, never that
+    the two tickers stay mutually exclusive when BOTH are genuinely live at
+    once. This test fast-forwards BOTH intervals to the same short value
+    and sleeps long enough for each to tick multiple times over, driving a
+    real collision:
+
+    1. Pre-loop window (before any file completes): with both intervals
+       elapsed several times over, the OLD code would emit
+       ``[eta] 0/N files … pending`` concurrently with the heartbeat's
+       ``still running`` tick for the armed pre-loop phase. The fix
+       confines the ticker's live window to n >= 1, so no such line ever
+       appears.
+    2. Once the file loop genuinely starts (first ``on_file``), the
+       heartbeat must disarm — sleeping again afterward must produce ONLY
+       real ``[eta] 1/N files`` progress ticks, never another
+       ``still running`` line interleaved with them.
+    """
+    import nexus.commands.index as index_mod
+
+    class _FastETATicker(index_mod._ETATicker):
+        def __init__(self, interval=60.0, emit=None):
+            super().__init__(interval=0.02, emit=emit)
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02)
+
+    monkeypatch.setattr(index_mod, "_ETATicker", _FastETATicker)
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+
+    def fake_index(path, reg, **kwargs):
+        on_start = kwargs.get("on_start")
+        on_phase = kwargs.get("on_phase")
+        on_file = kwargs.get("on_file")
+        on_start(2)
+        on_phase("Registering 1 catalog entries…")  # arms the heartbeat, pre-loop
+        time.sleep(0.09)  # both 0.02s intervals elapse several times over
+        on_file(Path("a.py"), 3, 0.1)  # real progress begins — must disarm the heartbeat
+        time.sleep(0.09)  # only the eta ticker may tick from here on
+        on_file(Path("b.py"), 2, 0.1)
+        return {}
+
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg, index_side_effect=fake_index,
+    )
+    assert result.exit_code == 0, result.output
+    # (1) no pending-state tick ever fired during the pre-loop window.
+    assert "0/2 files" not in result.output
+    # (2) once real per-file progress exists, no MORE heartbeat ticks —
+    # everything from the first genuine eta line onward is eta-only.
+    idx = result.output.find("1/2 files")
+    assert idx != -1, "expected a real per-file eta tick once the loop started"
+    assert "still running" not in result.output[idx:]
 
 
 # ── _PhaseHeartbeat (index-output-ux-assessment-2026-08-10 §7.1) ───────────

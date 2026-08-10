@@ -1722,6 +1722,48 @@ def test_run_index_passes_force_to_rdr_loop(tmp_path):
     assert rdr_calls[0].kwargs.get("force") is True
 
 
+# ── Code-path transient-5xx containment (P1, T2 22168 engine-w0-503) ───────
+
+def test_run_index_code_transient_5xx_deferred_not_aborted(tmp_path):
+    """A transient upsert 5xx (gateway 502/503/504) on a CODE file — the
+    direct-upload fallback taken whenever the ChunkBatcher is absent or
+    rejects the file (onnx-local mode's 16-chunk cap makes this the common
+    case for real source files) — must DEFER that file to staleness, exactly
+    like the prose/PDF/RDR loops do via ``_contain_transient_upsert``. It
+    must NOT propagate through ``run_file_loop``'s first-exception-cancels-
+    all contract and abort the WHOLE ``nx index repo`` run.
+
+    Pre-fix, ``_index_one_code`` calls ``_index_code_file`` unwrapped
+    (indexer.py:4305) on the false premise that code files are always
+    contained by the ChunkBatcher — false whenever ``ChunkBatcher.add``
+    rejects the file and it falls through to the legacy per-file upsert
+    (code_indexer.py:487-522). This is a v0.1.70-BLOCKING regression: a
+    503-emitting engine under embed saturation aborts entire index runs on
+    the first oversized code file.
+    """
+    from nexus.db.http_vector_client import VectorServiceError
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "boom.py").write_text("x = 1\n")
+    (repo / "ok.py").write_text("y = 2\n")
+    db, _ = _mock_db()
+
+    def _code_side_effect(file, *_a, **_kw):
+        if file.name == "boom.py":
+            raise VectorServiceError("gateway said 503", code=503)
+        return 1
+
+    with _patches(db, extra={
+        "nexus.indexer._index_code_file": {"side_effect": _code_side_effect},
+    }):
+        stats = _run_index(repo, _reg())
+
+    # The run must complete without raising, with the transient failure
+    # DEFERRED (not counted as written) — ok.py still lands.
+    assert stats["files_changed_by_kind"]["code"] == 1
+
+
 # ── _index_*_file return type ───────────────────────────────────────────────
 
 def _run_code(tmp_path, chunks=None, col_meta=None):
@@ -2159,6 +2201,31 @@ def test_prune_deleted_files_page_progress_degrades_without_count(monkeypatch):
     from nexus.indexer import _prune_deleted_files
     live = [("live-1", "a" * 64)]
     db, cols = _gc_db({"code__repo": live, "docs__repo": []})
+    catalog = _gc_catalog({"code__repo": {"a" * 64}, "docs__repo": set()})
+    phases: list[str] = []
+
+    _prune_deleted_files(
+        "code__repo", "docs__repo", db, catalog=catalog, on_phase=phases.append,
+    )
+
+    code_pages = [m for m in phases if "collection 1/2 (code__repo)" in m]
+    assert code_pages == [
+        "Pruning deleted files: collection 1/2 (code__repo), page 1 (1 chunks scanned)"
+    ]
+
+
+def test_prune_deleted_files_page_progress_degrades_on_negative_count(monkeypatch):
+    """A corrupted ``col.count()`` returning a negative int (e.g. -300, an
+    engine/collection-metadata corruption) must degrade to page-only
+    numbering — never render a nonsensical ``page k/-1`` denominator
+    (indexer.py's ceiling-division trick ``-(-_count // _CHROMA_PAGE_SIZE)``
+    yields -1 for _count=-300, since the isinstance(int) guard alone does
+    not reject negative counts)."""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    from nexus.indexer import _prune_deleted_files
+    live = [("live-1", "a" * 64)]
+    db, cols = _gc_db({"code__repo": live, "docs__repo": []})
+    cols["code__repo"].count.return_value = -300
     catalog = _gc_catalog({"code__repo": {"a" * 64}, "docs__repo": set()})
     phases: list[str] = []
 

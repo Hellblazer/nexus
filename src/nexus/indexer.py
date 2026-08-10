@@ -2833,7 +2833,12 @@ def _prune_deleted_files(
                 # ``-(-mock // 300)`` does NOT raise — it silently returns
                 # another Mock) would otherwise leak a Mock repr into the
                 # operator-visible phase message instead of degrading.
-                if isinstance(_count, int):
+                # ``>= 0`` guard: a corrupted negative count (e.g. -300)
+                # survives the isinstance check but the ceiling-division
+                # trick below can then yield a NEGATIVE _total_pages
+                # (-300 -> -1), rendering a nonsensical "page k/-1"
+                # denominator instead of degrading to page-only.
+                if isinstance(_count, int) and _count >= 0:
                     _total_pages = (
                         -(-_count // _CHROMA_PAGE_SIZE) if _count else 0
                     )
@@ -4302,7 +4307,19 @@ def _run_index(
 
     def _index_one_code(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))
-        return _index_code_file(
+        # nexus-7yfe6 / T2 22168 (engine-w0-503-client-degradation): contain a
+        # transient upsert 5xx (gateway/pool) exactly like the prose/PDF/RDR
+        # loops below. Code files are contained by the ChunkBatcher ONLY while
+        # ChunkBatcher.add(...) accepts the file — it returns False for any
+        # file exceeding per_collection_chunk_cap (16 chunks in onnx-local
+        # mode), which is most real source files; that rejection falls
+        # through to the identical legacy direct-upsert path prose/PDF use
+        # (code_indexer.py's _index_code_file, ~line 487-522). Without this
+        # wrapper a transient 5xx on that fallback propagates through
+        # run_file_loop's first-exception-cancels-all contract and aborts the
+        # WHOLE nx index repo run — pre-existing latent code, activated by an
+        # engine that starts emitting 503 under embed-admission saturation.
+        return _contain_transient_upsert(lambda: _index_code_file(
             file, repo, code_collection, code_model, code_col, db,
             voyage_client, git_meta, now_iso, score,
             chunk_lines=effective_chunk_lines,
@@ -4313,7 +4330,7 @@ def _run_index(
             staleness_cache=code_staleness,
             hooks=hooks,
             batcher=_batcher,
-        )
+        ), file)
 
     # nexus-qgc4b: tally files that actually wrote chunks across all three
     # loops; used below to skip the expensive post-index passes on all-skip runs.
@@ -4333,8 +4350,16 @@ def _run_index(
         _log.debug("indexing", file=str(file))
         # nexus-7yfe6: contain a transient upsert 5xx (gateway/pool) — defer the
         # file to staleness instead of failing (and, under concurrency, hanging)
-        # the whole run. Code files get this via the ChunkBatcher; prose/PDF take
-        # the direct upsert path, so they need it here.
+        # the whole run. Prose/PDF always take the direct upsert path (no
+        # ChunkBatcher involvement), so they need this wrapper unconditionally.
+        # CORRECTED (T2 22168, engine-w0-503-client-degradation): code files
+        # do NOT always get equivalent containment "via the ChunkBatcher" as
+        # this comment used to claim — that was only true while
+        # ChunkBatcher.add(...) accepts the file. It returns False (falling
+        # through to the same direct-upsert path prose/PDF use) for any file
+        # exceeding per_collection_chunk_cap, 16 chunks in onnx-local mode —
+        # most real source files. _index_one_code below now wraps with the
+        # identical _contain_transient_upsert to close that gap.
         return _contain_transient_upsert(lambda: _index_prose_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
