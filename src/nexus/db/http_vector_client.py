@@ -506,7 +506,17 @@ _CODE_UPSERT_CHUNK_CAP = 300
 #: onnx-local memory-bounded cap (nexus-33hpq), applies to EVERY prefix once
 #: the serving engine is onnx-local — see :func:`per_collection_chunk_cap`'s
 #: docstring for the memory arithmetic behind the number 16.
-_ONNX_LOCAL_UPSERT_CHUNK_CAP = 16
+#:
+#: ``NX_ONNX_LOCAL_UPSERT_CHUNK_CAP`` (nexus-97dp4): read ONCE at import
+#: time, deliberately — every caller (ChunkBatcher's flush cap AND this
+#: client's oversize paging) reads the SAME module-level constant, so a
+#: per-request re-read would let the two choke points disagree mid-run.
+#: This exists so tests/e2e/local-index-memory-gate.sh can deliberately
+#: raise the cap toward the pre-nexus-33hpq 300 (or beyond) to prove the
+#: gate's corpus actually binds a HIGHER ceiling too, without editing this
+#: file — a real mechanism, not a runtime sed. Unset (the default) leaves
+#: this byte-identical to before the env var existed: 16.
+_ONNX_LOCAL_UPSERT_CHUNK_CAP = int(os.environ.get("NX_ONNX_LOCAL_UPSERT_CHUNK_CAP") or 16)
 _CCE_COLLECTION_PREFIXES = frozenset({"docs", "knowledge", "rdr"})
 
 
