@@ -47,6 +47,8 @@ import pytest
 from nexus.catalog.factory import _ServiceCatalogWriter
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.catalog.link_generator import (
+    _FILE_PATH_RE,
+    _PROSE_PATH_RE,
     generate_citation_links,
     generate_pdf_corpus_links,
     generate_prose_filepath_links,
@@ -67,11 +69,17 @@ class _State:
     #: did, so the fake must serve ``/owners/show`` or every resolution
     #: returns None and the generators silently emit zero links.
     owners: dict[str, dict[str, Any]] = {}
+    #: T0.2 (nx/chroma-residue-plan-2026-08-10): records every GET /list
+    #: request's query params, so tests can pin the ROUND-TRIP count and
+    #: prove a request was content_type-scoped rather than an unfiltered
+    #: full-catalog fetch.
+    list_requests: list[dict[str, str]] = []
 
     @classmethod
     def reset(cls) -> None:
         cls.documents = {}
         cls.links = []
+        cls.list_requests = []
         # Default repo owner for the "1.1" prefix every fixture tumbler
         # sits under. ``repo_root`` is empty because every document in
         # this module carries an ABSOLUTE file_path, which resolve_path
@@ -169,6 +177,7 @@ class FakeLinkGenHandler(BaseHTTPRequestHandler):
         params = self._query_params()
 
         if op == "/list":
+            _State.list_requests.append(dict(params))
             docs = list(_State.documents.values())
             content_type = params.get("content_type")
             if content_type:
@@ -539,3 +548,477 @@ class TestPdfCorpusLinksServiceMode:
         )
         count = generate_pdf_corpus_links(reader, writer=writer)
         assert count == 0
+
+
+# ── T0.2 (nx/chroma-residue-plan-2026-08-10): fetch-scope narrowing ─────────
+#
+# Before this change, all three of the generators below (citations excepted
+# — see link_generator.py's ``_all_entries`` docstring) fetched the ENTIRE
+# tenant catalog via ``_all_entries`` -> ``cat.all_documents()`` (unbounded,
+# paginated 1000-at-a-time) and filtered by content_type client-side. A real
+# ``nx index repo .`` run measured 37.0s of a 41.8s catalog-hook phase spent
+# in linking that created ZERO links, against a ~19.8k-document catalog.
+#
+# The fix (``_entries_of_type`` -> ``all_documents(content_type=...)``)
+# issues ONE server-side-filtered request per content type the generator
+# actually matches on, instead of an O(catalog size) unfiltered scan.
+
+
+def _old_generate_rdr_filepath_links(cat, *, writer=None, new_tumblers=None):
+    """Reference copy of the PRE-T0.2 ``generate_rdr_filepath_links`` body
+    (full unfiltered ``cat.all_documents()`` + client-side filter), kept
+    ONLY so the equivalence tests below can prove the narrowed fetch
+    produces a byte-identical link set. Not a production code path.
+    """
+    if new_tumblers is not None and len(new_tumblers) == 0:
+        return 0
+    entries = cat.all_documents()
+    rdr_entries = [e for e in entries if e.content_type == "rdr" and e.file_path]
+    code_entries = [e for e in entries if e.content_type == "code" and e.file_path]
+    if new_tumblers is not None:
+        new_set = {str(t) for t in new_tumblers}
+        rdr_entries = [e for e in rdr_entries if str(e.tumbler) in new_set]
+    path_to_code: dict[str, Tumbler] = {code.file_path: code.tumbler for code in code_entries}
+    count = 0
+    for rdr in rdr_entries:
+        resolved = cat.resolve_path(rdr.tumbler)
+        if resolved is None or not resolved.is_file():
+            continue
+        try:
+            text = resolved.read_text(errors="replace")
+        except OSError:
+            continue
+        seen_targets: set[str] = set()
+        for match in _FILE_PATH_RE.finditer(text):
+            fpath = match.group(0)
+            if fpath in seen_targets:
+                continue
+            seen_targets.add(fpath)
+            code_tumbler = path_to_code.get(fpath)
+            if code_tumbler is None:
+                continue
+            try:
+                created = (writer if writer is not None else cat).link_if_absent(
+                    rdr.tumbler, code_tumbler, "implements", created_by="filepath_extractor",
+                )
+            except ValueError:
+                continue
+            if created:
+                count += 1
+    return count
+
+
+def _old_generate_prose_filepath_links(cat, *, writer=None, new_tumblers=None):
+    """Reference copy of the PRE-T0.2 ``generate_prose_filepath_links`` body."""
+    if new_tumblers is not None and len(new_tumblers) == 0:
+        return 0
+    entries = cat.all_documents()
+    prose_entries = [
+        e for e in entries
+        if e.content_type in ("prose", "markdown", "docs") and e.file_path
+    ]
+    code_entries = [e for e in entries if e.content_type == "code" and e.file_path]
+    if new_tumblers is not None:
+        new_set = {str(t) for t in new_tumblers}
+        prose_entries = [e for e in prose_entries if str(e.tumbler) in new_set]
+    path_to_code: dict[str, Tumbler] = {code.file_path: code.tumbler for code in code_entries}
+    count = 0
+    for prose in prose_entries:
+        resolved = cat.resolve_path(prose.tumbler)
+        if resolved is None or not resolved.is_file():
+            continue
+        try:
+            text = resolved.read_text(errors="replace")
+        except OSError:
+            continue
+        seen_targets: set[str] = set()
+        for match in _PROSE_PATH_RE.finditer(text):
+            fpath = match.group(0)
+            if fpath in seen_targets:
+                continue
+            seen_targets.add(fpath)
+            code_tumbler = path_to_code.get(fpath)
+            if code_tumbler is None:
+                continue
+            try:
+                created = (writer if writer is not None else cat).link_if_absent(
+                    prose.tumbler, code_tumbler, "implements", created_by="filepath_extractor",
+                )
+            except ValueError:
+                continue
+            if created:
+                count += 1
+    return count
+
+
+def _old_generate_pdf_corpus_links(cat, *, writer=None, new_tumblers=None):
+    """Reference copy of the PRE-T0.2 ``generate_pdf_corpus_links`` body."""
+    if new_tumblers is not None and len(new_tumblers) == 0:
+        return 0
+    entries = cat.all_documents()
+    pdf_entries = [
+        e for e in entries
+        if e.content_type in ("pdf", "paper") and e.head_hash
+    ]
+    by_hash: dict[str, list] = {}
+    for e in pdf_entries:
+        by_hash.setdefault(e.head_hash, []).append(e)
+    new_set = {str(t) for t in new_tumblers} if new_tumblers is not None else None
+    count = 0
+    for group in by_hash.values():
+        if len(group) < 2:
+            continue
+        anchor = min(group, key=lambda e: str(e.tumbler))
+        for member in group:
+            if member.tumbler == anchor.tumbler:
+                continue
+            if new_set is not None and str(member.tumbler) not in new_set:
+                continue
+            try:
+                created = (writer if writer is not None else cat).link_if_absent(
+                    member.tumbler, anchor.tumbler, "same-as", created_by="content_hash_dedup",
+                )
+            except ValueError:
+                continue
+            if created:
+                count += 1
+    return count
+
+
+class TestLinkGeneratorFetchScope:
+    """Round-trip pin: each filepath/pdf generator must issue exactly one
+    content_type-filtered ``/list`` request per content type it matches
+    on, and NEVER an unfiltered full-catalog fetch.
+
+    FAILS against pre-T0.2 code: ``_all_entries`` -> ``cat.all_documents()``
+    sends a ``/list`` request with NO ``content_type`` param (server-side
+    unbounded catalog scan) before filtering client-side, so
+    ``list_requests`` would contain an entry with an empty content_type
+    and the request COUNT would not be pinned to the generator's own
+    content-type set.
+    """
+
+    def test_rdr_linker_fetches_only_its_content_types(self, reader, writer, tmp_path) -> None:
+        rdr_path = tmp_path / "rdr.md"
+        rdr_path.write_text("See `src/nexus/foo.py`.\n")
+        _State.add_document(
+            "1.1.1", title="foo.py", content_type="code", file_path="src/nexus/foo.py",
+        )
+        _State.add_document(
+            "1.1.2", title="RDR", content_type="rdr", file_path=str(rdr_path),
+        )
+        # Noise: documents of unrelated content types that a full-catalog
+        # scan would also have fetched. Must not add extra round trips.
+        for i in range(25):
+            _State.add_document(f"9.9.{i}", title=f"noise{i}", content_type="knowledge")
+
+        generate_rdr_filepath_links(reader, writer=writer)
+
+        requested = [r.get("content_type", "") for r in _State.list_requests]
+        assert all(requested), f"unfiltered /list request(s) issued: {requested}"
+        assert set(requested) == {"rdr", "code"}
+        assert len(_State.list_requests) == 2
+
+    def test_prose_linker_fetches_only_its_content_types(self, reader, writer, tmp_path) -> None:
+        prose_path = tmp_path / "guide.md"
+        prose_path.write_text("See ``src/nexus/foo.py``.\n")
+        _State.add_document(
+            "1.1.1", title="foo.py", content_type="code", file_path="src/nexus/foo.py",
+        )
+        _State.add_document(
+            "1.1.2", title="Guide", content_type="prose", file_path=str(prose_path),
+        )
+
+        generate_prose_filepath_links(reader, writer=writer)
+
+        requested = [r.get("content_type", "") for r in _State.list_requests]
+        assert all(requested), f"unfiltered /list request(s) issued: {requested}"
+        assert set(requested) == {"prose", "markdown", "docs", "code"}
+        assert len(_State.list_requests) == 4
+
+    def test_pdf_linker_fetches_only_its_content_types(self, reader, writer) -> None:
+        _State.add_document(
+            "1.1.1", title="P1", content_type="paper",
+            head_hash="h1", physical_collection="knowledge__a",
+        )
+        _State.add_document(
+            "1.1.2", title="P2", content_type="paper",
+            head_hash="h1", physical_collection="knowledge__b",
+        )
+
+        generate_pdf_corpus_links(reader, writer=writer)
+
+        requested = [r.get("content_type", "") for r in _State.list_requests]
+        assert all(requested), f"unfiltered /list request(s) issued: {requested}"
+        assert set(requested) == {"pdf", "paper"}
+        assert len(_State.list_requests) == 2
+
+    def test_citation_linker_unchanged_still_full_scans(self, reader, writer) -> None:
+        """generate_citation_links is deliberately UNCHANGED (bib IDs can
+        live on any content type — see link_generator.py). Pins that the
+        narrowing did not touch it: exactly one unfiltered request.
+        """
+        _State.add_document(
+            "1.1.1", title="A", content_type="paper",
+            metadata={"bib_semantic_scholar_id": "a", "references": ["b"]},
+        )
+        _State.add_document(
+            "1.1.2", title="B", content_type="paper",
+            metadata={"bib_semantic_scholar_id": "b"},
+        )
+
+        generate_citation_links(reader, writer=writer)
+
+        requested = [r.get("content_type", "") for r in _State.list_requests]
+        assert requested == [""]
+
+
+class TestLinkGeneratorFetchScopeEquivalence:
+    """Load-bearing: the content_type-scoped fetch must produce a
+    byte-identical link set to the old full-scan-then-filter approach.
+    A performance win that silently changes WHICH links get created is a
+    correctness regression, not an optimization — this is what proves it
+    isn't one.
+    """
+
+    def _snapshot_and_clear(self) -> list[tuple[str, str, str, str]]:
+        snap = sorted(
+            (l["from_tumbler"], l["to_tumbler"], l["link_type"], l["created_by"])
+            for l in _State.links
+        )
+        _State.links.clear()
+        return snap
+
+    def test_rdr_linker_equivalent(self, reader, writer, tmp_path) -> None:
+        rdr1 = tmp_path / "rdr1.md"
+        rdr1.write_text("See `src/nexus/a.py` and `src/nexus/missing.py`.\n")
+        rdr2 = tmp_path / "rdr2.md"
+        rdr2.write_text("Touches `tests/b_test.py`.\n")
+        _State.add_document("1.1.1", title="a.py", content_type="code", file_path="src/nexus/a.py")
+        _State.add_document("1.1.2", title="b_test.py", content_type="code", file_path="tests/b_test.py")
+        _State.add_document("1.1.3", title="RDR1", content_type="rdr", file_path=str(rdr1))
+        _State.add_document("1.1.4", title="RDR2", content_type="rdr", file_path=str(rdr2))
+        # Noise: a non-code, non-rdr doc reusing both a real code file_path
+        # and the RDR's own file_path — must not be pulled in as a source
+        # or target by either implementation.
+        _State.add_document("2.2.1", title="lookalike", content_type="knowledge", file_path="src/nexus/a.py")
+        _State.add_document("2.2.2", title="lookalike2", content_type="prose", file_path=str(rdr1))
+
+        old_snap = self._run(_old_generate_rdr_filepath_links, reader, writer)
+        new_snap = self._run(generate_rdr_filepath_links, reader, writer)
+        assert old_snap  # non-vacuous: real links were actually produced
+        assert new_snap == old_snap
+
+    def test_prose_linker_equivalent(self, reader, writer, tmp_path) -> None:
+        p1 = tmp_path / "runbook.md"
+        p1.write_text("See ``src/nexus/foo.py``.\n")
+        p2 = tmp_path / "guide.md"
+        p2.write_text("See ``conexus/skills/bar.md``.\n")
+        _State.add_document("1.1.1", title="foo.py", content_type="code", file_path="src/nexus/foo.py")
+        _State.add_document("1.1.2", title="bar.md", content_type="code", file_path="conexus/skills/bar.md")
+        _State.add_document("1.1.3", title="Runbook", content_type="prose", file_path=str(p1))
+        _State.add_document("1.1.4", title="Guide", content_type="markdown", file_path=str(p2))
+        # Noise: unrelated content type must never contribute a source-side match.
+        _State.add_document("2.2.1", title="noise", content_type="knowledge", file_path=str(p1))
+
+        old_snap = self._run(_old_generate_prose_filepath_links, reader, writer)
+        new_snap = self._run(generate_prose_filepath_links, reader, writer)
+        assert old_snap
+        assert new_snap == old_snap
+
+    def test_pdf_linker_equivalent(self, reader, writer) -> None:
+        _State.add_document("1.1.1", title="P1", content_type="pdf", head_hash="h1", physical_collection="knowledge__a")
+        _State.add_document("1.1.2", title="P2", content_type="paper", head_hash="h1", physical_collection="knowledge__b")
+        _State.add_document("1.1.3", title="P3", content_type="paper", head_hash="h1", physical_collection="knowledge__c")
+        _State.add_document("1.1.4", title="Unique", content_type="pdf", head_hash="h2", physical_collection="knowledge__d")
+        # Noise: same head_hash, wrong content_type — must not join the group.
+        _State.add_document("2.2.1", title="noise", content_type="knowledge", head_hash="h1")
+
+        old_snap = self._run(_old_generate_pdf_corpus_links, reader, writer)
+        new_snap = self._run(generate_pdf_corpus_links, reader, writer)
+        assert old_snap
+        assert new_snap == old_snap
+
+    def test_prose_linker_docs_source_type_equivalent(self, reader, writer, tmp_path) -> None:
+        """Coverage-gap fix: the general prose equivalence test above only
+        exercises "prose" and "markdown" as SOURCE content types, never
+        "docs" -- despite "docs" being part of
+        ``generate_prose_filepath_links``'s documented source-type set.
+        Proves the narrowed fetch is equivalent for that source type too,
+        not just the two exercised elsewhere."""
+        d1 = tmp_path / "runbook.md"
+        d1.write_text("See ``src/nexus/foo.py``.\n")
+        _State.add_document("1.1.1", title="foo.py", content_type="code", file_path="src/nexus/foo.py")
+        _State.add_document("1.1.2", title="Runbook", content_type="docs", file_path=str(d1))
+
+        old_snap = self._run(_old_generate_prose_filepath_links, reader, writer)
+        new_snap = self._run(generate_prose_filepath_links, reader, writer)
+        assert old_snap  # non-vacuous: real links were actually produced
+        assert new_snap == old_snap
+
+    def test_rdr_linker_incremental_equivalent(self, reader, writer, tmp_path) -> None:
+        """Same proof, scoped by new_tumblers (the production call shape
+        from indexer.py)."""
+        rdr1 = tmp_path / "rdr1.md"
+        rdr1.write_text("See `src/nexus/a.py`.\n")
+        rdr2 = tmp_path / "rdr2.md"
+        rdr2.write_text("See `src/nexus/a.py` too.\n")
+        _State.add_document("1.1.1", title="a.py", content_type="code", file_path="src/nexus/a.py")
+        rdr1_t = Tumbler.parse("1.1.2")
+        rdr2_t = Tumbler.parse("1.1.3")
+        _State.add_document(str(rdr1_t), title="RDR1", content_type="rdr", file_path=str(rdr1))
+        _State.add_document(str(rdr2_t), title="RDR2", content_type="rdr", file_path=str(rdr2))
+
+        old_snap = self._run(_old_generate_rdr_filepath_links, reader, writer, new_tumblers=[rdr1_t])
+        new_snap = self._run(generate_rdr_filepath_links, reader, writer, new_tumblers=[rdr1_t])
+        assert old_snap
+        assert new_snap == old_snap
+
+    def _run(self, fn, reader, writer, **kwargs) -> list[tuple[str, str, str, str]]:
+        fn(reader, writer=writer, **kwargs)
+        return self._snapshot_and_clear()
+
+
+# ── T0.2 follow-up: skip a generator's fetches when no new doc could ever ───
+# match its source content_type ──────────────────────────────────────────────
+#
+# The T0.2 narrowing above still pays for a generator's full content-type
+# fetch set on EVERY incremental run with a non-empty new_tumblers, even when
+# none of the new documents are of that generator's own source type (e.g. an
+# `nx index repo .` run whose new_tumblers are all "code" gains nothing from
+# fetching "rdr" -- an RDR can never newly link to code it didn't just gain a
+# path to). The existing `len(new_tumblers) == 0` short-circuit only covers
+# the "nothing new at all" case, not "something new, but never our source
+# type" -- which the indexer.py measurement showed is the COMMON case (37.0s
+# of an 41.8s catalog-hook phase spent producing 0 links).
+#
+# `new_content_types` is opt-in and additive: passing it lets a generator
+# prove -- without any fetch -- that its source-type filter can only ever
+# produce an empty result, and skip straight to `return 0`. Omitting it
+# (every pre-existing call site) preserves the exact old fetch-and-filter
+# behavior.
+
+
+class TestLinkGeneratorSeedSkip:
+    """Proves the fetch-skip property directly against the /list request
+    spy -- zero REQUESTS, not just zero links. A generator that still
+    fetches and then produces 0 links is the pre-existing (correct but
+    slow) behavior, not this optimization; these tests fail against that
+    behavior and pass only once the pre-fetch short-circuit fires.
+    """
+
+    def test_rdr_linker_zero_requests_when_no_rdr_seed(self, reader, writer, tmp_path) -> None:
+        rdr_path = tmp_path / "rdr.md"
+        rdr_path.write_text("See `src/nexus/foo.py`.\n")
+        _State.add_document("1.1.1", title="foo.py", content_type="code", file_path="src/nexus/foo.py")
+        _State.add_document("1.1.2", title="RDR", content_type="rdr", file_path=str(rdr_path))
+        # This run's new_tumblers name only the "code" doc -- the rdr
+        # linker's source type ("rdr") is not among new_content_types.
+        code_t = Tumbler.parse("1.1.1")
+
+        count = generate_rdr_filepath_links(
+            reader, writer=writer,
+            new_tumblers=[code_t], new_content_types={"code"},
+        )
+
+        assert count == 0
+        assert _State.list_requests == []
+
+    def test_prose_linker_zero_requests_when_no_prose_seed(self, reader, writer) -> None:
+        _State.add_document("1.1.1", title="foo.py", content_type="code", file_path="src/nexus/foo.py")
+        code_t = Tumbler.parse("1.1.1")
+
+        count = generate_prose_filepath_links(
+            reader, writer=writer,
+            new_tumblers=[code_t], new_content_types={"code"},
+        )
+
+        assert count == 0
+        assert _State.list_requests == []
+
+    def test_pdf_linker_zero_requests_when_no_pdf_seed(self, reader, writer) -> None:
+        _State.add_document("1.1.1", title="RDR", content_type="rdr", file_path="/x/rdr.md")
+        rdr_t = Tumbler.parse("1.1.1")
+
+        count = generate_pdf_corpus_links(
+            reader, writer=writer,
+            new_tumblers=[rdr_t], new_content_types={"rdr"},
+        )
+
+        assert count == 0
+        assert _State.list_requests == []
+
+    def test_rdr_linker_still_fetches_and_links_when_rdr_seed_present(
+        self, reader, writer, tmp_path,
+    ) -> None:
+        """The skip must not become unconditional: a qualifying seed still
+        runs the generator's fetches and produces its links."""
+        rdr_path = tmp_path / "rdr.md"
+        rdr_path.write_text("See `src/nexus/foo.py`.\n")
+        _State.add_document("1.1.1", title="foo.py", content_type="code", file_path="src/nexus/foo.py")
+        _State.add_document("1.1.2", title="RDR", content_type="rdr", file_path=str(rdr_path))
+        rdr_t = Tumbler.parse("1.1.2")
+
+        count = generate_rdr_filepath_links(
+            reader, writer=writer,
+            new_tumblers=[rdr_t], new_content_types={"rdr"},
+        )
+
+        assert count == 1
+        assert set(r.get("content_type", "") for r in _State.list_requests) == {"rdr", "code"}
+
+    def test_prose_linker_still_fetches_and_links_when_docs_seed_present(
+        self, reader, writer, tmp_path,
+    ) -> None:
+        """"docs" is a legitimate (if currently unproduced by indexer.py's
+        _catalog_hook) source type -- naming it in new_content_types must
+        still trigger the fetch + match, proving it wasn't dropped from the
+        source-type set by this change."""
+        doc_path = tmp_path / "runbook.md"
+        doc_path.write_text("See ``src/nexus/foo.py``.\n")
+        _State.add_document("1.1.1", title="foo.py", content_type="code", file_path="src/nexus/foo.py")
+        _State.add_document("1.1.2", title="Runbook", content_type="docs", file_path=str(doc_path))
+        docs_t = Tumbler.parse("1.1.2")
+
+        count = generate_prose_filepath_links(
+            reader, writer=writer,
+            new_tumblers=[docs_t], new_content_types={"docs"},
+        )
+
+        assert count == 1
+
+    def test_pdf_linker_still_fetches_and_links_when_pdf_seed_present(self, reader, writer) -> None:
+        _State.add_document(
+            "1.1.1", title="P1", content_type="paper",
+            head_hash="h1", physical_collection="knowledge__a",
+        )
+        _State.add_document(
+            "1.1.2", title="P2", content_type="paper",
+            head_hash="h1", physical_collection="knowledge__b",
+        )
+        member_t = Tumbler.parse("1.1.2")
+
+        count = generate_pdf_corpus_links(
+            reader, writer=writer,
+            new_tumblers=[member_t], new_content_types={"paper"},
+        )
+
+        assert count == 1
+        assert set(r.get("content_type", "") for r in _State.list_requests) == {"pdf", "paper"}
+
+    def test_skip_is_opt_in_omitting_new_content_types_preserves_old_behavior(
+        self, reader, writer, tmp_path,
+    ) -> None:
+        """Backward compatibility: every pre-existing call site (including
+        every other test in this file, and the CLI full-scan path) does not
+        pass new_content_types at all. That must produce the EXACT
+        pre-existing fetch-and-filter behavior, not the new skip -- even
+        when new_tumblers alone names only a non-qualifying type."""
+        _State.add_document("1.1.1", title="foo.py", content_type="code", file_path="src/nexus/foo.py")
+        code_t = Tumbler.parse("1.1.1")
+
+        count = generate_rdr_filepath_links(reader, writer=writer, new_tumblers=[code_t])
+
+        assert count == 0
+        # Still fetches -- omitting new_content_types must not activate the skip.
+        assert set(r.get("content_type", "") for r in _State.list_requests) == {"rdr", "code"}

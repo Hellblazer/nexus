@@ -991,6 +991,13 @@ def _catalog_hook(
                 repo=repo_name, error=str(exc),
             )
         new_tumblers = []
+        # content_type of every doc landing in new_tumblers, tracked
+        # alongside it (populated in the same register_many/register
+        # success branches below). Lets the link-generation call site
+        # skip a generator's catalog fetches entirely when none of this
+        # run's new documents are of that generator's source type — see
+        # link_generator._no_qualifying_seed.
+        new_content_types: set[str] = set()
         # nexus-o6aa.10.4 follow-up: track per-file failures so the
         # catalog hook stops failing silently. Pre-fix, a single
         # cat.register() exception inside the loop tripped the outer
@@ -1316,9 +1323,10 @@ def _catalog_hook(
                         f"register_many returned {len(tumblers)} tumblers for "
                         f"{len(page)} docs"
                     )
-                for (path, _doc), tum in zip(page, tumblers):
+                for (path, doc), tum in zip(page, tumblers):
                     new_tumblers.append(tum)
                     file_to_doc_id[path] = str(tum)
+                    new_content_types.add(doc.get("content_type", ""))
             except Exception:  # noqa: BLE001 — batch unrecoverable; per-file isolation fallback
                 _log.warning(
                     "catalog_register_many_failed_falling_back_per_file",
@@ -1332,6 +1340,7 @@ def _catalog_hook(
                         )
                         new_tumblers.append(tum)
                         file_to_doc_id[path] = str(tum)
+                        new_content_types.add(doc.get("content_type", ""))
                     except Exception as exc:  # noqa: BLE001 — ghost-class per-file isolation
                         skipped_files.append((path, str(exc)))
                         _log.warning(
@@ -1388,7 +1397,10 @@ def _catalog_hook(
             # stage bucket names WHICH generator owns it, not just that
             # linking in aggregate is slow.
             _lg_t = time.monotonic()
-            fp_count = generate_rdr_filepath_links(cat, writer=writer, new_tumblers=new_tumblers)
+            fp_count = generate_rdr_filepath_links(
+                cat, writer=writer, new_tumblers=new_tumblers,
+                new_content_types=new_content_types,
+            )
             _stage_s["linking_rdr"] = time.monotonic() - _lg_t
             # nexus-sob9: prose + pdf coverage. Run with the same
             # incremental scope so a single bulk-index pass closes
@@ -1396,11 +1408,13 @@ def _catalog_hook(
             _lg_t = time.monotonic()
             prose_count = generate_prose_filepath_links(
                 cat, writer=writer, new_tumblers=new_tumblers,
+                new_content_types=new_content_types,
             )
             _stage_s["linking_prose"] = time.monotonic() - _lg_t
             _lg_t = time.monotonic()
             pdf_count = generate_pdf_corpus_links(
                 cat, writer=writer, new_tumblers=new_tumblers,
+                new_content_types=new_content_types,
             )
             _stage_s["linking_pdf"] = time.monotonic() - _lg_t
             links_created = fp_count + prose_count + pdf_count
