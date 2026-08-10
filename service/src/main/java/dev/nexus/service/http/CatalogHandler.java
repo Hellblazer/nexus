@@ -31,6 +31,7 @@ import java.util.*;
  *   POST  /v1/catalog/register           upsert owner + document
  *   GET   /v1/catalog/show               get document by tumbler (or title)
  *   GET   /v1/catalog/list               list documents (paginated)
+ *   GET   /v1/catalog/descendants        all documents under a tumbler prefix (unbounded, T2 nexus/chroma-residue-plan-2026-08-10 §C1)
  *   GET   /v1/catalog/search             FTS search
  *   POST  /v1/catalog/update             update document fields
  *   POST  /v1/catalog/update_many        batch-update fields for N documents (nexus-xedhp)
@@ -143,6 +144,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/register"              -> handleRegister(exchange, tenant, method);
                 case "/show"                  -> handleShow(exchange, tenant, method);
                 case "/list"                  -> handleList(exchange, tenant, method);
+                case "/descendants"           -> handleDescendants(exchange, tenant, method);
                 case "/search"                -> handleSearch(exchange, tenant, method);
                 case "/update"                -> handleUpdate(exchange, tenant, method);
                 case "/update_many"           -> handleUpdateMany(exchange, tenant, method);
@@ -395,6 +397,31 @@ public final class CatalogHandler implements HttpHandler {
         } else {
             docs = repo.listDocuments(tenant, limit, offset);
         }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("documents", docs, "count", docs.size())));
+    }
+
+    /**
+     * GET /v1/catalog/descendants?prefix=&lt;p&gt; — all documents whose
+     * tumbler starts with {@code prefix + "."} (T2 nexus/chroma-residue-plan-2026-08-10 §C1).
+     *
+     * <p>Backs {@code HttpCatalogClient.descendants()}, which previously had
+     * no dedicated route and pulled a single unbounded {@code /list} page
+     * (500 rows) and filtered client-side — silently truncating any subtree
+     * with more than one page of documents (verified 0% coverage on 11 of
+     * the 12 largest cloud-catalog subtrees). {@link CatalogRepository
+     * #descendants} runs ONE unbounded SQL query ({@code LIKE 'prefix.%'}),
+     * so there is no pagination to thread here — the whole point of this
+     * route is that the answer is complete by construction, not that it is
+     * capped and then paged. Response shape mirrors {@link #handleList}:
+     * {@code {"documents": [...], "count": N}}.
+     */
+    private void handleDescendants(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String prefix = queryParam(exchange, "prefix");
+        if (prefix == null || prefix.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"prefix query param required\"}"); return;
+        }
+        var docs = repo.descendants(tenant, prefix);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("documents", docs, "count", docs.size())));
     }
 

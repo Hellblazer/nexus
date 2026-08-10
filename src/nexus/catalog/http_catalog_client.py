@@ -1672,10 +1672,56 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return int(self.stats().get("doc_count", 0))
 
     def descendants(self, prefix: str) -> list[dict]:
-        # Server has no dedicated descendants route; pull all and filter
-        result = self._get("/list", limit=500)
-        docs = result.get("documents", []) if result else []
-        return [d for d in docs if d.get("tumbler", "").startswith(prefix + ".")]
+        """All documents whose tumbler starts with ``prefix + "."`` (T2 nexus/chroma-residue-plan-2026-08-10 §C1).
+
+        Prefers the dedicated ``GET /descendants`` engine route — one
+        unbounded query, complete by construction. Falls back to an
+        exhaustively PAGINATED ``/list`` walk (client-side filtered) when
+        the route is absent (404) — the route ships in engine-service
+        v0.1.70+ but ``REQUIRED_ENGINE_VERSION`` may still be pinned
+        below that at any given moment, so an engine predating the route
+        is an expected, not exceptional, condition here.
+
+        The PRE-FIX behaviour pulled a single unfiltered ``limit=500``
+        ``/list`` page and filtered client-side — silently truncating any
+        subtree larger than one page with no error (verified 0% coverage
+        on 11 of the 12 largest cloud-catalog subtrees, reproduced
+        against the live 19,824-document catalog). The fallback below
+        must never repeat that: it pages to exhaustion, mirroring
+        ``all_documents``'s unfiltered branch, rather than capping.
+        """
+        try:
+            result = self._get("/descendants", prefix=prefix)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                _log.warning(
+                    "http_catalog_client.descendants_route_missing_fallback_to_paginated_list",
+                    prefix=prefix,
+                )
+                return self._descendants_via_paginated_list(prefix)
+            raise
+        return result.get("documents", []) if result else []
+
+    def _descendants_via_paginated_list(self, prefix: str) -> list[dict]:
+        """Correctness fallback for :meth:`descendants` on a pre-route engine.
+
+        Pages ``/list`` to exhaustion (matching ``all_documents``'s
+        unfiltered-branch pattern) and filters client-side — slower than
+        the dedicated route (O(catalog size) instead of one indexed
+        query) but never silently truncates.
+        """
+        needle = prefix + "."
+        page = 500
+        out: list[dict] = []
+        cur = 0
+        while True:
+            result = self._get("/list", limit=page, offset=cur)
+            docs = result.get("documents", []) if result else []
+            out.extend(d for d in docs if d.get("tumbler", "").startswith(needle))
+            if len(docs) < page:
+                break
+            cur += page
+        return out
 
     def set_alias(self, tumbler: Tumbler | str, canonical: Tumbler | str) -> None:
         self._post("/update", {"tumbler": str(tumbler), "alias_of": str(canonical)})
