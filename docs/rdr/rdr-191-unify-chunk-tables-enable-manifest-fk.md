@@ -306,7 +306,7 @@ FULL costs nothing and is the adopted shape.
    whether an existing install survives (F14).** Three parts, all required:
    (a) existence-gate `chash_rekey.py`'s VALIDATE statements (`:128-136`) —
    zero-cost, and today an absent relation raises forever;
-   (b) retarget `OCTET_CHECKS` (`:56-69`) and `_validated_probe` (`:663-691`)
+   (b) retarget `OCTET_CHECKS` (`:56-70`, FOUR entries) and `_validated_probe` (`:663-691`)
    to `nexus.chunks` in the SAME engine release, forced by the
    `PRECONDITION_ENGINE → RUNG_CHASH_REKEY` edge — a two-release straddle
    strands every local box, not just un-converged ones;
@@ -385,7 +385,15 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
    predicate-dependent index, but it is no longer gating.
 2. **`chash_rekey.py` `OCTET_CHECKS`** — its convergence counting goes from
    4 checks to 2. That is a design change to the upgrade ladder's rung, not
-   a rename.
+   a rename. (RE-DERIVED 2026-08-10 against the live tuple after a planning
+   pass claimed this was off by one: `OCTET_CHECKS` (`:56-70`) holds FOUR
+   entries — three CONTENT tables `chunks_{384,768,1024}` plus ONE POINTER
+   table `catalog_document_chunks`; the fifth, `chash_index`, is a
+   commented-out tombstone from RDR-187. Unification collapses the three
+   content entries to one, so 3+1 becomes 1+1. **The 4-to-2 arithmetic here
+   was already correct.** What was genuinely stale was a COMMENT in the code
+   — `_validated_probe` said "all five octet CHECKs" while its compare has
+   always been `len(OCTET_CHECKS)` — fixed in the same commit as this note.)
 3. **`chash_tables.py`** (`CHASH_BEARING_TABLES` / `POISON_CHASH_TABLES`) is
    read in LOCKSTEP by doctor, the install-binary gate, and `forensics`.
    All three move together or the taxonomy lies.
@@ -703,7 +711,7 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
 
   **F16b — the replacement is better but NOT vacuity-proof either, and its
   JSON mode cannot express the non-vacuity check.** Verified by reading
-  `_manifest_verify_list` (`commands/catalog.py:476-569`):
+  `_manifest_verify_list` (`commands/catalog.py:452-569`):
 
   - read failure → `ClickException` (non-zero). Good.
   - damage found → **always** `Exit(1)`; `incomplete_collections` (row-cap or
@@ -742,7 +750,7 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
 
   **F14a — it strands EVERY local box, not just un-converged ones.**
   `chash_rekey.py`'s `_validated_probe` (`:663-691`) requires all four
-  hardcoded `OCTET_CHECKS` names (`:56-69`) to be convalidated. Three of them
+  hardcoded `OCTET_CHECKS` names (`:56-70`, FOUR of them) to be convalidated. Three of them
   cease to exist at the drop, so NO local box can ever report converged.
   Every box enters `converge()` and raises at the first VALIDATE —
   `validate_statements` (`:128-136`) has no existence gate and `run_admin_sql`
@@ -754,7 +762,7 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   MEASURED on live PG 17.5 / pgvector 0.8.2: a `NOT VALID` CHECK exempts
   PRE-EXISTING rows ONLY. Adopt-in-place must `INSERT…SELECT` the two
   non-adopted dims INTO the adopted table, which still carries the inherited
-  `NOT VALID` octet check (`rdr180-001-bytea-chash.xml:149-153`). On an
+  `NOT VALID` octet check (`rdr180-001-bytea-chash.xml:151-162` (the changeset is `:149-163`; the SQL block carries FIVE constraint names, one per chunk dim plus the manifest and the RDR-187-dropped `chash_index`)). On an
   un-rekeyed store those rows are 16 bytes → `ERROR: new row violates check
   constraint` → `MigrationException` → `Main` exits 1. **That is a BRICK,
   reached BEFORE the ladder rung ever runs.**
@@ -891,7 +899,7 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   **This TEMPERS F7.** F7's "`DimTables` abstracts ~25 call sites and needs
   zero changes" holds for the SERVING path only. There are at least FOUR
   independent hardcodings of the dim set: `DimTables`, `RekeyOps` (×5
-  internal), `StagingPromoteOps` (`:197-213`), and the raw-SQL channel — and
+  internal), `StagingPromoteOps` (record `:197-200`, with a separate `chunkDim(int)` resolver at `:202-216`), and the raw-SQL channel — and
   `StagingPromoteOps`' `ChunkDim` record ALSO carries `Field<Vector>
   embedding` (`:198`), so the single-embedding-column assumption is baked in
   there too, not only in `ChunkTable`.
@@ -908,16 +916,19 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   pinned.** Zero `octet_check` VALIDATE hits in `service/src/main`;
   `RekeyOps:64-66` states this explicitly, and nothing in Liquibase ever
   VALIDATEs them (deliberate — the GH #1390 crash-loop shape). The owner is
-  `chash_rekey.py:56-69` / `:128-136`, and `:54-55` says the constraint names
+  `chash_rekey.py:56-70` / `:128-136`, and `:54-55` says the constraint names
   MUST mirror the `rdr180-001` XML and are PINNED BY TEST against it.
   Renaming them under RDR-191 breaks that pin — related to F11a, same class.
 
   **F11e — good news:** `ChashCensus` (`:161-178`) is SCHEMA-DERIVED via
   `information_schema` enumeration and would AUTO-DISCOVER a unified
   `nexus.chunks`; only its CI assertion set (`KNOWN_INVENTORY :113-116`)
-  is hardcoded. And because `DimTables.of()` already resolves fields BY
-  STRING COLUMN NAME (`:39-51`), the smallest serving-path change is
-  `ChunkTable.of(table, dim)` selecting `embedding_<dim>`.
+  is hardcoded. And because the nested `ChunkTable.of(...)` factory
+  (`DimTables.java:38-51`) already resolves fields BY STRING COLUMN NAME, the
+  smallest serving-path change is `ChunkTable.of(table, dim)` selecting
+  `embedding_<dim>`. (There is no `DimTables.of()`; the factories are on the
+  nested records — `ChunkTable.of` at `:38-51`, `CentroidTable.of` at `:65`.
+  The dim-set maps are `CHUNKS :77-80` and `CENTROIDS :82-85`.)
 
   **NOT ESTABLISHED:** `PgVectorRepository` (2900+ lines) was not read beyond
   locating its 21 `DimTables` call sites. Whether anything there assumes a

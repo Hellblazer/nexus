@@ -661,8 +661,11 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
         return run_admin_sql(validate_statements(checks))
 
     def _validated_probe() -> bool | None:
-        # The data-side completion marker (see the class docstring): all
-        # five octet CHECKs convalidated. pg_constraint is a metadata
+        # The data-side completion marker (see the class docstring): every
+        # octet CHECK in OCTET_CHECKS convalidated — FOUR of them since
+        # RDR-187 dropped the chash_index entry (the comment said "five"
+        # from that removal until 2026-08-10, while the compare below has
+        # always been len(OCTET_CHECKS)). pg_constraint is a metadata
         # target under the diag lint, so this rides the same read-only
         # choke point as the poison probe.
         try:
