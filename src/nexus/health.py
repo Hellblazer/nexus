@@ -3516,8 +3516,13 @@ def _check_pending_rungs() -> list[HealthResult]:
     zero writes, zero work, the completion store is never opened (the
     ``resolve_pending_steps`` dry-run-truth precedent). Pending rungs are a
     soft warning with `nx upgrade` (the single trigger) as the remedy.
-    Crash-proof: any failure degrades to a non-critical pass — every check
-    in ``run_health_checks`` must never crash ``nx doctor`` as a whole.
+    Crash-proof: any failure ABOVE the per-rung loop (deferred imports,
+    ``default_registry()`` construction) degrades to a SOFT WARNING, never a
+    silent ``ok=True`` — a check that could not even enumerate the ladder
+    must not render as a clean row (nexus-v2mdd: this outer handler
+    previously reported ``ok=True``, regressing the identical bug
+    ``pending_rungs``' inner per-rung handling already fixed once). Never
+    crashes ``nx doctor`` as a whole.
     """
     try:
         from nexus.upgrade_ladder import registry as _ladder_registry  # noqa: PLC0415 — deferred to avoid module-load cost
@@ -3527,7 +3532,10 @@ def _check_pending_rungs() -> list[HealthResult]:
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.warning("doctor_pending_rungs_check_failed", error=str(exc))
         return [HealthResult(
-            label="Upgrade ladder", ok=True, detail="check failed (non-critical)",
+            label="Upgrade ladder",
+            ok=False,
+            warn=True,
+            detail=f"could not check pending rungs: {exc}",
         )]
 
     pending = [(name, status) for name, status in statuses if status.pending]

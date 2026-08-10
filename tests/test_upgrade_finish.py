@@ -2086,7 +2086,13 @@ class TestPendingDataRungCallout:
         assert "citations" in lines[0]
         assert "nx upgrade" in lines[0]
 
-    def test_detect_crash_degrades_to_no_callout(self):
+    def test_detect_crash_surfaces_as_unavailable_not_silently_dropped(self):
+        """nexus-v2mdd: a raising detect() used to be indistinguishable from
+        'not pending' (`except Exception: continue`), silently deleting the
+        chash-rekey PENDING warning whose own docstring says citations for
+        pre-existing content silently break without it. It must instead
+        surface as an explicit unknown/unavailable line naming the rung
+        and the failure — never a bare []."""
         from nexus.upgrade_finish import pending_data_rung_callout
 
         class _Boom:
@@ -2097,7 +2103,11 @@ class TestPendingDataRungCallout:
 
         with patch("nexus.upgrade_ladder.registry.default_registry",
                    return_value=[_Boom()]):
-            assert pending_data_rung_callout() == []
+            lines = pending_data_rung_callout()
+        assert len(lines) == 1
+        assert "chash-rekey" in lines[0]
+        assert "unknown" in lines[0].lower() or "unavailable" in lines[0].lower()
+        assert "probe exploded" in lines[0]
 
 
 class TestCheckVersionTransitionLaunchagentUnload:

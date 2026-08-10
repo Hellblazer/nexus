@@ -1518,8 +1518,12 @@ def pending_data_rung_callout() -> list[str]:
     (RDR-180 / critic-180-cohort finding 2). The chash-rekey rung gets an
     explicit consequence statement — its not-yet-run state silently breaks
     citation resolution for pre-existing content, unlike earlier rungs
-    whose unconverted rows were merely inert. Best-effort and read-only:
-    detect() failures degrade to no callout (doctor remains the backstop).
+    whose unconverted rows were merely inert. Read-only: a raising detect()
+    surfaces as an explicit unknown/unavailable line (never silently
+    dropped — nexus-v2mdd: ``except Exception: continue`` used to make a
+    raising detect() indistinguishable from "not pending", silently
+    deleting exactly the chash-rekey warning this function exists to emit).
+    ``nx doctor`` remains the backstop for full detail either way.
     """
     from nexus.upgrade_ladder.registry import default_registry  # noqa: PLC0415 — deferred, CLI startup cost
 
@@ -1527,7 +1531,10 @@ def pending_data_rung_callout() -> list[str]:
     for rung in default_registry():
         try:
             status = rung.detect()
-        except Exception:  # noqa: BLE001 — callout is best-effort; doctor is the backstop
+        except Exception as exc:  # noqa: BLE001 — must surface, not silently drop
+            lines.append(
+                f"rung '{rung.name}' status unknown — detect failed: {exc}"
+            )
             continue
         if not status.pending:
             continue

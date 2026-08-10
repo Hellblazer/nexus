@@ -247,14 +247,23 @@ def test_doctor_real_registry_on_service_mode_reports_no_pending(
 
 
 def test_doctor_check_is_crash_proof(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every doctor check must degrade internally, never crash `nx doctor`."""
+    """Every doctor check must degrade internally, never crash `nx doctor` —
+    but a check that could not even ENUMERATE the ladder (a failure above
+    the per-rung loop: deferred imports, default_registry() construction)
+    must render as a soft warning, not silently pass green. This is the
+    outer-handler counterpart to `test_a_rung_that_cannot_answer_is_pending_
+    not_green` above: that test pins the INNER per-rung leak fixed once
+    already; this one pins the OUTER blanket handler that regressed the
+    same bug (nexus-v2mdd) by swallowing failures above the loop into
+    ok=True."""
     def _boom() -> LadderRegistry:
         raise RuntimeError("registry exploded")
 
     monkeypatch.setattr(ladder_registry, "default_registry", _boom)
     results = _check_pending_rungs()
-    assert results[0].ok is True
-    assert "check failed" in results[0].detail
+    assert results[0].ok is False
+    assert results[0].warn is True  # soft warning, never a silent green pass
+    assert "registry exploded" in results[0].detail  # exception text survives
 
 
 def test_doctor_check_is_wired_into_run_health_checks() -> None:
