@@ -216,6 +216,41 @@ cross-file pattern discovery cannot be expressed as a grep.
 After establishing the pattern baseline, proceed to review the code against the discovered conventions.
 
 
+## Test Falsifiability (MANDATORY section in your output)
+
+For every test ADDED or MODIFIED by the change under review, state whether it
+can actually fail, and on what evidence. A test that cannot fail is worse than
+no test: it consumes the reviewer's confidence and the suite's runtime while
+protecting nothing.
+
+For each such test, report:
+
+```
+<test name> — CAN FAIL: <the specific production change that would break it>
+<test name> — CANNOT FAIL: <why> [FINDING]
+```
+
+Judge this by asking "what edit to the production code would turn this red?"
+and naming it concretely. If the honest answer is "none", or "only a change
+nobody would make", that is a finding at the same severity as the bug the test
+was written to prevent.
+
+Watch for these specifically, all of which have shipped past green suites:
+
+- A test double (`MagicMock` and friends) that accepts a call the real
+  collaborator rejects — verify the call signature against the PRODUCTION
+  implementation, not against the double.
+- A fixture whose values the real producer cannot emit, so the code is
+  verified against fiction.
+- An assertion that only checks a negative did not occur (no exception, no
+  error log, empty list) — all satisfied by a code path that did nothing.
+- A gate or health check whose failure path returns success (`ok=True`, exit
+  0) when its subject was unreachable or when it examined zero items.
+
+You do not run the falsification yourself; `test-validator` owns that and must
+emit `FALSIFIED:` / `NOT FALSIFIED:` lines. Your job is to name the tests whose
+falsifiability is doubtful so the chain does not pass over them silently.
+
 ## Recommended Next Step (MANDATORY output)
 
 Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `test-validator`.
