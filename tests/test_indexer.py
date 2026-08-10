@@ -668,7 +668,12 @@ def test_run_index_mixed_repo(tmp_path):
 
 # ── Prune helpers ────────────────────────────────────────────────────────────
 
-def _gc_col(rows: list[tuple[str, str]]):
+def _gc_col(
+    rows: list[tuple[str, str]],
+    *,
+    with_fast_path: bool = False,
+    fast_path_side_effect: object = None,
+):
     """Build a MagicMock T3 collection. ``rows`` is a list of
     ``(chunk_id, chunk_text_hash)`` pairs; the chunk_text_hash may be
     short (synthetic-write era), [:32] (post-D1), or [:64] (full sha256
@@ -680,6 +685,26 @@ def _gc_col(rows: list[tuple[str, str]]):
     the helper safe for callers that paginate (multiple offsets) or
     re-enter ``_prune_deleted_files`` (which loops over both code and
     docs collections; each iteration calls ``col.get`` at least once).
+
+    ``spec=[...]`` (not a bare ``MagicMock()``): a permissive mock's
+    ``get_all_metadata`` auto-vivifies as a callable child mock on ANY
+    attribute access, so ``getattr(col, "get_all_metadata", None)`` —
+    ``_fetch_all_chunk_metadata``'s fast-path probe — would find one on
+    every one of this fixture's ~30 existing callers and silently
+    exercise the wrong path (the exact "permissive test double" class
+    review 4cb743be H3 already flagged for a sibling fixture). ``spec``
+    without ``get_all_metadata`` makes that attribute access raise
+    ``AttributeError``, which ``getattr``'s default catches — matching a
+    pre-nexus-duoak engine / local Chroma collection, which is what
+    every EXISTING caller of this fixture is meant to simulate.
+
+    ``with_fast_path=True`` (nexus-<bead>) adds ``get_all_metadata`` to
+    the spec and wires it to return the same full-collection view as the
+    paginated ``get`` path by default — a single round trip instead of
+    N pages, proving the fast path is what actually gets exercised
+    end-to-end (``col.get.assert_not_called()``). ``fast_path_side_effect``
+    overrides that default, e.g. a ``VectorServiceError`` to simulate the
+    server's row-count cap (422) and force the fallback.
     """
     state = {
         "rows": {r[0]: {"chunk_text_hash": r[1]} for r in rows},
@@ -718,11 +743,24 @@ def _gc_col(rows: list[tuple[str, str]]):
         for i, m in zip(ids or [], metadatas or []):
             state["rows"][i] = dict(m or {})
 
-    col = MagicMock()
+    spec = ["get", "delete", "upsert", "count"]
+    if with_fast_path:
+        spec.append("get_all_metadata")
+    col = MagicMock(spec=spec)
     col.get.side_effect = _get
     col.delete.side_effect = _delete
     col.upsert.side_effect = _upsert
     col._rows = state["rows"]
+    if with_fast_path:
+        if fast_path_side_effect is not None:
+            col.get_all_metadata.side_effect = fast_path_side_effect
+        else:
+            def _get_all_metadata(*args, **kwargs):
+                return {
+                    "ids": list(state["rows"]),
+                    "metadatas": [dict(v) for v in state["rows"].values()],
+                }
+            col.get_all_metadata.side_effect = _get_all_metadata
     return col
 
 
@@ -2141,6 +2179,163 @@ def test_prune_deleted_files_paginates(tmp_path, monkeypatch):
 
     assert set(cols["code__repo"]._rows) == {r[0] for r in live}
     assert set(cols["quarantine-code__repo"]._rows) == {r[0] for r in orphan}
+
+
+# ── get_all_metadata fast path (index-output-ux-assessment-2026-08-10:     ──
+# ── 547.8s paginated sweep -> single round trip, mirroring                 ──
+# ── build_staleness_cache's contract) ───────────────────────────────────────
+
+
+def test_prune_deleted_files_uses_get_all_metadata_fast_path_not_pagination(
+    monkeypatch,
+):
+    """The single-shot read must be what actually executes when the
+    collection exposes it, not merely "still correct if it happened to
+    fire" — proving the 96-page/547.8s sweep this fixes collapses to ONE
+    round trip. Corpus (350 rows) spans what used to be 2 legacy pages
+    (``_CHROMA_PAGE_SIZE`` = 300) to prove the fast path finds every
+    orphan in a single call, not just a first page's worth.
+
+    Run against pre-fix ``_prune_deleted_files`` (which never calls
+    ``get_all_metadata`` at all — every full-collection read went through
+    paginated ``col.get`` calls instead), both assertions below fail:
+    ``get_all_metadata`` was called 0 times, and a full-collection
+    (id-less) ``col.get`` call WAS made (the pagination sweep).
+    """
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    from nexus.indexer import _prune_deleted_files
+    live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(250)]
+    orphan = [(f"orphan-{i:03d}", f"b{i:03d}" + "0" * 60) for i in range(100)]
+    live_chashes = {r[1] for r in live}
+    db, cols = _gc_db({"code__repo": [], "docs__repo": []})
+    cols["code__repo"] = _gc_col(live + orphan, with_fast_path=True)
+    catalog = _gc_catalog({"code__repo": live_chashes, "docs__repo": set()})
+
+    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+
+    cols["code__repo"].get_all_metadata.assert_called_once()
+    # col.get IS still called for the id-keyed quarantine copy (moving the
+    # 100 orphans out) — what must NOT happen is a full-collection
+    # (id-less) paginated scan, i.e. every call must carry ``ids=``.
+    full_collection_scans = [
+        c for c in cols["code__repo"].get.call_args_list
+        if c.kwargs.get("ids") is None
+    ]
+    assert not full_collection_scans, (
+        f"expected no full-collection paginated scan; got {full_collection_scans}"
+    )
+    assert set(cols["code__repo"]._rows) == {r[0] for r in live}
+    assert set(cols["quarantine-code__repo"]._rows) == {r[0] for r in orphan}
+
+
+def test_prune_deleted_files_fast_path_row_cap_falls_back_without_data_loss(
+    monkeypatch,
+):
+    """COMPLETENESS GUARANTEE: a row-cap-exceeded fast-path response
+    (server 422 -- ``PgVectorRepository.getAllMetadata`` raises rather
+    than returning the first 200,000 rows; mirrored here the same way
+    ``build_staleness_cache``'s own tests simulate it) must fall back to
+    the paginated sweep and still classify every orphan correctly. If a
+    cap-exceeded failure were ever mistaken for "the collection has
+    nothing" instead of "the read did not happen", live chunks would be
+    misclassified as orphans and deleted — this pins that it is NOT.
+    """
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    from nexus.db.http_vector_client import VectorServiceError
+    from nexus.indexer import _prune_deleted_files
+    live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(250)]
+    orphan = [(f"orphan-{i:03d}", f"b{i:03d}" + "0" * 60) for i in range(100)]
+    live_chashes = {r[1] for r in live}
+    db, cols = _gc_db({"code__repo": [], "docs__repo": []})
+    cols["code__repo"] = _gc_col(
+        live + orphan, with_fast_path=True,
+        fast_path_side_effect=VectorServiceError(
+            "POST /v1/vectors/get-all-metadata → HTTP 422: getAllMetadata: "
+            "collection 'code__repo' has more than 200000 matching rows; "
+            "caller must fall back to paginated /v1/vectors/get",
+            code=422,
+        ),
+    )
+    catalog = _gc_catalog({"code__repo": live_chashes, "docs__repo": set()})
+
+    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+
+    cols["code__repo"].get_all_metadata.assert_called_once()
+    assert cols["code__repo"].get.call_count >= 1, (
+        "row-cap failure must fall back to the paginated sweep"
+    )
+    assert set(cols["code__repo"]._rows) == {r[0] for r in live}, (
+        "live chunks must survive a fast-path row-cap failure"
+    )
+    assert set(cols["quarantine-code__repo"]._rows) == {r[0] for r in orphan}
+
+
+def test_prune_deleted_files_fast_path_and_fallback_both_fail_skips_collection(
+    monkeypatch,
+):
+    """Same per-collection isolation as
+    ``test_prune_deleted_files_manifest_read_failure_skips_collection``,
+    for the chunk-sweep read: when BOTH the fast path and the paginated
+    fallback fail, GC must skip THAT collection (no deletion, structured
+    warning) and still sweep the others — never classify orphans off a
+    read that never completed."""
+    from structlog.testing import capture_logs
+    from nexus.db.http_vector_client import VectorServiceError
+    from nexus.indexer import _prune_deleted_files
+
+    live_chash = "a" * 64
+    orphan_chash = "b" * 64
+    db, cols = _gc_db({
+        "code__repo": [("code-live", live_chash), ("code-orphan", orphan_chash)],
+        "docs__repo": [("docs-live", live_chash), ("docs-orphan", orphan_chash)],
+    })
+    broken = _gc_col(
+        [("code-live", live_chash), ("code-orphan", orphan_chash)],
+        with_fast_path=True,
+        fast_path_side_effect=VectorServiceError("row cap exceeded", code=422),
+    )
+    broken.get.side_effect = RuntimeError("paginated fallback also unreachable")
+    cols["code__repo"] = broken
+    catalog = _gc_catalog({"code__repo": {live_chash}, "docs__repo": {live_chash}})
+
+    with capture_logs() as cap:
+        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+
+    # Untouched: nothing deleted, nothing quarantined off a read that
+    # never completed.
+    assert _deleted_ids(cols["code__repo"]) == []
+    assert set(cols["code__repo"]._rows) == {"code-live", "code-orphan"}
+    # The sweep CONTINUED: docs__repo's orphan was still classified.
+    assert "docs-orphan" not in cols["docs__repo"]._rows
+    assert "docs-live" in cols["docs__repo"]._rows
+    err_logs = [
+        r for r in cap
+        if r.get("event") == "gc_sweep_read_failed_skipping_collection"
+    ]
+    assert err_logs, f"missing structured warning event; got {cap}"
+    assert err_logs[0]["collection"] == "code__repo"
+
+
+def test_prune_deleted_files_fast_path_emits_liveness_ping(monkeypatch):
+    """Constraint: the single-shot read must still surface a liveness
+    signal while it's in flight (nexus-p7tp3/mx22w/fx5oe indexer output
+    liveness work) — not regress to the silent-547s black hole in a new
+    shape just because it's now one call instead of 96."""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    from nexus.indexer import _prune_deleted_files
+    live = [("live-1", "a" * 64)]
+    db, cols = _gc_db({"code__repo": [], "docs__repo": []})
+    cols["code__repo"] = _gc_col(live, with_fast_path=True)
+    catalog = _gc_catalog({"code__repo": {"a" * 64}, "docs__repo": set()})
+    phases: list[str] = []
+
+    _prune_deleted_files(
+        "code__repo", "docs__repo", db, catalog=catalog, on_phase=phases.append,
+    )
+
+    code_phases = [m for m in phases if "collection 1/2 (code__repo)" in m]
+    assert code_phases, "expected at least one liveness ping for the fast path"
+    assert any("reading full collection" in m for m in code_phases)
 
 
 # ── real page progress (index-output-ux-assessment-2026-08-10 §7.2/a3) ─────

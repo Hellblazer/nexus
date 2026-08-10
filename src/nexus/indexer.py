@@ -2392,6 +2392,89 @@ def _paginated_get(
     return result
 
 
+def _fetch_all_chunk_metadata(
+    col: object,
+    collection_name: str,
+    *,
+    on_page: Callable[[int, int], None] | None = None,
+    on_fast_path_start: Callable[[], None] | None = None,
+) -> dict:
+    """ids + metadata for every LIVE chunk in *col*, single round trip when
+    the engine exposes ``get_all_metadata``, degrading to the
+    ``_paginated_get`` sweep otherwise.
+
+    Mirrors ``nexus.indexer_utils.build_staleness_cache``'s fast-path /
+    fallback contract exactly (the measurement this exists to fix: a real
+    ``nx index repo`` run on this repo spent 547.8s -- 70% of wall -- in
+    the paginated sweep this function replaces, one module away from
+    ``build_staleness_cache`` fetching the comparable read in 28.5s via
+    this exact fast path). Two collections, two call sites, one contract:
+    a change to either the row cap or the degradation policy should never
+    have to be kept in sync by hand across both places' independent
+    try/except ladders.
+
+    COMPLETENESS GUARANTEE (this function backs a GC orphan sweep --
+    "orphan" is decided by set-membership against a separately-fetched
+    alive set, so a caller silently treating a *short* read as *complete*
+    would misclassify live chunks as orphans and delete real data):
+    ``HttpVectorClient``'s ``get_all_metadata()`` never silently
+    truncates. Server-side (``PgVectorRepository.getAllMetadata``) fetches
+    ``GET_ALL_METADATA_MAX_ROWS + 1`` (200,001) rows and, when the +1
+    lands, RAISES (``IllegalStateException`` -> HTTP 422) rather than
+    returning the first 200,000 -- so this function's caller either gets
+    every row or an exception, never a row count it cannot tell apart
+    from "the collection genuinely only has this many". A fast-path
+    exception is therefore ALWAYS a "the read did not happen, fall back"
+    signal, never a signal to trust a partial response as ground truth.
+    Local-Chroma-mode collections (no ``get_all_metadata`` attribute) and
+    pre-v0.1.30 engines (the route itself is absent -> 404) take the same
+    fallback path, same as ``build_staleness_cache``.
+
+    Does NOT catch a paginated-fallback failure -- a total failure
+    propagates to the caller, which owns what "the read failed" means for
+    it (``_prune_deleted_files``: skip this collection with a structured
+    error, never silently classify orphans off a read that didn't
+    complete; ``chunk_quarantine``: skip this pass). Same boundary
+    ``build_staleness_cache`` draws for its own callers.
+    """
+    _get_all_metadata = getattr(col, "get_all_metadata", None)
+    if callable(_get_all_metadata):
+        if on_fast_path_start is not None:
+            on_fast_path_start()
+        try:
+            result = _get_all_metadata()
+        except Exception as exc:  # noqa: BLE001 — fast-path failure is a fallback signal, never fatal
+            hint = "falling back to the paginated sweep"
+            if getattr(exc, "code", None) == 404:
+                # nexus-5den3 (mirrored from build_staleness_cache): the
+                # pre-v0.1.30 404 hint is only actionable in local mode.
+                from nexus.config import is_local_mode  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
+                hint = (
+                    "engine lacks POST /v1/vectors/get-all-metadata "
+                    "(pre-v0.1.30) — "
+                    + (
+                        "upgrade the engine this install is pointed at"
+                        if is_local_mode()
+                        else (
+                            "the managed nexus service needs to be "
+                            "upgraded by the operator; no local action "
+                            "is possible"
+                        )
+                    )
+                )
+            _log.warning(
+                "prune_get_all_metadata_fast_path_failed_falling_back",
+                collection=collection_name, hint=hint, exc_info=True,
+            )
+        else:
+            return {
+                "ids": result.get("ids") or [],
+                "metadatas": result.get("metadatas") or [],
+            }
+    return _paginated_get(col, include=["metadatas"], on_page=on_page)
+
+
 def _batched_delete(col: object, ids: list[str]) -> int:
     """Delete *ids* from *col* in batches of _CHROMA_PAGE_SIZE (Cloud quota: 300)."""
     deleted = 0
@@ -2749,10 +2832,14 @@ def _prune_deleted_files(
     the authoritative GC for content-addressed chunks and ``nx t3 gc``
     handles only legacy pre-Phase-3 orphans.
 
-    ``on_phase``, when provided, receives real page progress for the
-    ``_paginated_get`` sweep below (index-output-ux-assessment-2026-08-10
+    ``on_phase``, when provided, receives a liveness ping for the
+    single-shot ``get_all_metadata`` read (see
+    ``_fetch_all_chunk_metadata``) and real page progress for the
+    ``_paginated_get`` fallback sweep (index-output-ux-assessment-2026-08-10
     §7.2/a3: the 547.8s observed run of this function was 96 pages over
-    28,564 chunks with zero output). Denominator is a best-effort
+    28,564 chunks with zero output — the fast path replaces that sweep in
+    the common case; the fallback and its page progress still exist for a
+    pre-v0.1.30 engine or a fast-path failure). Denominator is a best-effort
     ``col.count()`` call — only attempted when ``on_phase`` is set, so
     the common no-callback path (~20 existing call sites) pays no extra
     cost. When ``count()`` is unavailable or non-numeric, progress
@@ -2818,12 +2905,24 @@ def _prune_deleted_files(
         # chunks", and GC on a false-empty is how you delete nothing while
         # believing you swept). But it must skip THIS collection, not abort
         # the sweep for every collection after it.
-        # index-output-ux-assessment-2026-08-10 §7.2/a3: real page progress
-        # for the potentially long paginated scan below. Denominator is
-        # best-effort (col.count() may be unavailable or, on a test mock,
-        # non-numeric) — degrade to page-only numbering rather than raise.
-        # Only attempted when a caller actually wants progress output, so
-        # the ~20 existing on_phase-less call sites pay zero extra cost.
+        #
+        # index-output-ux-assessment-2026-08-10 §7.2/a3 measured this read
+        # at 547.8s (70% of a real `nx index repo` run's wall time) via the
+        # paginated sweep alone. ``_fetch_all_chunk_metadata`` takes the
+        # SAME single-shot ``get_all_metadata`` fast path
+        # ``build_staleness_cache`` already uses in the same run (28.5s for
+        # a comparable read there) and degrades to the paginated sweep only
+        # when the engine can't serve it — see that function's docstring
+        # for the completeness argument (the server's row cap RAISES, it
+        # never silently truncates, so a fast-path failure here is always
+        # "fall back", never "trust a short read").
+        #
+        # ``_total_pages`` is a best-effort denominator for the FALLBACK
+        # path's page-progress messages only (col.count() may be
+        # unavailable or, on a test mock, non-numeric — degrade to
+        # page-only numbering rather than raise). Only computed when a
+        # caller actually wants progress output, so the ~20 existing
+        # on_phase-less call sites pay zero extra cost.
         _total_pages: int | None = None
         if on_phase is not None:
             try:
@@ -2845,28 +2944,34 @@ def _prune_deleted_files(
             except Exception:  # noqa: BLE001 — best-effort denominator only
                 _total_pages = None
 
+        _where_label = f"collection {_coll_idx}/{_n_collections} ({collection_name})"
+
+        def _on_fast_path_start(_where=_where_label) -> None:
+            if on_phase is None:
+                return
+            on_phase(f"Pruning deleted files: {_where}, reading full collection…")
+
         def _on_page(
-            page_num: int, scanned: int, *,
-            _cn=collection_name, _idx=_coll_idx, _tp=_total_pages,
+            page_num: int, scanned: int, *, _where=_where_label, _tp=_total_pages,
         ) -> None:
             if on_phase is None:
                 return
-            where_ = f"collection {_idx}/{_n_collections} ({_cn})"
             if _tp:
                 on_phase(
-                    f"Pruning deleted files: {where_}, page {page_num}/{_tp} "
+                    f"Pruning deleted files: {_where}, page {page_num}/{_tp} "
                     f"({scanned:,} chunks scanned)"
                 )
             else:
                 on_phase(
-                    f"Pruning deleted files: {where_}, page {page_num} "
+                    f"Pruning deleted files: {_where}, page {page_num} "
                     f"({scanned:,} chunks scanned)"
                 )
 
         try:
-            all_chunks = _paginated_get(
-                col, include=["metadatas"],
+            all_chunks = _fetch_all_chunk_metadata(
+                col, collection_name,
                 on_page=_on_page if on_phase is not None else None,
+                on_fast_path_start=_on_fast_path_start if on_phase is not None else None,
             )
         except Exception:  # noqa: BLE001 — one collection's degrade must not end the sweep
             _log.warning(
