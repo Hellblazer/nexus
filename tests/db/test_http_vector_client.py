@@ -2124,33 +2124,43 @@ class TestOnnxLocalUpsertChunkCapValidation:
         assert _resolve_onnx_local_upsert_chunk_cap("300") == 300
         assert _resolve_onnx_local_upsert_chunk_cap("100000") == 100000
 
-    def test_override_active_emits_structured_warning(self) -> None:
-        """A run using a non-default cap must never be invisible."""
-        from structlog.testing import capture_logs
+    def test_override_active_emits_structured_warning(self, capsys) -> None:
+        """A run using a non-default cap must never be invisible.
 
+        nexus D9: the emission now goes through
+        ``nexus.logging_setup.emit_import_time_warning``, a standalone
+        logger bound directly to ``sys.stderr`` — deliberately independent
+        of the process-wide structlog config, since it must be safe to
+        call at IMPORT time, before ``configure_logging`` ever runs (see
+        that function's docstring). ``structlog.testing.capture_logs()``
+        only intercepts events routed through the GLOBAL config, so it can
+        no longer see this emission; assert on stderr instead, matching
+        how a real consumer (a human, or ``tests/e2e/local-index-memory-
+        gate.sh``) actually observes it.
+        """
         from nexus.db.http_vector_client import _resolve_onnx_local_upsert_chunk_cap
 
-        with capture_logs() as logs:
-            value = _resolve_onnx_local_upsert_chunk_cap("64")
+        value = _resolve_onnx_local_upsert_chunk_cap("64")
 
         assert value == 64
-        events = [e for e in logs if e["event"] == "onnx_local_upsert_chunk_cap_overridden"]
-        assert len(events) == 1
-        assert events[0]["value"] == 64
-        assert events[0]["log_level"] == "warning"
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "onnx_local_upsert_chunk_cap_overridden" in captured.err
+        assert "value=64" in captured.err
+        assert "level='warning'" in captured.err
 
-    def test_absent_env_var_emits_no_warning(self) -> None:
+    def test_absent_env_var_emits_no_warning(self, capsys) -> None:
         """Non-vacuity guard for the log test above: the default path
-        must stay silent — only an ACTIVE override logs."""
-        from structlog.testing import capture_logs
-
+        must stay silent — only an ACTIVE override logs. Asserted on
+        stdout/stderr directly (see the sibling test's docstring for why
+        ``capture_logs()`` no longer observes this emission)."""
         from nexus.db.http_vector_client import _resolve_onnx_local_upsert_chunk_cap
 
-        with capture_logs() as logs:
-            _resolve_onnx_local_upsert_chunk_cap(None)
+        _resolve_onnx_local_upsert_chunk_cap(None)
 
-        events = [e for e in logs if e["event"] == "onnx_local_upsert_chunk_cap_overridden"]
-        assert len(events) == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "onnx_local_upsert_chunk_cap_overridden" not in captured.err
 
     def test_module_constant_still_defaults_to_16(self) -> None:
         """Regression guard for the real import-time module constant

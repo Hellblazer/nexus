@@ -38,6 +38,8 @@ from typing import Any, NoReturn
 
 import structlog
 
+from nexus.logging_setup import emit_import_time_warning
+
 _log = structlog.get_logger(__name__)
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -575,7 +577,15 @@ def _resolve_onnx_local_upsert_chunk_cap(raw: str | None) -> int:
             f"upsert outright. Unset it, or set it to a positive integer "
             f"(default {_ONNX_LOCAL_UPSERT_CHUNK_CAP_DEFAULT})."
         )
-    _log.warning(
+    # nexus D9: this function runs at MODULE (import) scope — see the
+    # assignment below — before any entry point has called
+    # ``configure_logging``. The shared ``_log`` logger is unsafe here:
+    # structlog's unconfigured default writes to STDOUT, which would
+    # corrupt ``nx <cmd> --json`` for every invocation while this env var
+    # is set, regardless of whether the invoked subcommand ever reaches
+    # an onnx-local upsert. ``emit_import_time_warning`` is the safe
+    # primitive for exactly this case — see its docstring.
+    emit_import_time_warning(
         "onnx_local_upsert_chunk_cap_overridden",
         value=value,
         default=_ONNX_LOCAL_UPSERT_CHUNK_CAP_DEFAULT,
