@@ -2084,6 +2084,141 @@ def _dedup_by_id_keep_best(rows: list[dict], limit: int) -> list[dict]:
     return _dedup_by_id(rows)[:limit]
 
 
+def _resolve_seed_entries_batched(cat: Any, tumblers: list[str]) -> list:
+    """Batch-resolve *tumblers* to CatalogEntry objects, alias-following.
+
+    nexus-descendants-seed-n1: replaces a per-tumbler ``cat.resolve()`` loop
+    (one ``GET /show`` round trip per document — the same shape as the
+    175.5s/1,718-file incident cited in ``update_many``'s own docstring; at
+    scale this was 4,797 sequential round trips for one measured subtree)
+    with ``cat.resolve_many()`` (one batched, internally-paged
+    ``POST /resolve_many`` call).
+
+    ALIAS SEMANTIC: ``cat.descendants()``'s SQL (``CatalogRepository
+    .descendants``) filters only on ``tumbler LIKE prefix.%`` and
+    ``deleted_at IS NULL`` — it does NOT exclude alias rows, so a subtree can
+    legitimately contain documents whose ``alias_of`` points elsewhere
+    (possibly outside the subtree). The per-doc ``cat.resolve(...,
+    follow_alias=True)`` this replaces returns the CANONICAL entry for such a
+    row (server-side ``CatalogRepository.resolveAliasTarget``, chain-walked
+    up to 16 hops) — callers here need that: graph-traversal links
+    (``cat.graph()``/``cat.graph_many()``) are registered against canonical
+    tumblers, so seeding traversal from a raw alias tumbler would silently
+    miss them. ``cat.resolve_many()`` is a flat, non-alias-following identity
+    lookup (``WHERE tumbler IN (...)``, ``CatalogRepository.resolveMany`` —
+    no ``alias_of`` walk at all), so it is NOT a like-for-like substitute on
+    its own. This resolves the (typically small) subset of ACTUAL alias rows
+    with a per-doc, alias-chain-following ``cat.resolve()`` follow-up —
+    bounding round trips to ``1 + (aliases in the subtree)`` instead of
+    ``len(tumblers)``, while preserving the exact alias-following semantic
+    for every entry that needs it.
+    """
+    if not tumblers:
+        return []
+    resolved = cat.resolve_many(tumblers)
+    entries: list = []
+    for t in tumblers:
+        entry = resolved.get(t)
+        if entry is None:
+            continue
+        if getattr(entry, "alias_of", ""):
+            canonical = cat.resolve(t, follow_alias=True)
+            if canonical is None:
+                continue
+            entry = canonical
+        entries.append(entry)
+    return entries
+
+
+#: Batch size for :func:`_graph_many_batched`'s ``cat.graph_many()`` calls
+#: (substantive critique finding 2, T2 nexus/chroma-residue-C2-durability-
+#: critique-2026-08-10). ``CatalogRepository.MAX_GRAPH_NODES=500``
+#: (service/**, ``CatalogRepository.java``) is a PER-CALL cap applied to the
+#: MERGED reachable-node set across every seed in that one call — the N+1
+#: ``cat.graph()``-per-seed loop this replaced gave each seed its own
+#: independent 500-node budget; a single ``graph_many()`` call over ALL
+#: seeds collapses that to ONE 500-node budget shared across every seed —
+#: a severe, undisclosed completeness regression on exactly the
+#: large-subtree workload the N+1 fix targeted. Batching restores a budget
+#: PER BATCH while keeping round trips at ``ceil(N / _GRAPH_MANY_BATCH_SIZE)``
+#: instead of ``N``.
+#:
+#: 100 is chosen as: (a) an order of magnitude under
+#: ``CatalogHandler.MAX_BATCH_DOC_IDS=1000`` (service/**) — the HARD cap
+#: enforced server-side on POST /traverse's ``seeds`` array (a batch over
+#: that cap 400s outright, not merely truncates) — so a batch can never
+#: itself trigger that error, with 10x headroom for the hard cap value ever
+#: moving; (b) small enough that each batch's 500-node budget is a
+#: meaningful fraction of the batch (up to 5 nodes/seed average) rather
+#: than diluted to near-zero; (c) large enough that round trips stay
+#: bounded rather than reverting to the old N+1 shape — the plan's own
+#: 4,797-document reproduction subtree becomes 48 calls, not 4,797. Not
+#: independently measured against a live large, heavily-linked corpus
+#: (this repo has no such fixture); if a future measurement shows a
+#: different number materially reduces truncation without materially
+#: increasing latency, update this constant and its comment together.
+_GRAPH_MANY_BATCH_SIZE = 100
+
+#: Client-side mirror of ``CatalogRepository.MAX_GRAPH_NODES`` (service/**)
+#: — used ONLY as a truncation HEURISTIC, never asserted as certain: the
+#: POST /traverse wire response carries no truncation flag (the server-side
+#: cap only ``log.warn``s, CatalogRepository.java), so a batch landing at
+#: EXACTLY this many nodes is indistinguishable between "found exactly 500
+#: nodes" and "the server capped a larger result at 500". Treated as
+#: "possibly truncated" and disclosed either way — never silently dropped.
+_GRAPH_MANY_NODE_CAP_HINT = 500
+
+
+def _graph_many_batched(
+    cat: Any, seeds: list, *, depth: int, link_type: str,
+) -> tuple[dict, int, int]:
+    """Batched ``graph_many()`` BFS over *seeds*, restoring a PER-BATCH
+    ``MAX_GRAPH_NODES`` budget instead of one budget shared across every
+    seed in a single call (substantive critique finding 2 — see
+    :data:`_GRAPH_MANY_BATCH_SIZE`'s docstring for the full rationale).
+
+    Returns ``(merged_graph, batches_at_cap, batches_total)``:
+
+    - ``merged_graph``: ``{"nodes": [...], "edges": [...]}``, deduped
+      across batches (a node/edge reachable from more than one batch's
+      seeds would otherwise appear once per batch).
+    - ``batches_at_cap``: number of batches whose response landed at or
+      above :data:`_GRAPH_MANY_NODE_CAP_HINT` nodes — a heuristic signal
+      that batch MAY have been server-side truncated (see that constant's
+      docstring for why this cannot be certain from the wire response
+      alone).
+    - ``batches_total``: total batches issued, for the caller's disclosure
+      text ("N of M batches...").
+
+    Callers MUST surface ``batches_at_cap > 0`` to the user — silently
+    dropping it reintroduces exactly the completeness regression this
+    function exists to fix disclosure for.
+    """
+    if not seeds:
+        return {"nodes": [], "edges": []}, 0, 0
+    nodes_by_tumbler: dict[str, Any] = {}
+    edges_seen: dict[tuple, Any] = {}
+    batches_at_cap = 0
+    batches_total = 0
+    for i in range(0, len(seeds), _GRAPH_MANY_BATCH_SIZE):
+        chunk = seeds[i:i + _GRAPH_MANY_BATCH_SIZE]
+        batches_total += 1
+        graph = cat.graph_many(chunk, depth=depth, link_type=link_type)
+        chunk_nodes = graph.get("nodes", [])
+        if len(chunk_nodes) >= _GRAPH_MANY_NODE_CAP_HINT:
+            batches_at_cap += 1
+        for node in chunk_nodes:
+            nodes_by_tumbler[str(node.tumbler)] = node
+        for edge in graph.get("edges", []):
+            key = (str(edge.from_tumbler), str(edge.to_tumbler), edge.link_type)
+            edges_seen[key] = edge
+    return (
+        {"nodes": list(nodes_by_tumbler.values()), "edges": list(edges_seen.values())},
+        batches_at_cap,
+        batches_total,
+    )
+
+
 @mcp.tool(
     title="Metadata-Scoped Combined Search",
     annotations={"readOnlyHint": True},
@@ -2421,6 +2556,46 @@ def search_graph_hop(
         return _mcp_tool_error("search_graph_hop", e)
 
 
+# nexus-descendants-seed-cap: defensive ceiling on the graph-hop seed list
+# query() materializes client-side from an explicit `subtree` scope
+# (ab7907fb follow-on — descendants() itself no longer truncates a large
+# subtree, so this is the next place an unbounded list could reach the
+# wire). There is no dedicated per-request cap on POST
+# /v1/vectors/search-graph-hop's `seeds` array server-side (it binds as a
+# single Postgres array parameter, not a per-item IN-list, so the
+# resolve_many-style 32767-bind-limit rationale does not directly apply).
+#
+# Substantive critique finding 3 (T2 nexus/chroma-residue-C2-durability-
+# critique-2026-08-10): the original 1000 was a borrowed number ("it seemed
+# safe") that caps the plan's own flagship reproduction subtree
+# (4,797 documents, ~5x the old cap) — the exact scale this fix was written
+# for. Measured before raising it (this repo has no live large-linked
+# corpus in test fixtures, so the measurement is of what CAN be ruled out,
+# not a live breaking point): JSON-encoding a synthetic seeds array is
+# trivial at every size that matters — n=1000 -> 11KB/0.04ms, n=5000 ->
+# 59KB/0.19ms, n=10000 -> 119KB/0.35ms, n=20000 -> 249KB/0.65ms (measured
+# 2026-08-10, python3 json.dumps on this endpoint's exact wire shape) — so
+# request-body size/encode cost is not a limiting factor anywhere near this
+# range. Combined with the two source-verified facts above (no server-side
+# per-request cap on this endpoint; seeds bind as ONE array parameter, not
+# per-item, so no bind-limit concern), the only real unknown is server-side
+# BFS compute cost, which scales with the REACHABLE EDGE set (bounded
+# separately by CatalogRepository.MAX_GRAPH_NODES=500, service/**), not
+# directly with the seed count — and that was not measured here (no live
+# large-graph corpus available in this environment; a synthetic/nonexistent-
+# tumbler seed list would only measure IN-list lookup overhead against empty
+# results, not real BFS fanout, so it would not be a meaningful proxy).
+# 6000 is chosen as a deliberate, disclosed safety valve — not "no cap" —
+# sized to clear the known real workload (4,797) with >25% headroom, while
+# still bounding the pathological case (a `subtree` prefix that resolves to
+# tens of thousands of descendants) that disclosure alone does not protect
+# against. MUST stay paired with disclosure (`seed_scope` below) — a cap
+# that silently drops seeds reintroduces the exact silent-truncation class
+# ab7907fb fixed one layer down. Revisit with a real measurement if a
+# corpus this size ever lands in test fixtures.
+_MAX_GRAPH_HOP_SEEDS = 6000
+
+
 @mcp.tool(
     title="Catalog-Aware Document Query",
     annotations={"readOnlyHint": True},
@@ -2494,6 +2669,12 @@ def query(
 
         # Catalog-aware routing: derive target collections from catalog metadata
         catalog_collections: set[str] | None = None
+        # nexus-descendants-seed-n1 / substantive critique finding 2: declared
+        # here (not inside `if has_catalog_params:`) so it is ALWAYS defined
+        # by the time the routing_note/lines/structured-result code below
+        # reads it — a plain corpus-based query (no catalog params at all)
+        # must see None, not a NameError.
+        graph_batch_info: dict | None = None
         has_catalog_params = author or content_type or follow_links or subtree
 
         if has_catalog_params:
@@ -2555,12 +2736,25 @@ def query(
                     f"subtree={subtree!r}, follow_links={follow_links!r})"
                 )
 
+                # Disclosure envelope for a capped subtree seed list
+                # (nexus-descendants-seed-cap) — stays None unless the
+                # follow_links+subtree arm below actually runs; surfaced in
+                # both the text and structured responses so a cap is never
+                # silent.
+                seed_scope: dict | None = None
+
                 if follow_links:
                     # Graph-hop path: seeds resolved app-side, BFS in SQL.
                     seed_tumblers: list[str] = []
                     if subtree:
                         desc = cat.descendants(subtree)
-                        seed_tumblers = [d["tumbler"] for d in desc if d.get("tumbler")]
+                        all_seed_tumblers = [d["tumbler"] for d in desc if d.get("tumbler")]
+                        seed_tumblers = all_seed_tumblers[:_MAX_GRAPH_HOP_SEEDS]
+                        seed_scope = {
+                            "total": len(all_seed_tumblers),
+                            "used": len(seed_tumblers),
+                            "truncated": len(all_seed_tumblers) > _MAX_GRAPH_HOP_SEEDS,
+                        }
                     elif author or content_type:
                         if content_type and not author:
                             seed_entries_svc = cat.by_content_type(content_type)
@@ -2629,16 +2823,27 @@ def query(
 
                 if not rows:
                     if structured:
-                        return {
+                        empty_result: dict = {
                             "ids": [], "tumblers": [], "distances": [],
                             "collections": [], "chunk_collections": [],
                             "chunk_text_hash": [],
                         }
+                        if seed_scope is not None:
+                            empty_result["seed_scope"] = seed_scope
+                        return empty_result
+                    if seed_scope is not None and seed_scope["truncated"]:
+                        return (
+                            f"[WARNING: subtree seed list capped at "
+                            f"{seed_scope['used']} of {seed_scope['total']} "
+                            f"documents for graph-hop traversal — results may "
+                            f"be INCOMPLETE. Narrow `subtree` or split into "
+                            f"multiple queries.]\n{_no_docs_msg}"
+                        )
                     return _no_docs_msg
 
                 if structured:
                     tumblers_svc = [r.get("id", "") for r in rows]
-                    return {
+                    result: dict = {
                         "ids": tumblers_svc,
                         "tumblers": tumblers_svc,
                         "distances": _reported_distances(rows),
@@ -2649,6 +2854,11 @@ def query(
                         # HIGH-1: chash per matched chunk row, not a manifest guess
                         "chunk_text_hash": [r.get("chash", "") for r in rows],
                     }
+                    # nexus-descendants-seed-cap: disclose a capped subtree
+                    # seed list — never silent (see _MAX_GRAPH_HOP_SEEDS).
+                    if seed_scope is not None:
+                        result["seed_scope"] = seed_scope
+                    return result
 
                 # Text form: re-hydrate per tumbler from the catalog to build
                 # the same format as the existing dance path.
@@ -2668,7 +2878,18 @@ def query(
                     f"Found {len(rows)} documents "
                     f"(from {len(deduped_svc)} across {len(target)} collections)"
                 )
-                lines_svc: list[str] = [f"{routing_note_svc}\n{header_svc}"]
+                lines_svc: list[str] = []
+                if seed_scope is not None and seed_scope["truncated"]:
+                    # nexus-descendants-seed-cap: never silent — see
+                    # _MAX_GRAPH_HOP_SEEDS.
+                    lines_svc.append(
+                        f"[WARNING: subtree seed list capped at "
+                        f"{seed_scope['used']} of {seed_scope['total']} "
+                        f"documents for graph-hop traversal — results may be "
+                        f"INCOMPLETE. Narrow `subtree` or split into multiple "
+                        f"queries.]"
+                    )
+                lines_svc.append(f"{routing_note_svc}\n{header_svc}")
                 lines_svc.append("")
                 for i, row in enumerate(rows, 1):
                     tumbler_str = row.get("id", "")
@@ -2726,8 +2947,13 @@ def query(
                 # Use descendants() directly — NOT catalog_search(owner=) which has depth-equality bug
                 desc = cat.descendants(subtree)
                 catalog_collections = {d["physical_collection"] for d in desc if d.get("physical_collection")}
-                seed_entries = [cat.resolve(Tumbler.parse(d["tumbler"])) for d in desc]
-                seed_entries = [e for e in seed_entries if e is not None]
+                # nexus-descendants-seed-n1: batched (1 + aliases) round trips
+                # instead of one cat.resolve() per descendant — see
+                # _resolve_seed_entries_batched's docstring for the alias
+                # semantics this preserves.
+                seed_entries = _resolve_seed_entries_batched(
+                    cat, [d["tumbler"] for d in desc if d.get("tumbler")]
+                )
             elif author or content_type:
                 if content_type and not author:
                     seed_entries = cat.by_content_type(content_type)
@@ -2737,10 +2963,32 @@ def query(
                 catalog_collections = {r.physical_collection for r in seed_entries if r.physical_collection}
 
             if follow_links and catalog_collections is not None:
-                # Expand via link graph from already-resolved seed entries
+                # Expand via link graph from already-resolved seed entries.
+                # nexus-descendants-seed-n1: batched graph_many() BFS calls
+                # over ALL seeds instead of one cat.graph() round trip per
+                # seed — POST /traverse already accepts a seed list natively
+                # (graphBFS), so the per-entry loop was pure overhead, same
+                # N+1 shape as the resolve() loop above. A SINGLE graph_many()
+                # call over every seed (the original N+1 fix) shares ONE
+                # CatalogRepository.MAX_GRAPH_NODES=500 budget across all
+                # seeds instead of each seed getting its own, as the old N+1
+                # loop did — substantive critique finding 2 (T2
+                # nexus/chroma-residue-C2-durability-critique-2026-08-10).
+                # _graph_many_batched restores a PER-BATCH budget while
+                # keeping round trips far below N; any batch that may have
+                # been server-side truncated is disclosed via
+                # `graph_batch_info` below — never silent.
                 linked_collections: set[str] = set()
-                for entry in seed_entries:
-                    graph = cat.graph(entry.tumbler, depth=depth, link_type=follow_links)
+                if seed_entries:
+                    graph, batches_at_cap, batches_total = _graph_many_batched(
+                        cat, [e.tumbler for e in seed_entries],
+                        depth=depth, link_type=follow_links,
+                    )
+                    graph_batch_info = {
+                        "batches_total": batches_total,
+                        "batches_at_cap": batches_at_cap,
+                        "possibly_incomplete": batches_at_cap > 0,
+                    }
                     for node in graph["nodes"]:
                         if node.physical_collection:
                             linked_collections.add(node.physical_collection)
@@ -2820,16 +3068,28 @@ def query(
         results.sort(key=lambda r: r.distance)
         if not results:
             if structured:
-                return {
+                empty_result: dict = {
                     "ids": [], "tumblers": [], "distances": [],
                     "collections": [], "chunk_collections": [],
                     "chunk_text_hash": [],
                 }
-            return _no_results_message(qdiag, base="No documents found.")
+                if graph_batch_info is not None:
+                    empty_result["graph_scope"] = graph_batch_info
+                return empty_result
+            no_results_msg = _no_results_message(qdiag, base="No documents found.")
+            if graph_batch_info is not None and graph_batch_info["possibly_incomplete"]:
+                no_results_msg = (
+                    f"[WARNING: link-graph traversal for {graph_batch_info['batches_at_cap']} "
+                    f"of {graph_batch_info['batches_total']} seed batch(es) may be "
+                    f"INCOMPLETE (hit the per-request node cap) — catalog routing via "
+                    f"follow_links may have missed collections. Narrow `subtree` or "
+                    f"split into multiple queries.]\n{no_results_msg}"
+                )
+            return no_results_msg
 
         if structured:
             page = results[:limit]
-            return {
+            structured_result: dict = {
                 "ids": [r.id for r in page],
                 "tumblers": [r.metadata.get("tumbler", "") for r in page],
                 "distances": [float(r.distance) for r in page],
@@ -2845,6 +3105,12 @@ def query(
                     r.metadata.get("chunk_text_hash", "") for r in page
                 ],
             }
+            if graph_batch_info is not None:
+                # nexus-descendants-seed-n1 / substantive critique finding 2:
+                # disclose possible graph-traversal truncation — never
+                # silent (see _graph_many_batched's docstring).
+                structured_result["graph_scope"] = graph_batch_info
+            return structured_result
 
         # Group by document. RDR-108 Phase 4b (nexus-kosc): post-Phase-3
         # chunks no longer carry ``doc_id`` in their metadata, so the
@@ -2948,7 +3214,19 @@ def query(
         total = len(all_docs)
 
         header = f"Found {len(sorted_docs)} documents (from {len(results)} chunks across {len(target)} collections)"
-        lines: list[str] = [f"{routing_note}\n{header}" if routing_note else header]
+        lines: list[str] = []
+        if graph_batch_info is not None and graph_batch_info["possibly_incomplete"]:
+            # nexus-descendants-seed-n1 / substantive critique finding 2:
+            # never silent — see _graph_many_batched's docstring.
+            lines.append(
+                f"[WARNING: link-graph traversal for "
+                f"{graph_batch_info['batches_at_cap']} of "
+                f"{graph_batch_info['batches_total']} seed batch(es) may be "
+                f"INCOMPLETE (hit the per-request node cap) — catalog "
+                f"routing via follow_links may have missed collections. "
+                f"Narrow `subtree` or split into multiple queries.]"
+            )
+        lines.append(f"{routing_note}\n{header}" if routing_note else header)
         lines.append("")
         for i, d in enumerate(sorted_docs, 1):
             dist = f"{d['distance']:.4f}"
