@@ -53,6 +53,7 @@ import java.util.*;
  *   POST  /v1/catalog/manifest/purge     purge manifest for doc_id
  *   GET   /v1/catalog/manifest/chashes   chashes for collection
  *   POST  /v1/catalog/manifest/resync    recompute chunk_count from manifest row count
+ *   GET   /v1/catalog/manifest/null_collection  read-only count of pre-backfill (collection IS NULL) manifest rows (T2 nexus/chroma-residue-plan-2026-08-10 §C2)
  *   GET   /v1/catalog/chash/conformance   per-table chash width-conformance report (tenant-scoped, RDR-180 nexus-du2dw)
  *   GET   /v1/catalog/manifest/verify    per-doc referenced/present/missing (RUNFENCE, nexus-5xn3k.2)
  *   GET   /v1/catalog/manifest/verify_all per-collection referenced/present/missing, every live doc
@@ -174,6 +175,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/resync"       -> handleManifestResync(exchange, tenant, method);
                 case "/manifest/backfill"     -> handleManifestBackfill(exchange, tenant, method);
                 case "/manifest/orphans"      -> handleManifestOrphans(exchange, tenant, method);
+                case "/manifest/null_collection" -> handleManifestNullCollection(exchange, tenant, method);
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
                 // nexus-ysrwi: the third sibling. /manifest/orphans and
                 // /docs/orphaned already existed; links had no equivalent,
@@ -414,6 +416,24 @@ public final class CatalogHandler implements HttpHandler {
      * route is that the answer is complete by construction, not that it is
      * capped and then paged. Response shape mirrors {@link #handleList}:
      * {@code {"documents": [...], "count": N}}.
+     *
+     * <p><b>Completeness vs. index-acceleration (substantive critique
+     * 2026-08-10, T2 nexus/chroma-residue-C1-T0.1-critique-2026-08-10,
+     * finding 2):</b> completeness is guaranteed by construction above —
+     * that claim does not depend on any index existing. Whether the {@code
+     * LIKE 'prefix.%'} predicate itself is index-accelerated is a SEPARATE,
+     * narrower claim: a prefix {@code LIKE} can use the {@code
+     * catalog_documents_pk} B-tree on {@code (tenant_id, tumbler)} only
+     * under a "C" (or otherwise pattern-indexable, e.g. {@code
+     * text_pattern_ops}) collation — {@code scripts/build_pg_bundle.sh}
+     * provisions the LOCAL bundle with {@code initdb --no-locale} (C
+     * collation), so index-acceleration is confirmed there, but the CLOUD
+     * managed PostgreSQL's locale/collation is not provisioned or verified
+     * anywhere in this repository, and no {@code text_pattern_ops} index
+     * exists on this column. Do not describe this route as "one indexed
+     * SQL query" without that caveat — say "complete by construction,
+     * index-accelerated only under a pattern-indexable collation, unverified
+     * on the managed deployment."
      */
     private void handleDescendants(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -2118,6 +2138,29 @@ public final class CatalogHandler implements HttpHandler {
             Map.of("dim", dim,
                    "count", report.get("count"),
                    "orphans", report.get("orphans"))));
+    }
+
+    /**
+     * GET /v1/catalog/manifest/null_collection — read-only census of the
+     * manifest population {@code manifest_orphans}/{@code
+     * manifest_verify_all} structurally cannot see: rows with {@code
+     * collection IS NULL} (T2 nexus/chroma-residue-plan-2026-08-10 §C2).
+     *
+     * <p>Response: {@code {"total": <n>, "backfillable": <m>}}. {@code
+     * total} is every live-document manifest row with a NULL collection;
+     * {@code backfillable} is the subset {@link CatalogRepository
+     * #manifestBackfill} would stamp (the owning document HAS a
+     * physical_collection). {@code total - backfillable} is PERMANENTLY
+     * excluded (ghost/sourceless documents) — see {@link
+     * CatalogRepository#manifestNullCollectionReport}'s javadoc. NEVER
+     * mutates.
+     */
+    private void handleManifestNullCollection(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var report = repo.manifestNullCollectionReport(tenant);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("total", report.get("total"),
+                   "backfillable", report.get("backfillable"))));
     }
 
     /**

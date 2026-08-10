@@ -503,3 +503,79 @@ class Test8hpadAllowlistDoesNotOutliveItsTrigger:
             "(nexus-8hpad) in the SAME change, or the entry silently "
             "outlives its own removal trigger."
         )
+
+
+class TestDescendantsFallbackDoesNotOutliveItsRoute:
+    """Substantive critique 2026-08-10 finding 1 (T2
+    nexus/chroma-residue-C1-T0.1-critique-2026-08-10), on top of ab7907fb
+    (T2 nexus/chroma-residue-plan-2026-08-10 §C1).
+
+    ``HttpCatalogClient.descendants()`` prefers the dedicated ``GET
+    /v1/catalog/descendants`` engine route (one unbounded query, complete
+    by construction) and falls back to ``_descendants_via_paginated_list``
+    — an EXHAUSTIVE paginated ``/list`` walk — on a 404, because
+    ``REQUIRED_ENGINE_VERSION`` was pinned at ``(0, 1, 69)`` when the route
+    was added and the route ships in a LATER engine tag. That fallback was
+    the exact shape of a real, measured bug (0% coverage on 11 of 12 large
+    subtrees) before this fix, so it is a deliberate, temporary safety net
+    — not a design commitment. Named risk (critique finding 1): a
+    "temporary" Chroma-era page loop with no retirement mechanism becomes
+    permanent dead code nobody notices, because once every client-served
+    engine carries the route (``REQUIRED_ENGINE_VERSION`` >= the route's
+    ship version), the 404 branch can never fire again and the fallback
+    method is unreachable.
+
+    The route's exact ship version is NOT established with certainty here
+    (the ``descendants()`` docstring in ``http_catalog_client.py`` guesses
+    "v0.1.70+", but that file was out of this fix's edit surface and the
+    guess is unverified) — so this tripwire keys on the one fact that IS
+    certain: the route did not exist at ``REQUIRED_ENGINE_VERSION ==
+    (0, 1, 69)``, so it ships in some tag strictly after that. The instant
+    the floor advances past ``(0, 1, 69)``, every engine a client is
+    permitted to run against is required to carry the route, and the
+    paginated fallback becomes dead code that should be deleted in the
+    same change that bumps the floor.
+
+    THIS test, not human memory or a bead comment, IS the revisit trigger
+    (nexus-i5c2u: eyeball steps get skipped). It stays green while the
+    floor is pinned at or below ``(0, 1, 69)`` and goes RED the moment
+    ``REQUIRED_ENGINE_VERSION`` advances past it, unless
+    ``_descendants_via_paginated_list`` and its 404-triggered call site
+    have already been deleted from ``http_catalog_client.py`` in that SAME
+    change.
+    """
+
+    def test_floor_at_0_1_69_or_fallback_removed(self) -> None:
+        from pathlib import Path
+
+        from nexus.engine_version import REQUIRED_ENGINE_VERSION
+
+        if REQUIRED_ENGINE_VERSION <= (0, 1, 69):
+            return  # route not guaranteed present on every servable engine yet
+
+        client = (
+            Path(__file__).resolve().parent.parent
+            / "src" / "nexus" / "catalog" / "http_catalog_client.py"
+        )
+        text = client.read_text(encoding="utf-8")
+        assert "_descendants_via_paginated_list" not in text, (
+            f"REQUIRED_ENGINE_VERSION={REQUIRED_ENGINE_VERSION} has moved "
+            "past (0, 1, 69) — the version pinned when GET "
+            "/v1/catalog/descendants was added (ab7907fb, T2 "
+            "nexus/chroma-residue-plan-2026-08-10 §C1). The exact tag that "
+            "ships the route was not established with certainty (this "
+            "tripwire keys on the one certain fact: it postdates 0.1.69), "
+            "but a floor bump past that point means every engine a client "
+            "is permitted to run against now carries the route, so the "
+            "404-triggered pagination fallback can never fire again. "
+            "DELETE: the `_descendants_via_paginated_list` method in "
+            "src/nexus/catalog/http_catalog_client.py, the `except "
+            "httpx.HTTPStatusError` / `status_code == 404` branch in "
+            "`descendants()` that calls it, and the matching fallback "
+            "tests in tests/catalog/test_descendants_pagination_"
+            "completeness.py (TestDescendantsFallbackOn404) — in the SAME "
+            "change that bumps the floor, or this becomes exactly the "
+            "'permanent Chroma-era page loop under a temporary label' "
+            "named in critique finding 1 "
+            "(T2 nexus/chroma-residue-C1-T0.1-critique-2026-08-10)."
+        )

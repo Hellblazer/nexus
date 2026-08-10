@@ -422,6 +422,20 @@ fi
 # rationale + bead reference + a mechanized removal trigger, per the
 # HISTORY above.
 #
+# NOT HERE BY DESIGN: health.py's `_check_manifest_null_collection` (C2,
+# T2 nexus/chroma-residue-plan-2026-08-10) — GET
+# /v1/catalog/manifest/null_collection has never shipped on ANY engine tag
+# (REQUIRED_ENGINE_VERSION pinned at (0,1,69), before the route). Unlike
+# the two allowlist idioms above, this check does NOT take the
+# unconditional-WARN-plus-allowlist-entry path — that would put an entry
+# in this file on day one that could never be exercised as "removed",
+# since the check would never have rendered clean in the first place. It
+# instead gates its OWN severity on the live REQUIRED_ENGINE_VERSION
+# constant (ok=True informational while the floor is at or below (0,1,69),
+# loud WARN once it advances past — see that function's docstring), so it
+# self-corrects with no allowlist entry and no manual removal step ever
+# required. Substantive critique finding 1, 2026-08-10.
+#
 # The sentinel below matches NOTHING (an empty regex would match
 # everything through grep -v -E and silently allowlist every warning).
 ALLOWLIST_REGEX='__NO_ALLOWLISTED_WARNINGS_SENTINEL__'

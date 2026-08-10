@@ -741,6 +741,61 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             "orphans": result.get("orphans", []),
         }
 
+    def manifest_null_collection_report(self) -> dict:
+        """Read-only census of the manifest population :meth:`manifest_orphans`
+        cannot see (T2 nexus/chroma-residue-plan-2026-08-10 §C2): rows with
+        ``collection IS NULL``.
+
+        Returns ``{"total": <n>, "backfillable": <m>, "unavailable": <bool>}``.
+        ``total`` is every live-document manifest row with a NULL collection;
+        ``backfillable`` is the subset :meth:`manifest_backfill` would stamp
+        (the owning document has a ``physical_collection``). ``total -
+        backfillable`` is PERMANENTLY excluded from every orphan/verify check
+        — ghost/sourceless documents, whose manifest rows never get a
+        collection stamp (backfill or no backfill; see
+        ``CatalogRepository.manifestNullCollectionReport``'s javadoc).
+
+        Degrades gracefully on a pre-route engine (404): the route ships
+        after this bead's engine tag, and ``REQUIRED_ENGINE_VERSION`` may
+        still be pinned below it at any given moment — an expected, not
+        exceptional, condition (same shape as :meth:`descendants`). Unlike
+        ``descendants``, there is no client-side fallback computation that
+        would not itself be the O(catalog) full-corpus walk this route
+        exists to avoid — so a 404 (or any other failure) returns
+        ``{"total": 0, "backfillable": 0, "unavailable": True}``: an HONEST
+        "cannot determine," never a silent clean zero. Callers MUST check
+        ``unavailable`` before trusting ``total == 0`` as a real answer.
+        """
+        try:
+            result = self._get("/manifest/null_collection")
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            _log.warning(
+                "http_catalog_client.manifest_null_collection_report_failed",
+                status=status,
+            )
+            return {"total": 0, "backfillable": 0, "unavailable": True}
+        except Exception as exc:  # noqa: BLE001 — best-effort read-only diagnostic; never crash the caller
+            _log.warning(
+                "http_catalog_client.manifest_null_collection_report_failed",
+                error=str(exc),
+            )
+            return {"total": 0, "backfillable": 0, "unavailable": True}
+        result = result or {}
+        if "total" not in result:
+            # Same fail-honest contract as manifest_orphans' `count` field —
+            # a stripped `total` key must not read as a clean zero.
+            _log.warning(
+                "http_catalog_client.manifest_null_collection_report_malformed",
+                keys=sorted(result),
+            )
+            return {"total": 0, "backfillable": 0, "unavailable": True}
+        return {
+            "total": int(result.get("total", 0) or 0),
+            "backfillable": int(result.get("backfillable", 0) or 0),
+            "unavailable": False,
+        }
+
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead
         nexus-du2dw): the engine-route counterpart to the LOCAL-ONLY
@@ -1706,9 +1761,21 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         """Correctness fallback for :meth:`descendants` on a pre-route engine.
 
         Pages ``/list`` to exhaustion (matching ``all_documents``'s
-        unfiltered-branch pattern) and filters client-side — slower than
-        the dedicated route (O(catalog size) instead of one indexed
-        query) but never silently truncates.
+        unfiltered-branch pattern) and filters client-side — O(catalog
+        size) round trips instead of one server-side query — but never
+        silently truncates.
+
+        Do NOT read "one server-side query" as "one INDEX SEEK". The route's
+        predicate is ``tumbler LIKE prefix || '.%'``, which a B-tree can
+        accelerate only under a pattern-indexable collation (C locale, which
+        the bundled local PG uses — ``initdb --no-locale`` in
+        ``scripts/build_pg_bundle.sh``) and with no ``text_pattern_ops``
+        index present anywhere. The managed cloud deployment's collation is
+        not provisioned or verified anywhere in this repo, so on cloud this
+        may be a sequential scan. What the route guarantees unconditionally
+        is COMPLETENESS; index acceleration is unverified there. Correcting
+        the "one indexed SQL query" phrasing in ab7907fb's commit message,
+        which asserted more than was established.
         """
         needle = prefix + "."
         page = 500

@@ -405,6 +405,11 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                      "collection": "knowledge__o__minilm-l6-v2-384__v1"},
                 ],
             })
+        elif op == "/manifest/null_collection":
+            # T2 nexus/chroma-residue-plan-2026-08-10 §C2: GET
+            # /manifest/null_collection -> {total, backfillable} — mirrors
+            # CatalogRepository.manifestNullCollectionReport's shape.
+            self._send_json({"total": 0, "backfillable": 0})
         elif op == "/chash/conformance":
             # RDR-180 (nexus-du2dw): GET /chash/conformance?dim= ->
             # {dim, tables: [{table_name, total, non_conformant, sample_chashes}]}
@@ -2554,3 +2559,77 @@ class TestDanglingEndpointBecomesValueError:
         c = self._client_raising(monkeypatch, 400, {"error": "malformed body"})
         with pytest.raises(httpx.HTTPStatusError):
             c.link("1.1.1", "1.1.2", "cites", "someone")
+
+
+class TestManifestNullCollectionReport:
+    """Substantive critique finding 4 (T2 nexus/chroma-residue-C2-durability-
+    critique-2026-08-10): only the 200-with-data path had ANY coverage
+    (FakeCatalogHandler's default response) before this class — the
+    404/malformed-body 'unavailable' branches every real user hits TODAY
+    (no engine tag ships the route yet) had zero test coverage on either
+    the client or the health-check side.
+    """
+
+    def _client_get_raising(
+        self, monkeypatch: pytest.MonkeyPatch, status: int, body: dict,
+    ) -> HttpCatalogClient:
+        c = object.__new__(HttpCatalogClient)
+
+        def _boom(path, **params):
+            request = httpx.Request(
+                "GET", "http://svc/v1/catalog/manifest/null_collection",
+            )
+            response = httpx.Response(status, json=body, request=request)
+            raise httpx.HTTPStatusError("boom", request=request, response=response)
+
+        monkeypatch.setattr(c, "_get", _boom, raising=False)
+        return c
+
+    def _client_get_returning(
+        self, monkeypatch: pytest.MonkeyPatch, body: Any,
+    ) -> HttpCatalogClient:
+        c = object.__new__(HttpCatalogClient)
+        monkeypatch.setattr(c, "_get", lambda path, **params: body, raising=False)
+        return c
+
+    def test_200_with_data_returns_available(self, client: HttpCatalogClient) -> None:
+        """The pre-existing, already-covered-by-precedent shape (via
+        FakeCatalogHandler's default /manifest/null_collection response) —
+        pinned explicitly here so this class documents the full contract in
+        one place."""
+        report = client.manifest_null_collection_report()
+        assert report == {"total": 0, "backfillable": 0, "unavailable": False}
+
+    def test_404_returns_unavailable_not_a_false_clean_zero(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A pre-route engine 404s this route (today's real state — no
+        engine tag ships it yet). Must degrade to an HONEST 'cannot
+        determine', never a false-clean total=0."""
+        c = self._client_get_raising(monkeypatch, 404, {"error": "not found"})
+        report = c.manifest_null_collection_report()
+        assert report == {"total": 0, "backfillable": 0, "unavailable": True}
+
+    def test_other_http_status_error_also_returns_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        c = self._client_get_raising(monkeypatch, 500, {"error": "boom"})
+        report = c.manifest_null_collection_report()
+        assert report == {"total": 0, "backfillable": 0, "unavailable": True}
+
+    def test_malformed_body_missing_total_returns_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A 200 response stripped of the `total` field must NOT read as a
+        clean zero — same fail-honest contract as manifest_orphans' `count`
+        field (this method's own docstring)."""
+        c = self._client_get_returning(monkeypatch, {"backfillable": 0})
+        report = c.manifest_null_collection_report()
+        assert report == {"total": 0, "backfillable": 0, "unavailable": True}
+
+    def test_none_body_returns_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        c = self._client_get_returning(monkeypatch, None)
+        report = c.manifest_null_collection_report()
+        assert report == {"total": 0, "backfillable": 0, "unavailable": True}
