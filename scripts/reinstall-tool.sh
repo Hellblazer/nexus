@@ -349,9 +349,16 @@ fi
 # comparison — there is nothing to downgrade.
 NX_BIN="${VENV_DIR}/bin/nx"
 if [[ -f "${SOURCE}/pyproject.toml" && -x "$NX_BIN" ]]; then
-    SRC_VERSION="$(sed -n "s/^version *= *[\"']\([^\"']*\)[\"']/\1/p" "${SOURCE}/pyproject.toml" | head -1)"
+    # Pipe-free tail (nexus-i66g4/wbeyi class): capture sed's full output
+    # first, then take the first line via parameter expansion instead of
+    # `| head -1` -- under this script's `set -euo pipefail`, a
+    # still-writing sed closed early by head risks its SIGPIPE getting
+    # promoted over head's own (successful) exit status.
+    SRC_VERSION_ALL="$(sed -n "s/^version *= *[\"']\([^\"']*\)[\"']/\1/p" "${SOURCE}/pyproject.toml")"
+    SRC_VERSION="${SRC_VERSION_ALL%%$'\n'*}"
     [[ -n "$SRC_VERSION" ]] || echo "warn: could not parse version from ${SOURCE}/pyproject.toml — downgrade guard inactive"
-    INSTALLED_VERSION="$("$NX_BIN" --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*\).*/\1/p' | head -1)"
+    INSTALLED_VERSION_ALL="$("$NX_BIN" --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*\).*/\1/p')"
+    INSTALLED_VERSION="${INSTALLED_VERSION_ALL%%$'\n'*}"
     if [[ -n "$SRC_VERSION" && -n "$INSTALLED_VERSION" ]]; then
         NEWEST="$(printf '%s\n%s\n' "$SRC_VERSION" "$INSTALLED_VERSION" | sort -V | tail -1)"
         if [[ "$SRC_VERSION" != "$INSTALLED_VERSION" && "$NEWEST" == "$INSTALLED_VERSION" && "$FORCE" != "1" ]]; then

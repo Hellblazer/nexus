@@ -143,7 +143,7 @@ for name in migration-rehearsal gc-ab release-sandbox upgrade-shakeout sandbox t
     else
         bad "$name: blocked invocation exited 0 — should have failed on the held lock"
     fi
-    if echo "$out" | grep -q "FAILED to acquire"; then
+    if [[ "$out" == *"FAILED to acquire"* ]]; then
         ok "$name: failure message names the lock"
     else
         bad "$name: no lock-failure message in output: $out"
@@ -153,7 +153,7 @@ for name in migration-rehearsal gc-ab release-sandbox upgrade-shakeout sandbox t
     else
         bad "$name: blocked invocation took ${elapsed_ms}ms (>=1000ms — looks like real work ran before failing)"
     fi
-    if echo "$out" | grep -q "lock acquired"; then
+    if [[ "$out" == *"lock acquired"* ]]; then
         bad "$name: 'lock acquired' appeared while the lock was HELD — got past a lock it should not have"
     else
         ok "$name: never got past the held lock (no 'lock acquired' in output)"
@@ -172,7 +172,7 @@ for name in migration-rehearsal gc-ab release-sandbox upgrade-shakeout sandbox t
     else
         bad "$name: past-the-lock invocation exited $rc2 (expected 0 — did the self-test seam get skipped?): $out2"
     fi
-    if echo "$out2" | grep -q "lock acquired"; then
+    if [[ "$out2" == *"lock acquired"* ]]; then
         ok "$name: re-invocation acquired the (now-free) lock and printed the acquire line"
     else
         bad "$name: re-invocation never got past the lock: $out2"
@@ -210,12 +210,12 @@ if [[ $rc3 -eq 2 ]]; then
 else
     bad "migration-rehearsal --cold --guided: exited $rc3 (expected 2): $out3"
 fi
-if echo "$out3" | grep -q "different flows; pick one"; then
+if [[ "$out3" == *"different flows; pick one"* ]]; then
     ok "migration-rehearsal --cold --guided: conflict message present"
 else
     bad "migration-rehearsal --cold --guided: conflict message missing: $out3"
 fi
-if echo "$out3" | grep -qi "unbound variable"; then
+if [[ "${out3,,}" == *"unbound variable"* ]]; then
     bad "migration-rehearsal --cold --guided: 'unbound variable' leaked on stderr (a pre-lock trap referenced \$LOCKDIR before assignment): $out3"
 else
     ok "migration-rehearsal --cold --guided: no unbound-variable leak"
@@ -246,12 +246,12 @@ elif [[ $rc4 -eq 124 ]]; then
 else
     bad "upgrade-shakeout (no args): exited $rc4 (expected 0): $out4"
 fi
-if echo "$out4" | grep -q "^Usage:"; then
+if [[ $'\n'"$out4" == *$'\n'"Usage:"* ]]; then
     ok "upgrade-shakeout (no args): usage text present"
 else
     bad "upgrade-shakeout (no args): usage text missing: $out4"
 fi
-if echo "$out4" | grep -qiE "unbound variable|FAILED to acquire"; then
+if [[ "${out4,,}" == *"unbound variable"* || "${out4,,}" == *"failed to acquire"* ]]; then
     bad "upgrade-shakeout (no args): lock-contention/unbound-variable noise leaked: $out4"
 else
     ok "upgrade-shakeout (no args): no lock-contention/unbound-variable noise"
@@ -277,7 +277,7 @@ if [[ $rc5 -eq 0 ]]; then
 else
     bad "release-sandbox --help: exited $rc5 (expected 0): $out5"
 fi
-if echo "$out5" | grep -q "^Usage:"; then
+if [[ $'\n'"$out5" == *$'\n'"Usage:"* ]]; then
     ok "release-sandbox --help: usage text present"
 else
     bad "release-sandbox --help: usage text missing: $out5"
@@ -289,12 +289,12 @@ if [[ $rc6 -ne 0 ]]; then
 else
     bad "release-sandbox bogus-mode: exited 0 (expected nonzero)"
 fi
-if echo "$out6" | grep -q "unknown mode"; then
+if [[ "$out6" == *"unknown mode"* ]]; then
     ok "release-sandbox bogus-mode: unknown-mode message present"
 else
     bad "release-sandbox bogus-mode: unknown-mode message missing: $out6"
 fi
-if echo "$out6" | grep -qi "unbound variable"; then
+if [[ "${out6,,}" == *"unbound variable"* ]]; then
     bad "release-sandbox bogus-mode: 'unbound variable' leaked: $out6"
 else
     ok "release-sandbox bogus-mode: no unbound-variable leak"

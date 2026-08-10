@@ -154,7 +154,13 @@ if [[ -z "$FROM_VERSION" ]]; then
     [[ -z "$FROM_VERSION" ]] && _die "could not resolve latest conexus version from PyPI"
 fi
 
-echo "Upgrade-shakeout: $FROM_VERSION  →  $(grep '^version' "$REPO_ROOT/pyproject.toml" | head -1 | cut -d'"' -f2) (REPO_ROOT)"
+# Pipe-free tail (nexus-i66g4/wbeyi class): take the first line via
+# parameter expansion instead of `| head -1` -- under this script's
+# `set -o pipefail`, a still-writing grep closed early by head risks its
+# SIGPIPE getting promoted over head's own (successful) exit status.
+REPO_PKG_VERSION_ALL="$(grep '^version' "$REPO_ROOT/pyproject.toml" | cut -d'"' -f2)"
+REPO_PKG_VERSION="${REPO_PKG_VERSION_ALL%%$'\n'*}"
+echo "Upgrade-shakeout: $FROM_VERSION  →  ${REPO_PKG_VERSION} (REPO_ROOT)"
 echo "Sandbox: $SANDBOX"
 
 # ── 1. Fresh sandbox ─────────────────────────────────────────────────────────

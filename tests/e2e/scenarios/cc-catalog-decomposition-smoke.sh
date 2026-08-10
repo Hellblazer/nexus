@@ -70,9 +70,22 @@ _assert() {
 }
 
 _no_crash_markers() {
-    local snapshot
+    local snapshot crash_pattern
     snapshot=$(capture -200)
-    ! echo "$snapshot" | grep -qiE "AttributeError|database is locked|has no attribute '_sync'|has no attribute '_docs'|has no attribute '_links'|has no attribute '_writes'|RuntimeError"
+    # Pipe-free (nexus-i66g4/wbeyi class): match against the already-
+    # captured variable directly instead of `echo ... | grep -qiE ...` --
+    # under this script's `set -o pipefail`, a still-writing echo closed
+    # early by grep risks its SIGPIPE getting promoted over grep's own
+    # (successful) exit status. `=~` uses the same ERE dialect as
+    # `grep -E`, so the pattern carries over verbatim; `nocasematch`
+    # supplies grep's `-i`, scoped to this function only.
+    crash_pattern="AttributeError|database is locked|has no attribute '_sync'|has no attribute '_docs'|has no attribute '_links'|has no attribute '_writes'|RuntimeError"
+    shopt -s nocasematch
+    if [[ "$snapshot" =~ $crash_pattern ]]; then
+        shopt -u nocasematch
+        return 1
+    fi
+    shopt -u nocasematch
 }
 
 # ─── Stress sequence ─────────────────────────────────────────────────────────
