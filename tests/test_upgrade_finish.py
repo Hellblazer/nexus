@@ -2109,6 +2109,62 @@ class TestPendingDataRungCallout:
         assert "unknown" in lines[0].lower() or "unavailable" in lines[0].lower()
         assert "probe exploded" in lines[0]
 
+    def test_registry_construction_failure_surfaces_as_unavailable_not_silently_dropped(self):
+        """nexus-jgac3: v2mdd fixed the INNER per-rung `except Exception:
+        continue` (a raising detect()) but left this function's OWN
+        default_registry() call -- the thing that FEEDS the for-loop --
+        completely unguarded. A raising default_registry() (deferred
+        imports, registry construction) must degrade to an explicit
+        unavailable line, the same shape v2mdd already established for a
+        raising detect(), not propagate out of this function at all."""
+        from nexus.upgrade_finish import pending_data_rung_callout
+
+        with patch(
+            "nexus.upgrade_ladder.registry.default_registry",
+            side_effect=RuntimeError("registry construction exploded"),
+        ):
+            lines = pending_data_rung_callout()
+        assert len(lines) == 1
+        assert "unknown" in lines[0].lower() or "unavailable" in lines[0].lower()
+        assert "registry construction exploded" in lines[0]
+
+
+class TestCheckVersionTransitionPendingDataRungRegistryFailure:
+    """nexus-jgac3: drives the REAL pending_data_rung_callout (not mocked)
+    with default_registry() raising. Before the fix, this exception would
+    propagate out of pending_data_rung_callout, be swallowed by
+    check_version_transition's own outer try/except (a structlog warning
+    only, no user-visible trace) -- the finish summary would read as if
+    nothing were pending, exactly the GH #1402-shaped silent-failure this
+    bead is a live instance of. After the fix, pending_data_rung_callout
+    catches it internally and returns an explicit unavailable line, which
+    flows through into the summary normally, same as every other leg."""
+
+    def test_registry_construction_failure_surfaces_in_finish_summary_not_silently_absorbed(
+        self, tmp_path,
+    ):
+        (tmp_path / "last_seen_version").write_text("6.7.0\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.converge_engine", return_value=[],
+        ), patch(
+            "nexus.upgrade_finish.heal_diag_view", return_value=[],
+        ), patch(
+            "nexus.upgrade_ladder.registry.default_registry",
+            side_effect=RuntimeError("registry construction exploded"),
+        ):
+            line = check_version_transition(tmp_path)
+        assert line is not None
+        assert "unknown" in line.lower() or "unavailable" in line.lower()
+        assert "registry construction exploded" in line
+
 
 class TestCheckVersionTransitionLaunchagentUnload:
     """check_version_transition's finish pass also runs the T2 LaunchAgent
