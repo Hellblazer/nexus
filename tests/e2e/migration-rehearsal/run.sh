@@ -62,6 +62,7 @@ COLD=0
 COMPREHENSIVE=0
 STRESS=0
 FULLSTACK=0
+SHAKEOUT_E2E=0
 HOLE_PUNCH=0
 SHAKEOUT=0
 ACQUIRE=0
@@ -169,6 +170,7 @@ for a in "$@"; do
     --comprehensive) COMPREHENSIVE=1 ;;  # Phase D: daily-driver surface on the default rehearse.sh
     --stress)     STRESS=1 ;;            # Phase E: concurrency + queue-drain stress on the default rehearse.sh
     --fullstack)  FULLSTACK=1 ;;         # standalone: full topology (service + nx-mcp + claude) MCP-driven enqueue + worker drain
+    --shakeout-e2e) SHAKEOUT_E2E=1 ;;    # standalone: nexus-33hpq-class daily-driver shakeout — real-corpus code/md/pdf ingest, search/query retrieval, T2/T1 round-trip, doctor, MCP surface, live peak-RSS assertion during code ingest
     --hole-punch) HOLE_PUNCH=1 ;;        # standalone: verify-fill delta-fill proof against a real fault-injected PG target (nexus-s3dd4.7)
     --acquire)    ACQUIRE=1 ;;         # nexus-1ddsy: PUBLISHED-artifact gate — cold-acquire NEXUS_SERVICE_TAG on a bare box and drive it
     --shakeout)   SHAKEOUT=1 ;;          # standalone: CANDIDATE shakeout — CLI verb matrix + incremental index + concurrent load against the locally-built -Ob binary (nexus-h8rf6)
@@ -243,7 +245,7 @@ trap '_guided_restore' EXIT
 # stranded-install redirect; its acceptance rehearsal is tracked in nexus-8nlj4
 # (cut-time, gated on the LAST_MIGRATION_CAPABLE stamp). Refuse loud, pre-build.
 if [ "$GUIDED" = 1 ] || [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
-  echo "RETIRED (RDR-155 P4b): --guided/--cold/--hole-punch drive nx guided-upgrade, deleted in P4b P2. Superseded by the two-hop stranded-redirect rehearsal (nexus-8nlj4). The surviving journeys are --era-hop, --package-upgrade, --shakeout, --fullstack, --chash-window, and the default rehearse.sh (Phases A/D/E; its migrate leg is skipped)." >&2
+  echo "RETIRED (RDR-155 P4b): --guided/--cold/--hole-punch drive nx guided-upgrade, deleted in P4b P2. Superseded by the two-hop stranded-redirect rehearsal (nexus-8nlj4). The surviving journeys are --era-hop, --package-upgrade, --shakeout, --shakeout-e2e, --fullstack, --chash-window, and the default rehearse.sh (Phases A/D/E; its migrate leg is skipped)." >&2
   exit 2
 fi
 # nexus-gilf2: --guided seeds local-ONNX (bge-768) cross-model targets, while
@@ -314,6 +316,12 @@ fi
 # binary or PG bundle is staged by this harness) — never combined.
 [ "$STRANDED" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$SHAKEOUT" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$CHASH_WINDOW" = 1 ] || [ "$ACQUIRE" = 1 ]; } && { echo "--stranded is a standalone two-hop stranded-redirect journey (its own entrypoint); do not combine with other legs" >&2; exit 2; }
 [ "$STRANDED" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--stranded always rebuilds the working-tree wheel; --no-build is irrelevant" >&2; exit 2; }
+# --shakeout-e2e is a standalone journey (nexus-33hpq-class daily-driver
+# shakeout): same native-binary staging as the default path (it needs a
+# REAL locally-built service to embed the Step-2 corpus locally via
+# bge-768 — no engine artifact is acquired at runtime) — never combined
+# with another flow flag.
+[ "$SHAKEOUT_E2E" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$SHAKEOUT" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$CHASH_WINDOW" = 1 ] || [ "$ACQUIRE" = 1 ] || [ "$STRANDED" = 1 ]; } && { echo "--shakeout-e2e is a standalone daily-driver shakeout (its own entrypoint); do not combine with other legs" >&2; exit 2; }
 
 # RDR-184 P0.2 (nexus-ccs9v.2): serialize on the machine-global fixed
 # resources this harness mutates — the fixed docker tag ($IMAGE) and the
@@ -353,13 +361,24 @@ echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
 # No-op — unset in every normal invocation.
 [[ -n "${NX_E2E_LOCK_SELFTEST:-}" ]] && exit 0
 
-if [ "$GUIDED" = 1 ] || [ "$CHASH_WINDOW" = 1 ]; then
+if [ "$GUIDED" = 1 ] || [ "$CHASH_WINDOW" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ]; then
   # --guided / --chash-window force-rebuild the native binary with the stamp
   # baked in, so both are incompatible with --no-build (which would reuse a
   # stale/unstamped binary). For --chash-window the stamp matters for the
   # same reason as --guided: an unstamped binary reports release_version=null
   # and every version-shaped surface degrades to "unknown".
-  [ "$DO_BUILD" = 0 ] && { echo "--guided/--chash-window require a fresh native build; drop --no-build" >&2; exit 2; }
+  #
+  # --shakeout-e2e joins them for that SAME reason, proven empirically
+  # 2026-08-09: release.properties ships release_version= BLANK and it is
+  # stamped only by the engine-service-release workflow, so a locally-built
+  # binary reports release_version=null on /version FOREVER — not as a startup
+  # race. That made the journey's sidecar-vs-running-binary cross-check
+  # permanently UNMEASURED, and (worse) it meant the provenance sidecar the
+  # journey writes was asserting a version the binary could never corroborate
+  # — the exact "claim, not verified state" shape of nexus-hdumg. Stamping
+  # here makes the binary self-describe, so both doctor's convergence check
+  # and the journey's cross-check become real measurements instead of claims.
+  [ "$DO_BUILD" = 0 ] && { echo "--guided/--chash-window/--shakeout-e2e require a fresh native build; drop --no-build" >&2; exit 2; }
   echo "[stamp] stamping $RELEASE_PROPS release_version=$GUIDED_STAMP_VERSION (restored on exit)…"
   grep -v '^release_version=' "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp"
   printf 'release_version=%s\n' "$GUIDED_STAMP_VERSION" >> "$RELEASE_PROPS.tmp"
@@ -568,16 +587,21 @@ elif [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
   # + seed travel in; the entrypoint below picks the right one.
   cp "$HERE/Dockerfile.cold" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_cold.sh" "$HERE/rehearse_hole_punch.sh" "$HERE/seed_legacy.py" "$STAGE/"
-elif [ "$FULLSTACK" = 1 ]; then
+elif [ "$FULLSTACK" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ]; then
   # Full topology: native binary + the fullstack Dockerfile (adds linux claude) +
-  # the fullstack driver. Same native-binary staging as the default path.
+  # BOTH drivers it now unconditionally COPYs (rehearse_fullstack.sh AND
+  # rehearse_shakeout_e2e.sh — Dockerfile.fullstack is shared verbatim by
+  # both journeys, so the staged context must satisfy every COPY line in it
+  # regardless of which flag triggered this build; the entrypoint override
+  # below picks the right one to actually RUN). Same native-binary staging
+  # as the default path.
   mkdir -p "$STAGE/native"
   cp service/target/nexus-service "$STAGE/native/"
   if compgen -G "service/target/*.so" > /dev/null; then
     cp service/target/*.so "$STAGE/native/"
   fi
   cp "$HERE/Dockerfile.fullstack" "$STAGE/Dockerfile"
-  cp "$HERE/rehearse_fullstack.sh" "$HERE/seed_legacy.py" "$STAGE/"
+  cp "$HERE/rehearse_fullstack.sh" "$HERE/rehearse_shakeout_e2e.sh" "$HERE/seed_legacy.py" "$STAGE/"
 else
   # The native binary travels into the image. A LOCAL -Pnative -Ob quick build also
   # emits native-image .so siblings (libjvm/libawt/liblcms/...) that must be
@@ -638,6 +662,17 @@ fi
 if [ "$STRANDED" = 1 ]; then
   run_env+=(-e "PIN_RELEASE=$STRAND_PIN_RELEASE")
 fi
+if [ "$SHAKEOUT_E2E" = 1 ]; then
+  # Forward the two knobs rehearse_shakeout_e2e.sh advertises in its own header.
+  # Without this they are DEAD through the only documented entrypoint: setting
+  # them on the host has no effect inside the container (code-review finding,
+  # 2026-08-09). Only forwarded when actually set, so the in-container defaults
+  # (RSS budget 3 GB; index timeout 1800s) stay authoritative otherwise.
+  [ -n "${NX_SHAKEOUT_E2E_RSS_BUDGET_GB:-}" ] && \
+    run_env+=(-e "NX_SHAKEOUT_E2E_RSS_BUDGET_GB=$NX_SHAKEOUT_E2E_RSS_BUDGET_GB")
+  [ -n "${NX_SHAKEOUT_E2E_INDEX_TIMEOUT_S:-}" ] && \
+    run_env+=(-e "NX_SHAKEOUT_E2E_INDEX_TIMEOUT_S=$NX_SHAKEOUT_E2E_INDEX_TIMEOUT_S")
+fi
 if [ "$WITH_CLOUD" = 1 ]; then
   # Forward the Voyage key from .env (export VOYAGE_API_KEY=…) under both names
   # the code probes. Never echoed.
@@ -668,6 +703,22 @@ if [ "$FULLSTACK" = 1 ]; then
   docker run --rm "${run_env[@]}" \
     -v "$STAGE/.claude-credentials.json":/home/nexus/.claude/.credentials.json:ro \
     "$IMAGE"
+elif [ "$SHAKEOUT_E2E" = 1 ]; then
+  # nexus-33hpq-class daily-driver shakeout: same fresh-oauth mounting as
+  # --fullstack (Step 7's MCP workload is a real, billed claude -p call
+  # too), but override the image's default entrypoint (rehearse_fullstack.sh)
+  # to run this journey's own driver instead — mirrors how --acquire/
+  # --shakeout override the entrypoint on a shared/reused image.
+  FRESHCREDS="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null || true)"
+  if [ -z "$FRESHCREDS" ] && [ -f "$HOME/.claude/.credentials.json" ]; then
+    echo "      (keychain miss — falling back to ~/.claude/.credentials.json, may be stale)" >&2
+    FRESHCREDS="$(cat "$HOME/.claude/.credentials.json")"
+  fi
+  [ -n "$FRESHCREDS" ] || { echo "--shakeout-e2e needs claude oauth (keychain 'Claude Code-credentials' or ~/.claude/.credentials.json)" >&2; exit 1; }
+  printf '%s' "$FRESHCREDS" > "$STAGE/.claude-credentials.json"; chmod 600 "$STAGE/.claude-credentials.json"
+  docker run --rm "${run_env[@]}" \
+    -v "$STAGE/.claude-credentials.json":/home/nexus/.claude/.credentials.json:ro \
+    --entrypoint /bin/bash "$IMAGE" /home/nexus/rehearse_shakeout_e2e.sh
 elif [ "$HOLE_PUNCH" = 1 ]; then
   # nexus-s3dd4.7: override the cold box's default entrypoint to drive the
   # verify-fill hole-punch journey instead of the plain cold-acquire MVV.

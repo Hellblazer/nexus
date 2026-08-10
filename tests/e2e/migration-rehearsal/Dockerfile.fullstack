@@ -58,6 +58,7 @@ RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
 COPY --chown=nexus:nexus native/ /opt/nexus-service-native/
 
 COPY rehearse_fullstack.sh /home/nexus/rehearse_fullstack.sh
+COPY rehearse_shakeout_e2e.sh /home/nexus/rehearse_shakeout_e2e.sh
 COPY seed_legacy.py /home/nexus/seed_legacy.py
 
 ENTRYPOINT ["/bin/bash", "/home/nexus/rehearse_fullstack.sh"]
