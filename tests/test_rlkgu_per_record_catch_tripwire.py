@@ -314,6 +314,14 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
 #: tripwire; the fix is a deliberate classification decision, not a
 #: blanket exemption.
 _COMMAND_LEVEL_REASONS: dict[str, str] = {
+    "CombinedWriteEmbedTimeoutError": (
+        "Raised from HttpCatalogClient.write_manifest_many's chunk-"
+        "carrying POST (nexus-y9t08 CRITICAL fix) -- a flush-grain "
+        "catalog write invoked from indexer.py's ChunkBatcher flush path "
+        "and mcp_infra.py, never from index_pdf/index_markdown/"
+        "_index_record/_index_dt_content_record or any other "
+        "per-record/per-file loop body in dt.py or index.py."
+    ),
     "T3ConnectionError": (
         "No live `raise T3ConnectionError` site anywhere in src/nexus/ "
         "as of nexus-rlkgu -- defined but currently unused, unreachable "

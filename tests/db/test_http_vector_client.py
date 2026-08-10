@@ -2068,6 +2068,98 @@ def test_serving_embedding_mode_reads_singleton_best_effort(monkeypatch):
     assert hvc._serving_embedding_mode() is None
 
 
+class TestOnnxLocalUpsertChunkCapValidation:
+    """nexus-97dp4 CRITICAL 2: ``NX_ONNX_LOCAL_UPSERT_CHUNK_CAP`` overrides
+    the nexus-33hpq memory-safety cap (default 16) for
+    ``tests/e2e/local-index-memory-gate.sh``. Before this fix the raw
+    ``int(os.environ.get(...) or 16)`` had no validation (a non-numeric
+    value crashed the process with an uncaught ValueError at IMPORT time,
+    killing every ``nx`` invocation), no bounds checking, and no log line
+    when active.
+
+    ``_resolve_onnx_local_upsert_chunk_cap(raw)`` is a pure function
+    taking the literal ``os.environ.get(...)`` string (or ``None``) so
+    every path is directly testable without env/reload gymnastics — the
+    module-level assignment still reads ``os.environ`` exactly ONCE at
+    import time (unchanged contract: every caller sees the same
+    constant)."""
+
+    def test_absent_env_var_defaults_to_16(self) -> None:
+        from nexus.db.http_vector_client import _resolve_onnx_local_upsert_chunk_cap
+
+        assert _resolve_onnx_local_upsert_chunk_cap(None) == 16
+        assert _resolve_onnx_local_upsert_chunk_cap("") == 16
+
+    def test_non_numeric_value_fails_loud(self) -> None:
+        """FAIL LOUD, never a silent fall-through (project standing
+        directive: no silent fallbacks for correctness/safety problems).
+        This constant defeats the nexus-33hpq 77.4GB-RSS memory-safety
+        cap if a bad value were ever silently absorbed instead of
+        surfaced."""
+        from nexus.db.http_vector_client import _resolve_onnx_local_upsert_chunk_cap
+
+        with pytest.raises(RuntimeError, match="NX_ONNX_LOCAL_UPSERT_CHUNK_CAP"):
+            _resolve_onnx_local_upsert_chunk_cap("not-a-number")
+
+    def test_zero_fails_loud(self) -> None:
+        from nexus.db.http_vector_client import _resolve_onnx_local_upsert_chunk_cap
+
+        with pytest.raises(RuntimeError, match="positive"):
+            _resolve_onnx_local_upsert_chunk_cap("0")
+
+    def test_negative_fails_loud(self) -> None:
+        from nexus.db.http_vector_client import _resolve_onnx_local_upsert_chunk_cap
+
+        with pytest.raises(RuntimeError, match="positive"):
+            _resolve_onnx_local_upsert_chunk_cap("-5")
+
+    def test_valid_override_is_accepted_with_no_upper_bound(self) -> None:
+        """Deliberately NOT bounded above the safe default (16) —
+        tests/e2e/local-index-memory-gate.sh's whole purpose is RAISING
+        this toward the pre-nexus-33hpq 300 (or beyond) to prove the
+        gate's corpus actually binds a higher ceiling too. Capping this
+        above the default would defeat that harness."""
+        from nexus.db.http_vector_client import _resolve_onnx_local_upsert_chunk_cap
+
+        assert _resolve_onnx_local_upsert_chunk_cap("300") == 300
+        assert _resolve_onnx_local_upsert_chunk_cap("100000") == 100000
+
+    def test_override_active_emits_structured_warning(self) -> None:
+        """A run using a non-default cap must never be invisible."""
+        from structlog.testing import capture_logs
+
+        from nexus.db.http_vector_client import _resolve_onnx_local_upsert_chunk_cap
+
+        with capture_logs() as logs:
+            value = _resolve_onnx_local_upsert_chunk_cap("64")
+
+        assert value == 64
+        events = [e for e in logs if e["event"] == "onnx_local_upsert_chunk_cap_overridden"]
+        assert len(events) == 1
+        assert events[0]["value"] == 64
+        assert events[0]["log_level"] == "warning"
+
+    def test_absent_env_var_emits_no_warning(self) -> None:
+        """Non-vacuity guard for the log test above: the default path
+        must stay silent — only an ACTIVE override logs."""
+        from structlog.testing import capture_logs
+
+        from nexus.db.http_vector_client import _resolve_onnx_local_upsert_chunk_cap
+
+        with capture_logs() as logs:
+            _resolve_onnx_local_upsert_chunk_cap(None)
+
+        events = [e for e in logs if e["event"] == "onnx_local_upsert_chunk_cap_overridden"]
+        assert len(events) == 0
+
+    def test_module_constant_still_defaults_to_16(self) -> None:
+        """Regression guard for the real import-time module constant
+        (unset env in this test process): unaffected by the refactor."""
+        from nexus.db import http_vector_client as hvc
+
+        assert hvc._ONNX_LOCAL_UPSERT_CHUNK_CAP == 16
+
+
 class TestUpsertChunksPaging:
     """A single oversize upsert is paged into <=cap sub-POSTs so no request
     exceeds the control-plane requestTimeout (nexus-nf3n7)."""

@@ -791,6 +791,83 @@ class TestReadTimeoutSelfHeal:
         assert len(calls) == 2
 
 
+class TestReadTimeoutRetryOptOut:
+    """nexus-y9t08 CRITICAL 1: ``retry_read_timeout=False`` is the narrow,
+    per-call opt-out from ``TestReadTimeoutSelfHeal``'s self-heal-on-
+    ReadTimeout default. Matches the predecessor ``HttpVectorClient``
+    path's deliberate exclusion of ALL timeouts from its own retry
+    classifier (``http_vector_client.py:779-784`` — "TimeoutError is
+    intentionally NOT in this retry classifier"). Every OTHER exception
+    this classifier retries (ConnectionResetError et al.) is UNAFFECTED
+    by this flag — see the second test below."""
+
+    def test_read_timeout_not_retried_when_opted_out(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = _make_echo_store()
+        calls: list[str] = []
+
+        def _always_timeout(method: str, path: str, **kwargs: Any) -> Any:
+            calls.append(method)
+            raise httpx.ReadTimeout("hang mid-read")
+
+        monkeypatch.setattr(store, "_request_once", _always_timeout)
+
+        with pytest.raises(httpx.ReadTimeout):
+            store._post("/v1/echo", {"value": "rt"}, retry_read_timeout=False)
+
+        # Exactly ONE attempt — the self-heal retry never fires for this
+        # call. (Contrast TestReadTimeoutSelfHeal's default-True test,
+        # which sees 2.)
+        assert len(calls) == 1
+
+    def test_connection_reset_still_retries_when_read_timeout_opted_out(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Narrowness guard: the opt-out is ReadTimeout-specific, not a
+        blanket 'never self-heal this call' switch."""
+        store = _make_echo_store()
+        real_request_once = store._request_once
+        calls: list[str] = []
+
+        def _flaky(method: str, path: str, **kwargs: Any) -> Any:
+            calls.append(method)
+            if len(calls) == 1:
+                raise ConnectionResetError("reset by peer")
+            return real_request_once(method, path, **kwargs)
+
+        monkeypatch.setattr(store, "_request_once", _flaky)
+
+        result = store._post("/v1/echo", {"value": "rt"}, retry_read_timeout=False)
+
+        assert result == {"echo": {"value": "rt"}}
+        assert len(calls) == 2
+
+    def test_default_omits_opt_out_and_still_self_heals(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every OTHER catalog/T2 call site (the overwhelming majority)
+        never passes ``retry_read_timeout`` at all — confirms the default
+        (omitted) preserves ``TestReadTimeoutSelfHeal``'s exact behavior,
+        not just a `True` value someone could pass explicitly."""
+        store = _make_echo_store()
+        real_request_once = store._request_once
+        calls: list[str] = []
+
+        def _flaky(method: str, path: str, **kwargs: Any) -> Any:
+            calls.append(method)
+            if len(calls) == 1:
+                raise httpx.ReadTimeout("hang mid-read")
+            return real_request_once(method, path, **kwargs)
+
+        monkeypatch.setattr(store, "_request_once", _flaky)
+
+        result = store._post("/v1/echo", {"value": "rt"})
+
+        assert result == {"echo": {"value": "rt"}}
+        assert len(calls) == 2
+
+
 class TestLeaseGapReresolveRetry:
     """nexus-7dsgp (GH #1405 defect 1): the retry path (``_invalidate_and_reresolve``)
     must opt into the bounded lease-wait mitigation, bounded and non-stacking,

@@ -90,7 +90,7 @@ from nexus.catalog.catalog_spans import parse_chash_span
 from nexus.catalog.types import ManifestRow, _CROSS_PROJECT_OVERRIDE_ENV
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
-from nexus.errors import IndexRunVerifyRefused
+from nexus.errors import CombinedWriteEmbedTimeoutError, IndexRunVerifyRefused
 
 _log = structlog.get_logger(__name__)
 
@@ -177,26 +177,52 @@ _REGISTER_MANY_PAGE = 1000
 # 30 seconds — its own defect, and unjustified for the ~100+ other call
 # sites through this client that do no embedding.
 #
-# RETRY DECISION (documented, not silently skipped — same bead): this
-# constant does NOT change retry behavior. ``httpx.ReadTimeout`` remains
-# retryable at both the mixin's self-heal layer
-# (``_refreshable_client._is_retryable_endpoint_error``) and the outer
-# ``nexus.retry._manifest_write_with_retry`` wrapper (up to 8 POSTs total,
-# each starting a fresh — and, since the engine has no cancellation path,
-# UNCANCELLED — server-side embed on a timeout). Left unchanged
-# deliberately: (1) the 600s budget matches the OLD path's own accepted
-# behavior, under which a ReadTimeout on this workload was rare enough in
-# practice to never surface as a retry-storm complaint; (2) the outer
-# retry is a general, already-documented, deliberate connectivity-blip
-# recovery shared by every catalog write in this module, not specific to
-# this call — narrowing it here without evidence the 600s budget alone is
-# insufficient risks reintroducing GH #1371 (the transient-connection data
-# loss the retry was added to close) for a class of failure this fix
-# already makes rare. If evidence surfaces that duplicate/uncancelled
-# embeds are STILL a real problem even at 600s, that is a distinct
-# follow-up (bounded embed concurrency / engine-side admission control —
-# T2 ``nexus/assess-local-index-cluster-2026-08-10`` Phase 2 items 6-7),
-# not a reason to weaken this call's connectivity resilience preemptively.
+# RETRY DECISION — CORRECTED (nexus-y9t08 round 2; the original text
+# below this line, shipped in 127f2dbc, made a FALSE claim about the old
+# path and has been struck):
+#
+# The 127f2dbc version of this comment claimed "the 600s budget matches
+# the OLD path's own accepted behavior, under which a ReadTimeout on this
+# workload was rare enough in practice to never surface as a retry-storm
+# complaint." That is FALSE, verified directly against the predecessor's
+# own source: ``HttpVectorClient``'s retry classifier
+# (``src/nexus/db/http_vector_client.py:779-784``) catches ONLY
+# ``(urllib.error.URLError, ConnectionRefusedError, ConnectionResetError)``
+# — its own comment states explicitly "TimeoutError is intentionally NOT
+# in this retry classifier (it is not an auto-restart signature); it
+# propagates straight to the _get/_post handler". The old path FAILS ONCE
+# on a timeout, by deliberate design — it does not retry it "rarely
+# enough to not matter"; it never retries it at all.
+#
+# The retained retry-on-ReadTimeout in 127f2dbc was therefore a NEW
+# amplifier introduced in 7.5.0, not a restoration of prior behavior: up
+# to 8 POSTs total across the mixin's self-heal layer (one retry) and the
+# outer ``nexus.retry._manifest_write_with_retry`` wrapper (up to 4
+# attempts), each starting a fresh — and, since the engine has no
+# cancellation path, UNCANCELLED — server-side embed on a timeout, firing
+# hardest exactly when the engine is already under the memory pressure
+# that caused the original incident (nexus-33hpq, nexus-b32rx).
+#
+# FIX: a ``httpx.ReadTimeout`` on THIS call (the chunk-carrying POST) is
+# no longer retried, matching the old path's actual behavior. See
+# ``write_manifest_many``'s ``page_carries_chunks`` branch below —
+# ``retry_read_timeout=False`` closes the inner self-heal retry
+# (``RefreshableHttpStoreMixin._send``), and catching+converting the
+# ``httpx.ReadTimeout`` into :class:`~nexus.errors.CombinedWriteEmbedTimeoutError`
+# closes the outer ``_manifest_write_with_retry`` retry too (that
+# classifier — ``nexus.retry._is_connectivity_error`` — inspects
+# exception type/chain only, so a bare re-raised ``httpx.ReadTimeout``
+# would still be retried there even after the inner layer stopped).
+# Every OTHER exception this call can raise
+# (``ConnectionResetError``/``httpx.ConnectError``/etc. — genuine
+# connectivity blips, GH #1371) is UNCHANGED at both layers; this
+# narrowing applies to ReadTimeout on this ONE call only, never to
+# ``nexus.retry``'s general classifier or any other catalog call.
+#
+# Deeper mitigation (bounded embed concurrency / engine-side admission
+# control / cancellation) remains Phase 2 (engine-tag-cut) scope per T2
+# ``nexus/assess-local-index-cluster-2026-08-10`` items 6-7 — explicitly
+# NOT this fix.
 _COMBINED_WRITE_EMBED_TIMEOUT_S = 600.0
 
 #: Page size for update_many POSTs — same MAX_BATCH_DOC_IDS cap as
@@ -394,14 +420,29 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         filtered = {k: v for k, v in params.items() if v is not None and v != ""}
         return super()._get(f"/v1/catalog{path}", params=filtered)
 
-    def _post(self, path: str, body: dict | None = None, *, timeout: float | None = None) -> Any:
+    def _post(
+        self,
+        path: str,
+        body: dict | None = None,
+        *,
+        timeout: float | None = None,
+        retry_read_timeout: bool = True,
+    ) -> Any:
         """``timeout`` (nexus-y9t08): optional per-call override forwarded
         to the mixin's ``_post`` — see that method's docstring. ``None``
         (the default) means every existing call site is byte-identical to
         before this kwarg existed; only ``write_manifest_many``'s
         chunk-carrying (combined-write) branch passes a non-default value.
+
+        ``retry_read_timeout`` (nexus-y9t08 CRITICAL 1 correction):
+        forwarded to the mixin's ``_post`` unchanged — default ``True``
+        means every existing call site keeps retrying a ``ReadTimeout``
+        exactly as before this kwarg existed. Only
+        ``write_manifest_many``'s chunk-carrying branch passes ``False``.
         """
-        return super()._post(f"/v1/catalog{path}", body or {}, timeout=timeout)
+        return super()._post(
+            f"/v1/catalog{path}", body or {}, timeout=timeout, retry_read_timeout=retry_read_timeout,
+        )
 
     def _docs_from(self, result: Any) -> list[CatalogEntry]:
         if not result:
@@ -3028,10 +3069,40 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 # server-side embed — give it the embed-appropriate
                 # budget, not the 30s control-plane default. See the
                 # constant's docstring above for the (a)-vs-(b) scoping
-                # decision and the deliberate no-change-to-retry decision.
-                result = self._post(
-                    "/manifest/write_many", body, timeout=_COMBINED_WRITE_EMBED_TIMEOUT_S,
-                )
+                # decision and the CORRECTED retry decision.
+                #
+                # retry_read_timeout=False: a ReadTimeout here must fail
+                # ONCE, not retry — matches the predecessor path's
+                # deliberate exclusion of timeouts (see the constant's
+                # docstring). Caught below and converted to
+                # CombinedWriteEmbedTimeoutError so the OUTER
+                # nexus.retry._manifest_write_with_retry wrapper (around
+                # this whole call, from indexer.py's flush path) also does
+                # not retry — that classifier is type/chain-based only, so
+                # a bare re-raised httpx.ReadTimeout (which IS-A
+                # httpx.TransportError) would still be retried there even
+                # after this inner self-heal opt-out. The deferred-raise
+                # below (store the exception, raise it OUTSIDE the except
+                # block) deliberately avoids implicit __context__ chaining
+                # back to the original ReadTimeout — a chained context
+                # would still classify as connectivity at the outer layer
+                # despite the new top-level type (verified: `raise ... from
+                # None` clears __cause__ but NOT __context__).
+                _pending_timeout: httpx.ReadTimeout | None = None
+                try:
+                    result = self._post(
+                        "/manifest/write_many", body,
+                        timeout=_COMBINED_WRITE_EMBED_TIMEOUT_S,
+                        retry_read_timeout=False,
+                    )
+                except httpx.ReadTimeout as _rt:
+                    _pending_timeout = _rt
+                if _pending_timeout is not None:
+                    raise CombinedWriteEmbedTimeoutError(
+                        collection=collection or "",
+                        chunk_count=len(chunks) if chunks else 0,
+                        original=str(_pending_timeout),
+                    )
             else:
                 result = self._post("/manifest/write_many", body)
             result = result if isinstance(result, dict) else {}
