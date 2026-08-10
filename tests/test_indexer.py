@@ -750,6 +750,14 @@ def _gc_col(
     col.get.side_effect = _get
     col.delete.side_effect = _delete
     col.upsert.side_effect = _upsert
+    # count() is DELIBERATELY left as a bare spec\'d MagicMock attribute
+    # (no return_value/side_effect wired) — several existing callers
+    # (test_prune_deleted_files_page_progress_degrades_without_count et
+    # al.) rely on col.count() returning a non-int Mock by default to
+    # exercise the page-progress denominator's degrade-gracefully path.
+    # Callers that want a real count (e.g. the nexus-oqku empty-manifest
+    # guard's diagnostic t3_chunks field) wire col.count.return_value
+    # themselves.
     col._rows = state["rows"]
     if with_fast_path:
         if fast_path_side_effect is not None:
@@ -800,6 +808,21 @@ def _gc_db(per_collection_rows: dict[str, list[tuple[str, str]]]):
     # look service-mode (truthy upsert_chunks_with_embeddings) and swallow
     # quarantine writes silently (review 4cb743be H3 — permissive mocks).
     db.upsert_chunks_with_embeddings = None
+    # RDR-191 Phase 1: same reasoning, extended. A bare MagicMock's
+    # auto-attrs make `db.gc_quarantine_orphans` (etc.) truthy, so
+    # `chunk_quarantine.py`'s `*_serverside` wrappers would believe this
+    # fake `db` has the RDR-191 server route and call it — the MagicMock
+    # call then returns another MagicMock, which `int(result.get(...))`
+    # happily coerces (MagicMock's `__int__` defaults to 1) into a
+    # plausible-looking "1 row moved" success, short-circuiting
+    # `_prune_deleted_files` into the server branch's `continue` WITHOUT
+    # ever touching `cols[...]._rows` — every assertion in this file reads
+    # `_rows` directly, so the whole client-side algorithm under test here
+    # would silently never run. None signals "no HTTP GC capability",
+    # exactly like `upsert_chunks_with_embeddings = None` above.
+    db.gc_quarantine_orphans = None
+    db.gc_restore_rereferenced = None
+    db.gc_expire_quarantine = None
     return db, cols
 
 
@@ -951,6 +974,14 @@ def test_prune_deleted_files_chunk_without_chunk_text_hash_skipped(tmp_path):
     col = _gc_col([("ancient", ""), ("orphan", "b" * 64)])
     db = MagicMock(); db.get_or_create_collection.return_value = col
     db.get_collection.return_value = col
+    # RDR-191 Phase 1: this test is specifically about the client-side
+    # fallback's unsafe_skipped behaviour (a state the new server-side
+    # anti-join cannot even represent — chash is a NOT NULL PK column
+    # there) — signal "no HTTP GC route" so the fallback path under test
+    # actually runs, same convention as `_gc_db`'s `upsert_chunks_with_embeddings = None`.
+    db.gc_quarantine_orphans = None
+    db.gc_restore_rereferenced = None
+    db.gc_expire_quarantine = None
     catalog = _gc_catalog({"code__repo": {"a" * 32}, "docs__repo": set()})
 
     with capture_logs() as cap:
@@ -1030,6 +1061,7 @@ def test_prune_deleted_files_skips_when_manifest_empty_no_wipe(tmp_path):
         ("chunk-2", "b" * 64),
         ("chunk-3", "c" * 64),
     ])
+    col.count.return_value = 3
     db = MagicMock()
     db.get_collection.return_value = col
 
@@ -2365,14 +2397,24 @@ def test_paginated_get_on_page_defaults_to_none_safely():
 def test_prune_deleted_files_emits_page_progress_per_collection(monkeypatch):
     """310 rows (code__repo) / _CHROMA_PAGE_SIZE=300 = 2 pages; docs__repo
     is empty but ``_paginated_get`` still issues its one terminating page,
-    so both collections must be represented."""
+    so both collections must be represented.
+
+    RDR-191 Phase 1: docs__repo's manifest must be NON-empty here (an
+    unrelated placeholder chash) — the nexus-oqku empty-manifest guard now
+    runs BEFORE any T3 read at all (it must also gate the server-side
+    anti-join, see indexer.py), so a genuinely empty manifest short-
+    circuits before ever reaching the page-progress path this test is
+    about. That guard's own behaviour is covered separately
+    (``test_prune_deleted_files_skips_when_manifest_empty_no_wipe``); this
+    test still wants a referenced-but-T3-empty collection to reach the
+    pagination code this docstring describes."""
     monkeypatch.delenv("NX_GC_FORCE", raising=False)
     from nexus.indexer import _prune_deleted_files
     live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(200)]
     orphan = [(f"orphan-{i:03d}", f"b{i:03d}" + "0" * 60) for i in range(110)]
     live_chashes = {r[1] for r in live}
     db, cols = _gc_db({"code__repo": live + orphan, "docs__repo": []})
-    catalog = _gc_catalog({"code__repo": live_chashes, "docs__repo": set()})
+    catalog = _gc_catalog({"code__repo": live_chashes, "docs__repo": {"z" * 64}})
     phases: list[str] = []
 
     _prune_deleted_files(

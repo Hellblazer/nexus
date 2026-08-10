@@ -17,10 +17,23 @@ actually runs against in production.
 Per ``tests/AGENTS.md``: integration over mocks, real substrate via
 ``t2_service_env`` (wraps ``ensure_engine``/``mint_test_tenant`` from
 ``tests/_engine_substrate.py``).
+
+RDR-191 Phase 1 UPDATE: ``_prune_deleted_files`` now tries the server-side
+anti-join route (``nexus.gc_quarantine_orphans`` et al., catalog-023) FIRST
+and only falls back to this fast path (still fully live, Phase 1 does not
+retire it) when that route is unavailable. This test forces that fallback
+via ``patch.object(HttpVectorClient, "gc_quarantine_orphans", None)`` (the
+same "pre-route engine" simulation used in
+``test_rdr191_gc_serverside_prune.py``) so its original claim — the
+single-shot ``get_all_metadata`` read replaces the paginated full-collection
+scan — stays exercised on the path that still makes it. The DEFAULT
+(server-first) path's zero-wire-crossing claim is proven separately in
+``test_rdr191_gc_serverside_prune.py``.
 """
 from __future__ import annotations
 
 import hashlib
+from unittest.mock import patch
 
 import pytest
 
@@ -115,7 +128,13 @@ def test_prune_deleted_files_fast_path_against_real_engine(t2_service_env) -> No
         posted.append((path, body.get("collection", "")))
         return real_post(path, body, **kwargs)
 
-    with patch("nexus.db.http_vector_client._post", side_effect=_spy_post):
+    # RDR-191 Phase 1: force the server-side route unavailable so this run
+    # takes the (still fully live) client-side fast path under test here —
+    # see the module docstring.
+    with patch.object(hvc.HttpVectorClient, "gc_quarantine_orphans", None), \
+         patch.object(hvc.HttpVectorClient, "gc_restore_rereferenced", None), \
+         patch.object(hvc.HttpVectorClient, "gc_expire_quarantine", None), \
+         patch("nexus.db.http_vector_client._post", side_effect=_spy_post):
         _prune_deleted_files(coll_name, "docs__gam-fastpath-unused", db, catalog=cat)
 
     posted_paths = [p for p, _ in posted]

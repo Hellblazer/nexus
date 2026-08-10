@@ -177,6 +177,9 @@ public final class VectorHandler implements HttpHandler {
                 case "/count"         -> handleCount(exchange, method);
                 case "/stats"         -> handleStats(exchange, method);   // RDR-156 P3
                 case "/embed"         -> handleEmbed(exchange, method);    // parity gate
+                case "/gc/quarantine-orphans"  -> handleGcQuarantineOrphans(exchange, method);   // RDR-191 P1
+                case "/gc/restore-rereferenced" -> handleGcRestoreRereferenced(exchange, method); // RDR-191 P1
+                case "/gc/expire-quarantine"   -> handleGcExpireQuarantine(exchange, method);     // RDR-191 P1
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (SkipHandlerException e) {
@@ -764,6 +767,92 @@ public final class VectorHandler implements HttpHandler {
     }
 
     /**
+     * POST /v1/vectors/gc/quarantine-orphans (RDR-191 Phase 1)
+     *
+     * <p>Server-side anti-join move: every chunk in {@code collection} whose
+     * chash has no {@code catalog_document_chunks} row moves to
+     * {@code quarantine_collection}. Zero chunk rows / embeddings cross the
+     * wire — the response carries only the moved count and a capped sample.
+     *
+     * <p>Request:
+     * <pre>
+     * {
+     *   "collection": "code__owner__voyage-code-3__v1",
+     *   "quarantine_collection": "quarantine-code__owner__voyage-code-3__v1",
+     *   "quarantined_at": "2026-08-10T12:00:00Z",
+     *   "sample_limit": 20
+     * }
+     * </pre>
+     * <p>Response 200: {"moved": N, "sample": [{"chash": "...", "title": "..."}, ...]}
+     */
+    private void handleGcQuarantineOrphans(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String collection           = requireString(body, "collection");
+        String quarantineCollection = requireString(body, "quarantine_collection");
+        String quarantinedAt        = requireString(body, "quarantined_at");
+        int sampleLimit             = optInt(body, "sample_limit", 20);
+
+        var outcome = repo.quarantineOrphans(tenant, collection, quarantineCollection, quarantinedAt, sampleLimit);
+        HttpUtil.send(ex, 200, json(Map.of("moved", outcome.moved(), "sample", outcome.sample())));
+    }
+
+    /**
+     * POST /v1/vectors/gc/restore-rereferenced (RDR-191 Phase 1)
+     *
+     * <p>Request: {"quarantine_collection": "...", "origin_collection": "..."}
+     * <p>Response 200: {"restored": N}
+     */
+    private void handleGcRestoreRereferenced(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String quarantineCollection = requireString(body, "quarantine_collection");
+        String originCollection     = requireString(body, "origin_collection");
+
+        long restored = repo.restoreRereferenced(tenant, quarantineCollection, originCollection);
+        HttpUtil.send(ex, 200, json(Map.of("restored", restored)));
+    }
+
+    /**
+     * POST /v1/vectors/gc/expire-quarantine (RDR-191 Phase 1)
+     *
+     * <p>Request:
+     * <pre>
+     * {
+     *   "quarantine_collection": "...",
+     *   "origin_collection": "...",
+     *   "cutoff": "2026-07-27T12:00:00Z",
+     *   "floor_fraction": 0.5,
+     *   "floor_min_chunks": 50,
+     *   "force": false
+     * }
+     * </pre>
+     * <p>Response 200: {"expired": N, "refused": M} — the nexus-mr89x safety
+     * floor (see catalog-023 changelog): {@code refused &gt; 0} means the
+     * floor fired and nothing was deleted this call.
+     */
+    private void handleGcExpireQuarantine(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String quarantineCollection = requireString(body, "quarantine_collection");
+        String originCollection     = requireString(body, "origin_collection");
+        String cutoff                = requireString(body, "cutoff");
+        double floorFraction        = optDouble(body, "floor_fraction", 0.5);
+        int floorMinChunks          = optInt(body, "floor_min_chunks", 50);
+        boolean force                = optBool(body, "force", false);
+
+        var outcome = repo.expireQuarantine(tenant, quarantineCollection, originCollection,
+                cutoff, floorFraction, floorMinChunks, force);
+        HttpUtil.send(ex, 200, json(Map.of("expired", outcome.expired(), "refused", outcome.refused())));
+    }
+
+    /**
      * GET /v1/vectors/collections
      * Response 200: [{"name":"..."}, ...] — the tenant's collections only (RLS)
      */
@@ -985,6 +1074,17 @@ public final class VectorHandler implements HttpHandler {
         try { return Integer.parseInt(val.toString()); }
         catch (NumberFormatException e) {
             throw new IllegalArgumentException("field '" + key + "' must be an integer");
+        }
+    }
+
+    /** Optional double field; absent or null → {@code defaultValue}. */
+    private double optDouble(Map<String, Object> body, String key, double defaultValue) {
+        Object val = body.get(key);
+        if (val == null) return defaultValue;
+        if (val instanceof Number n) return n.doubleValue();
+        try { return Double.parseDouble(val.toString()); }
+        catch (NumberFormatException e) {
+            throw new IllegalArgumentException("field '" + key + "' must be a number");
         }
     }
 

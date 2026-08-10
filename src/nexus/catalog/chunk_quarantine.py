@@ -78,6 +78,105 @@ def quarantine_days() -> int:
     return val
 
 
+def now_stamp() -> str:
+    """The GC quarantine timestamp format: ``2026-08-10T12:00:00Z``.
+
+    Shared by the client-side stamp (:func:`quarantine_orphans`'s ``now``)
+    and the RDR-191 server-side path (:func:`quarantine_orphans_serverside`
+    passes this same shape through as ``quarantined_at``/compares against
+    it as ``cutoff`` in :func:`expire_quarantine_serverside`) so both
+    remain lexicographically comparable — see the catalog-023 changelog
+    header for why that matters.
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ── RDR-191 Phase 1: server-side prune (catalog-023) ────────────────────────
+#
+# These three ``*_serverside`` wrappers try the engine's anti-join GC route
+# (``HttpVectorClient.gc_quarantine_orphans`` / ``gc_restore_rereferenced`` /
+# ``gc_expire_quarantine``) and return ``None`` when it is unavailable — a
+# ``db`` with no such method (local/in-memory mode; the InMemoryVectorClient
+# unit-test double has no server to route to) or a 404 from a pre-route
+# engine (``REQUIRED_ENGINE_VERSION`` is ``(0, 1, 69)``; this route ships in
+# the NEXT tag — see ``TestGcServersideFallbackDoesNotOutliveItsRoute`` in
+# ``tests/test_engine_version.py`` for the same retirement-tripwire shape as
+# ``HttpCatalogClient.descendants``'s ``_descendants_via_paginated_list``,
+# ab7907fb). Callers (``indexer._prune_deleted_files``) fall back to the
+# client-side fetch-diff-copy-delete path on ``None``.
+#
+# A ``None`` return is a ROUTE-UNAVAILABLE signal, never "nothing to do" —
+# the caller must not mistake it for a zero-orphan result.
+
+def quarantine_orphans_serverside(
+    db: Any, collection_name: str, quarantine_name: str,
+    quarantined_at: str, sample_limit: int = 20,
+) -> tuple[int, list[dict]] | None:
+    """Try the server-side anti-join move. ``(moved, sample)`` or ``None``
+    if the route is unavailable (caller falls back to :func:`quarantine_orphans`)."""
+    fn = getattr(db, "gc_quarantine_orphans", None)
+    if fn is None:
+        return None
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: avoid import cost for the common (route-present) path
+
+    try:
+        result = fn(collection_name, quarantine_name, quarantined_at, sample_limit)
+    except VectorServiceError as exc:
+        if getattr(exc, "code", None) == 404:
+            _log.warning(
+                "gc_quarantine_orphans_route_missing_fallback_to_client_side",
+                collection=collection_name,
+            )
+            return None
+        raise
+    return int(result.get("moved", 0)), list(result.get("sample") or [])
+
+
+def restore_rereferenced_serverside(db: Any, quarantine_name: str, origin_name: str) -> int | None:
+    """Try the server-side re-reference restore. Restored count, or ``None``
+    if the route is unavailable (caller falls back to :func:`restore_rereferenced`)."""
+    fn = getattr(db, "gc_restore_rereferenced", None)
+    if fn is None:
+        return None
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: avoid import cost for the common (route-present) path
+
+    try:
+        return fn(quarantine_name, origin_name)
+    except VectorServiceError as exc:
+        if getattr(exc, "code", None) == 404:
+            _log.warning(
+                "gc_restore_rereferenced_route_missing_fallback_to_client_side",
+                collection=origin_name,
+            )
+            return None
+        raise
+
+
+def expire_quarantine_serverside(
+    db: Any, quarantine_name: str, origin_name: str, cutoff: str,
+    *, floor_fraction: float, floor_min_chunks: int, force: bool = False,
+) -> tuple[int, int] | None:
+    """Try the server-side grace-window expiry. ``(expired, refused)`` or
+    ``None`` if the route is unavailable (caller falls back to
+    :func:`expire_quarantine`)."""
+    fn = getattr(db, "gc_expire_quarantine", None)
+    if fn is None:
+        return None
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: avoid import cost for the common (route-present) path
+
+    try:
+        result = fn(quarantine_name, origin_name, cutoff, floor_fraction, floor_min_chunks, force)
+    except VectorServiceError as exc:
+        if getattr(exc, "code", None) == 404:
+            _log.warning(
+                "gc_expire_quarantine_route_missing_fallback_to_client_side",
+                collection=origin_name,
+            )
+            return None
+        raise
+    return int(result.get("expired", 0)), int(result.get("refused", 0))
+
+
 def _fetch_full(db: Any, col: Any, collection_name: str, ids: list[str]):
     """(ids, embeddings, metadatas, documents) for *ids*, both modes.
 
@@ -160,7 +259,7 @@ def quarantine_orphans(
     if not orphan_ids:
         return 0
     qname = quarantine_collection_name(collection_name)
-    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = now_stamp()
     moved = 0
     for i in range(0, len(orphan_ids), _WRITE_BATCH):
         batch = orphan_ids[i:i + _WRITE_BATCH]

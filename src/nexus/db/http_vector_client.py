@@ -2072,6 +2072,72 @@ class HttpVectorClient:
         result = _get("/v1/vectors/stats", tenant=self._tenant)
         return result if isinstance(result, list) else []
 
+    # ── RDR-191 Phase 1: server-side GC prune (catalog-023) ─────────────────
+    #
+    # These three route straight to ``nexus.gc_quarantine_orphans`` /
+    # ``gc_restore_rereferenced`` / ``gc_expire_quarantine`` — the anti-join
+    # move/restore/expire that replaces
+    # ``chunk_quarantine.py``'s get-all-metadata-then-diff-then-copy-then-
+    # delete dance. Zero chunk rows and zero embeddings cross this wire.
+    # ``REQUIRED_ENGINE_VERSION`` is ``(0, 1, 69)`` and this route ships in
+    # the NEXT engine tag, so a 404 (``VectorServiceError.code == 404``) is
+    # an EXPECTED pre-route-engine condition, not exceptional — callers
+    # (``chunk_quarantine.py``'s ``*_serverside`` wrappers) catch it and fall
+    # back to the client-side path, same shape as :meth:`list_collections`'s
+    # ``/stats`` -> ``/collections`` + ``/count`` fallback above.
+
+    def gc_quarantine_orphans(
+        self, collection: str, quarantine_collection: str,
+        quarantined_at: str, sample_limit: int = 20,
+    ) -> dict:
+        """POST /v1/vectors/gc/quarantine-orphans.
+
+        Returns ``{"moved": N, "sample": [{"chash": hex, "title": ...}, ...]}``.
+        Raises :class:`VectorServiceError` (``code=404`` on a pre-route engine).
+        """
+        return _post(
+            "/v1/vectors/gc/quarantine-orphans",
+            {
+                "collection": collection,
+                "quarantine_collection": quarantine_collection,
+                "quarantined_at": quarantined_at,
+                "sample_limit": sample_limit,
+            },
+            tenant=self._tenant,
+        )
+
+    def gc_restore_rereferenced(self, quarantine_collection: str, origin_collection: str) -> int:
+        """POST /v1/vectors/gc/restore-rereferenced. Returns the restored count."""
+        result = _post(
+            "/v1/vectors/gc/restore-rereferenced",
+            {"quarantine_collection": quarantine_collection, "origin_collection": origin_collection},
+            tenant=self._tenant,
+        )
+        return int(result.get("restored", 0))
+
+    def gc_expire_quarantine(
+        self, quarantine_collection: str, origin_collection: str, cutoff: str,
+        floor_fraction: float, floor_min_chunks: int, force: bool,
+    ) -> dict:
+        """POST /v1/vectors/gc/expire-quarantine.
+
+        Returns ``{"expired": N, "refused": M}`` — the nexus-mr89x safety
+        floor (see catalog-023 changelog): ``refused > 0`` means the floor
+        fired and nothing was deleted this call.
+        """
+        return _post(
+            "/v1/vectors/gc/expire-quarantine",
+            {
+                "quarantine_collection": quarantine_collection,
+                "origin_collection": origin_collection,
+                "cutoff": cutoff,
+                "floor_fraction": floor_fraction,
+                "floor_min_chunks": floor_min_chunks,
+                "force": force,
+            },
+            tenant=self._tenant,
+        )
+
     def list_collections(self) -> list[dict]:
         """List the tenant's vector collections with live chunk counts.
 

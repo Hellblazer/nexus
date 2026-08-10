@@ -2793,6 +2793,81 @@ def _prune_misclassified(
         bar.close()
 
 
+def _prune_collection_serverside(
+    db: object, collection_name: str, quarantine_name: str, quarantined_at: str,
+) -> bool:
+    """RDR-191 Phase 1: attempt restore + quarantine + expire entirely
+    server-side (``nexus.gc_restore_rereferenced`` / ``gc_quarantine_orphans``
+    / ``gc_expire_quarantine``, catalog-023) for one collection. Zero chunk
+    rows and zero embeddings cross the wire on this path.
+
+    Returns ``True`` when the quarantine leg (the expensive one this RDR
+    targets — the old path's full-collection metadata read plus
+    embedding-carrying copy) ran server-side: the caller treats this
+    collection as DONE for this pass. Returns ``False`` when the route is
+    unavailable (pre-route engine — ``REQUIRED_ENGINE_VERSION`` is
+    ``(0, 1, 69)`` and this route ships in the NEXT tag — or a non-HTTP
+    ``db``, e.g. local/in-memory mode): the caller falls back to the
+    client-side fetch-diff-copy-delete path unchanged.
+
+    The restore leg running server-side even when quarantine then falls
+    back is safe and non-wasteful: restore only moves chashes the manifest
+    ALREADY references back to origin — the client fallback's own,
+    independently-computed ``referenced`` set agrees, so there is no
+    inconsistency between a server-restored row and a client-computed
+    orphan set.
+
+    Expire-route unavailability after a successful server-side quarantine
+    (an engine inexplicably missing the sibling route — should not occur
+    since all three ship in the same changeset) is logged and skipped, not
+    treated as a fallback trigger: matches the OLD code's own best-effort
+    tolerance for ``expire_quarantine`` failures (``gc_expiry_pass_failed``).
+    """
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+    from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — deferred import
+        expire_quarantine_serverside,
+        quarantine_days,
+        quarantine_orphans_serverside,
+        restore_rereferenced_serverside,
+    )
+
+    restored = restore_rereferenced_serverside(db, quarantine_name, collection_name)
+    if restored is None:
+        return False  # route unavailable — client-side path handles restore too
+
+    quarantined = quarantine_orphans_serverside(
+        db, collection_name, quarantine_name, quarantined_at, sample_limit=20,
+    )
+    if quarantined is None:
+        return False  # route unavailable
+    moved, sample = quarantined
+
+    if moved:
+        _log.info(
+            "gc_pruned_orphan_chunks_serverside",
+            collection=collection_name, count=moved, restored=restored,
+            sample=sample, mode="quarantine-serverside",
+        )
+
+    import os  # noqa: PLC0415 — deferred: branch-local, matches chunk_quarantine.py's own NX_GC_FORCE read
+    force = os.environ.get("NX_GC_FORCE", "") == "1"
+    cutoff = (
+        datetime.now(UTC) - timedelta(days=quarantine_days())
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    expired = expire_quarantine_serverside(
+        db, quarantine_name, collection_name, cutoff,
+        floor_fraction=_gc_floor_fraction(), floor_min_chunks=_GC_FLOOR_MIN_CHUNKS,
+        force=force,
+    )
+    if expired is None:
+        _log.warning(
+            "gc_expire_quarantine_route_missing_after_quarantine_succeeded",
+            collection=collection_name,
+        )
+    return True
+
+
 def _prune_deleted_files(
     code_collection: str,
     docs_collection: str,
@@ -2902,6 +2977,68 @@ def _prune_deleted_files(
             col = db.get_collection(collection_name)
         except collection_not_found_errors():
             continue
+
+        # nexus-oqku (moved up for RDR-191 P1): when the catalog manifest
+        # has zero referenced chashes for a collection, every chunk would
+        # read as orphan and the sweep below would delete the entire
+        # collection. This fires on the first ``nx index repo`` after the
+        # RDR-108 schema migration lands on a system that has not yet run
+        # manifest backfill. An empty manifest cannot prove ANY chunk is
+        # live or dead; skip and log instead of a silent full-collection
+        # wipe. Checked HERE (before either path) because it must gate the
+        # RDR-191 server-side anti-join too — that SQL would otherwise read
+        # "no manifest rows" as "every chunk is unreferenced" just as
+        # readily as the client-side diff would.
+        if not referenced:
+            # Best-effort diagnostic count only — col.count() is the same
+            # cheap COUNT(*) the page-progress denominator above uses, NOT
+            # the expensive full-metadata read this guard exists to avoid
+            # paying before we know it's safe to. Never raises into the
+            # warning path; a test double or degraded read just omits it.
+            try:
+                _t3_chunks = col.count()
+            except Exception:  # noqa: BLE001 — diagnostic only
+                _t3_chunks = None
+            _log.warning(
+                "manifest_empty_skipping_gc",
+                collection=collection_name,
+                **({"t3_chunks": _t3_chunks} if isinstance(_t3_chunks, int) else {}),
+                note=(
+                    "catalog manifest has zero referenced chashes for this "
+                    "collection. GC cannot safely decide orphans without a "
+                    "manifest. Run a fresh `nx index repo` (populates "
+                    "manifest via post-store hook) or backfill manually "
+                    "before retrying GC."
+                ),
+            )
+            continue
+
+        # RDR-191 Phase 1: try the server-side anti-join prune first — zero
+        # chunk rows, zero embeddings cross the wire (nexus.gc_quarantine_orphans
+        # / gc_restore_rereferenced / gc_expire_quarantine, catalog-023).
+        # Falls back to the client-side fetch-diff-copy-delete path below
+        # when the engine predates the route (404) or `db` has no HTTP
+        # capability (local/in-memory mode).
+        from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — deferred import
+            now_stamp, quarantine_collection_name,
+        )
+        qname = quarantine_collection_name(collection_name)
+        # nexus-ou4tb contract (see the comment below): a degraded read must
+        # skip THIS collection, not abort the sweep for every collection after
+        # it. `_prune_collection_serverside` returns False for the benign
+        # "engine predates the route / no HTTP capability" case and re-raises
+        # everything else — including a bare ConnectionError/TimeoutError from
+        # `_post` on a local-mode blip. Unwrapped, one transient hiccup on one
+        # collection would abort the whole prune AND every pipeline phase after
+        # it, where the legacy arms below merely log and continue.
+        try:
+            if _prune_collection_serverside(db, collection_name, qname, now_stamp()):
+                continue
+        except Exception:  # noqa: BLE001 — best-effort; failure logged, sweep continues
+            _log.warning("gc_serverside_prune_failed", collection=collection_name,
+                         exc_info=True)
+            continue
+
         # nexus-xukbj: restore BEFORE the empty-collection early-continue —
         # a fully-quarantined collection (origin emptied) must still be able
         # to restore when a heal re-references its chashes.
@@ -2995,29 +3132,10 @@ def _prune_deleted_files(
             continue
         if not all_chunks["ids"]:
             continue
-        # nexus-oqku: when the catalog manifest has zero referenced
-        # chashes for a collection that DOES have T3 chunks, every
-        # chunk would be classified as orphan and the loop below
-        # would delete the entire collection. This fires on the
-        # first ``nx index repo`` after the RDR-108 schema migration
-        # lands on a system that has not yet run manifest backfill.
-        # An empty manifest cannot prove ANY chunk is live or dead;
-        # treat it the same way as the per-chunk missing-chash case
-        # (skip and log) instead of silent full-collection wipe.
-        if not referenced:
-            _log.warning(
-                "manifest_empty_skipping_gc",
-                collection=collection_name,
-                t3_chunks=len(all_chunks["ids"]),
-                note=(
-                    "catalog manifest has zero referenced chashes for this "
-                    "collection but T3 has chunks. GC cannot safely decide "
-                    "orphans without a manifest. Run a fresh `nx index repo` "
-                    "(populates manifest via post-store hook) or backfill "
-                    "manually before retrying GC."
-                ),
-            )
-            continue
+        # nexus-oqku's empty-manifest guard now runs unconditionally at the
+        # top of this collection's iteration (before the RDR-191 server-path
+        # attempt) — see the comment there. `referenced` is guaranteed
+        # non-empty by the time control reaches here.
         orphan_ids: list[str] = []
         orphan_sample: list[dict] = []
         unsafe_skipped = 0

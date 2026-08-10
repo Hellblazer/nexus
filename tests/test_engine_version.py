@@ -579,3 +579,66 @@ class TestDescendantsFallbackDoesNotOutliveItsRoute:
             "named in critique finding 1 "
             "(T2 nexus/chroma-residue-C1-T0.1-critique-2026-08-10)."
         )
+
+
+class TestGcServersideFallbackDoesNotOutliveItsRoute:
+    """RDR-191 Phase 1: ``nexus.gc_quarantine_orphans`` / ``gc_restore_rereferenced``
+    / ``gc_expire_quarantine`` (catalog-023) ship at ``REQUIRED_ENGINE_VERSION
+    == (0, 1, 69)`` — the route did not exist yet at that pin, so it ships in
+    SOME tag strictly after it. Same shape as
+    ``TestDescendantsFallbackDoesNotOutliveItsRoute`` (ab7907fb): this test is
+    the revisit trigger, not human memory or a bead comment.
+
+    IMPORTANT ASYMMETRY vs. the ``descendants`` tripwire, spelled out so a
+    future editor does not over-delete: ``descendants()``'s fallback was
+    PURELY an engine-version workaround (a 404-triggered branch with no other
+    reason to exist), so the whole fallback method retires. The GC
+    ``*_serverside`` wrappers in ``nexus/catalog/chunk_quarantine.py``
+    (``quarantine_orphans_serverside`` / ``restore_rereferenced_serverside``
+    / ``expire_quarantine_serverside``) have TWO independent reasons to
+    return ``None`` — a 404 (engine predates the route: retires once the
+    floor passes) AND ``getattr(db, "gc_quarantine_orphans", None) is None``
+    (``db`` has no HTTP capability at all — local/in-memory mode, which
+    NEVER retires, engine version is irrelevant to it). Only the
+    ``VectorServiceError`` / ``code == 404`` branches in those three
+    functions are what this floor bump makes unreachable — the
+    ``fn is None`` attribute-absence branches, the functions themselves, and
+    the client-side ``quarantine_orphans``/``restore_rereferenced``/
+    ``expire_quarantine`` implementations they fall back to (RDR-191's own
+    apparatus-retirement is Phase 5, a separate and much larger change) MUST
+    NOT be deleted by this trigger.
+    """
+
+    def test_floor_at_0_1_69_or_404_branches_revisited(self) -> None:
+        from pathlib import Path
+
+        from nexus.engine_version import REQUIRED_ENGINE_VERSION
+
+        if REQUIRED_ENGINE_VERSION <= (0, 1, 69):
+            return  # route not guaranteed present on every servable HTTP-capable engine yet
+
+        cq = (
+            Path(__file__).resolve().parent.parent
+            / "src" / "nexus" / "catalog" / "chunk_quarantine.py"
+        )
+        text = cq.read_text(encoding="utf-8")
+        assert "code == 404" not in text and "getattr(exc, \"code\", None) == 404" not in text, (
+            f"REQUIRED_ENGINE_VERSION={REQUIRED_ENGINE_VERSION} has moved "
+            "past (0, 1, 69) — the version pinned when the RDR-191 "
+            "gc_quarantine_orphans/gc_restore_rereferenced/gc_expire_quarantine "
+            "routes were added (catalog-023-quarantine-functions.xml). Every "
+            "HTTP-capable engine a client is now permitted to run against "
+            "carries the route, so the 404-triggered fallback branches in "
+            "quarantine_orphans_serverside/restore_rereferenced_serverside/"
+            "expire_quarantine_serverside (nexus/catalog/chunk_quarantine.py) "
+            "can never fire again FOR AN HTTP db. REVISIT (do not blind-"
+            "delete): decide whether to simplify those three functions' "
+            "exception handling now that a 404 can only mean a genuine "
+            "server error, not a version-skew fallback trigger — but leave "
+            "the `fn is None` branch, the three *_serverside functions "
+            "themselves, and the client-side quarantine_orphans/"
+            "restore_rereferenced/expire_quarantine apparatus they fall "
+            "back to firmly in place (local/in-memory mode has no HTTP "
+            "route ever, independent of engine version; and RDR-191's own "
+            "apparatus retirement is Phase 5, not triggered by this floor)."
+        )

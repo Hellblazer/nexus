@@ -382,6 +382,15 @@
          before the runAlways grants below for file-order clarity. -->
     <include file="db/changelog/staging-002-document-chunks-chash-index.xml"/>
 
+    <!-- RDR-191 Phase 1: nexus.gc_quarantine_orphans / gc_restore_rereferenced /
+         gc_expire_quarantine — server-side anti-join prune replacing the
+         client-side get-all-metadata-then-diff-then-copy-then-delete dance
+         (indexer._prune_deleted_files / chunk_quarantine.py). Needs
+         chunks_384/768/1024 (vectors-001) and catalog_document_chunks with
+         its collection column (catalog-014); before the runAlways grants
+         below for file-order clarity. -->
+    <include file="db/changelog/catalog-023-quarantine-functions.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

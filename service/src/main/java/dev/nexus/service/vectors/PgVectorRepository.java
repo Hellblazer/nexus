@@ -23,6 +23,9 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
+import static dev.nexus.service.jooq.nexus.Tables.GC_EXPIRE_QUARANTINE;
+import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS;
+import dev.nexus.service.jooq.nexus.Routines;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_384;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_768;
@@ -2156,6 +2159,107 @@ public final class PgVectorRepository {
     }
 
     /**
+     * RDR-191 Phase 1 (bead-less, RDR §Decision item 5 / Phasing "Phase 1 —
+     * Prune into SQL"): the server-side anti-join move that replaces the
+     * client's get-all-metadata -&gt; diff-in-Python -&gt; copy-with-
+     * embeddings -&gt; delete dance ({@code chunk_quarantine.py}'s
+     * {@code quarantine_orphans}). Zero chunk rows and zero embeddings
+     * cross the {@code /v1/vectors} wire — only the moved count and a
+     * capped sample (id + title, for logging) come back.
+     *
+     * @param collection          the origin collection (dim derives from this)
+     * @param quarantineCollection the sibling quarantine collection name
+     * @param quarantinedAt       caller-formatted stamp (matches the existing
+     *                            {@code %Y-%m-%dT%H:%M:%SZ} shape so string
+     *                            comparison against a later cutoff stays
+     *                            chronologically correct — see the
+     *                            catalog-023 changelog header)
+     * @param sampleLimit         cap on the logging sample's size
+     */
+    public record QuarantineOutcome(long moved, List<Map<String, Object>> sample) {}
+
+    /**
+     * Ensure-registered stub for a destination collection the RDR-191 GC
+     * functions write into directly via SQL (never through
+     * {@link #upsertChunksInternal}'s own auto-stub) — same short,
+     * separately-committed-transaction shape as that method's own stub
+     * (RDR-156 P0.2, bead nexus-70r3c.2): {@code chunks_<dim>.collection}
+     * carries a {@code catalog_collections} FK, so an unregistered
+     * quarantine sibling (first orphan ever quarantined for that origin)
+     * would otherwise fail the INSERT inside {@code gc_quarantine_orphans}
+     * with a foreign-key violation.
+     */
+    private void ensureCollectionRegistered(String tenant, String collection) {
+        if (CollectionRegistry.isKnown(tenant, collection)) return;
+        String[] collSegs = collection.split("__");
+        boolean conformant = collSegs.length == 4;
+        String regContentType  = conformant ? collSegs[0] : "";
+        String regOwner        = conformant ? collSegs[1] : "";
+        String regModel        = conformant ? collSegs[2] : "";
+        String regModelVersion = conformant ? collSegs[3] : "";
+        tenantScope.withTenant(tenant, ctx -> {
+            ctx.insertInto(CATALOG_COLLECTIONS,
+                            CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                            CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                            CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
+               .values(tenant, collection, regContentType, regOwner, regModel, regModelVersion)
+               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .doNothing()
+               .execute();
+            return null;
+        });
+        CollectionRegistry.markKnown(tenant, collection);
+    }
+
+    public QuarantineOutcome quarantineOrphans(String tenant, String collection,
+                                                String quarantineCollection,
+                                                String quarantinedAt, int sampleLimit) {
+        int dim = dimForCollection(collection);
+        ensureCollectionRegistered(tenant, quarantineCollection);
+        var rec = tenantScope.withTenant(tenant, ctx ->
+            ctx.selectFrom(GC_QUARANTINE_ORPHANS.call(
+                    dim, tenant, collection, quarantineCollection, quarantinedAt, sampleLimit))
+               .fetchOne());
+        long moved = rec.get(GC_QUARANTINE_ORPHANS.MOVED);
+        JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS.SAMPLE);
+        return new QuarantineOutcome(moved, fromJsonList(sampleJson != null ? sampleJson.data() : null));
+    }
+
+    /**
+     * RDR-191 Phase 1: restores quarantined chunks whose chash is referenced
+     * again by the catalog manifest (a heal re-referenced them, or content
+     * returned) — {@code chunk_quarantine.py}'s {@code restore_rereferenced},
+     * server-side. Dim derives from {@code originCollection}.
+     */
+    public long restoreRereferenced(String tenant, String quarantineCollection, String originCollection) {
+        int dim = dimForCollection(originCollection);
+        ensureCollectionRegistered(tenant, originCollection);
+        return tenantScope.withTenant(tenant, ctx ->
+            Routines.gcRestoreRereferenced(ctx.configuration(), dim, tenant, quarantineCollection, originCollection));
+    }
+
+    /**
+     * RDR-191 Phase 1: hard-deletes quarantine rows past the grace window —
+     * {@code chunk_quarantine.py}'s {@code expire_quarantine}, server-side.
+     * Carries the nexus-mr89x safety floor verbatim (see the catalog-023
+     * changelog header): {@code refused &gt; 0} means the floor fired and
+     * nothing was deleted.
+     */
+    public record ExpireOutcome(long expired, long refused) {}
+
+    public ExpireOutcome expireQuarantine(String tenant, String quarantineCollection, String originCollection,
+                                           String cutoff, double floorFraction, int floorMinChunks,
+                                           boolean force) {
+        int dim = dimForCollection(originCollection);
+        var rec = tenantScope.withTenant(tenant, ctx ->
+            ctx.selectFrom(GC_EXPIRE_QUARANTINE.call(
+                    dim, tenant, quarantineCollection, originCollection, cutoff,
+                    floorFraction, floorMinChunks, force))
+               .fetchOne());
+        return new ExpireOutcome(rec.get(GC_EXPIRE_QUARANTINE.EXPIRED), rec.get(GC_EXPIRE_QUARANTINE.REFUSED));
+    }
+
+    /**
      * Metadata-only update on existing chunks - no re-embedding, {@code chunk_text} and
      * {@code embedding} unchanged (frecency reindex path, RDR-152 nexus-enehl).
      *
@@ -3421,6 +3525,18 @@ public final class PgVectorRepository {
             return MAPPER.readValue(json, MAP_TYPE);
         } catch (Exception e) {
             throw new IllegalStateException("stored metadata is not valid JSON: " + json, e);
+        }
+    }
+
+    private static final TypeReference<List<Map<String, Object>>> LIST_TYPE = new TypeReference<>() {};
+
+    /** RDR-191: parses {@code gc_quarantine_orphans}'s capped {@code sample} column. */
+    private static List<Map<String, Object>> fromJsonList(String json) {
+        if (json == null || json.isBlank()) return List.of();
+        try {
+            return MAPPER.readValue(json, LIST_TYPE);
+        } catch (Exception e) {
+            throw new IllegalStateException("stored sample is not valid JSON array: " + json, e);
         }
     }
 }
