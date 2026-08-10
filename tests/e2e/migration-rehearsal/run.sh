@@ -224,7 +224,12 @@ fi
 # trap below so a later `trap ... EXIT` does not clobber it). Defined + armed
 # BEFORE the stamp mutation so a signal in the stamp window still restores it.
 _guided_restore() {
-  { [ "$GUIDED" = 1 ] || [ "$CHASH_WINDOW" = 1 ]; } || return 0
+  # MUST list every leg that stamps RELEASE_PROPS above. A leg added to the
+  # stamp condition but not here leaves `release_version=<version>` committed
+  # into the working tree — which then bakes a stamp into every subsequent
+  # local build and can be committed by accident. Observed exactly that way
+  # 2026-08-09 when --shakeout-e2e was added to the stamp side only.
+  { [ "$GUIDED" = 1 ] || [ "$CHASH_WINDOW" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ]; } || return 0
   rm -f "$RELEASE_PROPS.tmp" 2>/dev/null || true
   git checkout -- "$RELEASE_PROPS" 2>/dev/null || true
 }
