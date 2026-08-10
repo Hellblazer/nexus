@@ -819,6 +819,32 @@ def index_repo_cmd(
                 f"the extraction deliberately, or 'nx index pdf <file>' after "
                 f"fixing the underlying extraction (e.g. --extractor mineru)."
             )
+        # nexus-4s1ww / GH #1432: when every (or some) file's chunk-batch
+        # flush permanently fails (post bisect-retry — ChunkBatcher.
+        # failed_files, see indexer._run_index), the write path silently
+        # dropped chunks while the run still printed "Done." and exited 0.
+        # A stdout WARNING (click.echo(), plain — never print(), never
+        # structlog for the user-facing line) plus a non-zero exit close
+        # both channels a human or a script would check. ANY count > 0
+        # fails the run, matching the pdf_quality_gate_failed precedent
+        # above: one file's chunks permanently missing is the same
+        # severity class as all of them, just smaller in count — not
+        # gated on "every file failed."
+        chunk_flush_failed_files = (stats or {}).get("chunk_flush_failed_files", 0)
+        if chunk_flush_failed_files:
+            click.echo(
+                f"Warning: {chunk_flush_failed_files}/{n} file(s) failed to "
+                f"flush chunk uploads (zero chunks landed for the affected "
+                f"file(s)) — see the chunk_batch_flush_failed log events "
+                f"for details. Re-run 'nx index repo' to retry; the "
+                f"affected files are stale and will be retried "
+                f"automatically."
+            )
+            raise click.ClickException(
+                f"{chunk_flush_failed_files} file(s) failed to flush chunk "
+                f"uploads this run (nexus-4s1ww) — see the WARNING line "
+                f"above."
+            )
 
 
 def _taxonomy_incomplete(collections: list[str]) -> bool:

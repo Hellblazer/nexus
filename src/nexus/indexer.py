@@ -2970,12 +2970,24 @@ def _drain_batcher_with_markers(
                 rate = done / elapsed
                 line += f", {rate * 60:.1f} flushes/min"
                 line += f", ~{_fmt_duration((total - done) / rate)} remaining"
+            # nexus-4s1ww / GH #1432: surface failures AS THEY HAPPEN during
+            # the drain, not only in the end-of-run summary — the drain can
+            # run for minutes, and a batcher-less duck-typed stand-in (e.g.
+            # test doubles) has no ``failed_files`` at all, hence the
+            # defensive getattr instead of a hard attribute access.
+            _failed_so_far = len(getattr(batcher, "failed_files", {}) or {})
+            if _failed_so_far:
+                line += f", {_failed_so_far} file(s) failed"
             on_phase(line + ")")
     flushed = batcher.drain(on_progress=progress)
     if on_phase is not None and busy:
+        _failed_final = len(getattr(batcher, "failed_files", {}) or {})
+        _fail_suffix = (
+            f" — {_failed_final} file(s) failed to flush" if _failed_final else ""
+        )
         on_phase(
             f"Flush drain complete — {flushed} flushes, "
-            f"{time.monotonic() - t0:.1f}s"
+            f"{time.monotonic() - t0:.1f}s{_fail_suffix}"
         )
     return flushed
 
@@ -3824,6 +3836,13 @@ def _run_index(
     # client-side and cannot accept the empty-embeddings Seam B batches.
     from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — deferred to avoid circular import
     _batcher = None
+    # nexus-4s1ww / GH #1432: path -> error for every file whose chunks
+    # PERMANENTLY failed to flush this run (populated below from
+    # ChunkBatcher.failed_files — the count that SURVIVED bisect-retry
+    # settlement, never a raw attempt/retry count). Defaults to empty so
+    # the stats dict always carries the key, even when db isn't an
+    # HttpVectorClient (legacy per-file path, no batcher constructed).
+    _batch_failures: dict[str, str] = {}
     if isinstance(db, HttpVectorClient):
         from nexus.chunk_batcher import ChunkBatcher  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -4673,6 +4692,14 @@ def _run_index(
         # index_repo_cmd uses this to drive a non-zero exit after
         # post-processing completes.
         "pdf_quality_gate_failed": len(_quality_gate_failed),
+        # nexus-4s1ww / GH #1432: count of files whose chunk-batch flush
+        # PERMANENTLY failed this run (ChunkBatcher.failed_files — post
+        # bisect-retry survivors only, see chunk_batcher.py). Zero chunks
+        # from these files landed. index_repo_cmd uses this the same way
+        # as pdf_quality_gate_failed: a non-zero count drives a non-zero
+        # exit after the rest of the run completes, so a total-write-path
+        # failure is never reported as a clean "Done." at rc=0.
+        "chunk_flush_failed_files": len(_batch_failures),
         # nexus-tevzq: per-collection-kind attribution for the caller's
         # discover gate. Keys match the collection-name content_type prefix
         # (RDR-103 shape). prose+pdf both land in docs__.
