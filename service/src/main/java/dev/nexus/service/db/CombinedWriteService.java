@@ -7,6 +7,8 @@ import dev.nexus.service.vectors.EmbedResult;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.DSLContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -54,8 +56,22 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * CatalogRepository}'s per-doc chunk-upsert only writes chashes present in
  * the map, treating everything else as "must already exist" (verified
  * in-transaction, per doc, at the point a manifest actually references it).
+ *
+ * <p><b>Observability (nexus-acvi7, T2 {@code
+ * engine-embed-path-hardening-design-v0.1.70} §2.5(a)):</b> the
+ * existence-partition emits one {@code event=combined_write_embed_partition}
+ * INFO line per call (collection, deduped/skipped/embedded counts,
+ * force_re_embed) after the partition and before the embed call, and the
+ * same three counts ({@code chunks_deduped}/{@code embed_skipped}/{@code
+ * embed_embedded}) are merged into the response envelope alongside {@code
+ * chunks_written}. Without this the RDR-181 "known chashes never
+ * re-embedded" guarantee was completely unobservable — nothing could tell
+ * a silently-broken skip (every warm reindex re-embedding unchanged
+ * content) from a working one.
  */
 public final class CombinedWriteService {
+
+    private static final Logger log = LoggerFactory.getLogger(CombinedWriteService.class);
 
     private final TenantScope    tenantScope;
     private final CatalogRepository catalogRepo;
@@ -156,6 +172,20 @@ public final class CombinedWriteService {
             textsToEmbed.add(dedupTexts.get(idx));
         }
 
+        // nexus-acvi7: the existence-partition above is otherwise completely
+        // unobservable — the RDR-181 "known chashes are never re-embedded"
+        // hard requirement (design memo §0) had zero log lines and zero
+        // response accounting, so a silently-broken skip (every warm
+        // reindex re-embedding unchanged chunks) was indistinguishable from
+        // a working one. One INFO line per call, emitted AFTER the
+        // partition and BEFORE the embed call below (2.5(a) of T2
+        // [22162]) — this is deliberately the FIRST log line
+        // CombinedWriteService ever emits.
+        int embeddedCount = needEmbedIdx.size();
+        int skippedCount  = dedupChashes.size() - embeddedCount;
+        log.info("event=combined_write_embed_partition collection={} deduped={} skipped={} embedded={} force_re_embed={}",
+                  collection, dedupChashes.size(), skippedCount, embeddedCount, forceReEmbed);
+
         // Phase 2b: embed OUTSIDE any transaction — the existence-check
         // transaction above has already committed, and no per-doc manifest
         // transaction has opened yet (design memo §0: "ALL embedding for
@@ -196,6 +226,25 @@ public final class CombinedWriteService {
         // one per-doc transaction at a time.
         Map<String, Object> response =
             catalogRepo.writeManifestMany(tenant, docs, complete, sweep, collection, resolved);
+        // nexus-acvi7: merge the embed-partition counts into the SAME
+        // response envelope `chunks_written` already rides — this is the
+        // right seam (CatalogRepository.writeManifestMany's map, built at
+        // CatalogRepository.java ~:4297-4326, knows nothing about the
+        // embed phase; only CombinedWriteService does) rather than a
+        // parallel channel. Additive keys: a 7.5.0 client
+        // (http_catalog_client.py's write_manifest_many) reads only
+        // named keys out of this map and silently ignores unknown ones,
+        // so this is backward compatible with every client in the field
+        // (verified: `out = {failed_doc_ids, complete_refused, ...}` is
+        // built by explicit key extraction, never `dict(result)`).
+        // Always present on this path (writeManyCombined is ONLY invoked
+        // by CatalogHandler when the request actually carried `chunks` —
+        // see CatalogHandler.handleManifestWriteMany's `rawChunks != null`
+        // branch — so these three counts are never misleadingly absent
+        // the way `chunks_written` is on the non-combined path).
+        response.put("chunks_deduped", dedupChashes.size());
+        response.put("embed_skipped", skippedCount);
+        response.put("embed_embedded", embeddedCount);
         return new CombinedWriteResult(response, embedResult.tokens());
     }
 

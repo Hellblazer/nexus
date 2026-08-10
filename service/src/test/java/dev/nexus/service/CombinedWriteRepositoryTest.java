@@ -554,6 +554,125 @@ class CombinedWriteRepositoryTest {
         assertThat(chunk384Exists(TENANT_A, col, x)).isTrue();
     }
 
+    // ── nexus-acvi7 (W7, T2 engine-embed-path-hardening-design-v0.1.70 ───────
+    //    §2.5(a)): the existence-partition's embed accounting must be ────────
+    //    OBSERVABLE -- a structured log line AND response-envelope counts, ───
+    //    correct for a MIXED batch (some chunks known, some new). ────────────
+
+    @Test @Order(11)
+    void combinedWrite_mixedKnownAndNewChashes_reportsAccurateEmbedPartitionCounts() throws Exception {
+        String col = "code__cw11__minilm-l6-v2-384__v1";
+        String known1 = ch("cw11-known-1");
+        String known2 = ch("cw11-known-2");
+        String new1 = ch("cw11-new-1");
+        String new2 = ch("cw11-new-2");
+        String new3 = ch("cw11-new-3");
+        seedChunk384(TENANT_A, col, known1, "known text 1");
+        seedChunk384(TENANT_A, col, known2, "known text 2");
+        registerDoc(TENANT_A, "cw.11", col);
+
+        int embedCallsBefore = embedder.calls.get();
+
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        var result = svc.writeManyCombined(TENANT_A, col,
+            List.of(chunk(known1, "known text 1"), chunk(known2, "known text 2"),
+                    chunk(new1, "new text 1"), chunk(new2, "new text 2"), chunk(new3, "new text 3")),
+            List.of(doc("cw.11", List.of(
+                row(0, known1), row(1, known2), row(2, new1), row(3, new2), row(4, new3)))),
+            null, false, false);
+        List<String> messages;
+        try {
+            messages = logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .toList();
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+
+        assertThat(result.response().get("chunks_deduped"))
+            .as("5 distinct chashes sent in `chunks`").isEqualTo(5);
+        assertThat(result.response().get("embed_skipped"))
+            .as("2 chashes already stored with IDENTICAL text").isEqualTo(2);
+        assertThat(result.response().get("embed_embedded"))
+            .as("3 chashes are new").isEqualTo(3);
+        assertThat(embedder.calls.get() - embedCallsBefore)
+            .as("ground truth: exactly the 3 NEW texts must have reached the embedder")
+            .isEqualTo(3);
+        assertThat(messages)
+            .as("the existence-partition must emit ONE observable line naming the exact counts, "
+                + "BEFORE the embed call")
+            .anyMatch(m -> m.startsWith("event=combined_write_embed_partition")
+                && m.contains("collection=" + col)
+                && m.contains("deduped=5")
+                && m.contains("skipped=2")
+                && m.contains("embedded=3")
+                && m.contains("force_re_embed=false"));
+    }
+
+    // ── non-vacuity (mandatory): force-disable the existence-partition and ───
+    //    confirm the signal CHANGES -- a counter reporting the same numbers ───
+    //    whether or not the skip works is worthless. Three calls over the ─────
+    //    SAME chash set: all-new (embed), repeat (skip), forced-repeat ───────
+    //    (embed again despite identical stored text) -- a two-directional ────
+    //    detector, mirroring warm-reindex-skip-gate.sh's leg B / leg C. ──────
+
+    @Test @Order(12)
+    void combinedWrite_forceReEmbed_flipsCountsBothDirections_nonVacuityProof() throws Exception {
+        String col = "code__cw12__minilm-l6-v2-384__v1";
+        List<String> chashes = List.of(
+            ch("cw12-a"), ch("cw12-b"), ch("cw12-c"), ch("cw12-d"), ch("cw12-e"));
+        List<Map<String, Object>> chunks = new ArrayList<>();
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (int i = 0; i < chashes.size(); i++) {
+            chunks.add(chunk(chashes.get(i), "cw12 stable text " + i));
+            rows.add(row(i, chashes.get(i)));
+        }
+        registerDoc(TENANT_A, "cw.12a", col);
+        registerDoc(TENANT_A, "cw.12b", col);
+        registerDoc(TENANT_A, "cw.12c", col);
+
+        // Call 1: every chash is brand new -- nothing to skip.
+        int before1 = embedder.calls.get();
+        var r1 = svc.writeManyCombined(TENANT_A, col, chunks,
+            List.of(doc("cw.12a", rows)), null, false, false);
+        assertThat(r1.response().get("embed_skipped")).as("call 1: all new").isEqualTo(0);
+        assertThat(r1.response().get("embed_embedded")).as("call 1: all new").isEqualTo(5);
+        assertThat(embedder.calls.get() - before1).as("call 1: embedder ground truth").isEqualTo(5);
+
+        // Call 2: SAME chashes, SAME text, force_re_embed=false -- the
+        // existence-partition must skip every one of them (RDR-181).
+        int before2 = embedder.calls.get();
+        var r2 = svc.writeManyCombined(TENANT_A, col, chunks,
+            List.of(doc("cw.12b", rows)), null, false, false);
+        assertThat(r2.response().get("embed_skipped")).as("call 2: skip fires normally").isEqualTo(5);
+        assertThat(r2.response().get("embed_embedded")).as("call 2: skip fires normally").isEqualTo(0);
+        assertThat(embedder.calls.get() - before2)
+            .as("ground truth: the embedder must see ZERO of these texts on the skip path").isEqualTo(0);
+
+        // Call 3: SAME chashes, SAME text, but force_re_embed=true --
+        // deliberately disables the existence-partition. If the response
+        // counter merely reported a constant, or the partition itself were
+        // broken and the counter blindly reported skips regardless, THIS
+        // assertion catches it: the numbers must flip back to all-embedded.
+        int before3 = embedder.calls.get();
+        var r3 = svc.writeManyCombined(TENANT_A, col, chunks,
+            List.of(doc("cw.12c", rows)), null, false, true);
+        assertThat(r3.response().get("embed_skipped"))
+            .as("call 3: force_re_embed must disable the skip -- signal must CHANGE, not stay constant")
+            .isEqualTo(0);
+        assertThat(r3.response().get("embed_embedded")).as("call 3: force_re_embed").isEqualTo(5);
+        assertThat(embedder.calls.get() - before3)
+            .as("ground truth: force_re_embed must actually re-invoke the embedder on all 5")
+            .isEqualTo(5);
+    }
+
     /** Deterministic, dim-384 embedder that counts every text it is asked to embed. */
     static final class CountingFakeEmbedder implements Embedder {
         final AtomicInteger calls = new AtomicInteger();
