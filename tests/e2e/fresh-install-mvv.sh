@@ -463,7 +463,12 @@ for f in $LEGS_TO_CHECK; do
 done
 
 GATE_OK=1
-VERSION_STRING="$(_nx --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+# Pipe-free tail (nexus-i66g4/6zxfb/wbeyi class): take the first line via
+# parameter expansion instead of `| head -1` -- under this script's
+# `set -o pipefail`, a still-writing grep closed early by head risks its
+# SIGPIPE being promoted over head's own (successful) exit status.
+VERSION_ALL="$(_nx --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+VERSION_STRING="${VERSION_ALL%%$'\n'*}"
 if [ "$PUBLISHED_MODE" = 1 ]; then
     echo "FRESH-INSTALL MVV PASSED — conexus $VERSION_STRING (PUBLISHED artifact, uv-tool resolution layer)"
 else

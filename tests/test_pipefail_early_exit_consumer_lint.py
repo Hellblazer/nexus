@@ -980,13 +980,14 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # `grep -ln 'bash -c\\|sh -c'` across every file contributing to
         # this exemption set).
         "service/linux-native-verify.sh:43",
-        # --- tests/e2e/fresh-install-mvv.sh (3 entries): release-battery
+        # --- tests/e2e/fresh-install-mvv.sh (2 entries): release-battery
         # gate (AGENTS.md "Cutting a release" step 1b); needs a real
         # fresh-HOME wheel install to safely verify a rewrite of its
-        # dist-info / version-banner sniffing.
+        # dist-info sniffing. The former third entry (the `--version`
+        # banner sniff) was FIXED rather than exempted -- it needed no
+        # live infra, being a plain capture-then-parameter-expansion.
         "tests/e2e/fresh-install-mvv.sh:281",
         "tests/e2e/fresh-install-mvv.sh:294",
-        "tests/e2e/fresh-install-mvv.sh:452",
         # --- tests/e2e/local-index-memory-gate.sh (1 entry): owned by a
         # concurrent agent in the authoring session (nexus-wbeyi itself)
         # -- reported to that hand-off, not fixed here. This is a
@@ -997,7 +998,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/local-index-memory-gate.sh:849",
     }
 )
-_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 158
+_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 157
 
 
 def test_pipefail_early_exit_exempt_ratchet() -> None:
