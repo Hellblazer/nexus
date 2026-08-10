@@ -2343,21 +2343,35 @@ _CHROMA_PAGE_SIZE: int = 300
 """ChromaDB Cloud hard cap per get() call — paginate above this."""
 
 
-def _paginated_get(col: object, include: list[str], where: dict | None = None) -> dict:
+def _paginated_get(
+    col: object,
+    include: list[str],
+    where: dict | None = None,
+    *,
+    on_page: Callable[[int, int], None] | None = None,
+) -> dict:
     """Fetch all matching chunks from *col* by paginating in _CHROMA_PAGE_SIZE batches.
 
     ChromaDB Cloud silently truncates unbounded col.get() calls at 300 records.
     This helper accumulates pages until a short page signals the end.
 
+    ``on_page(page_num, scanned_so_far)``, when provided, fires after each
+    page lands (index-output-ux-assessment-2026-08-10 §7.2/a3): this loop
+    was previously a black hole (427.5s unbroken on a 96-page collection,
+    nexus-vatx) with no way for a caller to surface real progress.
+    ``page_num`` is 1-based; ``scanned_so_far`` is the cumulative id count.
+
     Returns a dict with ``"ids"`` and, when ``"metadatas"`` is in *include*,
     a ``"metadatas"`` key — matching the shape returned by col.get().
     """
     offset = 0
+    page_num = 0
     all_ids: list[str] = []
     all_metas: list[dict] = []
     has_metas = "metadatas" in include
 
     while True:
+        page_num += 1
         kwargs: dict = {"include": include, "limit": _CHROMA_PAGE_SIZE, "offset": offset}
         if where is not None:
             kwargs["where"] = where
@@ -2366,6 +2380,8 @@ def _paginated_get(col: object, include: list[str], where: dict | None = None) -
         all_ids.extend(batch_ids)
         if has_metas:
             all_metas.extend(batch.get("metadatas") or [])
+        if on_page is not None:
+            on_page(page_num, len(all_ids))
         if len(batch_ids) < _CHROMA_PAGE_SIZE:
             break
         offset += _CHROMA_PAGE_SIZE
@@ -2687,6 +2703,7 @@ def _prune_deleted_files(
     *,
     catalog: object | None,
     rdr_collection: str | None = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> None:
     """Remove orphan T3 chunks via the catalog manifest (RDR-108 Phase 4 /
     nexus-dyxe).
@@ -2731,6 +2748,15 @@ def _prune_deleted_files(
     paths will be reconciled in nexus-e5aw; until then this function is
     the authoritative GC for content-addressed chunks and ``nx t3 gc``
     handles only legacy pre-Phase-3 orphans.
+
+    ``on_phase``, when provided, receives real page progress for the
+    ``_paginated_get`` sweep below (index-output-ux-assessment-2026-08-10
+    §7.2/a3: the 547.8s observed run of this function was 96 pages over
+    28,564 chunks with zero output). Denominator is a best-effort
+    ``col.count()`` call — only attempted when ``on_phase`` is set, so
+    the common no-callback path (~20 existing call sites) pays no extra
+    cost. When ``count()`` is unavailable or non-numeric, progress
+    degrades to page-only numbering (no ``/total``), never raises.
     """
     if catalog is None:
         return
@@ -2748,7 +2774,8 @@ def _prune_deleted_files(
     _collections = (code_collection, docs_collection) + (
         (rdr_collection,) if rdr_collection else ()
     )
-    for collection_name in _collections:
+    _n_collections = len(_collections)
+    for _coll_idx, collection_name in enumerate(_collections, start=1):
         # nexus-ir6eh: the alive-set read is count-reconciled client-side
         # (HttpCatalogClient.chashes_for_collection raises on a truncated
         # or count-stripped response). GC must never classify orphans off
@@ -2791,8 +2818,51 @@ def _prune_deleted_files(
         # chunks", and GC on a false-empty is how you delete nothing while
         # believing you swept). But it must skip THIS collection, not abort
         # the sweep for every collection after it.
+        # index-output-ux-assessment-2026-08-10 §7.2/a3: real page progress
+        # for the potentially long paginated scan below. Denominator is
+        # best-effort (col.count() may be unavailable or, on a test mock,
+        # non-numeric) — degrade to page-only numbering rather than raise.
+        # Only attempted when a caller actually wants progress output, so
+        # the ~20 existing on_phase-less call sites pay zero extra cost.
+        _total_pages: int | None = None
+        if on_phase is not None:
+            try:
+                _count = col.count()
+                # isinstance guard, not just a bare try/except: a permissive
+                # test double (MagicMock configures magic methods, so
+                # ``-(-mock // 300)`` does NOT raise — it silently returns
+                # another Mock) would otherwise leak a Mock repr into the
+                # operator-visible phase message instead of degrading.
+                if isinstance(_count, int):
+                    _total_pages = (
+                        -(-_count // _CHROMA_PAGE_SIZE) if _count else 0
+                    )
+            except Exception:  # noqa: BLE001 — best-effort denominator only
+                _total_pages = None
+
+        def _on_page(
+            page_num: int, scanned: int, *,
+            _cn=collection_name, _idx=_coll_idx, _tp=_total_pages,
+        ) -> None:
+            if on_phase is None:
+                return
+            where_ = f"collection {_idx}/{_n_collections} ({_cn})"
+            if _tp:
+                on_phase(
+                    f"Pruning deleted files: {where_}, page {page_num}/{_tp} "
+                    f"({scanned:,} chunks scanned)"
+                )
+            else:
+                on_phase(
+                    f"Pruning deleted files: {where_}, page {page_num} "
+                    f"({scanned:,} chunks scanned)"
+                )
+
         try:
-            all_chunks = _paginated_get(col, include=["metadatas"])
+            all_chunks = _paginated_get(
+                col, include=["metadatas"],
+                on_page=_on_page if on_phase is not None else None,
+            )
         except Exception:  # noqa: BLE001 — one collection's degrade must not end the sweep
             _log.warning(
                 "gc_sweep_read_failed_skipping_collection",
@@ -4638,7 +4708,7 @@ def _run_index(
                 _delete_docs_for_paths(repo, delta_deleted)
             _prune_deleted_files(
                 code_collection, docs_collection, db, catalog=_cat,
-                rdr_collection=rdr_col_name,
+                rdr_collection=rdr_col_name, on_phase=on_phase,
             )
         _phase(f"Pruning deleted files done ({time.monotonic() - _t:.1f}s)")
 

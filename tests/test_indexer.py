@@ -2101,6 +2101,125 @@ def test_prune_deleted_files_paginates(tmp_path, monkeypatch):
     assert set(cols["quarantine-code__repo"]._rows) == {r[0] for r in orphan}
 
 
+# ── real page progress (index-output-ux-assessment-2026-08-10 §7.2/a3) ─────
+
+
+def test_paginated_get_invokes_on_page_per_page():
+    """The 427.5s black hole was this exact loop with no callback. Each
+    page must fire on_page(page_num, cumulative_scanned)."""
+    from nexus.indexer import _paginated_get
+    live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(310)]
+    col = _gc_col(live)
+    pages: list[tuple[int, int]] = []
+
+    _paginated_get(col, include=["metadatas"], on_page=lambda p, s: pages.append((p, s)))
+
+    assert pages == [(1, 300), (2, 310)]
+
+
+def test_paginated_get_on_page_defaults_to_none_safely():
+    """Backward compat: ~20 existing call sites never pass on_page."""
+    from nexus.indexer import _paginated_get
+    col = _gc_col([("a", "x" * 64)])
+    result = _paginated_get(col, include=["metadatas"])
+    assert result["ids"] == ["a"]
+
+
+def test_prune_deleted_files_emits_page_progress_per_collection(monkeypatch):
+    """310 rows (code__repo) / _CHROMA_PAGE_SIZE=300 = 2 pages; docs__repo
+    is empty but ``_paginated_get`` still issues its one terminating page,
+    so both collections must be represented."""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    from nexus.indexer import _prune_deleted_files
+    live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(200)]
+    orphan = [(f"orphan-{i:03d}", f"b{i:03d}" + "0" * 60) for i in range(110)]
+    live_chashes = {r[1] for r in live}
+    db, cols = _gc_db({"code__repo": live + orphan, "docs__repo": []})
+    catalog = _gc_catalog({"code__repo": live_chashes, "docs__repo": set()})
+    phases: list[str] = []
+
+    _prune_deleted_files(
+        "code__repo", "docs__repo", db, catalog=catalog, on_phase=phases.append,
+    )
+
+    code_pages = [m for m in phases if "collection 1/2 (code__repo)" in m]
+    docs_pages = [m for m in phases if "collection 2/2 (docs__repo)" in m]
+    assert len(code_pages) == 2
+    assert "page 1" in code_pages[0]
+    assert "page 2" in code_pages[1]
+    assert len(docs_pages) == 1
+    assert "page 1" in docs_pages[0]
+    assert "0 chunks scanned" in docs_pages[0]
+
+
+def test_prune_deleted_files_page_progress_degrades_without_count(monkeypatch):
+    """``col.count()`` on a bare MagicMock returns a Mock, not an int —
+    the denominator must degrade to page-only numbering, never raise."""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    from nexus.indexer import _prune_deleted_files
+    live = [("live-1", "a" * 64)]
+    db, cols = _gc_db({"code__repo": live, "docs__repo": []})
+    catalog = _gc_catalog({"code__repo": {"a" * 64}, "docs__repo": set()})
+    phases: list[str] = []
+
+    _prune_deleted_files(
+        "code__repo", "docs__repo", db, catalog=catalog, on_phase=phases.append,
+    )
+
+    code_pages = [m for m in phases if "collection 1/2 (code__repo)" in m]
+    assert code_pages == [
+        "Pruning deleted files: collection 1/2 (code__repo), page 1 (1 chunks scanned)"
+    ]
+
+
+def test_prune_deleted_files_page_progress_includes_denominator_when_count_available(
+    monkeypatch,
+):
+    """When ``col.count()`` returns a real int, the message carries a real
+    ``page k/K`` denominator (137-page-total shape from the assessment)."""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    from nexus.indexer import _prune_deleted_files
+    live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(310)]
+    live_chashes = {r[1] for r in live}
+    db, cols = _gc_db({"code__repo": live, "docs__repo": []})
+    cols["code__repo"].count.return_value = 310
+    catalog = _gc_catalog({"code__repo": live_chashes, "docs__repo": set()})
+    phases: list[str] = []
+
+    _prune_deleted_files(
+        "code__repo", "docs__repo", db, catalog=catalog, on_phase=phases.append,
+    )
+
+    code_pages = [m for m in phases if "collection 1/2 (code__repo)" in m]
+    assert code_pages == [
+        "Pruning deleted files: collection 1/2 (code__repo), page 1/2 (300 chunks scanned)",
+        "Pruning deleted files: collection 1/2 (code__repo), page 2/2 (310 chunks scanned)",
+    ]
+
+
+def test_prune_deleted_files_page_progress_no_bracket_nm_form(monkeypatch):
+    """Constraint: page-progress lines must never match ``^\\s*\\[N/M\\]``
+    (that shape is reserved for the per-file monitor lines)."""
+    import re
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    from nexus.indexer import _prune_deleted_files
+    live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(310)]
+    live_chashes = {r[1] for r in live}
+    db, cols = _gc_db({"code__repo": live, "docs__repo": []})
+    cols["code__repo"].count.return_value = 310
+    catalog = _gc_catalog({"code__repo": live_chashes, "docs__repo": set()})
+    phases: list[str] = []
+
+    _prune_deleted_files(
+        "code__repo", "docs__repo", db, catalog=catalog, on_phase=phases.append,
+    )
+
+    assert phases, "expected at least one on_phase call"
+    pattern = re.compile(r"^\s*\[[0-9]+/[0-9]+\]")
+    for msg in phases:
+        assert not pattern.match(msg)
+
+
 def test_frecency_update_paginates(tmp_path):
     """nexus-afudo (2026-08-05): pinned to the doc_id-keyed path (a
     real ``_build_frecency_doc_id_map`` patch) so this pagination

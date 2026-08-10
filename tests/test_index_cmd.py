@@ -834,6 +834,192 @@ def test_eta_ticker_no_emit_before_start():
     t.stop()
 
 
+# ── nexus-vatx dead-ticker latch fix (index-output-ux-assessment) ──────────
+
+
+def test_eta_ticker_not_stopped_by_first_phase_marker(runner, repo_dir, mock_reg, monkeypatch):
+    """The ticker used to be killed on the FIRST ``on_phase`` call, on the
+    (false) theory that the file walk was already done by then. In
+    production the first phase marker fires BEFORE the per-file loop even
+    starts (indexer.py on_start at :3496 precedes the first run_file_loop
+    at :4252) — the fix must let the ticker survive phase markers and
+    still emit during a simulated long phase that follows one."""
+    import nexus.commands.index as index_mod
+
+    class _FastETATicker(index_mod._ETATicker):
+        def __init__(self, interval=60.0, emit=None):
+            super().__init__(interval=0.02, emit=emit)
+
+    monkeypatch.setattr(index_mod, "_ETATicker", _FastETATicker)
+
+    def fake_index(path, reg, **kwargs):
+        on_start = kwargs.get("on_start")
+        on_phase = kwargs.get("on_phase")
+        on_file = kwargs.get("on_file")
+        on_start(2)
+        on_phase("Registering 1 catalog entries…")  # fires pre-loop in production
+        time.sleep(0.06)  # simulated long phase: let the ticker tick >= once
+        on_file(Path("a.py"), 3, 0.1)
+        on_file(Path("b.py"), 2, 0.1)
+        return {}
+
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg, index_side_effect=fake_index,
+    )
+    assert result.exit_code == 0, result.output
+    assert "[eta]" in result.output
+
+
+def test_eta_ticker_stops_when_file_loop_completes_not_on_phase(
+    runner, repo_dir, mock_reg, monkeypatch,
+):
+    """Exact-count regression for the latch fix: ``.stop()`` must not be
+    called as a side effect of a phase marker, and must be called once
+    the file loop reaches its total."""
+    import nexus.commands.index as index_mod
+
+    stop_calls: list[int] = []
+    orig_stop = index_mod._ETATicker.stop
+
+    def spy_stop(self):
+        stop_calls.append(1)
+        orig_stop(self)
+
+    monkeypatch.setattr(index_mod._ETATicker, "stop", spy_stop)
+
+    def fake_index(path, reg, **kwargs):
+        on_start = kwargs.get("on_start")
+        on_phase = kwargs.get("on_phase")
+        on_file = kwargs.get("on_file")
+        on_start(2)
+        on_phase("Registering 1 catalog entries…")
+        assert len(stop_calls) == 0, "a phase marker must not stop the ticker"
+        on_file(Path("a.py"), 3, 0.1)
+        assert len(stop_calls) == 0, "the ticker must not stop before the loop completes"
+        on_file(Path("b.py"), 2, 0.1)
+        assert len(stop_calls) == 1, "the ticker must stop exactly once n reaches total"
+        return {}
+
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg, index_side_effect=fake_index,
+    )
+    assert result.exit_code == 0, result.output
+
+
+# ── _PhaseHeartbeat (index-output-ux-assessment-2026-08-10 §7.1) ───────────
+
+
+def test_phase_heartbeat_emits_at_interval_tty():
+    """TTY rendering: in-place (\\r, nl=False), no scrollback growth."""
+    from nexus.commands.index import _PhaseHeartbeat
+    calls: list[tuple[str, bool]] = []
+    hb = _PhaseHeartbeat(is_tty=True, echo=lambda msg, nl: calls.append((msg, nl)), interval=0.02)
+    hb.arm("Pruning deleted files…")
+    time.sleep(0.07)
+    hb.disarm()
+    ticks = [c for c in calls if "still running" in c[0]]
+    assert len(ticks) >= 2
+    for msg, nl in ticks:
+        assert nl is False
+        assert msg.startswith("\r")
+        assert "Pruning deleted files…" in msg
+        assert "elapsed)" in msg
+
+
+def test_phase_heartbeat_emits_at_interval_nontty_no_cr():
+    """Non-TTY rendering: real appended lines, never a \\r."""
+    from nexus.commands.index import _PhaseHeartbeat
+    calls: list[tuple[str, bool]] = []
+    hb = _PhaseHeartbeat(
+        is_tty=False, echo=lambda msg, nl: calls.append((msg, nl)), interval=0.02,
+    )
+    hb.arm("Pruning misclassified chunks…")
+    time.sleep(0.07)
+    hb.disarm()
+    ticks = [c for c in calls if "still running" in c[0]]
+    assert len(ticks) >= 2
+    for msg, nl in ticks:
+        assert "\r" not in msg
+        assert nl is True
+
+
+def test_phase_heartbeat_never_emits_bracket_nm_form():
+    """Constraint: heartbeat lines must never match ``^\\s*\\[N/M\\]`` —
+    that shape is reserved for the per-file progress lines counted by
+    tests/e2e/migration-rehearsal/rehearse_shakeout.sh."""
+    import re
+    from nexus.commands.index import _PhaseHeartbeat
+    calls: list[str] = []
+    hb = _PhaseHeartbeat(is_tty=False, echo=lambda msg, nl: calls.append(msg), interval=0.02)
+    hb.arm("Pruning deleted files…")
+    time.sleep(0.05)
+    hb.disarm()
+    assert calls, "expected at least one heartbeat tick"
+    pattern = re.compile(r"^\s*\[[0-9]+/[0-9]+\]")
+    for msg in calls:
+        assert not pattern.match(msg)
+
+
+def test_phase_heartbeat_disarm_before_first_tick_emits_nothing():
+    from nexus.commands.index import _PhaseHeartbeat
+    calls: list[str] = []
+    hb = _PhaseHeartbeat(is_tty=False, echo=lambda msg, nl: calls.append(msg), interval=5.0)
+    hb.arm("Stamping pipeline version…")
+    hb.disarm()
+    assert calls == []
+
+
+def test_phase_heartbeat_rearm_stops_previous_phase_ticks():
+    """arm() for a new phase must fully stop the previous phase's ticker —
+    no interleaved/overlapping threads."""
+    from nexus.commands.index import _PhaseHeartbeat
+    calls: list[str] = []
+    hb = _PhaseHeartbeat(is_tty=False, echo=lambda msg, nl: calls.append(msg), interval=0.02)
+    hb.arm("Phase A…")
+    time.sleep(0.03)
+    hb.arm("Phase B…")  # must fully disarm Phase A's thread before returning
+    time.sleep(0.05)
+    hb.disarm()
+    a_indices = [i for i, c in enumerate(calls) if "Phase A" in c]
+    b_indices = [i for i, c in enumerate(calls) if "Phase B" in c]
+    assert b_indices, "expected at least one Phase B tick"
+    if a_indices:
+        assert max(a_indices) < min(b_indices), "a Phase A tick fired after Phase B was armed"
+
+
+def test_on_phase_heartbeat_fires_for_silent_long_phase(runner, repo_dir, mock_reg, monkeypatch):
+    """Integration: on_phase wiring arms/disarms the heartbeat and prints
+    it on the ``[post]`` channel with the exact liveness constraints."""
+    import re
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+
+    def fake_index(path, reg, **kwargs):
+        on_start = kwargs.get("on_start")
+        on_phase = kwargs.get("on_phase")
+        on_start(1)
+        on_phase("Pruning deleted files…")
+        time.sleep(0.07)
+        on_phase("Pruning deleted files done (0.1s)")
+        return {}
+
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg, index_side_effect=fake_index,
+    )
+    assert result.exit_code == 0, result.output
+    assert "  [post] Pruning deleted files…" in result.output
+    assert "still running" in result.output
+    assert "elapsed)" in result.output
+    assert "  [post] Pruning deleted files done (0.1s)" in result.output
+    assert not re.search(r"^\s*\[[0-9]+/[0-9]+\]", result.output, re.MULTILINE)
+    assert "\r" not in result.output  # CliRunner's stdout is never a TTY
+
+
 # ── --debug-timing (nexus-7niu) ─────────────────────────────────────────────
 
 
