@@ -305,7 +305,23 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 58
 # class as the I1 sibling immediately above, same file, same blind spot
 # (a targeted battery run doesn't collect the whole session). Rationale in
 # conftest.py beside the entry.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 41
+# 41 -> 45 (nexus-y9t08 + nexus-n2w4q, 2026-08-10): +4, the combined-write
+# timeout/retry follow-ups to the wxjr6 pair already excluded at 37->39 —
+# test_manifest_write_many.py::TestWriteManifestManyCombinedTimeout::
+# test_combined_write_gets_an_embed_grade_timeout (127f2dbc) and the three
+# TestCombinedWriteReadTimeoutNotRetried cases (47c5a39a). Reason
+# "string-literal-as-name", identical to their siblings: the conformant
+# RDR-103 collection name is the argument that selects the chunk-carrying
+# branch of `write_manifest_many` (which raises ValueError without it), and
+# the assertions are on POST kwargs (timeout / retry_read_timeout), POST
+# count, and exception type — never on the name. `_client()` is
+# `HttpCatalogClient.__new__` and all four monkeypatch `_post`, so no
+# embedder, credential, or mode-dependent path is constructed. Same
+# blind spot as every other late-caught entry in this list: both authoring
+# commits ran targeted path-scoped batteries, and this census is only
+# non-vacuous on a whole-session collection. Rationale also recorded beside
+# the entries in conftest.py.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 45
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:
