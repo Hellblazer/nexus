@@ -87,6 +87,62 @@ EXEMPTIONS: a ratchet, mirroring ``tests/test_mode_declarations_are_explicit
 .py`` (RDR-109) — an exact-equality ceiling on a per-entry-documented
 exclusion set, never a bare unbounded allowlist. See
 ``_PIPEFAIL_EARLY_EXIT_EXEMPT`` below.
+
+``|| true`` RATCHET (closes a substantive-critique gap on this file, 2026-
+08-10 hardening pass): the sanctioned display-only mitigation above is no
+longer a bare, untracked escape hatch. A trailing ``|| true``/``|| :`` on
+an early-exit-consumer pipe segment now REQUIRES a matching entry in
+``_PIPEFAIL_OR_TRUE_SITES`` (same exact-equality-ceiling ratchet shape as
+``_PIPEFAIL_EARLY_EXIT_EXEMPT``) — an untracked ``|| true`` site is
+flagged by the sweep exactly like an unexempted violation, just with a
+different remediation message. Worth naming explicitly, because it is the
+reason this ratchet exists at all: appending ``|| true`` to a pipe used as
+an ``if``/``elif`` CONDITION does not merely neutralize the pipefail
+hazard, it makes that condition UNCONDITIONALLY TRUE — the untracked
+escape hatch would silently convert a real assertion into a vacuous pass,
+precisely this repo's dominant defect class. ``_if_condition_or_true_bug_
+hits`` / the ``test_no_if_condition_neutralizes_its_own_pipe_with_or_true``
+sweep below catch that specific shape as a hard, always-a-bug failure (not
+merely advisory) — verified zero live occurrences in this repo at
+authoring time, so the gate starts clean.
+
+TRANSITIVE ``source``/``.`` PRECONDITION: a script that never declares
+``pipefail`` itself but ``source``s (or ``. ``s) a repo-local lib that DOES
+is exactly as exposed to this hazard as if it declared pipefail directly —
+confirmed real: ``scripts/validate/03-cli.sh`` and
+``scripts/validate/04-hooks.sh`` both ``source "$(dirname "$0")/lib.sh"``,
+and ``lib.sh`` sets ``set -uo pipefail``; neither file declared pipefail
+itself, so both were invisible to the precondition filter before this fix.
+``_sets_pipefail`` now resolves exactly ONE level of ``source``/``.`` for a
+small set of repo-local path idioms (``$(dirname "$0")/…``,
+``$(dirname "${BASH_SOURCE[0]}")/…``, ``$HERE/…``, ``$SCRIPT_DIR/…``,
+``$REPO_ROOT/…``) — anything else (a dynamic/generated path like
+``"${SANDBOX_ENV}"`` or ``"${CREDS_FILE}"``) is left unresolved rather than
+guessed at, which only means such a script is not YET recognized as
+pipefail-set via that hop; it does not create a false negative beyond what
+already existed. DISCLOSED BOUND, not silently assumed: this is exactly
+one hop, not a transitive closure. Verified at authoring time that one
+hop is sufficient for the WHOLE current tree — none of the repo-local libs
+sourced anywhere in this corpus (``scripts/validate/lib.sh``,
+``tests/e2e/lib.sh``, ``tests/e2e/lib/lock.sh``,
+``tests/e2e/lib/expectations.sh``) itself sources a further file, so there
+is no live 2-hop chain today. If a future lib begins sourcing another lib,
+that second hop is invisible to this precondition filter until this scope
+is revisited — a disclosed limitation, not a silent gap.
+
+ADDITIONAL DISCLOSED-DEFERRED INSTANCES: beyond ``sed -n '/pat/q'`` /
+``awk '{exit}'`` (already disclosed above), a ``while read`` / bare
+``read`` loop consuming a pipe and exiting early via ``break`` is the same
+defect class and is NOT covered by this lint. Verified zero live
+occurrences in this repo at authoring time (dormant, not exploited) — left
+for a future pass on the same "don't guess broader than a demonstrated
+instance" principle as the sed/awk carve-out, rather than silently
+unmentioned. ``grep``'s long-form early-exit flags (``--quiet``,
+``--max-count=<N>``) and ``grep -l``/combined ``-l`` clusters (list-
+matching-filenames — early-exit like ``-q``, stops after the first match
+per input) ARE now covered (trivial additions to
+``_grep_flags_are_early_exit``; a long-form spelling escaping a short-form
+detector was a real hole, not a considered scope decision).
 """
 
 from __future__ import annotations
@@ -122,10 +178,33 @@ _CONSUMER_START_RE = re.compile(r"^(?P<cmd>x?e?f?grep|head)\b(?P<rest>.*)$")
 # A `-m<N>` / `-m <N>` early-exit form on a grep flag cluster.
 _GREP_DASH_M_RE = re.compile(r"(?:^|\s)-\w*m\s*\d|(?:^|\s)-m\s+\d")
 
+# Long-form spellings of the same early-exit flags the short forms above
+# already catch -- ``--quiet`` (== ``-q``) and ``--max-count=<N>`` (== ``-m
+# <N>``). A long-form spelling escaping a short-form detector is a real
+# detection hole, not a scope decision (gap #3).
+_GREP_QUIET_LONG_RE = re.compile(r"(?:^|\s)--quiet\b")
+_GREP_MAX_COUNT_LONG_RE = re.compile(r"(?:^|\s)--max-count=\d")
+
+# `-l` / combined clusters containing `l` (`grep -l`, `grep -il`, ...) --
+# list matching FILE NAMES, stopping after the first match per input file.
+# Same early-exit hazard shape as `-q` (gap #3).
+_GREP_DASH_L_RE = re.compile(r"(?:^|\s)-\w*l\w*(?:\s|$)")
+
 # The sanctioned "discard the exit status" mitigation for display-only
-# pipelines (release-sandbox.sh's existing idiom). Recognized as a
-# non-violation shape rather than requiring a per-site exemption entry.
-_OR_TRUE_RE = re.compile(r"\|\|\s*(?:true|:)\b")
+# pipelines (release-sandbox.sh's existing idiom). Recognizing this SHAPE
+# is not, by itself, a free pass any more -- see the `_PIPEFAIL_OR_TRUE_
+# SITES` ratchet below (gap #1): every guarded hit still needs a tracked,
+# reviewed entry.
+#
+# NOTE (found while hardening this file, 2026-08-10): the naive
+# `r"\|\|\s*(?:true|:)\b"` never matches the `:` alternative -- `\b`
+# requires a word/non-word transition, but `:` is itself non-word, so a
+# trailing `:` followed by anything else non-word (end of line, a space,
+# a `;`) has non-word on BOTH sides of that position and no boundary
+# exists. `\b` is scoped to `true` only below; `:` needs no boundary
+# check (it is not a word-character prefix of some longer token grep/
+# shell would care about here).
+_OR_TRUE_RE = re.compile(r"\|\|\s*(?:true\b|:)")
 
 
 def _split_pipe_segments(line: str) -> list[str]:
@@ -275,13 +354,30 @@ def _grep_flags_are_early_exit(rest: str) -> bool:
         return True
     if _GREP_DASH_M_RE.search(flag_blob):
         return True
+    if _GREP_QUIET_LONG_RE.search(flag_blob):
+        return True
+    if _GREP_MAX_COUNT_LONG_RE.search(flag_blob):
+        return True
+    if _GREP_DASH_L_RE.search(flag_blob):
+        return True
     return False
 
 
-def _early_exit_consumer_hits(lines: list[str]) -> list[tuple[int, str]]:
-    """Return ``(1-based lineno, matched consumer description)`` pairs for
-    every early-exit-consumer pipe stage in *lines* that is not guarded by
-    a trailing ``|| true`` / ``|| :``.
+def _iter_early_exit_consumer_segments(lines: list[str]):
+    """Yield ``(1-based lineno, snippet, guarded)`` for every pipe segment
+    in *lines* that opens with an early-exit consumer (``grep -q`` /
+    ``grep -m<N>`` / ``grep --quiet`` / ``grep --max-count=<N>`` /
+    ``grep -l`` / ``head``), where ``guarded`` is True iff a trailing
+    ``|| true`` / ``|| :`` appears anywhere from that segment to the end
+    of the line (the sanctioned display-only mitigation -- `|| true` can
+    trail ANY later pipe stage, e.g. `cmd | head -3 | sed ... || true`,
+    the 6zxfb shape where head is a MIDDLE stage, and it still neutralizes
+    the promoted failure for every upstream stage, so every segment from
+    here to end of line is checked, not just this one).
+
+    Shared core for `_early_exit_consumer_hits` (unguarded view) and
+    `_or_true_guarded_early_exit_hits` (guarded view) so the two can never
+    silently drift apart.
 
     Line-based, like ``test_shell_continuation_lint.py``'s scanner --
     deliberately no full shell parser. Every real instance found across
@@ -289,7 +385,6 @@ def _early_exit_consumer_hits(lines: list[str]) -> list[tuple[int, str]]:
     authoring time) has the pipe and its consumer on the same physical
     line, so this is not a hypothetical simplification.
     """
-    hits: list[tuple[int, str]] = []
     for i, line in enumerate(lines, start=1):
         if line.lstrip().startswith("#"):
             continue
@@ -310,26 +405,139 @@ def _early_exit_consumer_hits(lines: list[str]) -> list[tuple[int, str]]:
                 early_exit = _grep_flags_are_early_exit(rest)
             if not early_exit:
                 continue
-            # The sanctioned display-only mitigation: exit status of the
-            # whole pipeline is discarded, so a SIGPIPE-promoted failure
-            # cannot abort the script here. `|| true` can trail ANY later
-            # pipe stage (e.g. `cmd | head -3 | sed ... || true` -- the
-            # 6zxfb shape, where head is a MIDDLE stage) and it still
-            # neutralizes the promoted failure for every upstream stage,
-            # so scan every segment from here to end of line, not just
-            # this one.
-            if any(_OR_TRUE_RE.search(s) for s in segments[idx:]):
-                continue
-            hits.append((i, stripped.strip()))
+            guarded = any(_OR_TRUE_RE.search(s) for s in segments[idx:])
+            yield i, stripped.strip(), guarded
+
+
+def _early_exit_consumer_hits(lines: list[str]) -> list[tuple[int, str]]:
+    """Return ``(1-based lineno, matched consumer description)`` pairs for
+    every early-exit-consumer pipe stage in *lines* that is NOT guarded by
+    a trailing ``|| true`` / ``|| :``. A guarded hit is not silently
+    dropped -- it is a candidate for `_or_true_guarded_early_exit_hits`
+    below, which the `_PIPEFAIL_OR_TRUE_SITES` ratchet enforces against.
+    """
+    return [
+        (i, snippet)
+        for i, snippet, guarded in _iter_early_exit_consumer_segments(lines)
+        if not guarded
+    ]
+
+
+def _or_true_guarded_early_exit_hits(lines: list[str]) -> list[tuple[int, str]]:
+    """Return ``(1-based lineno, matched consumer description)`` pairs for
+    every early-exit-consumer pipe stage in *lines* that IS guarded by a
+    trailing ``|| true`` / ``|| :`` -- the mirror image of
+    `_early_exit_consumer_hits`. Used to enforce the `_PIPEFAIL_OR_TRUE_
+    SITES` ratchet (gap #1): every guarded site must be a tracked,
+    reviewed entry, never a silent, untracked escape hatch.
+    """
+    return [
+        (i, snippet)
+        for i, snippet, guarded in _iter_early_exit_consumer_segments(lines)
+        if guarded
+    ]
+
+
+_IF_LINE_RE = re.compile(r"^\s*(?:if|elif)\b")
+_THEN_TAIL_RE = re.compile(r";\s*then\s*(?:#.*)?$")
+
+
+def _if_condition_or_true_bug_hits(lines: list[str]) -> list[tuple[int, str]]:
+    """Return ``(1-based lineno, full stripped line)`` for the always-
+    true-condition bug shape: ``if <producer> | <early-exit consumer> ||
+    true; then`` (or ``elif``).
+
+    Appending ``|| true`` to a pipe used as an ``if``/``elif`` CONDITION
+    does not merely hide the pipefail hazard the way the same suffix does
+    on a display-only pipeline -- it makes the condition succeed
+    UNCONDITIONALLY, deleting the assertion outright. This is flagged as
+    a hard failure (`test_no_if_condition_neutralizes_its_own_pipe_with_
+    or_true` below), not merely advisory, because it is always a bug with
+    no legitimate use, and the sweep found zero live occurrences at
+    authoring time.
+
+    Deliberately narrow: single physical line, ``if``/``elif`` ... ``;
+    then`` on the same line. The two-line ``if cond\\nthen`` form is not
+    covered -- no live instance of that shape combined with this bug
+    exists in this repo at authoring time, and widening beyond a
+    demonstrated instance repeats this file's own documented anti-pattern
+    of guessing too broadly (see the sed/awk carve-out above).
+    """
+    hits: list[tuple[int, str]] = []
+    for i, line in enumerate(lines, start=1):
+        if line.lstrip().startswith("#"):
+            continue
+        if not _IF_LINE_RE.match(line):
+            continue
+        if not _THEN_TAIL_RE.search(line):
+            continue
+        for _, _, guarded in _iter_early_exit_consumer_segments([line]):
+            if guarded:
+                hits.append((i, line.strip()))
+                break
     return hits
 
 
-def _sets_pipefail(text: str) -> bool:
+# `source`/`.` line -> resolved path idioms this repo actually uses,
+# resolved relative to the SOURCING file's own directory (`$(dirname
+# "$0")`, `$(dirname "${BASH_SOURCE[0]}")`, `$HERE`, `$SCRIPT_DIR` -- all
+# four are, by this repo's own convention, defined at the top of the
+# sourcing script as that script's own directory) or to the repo root
+# (`$REPO_ROOT`). Anything else (a dynamic/generated path like
+# `"${SANDBOX_ENV}"`) is deliberately left unresolved -- see the
+# TRANSITIVE `source`/`.` PRECONDITION docstring section above.
+_SOURCE_LINE_RE = re.compile(r"^\s*(?:source|\.)\s+\S")
+_SOURCE_DIRNAME_RE = re.compile(
+    r'\$\(\s*dirname\s+"?\$(?:0|\{?BASH_SOURCE\[0\]\}?)"?\s*\)\s*/\s*(?P<rest>[^"\'\s]+)'
+)
+_SOURCE_SAME_DIR_VAR_RE = re.compile(r'\$\{?(?:HERE|SCRIPT_DIR)\}?/(?P<rest>[^"\'\s]+)')
+_SOURCE_REPO_ROOT_VAR_RE = re.compile(r'\$\{?REPO_ROOT\}?/(?P<rest>[^"\'\s]+)')
+
+
+def _resolve_one_level_sourced_path(line: str, sourcing_file: Path) -> Path | None:
+    """Resolve a ``source``/``.`` line to the sourced file's path, for the
+    small set of repo-local path idioms this repo actually uses. Returns
+    ``None`` if *line* is not a ``source``/``.`` line, or its target
+    expression does not match a recognized idiom (a dynamic/generated
+    path -- left unresolved, not guessed at).
+    """
+    if not _SOURCE_LINE_RE.match(line):
+        return None
+    m = _SOURCE_DIRNAME_RE.search(line) or _SOURCE_SAME_DIR_VAR_RE.search(line)
+    if m:
+        return sourcing_file.parent / m.group("rest")
+    m = _SOURCE_REPO_ROOT_VAR_RE.search(line)
+    if m:
+        return REPO_ROOT / m.group("rest")
+    return None
+
+
+def _sets_pipefail(text: str, *, file_path: Path | None = None) -> bool:
+    """True if *text* sets ``pipefail`` directly, OR (when *file_path* is
+    given) *text* ``source``s/``. ``s a repo-local file (resolved one
+    level, see `_resolve_one_level_sourced_path`) that itself sets
+    ``pipefail`` (gap #2 -- e.g. ``scripts/validate/03-cli.sh`` sourcing
+    ``scripts/validate/lib.sh``).
+    """
     for line in text.splitlines():
         if line.lstrip().startswith("#"):
             continue
         if _PIPEFAIL_SET_RE.search(line):
             return True
+    if file_path is None:
+        return False
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        sourced = _resolve_one_level_sourced_path(line, file_path)
+        if sourced is None or not sourced.is_file():
+            continue
+        sourced_text = sourced.read_text(encoding="utf-8", errors="replace")
+        for sline in sourced_text.splitlines():
+            if sline.lstrip().startswith("#"):
+                continue
+            if _PIPEFAIL_SET_RE.search(sline):
+                return True
     return False
 
 
@@ -408,6 +616,75 @@ def test_detector_ignores_comment_lines() -> None:
     assert _early_exit_consumer_hits(benign.splitlines(keepends=True)) == []
 
 
+def test_detector_catches_grep_quiet_long_form() -> None:
+    """gap #3: `--quiet` is the long-form spelling of `-q` -- a long-form
+    spelling escaping a short-form detector is a real hole."""
+    bad = 'nx daemon service status | grep --quiet "healthy"\n'
+    assert _early_exit_consumer_hits(bad.splitlines(keepends=True)) == [
+        (1, 'grep --quiet "healthy"')
+    ]
+
+
+def test_detector_catches_grep_max_count_long_form() -> None:
+    """gap #3: `--max-count=N` is the long-form spelling of `-mN`."""
+    bad = 'nx daemon service status | grep --max-count=1 "healthy"\n'
+    assert _early_exit_consumer_hits(bad.splitlines(keepends=True)) == [
+        (1, 'grep --max-count=1 "healthy"')
+    ]
+
+
+def test_detector_catches_grep_dash_l() -> None:
+    """gap #3: `grep -l` (list matching FILE NAMES) stops after the first
+    match per input file -- same early-exit hazard shape as `-q`."""
+    bad = 'nx catalog stats 2>&1 | grep -l "ERROR"\n'
+    assert _early_exit_consumer_hits(bad.splitlines(keepends=True)) == [
+        (1, 'grep -l "ERROR"')
+    ]
+
+
+def test_or_true_guarded_hits_detects_untracked_escape_hatch() -> None:
+    """gap #1 falsification control: construct a genuine control-flow-
+    gating pipe with `|| true` tacked on (the exact untracked-escape-hatch
+    shape gap #1 exists to close) and confirm `_or_true_guarded_early_
+    exit_hits` -- the function the sweep's ratchet enforcement is built
+    on -- actually flags it as a guarded hit requiring registration."""
+    bad = 'healthy="$(nx daemon service status | grep -qiE "healthy" || true)"\n'
+    hits = _or_true_guarded_early_exit_hits(bad.splitlines(keepends=True))
+    assert hits == [(1, 'grep -qiE "healthy" || true)"')]
+    # And, critically, it is NOT also reported as an unguarded violation --
+    # the two views are mutually exclusive by construction.
+    assert _early_exit_consumer_hits(bad.splitlines(keepends=True)) == []
+
+
+def test_if_condition_or_true_detects_always_true_bug() -> None:
+    """gap #1 (compounding irony) falsification control: `if <pipe> ||
+    true; then` is ALWAYS a bug -- the `|| true` makes the condition
+    unconditionally succeed, not merely neutralize a pipefail hazard."""
+    bad = 'if nx daemon service status | grep -qiE "healthy" || true; then\n'
+    hits = _if_condition_or_true_bug_hits(bad.splitlines(keepends=True))
+    assert [h[0] for h in hits] == [1]
+
+    elif_bad = '  elif cmd | head -1 || : ; then\n'
+    hits = _if_condition_or_true_bug_hits(elif_bad.splitlines(keepends=True))
+    assert [h[0] for h in hits] == [1]
+
+
+def test_if_condition_or_true_ignores_non_condition_or_true() -> None:
+    """The legitimate display-only `|| true` shape (no `if`/`elif`, no
+    `; then`) must never be flagged by the always-true-bug detector --
+    only the actual bug shape is in scope."""
+    benign = "nx catalog stats 2>&1 | head -15 | sed 's/^/  /' || true\n"
+    assert _if_condition_or_true_bug_hits(benign.splitlines(keepends=True)) == []
+
+
+def test_if_condition_or_true_ignores_if_without_early_exit_consumer() -> None:
+    """`grep -c` (never early-exit) inside an `if ... || true; then` is
+    not this bug -- `-c` drains the pipe like `tail`, so there is no
+    early-exit consumer to have been neutralized in the first place."""
+    benign = 'if cmd | grep -c pattern || true; then\n'
+    assert _if_condition_or_true_bug_hits(benign.splitlines(keepends=True)) == []
+
+
 def test_sets_pipefail_recognizes_combined_flag_forms() -> None:
     assert _sets_pipefail("set -o pipefail\n")
     assert _sets_pipefail("set -eo pipefail\n")
@@ -415,6 +692,42 @@ def test_sets_pipefail_recognizes_combined_flag_forms() -> None:
     assert _sets_pipefail("set -uo pipefail\n")
     assert not _sets_pipefail("set -eu\n")
     assert not _sets_pipefail("# set -o pipefail (example only)\n")
+
+
+def test_sets_pipefail_detects_transitive_source_of_pipefail_lib() -> None:
+    """gap #2: scripts/validate/03-cli.sh and 04-hooks.sh set no pipefail
+    directly, but both `source "$(dirname "$0")/lib.sh"`, which does. One-
+    level source resolution must recognize both as pipefail-set."""
+    for rel in ("scripts/validate/03-cli.sh", "scripts/validate/04-hooks.sh"):
+        path = REPO_ROOT / rel
+        text = path.read_text(encoding="utf-8")
+        # Confirm the premise: the file does NOT declare pipefail itself --
+        # the whole point of this test is that only the transitively-
+        # sourced lib.sh does.
+        assert not any(
+            _PIPEFAIL_SET_RE.search(line)
+            for line in text.splitlines()
+            if not line.lstrip().startswith("#")
+        ), f"{rel} now sets pipefail directly -- update this test's premise"
+        assert not _sets_pipefail(text), (
+            f"{rel} should not be recognized as pipefail-set WITHOUT "
+            "source resolution -- update this test's premise"
+        )
+        assert _sets_pipefail(text, file_path=path), (
+            f"{rel} sources scripts/validate/lib.sh (which sets pipefail "
+            "via `set -uo pipefail`) but is not recognized as "
+            "pipefail-set through one-level source resolution"
+        )
+
+
+def test_sets_pipefail_source_resolution_does_not_guess_dynamic_paths() -> None:
+    """A `source "${SOME_DYNAMIC_VAR}"` line (generated/runtime path, not
+    one of the recognized repo-local idioms) must be left unresolved, not
+    guessed at -- confirms `_resolve_one_level_sourced_path` returns None
+    rather than raising or matching something unintended."""
+    text = 'source "${SANDBOX_ENV}"\nnx catalog stats\n'
+    fake_path = REPO_ROOT / "scripts" / "rdr152-sandbox" / "prod-copy.sh"
+    assert not _sets_pipefail(text, file_path=fake_path)
 
 
 def test_scope_precondition_a_script_with_the_hazard_shape_but_no_pipefail_is_not_flagged() -> None:
@@ -466,7 +779,7 @@ def test_scope_precondition_a_script_with_the_hazard_shape_but_no_pipefail_is_no
 # rather than reviewed by inspection alone.
 _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
     {
-        # --- tests/e2e/migration-rehearsal/*.sh (140 entries): Docker-
+        # --- tests/e2e/migration-rehearsal/*.sh (138 entries): Docker-
         # rehearsal-only, pre-tag release battery (AGENTS.md
         # "Engine-service release"). Every line matches the *exact*
         # wbeyi shape (`nx ... | grep -q...` gating control flow, or
@@ -504,7 +817,6 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:315",
         "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:336",
         "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:339",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:387",
         "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:387",
         "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:403",
         "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:490",
@@ -565,20 +877,26 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:51",
         "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:75",
         "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:97",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:116",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:119",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:129",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:135",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:138",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:144",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:153",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:157",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:159",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:167",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:171",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:211",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:41",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:92",
+        # nexus-xm0cp (2026-08-10): line numbers shifted by the fix for
+        # that bead (deleted the T2-database-not-found dead branch, the
+        # two dual_write_failed sites, and the 5xx-log-scan block; added
+        # the Phase D client-rc census). One violation was eliminated
+        # outright (the old :157 "T2 database not found" pipe no longer
+        # exists — the branch itself was deleted, not retargeted), so
+        # this file's count drops from 14 to 13; see the ceiling below.
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:118",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:121",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:131",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:137",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:140",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:146",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:155",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:166",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:174",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:178",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:223",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:44",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:94",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:142",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:193",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:238",
@@ -622,10 +940,9 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/run.sh:551",
         "tests/e2e/migration-rehearsal/run.sh:563",
         "tests/e2e/migration-rehearsal/run.sh:579",
-        # --- tests/e2e/mac-signed-binary-gate.sh (8 entries): needs an
+        # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.
-        "tests/e2e/mac-signed-binary-gate.sh:117",
         "tests/e2e/mac-signed-binary-gate.sh:117",
         "tests/e2e/mac-signed-binary-gate.sh:118",
         "tests/e2e/mac-signed-binary-gate.sh:127",
@@ -680,7 +997,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/local-index-memory-gate.sh:849",
     }
 )
-_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 159
+_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 158
 
 
 def test_pipefail_early_exit_exempt_ratchet() -> None:
@@ -725,6 +1042,115 @@ def test_pipefail_early_exit_exempt_entries_are_live_violations() -> None:
     )
 
 
+# ── ratchet: `|| true`-guarded early-exit-consumer sites (gap #1) ──────────
+#
+# The `|| true` (or `|| :`) suffix is the sanctioned display-only
+# mitigation (see SANCTIONED FIX in the module docstring) -- but appending
+# it to a genuine early-exit pipe silently defeated detection with zero
+# review friction UNLESS every site is itself tracked here, exact-equality
+# ratcheted exactly like `_PIPEFAIL_EARLY_EXIT_EXEMPT` above. Untracked,
+# any author could suffix `|| true` onto a real control-flow-gating pipe;
+# worse, appending `|| true` to a pipe used as an `if`/`elif`/`&&`
+# CONDITION makes that condition UNCONDITIONALLY TRUE, so the escape
+# hatch would not merely hide the pipefail hazard, it would convert the
+# assertion into a vacuous pass -- precisely this repo's dominant defect
+# class. A per-entry rationale is required (not just a count ceiling):
+# unlike the EXEMPT set above (where every entry is provably a real,
+# still-detected VIOLATION and the risk is only "which ones", here the
+# whole point is proving each site is display-only, which cannot be
+# verified mechanically -- only a human review, recorded as a rationale
+# comment, closes that gap.
+#
+# Every entry below was verified at authoring time (2026-08-10) to be a
+# genuine display-only pipeline: none sits inside an `if`/`elif`/`&&`/
+# `||` CONTROL-FLOW position, and none feeds a variable that later gates
+# a pass/fail decision -- each truncates or extracts output for
+# human-readable pretty-printing / cosmetic summary counters only.
+_PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
+    {
+        # scripts/rdr152-sandbox/prod-copy.sh (3 entries): each truncates
+        # a per-table ETL error dump to 20 lines for terminal
+        # readability inside a manual ops runbook (RDR-152 sandbox
+        # refresh) -- not gating any pass/fail decision; `nx storage
+        # migrate`'s own exit code / summary further down is what
+        # actually surfaces failure, this is supplementary diagnostic
+        # noise-truncation only.
+        "scripts/rdr152-sandbox/prod-copy.sh:148",
+        "scripts/rdr152-sandbox/prod-copy.sh:159",
+        "scripts/rdr152-sandbox/prod-copy.sh:169",
+        # tests/containers/fanout.sh:158 (1 entry): extracts a junit
+        # <testsuite> attribute string purely to accumulate cosmetic
+        # TOTAL_T/TOTAL_P/... summary counters printed at the end of the
+        # run; the actual pass/fail decision (`FAIL=1`) is computed a
+        # few lines below from each shard's own `$rc` exit code, never
+        # from this.
+        "tests/containers/fanout.sh:158",
+        # tests/e2e/migration-rehearsal/rehearse_shakeout.sh (1 entry):
+        # prints staleness/skip diagnostic lines for human eyeballing in
+        # a "run-2 log tail for diagnosis" block -- the actual
+        # indexed-content-searchable assertion runs on the next
+        # (unrelated) line via a fresh, unguarded
+        # `nx search ... | grep -qi`.
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:221",
+        # tests/e2e/release-sandbox.sh (3 entries): the already-commented
+        # `|| true: head is an early-exit consumer...` idiom this file's
+        # own docstring cites as the sanctioned shape -- readback for
+        # human eyeballing only; the actual FAIL/bad decision for each
+        # surrounding block is made from a separately-captured variable
+        # or a dedicated gate elsewhere, never from these truncated
+        # echoes.
+        "tests/e2e/release-sandbox.sh:647",
+        "tests/e2e/release-sandbox.sh:651",
+        "tests/e2e/release-sandbox.sh:682",
+    }
+)
+_PIPEFAIL_OR_TRUE_SITES_CEILING = 8
+
+
+def test_pipefail_or_true_sites_ratchet() -> None:
+    assert len(_PIPEFAIL_OR_TRUE_SITES) == _PIPEFAIL_OR_TRUE_SITES_CEILING, (
+        f"_PIPEFAIL_OR_TRUE_SITES has {len(_PIPEFAIL_OR_TRUE_SITES)} "
+        f"entries, expected exactly {_PIPEFAIL_OR_TRUE_SITES_CEILING}. "
+        "This set may only shrink (fix the site -- eliminate the pipe or "
+        "remove the `|| true` -- and remove its entry) or grow with a "
+        "documented per-entry rationale (why the site is genuinely "
+        "display-only, not control-flow-gating) plus a conscious bump of "
+        "`_PIPEFAIL_OR_TRUE_SITES_CEILING` in this file."
+    )
+
+
+def test_pipefail_or_true_sites_are_live_or_true_guarded_hits() -> None:
+    """Every `_PIPEFAIL_OR_TRUE_SITES` entry must still name a REAL,
+    currently-detected `|| true`-guarded early-exit-consumer pipe -- same
+    liveness discipline as `test_pipefail_early_exit_exempt_entries_are_
+    live_violations` above, for the same reason: a stale entry is a free,
+    unrationalized escape-hatch slot for whoever edits this set next."""
+    dead: list[str] = []
+    by_file: dict[str, set[int]] = {}
+    for entry in _PIPEFAIL_OR_TRUE_SITES:
+        path, _, lineno = entry.rpartition(":")
+        by_file.setdefault(path, set()).add(int(lineno))
+
+    for rel_path, linenos in by_file.items():
+        full = REPO_ROOT / rel_path
+        if not full.is_file():
+            dead.extend(f"{rel_path}:{n} -> no such file" for n in linenos)
+            continue
+        lines = full.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        hit_lines = {n for n, _ in _or_true_guarded_early_exit_hits(lines)}
+        for n in sorted(linenos):
+            if n not in hit_lines:
+                dead.append(f"{rel_path}:{n} -> no `|| true`-guarded early-exit-consumer pipe detected there")
+
+    assert not dead, (
+        f"{len(dead)} `|| true`-guarded-site entr{'y' if len(dead) == 1 else 'ies'} "
+        "no longer name a live guarded hit:\n  " + "\n  ".join(dead)
+        + "\n\nRetarget if the line moved, or delete the entry and lower "
+        "`_PIPEFAIL_OR_TRUE_SITES_CEILING` if the `|| true` was removed "
+        "(or the pipe eliminated)."
+    )
+
+
 # ── the sweep ────────────────────────────────────────────────────────────
 
 
@@ -734,9 +1160,10 @@ def test_no_pipefail_script_pipes_into_an_early_exit_consumer() -> None:
 
     pipefail_scripts = 0
     violations: list[str] = []
+    or_true_violations: list[str] = []
     for script in scripts:
         text = script.read_text(encoding="utf-8", errors="replace")
-        if not _sets_pipefail(text):
+        if not _sets_pipefail(text, file_path=script):
             continue
         pipefail_scripts += 1
         lines = text.splitlines(keepends=True)
@@ -746,6 +1173,11 @@ def test_no_pipefail_script_pipes_into_an_early_exit_consumer() -> None:
             if entry in _PIPEFAIL_EARLY_EXIT_EXEMPT:
                 continue
             violations.append(f"{entry}  ({snippet})")
+        for lineno, snippet in _or_true_guarded_early_exit_hits(lines):
+            entry = f"{rel}:{lineno}"
+            if entry in _PIPEFAIL_OR_TRUE_SITES:
+                continue
+            or_true_violations.append(f"{entry}  ({snippet})")
 
     # Non-vacuity: the pipefail-precondition filter must actually be
     # letting a meaningful subset of the corpus through, not silently
@@ -773,4 +1205,50 @@ def test_no_pipefail_script_pipes_into_an_early_exit_consumer() -> None:
         "it to `_PIPEFAIL_EARLY_EXIT_EXEMPT` in this file with a "
         "documented rationale and bump the ceiling in the same diff:\n  "
         + "\n  ".join(violations)
+    )
+
+    assert not or_true_violations, (
+        "the following pipefail-set shell script(s) neutralize an "
+        "early-exit-consumer pipe with a trailing `|| true` / `|| :` "
+        "WITHOUT a tracked `_PIPEFAIL_OR_TRUE_SITES` entry -- this is the "
+        "untracked-escape-hatch gap the ratchet exists to close: a bare "
+        "`|| true` can silently defeat this lint's real purpose (and, "
+        "worse, if the pipe is an `if`/`elif` CONDITION, `|| true` makes "
+        "that condition UNCONDITIONALLY TRUE -- see "
+        "`test_no_if_condition_neutralizes_its_own_pipe_with_or_true`). "
+        "If this really is a display-only pipeline, add it to "
+        "`_PIPEFAIL_OR_TRUE_SITES` in this file with a documented "
+        "rationale (why it does not gate any pass/fail decision) and "
+        "bump `_PIPEFAIL_OR_TRUE_SITES_CEILING` in the same diff. "
+        "Otherwise, remove the `|| true` and fix the pipe like a normal "
+        "violation:\n  " + "\n  ".join(or_true_violations)
+    )
+
+
+def test_no_if_condition_neutralizes_its_own_pipe_with_or_true() -> None:
+    """The always-true-condition bug shape (see `_if_condition_or_true_bug
+    _hits`'s docstring) is a hard failure across EVERY tracked shell
+    script, not just pipefail-set ones -- `||` runs regardless of
+    pipefail, so this bug is independent of the pipefail precondition
+    that gates the rest of this file's sweep."""
+    scripts = _tracked_shell_scripts()
+    assert len(scripts) >= 10, f"suspicious sweep: only {len(scripts)} scripts enumerated"
+
+    violations: list[str] = []
+    for script in scripts:
+        text = script.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines(keepends=True)
+        rel = script.relative_to(REPO_ROOT).as_posix()
+        for lineno, snippet in _if_condition_or_true_bug_hits(lines):
+            violations.append(f"{rel}:{lineno}  ({snippet})")
+
+    assert not violations, (
+        "the following if/elif condition(s) pipe an early-exit consumer "
+        "and then suffix `|| true` (or `|| :`), which makes the "
+        "CONDITION UNCONDITIONALLY TRUE regardless of what the pipe "
+        "actually matched -- this is not a pipefail-hazard mitigation "
+        "here, it deletes the assertion outright. Fix: remove the `|| "
+        "true`/`|| :` (the condition should fail loud on a real grep/head "
+        "non-match), or restructure so the pipe result is captured to a "
+        "variable BEFORE the `if`:\n  " + "\n  ".join(violations)
     )

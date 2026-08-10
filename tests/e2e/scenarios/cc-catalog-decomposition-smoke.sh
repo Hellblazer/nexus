@@ -78,7 +78,13 @@ _no_crash_markers() {
     # early by grep risks its SIGPIPE getting promoted over grep's own
     # (successful) exit status. `=~` uses the same ERE dialect as
     # `grep -E`, so the pattern carries over verbatim; `nocasematch`
-    # supplies grep's `-i`, scoped to this function only.
+    # supplies grep's `-i`.
+    #
+    # `shopt` is PROCESS-GLOBAL -- bash has no function-scoping for it
+    # (`local -` scopes `set` options only, not `shopt`). The restore
+    # below is manual bookkeeping, not automatic scoping: EVERY exit path
+    # added to this function must toggle `nocasematch` back off, or it
+    # leaks case-insensitivity into every later `[[ =~ ]]` in this script.
     crash_pattern="AttributeError|database is locked|has no attribute '_sync'|has no attribute '_docs'|has no attribute '_links'|has no attribute '_writes'|RuntimeError"
     shopt -s nocasematch
     if [[ "$snapshot" =~ $crash_pattern ]]; then

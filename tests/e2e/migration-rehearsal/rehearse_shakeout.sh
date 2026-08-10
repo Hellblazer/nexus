@@ -15,13 +15,16 @@
 #                                              incl. the umvh2 delete-by-title
 #                                              regression)
 #   Phase C  index + staleness                (index a synthetic repo; assert
-#                                              zero dual-write/staleness
-#                                              failures; re-index must be
-#                                              incremental, not a full re-embed)
+#                                              zero staleness-cache failures;
+#                                              re-index must be incremental,
+#                                              not a full re-embed)
 #   Phase D  concurrent write load            (parallel index runs + store
-#                                              puts; assert ZERO 5xx in the
-#                                              service log — the lock-convoy
-#                                              tier)
+#                                              puts; assert ZERO client-rc
+#                                              failures across the concurrent
+#                                              workload — the lock-convoy
+#                                              tier. No 5xx log scan: the
+#                                              candidate has no request
+#                                              logger to scan, nexus-xm0cp)
 #
 # Exit 0 only when every phase passes: "CANDIDATE SHAKEOUT PASSED".
 set -uo pipefail
@@ -48,7 +51,6 @@ run_check() {
 
 SVC_NATIVE_DIR="/opt/nexus-service-native"
 SVC_WELL_KNOWN_DIR="$HOME/.config/nexus/service"
-SERVICE_LOG="$HOME/.config/nexus/logs/storage_service_native.log"
 
 # ── Phase A: position the candidate binary + provision + serve ───────────────
 say "Phase A — provision + serve the CANDIDATE binary"
@@ -153,13 +155,18 @@ PLAN_SEED_OUT="$(nx plan reseed 2>&1)"
 printf '%s' "$PLAN_SEED_OUT" | grep -qE "Seeded [0-9]+ new builtin row" \
   && ok "plan reseed writes through the service" \
   || { bad "plan reseed"; printf '%s\n' "$PLAN_SEED_OUT" | sed 's/^/       | /' | tail -6; }
+# nexus-xm0cp: the "T2 database not found" fallback this used to guard
+# against was the local SQLite PlanLibrary snapshot; that code path was
+# deleted outright at nexus-i711w Stage 2 sub-stage A3 (_open_plan_library
+# now only ever constructs HttpPlanLibrary — a resolution failure raises
+# "plans service unavailable: ..." instead, untestable here since Phase A
+# already gates on a healthy service). No live producer for that literal
+# remains in src/; collapsed to the one real assertion below.
 PLAN_LIST_OUT="$(nx plan list 2>&1)"
-if printf '%s' "$PLAN_LIST_OUT" | grep -q "T2 database not found"; then
-  bad "plan list fell back to the local snapshot (o02xe regression)"
-elif printf '%s' "$PLAN_LIST_OUT" | grep -qiE "builtin"; then
+if printf '%s' "$PLAN_LIST_OUT" | grep -qiE "builtin"; then
   ok "plan list reads seeded builtins back from the service"
 else
-  bad "plan list returned no builtin rows after reseed"
+  bad "plan list returned no builtin rows after reseed (o02xe regression)"
   printf '%s\n' "$PLAN_LIST_OUT" | sed 's/^/       | /' | tail -6
 fi
 
@@ -182,7 +189,12 @@ done
 
 IDX1=/tmp/shakeout-index-1.log
 if nx index repo "$REPO" > "$IDX1" 2>&1; then ok "index run 1 (exit 0)"; else bad "index run 1 failed"; fi
-grep -q "dual_write_failed"      "$IDX1" && bad "chash dual-write failures in run 1" || ok "zero chash dual-write failures"
+# nexus-xm0cp: the chash dual-write hook this used to guard (`grep -q
+# "dual_write_failed"`) was retired at RDR-187 / nexus-piwya.4 -- the
+# chunks tables are the chash store now, nothing left to dual-write, and
+# the string has zero producers anywhere in src/ or service/ (confirmed
+# by exhaustive inverse-grep). Deleted rather than retargeted at a signal
+# nothing emits.
 grep -q "docs_for_chashes_failed" "$IDX1" && bad "staleness-cache failure in run 1"   || ok "staleness cache built (no shape crash)"
 
 # Touch 2 files; the re-index must be incremental (h8rf6.3 regression).
@@ -212,7 +224,7 @@ nx search "flux capacitor array" --corpus docs -m 2 2>/dev/null | grep -qi "doc"
   && ok "indexed content searchable" || bad "indexed content not searchable"
 
 # ── Phase D: concurrent write load (the lock-convoy tier) ───────────────────
-say "Phase D — concurrent writes: parallel index + store puts; zero 5xx allowed"
+say "Phase D — concurrent writes: parallel index + store puts; zero failures allowed"
 REPO2=/tmp/shakeout-repo-2
 rm -rf "$REPO2"; mkdir -p "$REPO2/src"
 for i in $(seq 1 15); do
@@ -220,25 +232,68 @@ for i in $(seq 1 15); do
 done
 ( cd "$REPO2" && git init -q && git add -A && git -c user.email=s@x -c user.name=s commit -qm seed )
 
-LOG_MARK=$(wc -l < "$SERVICE_LOG" 2>/dev/null || echo 0)
 IDXA=/tmp/shakeout-load-a.log; IDXB=/tmp/shakeout-load-b.log
 ( nx index repo "$REPO" --force > "$IDXA" 2>&1 ) &
 PA=$!
 ( nx index repo "$REPO2" > "$IDXB" 2>&1 ) &
 PB=$!
-for i in $(seq 1 10); do
-  printf '# load doc %d\ncontent %d\n' "$i" "$i" > "/tmp/load-$i.md"
-  nx store put "/tmp/load-$i.md" --collection knowledge__shakeout --title "load-$i" >/dev/null 2>&1
-done
+# nexus-xm0cp: there is no service-side 5xx signal to scan for -- the
+# candidate is com.sun.net.httpserver with no request logger, and
+# service/src/main/resources/logback.xml has no status field in its one
+# appender pattern. The only real assertion this phase can produce is a
+# CLIENT-SIDE census over the concurrent workload it already spawns, via
+# lib/store_put_census.sh (shared with tests/test_shakeout_store_put_census.py's
+# durable falsifiability demonstration -- both source the same function,
+# never a look-alike). `nx store put` raises on a non-2xx, non-retryable
+# service response (HttpVectorClient's urllib.error.HTTPError handling,
+# re-raised through src/nexus/commands/store.py's `except Exception: ...
+# raise`, uncaught by Click), which surfaces as a non-zero CLI exit -- so a
+# failed rc here IS observable evidence of a lock-convoy failure, not a
+# proxy for nothing. Previously these 10 calls sent stdout+stderr to
+# /dev/null and never read rc; zero assertions came out of this half of
+# the load phase.
+# shellcheck source=./lib/store_put_census.sh disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/store_put_census.sh"
+census_concurrent_store_puts 10 "/tmp/load-put"
 wait "$PA"; RA=$?
 wait "$PB"; RB=$?
 [ "$RA" = 0 ] && ok "parallel index A (exit 0)" || bad "parallel index A failed"
 [ "$RB" = 0 ] && ok "parallel index B (exit 0)" || bad "parallel index B failed"
-
-fivexx=$(tail -n "+$((LOG_MARK+1))" "$SERVICE_LOG" 2>/dev/null | grep -cE '\" (5[0-9][0-9]) |status=5[0-9][0-9]|HTTP 5[0-9][0-9]' || true)
-dwf=$(cat "$IDXA" "$IDXB" 2>/dev/null | grep -c "dual_write_failed" || true)
-[ "${fivexx:-0}" = 0 ] && ok "zero 5xx in service log under concurrent load" || bad "$fivexx 5xx responses under load (lock-convoy class)"
-[ "${dwf:-0}" = 0 ]    && ok "zero dual-write failures under concurrent load"  || bad "$dwf dual-write failures under load"
+if [ "$STORE_FAILS" = 0 ]; then
+  ok "10/10 concurrent store puts succeeded (exit 0)"
+else
+  bad "$STORE_FAILS/10 concurrent store puts failed under load (lock-convoy class):$STORE_FAIL_IDX"
+  for i in $STORE_FAIL_IDX; do
+    note "load-$i failure tail:"
+    sed 's/^/       | /' "/tmp/load-put-$i.log" | tail -6
+  done
+fi
+# nexus-xm0cp Finding 2: HttpVectorClient absorbs 502/503/504 via a bounded
+# retry (_GATEWAY_RETRY_CODES / _GATEWAY_RETRY_SLEEPS,
+# src/nexus/db/http_vector_client.py) BEFORE ever raising, so a transient
+# gateway blip that resolves within ~17s never reaches a client rc -- the
+# STORE_FAILS census above is structurally blind to exactly the shape a
+# lock convoy is most likely to take. JUDGEMENT CALL (per review, recorded
+# here rather than left implicit): a captured vector_gateway_retry in this
+# phase is treated as a FAIL, not a report-only observation. The retry
+# mechanism was designed for slow CCE embedding on LARGE batches
+# (nexus-duoak.4) -- but these 10 docs are trivial single-chunk ~20-byte
+# files against knowledge__shakeout, so an embedding-timeout explanation
+# does not plausibly apply here; a retry on THIS workload is far more
+# likely to be connection/thread-pool contention under concurrent load,
+# i.e. the exact convoy signal this phase exists to catch. A release gate
+# over-detecting a rare, fully-diagnosable FAIL (the log tail prints below,
+# same as the failure branch above) is preferable to silently shipping a
+# convoy defect the way the ORIGINAL /dev/null-swallowed loop did.
+if [ "$STORE_RETRIES" = 0 ]; then
+  ok "zero gateway-retry (502/503/504) absorptions across the concurrent workload"
+else
+  bad "$STORE_RETRIES/10 concurrent store puts absorbed a gateway retry under load (lock-convoy class, see vector_gateway_retry):$STORE_RETRY_IDX"
+  for i in $STORE_RETRY_IDX; do
+    note "load-$i gateway-retry tail:"
+    grep "vector_gateway_retry" "/tmp/load-put-$i.log" | sed 's/^/       | /'
+  done
+fi
 
 # ── Verdict ──────────────────────────────────────────────────────────────────
 say "Verdict"

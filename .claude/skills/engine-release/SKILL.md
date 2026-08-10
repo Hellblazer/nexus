@@ -65,9 +65,20 @@ This is strictly stronger than the `--guided` gate it replaces. It performs the
 same native-image build — the `-Ob` quick build has the SAME reachability
 requirements as the full release build, so it catches a broken native build
 before the tag burns a release-workflow run — and then adds the full CLI-verb
-matrix, incremental index, and a zero-5xx-under-load assertion against that
-binary. A FAIL here is a product finding, not a harness formality: its maiden
-runs caught two production bugs the unit suites missed (nexus-h8rf6).
+matrix, incremental index, and (nexus-xm0cp) a CLIENT-SIDE census over the
+concurrent load phase against that binary — the candidate has no request
+logger (`com.sun.net.httpserver`, no access-log appender), so there is no
+service-side 5xx signal to scan. The census has TWO parts, not one: (1) none
+of the concurrent `nx store put` / `nx index repo` calls exit non-zero, and
+(2) none of them logs an absorbed `vector_gateway_retry` either — coverage
+gap (1) alone would miss it: `HttpVectorClient` retries a 502/503/504 within
+a bounded budget BEFORE ever raising (`_GATEWAY_RETRY_CODES`,
+`src/nexus/db/http_vector_client.py`), so a gateway blip that resolves in
+time never reaches a client exit code at all, exactly the shape a lock
+convoy is most likely to take. Part (2) closes that gap by scanning each
+call's log for the retry's own structlog line. A FAIL here is a product
+finding, not a harness formality: its maiden runs caught two production bugs
+the unit suites missed (nexus-h8rf6).
 
 Notes:
 - The host JVM suite (`cd service && ./mvnw -q test`, Step 2) validates the Java
