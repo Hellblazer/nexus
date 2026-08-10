@@ -513,8 +513,8 @@ else
   PDF_INDEXED=0
 fi
 
-# ── Step 4 — nx search + nx query retrieval ─────────────────────────────────
-say "Step 4 — nx search + nx query (retrieval must return what was indexed)"
+# ── Step 4 — nx search (CLI) + MCP `query` retrieval ────────────────────────
+say "Step 4 — nx search (CLI) + MCP query tool (retrieval must return what was indexed)"
 # `nx query` has NO CLI verb (only an MCP tool — confirmed against
 # src/nexus/cli.py's add_command() list: no `query` group is registered).
 # Its leg of this step is therefore driven via the MCP `query` tool inside
