@@ -29,20 +29,47 @@
 # hypothesis, not just the memory one.
 #
 # PRECEDENT: tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh Step 2/8
-# already solved "corpus that binds the cap" for a Linux CONTAINER using
-# /proc introspection and a single oversize-file trick (a file whose own
-# chunk count exceeds the cap forces ChunkBatcher.add() to reject it as
-# oversize-for-one-batch, routing it through the legacy per-file paged
-# upload whose FIRST page is exactly min(total, cap) chunks — deterministic,
-# no multi-file boundary-alignment luck required). This script reuses that
-# mechanism, generalized: (1) it runs on the bare host (macOS or Linux) via
-# `ps`, not /proc, since this box has no /proc; (2) it CALIBRATES file size
-# against the live chunker instead of a hard-coded function count, because
-# the container script's own hard-coded "40 funcs -> 21 chunks" figure does
-# NOT reproduce on this tree (measured here: 40 funcs -> 10 chunks — the
-# chunker's actual behavior drifted from that comment, silently); trusting a
-# stale magic number is exactly the class of bug this gate exists to avoid a
-# repeat of. (3) it adds a HARD RSS CEILING with immediate SIGKILL — the
+# solved "corpus that binds the cap" for a Linux CONTAINER using a single
+# oversize-file trick (a file whose own chunk count exceeds the cap forces
+# ChunkBatcher.add() to reject it as oversize-for-one-batch, routing it
+# through the LEGACY per-file paged upload). This script's first version
+# reused that trick, generalized to the bare host — and that reuse was
+# itself D3 (nexus-97dp4 first-run finding): an oversize file ALWAYS routes
+# to the legacy path, by construction (chunk_batcher.py:255-260), so it can
+# only ever prove the legacy path binds the cap, never the COMBINED-WRITE
+# path — a DIFFERENT code path from the one the nexus-33hpq incident
+# actually ran, and `--corpus-scale` (more oversize files) cannot fix it.
+#
+# The combined-write path's cap can only bind by ACCUMULATING multiple
+# under-cap files in ChunkBatcher's pending buffer until the running total
+# reaches the cap EXACTLY (chunk_batcher.py:262-303 — the overflow guard is
+# a strict `>`: exceeding the cap pre-flushes the OLD pending BELOW cap and
+# starts fresh, discarding the accumulated progress). A uniform "many small
+# files" corpus is NOT automatically sufficient: if the per-file chunk count
+# doesn't evenly divide the cap, the running total cycles through the same
+# partial sums forever and NEVER lands on the cap — empirically confirmed
+# (50 files of 7 chunks each against cap=16 flushes at 14 chunks, 25 times,
+# 0 cap-binds; see this repair's report). This script's corpus is instead
+# GROUPS of (a) a few "bulk" files calibrated to ~cap/4 chunks each — real
+# accumulation, several files needed — followed by (b) exactly the "trim"
+# files needed to complete the remainder to the cap. A 1-chunk trim file
+# added to a pending buffer of size V can NEVER overflow (V is always < cap
+# — the buffer resets to 0 the instant it reaches cap — so V+1 <= cap
+# always), so trim files always merge safely and climb the running total
+# 1-by-1 until it lands on the cap EXACTLY. Ordering (bulk files before
+# trim files within a group) is enforced by `git ls-files`' deterministic
+# lexicographic traversal (indexer.py `_git_ls_files`, verified — not
+# rglob/os.walk, whose ordering is not guaranteed) via `gNNN_bulk_*` <
+# `gNNN_trim_*` filename prefixes. Both unit sizes are CALIBRATED against
+# the live chunker (nexus.chunker.chunk_file — pure client-side, no
+# network, no engine), never a hard-coded funcs-per-chunk ratio: the
+# original oversize-file version's own hard-coded "40 funcs -> 21 chunks"
+# figure did NOT reproduce on this tree (measured here: 40 funcs -> 10
+# chunks — the chunker's actual behavior drifted from that comment,
+# silently); trusting a stale magic number is exactly the class of bug this
+# gate exists to avoid a repeat of.
+#
+# This script also adds a HARD RSS CEILING with immediate SIGKILL — the
 # rehearsal gate only samples and reports; this gate protects the machine.
 #
 # ISOLATION (non-negotiable — see "Refuse to start" below): everything runs
@@ -125,18 +152,32 @@ _largest_flush_in_log() {
     if [ "$a" -ge "$b" ] 2>/dev/null; then echo "$a"; else echo "$b"; fi
 }
 
-# Count of flush/page events (either family) whose chunk count reached or
-# exceeded *cap* — the "bound M times" figure in the verdict line. A cap
-# that binds exactly once could still be luck; a gate reporting the COUNT
-# lets a reviewer judge how thoroughly the ceiling was exercised.
+# Count of flush/page events whose chunk count reached or exceeded *cap* —
+# the "bound M times" figure in the verdict line. A cap that binds exactly
+# once could still be luck; a gate reporting the COUNT lets a reviewer judge
+# how thoroughly the ceiling was exercised.
+#
+# D4 (nexus-97dp4 first-run finding): *family* selects which event family is
+# counted — "combined" (chunk_flush_complete, the ChunkBatcher combined-
+# write path this gate exists to exercise), "legacy" (the per-file paged
+# upload's http_vector_upsert_chunks_request), or "both" (default — the sum,
+# kept ONLY for this function's own log-scan use and the pre-existing
+# self-test; the JSON emitter below NEVER uses "both" — see _emit_json's own
+# comment for why flushes_at_cap and legacy_pages_at_cap must stay separate
+# counters, not a summed one, to keep flushes_at_cap <= flushes true by
+# construction).
 _cap_bound_count_in_log() {
-    local log="$1" cap="$2" n=0 v
-    for v in $(grep -F 'chunk_flush_complete' "$log" 2>/dev/null | grep -oE 'chunks=[0-9]+' | cut -d= -f2); do
-        [ "$v" -ge "$cap" ] 2>/dev/null && n=$((n + 1))
-    done
-    for v in $(grep -F 'http_vector_upsert_chunks_request' "$log" 2>/dev/null | grep -oE ' count=[0-9]+' | tr -d ' ' | cut -d= -f2); do
-        [ "$v" -ge "$cap" ] 2>/dev/null && n=$((n + 1))
-    done
+    local log="$1" cap="$2" family="${3:-both}" n=0 v
+    if [ "$family" = "combined" ] || [ "$family" = "both" ]; then
+        for v in $(grep -F 'chunk_flush_complete' "$log" 2>/dev/null | grep -oE 'chunks=[0-9]+' | cut -d= -f2); do
+            [ "$v" -ge "$cap" ] 2>/dev/null && n=$((n + 1))
+        done
+    fi
+    if [ "$family" = "legacy" ] || [ "$family" = "both" ]; then
+        for v in $(grep -F 'http_vector_upsert_chunks_request' "$log" 2>/dev/null | grep -oE ' count=[0-9]+' | tr -d ' ' | cut -d= -f2); do
+            [ "$v" -ge "$cap" ] 2>/dev/null && n=$((n + 1))
+        done
+    fi
     echo "$n"
 }
 
@@ -242,9 +283,20 @@ _compute_verdict() {
 
 _emit_json() {
     # $1 peak_gb(str) $2 cap $3 timeout $4 flushes $5 flushes_at_cap
-    # $6 killed(0/1) $7 wall_s $8 manifest_retries $9 refreshable_retries
-    printf '{"peak_gb":%s,"cap":%s,"timeout_s":%s,"flushes":%s,"flushes_at_cap":%s,"killed":%s,"wall_s":%s,"manifest_write_retries":%s,"refreshable_retries":%s}\n' \
-        "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"
+    # $6 legacy_pages_at_cap $7 killed(0/1) $8 wall_s $9 manifest_retries
+    # $10 refreshable_retries
+    #
+    # D4 (nexus-97dp4 first-run finding): "flushes" and "flushes_at_cap" are
+    # now the SAME event family (chunk_flush_complete — the ChunkBatcher
+    # combined-write path this gate exists to exercise): flushes_at_cap is a
+    # same-family SUBSET count of flushes, so flushes_at_cap <= flushes
+    # holds BY CONSTRUCTION, not by convention. The legacy per-file paged-
+    # upload family (http_vector_upsert_chunks_request) that ALSO reached or
+    # exceeded the cap is reported SEPARATELY as legacy_pages_at_cap — never
+    # folded into flushes_at_cap, which is exactly the mixing that let the
+    # old two-family sum exceed "flushes" in the first place.
+    printf '{"peak_gb":%s,"cap":%s,"timeout_s":%s,"flushes":%s,"flushes_at_cap":%s,"legacy_pages_at_cap":%s,"killed":%s,"wall_s":%s,"manifest_write_retries":%s,"refreshable_retries":%s}\n' \
+        "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}"
 }
 
 # ── --self-test: pure-function checks against synthetic fixtures ───────────
@@ -290,10 +342,16 @@ EOF
         "$(_largest_flush_in_log "$t/does-not-exist.log")" "0"
 
     say "self-test: _cap_bound_count_in_log"
-    _assert_eq "two flushes >= cap=16 in fake1.log" \
+    _assert_eq "two flushes >= cap=16 in fake1.log (family=both, default)" \
         "$(_cap_bound_count_in_log "$t/fake1.log" 16)" "2"
     _assert_eq "zero flushes >= cap=16 in fake2.log (the 97dp4 vacuous case)" \
         "$(_cap_bound_count_in_log "$t/fake2.log" 16)" "0"
+    _assert_eq "D4: family=combined counts ONLY chunk_flush_complete in fake1.log" \
+        "$(_cap_bound_count_in_log "$t/fake1.log" 16 combined)" "1"
+    _assert_eq "D4: family=legacy counts ONLY http_vector_upsert_chunks_request in fake1.log" \
+        "$(_cap_bound_count_in_log "$t/fake1.log" 16 legacy)" "1"
+    _assert_eq "D4: family=both still sums combined+legacy (backward compatible)" \
+        "$(_cap_bound_count_in_log "$t/fake1.log" 16 both)" "2"
 
     say "self-test: _count_matches_in_log"
     cat > "$t/fake3.log" <<'EOF'
@@ -363,13 +421,22 @@ EOF
 
     say "self-test: _emit_json produces one parseable JSON line"
     local json
-    json="$(_emit_json "3.03" 16 600.0 8 2 0 187 0 0)"
+    # args: peak_gb cap timeout flushes flushes_at_cap legacy_pages_at_cap killed wall_s manifest_retries refreshable_retries
+    json="$(_emit_json "3.03" 16 600.0 8 2 0 0 187 0 0)"
     printf '%s\n' "$json"
     if command -v python3 >/dev/null 2>&1; then
-        if printf '%s' "$json" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["peak_gb"]==3.03; assert d["cap"]==16; assert d["killed"]==0' 2>/dev/null; then
-            ok "JSON line parses and round-trips the fields it claims"
+        if printf '%s' "$json" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+assert d["peak_gb"]==3.03
+assert d["cap"]==16
+assert d["killed"]==0
+assert d["flushes"]==8
+assert d["flushes_at_cap"]==2
+assert d["legacy_pages_at_cap"]==0
+assert d["flushes_at_cap"] <= d["flushes"], "D4: flushes_at_cap must never exceed flushes"' 2>/dev/null; then
+            ok "JSON line parses and round-trips the fields it claims, D4 coherence holds (flushes_at_cap <= flushes)"
         else
-            bad "JSON line failed to parse or a field did not round-trip"
+            bad "JSON line failed to parse, a field did not round-trip, or D4 coherence was violated"
             failures=$((failures + 1))
         fi
     else
@@ -419,9 +486,12 @@ Usage: $0 [--cap N] [--timeout S] [--rss-ceiling GB] [--corpus-scale N]
                       shipped value at authoring time)
   --rss-ceiling GB    SIGKILL the isolated engine if its RSS exceeds this
                       (default: 20)
-  --corpus-scale N    number of independently-oversize filler files to
-                      generate, each calibrated LIVE against this tree's
-                      real chunker to exceed the effective cap (default: 1)
+  --corpus-scale N    multiplier on the number of GUARANTEED cap-binding
+                      groups generated on the combined-write path (default:
+                      1 -> 3 groups, each independently calibrated LIVE
+                      against this tree's real chunker to land EXACTLY on
+                      the effective cap; see the header comment for why
+                      "many small files" alone does not guarantee this)
   --self-test         run the sampler/verdict/log-parsing unit checks
                       against synthetic fixtures ONLY — no provisioning,
                       no engine, no PG, no network. Safe anywhere.
@@ -549,13 +619,66 @@ else
 fi
 
 say "3/6 nx init (local: engine + PG + bge-768)"
-_nx init >"$LOGS/init.log" 2>&1 || { tail -30 "$LOGS/init.log" >&2; _die "nx init failed"; }
+# D5 (nexus-97dp4 first-run finding): --no-autostart takes precedence over
+# --yes (init.py:837-843) and declines the autostart registration
+# deterministically regardless of interactivity — no TTY prompt to hang on,
+# and no autostart unit left pointing at this run's /tmp install for
+# cleanup to later delete out from under it. </dev/null is defense in depth
+# against any OTHER unexpected prompt.
+_nx init --no-autostart >"$LOGS/init.log" 2>&1 </dev/null \
+    || { tail -30 "$LOGS/init.log" >&2; _die "nx init failed"; }
+
+# D-POLL + D1 (nexus-97dp4 first-run finding — MUST land together, see the
+# report handed back with this repair): the old poll piped nx's own prose
+# output into `grep -qiE ... "running"`. Under `set -o pipefail` (line ~87)
+# that pipeline can NEVER return 0 — grep -q exits at its FIRST match while
+# nx (click.echo, line-buffered) is still mid-write, so nx gets SIGPIPE and
+# exits 1, and pipefail promotes nx's 1 over grep's 0. Every run died here,
+# even against a live, healthy service. Fixing ONLY the pipefail accident
+# would have been WORSE: the dead-service message is literally "...is the
+# service running?" — it matches the SAME pattern via the word "running",
+# so a naive fix would have made a DEAD service read as healthy (the exact
+# false-clean class this gate exists to catch).
+#
+# The replacement never greps prose and never pipes nx's own stdout into
+# anything that can close early: `nx daemon service status --json` is
+# captured via command substitution (no pipe -> no pipefail exposure ever),
+# its own exit code is checked directly (0 == a lease was found, per the
+# command's own docstring: "Exits non-zero when no live lease is found"),
+# and the JSON body's `health` field — populated from a real GET /health
+# probe, "ok" | "db-down" | "unreachable" (daemon.py:_probe_health) — is the
+# ONLY thing ever treated as "healthy". D2: every attempt's raw output is
+# preserved in $STATUS_LOG and tailed on failure, never discarded.
+STATUS_LOG="$LOGS/health-poll.log"
+: > "$STATUS_LOG"
 healthy=0
+attempt=0
 for _ in $(seq 1 30); do
-    _nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|running" && { healthy=1; break; }
+    attempt=$((attempt + 1))
+    STATUS_JSON="$(_nx daemon service status --json 2>>"$STATUS_LOG")"
+    STATUS_RC=$?
+    { printf -- '--- attempt %s (rc=%s) ---\n' "$attempt" "$STATUS_RC"; printf '%s\n' "$STATUS_JSON"; } >> "$STATUS_LOG"
+    if [ "$STATUS_RC" = 0 ]; then
+        HEALTH="$(printf '%s' "$STATUS_JSON" | "$VENV/bin/python" -c '
+import json, sys
+try:
+    print(json.load(sys.stdin).get("health", ""))
+except Exception:
+    print("")
+')"
+        if [ "$HEALTH" = "ok" ]; then
+            healthy=1
+            break
+        fi
+    fi
     sleep 2
 done
-[ "$healthy" = 1 ] || _die "service never became healthy"
+if [ "$healthy" != 1 ]; then
+    note "service health poll never observed health==ok after $attempt attempt(s) — see $STATUS_LOG"
+    tail -40 "$STATUS_LOG" >&2
+    _die "service never became healthy"
+fi
+note "service health verified via 'nx daemon service status --json' -> health=ok (attempt $attempt/30)"
 
 EFFECTIVE_CAP="$("$VENV/bin/python" -c '
 import os
@@ -569,19 +692,29 @@ print(m._ONNX_LOCAL_UPSERT_CHUNK_CAP)
 note "effective onnx-local upsert-chunk cap, VERIFIED (not assumed): $EFFECTIVE_CAP"
 
 # ── corpus generation — calibrated LIVE against this tree's real chunker ───
-say "4/6 generate a corpus calibrated to actually bind cap=$EFFECTIVE_CAP (corpus-scale=$CORPUS_SCALE)"
-i=1
-while [ "$i" -le "$CORPUS_SCALE" ]; do
-    FUNCS=40
-    ITER=0
-    while :; do
-        ITER=$((ITER + 1))
-        [ "$ITER" -le 12 ] || _die "corpus calibration for file $i did not exceed cap=$EFFECTIVE_CAP after 12 growth iterations (last: $FUNCS funcs -> $CHUNKS chunks) — the chunker or cap changed shape enough that this generator needs a new starting point"
-        "$VENV/bin/python" - "$CORPUS_DIR/oversize_$i.py" "$FUNCS" <<'PYEOF'
+say "4/6 generate a corpus calibrated to actually bind cap=$EFFECTIVE_CAP on the ChunkBatcher COMBINED-WRITE path (corpus-scale=$CORPUS_SCALE)"
+# D3 (nexus-97dp4 first-run finding — full mechanism in the header comment
+# and the repair report). Every generated file's content is tagged unique
+# (RDR-108/T3 content addressing: identical chunk text in the same
+# collection collapses to one T3 row, which would silently defeat the
+# accumulation this corpus depends on).
+
+_measure_chunks() {
+    "$VENV/bin/python" -c "
+from pathlib import Path
+from nexus.chunker import chunk_file
+p = Path('$1')
+print(len(chunk_file(p, p.read_text())))
+"
+}
+
+_write_filler() {
+    # $1 path  $2 nfuncs  $3 tag (uniqueness marker only — verified NOT to
+    # change the chunk count, since it lands in a leading comment line
+    # outside any function body)
+    "$VENV/bin/python" - "$1" "$2" "$3" <<'PYEOF'
 import sys
 from pathlib import Path
-
-path, nfuncs = sys.argv[1], int(sys.argv[2])
 
 
 def make_func(i: int) -> str:
@@ -594,34 +727,97 @@ def make_func(i: int) -> str:
     )
 
 
-content = "# Generated local-index-memory-gate fixture — deterministic filler.\n\n"
+path, nfuncs, tag = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+content = f"# Generated local-index-memory-gate fixture — deterministic filler. tag={tag}\n\n"
 content += "\n\n".join(make_func(i) for i in range(nfuncs)) + "\n"
 Path(path).write_text(content)
 PYEOF
-        CHUNKS="$("$VENV/bin/python" -c "
-from pathlib import Path
-from nexus.chunker import chunk_file
-p = Path('$CORPUS_DIR/oversize_$i.py')
-print(len(chunk_file(p, p.read_text())))
-")"
-        if [ "$CHUNKS" -gt "$EFFECTIVE_CAP" ] 2>/dev/null; then
-            note "oversize_$i.py: $FUNCS funcs -> $CHUNKS chunks (> cap $EFFECTIVE_CAP, margin ${CHUNKS}-${EFFECTIVE_CAP}=$((CHUNKS - EFFECTIVE_CAP))) — calibration OK, measured not guessed"
-            break
-        fi
-        FUNCS=$((FUNCS * 2))
-    done
-    i=$((i + 1))
+}
+
+# Calibrate a "bulk" per-file chunk count around cap/4 — comfortably under
+# cap, several files genuinely needed to approach it. Never guessed:
+# measured LIVE (see the header comment on why a hard-coded funcs-per-chunk
+# ratio already drifted once on this tree).
+TARGET_BULK_CHUNKS=$(( EFFECTIVE_CAP / 4 ))
+[ "$TARGET_BULK_CHUNKS" -ge 1 ] || TARGET_BULK_CHUNKS=1
+BULK_FUNCS=2
+BULK_CHUNKS=0
+ITER=0
+while :; do
+    ITER=$((ITER + 1))
+    [ "$ITER" -le 14 ] || _die "bulk-file calibration did not reach target=$TARGET_BULK_CHUNKS chunks (cap=$EFFECTIVE_CAP) after 14 doublings (last: $BULK_FUNCS funcs -> $BULK_CHUNKS chunks) — the chunker's funcs-per-chunk ratio changed shape enough that this generator needs a new starting point"
+    _write_filler "$CORPUS_DIR/.calib_bulk.py" "$BULK_FUNCS" calib-bulk
+    BULK_CHUNKS="$(_measure_chunks "$CORPUS_DIR/.calib_bulk.py")"
+    [ "$BULK_CHUNKS" -ge "$TARGET_BULK_CHUNKS" ] 2>/dev/null && break
+    BULK_FUNCS=$((BULK_FUNCS * 2))
 done
-# One small in-cap file for contrast with the normal ChunkBatcher combined-
-# write path (mirrors rehearse_shakeout_e2e.sh's design).
-printf '# small\n\ndef sentinel_%s() -> str:\n    """local-index-memory-gate sentinel."""\n    return "ok"\n' "$$" > "$CORPUS_DIR/small_sentinel.py"
+rm -f "$CORPUS_DIR/.calib_bulk.py"
+[ "$BULK_CHUNKS" -lt "$EFFECTIVE_CAP" ] 2>/dev/null \
+    || _die "bulk calibration overshot the cap: $BULK_FUNCS funcs -> $BULK_CHUNKS chunks >= cap=$EFFECTIVE_CAP while only targeting $TARGET_BULK_CHUNKS — cap is too small relative to the chunker's granularity for a bulk component; try a larger --cap"
+note "bulk unit calibrated LIVE: $BULK_FUNCS funcs -> $BULK_CHUNKS chunks/file (target ~$TARGET_BULK_CHUNKS, < cap $EFFECTIVE_CAP)"
+
+# Calibrate the trim unit: smallest funcs count producing EXACTLY one
+# chunk — the exact-landing primitive the whole binding guarantee rests on
+# (see the header comment's proof sketch).
+TRIM_FUNCS=1
+TRIM_CHUNKS=""
+ITER=0
+while :; do
+    ITER=$((ITER + 1))
+    [ "$ITER" -le 8 ] || _die "trim-file calibration did not find a funcs count producing exactly 1 chunk after 8 iterations (last: $TRIM_FUNCS funcs -> ${TRIM_CHUNKS:-?} chunks) — the chunker's grouping changed shape enough that this generator needs a new starting point"
+    _write_filler "$CORPUS_DIR/.calib_trim.py" "$TRIM_FUNCS" calib-trim
+    TRIM_CHUNKS="$(_measure_chunks "$CORPUS_DIR/.calib_trim.py")"
+    [ "$TRIM_CHUNKS" = 1 ] && break
+    TRIM_FUNCS=$((TRIM_FUNCS + 1))
+done
+rm -f "$CORPUS_DIR/.calib_trim.py"
+note "trim unit calibrated LIVE: $TRIM_FUNCS funcs -> exactly 1 chunk/file (the exact-landing primitive)"
+
+# Per group: enough bulk files to approach the cap without exceeding it
+# (K = floor(cap / bulk_chunks)), then exactly the trim files needed to
+# complete the remainder to the cap (R = cap - K*bulk_chunks). Group/file
+# naming (gNNN_bulk_* before gNNN_trim_*) relies on git ls-files'
+# deterministic lexicographic traversal (indexer.py _git_ls_files —
+# verified, not rglob/os.walk) so bulk files are always staged before the
+# trims that complete them. --corpus-scale multiplies GROUPS (independent
+# guaranteed landings); default 3 groups so the cap binds more than once,
+# not as a single-flush fluke.
+BULK_PER_GROUP=$(( EFFECTIVE_CAP / BULK_CHUNKS ))
+[ "$BULK_PER_GROUP" -ge 1 ] 2>/dev/null || BULK_PER_GROUP=0
+TRIM_PER_GROUP=$(( EFFECTIVE_CAP - BULK_PER_GROUP * BULK_CHUNKS ))
+# NOT named GROUPS: that is a bash BUILT-IN special array variable (the
+# current user's group-membership list, `declare -p GROUPS`) — assigning to
+# it is silently absorbed by bash's own dynamic-variable machinery rather
+# than producing the intended integer, so --corpus-scale would have had NO
+# real effect and the group count would vary by machine/user instead of by
+# request (caught empirically: `GROUPS=$(( 3 * CORPUS_SCALE ))` with
+# CORPUS_SCALE=1 read back as 20 on this box, not 3 — this box's first real
+# group id). NUM_GROUPS avoids the collision.
+NUM_GROUPS=$(( 3 * CORPUS_SCALE ))
+note "corpus plan: $NUM_GROUPS group(s) x ($BULK_PER_GROUP bulk file(s) @ $BULK_CHUNKS chunks + $TRIM_PER_GROUP trim file(s) @ 1 chunk) = exactly $EFFECTIVE_CAP chunks/group, guaranteeing $NUM_GROUPS cap landing(s) on the combined-write path"
+
+g=1
+while [ "$g" -le "$NUM_GROUPS" ]; do
+    gp="$(printf 'g%04d' "$g")"
+    i=1
+    while [ "$i" -le "$BULK_PER_GROUP" ]; do
+        _write_filler "$CORPUS_DIR/${gp}_bulk_$(printf '%03d' "$i").py" "$BULK_FUNCS" "${gp}-bulk-$i"
+        i=$((i + 1))
+    done
+    i=1
+    while [ "$i" -le "$TRIM_PER_GROUP" ]; do
+        _write_filler "$CORPUS_DIR/${gp}_trim_$(printf '%03d' "$i").py" "$TRIM_FUNCS" "${gp}-trim-$i"
+        i=$((i + 1))
+    done
+    g=$((g + 1))
+done
 
 ( cd "$CORPUS_DIR" && git init -q && git add -A \
     && git -c user.email=memgate@e2e.local -c user.name=local-index-memory-gate commit -qm corpus ) \
     >"$LOGS/corpus-git.log" 2>&1 || { cat "$LOGS/corpus-git.log" >&2; _die "corpus fixture repo init/commit failed"; }
 
 FILE_COUNT="$(find "$CORPUS_DIR" -type f -name '*.py' | wc -l | tr -d ' ')"
-note "corpus: $FILE_COUNT python files (--corpus-scale=$CORPUS_SCALE oversize + 1 small)"
+note "corpus: $FILE_COUNT python files ($NUM_GROUPS group(s), each guaranteed to bind cap=$EFFECTIVE_CAP exactly once on the combined-write path)"
 
 # ── indexing + live RSS sampling with hard ceiling ──────────────────────────
 say "5/6 nx index repo — live RSS sampling (~1s), hard ceiling $RSS_CEILING_GB GB"
@@ -708,12 +904,19 @@ fi
 
 LARGEST_FLUSH=0
 FLUSHES_AT_CAP=0
+LEGACY_PAGES_AT_CAP=0
 FLUSHES_TOTAL=0
 MANIFEST_RETRIES=0
 REFRESHABLE_RETRIES=0
 if [ -n "$RUN_LOG" ] && [ -r "$RUN_LOG" ]; then
     LARGEST_FLUSH="$(_largest_flush_in_log "$RUN_LOG")"
-    FLUSHES_AT_CAP="$(_cap_bound_count_in_log "$RUN_LOG" "$EFFECTIVE_CAP")"
+    # D4 (nexus-97dp4 first-run finding): FLUSHES_AT_CAP is now the SAME
+    # event family as FLUSHES_TOTAL (chunk_flush_complete only) — a
+    # same-family subset count, so FLUSHES_AT_CAP <= FLUSHES_TOTAL holds by
+    # construction. The legacy per-file paged-upload family that also
+    # reached/exceeded the cap is a SEPARATE counter, never summed in here.
+    FLUSHES_AT_CAP="$(_cap_bound_count_in_log "$RUN_LOG" "$EFFECTIVE_CAP" combined)"
+    LEGACY_PAGES_AT_CAP="$(_cap_bound_count_in_log "$RUN_LOG" "$EFFECTIVE_CAP" legacy)"
     # Same double-print trap as _count_matches_in_log (grep -c prints "0" AND
     # exits 1 on zero matches) — capture-then-default, never `|| echo 0`.
     FLUSHES_TOTAL="$(_count_matches_in_log "$RUN_LOG" chunk_flush_complete)"
@@ -727,10 +930,13 @@ VERDICT_LINE="$(_compute_verdict "$KILLED" "$INDEX_RC" "$PEAK_KB" "$CEILING_KB" 
     "$EFFECTIVE_CAP" "$LARGEST_FLUSH" "$KILL_ELAPSED" "$FLUSHES_AT_CAP")"
 GATE_STATUS="${VERDICT_LINE%%|*}"
 REASON="${VERDICT_LINE#*|}"
+if [ "$LEGACY_PAGES_AT_CAP" -gt 0 ] 2>/dev/null; then
+    note "legacy per-file paged-upload path ALSO bound the cap $LEGACY_PAGES_AT_CAP time(s) (reported separately — D4, not folded into the combined-write count above)"
+fi
 
 PEAK_GB_STR="$(_kb_to_gb_str "$PEAK_KB")"
 _emit_json "$PEAK_GB_STR" "$EFFECTIVE_CAP" "${EFFECTIVE_TIMEOUT:-null}" \
-    "$FLUSHES_TOTAL" "$FLUSHES_AT_CAP" "$KILLED" "$WALL_S" \
+    "$FLUSHES_TOTAL" "$FLUSHES_AT_CAP" "$LEGACY_PAGES_AT_CAP" "$KILLED" "$WALL_S" \
     "$MANIFEST_RETRIES" "$REFRESHABLE_RETRIES"
 
 case "$GATE_STATUS" in
