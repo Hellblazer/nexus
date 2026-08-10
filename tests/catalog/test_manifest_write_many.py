@@ -148,7 +148,7 @@ class TestWriteManifestManyCombined:
         chunks = [{"chash": "a" * 64, "text": "hi", "metadata": {"k": "v"}}]
         monkeypatch.setattr(
             c, "_post",
-            lambda path, body: posts.append(body) or {
+            lambda path, body, **kw: posts.append(body) or {
                 "docs": 1, "rows": 1, "failed_doc_ids": [], "chunks_written": 1,
             },
             raising=False,
@@ -177,7 +177,7 @@ class TestWriteManifestManyCombined:
         c = _client()
         monkeypatch.setattr(
             c, "_post",
-            lambda path, body: {"docs": 1, "rows": 1, "failed_doc_ids": []},
+            lambda path, body, **kw: {"docs": 1, "rows": 1, "failed_doc_ids": []},
             raising=False,
         )
         with pytest.raises(RuntimeError, match="ack mismatch"):
@@ -220,6 +220,72 @@ class TestWriteManifestManyCombined:
         assert result["swept"] == 2
         assert result["sweep_skipped"] == 1
         assert result["sweep_detail"][0]["reason"] == "sweep_failed"
+
+
+class TestWriteManifestManyCombinedTimeout:
+    """nexus-y9t08: the combined write (``chunks=`` present) performs a
+    SYNCHRONOUS server-side embed inside the request. The v7.5.0 regression
+    let this call inherit ``RefreshableHttpStoreMixin``'s
+    ``_DEFAULT_TIMEOUT_S`` (30.0s, a control-plane default) instead of an
+    embed-appropriate budget — the predecessor path
+    (``HttpVectorClient.upsert_chunks`` -> ``/v1/vectors/upsert-chunks``)
+    passed ``timeout=600`` explicitly for the identical synchronous-embed
+    shape (``src/nexus/db/http_vector_client.py:1408``).
+
+    Scoping decision (bead ask (a) vs (b)): option (a), a PER-REQUEST
+    override on the chunk-carrying POST only — not a client-wide timeout
+    bump (option (b), which would make every genuinely-hung ordinary
+    catalog call (registration, linking, listing) take 10 minutes to
+    surface). The plain (no ``chunks``) branch of ``write_manifest_many``
+    must keep the 30s default; that is what
+    ``test_plain_write_never_gets_the_embed_timeout`` pins.
+    """
+
+    def test_combined_write_gets_an_embed_grade_timeout(self, monkeypatch) -> None:
+        c = _client()
+        calls: list[dict[str, Any]] = []
+
+        def _fake_post(path: str, body: dict, **kw: Any) -> dict:
+            calls.append(kw)
+            return {"docs": 1, "rows": 1, "failed_doc_ids": [], "chunks_written": 1}
+
+        monkeypatch.setattr(c, "_post", _fake_post, raising=False)
+
+        c.write_manifest_many(
+            [("1.9.16", [{"chash": "a" * 64, "position": 0}])],
+            chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
+            collection="code__nexus-1-1__voyage-code-3__v1",
+        )
+
+        assert len(calls) == 1
+        # Non-vacuity: must be an EXPLICIT override, not just "present" —
+        # and it must differ from the T2 control-plane default this
+        # regression accidentally inherited.
+        from nexus.db.t2._refreshable_client import _DEFAULT_TIMEOUT_S
+
+        assert calls[0].get("timeout") is not None
+        assert calls[0]["timeout"] != _DEFAULT_TIMEOUT_S
+        assert calls[0]["timeout"] == 600.0
+
+    def test_plain_write_never_gets_the_embed_timeout(self, monkeypatch) -> None:
+        """The narrowness guard for scoping decision (a): a manifest write
+        with no ``chunks`` (the overwhelming majority of catalog traffic —
+        registration, linking, plain manifest replace) must NOT receive the
+        embed-grade override. A blanket bump (option (b)) would make this
+        assertion fail."""
+        c = _client()
+        calls: list[dict[str, Any]] = []
+
+        def _fake_post(path: str, body: dict, **kw: Any) -> dict:
+            calls.append(kw)
+            return {"docs": 1, "rows": 1, "failed_doc_ids": []}
+
+        monkeypatch.setattr(c, "_post", _fake_post, raising=False)
+
+        c.write_manifest_many([("1.9.17", [{"chash": "a" * 64, "position": 0}])])
+
+        assert len(calls) == 1
+        assert "timeout" not in calls[0]
 
 
 class _FakeCat:

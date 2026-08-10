@@ -151,6 +151,54 @@ _MANIFEST_GET_MANY_PAGE = 1000
 #: cap (nexus-9dvqy). ~24 columns/row keeps a full page under PostgreSQL's
 #: 32767 bind-parameter ceiling.
 _REGISTER_MANY_PAGE = 1000
+
+# nexus-y9t08: the combined write (write_manifest_many's ``chunks=``
+# branch) makes the engine run a SYNCHRONOUS server-side embed inside the
+# request/transaction — the exact same shape ``HttpVectorClient.upsert_chunks``
+# (its predecessor for this workload) passes ``timeout=600`` for
+# (``src/nexus/db/http_vector_client.py:1413``, docstring reasoning at
+# :837-843: "a 300-chunk CCE (voyage-context-3) upsert batch routinely
+# exceeds 120s server-side (embed is synchronous in the request)" — and
+# note that docstring's own closing point, that the raise is deliberately
+# NOT global because a slow search should still fail fast, which is the
+# same reasoning driving the per-request scoping below). The v7.5.0 combined
+# write REGRESSED this: HttpCatalogClient's ``__init__`` builds on
+# RefreshableHttpStoreMixin without an explicit ``timeout``, so it silently
+# inherited the mixin's ``_DEFAULT_TIMEOUT_S`` (30.0s) — a control-plane
+# default sized for ordinary catalog calls (registration, linking,
+# listing), not a synchronous embed.
+#
+# SCOPING DECISION (bead nexus-y9t08, option (a) over (b)): this constant
+# is applied as a PER-REQUEST override on the chunk-carrying POST only
+# (see write_manifest_many's ``page_carries_chunks`` branch below), never
+# as a client-wide bump on ``HttpCatalogClient``. A blanket 600s default on
+# every catalog call would make a genuinely hung ordinary control-plane
+# request (one with no embed at all) take 10 minutes to surface instead of
+# 30 seconds — its own defect, and unjustified for the ~100+ other call
+# sites through this client that do no embedding.
+#
+# RETRY DECISION (documented, not silently skipped — same bead): this
+# constant does NOT change retry behavior. ``httpx.ReadTimeout`` remains
+# retryable at both the mixin's self-heal layer
+# (``_refreshable_client._is_retryable_endpoint_error``) and the outer
+# ``nexus.retry._manifest_write_with_retry`` wrapper (up to 8 POSTs total,
+# each starting a fresh — and, since the engine has no cancellation path,
+# UNCANCELLED — server-side embed on a timeout). Left unchanged
+# deliberately: (1) the 600s budget matches the OLD path's own accepted
+# behavior, under which a ReadTimeout on this workload was rare enough in
+# practice to never surface as a retry-storm complaint; (2) the outer
+# retry is a general, already-documented, deliberate connectivity-blip
+# recovery shared by every catalog write in this module, not specific to
+# this call — narrowing it here without evidence the 600s budget alone is
+# insufficient risks reintroducing GH #1371 (the transient-connection data
+# loss the retry was added to close) for a class of failure this fix
+# already makes rare. If evidence surfaces that duplicate/uncancelled
+# embeds are STILL a real problem even at 600s, that is a distinct
+# follow-up (bounded embed concurrency / engine-side admission control —
+# T2 ``nexus/assess-local-index-cluster-2026-08-10`` Phase 2 items 6-7),
+# not a reason to weaken this call's connectivity resilience preemptively.
+_COMBINED_WRITE_EMBED_TIMEOUT_S = 600.0
+
 #: Page size for update_many POSTs — same MAX_BATCH_DOC_IDS cap as
 #: register_many (nexus-xedhp).
 _UPDATE_MANY_PAGE = 1000
@@ -346,8 +394,14 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         filtered = {k: v for k, v in params.items() if v is not None and v != ""}
         return super()._get(f"/v1/catalog{path}", params=filtered)
 
-    def _post(self, path: str, body: dict | None = None) -> Any:
-        return super()._post(f"/v1/catalog{path}", body or {})
+    def _post(self, path: str, body: dict | None = None, *, timeout: float | None = None) -> Any:
+        """``timeout`` (nexus-y9t08): optional per-call override forwarded
+        to the mixin's ``_post`` — see that method's docstring. ``None``
+        (the default) means every existing call site is byte-identical to
+        before this kwarg existed; only ``write_manifest_many``'s
+        chunk-carrying (combined-write) branch passes a non-default value.
+        """
+        return super()._post(f"/v1/catalog{path}", body or {}, timeout=timeout)
 
     def _docs_from(self, result: Any) -> list[CatalogEntry]:
         if not result:
@@ -2969,7 +3023,17 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 body["chunks"] = chunks
                 if force_re_embed:
                     body["force_re_embed"] = True
-            result = self._post("/manifest/write_many", body)
+            if page_carries_chunks:
+                # nexus-y9t08: this page's POST triggers a synchronous
+                # server-side embed — give it the embed-appropriate
+                # budget, not the 30s control-plane default. See the
+                # constant's docstring above for the (a)-vs-(b) scoping
+                # decision and the deliberate no-change-to-retry decision.
+                result = self._post(
+                    "/manifest/write_many", body, timeout=_COMBINED_WRITE_EMBED_TIMEOUT_S,
+                )
+            else:
+                result = self._post("/manifest/write_many", body)
             result = result if isinstance(result, dict) else {}
             if page_carries_chunks:
                 # nexus-wxjr6 ack-echo (design memo §5.2) — see docstring.

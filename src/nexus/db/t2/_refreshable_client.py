@@ -476,15 +476,38 @@ class RefreshableHttpStoreMixin:
 
     # ── Public transport (subclasses call these, never self._client directly) ──
 
-    def _post(self, path: str, payload: dict[str, Any], *, idempotent: bool = True) -> Any:
+    def _post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        idempotent: bool = True,
+        timeout: float | None = None,
+    ) -> Any:
         """POST JSON *payload* to *path*; self-heals once on a retryable error.
 
         ``idempotent=False`` (nexus-tjvgf) disables BOTH retry axes for
         operations where a lost-response retry double-applies server-side
         (queue claims, counter increments, content-appending merges) —
         see :meth:`_send`.
+
+        ``timeout`` (nexus-y9t08) is an OPTIONAL per-request override —
+        omitted (``None``, the default) means "no override", so the call
+        rides the client-wide ``_DEFAULT_TIMEOUT_S`` exactly as before this
+        kwarg existed. When supplied, it is forwarded to httpx's own
+        per-request ``timeout=`` (``Client.request(..., timeout=...)``),
+        which overrides the client-wide default for THIS call only — the
+        underlying ``httpx.Client``'s constructor-time timeout, and every
+        other call through this same instance, is untouched. This is the
+        primitive a caller with one occasionally-slow endpoint (e.g. a
+        synchronous server-side embed) reaches for instead of bumping the
+        whole client's timeout, which would make a genuinely hung ordinary
+        call take just as long to surface.
         """
-        return self._send("POST", path, json=payload, idempotent=idempotent)
+        kwargs: dict[str, Any] = {"json": payload, "idempotent": idempotent}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return self._send("POST", path, **kwargs)
 
     def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
         """GET *path*; self-heals once on a retryable error."""

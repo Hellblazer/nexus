@@ -1091,3 +1091,57 @@ class TestTokenOnlyConstructionTimeEvidenceGate:
 
         with pytest.raises(RuntimeError, match="no service token is resolvable"):
             _make_echo_store(base_url="http://127.0.0.1:1")  # never dialed
+
+
+class TestPostPerRequestTimeoutOverride:
+    """nexus-y9t08: ``_post`` accepts an optional per-call ``timeout=``
+    override that reaches httpx's per-request timeout WITHOUT touching the
+    client-wide ``_DEFAULT_TIMEOUT_S`` (30.0s) baked into ``self._client`` at
+    construction. This is the primitive the combined-write path
+    (``HttpCatalogClient.write_manifest_many``'s ``chunks=`` branch) uses to
+    get an embed-appropriate timeout for ONE call without bumping every
+    other catalog call's timeout (see ``tests/catalog/test_manifest_write_many.py``
+    ``TestWriteManifestManyCombinedTimeout`` for the catalog-level pin)."""
+
+    def test_post_with_timeout_reaches_the_request(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = _make_echo_store()
+        captured: list[dict[str, Any]] = []
+        real_request_once = store._request_once
+
+        def _capturing(method: str, path: str, **kwargs: Any) -> Any:
+            captured.append(kwargs)
+            return real_request_once(method, path, **kwargs)
+
+        monkeypatch.setattr(store, "_request_once", _capturing)
+
+        result = store._post("/v1/echo", {"value": "with-timeout"}, timeout=600.0)
+
+        assert result == {"echo": {"value": "with-timeout"}}
+        assert captured[-1].get("timeout") == 600.0
+
+    def test_post_without_timeout_omits_the_override(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The default (no ``timeout=`` kwarg at the call site) must NOT
+        inject a ``timeout`` key at all — httpx then falls back to the
+        client-wide default (30.0s, ``_DEFAULT_TIMEOUT_S``). Asserting
+        absence, not a specific value, is what makes this non-vacuous
+        against a regression that starts always passing SOME timeout
+        (which would silently convert every plain call into the (b)
+        blanket-bump shape the bead explicitly rejected)."""
+        store = _make_echo_store()
+        captured: list[dict[str, Any]] = []
+        real_request_once = store._request_once
+
+        def _capturing(method: str, path: str, **kwargs: Any) -> Any:
+            captured.append(kwargs)
+            return real_request_once(method, path, **kwargs)
+
+        monkeypatch.setattr(store, "_request_once", _capturing)
+
+        result = store._post("/v1/echo", {"value": "no-timeout"})
+
+        assert result == {"echo": {"value": "no-timeout"}}
+        assert "timeout" not in captured[-1]
