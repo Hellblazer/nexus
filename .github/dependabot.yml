@@ -1,0 +1,36 @@
+# Keeps the repo's ~87 SHA-pinned GitHub Actions current.
+#
+# WHY THIS EXISTS (2026-08-11, nexus-aktyn): SHA pinning is deliberate and stays
+# — a tag is mutable, a commit sha is not, and the publish action handles
+# publishing credentials. The defect was the missing other half: nothing ever
+# refreshed those pins, so they rot silently and the rot surfaces at the worst
+# possible moment. pypa/gh-action-pypi-publish sat at a 2026-02-18 commit until
+# the conexus 7.6.0 release, where its bundled twine rejected the
+# Metadata-Version 2.5 that hatchling 1.32.0 emits. Cost: a failed release run,
+# two fix PRs, and two tag re-points.
+#
+# The publish action is the worst case in the set because it is exercised
+# exactly once per release. Every other pinned action runs on ordinary CI, so
+# its rot shows up on a normal PR instead of during a release.
+#
+# Dependabot rewrites the sha AND the trailing version comment together, and it
+# dereferences annotated tags correctly — which is its own small win, since
+# doing that by hand is how the first fix for the above got pinned to a tag
+# object's sha rather than the commit's ("docker: manifest unknown").
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Grouped so 87 pins do not arrive as 87 PRs. CI cost discipline applies to
+    # dependency churn too: one PR per week runs the matrix once, not N times.
+    groups:
+      actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore(actions)"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 3
