@@ -33,9 +33,7 @@ Route mapping (matches TelemetryHandler Java):
     POST /v1/telemetry/relevance/expire — expire_relevance_log
     POST /v1/telemetry/search/batch     — log_search_batch
     GET  /v1/telemetry/search/stats     — query_collection_stats
-    POST /v1/telemetry/search/trim      — trim_search_telemetry (dry_run=True
-                                           previews the count without deleting,
-                                           same WHERE predicate as the delete)
+    POST /v1/telemetry/search/trim      — trim_search_telemetry
     POST /v1/telemetry/rename_collection — rename_collection
     POST /v1/telemetry/import           — import_* methods (ETL)
     POST /v1/telemetry/import_batch     — import_rows_batch (bulk ETL)
@@ -572,36 +570,14 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             params={"collection": collection, "days": days},
         )
 
-    def trim_search_telemetry(self, days: int = 30, *, dry_run: bool = False) -> int:
-        """Delete (or, with ``dry_run=True``, COUNT without deleting)
-        ``search_telemetry`` rows older than *days* days.
+    def trim_search_telemetry(self, days: int = 30) -> int:
+        """Delete ``search_telemetry`` rows older than *days* days.
 
-        Calls ``POST /v1/telemetry/search/trim`` with
-        ``{"days": days, "dry_run": dry_run}``.
-
-        DESIGN NOTE (the search_telemetry trim-preview gap): ``dry_run=True``
-        does NOT hit a separate count endpoint. The engine
-        (``TelemetryRepository.trimSearchTelemetry``) computes the preview
-        from the EXACT SAME ``ts < cutoff`` predicate the real delete uses —
-        a ``SELECT count(*)`` substituted for the ``DELETE``. This is
-        deliberate: a census computed by a *different* predicate than the
-        action it authorises can drift from that action (the nexus-3rr3x
-        class — ``purge-trash``'s dry-run once reported 340 against a live
-        census of 11,156 because the two were computed by different
-        queries). Sharing the predicate here makes that drift impossible by
-        construction, not merely unlikely, so a caller can trust that the
-        number this returns with ``dry_run=True`` is exactly what a
-        subsequent ``dry_run=False`` call removes (barring rows that cross
-        the cutoff in the interim).
-
-        ``dry_run`` defaults to ``False`` — every pre-existing caller keeps
-        its real-delete behavior unchanged.
+        Calls ``POST /v1/telemetry/search/trim``.
         """
         if days < 1:
             raise ValueError(f"days must be >= 1; got {days}")
-        resp = self._post(
-            "/v1/telemetry/search/trim", {"days": days, "dry_run": dry_run}
-        )
+        resp = self._post("/v1/telemetry/search/trim", {"days": days})
         return int(resp.get("deleted", 0))
 
     def list_hook_failures(
@@ -650,21 +626,14 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "oldest_occurred_at": str(resp.get("oldest_occurred_at") or ""),
         }
 
-    def trim_hook_failures(self, days: int = 30, *, dry_run: bool = False) -> int:
-        """Delete (or, with ``dry_run=True``, COUNT without deleting)
-        ``hook_failures`` rows older than *days* days (nexus-7365x).
+    def trim_hook_failures(self, days: int = 30) -> int:
+        """Delete ``hook_failures`` rows older than *days* days (nexus-7365x).
 
-        Calls ``POST /v1/telemetry/hook_failures/trim``. Same dry-run-reuses-
-        the-delete's-own-predicate contract as :meth:`trim_search_telemetry`
-        — added alongside it so a caller trimming both tables under one
-        ``--dry-run`` cannot preview one while silently mutating the other.
-        ``dry_run`` defaults to ``False``.
+        Calls ``POST /v1/telemetry/hook_failures/trim``.
         """
         if days < 1:
             raise ValueError(f"days must be >= 1; got {days}")
-        resp = self._post(
-            "/v1/telemetry/hook_failures/trim", {"days": days, "dry_run": dry_run}
-        )
+        resp = self._post("/v1/telemetry/hook_failures/trim", {"days": days})
         return int(resp.get("deleted", 0))
 
     def rename_collection(self, *, old: str, new: str) -> dict[str, int]:

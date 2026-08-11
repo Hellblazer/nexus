@@ -31,9 +31,7 @@ import java.util.Map;
  *   POST /v1/telemetry/relevance/expire        expire old entries
  *   POST /v1/telemetry/search/batch            batch search telemetry
  *   GET  /v1/telemetry/search/stats            collection health stats
- *   POST /v1/telemetry/search/trim             trim old entries; dry_run=true previews the
- *                                              count without deleting (same WHERE predicate
- *                                              as the delete, never a separate count query)
+ *   POST /v1/telemetry/search/trim             trim old entries
  *   POST /v1/telemetry/rename_collection       rename collection in all tables
  *   POST /v1/telemetry/tier_writes/record      record a tier-write event
  *   GET  /v1/telemetry/tier_writes/query       aggregated counts for nx tier-status (nexus-59wjj)
@@ -46,8 +44,7 @@ import java.util.Map;
  *   GET  /v1/telemetry/nx_answer_runs/query     rows + exact aggregates (nexus-eho3u)
  *   POST /v1/telemetry/hook_failures/record    record a hook failure
  *   GET  /v1/telemetry/hook_failures/list      list hook failures + exact totals (nexus-onjvy)
- *   POST /v1/telemetry/hook_failures/trim      trim old hook-failure entries; same dry_run=true
- *                                              preview contract as search/trim
+ *   POST /v1/telemetry/hook_failures/trim      trim old hook-failure entries
  *   POST /v1/telemetry/frecency/upsert         upsert frecency record
  *   GET  /v1/telemetry/frecency/get            get frecency by chunk_id
  *   POST /v1/telemetry/import                  fidelity ETL for all 6 tables
@@ -198,25 +195,12 @@ public final class TelemetryHandler implements HttpHandler {
         HttpUtil.send(ex, 200, json(stats));
     }
 
-    /**
-     * POST /v1/telemetry/search/trim — trim, or with {@code dry_run=true} PREVIEW,
-     * search_telemetry rows older than {@code days}.
-     *
-     * <p>{@code dry_run} defaults to {@code false} when absent (every pre-existing
-     * caller keeps its real-delete behavior). When {@code true} the response
-     * carries the count that WOULD be deleted, computed by
-     * {@link TelemetryRepository#trimSearchTelemetry(String, int, boolean)} from
-     * the identical predicate the real delete uses, and nothing is removed. The
-     * echoed {@code dry_run} field lets a caller tell a preview response apart
-     * from a real one at a glance.
-     */
     private void handleSearchTrim(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         var body = readBody(ex);
         int days = optInt(body, "days", 30);
-        boolean dryRun = Boolean.TRUE.equals(body.get("dry_run"));
-        int deleted = repo.trimSearchTelemetry(tenant, days, dryRun);
-        HttpUtil.send(ex, 200, json(Map.of("deleted", deleted, "dry_run", dryRun)));
+        int deleted = repo.trimSearchTelemetry(tenant, days);
+        HttpUtil.send(ex, 200, json(Map.of("deleted", deleted)));
     }
 
     // ── rename_collection ──────────────────────────────────────────────────────
@@ -395,19 +379,12 @@ public final class TelemetryHandler implements HttpHandler {
         HttpUtil.send(ex, 200, json(repo.getHookFailures(tenant, days, hookNames, limit)));
     }
 
-    /**
-     * POST /v1/telemetry/hook_failures/trim — same {@code dry_run} contract as
-     * {@link #handleSearchTrim}, added alongside it so {@code nx doctor
-     * --trim-telemetry --dry-run} cannot preview one trimmed table while
-     * silently deleting the other.
-     */
     private void handleHookFailureTrim(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         var body = readBody(ex);
         int days = optInt(body, "days", 30);
-        boolean dryRun = Boolean.TRUE.equals(body.get("dry_run"));
-        int deleted = repo.trimHookFailures(tenant, days, dryRun);
-        HttpUtil.send(ex, 200, json(Map.of("deleted", deleted, "dry_run", dryRun)));
+        int deleted = repo.trimHookFailures(tenant, days);
+        HttpUtil.send(ex, 200, json(Map.of("deleted", deleted)));
     }
 
     // ── frecency ───────────────────────────────────────────────────────────────
