@@ -59,6 +59,50 @@ def _resolve_level(mode: str, verbose: bool) -> int:
     return logging.INFO
 
 
+def emit_import_time_warning(event: str, **fields: object) -> None:
+    """Emit a structlog WARNING that is safe to call from MODULE-LEVEL /
+    IMPORT-TIME code, before any entry point has called
+    :func:`configure_logging`.
+
+    The shared per-module logger (``structlog.get_logger(__name__)``) is
+    UNSAFE for this: before ``configure_logging`` runs, ``get_logger()``
+    returns a logger bound to structlog's own unconfigured default,
+    ``PrintLoggerFactory`` — which writes to **STDOUT**, not stderr (see
+    the corrected note on :func:`configure_logging`'s docstring below). A
+    module-level statement that logs through the shared logger therefore
+    corrupts ``nx <cmd> --json`` for any consumer parsing stdout as JSON
+    (nexus D9: ``nexus.db.http_vector_client``'s
+    ``NX_ONNX_LOCAL_UPSERT_CHUNK_CAP`` override warning ran at module
+    scope and printed a log line ahead of every JSON payload, for every
+    ``nx`` invocation, regardless of which subcommand was requested).
+
+    This helper binds its own throwaway logger directly to
+    ``sys.stderr`` via ``structlog.wrap_logger``, independent of the
+    process-wide structlog configuration (whatever state
+    ``structlog.configure()`` is currently in — configured or not, CLI
+    mode or otherwise). It never reads or mutates global structlog
+    state, so it is safe to call from any module-level / import-time
+    statement, and equally safe to call again after
+    :func:`configure_logging` has already run — it cannot interfere
+    with the file-handler routing that function sets up.
+
+    Use this — never the shared ``_log = structlog.get_logger(__name__)``
+    — for any log emission reachable from a module's top-level
+    execution (a bare module-level statement, or a function invoked to
+    populate a module-level constant).
+    """
+    structlog.wrap_logger(
+        structlog.PrintLogger(file=sys.stderr),
+        processors=[
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.KeyValueRenderer(
+                key_order=["event", "timestamp", "level"], drop_missing=True,
+            ),
+        ],
+    ).warning(event, **fields)
+
+
 def configure_logging(
     mode: Literal[
         "cli", "console", "mcp", "hook", "watchdog",
@@ -72,9 +116,20 @@ def configure_logging(
     Routes structlog events through the stdlib ``logging`` module so the
     rotating file handler installed below catches them. Without this
     bridge, ``structlog.get_logger().info(...)`` writes via structlog's
-    default ``PrintLoggerFactory`` which goes to stderr, bypassing the
-    file handler entirely (the historical reason ``mcp.log`` was a 0-byte
-    file even on a long-running server).
+    default ``PrintLoggerFactory``, which writes to **STDOUT** — verified
+    against structlog's own source (``PrintLoggerFactory.__init__``
+    defaults its ``file`` argument to ``sys.stdout``). A prior version of
+    this comment claimed the default goes to stderr; that was false, and
+    is plausibly why nexus D9 (a module-level structlog call executed at
+    IMPORT time — before this function ever runs — corrupting ``nx <cmd>
+    --json``'s stdout payload) went unanticipated. Two independent
+    consequences follow from the true default: the rotating file handler
+    below never sees the event (the historical reason ``mcp.log`` was a
+    0-byte file even on a long-running server), AND any structlog call
+    made before this bridge is installed lands on the SAME stream a
+    machine consumer parses as JSON. Import-time / module-level code
+    must use :func:`emit_import_time_warning` instead of the ambient
+    ``structlog.get_logger()`` — see that function's docstring.
 
     Modes:
       * ``cli``: stderr only, WARNING default. Kept legacy-compatible so

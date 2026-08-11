@@ -183,14 +183,19 @@ class CatalogHandlerEnvelopeConformanceGateTest {
     }
 
     /** Enumerated honestly from the live switch (see {@link #everySwitchRouteIsClassified}),
-     * post {@code by_doc_id}-removal. 68 routes on the final tree (65 + {@code
+     * post {@code by_doc_id}-removal. 69 routes on the final tree (65 + {@code
      * /purge-trash}, nexus-3ck2g E3; + {@code /chash/conformance}, nexus-du2dw;
-     * + {@code /manifest/chashes_many}, nexus-eslkl). */
+     * + {@code /manifest/chashes_many}, nexus-eslkl; + {@code /descendants},
+     * T2 nexus/chroma-residue-plan-2026-08-10 §C1). */
     private static final List<RouteSpec> ROUTES = List.of(
         // ── Documents ─────────────────────────────────────────────────────
         neither("/register", "handleRegister"),
         neither("/show", "handleShow"),
         collectionOk("/list", "handleList"),
+        // T2 nexus/chroma-residue-plan-2026-08-10 §C1: same envelope shape as /list ({"documents":[...],"count":N})
+        // but backed by CatalogRepository#descendants -- ONE unbounded query
+        // (LIKE 'prefix.%'), complete by construction; no pagination to guard.
+        collectionOk("/descendants", "handleDescendants"),
         collectionOk("/search", "handleSearch"),
         neither("/update", "handleUpdate"),
         both("/update_many", "handleUpdateMany", POSITIONAL),
@@ -231,6 +236,9 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         neither("/manifest/resync", "handleManifestResync"),
         neither("/manifest/backfill", "handleManifestBackfill"),
         collectionOk("/manifest/orphans", "handleManifestOrphans"),
+        // T2 nexus/chroma-residue-plan-2026-08-10 §C2: scalar {total,
+        // backfillable} counts, not a JSON array -- not collectionReturning.
+        neither("/manifest/null_collection", "handleManifestNullCollection"),
         collectionOk("/links/orphaned", "handleLinksOrphaned"),
 
         // ── Chash conformance (RDR-180, nexus-du2dw) ────────────────────────

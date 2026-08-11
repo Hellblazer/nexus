@@ -338,7 +338,17 @@ from __future__ import annotations
 #: deletes the client-side compute_assignments/persist_assignments dance the
 #: route replaces for THIS call site — no fallback, an engine below this
 #: floor 404s and the hook fails loud via the RDR-172 tripwire.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 69)
+#: BUMPED TO (0, 1, 71) — v0.1.70 is a SKIPPED version. It was cut,
+#: published and fully gated, but a defect found after the cut
+#: (nexus-syfes: gc_quarantine_orphans registered the quarantine sibling
+#: even on a zero-orphan pass, leaving a permanently-orphaned
+#: catalog_collections projection row that failed the release shakedown's
+#: collections-drift gate) meant no release ever pinned it. catalog-024
+#: fixes it via CREATE OR REPLACE over the untouched catalog-023.
+#: v0.1.71 gates on this tree: engine suite 1974/0/0 (1 skipped),
+#: run.sh --shakeout CANDIDATE SHAKEOUT PASSED, and
+#: run.sh --acquire ACQUIRE GATE PASSED against the published bytes.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 71)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

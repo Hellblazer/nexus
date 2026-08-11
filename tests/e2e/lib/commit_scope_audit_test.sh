@@ -64,25 +64,25 @@ else
     bad "exit code was 0 despite a foreign file being present"
 fi
 
-if echo "$OUT" | grep -q "FOREIGN FILE(S) DETECTED in ${c2}"; then
+if [[ "$OUT" == *"FOREIGN FILE(S) DETECTED in ${c2}"* ]]; then
     ok "flags the correct commit (${c2}) as containing the foreign file"
 else
     bad "did not flag the foreign-file commit ${c2}; output was:\n$OUT"
 fi
 
-if echo "$OUT" | grep -q "secrets/leak.txt"; then
+if [[ "$OUT" == *"secrets/leak.txt"* ]]; then
     ok "names the actual foreign file (secrets/leak.txt) in the output"
 else
     bad "foreign file path secrets/leak.txt missing from output"
 fi
 
-if echo "$OUT" | grep -q "FOREIGN FILE(S) DETECTED in ${c1}"; then
+if [[ "$OUT" == *"FOREIGN FILE(S) DETECTED in ${c1}"* ]]; then
     bad "incorrectly flagged the clean commit ${c1}"
 else
     ok "clean commit ${c1} is NOT flagged"
 fi
 
-if echo "$OUT" | grep -q "FOREIGN FILE(S) DETECTED in ${c3}"; then
+if [[ "$OUT" == *"FOREIGN FILE(S) DETECTED in ${c3}"* ]]; then
     bad "incorrectly flagged the clean commit ${c3}"
 else
     ok "clean commit ${c3} is NOT flagged"
@@ -97,7 +97,7 @@ if [[ $RC_CLEAN -eq 0 ]]; then
 else
     bad "expected exit 0 for a clean range, got $RC_CLEAN"
 fi
-if echo "$OUT_CLEAN" | grep -q "FOREIGN FILE"; then
+if [[ "$OUT_CLEAN" == *"FOREIGN FILE"* ]]; then
     bad "clean range unexpectedly reports a foreign file"
 else
     ok "no FOREIGN FILE marker for the clean range"
@@ -133,12 +133,12 @@ if [[ $RC_UNICODE -eq 0 ]]; then
 else
     bad "expected exit 0 for a unicode-filename in-scope commit, got $RC_UNICODE: $OUT_UNICODE"
 fi
-if echo "$OUT_UNICODE" | grep -q "OUTSIDE ALLOWLIST"; then
+if [[ "$OUT_UNICODE" == *"OUTSIDE ALLOWLIST"* ]]; then
     bad "unicode filename src/café.txt was misclassified as OUTSIDE ALLOWLIST (core.quotePath regression): $OUT_UNICODE"
 else
     ok "unicode filename src/café.txt is correctly recognized as in-scope (no quoting false-positive)"
 fi
-if echo "$OUT_UNICODE" | grep -q "café.txt"; then
+if [[ "$OUT_UNICODE" == *"café.txt"* ]]; then
     ok "the unquoted, correctly-decoded filename appears in the report"
 else
     bad "expected to see the plain (unquoted) filename café.txt in the output: $OUT_UNICODE"
@@ -157,12 +157,16 @@ git -C "$REPO" merge -q --no-ff -m "merge side into main" "$side_head"
 merge_c="$(git -C "$REPO" rev-parse HEAD)"
 
 OUT_MERGE="$(cd "$REPO" && bash "$AUDIT" "${merge_c}" "src" 2>&1)"
-if echo "$OUT_MERGE" | grep -q "\[merge commit -- not audited\]"; then
+if [[ "$OUT_MERGE" == *"[merge commit -- not audited]"* ]]; then
     ok "merge commit ${merge_c} is explicitly labeled as not-audited (not silently blank)"
 else
     bad "merge commit ${merge_c} was not labeled as skipped: $OUT_MERGE"
 fi
-if echo "$OUT_MERGE" | grep -qE "^1 merge commit\(s\) skipped -- not audited$"; then
+# Whole-LINE match (grep's per-line ^...$ semantics) -- bash's
+# `[[ =~ ]]` anchors ^/$ to the whole multi-line blob, not each
+# embedded line, so this checks for the exact line bounded by
+# newlines-or-string-edges instead.
+if [[ $'\n'"$OUT_MERGE"$'\n' == *$'\n'"1 merge commit(s) skipped -- not audited"$'\n'* ]]; then
     ok "summary line reports exactly 1 merge commit skipped"
 else
     bad "expected a '1 merge commit(s) skipped -- not audited' summary line, got: $OUT_MERGE"
@@ -171,7 +175,7 @@ fi
 # omit the line entirely -- a reader must never have to infer "0" from
 # absence.
 OUT_NOMERGE="$(cd "$REPO" && bash "$AUDIT" "${c1}" "src" 2>&1)"
-if echo "$OUT_NOMERGE" | grep -qE "^0 merge commit\(s\) skipped -- not audited$"; then
+if [[ $'\n'"$OUT_NOMERGE"$'\n' == *$'\n'"0 merge commit(s) skipped -- not audited"$'\n'* ]]; then
     ok "a merge-free range explicitly reports 0 merge commits skipped (never silently omitted)"
 else
     bad "expected '0 merge commit(s) skipped -- not audited' on a merge-free range, got: $OUT_NOMERGE"
@@ -191,12 +195,15 @@ if [[ -x /bin/bash ]] && ! /bin/bash -c '(( BASH_VERSINFO[0] >= 4 ))' 2>/dev/nul
     else
         bad "expected exit 1 from the bash-version guard under /bin/bash 3.2, got $RC_OLDBASH: $OUT_OLDBASH"
     fi
-    if echo "$OUT_OLDBASH" | grep -q "requires bash >= 4"; then
+    if [[ "$OUT_OLDBASH" == *"requires bash >= 4"* ]]; then
         ok "clear 'requires bash >= 4' message shown under bash 3.2"
     else
         bad "expected a clear 'requires bash >= 4' message under bash 3.2, got: $OUT_OLDBASH"
     fi
-    if echo "$OUT_OLDBASH" | grep -qi "command not found\|syntax error"; then
+    # Pipe-free, case-insensitive (nexus-i66g4/wbeyi class): lowercase the
+    # haystack and compare against already-lowercase literal needles
+    # instead of `grep -qi` -- avoids toggling global `nocasematch` state.
+    if [[ "${OUT_OLDBASH,,}" == *"command not found"* || "${OUT_OLDBASH,,}" == *"syntax error"* ]]; then
         bad "raw bash4+-syntax failure leaked under bash 3.2 (guard did not fire before mapfile): $OUT_OLDBASH"
     else
         ok "no raw 'command not found'/syntax-error leak under bash 3.2 -- the guard fired first"

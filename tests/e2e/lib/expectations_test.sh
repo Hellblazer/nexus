@@ -365,12 +365,12 @@ if [[ "$(printf '%s\n' "$out" | grep -c "UNDECLARED")" == "1" ]]; then
 else
     bad "expected exactly 1 UNDECLARED, got: $out"
 fi
-if printf '%s\n' "$out" | grep -q $'UNDECLARED\tarogue-bg-1234567890abcdef\trogue-bg'; then
+if [[ "$out" == *$'UNDECLARED\tarogue-bg-1234567890abcdef\trogue-bg'* ]]; then
     ok "the undeclared named teammate is the one flagged"
 else
     bad "wrong/missing UNDECLARED line: $out"
 fi
-if printf '%s\n' "$out" | grep -qE "general-purpose|declared-bg|declared-sync"; then
+if [[ "$out" == *"general-purpose"* || "$out" == *"declared-bg"* || "$out" == *"declared-sync"* ]]; then
     bad "audit flagged a sync or declared dispatch (cry-wolf class): $out"
 else
     ok "sync-unnamed and both declared dispatches not flagged"
@@ -386,7 +386,7 @@ if [[ "$no_ledger_rc" == "3" ]]; then
 else
     bad "missing file: expected rc=3, got rc=$no_ledger_rc"
 fi
-if printf '%s\n' "$no_ledger_err" | grep -q "NOTE"; then
+if [[ "$no_ledger_err" == *"NOTE"* ]]; then
     ok "missing file: NOTE line printed to stderr"
 else
     bad "missing file: no NOTE line on stderr: $no_ledger_err"

@@ -1,0 +1,783 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-syfes: catalog-023's gc_quarantine_orphans / gc_restore_rereferenced
+    left a permanently-orphaned catalog_collections row behind for the
+    quarantine/origin sibling every time a GC pass found NOTHING to move.
+
+    MECHANISM (see PgVectorRepository.quarantineOrphans/restoreRereferenced,
+    pre-fix): the Java caller registered the sibling collection
+    (ensureCollectionRegistered -> INSERT ... ON CONFLICT DO NOTHING into
+    catalog_collections) UNCONDITIONALLY, in its own short committed
+    transaction, BEFORE invoking the anti-join function at all. It had to
+    register first because chunks_<dim>.collection carries a
+    catalog_collections FK (fk-002) and these functions INSERT directly
+    into chunks_<dim> rather than going through
+    PgVectorRepository.upsertChunksInternal's own auto-stub (RDR-156 P0.2),
+    the only OTHER place that registers a collection before writing to it.
+    When the anti-join found zero orphans (or zero re-referenced rows to
+    restore), the function inserted nothing — but the pre-registration had
+    ALREADY committed, in ITS OWN transaction, independently of whatever the
+    function did next. A collection that never gets so much as one orphan
+    quarantined still ends up with a permanently-registered, permanently-
+    empty quarantine sibling. Every GC pass over a clean collection minted
+    one of these: `nx doctor`'s collections-drift check (a T3-collection-
+    gone-and-not-superseded scan) flags them forever, since nothing ever
+    prunes a catalog_collections row with no chunks and no supersedes chain.
+
+    FIX: move the registration INSIDE each function, guarded on there
+    actually being something to insert. Each dim branch already computes
+    v_chashes (the anti-join hit set) and early-returns when it is NULL
+    (nothing to do); the registration INSERT is placed AFTER that guard and
+    BEFORE the branch's own INSERT INTO chunks_<dim> — so the row that
+    satisfies the FK is now created in the SAME statement-level transaction
+    as the write that needs it, atomically, instead of as a separately-
+    committed side effect that can outlive a no-op. A collection with zero
+    orphans/zero restores across its entire lifetime now never gets a
+    catalog_collections row for its unused sibling at all.
+
+    gc_expire_quarantine is untouched — it never INSERTs into chunks_<dim>
+    (hard-delete only), so it never needed the pre-registration this bug
+    lives in.
+
+    ENRICHMENT PARITY: reproduces PgVectorRepository.ensureCollectionRegistered's
+    split-on-"__" rule in SQL (string_to_array(name, '__')) — a conformant
+    4-segment name populates content_type/owner_id/embedding_model/
+    model_version; anything else leaves all four ''. This matches the Java
+    stub for every name the real quarantine_collection_name() generator
+    (chunk_quarantine.py) can produce, and for every origin_collection this
+    project's conformance enum admits. It is NOT byte-for-byte identical in
+    one case the generator cannot reach: PL/pgSQL string_to_array and Java's
+    no-limit String.split disagree on trailing empty segments, so a name
+    ENDING in "__" splits into 5 elements (a trailing '') under
+    string_to_array but only 4 under String.split, which drops it. That
+    divergence is confined to the enrichment columns — a "__"-suffixed name
+    would enrich differently (or land blank vs. populated) between the two
+    paths, but the row is registered in both either way; ON CONFLICT
+    (tenant_id, name) DO NOTHING is idempotent in both, and whether-the-row-
+    exists is never affected. catalog_collections' non-PK columns are NOT
+    NULL DEFAULT '' (catalog-001 changeset 5), so this INSERT is legal for
+    both shapes.
+
+    GRANTS: no new GRANT needed. nexus_svc already holds SELECT, INSERT,
+    UPDATE, DELETE on catalog_collections via grants-nexus-svc.xml's
+    schema-wide runAlways DML grant (every table nexus_admin owns in the
+    nexus schema, which includes catalog_collections since catalog-001);
+    these functions are SECURITY INVOKER, so the INSERT below executes as
+    whichever role the caller's connection authenticated as (nexus_svc in
+    production) under the SAME nexus.tenant GUC / FORCE RLS scope the
+    pre-fix Java-side INSERT ran under. No new EXECUTE grant needed either
+    — CREATE OR REPLACE FUNCTION preserves the existing grant on the
+    unchanged (dim, ...) signature from catalog-023-4.
+
+    Does not touch catalog-023-quarantine-functions.xml in place — that
+    file already shipped in published engine-service-v0.1.70 and has run
+    on dev machines; editing a shipped changeset's checksum is a rug-pull.
+    CREATE OR REPLACE FUNCTION here is idempotent and safe to layer on top.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: nexus.gc_quarantine_orphans — register-on-insert only ─── -->
+    <changeSet id="catalog-024-1" author="nexus-syfes.1">
+        <comment>
+            CREATE OR REPLACE nexus.gc_quarantine_orphans: same signature and
+            return shape as catalog-023-1. Only change: the quarantine sibling's
+            catalog_collections stub is now inserted inside each dim branch,
+            guarded by the existing "IF v_chashes IS NULL THEN RETURN" early-out,
+            so a zero-orphan pass over a clean collection never registers its
+            unused quarantine sibling.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans(
+    dim                      int,
+    p_tenant_id              text,
+    p_collection             text,
+    p_quarantine_collection  text,
+    p_quarantined_at         text,
+    p_sample_limit           int
+)
+RETURNS TABLE(moved bigint, sample jsonb)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_chashes bytea[];
+    v_moved   bigint;
+    v_sample  jsonb;
+    v_seg     text[];
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    IF dim = 384 THEN
+        SELECT array_agg(c.chash) INTO v_chashes
+          FROM nexus.chunks_384 c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_collection
+           AND NOT EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = c.collection
+                    AND m.chash      = c.chash
+               );
+
+        IF v_chashes IS NULL THEN
+            RETURN QUERY SELECT 0::bigint, NULL::jsonb;
+            RETURN;
+        END IF;
+
+        v_seg := string_to_array(p_quarantine_collection, '__');
+        INSERT INTO nexus.catalog_collections
+            (tenant_id, name, content_type, owner_id, embedding_model, model_version)
+        VALUES (
+            p_tenant_id, p_quarantine_collection,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END
+        )
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text, c.embedding,
+               COALESCE(c.metadata, '{}'::jsonb)
+                 || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                        'origin_collection', p_collection)
+          FROM nexus.chunks_384 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND c.chash = ANY(v_chashes)
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        WITH del AS (
+            DELETE FROM nexus.chunks_384 c
+             WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+               AND c.chash = ANY(v_chashes)
+            RETURNING c.chash, c.metadata->>'title' AS title
+        ),
+        counted AS (SELECT count(*) AS n FROM del),
+        sampled AS (
+            SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title)) AS s
+              FROM (SELECT chash, title FROM del LIMIT p_sample_limit) lim
+        )
+        SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+        RETURN QUERY SELECT v_moved, v_sample;
+        RETURN;
+
+    ELSIF dim = 768 THEN
+        SELECT array_agg(c.chash) INTO v_chashes
+          FROM nexus.chunks_768 c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_collection
+           AND NOT EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = c.collection
+                    AND m.chash      = c.chash
+               );
+
+        IF v_chashes IS NULL THEN
+            RETURN QUERY SELECT 0::bigint, NULL::jsonb;
+            RETURN;
+        END IF;
+
+        v_seg := string_to_array(p_quarantine_collection, '__');
+        INSERT INTO nexus.catalog_collections
+            (tenant_id, name, content_type, owner_id, embedding_model, model_version)
+        VALUES (
+            p_tenant_id, p_quarantine_collection,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END
+        )
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text, c.embedding,
+               COALESCE(c.metadata, '{}'::jsonb)
+                 || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                        'origin_collection', p_collection)
+          FROM nexus.chunks_768 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND c.chash = ANY(v_chashes)
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        WITH del AS (
+            DELETE FROM nexus.chunks_768 c
+             WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+               AND c.chash = ANY(v_chashes)
+            RETURNING c.chash, c.metadata->>'title' AS title
+        ),
+        counted AS (SELECT count(*) AS n FROM del),
+        sampled AS (
+            SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title)) AS s
+              FROM (SELECT chash, title FROM del LIMIT p_sample_limit) lim
+        )
+        SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+        RETURN QUERY SELECT v_moved, v_sample;
+        RETURN;
+
+    ELSIF dim = 1024 THEN
+        SELECT array_agg(c.chash) INTO v_chashes
+          FROM nexus.chunks_1024 c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_collection
+           AND NOT EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = c.collection
+                    AND m.chash      = c.chash
+               );
+
+        IF v_chashes IS NULL THEN
+            RETURN QUERY SELECT 0::bigint, NULL::jsonb;
+            RETURN;
+        END IF;
+
+        v_seg := string_to_array(p_quarantine_collection, '__');
+        INSERT INTO nexus.catalog_collections
+            (tenant_id, name, content_type, owner_id, embedding_model, model_version)
+        VALUES (
+            p_tenant_id, p_quarantine_collection,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END
+        )
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text, c.embedding,
+               COALESCE(c.metadata, '{}'::jsonb)
+                 || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                        'origin_collection', p_collection)
+          FROM nexus.chunks_1024 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND c.chash = ANY(v_chashes)
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        WITH del AS (
+            DELETE FROM nexus.chunks_1024 c
+             WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+               AND c.chash = ANY(v_chashes)
+            RETURNING c.chash, c.metadata->>'title' AS title
+        ),
+        counted AS (SELECT count(*) AS n FROM del),
+        sampled AS (
+            SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title)) AS s
+              FROM (SELECT chash, title FROM del LIMIT p_sample_limit) lim
+        )
+        SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+        RETURN QUERY SELECT v_moved, v_sample;
+        RETURN;
+    END IF;
+END;
+$$
+        </sql>
+        <rollback>
+            <!-- Restores catalog-023-1's original body verbatim (the state
+                 immediately preceding this changeset) — same precedent as
+                 catalog-019's per-changeset rollbacks: CREATE OR REPLACE back
+                 to the prior definition, not a DROP. Unlike catalog-019 this
+                 also removes the register-on-insert INSERT INTO
+                 catalog_collections added by this changeset, so a rollback
+                 genuinely reverts to catalog-023's pre-registration-fix
+                 behaviour (including the bug this changeset fixes). -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans(
+    dim                      int,
+    p_tenant_id              text,
+    p_collection             text,
+    p_quarantine_collection  text,
+    p_quarantined_at         text,
+    p_sample_limit           int
+)
+RETURNS TABLE(moved bigint, sample jsonb)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_chashes bytea[];
+    v_moved   bigint;
+    v_sample  jsonb;
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    IF dim = 384 THEN
+        SELECT array_agg(c.chash) INTO v_chashes
+          FROM nexus.chunks_384 c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_collection
+           AND NOT EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = c.collection
+                    AND m.chash      = c.chash
+               );
+
+        IF v_chashes IS NULL THEN
+            RETURN QUERY SELECT 0::bigint, NULL::jsonb;
+            RETURN;
+        END IF;
+
+        INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text, c.embedding,
+               COALESCE(c.metadata, '{}'::jsonb)
+                 || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                        'origin_collection', p_collection)
+          FROM nexus.chunks_384 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND c.chash = ANY(v_chashes)
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        WITH del AS (
+            DELETE FROM nexus.chunks_384 c
+             WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+               AND c.chash = ANY(v_chashes)
+            RETURNING c.chash, c.metadata->>'title' AS title
+        ),
+        counted AS (SELECT count(*) AS n FROM del),
+        sampled AS (
+            SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title)) AS s
+              FROM (SELECT chash, title FROM del LIMIT p_sample_limit) lim
+        )
+        SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+        RETURN QUERY SELECT v_moved, v_sample;
+        RETURN;
+
+    ELSIF dim = 768 THEN
+        SELECT array_agg(c.chash) INTO v_chashes
+          FROM nexus.chunks_768 c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_collection
+           AND NOT EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = c.collection
+                    AND m.chash      = c.chash
+               );
+
+        IF v_chashes IS NULL THEN
+            RETURN QUERY SELECT 0::bigint, NULL::jsonb;
+            RETURN;
+        END IF;
+
+        INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text, c.embedding,
+               COALESCE(c.metadata, '{}'::jsonb)
+                 || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                        'origin_collection', p_collection)
+          FROM nexus.chunks_768 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND c.chash = ANY(v_chashes)
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        WITH del AS (
+            DELETE FROM nexus.chunks_768 c
+             WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+               AND c.chash = ANY(v_chashes)
+            RETURNING c.chash, c.metadata->>'title' AS title
+        ),
+        counted AS (SELECT count(*) AS n FROM del),
+        sampled AS (
+            SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title)) AS s
+              FROM (SELECT chash, title FROM del LIMIT p_sample_limit) lim
+        )
+        SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+        RETURN QUERY SELECT v_moved, v_sample;
+        RETURN;
+
+    ELSIF dim = 1024 THEN
+        SELECT array_agg(c.chash) INTO v_chashes
+          FROM nexus.chunks_1024 c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_collection
+           AND NOT EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = c.collection
+                    AND m.chash      = c.chash
+               );
+
+        IF v_chashes IS NULL THEN
+            RETURN QUERY SELECT 0::bigint, NULL::jsonb;
+            RETURN;
+        END IF;
+
+        INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text, c.embedding,
+               COALESCE(c.metadata, '{}'::jsonb)
+                 || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                        'origin_collection', p_collection)
+          FROM nexus.chunks_1024 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND c.chash = ANY(v_chashes)
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        WITH del AS (
+            DELETE FROM nexus.chunks_1024 c
+             WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+               AND c.chash = ANY(v_chashes)
+            RETURNING c.chash, c.metadata->>'title' AS title
+        ),
+        counted AS (SELECT count(*) AS n FROM del),
+        sampled AS (
+            SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title)) AS s
+              FROM (SELECT chash, title FROM del LIMIT p_sample_limit) lim
+        )
+        SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+        RETURN QUERY SELECT v_moved, v_sample;
+        RETURN;
+    END IF;
+END;
+$$
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: nexus.gc_restore_rereferenced — register-on-insert only ─ -->
+    <changeSet id="catalog-024-2" author="nexus-syfes.2">
+        <comment>
+            CREATE OR REPLACE nexus.gc_restore_rereferenced: same signature and
+            return shape as catalog-023-2. Only change: the origin collection's
+            catalog_collections stub is now inserted inside each dim branch,
+            guarded by the existing "IF v_chashes IS NULL THEN RETURN 0" early-out,
+            so a zero-match restore pass never registers an origin collection
+            that has never received anything back from quarantine.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.gc_restore_rereferenced(
+    dim                      int,
+    p_tenant_id              text,
+    p_quarantine_collection  text,
+    p_origin_collection      text
+)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_chashes  bytea[];
+    v_restored bigint := 0;
+    v_seg      text[];
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    IF dim = 384 THEN
+        SELECT array_agg(c.chash) INTO v_chashes
+          FROM nexus.chunks_384 c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_quarantine_collection
+           AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+           AND EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = p_origin_collection
+                    AND m.chash      = c.chash
+               );
+
+        IF v_chashes IS NULL THEN
+            RETURN 0;
+        END IF;
+
+        v_seg := string_to_array(p_origin_collection, '__');
+        INSERT INTO nexus.catalog_collections
+            (tenant_id, name, content_type, owner_id, embedding_model, model_version)
+        VALUES (
+            p_tenant_id, p_origin_collection,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END
+        )
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text, c.embedding,
+               (COALESCE(c.metadata, '{}'::jsonb) - 'quarantined_at' - 'origin_collection')
+          FROM nexus.chunks_384 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes)
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        DELETE FROM nexus.chunks_384 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes);
+
+        v_restored := array_length(v_chashes, 1);
+        RETURN v_restored;
+
+    ELSIF dim = 768 THEN
+        SELECT array_agg(c.chash) INTO v_chashes
+          FROM nexus.chunks_768 c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_quarantine_collection
+           AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+           AND EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = p_origin_collection
+                    AND m.chash      = c.chash
+               );
+
+        IF v_chashes IS NULL THEN
+            RETURN 0;
+        END IF;
+
+        v_seg := string_to_array(p_origin_collection, '__');
+        INSERT INTO nexus.catalog_collections
+            (tenant_id, name, content_type, owner_id, embedding_model, model_version)
+        VALUES (
+            p_tenant_id, p_origin_collection,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END
+        )
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text, c.embedding,
+               (COALESCE(c.metadata, '{}'::jsonb) - 'quarantined_at' - 'origin_collection')
+          FROM nexus.chunks_768 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes)
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        DELETE FROM nexus.chunks_768 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes);
+
+        v_restored := array_length(v_chashes, 1);
+        RETURN v_restored;
+
+    ELSIF dim = 1024 THEN
+        SELECT array_agg(c.chash) INTO v_chashes
+          FROM nexus.chunks_1024 c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_quarantine_collection
+           AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+           AND EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = p_origin_collection
+                    AND m.chash      = c.chash
+               );
+
+        IF v_chashes IS NULL THEN
+            RETURN 0;
+        END IF;
+
+        v_seg := string_to_array(p_origin_collection, '__');
+        INSERT INTO nexus.catalog_collections
+            (tenant_id, name, content_type, owner_id, embedding_model, model_version)
+        VALUES (
+            p_tenant_id, p_origin_collection,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END
+        )
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text, c.embedding,
+               (COALESCE(c.metadata, '{}'::jsonb) - 'quarantined_at' - 'origin_collection')
+          FROM nexus.chunks_1024 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes)
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        DELETE FROM nexus.chunks_1024 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes);
+
+        v_restored := array_length(v_chashes, 1);
+        RETURN v_restored;
+    END IF;
+END;
+$$
+        </sql>
+        <rollback>
+            <!-- Restores catalog-023-2's original body verbatim — see
+                 catalog-024-1's rollback comment for rationale. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.gc_restore_rereferenced(
+    dim                      int,
+    p_tenant_id              text,
+    p_quarantine_collection  text,
+    p_origin_collection      text
+)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_chashes  bytea[];
+    v_restored bigint := 0;
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    IF dim = 384 THEN
+        SELECT array_agg(c.chash) INTO v_chashes
+          FROM nexus.chunks_384 c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_quarantine_collection
+           AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+           AND EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = p_origin_collection
+                    AND m.chash      = c.chash
+               );
+
+        IF v_chashes IS NULL THEN
+            RETURN 0;
+        END IF;
+
+        INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text, c.embedding,
+               (COALESCE(c.metadata, '{}'::jsonb) - 'quarantined_at' - 'origin_collection')
+          FROM nexus.chunks_384 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes)
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        DELETE FROM nexus.chunks_384 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes);
+
+        v_restored := array_length(v_chashes, 1);
+        RETURN v_restored;
+
+    ELSIF dim = 768 THEN
+        SELECT array_agg(c.chash) INTO v_chashes
+          FROM nexus.chunks_768 c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_quarantine_collection
+           AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+           AND EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = p_origin_collection
+                    AND m.chash      = c.chash
+               );
+
+        IF v_chashes IS NULL THEN
+            RETURN 0;
+        END IF;
+
+        INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text, c.embedding,
+               (COALESCE(c.metadata, '{}'::jsonb) - 'quarantined_at' - 'origin_collection')
+          FROM nexus.chunks_768 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes)
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        DELETE FROM nexus.chunks_768 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes);
+
+        v_restored := array_length(v_chashes, 1);
+        RETURN v_restored;
+
+    ELSIF dim = 1024 THEN
+        SELECT array_agg(c.chash) INTO v_chashes
+          FROM nexus.chunks_1024 c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_quarantine_collection
+           AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+           AND EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = p_origin_collection
+                    AND m.chash      = c.chash
+               );
+
+        IF v_chashes IS NULL THEN
+            RETURN 0;
+        END IF;
+
+        INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text, c.embedding,
+               (COALESCE(c.metadata, '{}'::jsonb) - 'quarantined_at' - 'origin_collection')
+          FROM nexus.chunks_1024 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes)
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        DELETE FROM nexus.chunks_1024 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes);
+
+        v_restored := array_length(v_chashes, 1);
+        RETURN v_restored;
+    END IF;
+END;
+$$
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

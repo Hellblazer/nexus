@@ -149,6 +149,57 @@ For Maven projects:
 - Tests that test implementation rather than behavior
 - Flaky tests (non-deterministic failures)
 
+## FALSIFICATION (MANDATORY OUTPUT — a test that cannot fail is worse than no test)
+
+A passing test proves nothing until you have seen it fail for the right
+reason. Reading a test and judging it sound is NOT falsification; the test
+smells above are all things a vacuous test can pass while exhibiting none of
+them.
+
+**For every regression test covering a fix, emit exactly one of these lines:**
+
+```
+FALSIFIED: <test> — reverted <the specific change>, test failed with <the actual error>
+NOT FALSIFIED: <test> — <why it could not be done>
+```
+
+Falsify by **breaking the production code**, not by editing the test: revert
+the guard, delete the call, or invert the condition, run the test, observe
+red, restore. If reverting is impractical, say so in the NOT FALSIFIED line
+rather than substituting a weaker check.
+
+A `NOT FALSIFIED` line is an acceptable answer and an honest one. Silence is
+not: omitting both lines reports the test as verified when it was only read.
+
+### The specific shapes this catches
+
+These are all real defects that shipped past green suites and past a reading:
+
+- **A test double that accepts a call production rejects.** A bare
+  `MagicMock()` accepts any signature, so a call the real object refuses
+  passes forever. Assert POST-STATE against the real substrate, never the
+  absence of an exception.
+- **A fixture encoding a value reality cannot produce.** A fabricated process
+  table, an API response hand-written to match the parser rather than the
+  server. The test then verifies the code against fiction. Where the input
+  comes from an external command or service, at least one test must obtain it
+  from the real source.
+- **An assertion on the absence of a negative signal.** "No exception raised",
+  "no error logged", "the list is empty" — all satisfied by a code path that
+  did nothing at all. Require a positive post-state.
+- **A gate whose failure path returns success.** A check that returns
+  `ok=True` / exit 0 when its subject is unreachable, or when it examined zero
+  items, cannot distinguish clean from never-ran. If the code under test is a
+  gate, falsify BOTH arms: make its subject damaged, and make its subject
+  unavailable.
+
+### Non-vacuity for the gate itself
+
+When the change under review IS a detector, guard, lint, or health check, the
+falsification obligation extends to its denominator: report how many items it
+actually examined. A gate that scanned nothing passes silently. If the count
+can be zero in normal operation, that is a finding, not a footnote.
+
 ## Test Failure Analysis
 
 ### Failure Pattern Recognition

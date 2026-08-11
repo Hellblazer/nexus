@@ -2740,6 +2740,75 @@ public final class CatalogRepository {
             (long) ctx.fetchCount(MANIFEST_ORPHANS.call(dim)));
     }
 
+    /**
+     * Read-only census of the population {@code manifest_orphans}/{@code
+     * manifest_verify_all} structurally cannot see (T2 nexus/chroma-residue-
+     * plan-2026-08-10 §C2): manifest rows with {@code collection IS NULL}.
+     * Both functions filter {@code collection IS NOT NULL} before doing
+     * anything else (catalog-004-manifest-functions.xml's {@code
+     * manifest_orphans}; catalog-020-index-run-fence.xml's {@code
+     * manifest_verify}/{@code manifest_verify_all}) — a NULL-collection row
+     * is invisible to every one of them, not counted as an orphan and not
+     * counted as damaged. Without this report a caller reading a clean zero
+     * from those checks cannot tell "verified clean" from "never looked at."
+     *
+     * <p>Splits the total into:
+     * <ul>
+     *   <li>{@code total} — every live-document manifest row with {@code
+     *       collection IS NULL}.
+     *   <li>{@code backfillable} — the subset whose owning document HAS a
+     *       {@code physical_collection}. {@link #manifestBackfill} stamps
+     *       exactly this subset (its WHERE clause, catalog-004-manifest-
+     *       functions.xml changeset 2, is {@code physical_collection IS NOT
+     *       NULL AND != ''}) — after backfill runs, these rows become
+     *       visible to the orphan/verify checks.
+     * </ul>
+     * {@code total - backfillable} is the population backfill can NEVER
+     * reach: ghost/sourceless documents (physical_collection NULL or
+     * empty — see {@code CatalogRepository#register}'s ghost-element
+     * contract). catalog-014-manifest-collection-stamp.xml's changeset
+     * comment states this in so many words: "ghost docs (physical_collection
+     * empty) ... are skipped, matching manifest_backfill()'s semantics." A
+     * caller must not promise running backfill will cover that remainder —
+     * it is permanently excluded from every orphan/verify check, backfill
+     * or no backfill.
+     *
+     * <p>Tombstone-aware ({@code d.deleted_at IS NULL}), matching {@code
+     * manifest_verify_all}'s own filter, so the population this report
+     * describes lines up with the checks it explains the blind spot of.
+     * Both counts are read in the SAME tenant-scoped transaction so they
+     * are mutually consistent. NEVER mutates.
+     */
+    public Map<String, Long> manifestNullCollectionReport(String tenant) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var joinCondition = CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID));
+
+            Long total = ctx.selectCount()
+                .from(CATALOG_DOCUMENT_CHUNKS)
+                .join(CATALOG_DOCUMENTS).on(joinCondition)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                       .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.isNull())
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                .fetchOne(0, Long.class);
+
+            Long backfillable = ctx.selectCount()
+                .from(CATALOG_DOCUMENT_CHUNKS)
+                .join(CATALOG_DOCUMENTS).on(joinCondition)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                       .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.isNull())
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                       .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.isNotNull())
+                       .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.ne("")))
+                .fetchOne(0, Long.class);
+
+            Map<String, Long> out = new LinkedHashMap<>();
+            out.put("total", total != null ? total : 0L);
+            out.put("backfillable", backfillable != null ? backfillable : 0L);
+            return out;
+        });
+    }
+
     private static void requireSupportedDim(int dim) {
         if (!MANIFEST_DIMS.contains(dim)) {
             throw new IllegalArgumentException(
@@ -2905,7 +2974,24 @@ public final class CatalogRepository {
         );
     }
 
-    /** Descendants: all documents with tumbler starting with prefix + "." */
+    /**
+     * Descendants: all documents with tumbler starting with prefix + "."
+     *
+     * <p>Complete by construction — one unbounded scan of {@code
+     * catalog_documents}, no LIMIT/OFFSET to under- or over-shoot. That
+     * completeness guarantee holds regardless of indexing. Whether the
+     * {@code LIKE 'prefix.%'} predicate is index-accelerated is a separate
+     * question: it can use the {@code catalog_documents_pk} B-tree on
+     * {@code (tenant_id, tumbler)} only under a "C" (or {@code
+     * text_pattern_ops}) collation. The local PG bundle is provisioned with
+     * {@code initdb --no-locale} (C collation — confirmed index-accelerated
+     * there), but the managed cloud PostgreSQL's collation is not
+     * provisioned or verified anywhere in this codebase and no {@code
+     * text_pattern_ops} index exists here — so on the managed deployment
+     * this remains index-acceleration UNVERIFIED, not confirmed slow, not
+     * confirmed fast (substantive critique 2026-08-10, T2
+     * nexus/chroma-residue-C1-T0.1-critique-2026-08-10, finding 2).
+     */
     public List<Map<String, Object>> descendants(String tenant, String prefix) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)

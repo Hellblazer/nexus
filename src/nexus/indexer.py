@@ -991,6 +991,13 @@ def _catalog_hook(
                 repo=repo_name, error=str(exc),
             )
         new_tumblers = []
+        # content_type of every doc landing in new_tumblers, tracked
+        # alongside it (populated in the same register_many/register
+        # success branches below). Lets the link-generation call site
+        # skip a generator's catalog fetches entirely when none of this
+        # run's new documents are of that generator's source type — see
+        # link_generator._no_qualifying_seed.
+        new_content_types: set[str] = set()
         # nexus-o6aa.10.4 follow-up: track per-file failures so the
         # catalog hook stops failing silently. Pre-fix, a single
         # cat.register() exception inside the loop tripped the outer
@@ -1316,9 +1323,10 @@ def _catalog_hook(
                         f"register_many returned {len(tumblers)} tumblers for "
                         f"{len(page)} docs"
                     )
-                for (path, _doc), tum in zip(page, tumblers):
+                for (path, doc), tum in zip(page, tumblers):
                     new_tumblers.append(tum)
                     file_to_doc_id[path] = str(tum)
+                    new_content_types.add(doc.get("content_type", ""))
             except Exception:  # noqa: BLE001 — batch unrecoverable; per-file isolation fallback
                 _log.warning(
                     "catalog_register_many_failed_falling_back_per_file",
@@ -1332,6 +1340,7 @@ def _catalog_hook(
                         )
                         new_tumblers.append(tum)
                         file_to_doc_id[path] = str(tum)
+                        new_content_types.add(doc.get("content_type", ""))
                     except Exception as exc:  # noqa: BLE001 — ghost-class per-file isolation
                         skipped_files.append((path, str(exc)))
                         _log.warning(
@@ -1388,7 +1397,10 @@ def _catalog_hook(
             # stage bucket names WHICH generator owns it, not just that
             # linking in aggregate is slow.
             _lg_t = time.monotonic()
-            fp_count = generate_rdr_filepath_links(cat, writer=writer, new_tumblers=new_tumblers)
+            fp_count = generate_rdr_filepath_links(
+                cat, writer=writer, new_tumblers=new_tumblers,
+                new_content_types=new_content_types,
+            )
             _stage_s["linking_rdr"] = time.monotonic() - _lg_t
             # nexus-sob9: prose + pdf coverage. Run with the same
             # incremental scope so a single bulk-index pass closes
@@ -1396,11 +1408,13 @@ def _catalog_hook(
             _lg_t = time.monotonic()
             prose_count = generate_prose_filepath_links(
                 cat, writer=writer, new_tumblers=new_tumblers,
+                new_content_types=new_content_types,
             )
             _stage_s["linking_prose"] = time.monotonic() - _lg_t
             _lg_t = time.monotonic()
             pdf_count = generate_pdf_corpus_links(
                 cat, writer=writer, new_tumblers=new_tumblers,
+                new_content_types=new_content_types,
             )
             _stage_s["linking_pdf"] = time.monotonic() - _lg_t
             links_created = fp_count + prose_count + pdf_count
@@ -2343,21 +2357,35 @@ _CHROMA_PAGE_SIZE: int = 300
 """ChromaDB Cloud hard cap per get() call — paginate above this."""
 
 
-def _paginated_get(col: object, include: list[str], where: dict | None = None) -> dict:
+def _paginated_get(
+    col: object,
+    include: list[str],
+    where: dict | None = None,
+    *,
+    on_page: Callable[[int, int], None] | None = None,
+) -> dict:
     """Fetch all matching chunks from *col* by paginating in _CHROMA_PAGE_SIZE batches.
 
     ChromaDB Cloud silently truncates unbounded col.get() calls at 300 records.
     This helper accumulates pages until a short page signals the end.
 
+    ``on_page(page_num, scanned_so_far)``, when provided, fires after each
+    page lands (index-output-ux-assessment-2026-08-10 §7.2/a3): this loop
+    was previously a black hole (427.5s unbroken on a 96-page collection,
+    nexus-vatx) with no way for a caller to surface real progress.
+    ``page_num`` is 1-based; ``scanned_so_far`` is the cumulative id count.
+
     Returns a dict with ``"ids"`` and, when ``"metadatas"`` is in *include*,
     a ``"metadatas"`` key — matching the shape returned by col.get().
     """
     offset = 0
+    page_num = 0
     all_ids: list[str] = []
     all_metas: list[dict] = []
     has_metas = "metadatas" in include
 
     while True:
+        page_num += 1
         kwargs: dict = {"include": include, "limit": _CHROMA_PAGE_SIZE, "offset": offset}
         if where is not None:
             kwargs["where"] = where
@@ -2366,6 +2394,8 @@ def _paginated_get(col: object, include: list[str], where: dict | None = None) -
         all_ids.extend(batch_ids)
         if has_metas:
             all_metas.extend(batch.get("metadatas") or [])
+        if on_page is not None:
+            on_page(page_num, len(all_ids))
         if len(batch_ids) < _CHROMA_PAGE_SIZE:
             break
         offset += _CHROMA_PAGE_SIZE
@@ -2374,6 +2404,89 @@ def _paginated_get(col: object, include: list[str], where: dict | None = None) -
     if has_metas:
         result["metadatas"] = all_metas
     return result
+
+
+def _fetch_all_chunk_metadata(
+    col: object,
+    collection_name: str,
+    *,
+    on_page: Callable[[int, int], None] | None = None,
+    on_fast_path_start: Callable[[], None] | None = None,
+) -> dict:
+    """ids + metadata for every LIVE chunk in *col*, single round trip when
+    the engine exposes ``get_all_metadata``, degrading to the
+    ``_paginated_get`` sweep otherwise.
+
+    Mirrors ``nexus.indexer_utils.build_staleness_cache``'s fast-path /
+    fallback contract exactly (the measurement this exists to fix: a real
+    ``nx index repo`` run on this repo spent 547.8s -- 70% of wall -- in
+    the paginated sweep this function replaces, one module away from
+    ``build_staleness_cache`` fetching the comparable read in 28.5s via
+    this exact fast path). Two collections, two call sites, one contract:
+    a change to either the row cap or the degradation policy should never
+    have to be kept in sync by hand across both places' independent
+    try/except ladders.
+
+    COMPLETENESS GUARANTEE (this function backs a GC orphan sweep --
+    "orphan" is decided by set-membership against a separately-fetched
+    alive set, so a caller silently treating a *short* read as *complete*
+    would misclassify live chunks as orphans and delete real data):
+    ``HttpVectorClient``'s ``get_all_metadata()`` never silently
+    truncates. Server-side (``PgVectorRepository.getAllMetadata``) fetches
+    ``GET_ALL_METADATA_MAX_ROWS + 1`` (200,001) rows and, when the +1
+    lands, RAISES (``IllegalStateException`` -> HTTP 422) rather than
+    returning the first 200,000 -- so this function's caller either gets
+    every row or an exception, never a row count it cannot tell apart
+    from "the collection genuinely only has this many". A fast-path
+    exception is therefore ALWAYS a "the read did not happen, fall back"
+    signal, never a signal to trust a partial response as ground truth.
+    Local-Chroma-mode collections (no ``get_all_metadata`` attribute) and
+    pre-v0.1.30 engines (the route itself is absent -> 404) take the same
+    fallback path, same as ``build_staleness_cache``.
+
+    Does NOT catch a paginated-fallback failure -- a total failure
+    propagates to the caller, which owns what "the read failed" means for
+    it (``_prune_deleted_files``: skip this collection with a structured
+    error, never silently classify orphans off a read that didn't
+    complete; ``chunk_quarantine``: skip this pass). Same boundary
+    ``build_staleness_cache`` draws for its own callers.
+    """
+    _get_all_metadata = getattr(col, "get_all_metadata", None)
+    if callable(_get_all_metadata):
+        if on_fast_path_start is not None:
+            on_fast_path_start()
+        try:
+            result = _get_all_metadata()
+        except Exception as exc:  # noqa: BLE001 — fast-path failure is a fallback signal, never fatal
+            hint = "falling back to the paginated sweep"
+            if getattr(exc, "code", None) == 404:
+                # nexus-5den3 (mirrored from build_staleness_cache): the
+                # pre-v0.1.30 404 hint is only actionable in local mode.
+                from nexus.config import is_local_mode  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
+                hint = (
+                    "engine lacks POST /v1/vectors/get-all-metadata "
+                    "(pre-v0.1.30) — "
+                    + (
+                        "upgrade the engine this install is pointed at"
+                        if is_local_mode()
+                        else (
+                            "the managed nexus service needs to be "
+                            "upgraded by the operator; no local action "
+                            "is possible"
+                        )
+                    )
+                )
+            _log.warning(
+                "prune_get_all_metadata_fast_path_failed_falling_back",
+                collection=collection_name, hint=hint, exc_info=True,
+            )
+        else:
+            return {
+                "ids": result.get("ids") or [],
+                "metadatas": result.get("metadatas") or [],
+            }
+    return _paginated_get(col, include=["metadatas"], on_page=on_page)
 
 
 def _batched_delete(col: object, ids: list[str]) -> int:
@@ -2680,6 +2793,81 @@ def _prune_misclassified(
         bar.close()
 
 
+def _prune_collection_serverside(
+    db: object, collection_name: str, quarantine_name: str, quarantined_at: str,
+) -> bool:
+    """RDR-191 Phase 1: attempt restore + quarantine + expire entirely
+    server-side (``nexus.gc_restore_rereferenced`` / ``gc_quarantine_orphans``
+    / ``gc_expire_quarantine``, catalog-023) for one collection. Zero chunk
+    rows and zero embeddings cross the wire on this path.
+
+    Returns ``True`` when the quarantine leg (the expensive one this RDR
+    targets — the old path's full-collection metadata read plus
+    embedding-carrying copy) ran server-side: the caller treats this
+    collection as DONE for this pass. Returns ``False`` when the route is
+    unavailable (pre-route engine — ``REQUIRED_ENGINE_VERSION`` is
+    ``(0, 1, 69)`` and this route ships in the NEXT tag — or a non-HTTP
+    ``db``, e.g. local/in-memory mode): the caller falls back to the
+    client-side fetch-diff-copy-delete path unchanged.
+
+    The restore leg running server-side even when quarantine then falls
+    back is safe and non-wasteful: restore only moves chashes the manifest
+    ALREADY references back to origin — the client fallback's own,
+    independently-computed ``referenced`` set agrees, so there is no
+    inconsistency between a server-restored row and a client-computed
+    orphan set.
+
+    Expire-route unavailability after a successful server-side quarantine
+    (an engine inexplicably missing the sibling route — should not occur
+    since all three ship in the same changeset) is logged and skipped, not
+    treated as a fallback trigger: matches the OLD code's own best-effort
+    tolerance for ``expire_quarantine`` failures (``gc_expiry_pass_failed``).
+    """
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+    from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — deferred import
+        expire_quarantine_serverside,
+        quarantine_days,
+        quarantine_orphans_serverside,
+        restore_rereferenced_serverside,
+    )
+
+    restored = restore_rereferenced_serverside(db, quarantine_name, collection_name)
+    if restored is None:
+        return False  # route unavailable — client-side path handles restore too
+
+    quarantined = quarantine_orphans_serverside(
+        db, collection_name, quarantine_name, quarantined_at, sample_limit=20,
+    )
+    if quarantined is None:
+        return False  # route unavailable
+    moved, sample = quarantined
+
+    if moved:
+        _log.info(
+            "gc_pruned_orphan_chunks_serverside",
+            collection=collection_name, count=moved, restored=restored,
+            sample=sample, mode="quarantine-serverside",
+        )
+
+    import os  # noqa: PLC0415 — deferred: branch-local, matches chunk_quarantine.py's own NX_GC_FORCE read
+    force = os.environ.get("NX_GC_FORCE", "") == "1"
+    cutoff = (
+        datetime.now(UTC) - timedelta(days=quarantine_days())
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    expired = expire_quarantine_serverside(
+        db, quarantine_name, collection_name, cutoff,
+        floor_fraction=_gc_floor_fraction(), floor_min_chunks=_GC_FLOOR_MIN_CHUNKS,
+        force=force,
+    )
+    if expired is None:
+        _log.warning(
+            "gc_expire_quarantine_route_missing_after_quarantine_succeeded",
+            collection=collection_name,
+        )
+    return True
+
+
 def _prune_deleted_files(
     code_collection: str,
     docs_collection: str,
@@ -2687,6 +2875,7 @@ def _prune_deleted_files(
     *,
     catalog: object | None,
     rdr_collection: str | None = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> None:
     """Remove orphan T3 chunks via the catalog manifest (RDR-108 Phase 4 /
     nexus-dyxe).
@@ -2731,6 +2920,19 @@ def _prune_deleted_files(
     paths will be reconciled in nexus-e5aw; until then this function is
     the authoritative GC for content-addressed chunks and ``nx t3 gc``
     handles only legacy pre-Phase-3 orphans.
+
+    ``on_phase``, when provided, receives a liveness ping for the
+    single-shot ``get_all_metadata`` read (see
+    ``_fetch_all_chunk_metadata``) and real page progress for the
+    ``_paginated_get`` fallback sweep (index-output-ux-assessment-2026-08-10
+    §7.2/a3: the 547.8s observed run of this function was 96 pages over
+    28,564 chunks with zero output — the fast path replaces that sweep in
+    the common case; the fallback and its page progress still exist for a
+    pre-v0.1.30 engine or a fast-path failure). Denominator is a best-effort
+    ``col.count()`` call — only attempted when ``on_phase`` is set, so
+    the common no-callback path (~20 existing call sites) pays no extra
+    cost. When ``count()`` is unavailable or non-numeric, progress
+    degrades to page-only numbering (no ``/total``), never raises.
     """
     if catalog is None:
         return
@@ -2748,7 +2950,8 @@ def _prune_deleted_files(
     _collections = (code_collection, docs_collection) + (
         (rdr_collection,) if rdr_collection else ()
     )
-    for collection_name in _collections:
+    _n_collections = len(_collections)
+    for _coll_idx, collection_name in enumerate(_collections, start=1):
         # nexus-ir6eh: the alive-set read is count-reconciled client-side
         # (HttpCatalogClient.chashes_for_collection raises on a truncated
         # or count-stripped response). GC must never classify orphans off
@@ -2774,6 +2977,68 @@ def _prune_deleted_files(
             col = db.get_collection(collection_name)
         except collection_not_found_errors():
             continue
+
+        # nexus-oqku (moved up for RDR-191 P1): when the catalog manifest
+        # has zero referenced chashes for a collection, every chunk would
+        # read as orphan and the sweep below would delete the entire
+        # collection. This fires on the first ``nx index repo`` after the
+        # RDR-108 schema migration lands on a system that has not yet run
+        # manifest backfill. An empty manifest cannot prove ANY chunk is
+        # live or dead; skip and log instead of a silent full-collection
+        # wipe. Checked HERE (before either path) because it must gate the
+        # RDR-191 server-side anti-join too — that SQL would otherwise read
+        # "no manifest rows" as "every chunk is unreferenced" just as
+        # readily as the client-side diff would.
+        if not referenced:
+            # Best-effort diagnostic count only — col.count() is the same
+            # cheap COUNT(*) the page-progress denominator above uses, NOT
+            # the expensive full-metadata read this guard exists to avoid
+            # paying before we know it's safe to. Never raises into the
+            # warning path; a test double or degraded read just omits it.
+            try:
+                _t3_chunks = col.count()
+            except Exception:  # noqa: BLE001 — diagnostic only
+                _t3_chunks = None
+            _log.warning(
+                "manifest_empty_skipping_gc",
+                collection=collection_name,
+                **({"t3_chunks": _t3_chunks} if isinstance(_t3_chunks, int) else {}),
+                note=(
+                    "catalog manifest has zero referenced chashes for this "
+                    "collection. GC cannot safely decide orphans without a "
+                    "manifest. Run a fresh `nx index repo` (populates "
+                    "manifest via post-store hook) or backfill manually "
+                    "before retrying GC."
+                ),
+            )
+            continue
+
+        # RDR-191 Phase 1: try the server-side anti-join prune first — zero
+        # chunk rows, zero embeddings cross the wire (nexus.gc_quarantine_orphans
+        # / gc_restore_rereferenced / gc_expire_quarantine, catalog-023).
+        # Falls back to the client-side fetch-diff-copy-delete path below
+        # when the engine predates the route (404) or `db` has no HTTP
+        # capability (local/in-memory mode).
+        from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — deferred import
+            now_stamp, quarantine_collection_name,
+        )
+        qname = quarantine_collection_name(collection_name)
+        # nexus-ou4tb contract (see the comment below): a degraded read must
+        # skip THIS collection, not abort the sweep for every collection after
+        # it. `_prune_collection_serverside` returns False for the benign
+        # "engine predates the route / no HTTP capability" case and re-raises
+        # everything else — including a bare ConnectionError/TimeoutError from
+        # `_post` on a local-mode blip. Unwrapped, one transient hiccup on one
+        # collection would abort the whole prune AND every pipeline phase after
+        # it, where the legacy arms below merely log and continue.
+        try:
+            if _prune_collection_serverside(db, collection_name, qname, now_stamp()):
+                continue
+        except Exception:  # noqa: BLE001 — best-effort; failure logged, sweep continues
+            _log.warning("gc_serverside_prune_failed", collection=collection_name,
+                         exc_info=True)
+            continue
+
         # nexus-xukbj: restore BEFORE the empty-collection early-continue —
         # a fully-quarantined collection (origin emptied) must still be able
         # to restore when a heal re-references its chashes.
@@ -2791,8 +3056,74 @@ def _prune_deleted_files(
         # chunks", and GC on a false-empty is how you delete nothing while
         # believing you swept). But it must skip THIS collection, not abort
         # the sweep for every collection after it.
+        #
+        # index-output-ux-assessment-2026-08-10 §7.2/a3 measured this read
+        # at 547.8s (70% of a real `nx index repo` run's wall time) via the
+        # paginated sweep alone. ``_fetch_all_chunk_metadata`` takes the
+        # SAME single-shot ``get_all_metadata`` fast path
+        # ``build_staleness_cache`` already uses in the same run (28.5s for
+        # a comparable read there) and degrades to the paginated sweep only
+        # when the engine can't serve it — see that function's docstring
+        # for the completeness argument (the server's row cap RAISES, it
+        # never silently truncates, so a fast-path failure here is always
+        # "fall back", never "trust a short read").
+        #
+        # ``_total_pages`` is a best-effort denominator for the FALLBACK
+        # path's page-progress messages only (col.count() may be
+        # unavailable or, on a test mock, non-numeric — degrade to
+        # page-only numbering rather than raise). Only computed when a
+        # caller actually wants progress output, so the ~20 existing
+        # on_phase-less call sites pay zero extra cost.
+        _total_pages: int | None = None
+        if on_phase is not None:
+            try:
+                _count = col.count()
+                # isinstance guard, not just a bare try/except: a permissive
+                # test double (MagicMock configures magic methods, so
+                # ``-(-mock // 300)`` does NOT raise — it silently returns
+                # another Mock) would otherwise leak a Mock repr into the
+                # operator-visible phase message instead of degrading.
+                # ``>= 0`` guard: a corrupted negative count (e.g. -300)
+                # survives the isinstance check but the ceiling-division
+                # trick below can then yield a NEGATIVE _total_pages
+                # (-300 -> -1), rendering a nonsensical "page k/-1"
+                # denominator instead of degrading to page-only.
+                if isinstance(_count, int) and _count >= 0:
+                    _total_pages = (
+                        -(-_count // _CHROMA_PAGE_SIZE) if _count else 0
+                    )
+            except Exception:  # noqa: BLE001 — best-effort denominator only
+                _total_pages = None
+
+        _where_label = f"collection {_coll_idx}/{_n_collections} ({collection_name})"
+
+        def _on_fast_path_start(_where=_where_label) -> None:
+            if on_phase is None:
+                return
+            on_phase(f"Pruning deleted files: {_where}, reading full collection…")
+
+        def _on_page(
+            page_num: int, scanned: int, *, _where=_where_label, _tp=_total_pages,
+        ) -> None:
+            if on_phase is None:
+                return
+            if _tp:
+                on_phase(
+                    f"Pruning deleted files: {_where}, page {page_num}/{_tp} "
+                    f"({scanned:,} chunks scanned)"
+                )
+            else:
+                on_phase(
+                    f"Pruning deleted files: {_where}, page {page_num} "
+                    f"({scanned:,} chunks scanned)"
+                )
+
         try:
-            all_chunks = _paginated_get(col, include=["metadatas"])
+            all_chunks = _fetch_all_chunk_metadata(
+                col, collection_name,
+                on_page=_on_page if on_phase is not None else None,
+                on_fast_path_start=_on_fast_path_start if on_phase is not None else None,
+            )
         except Exception:  # noqa: BLE001 — one collection's degrade must not end the sweep
             _log.warning(
                 "gc_sweep_read_failed_skipping_collection",
@@ -2801,29 +3132,10 @@ def _prune_deleted_files(
             continue
         if not all_chunks["ids"]:
             continue
-        # nexus-oqku: when the catalog manifest has zero referenced
-        # chashes for a collection that DOES have T3 chunks, every
-        # chunk would be classified as orphan and the loop below
-        # would delete the entire collection. This fires on the
-        # first ``nx index repo`` after the RDR-108 schema migration
-        # lands on a system that has not yet run manifest backfill.
-        # An empty manifest cannot prove ANY chunk is live or dead;
-        # treat it the same way as the per-chunk missing-chash case
-        # (skip and log) instead of silent full-collection wipe.
-        if not referenced:
-            _log.warning(
-                "manifest_empty_skipping_gc",
-                collection=collection_name,
-                t3_chunks=len(all_chunks["ids"]),
-                note=(
-                    "catalog manifest has zero referenced chashes for this "
-                    "collection but T3 has chunks. GC cannot safely decide "
-                    "orphans without a manifest. Run a fresh `nx index repo` "
-                    "(populates manifest via post-store hook) or backfill "
-                    "manually before retrying GC."
-                ),
-            )
-            continue
+        # nexus-oqku's empty-manifest guard now runs unconditionally at the
+        # top of this collection's iteration (before the RDR-191 server-path
+        # attempt) — see the comment there. `referenced` is guaranteed
+        # non-empty by the time control reaches here.
         orphan_ids: list[str] = []
         orphan_sample: list[dict] = []
         unsafe_skipped = 0
@@ -2970,12 +3282,24 @@ def _drain_batcher_with_markers(
                 rate = done / elapsed
                 line += f", {rate * 60:.1f} flushes/min"
                 line += f", ~{_fmt_duration((total - done) / rate)} remaining"
+            # nexus-4s1ww / GH #1432: surface failures AS THEY HAPPEN during
+            # the drain, not only in the end-of-run summary — the drain can
+            # run for minutes, and a batcher-less duck-typed stand-in (e.g.
+            # test doubles) has no ``failed_files`` at all, hence the
+            # defensive getattr instead of a hard attribute access.
+            _failed_so_far = len(getattr(batcher, "failed_files", {}) or {})
+            if _failed_so_far:
+                line += f", {_failed_so_far} file(s) failed"
             on_phase(line + ")")
     flushed = batcher.drain(on_progress=progress)
     if on_phase is not None and busy:
+        _failed_final = len(getattr(batcher, "failed_files", {}) or {})
+        _fail_suffix = (
+            f" — {_failed_final} file(s) failed to flush" if _failed_final else ""
+        )
         on_phase(
             f"Flush drain complete — {flushed} flushes, "
-            f"{time.monotonic() - t0:.1f}s"
+            f"{time.monotonic() - t0:.1f}s{_fail_suffix}"
         )
     return flushed
 
@@ -3824,6 +4148,13 @@ def _run_index(
     # client-side and cannot accept the empty-embeddings Seam B batches.
     from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — deferred to avoid circular import
     _batcher = None
+    # nexus-4s1ww / GH #1432: path -> error for every file whose chunks
+    # PERMANENTLY failed to flush this run (populated below from
+    # ChunkBatcher.failed_files — the count that SURVIVED bisect-retry
+    # settlement, never a raw attempt/retry count). Defaults to empty so
+    # the stats dict always carries the key, even when db isn't an
+    # HttpVectorClient (legacy per-file path, no batcher constructed).
+    _batch_failures: dict[str, str] = {}
     if isinstance(db, HttpVectorClient):
         from nexus.chunk_batcher import ChunkBatcher  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -4213,7 +4544,19 @@ def _run_index(
 
     def _index_one_code(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))
-        return _index_code_file(
+        # nexus-7yfe6 / T2 22168 (engine-w0-503-client-degradation): contain a
+        # transient upsert 5xx (gateway/pool) exactly like the prose/PDF/RDR
+        # loops below. Code files are contained by the ChunkBatcher ONLY while
+        # ChunkBatcher.add(...) accepts the file — it returns False for any
+        # file exceeding per_collection_chunk_cap (16 chunks in onnx-local
+        # mode), which is most real source files; that rejection falls
+        # through to the identical legacy direct-upsert path prose/PDF use
+        # (code_indexer.py's _index_code_file, ~line 487-522). Without this
+        # wrapper a transient 5xx on that fallback propagates through
+        # run_file_loop's first-exception-cancels-all contract and aborts the
+        # WHOLE nx index repo run — pre-existing latent code, activated by an
+        # engine that starts emitting 503 under embed-admission saturation.
+        return _contain_transient_upsert(lambda: _index_code_file(
             file, repo, code_collection, code_model, code_col, db,
             voyage_client, git_meta, now_iso, score,
             chunk_lines=effective_chunk_lines,
@@ -4224,7 +4567,7 @@ def _run_index(
             staleness_cache=code_staleness,
             hooks=hooks,
             batcher=_batcher,
-        )
+        ), file)
 
     # nexus-qgc4b: tally files that actually wrote chunks across all three
     # loops; used below to skip the expensive post-index passes on all-skip runs.
@@ -4244,8 +4587,27 @@ def _run_index(
         _log.debug("indexing", file=str(file))
         # nexus-7yfe6: contain a transient upsert 5xx (gateway/pool) — defer the
         # file to staleness instead of failing (and, under concurrency, hanging)
-        # the whole run. Code files get this via the ChunkBatcher; prose/PDF take
-        # the direct upsert path, so they need it here.
+        # the whole run. CORRECTED (nexus-acvi7, 2026-08-10): "Prose/PDF always
+        # take the direct upsert path (no ChunkBatcher involvement)" — the
+        # prior wording here — is REFUTED by prose_indexer.py:255
+        # (`ctx.batcher.add(...)`): prose goes through the exact same
+        # ChunkBatcher every code file does. `add()` only falls through to
+        # the direct upsert (prose_indexer.py:282-290) when it REJECTS the
+        # file (oversize, chunk_batcher.py:253-260) — same trigger as code's.
+        # The wrapper's PLACEMENT here was never wrong despite that: it wraps
+        # the whole per-file call, so it transparently covers the fallback
+        # branch whenever `add()` rejects and is inert (no upsert call in
+        # this frame to catch) whenever `add()` accepts — either way the
+        # per-file call is correctly contained. What was wrong was only the
+        # STATED REASON, not the code.
+        # ALSO CORRECTED (T2 22168, engine-w0-503-client-degradation): code files
+        # do NOT always get equivalent containment "via the ChunkBatcher" as
+        # this comment used to claim — that was only true while
+        # ChunkBatcher.add(...) accepts the file. It returns False (falling
+        # through to the same direct-upsert path prose/PDF use) for any file
+        # exceeding per_collection_chunk_cap, 16 chunks in onnx-local mode —
+        # most real source files. _index_one_code below now wraps with the
+        # identical _contain_transient_upsert to close that gap.
         return _contain_transient_upsert(lambda: _index_prose_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
@@ -4619,7 +4981,7 @@ def _run_index(
                 _delete_docs_for_paths(repo, delta_deleted)
             _prune_deleted_files(
                 code_collection, docs_collection, db, catalog=_cat,
-                rdr_collection=rdr_col_name,
+                rdr_collection=rdr_col_name, on_phase=on_phase,
             )
         _phase(f"Pruning deleted files done ({time.monotonic() - _t:.1f}s)")
 
@@ -4673,6 +5035,14 @@ def _run_index(
         # index_repo_cmd uses this to drive a non-zero exit after
         # post-processing completes.
         "pdf_quality_gate_failed": len(_quality_gate_failed),
+        # nexus-4s1ww / GH #1432: count of files whose chunk-batch flush
+        # PERMANENTLY failed this run (ChunkBatcher.failed_files — post
+        # bisect-retry survivors only, see chunk_batcher.py). Zero chunks
+        # from these files landed. index_repo_cmd uses this the same way
+        # as pdf_quality_gate_failed: a non-zero count drives a non-zero
+        # exit after the rest of the run completes, so a total-write-path
+        # failure is never reported as a clean "Done." at rc=0.
+        "chunk_flush_failed_files": len(_batch_failures),
         # nexus-tevzq: per-collection-kind attribution for the caller's
         # discover gate. Keys match the collection-name content_type prefix
         # (RDR-103 shape). prose+pdf both land in docs__.

@@ -3516,8 +3516,13 @@ def _check_pending_rungs() -> list[HealthResult]:
     zero writes, zero work, the completion store is never opened (the
     ``resolve_pending_steps`` dry-run-truth precedent). Pending rungs are a
     soft warning with `nx upgrade` (the single trigger) as the remedy.
-    Crash-proof: any failure degrades to a non-critical pass — every check
-    in ``run_health_checks`` must never crash ``nx doctor`` as a whole.
+    Crash-proof: any failure ABOVE the per-rung loop (deferred imports,
+    ``default_registry()`` construction) degrades to a SOFT WARNING, never a
+    silent ``ok=True`` — a check that could not even enumerate the ladder
+    must not render as a clean row (nexus-v2mdd: this outer handler
+    previously reported ``ok=True``, regressing the identical bug
+    ``pending_rungs``' inner per-rung handling already fixed once). Never
+    crashes ``nx doctor`` as a whole.
     """
     try:
         from nexus.upgrade_ladder import registry as _ladder_registry  # noqa: PLC0415 — deferred to avoid module-load cost
@@ -3527,7 +3532,10 @@ def _check_pending_rungs() -> list[HealthResult]:
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.warning("doctor_pending_rungs_check_failed", error=str(exc))
         return [HealthResult(
-            label="Upgrade ladder", ok=True, detail="check failed (non-critical)",
+            label="Upgrade ladder",
+            ok=False,
+            warn=True,
+            detail=f"could not check pending rungs: {exc}",
         )]
 
     pending = [(name, status) for name, status in statuses if status.pending]
@@ -4043,6 +4051,194 @@ def _check_dangling_manifests() -> list[HealthResult]:
         detail=detail,
         fix_suggestions=fix_suggestions,
     )]
+
+
+_MANIFEST_NULL_COLLECTION_LABEL = "manifest pre-backfill rows (collection IS NULL)"
+
+
+def _check_manifest_null_collection() -> list[HealthResult]:
+    """T2 nexus/chroma-residue-plan-2026-08-10 §C2: read-only census of the
+    manifest population :func:`_check_dangling_manifests` (via
+    ``manifest_verify_all()``) and :func:`manifest_orphan_report` (via
+    ``manifest_orphans(dim)``) structurally CANNOT see — manifest rows with
+    ``collection IS NULL``.
+
+    THE FALSE-CLEAN MECHANISM. Both engine functions filter their working
+    set to ``collection IS NOT NULL`` before doing anything else
+    (catalog-004-manifest-functions.xml's ``manifest_orphans``;
+    catalog-020-index-run-fence.xml's ``manifest_verify``/
+    ``manifest_verify_all``) — pre-backfill state, per each function's own
+    comment. ``manifest_verify_all()`` GROUPs BY collection over that
+    already-filtered set, so a collection whose manifest rows are 100%
+    NULL-collection never appears in its output AT ALL — not as damaged,
+    not as clean, simply absent. ``_check_dangling_manifests`` reads that
+    absence as "nothing to report" indistinguishably from "verified clean."
+    Neither engine function's own docs are wrong; the client-side caller
+    (``HttpCatalogClient.manifest_backfill``'s docstring, ``nx doctor``'s
+    ONLY ``manifest_orphans`` caller) never invoked
+    ``nexus.manifest_backfill()`` first, so the exclusion is silently live
+    on every un-backfilled manifest, not a documented edge case nobody hits.
+
+    WHY THIS CHECK DOES NOT JUST CALL manifest_backfill() ITSELF. ``nx
+    doctor`` is a read-only diagnostic; ``manifest_backfill()`` is a WRITE
+    (it stamps rows). Calling it here would mutate the user's catalog as an
+    undocumented side effect of a health check — exactly the kind of silent
+    fallback the project's correctness discipline forbids. This check
+    reports the excluded population explicitly instead, so a clean
+    ``_check_dangling_manifests`` verdict can never be mistaken for
+    complete coverage.
+
+    THE GHOST-DOCUMENT REFINEMENT (verified against source, not assumed):
+    running ``manifest_backfill()`` is NECESSARY BUT NOT SUFFICIENT.
+    ``manifest_backfill()``'s own WHERE clause
+    (catalog-004-manifest-functions.xml changeset 2) only stamps rows whose
+    owning document HAS a ``physical_collection`` — ``AND
+    d.physical_collection IS NOT NULL AND d.physical_collection != ''``.
+    Ghost/sourceless documents (registered with an empty
+    ``physical_collection`` — see ``CatalogRepository#register``'s ghost-
+    element contract) never satisfy that predicate, so their manifest rows'
+    ``collection`` stays NULL FOREVER — confirmed verbatim by
+    catalog-014-manifest-collection-stamp.xml's own changeset comment:
+    "ghost docs (physical_collection empty) ... are skipped, matching
+    manifest_backfill()'s semantics." This check therefore splits the
+    population into ``backfillable`` (running backfill would fix these) and
+    the remainder (permanently excluded, backfill or no backfill) rather
+    than naming one blanket remedy that would be false for the remainder.
+
+    Best-effort, never crashes `nx doctor`: a catalog reader lacking
+    ``manifest_null_collection_report`` (an older client, or a test double)
+    degrades to the same honest "cannot determine" as an engine 404 —
+    ``unavailable=True`` NEVER renders as a silent clean pass, but its
+    severity is GATED ON THE ENGINE FLOOR (substantive critique finding 1,
+    T2 nexus/chroma-residue-C2-durability-critique-2026-08-10), unlike
+    ``_check_chash_conformance_report``'s unconditional loud-WARN-plus-
+    allowlist-entry contract: while ``REQUIRED_ENGINE_VERSION`` is at or
+    below ``(0,1,69)`` (the pin at the time this route was added — it has
+    never shipped on any tag), "route absent" is the EXPECTED state on
+    every engine a client is permitted to run, so it renders as
+    informational (``ok=True``); once the floor advances past that point,
+    the same "unavailable" reading becomes genuinely wrong and renders as a
+    loud WARN. See the ``unavailable`` branch below for the full rationale
+    — this self-corrects on the live constant with no allowlist entry or
+    manual removal step needed.
+
+    READ-ONLY: this function never calls ``manifest_backfill`` and never
+    mutates the catalog.
+    """
+    label = _MANIFEST_NULL_COLLECTION_LABEL
+    from nexus.engine_version import REQUIRED_ENGINE_VERSION  # noqa: PLC0415 — deferred; stdlib-only leaf, cheap either way
+
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_manifest_null_collection_check_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
+
+    try:
+        report = cat.manifest_null_collection_report()
+    except Exception as exc:  # noqa: BLE001 — best-effort: a reader without this method (older client,
+        # test double) must degrade honestly, not crash `nx doctor`.
+        _log.debug("doctor_manifest_null_collection_check_failed", error=str(exc))
+        report = {"total": 0, "backfillable": 0, "unavailable": True}
+
+    if report.get("unavailable"):
+        # Severity-gated on the engine floor (substantive critique finding 1,
+        # T2 nexus/chroma-residue-C2-durability-critique-2026-08-10) — the
+        # SAME shape as TestDescendantsFallbackDoesNotOutliveItsRoute
+        # (tests/test_engine_version.py) and http_catalog_client.py's own
+        # descendants()/manifest_null_collection_report() docstrings:
+        # GET /v1/catalog/manifest/null_collection ships in an engine tag
+        # AFTER REQUIRED_ENGINE_VERSION==(0,1,69) (the pin at the time this
+        # route was added), so "route absent" is the EXPECTED condition on
+        # every engine a client is permitted to run today, not a defect.
+        #
+        # Rendering that expected gap as a loud WARN unconditionally (the
+        # `_check_dangling_manifests`/`_check_chash_conformance_report`
+        # precedent, which pairs an unconditional WARN with a temporary
+        # fresh-install-mvv.sh ALLOWLIST_REGEX entry + a mechanized removal
+        # trigger) would make `./tests/e2e/fresh-install-mvv.sh` fail on
+        # EVERY virgin box today — the empty-by-design allowlist regex
+        # matches nothing, and every install currently 404s this route.
+        # Unlike those two checks (whose "engine predates the route" branch
+        # was a genuinely transient historical gap already closed once the
+        # floor moved), this route has never shipped on ANY tag — so an
+        # unconditional WARN here would be pure alarm fatigue: every user
+        # sees it, it names no action they can take, and it never resolves
+        # until Hal cuts the next engine tag. Gating on the floor instead
+        # means this check self-corrects the moment REQUIRED_ENGINE_VERSION
+        # advances past (0,1,69) with NO manual removal step required (unlike
+        # the allowlist-entry idiom) — the comparison re-evaluates the LIVE
+        # constant on every call.
+        route_predates_floor = REQUIRED_ENGINE_VERSION <= (0, 1, 69)
+        if route_predates_floor:
+            return [HealthResult(
+                label=label,
+                ok=True,
+                detail=(
+                    "informational — this engine predates GET "
+                    "/v1/catalog/manifest/null_collection "
+                    f"(REQUIRED_ENGINE_VERSION={REQUIRED_ENGINE_VERSION} "
+                    "pins a floor at or below (0,1,69), before the route "
+                    "shipped), so orphan-check coverage for pre-backfill "
+                    "(collection IS NULL) manifest rows cannot be "
+                    "determined on this engine. This is EXPECTED, not a "
+                    "defect — the 'dangling manifest chashes' check's clean "
+                    "verdict still does not cover this population; re-run "
+                    "after the next engine tag lands."
+                ),
+            )]
+        return [HealthResult(
+            label=label,
+            ok=False,
+            warn=True,
+            detail=(
+                "UNKNOWN — could not determine how many manifest rows are "
+                "pre-backfill (collection IS NULL), even though "
+                f"REQUIRED_ENGINE_VERSION={REQUIRED_ENGINE_VERSION} should "
+                "carry GET /v1/catalog/manifest/null_collection. The "
+                "'dangling manifest chashes' check's clean verdict does NOT "
+                "cover this population — investigate the read failure (this "
+                "is no longer the expected pre-route-floor gap)."
+            ),
+        )]
+
+    total = int(report.get("total", 0) or 0)
+    if total == 0:
+        return [HealthResult(label=label, ok=True, detail="none")]
+
+    backfillable = int(report.get("backfillable", 0) or 0)
+    ghost = total - backfillable
+    detail = (
+        f"{total} manifest row(s) have collection IS NULL and are NOT "
+        "covered by the 'dangling manifest chashes' check above (or by "
+        "manifest_orphans) — a clean verdict there says nothing about "
+        "these rows."
+    )
+    fix_suggestions: list[str] = []
+    if backfillable:
+        detail += (
+            f" {backfillable} of them are pre-backfill state (their "
+            "document has a physical_collection) and would be stamped by "
+            "the engine's nexus.manifest_backfill() function, after which "
+            "they become visible to the checks above."
+        )
+        fix_suggestions.append(
+            "no `nx` CLI command currently invokes manifest_backfill() — "
+            "it is reachable only via POST /v1/catalog/manifest/backfill "
+            "directly; this is a gap, not a command name to run"
+        )
+    if ghost:
+        detail += (
+            f" {ghost} belong to ghost/sourceless document(s) (no "
+            "physical_collection) and can NEVER be stamped by "
+            "manifest_backfill() — permanently outside every orphan/verify "
+            "check, backfill or no backfill."
+        )
+    return [HealthResult(label=label, ok=False, warn=True, detail=detail, fix_suggestions=fix_suggestions)]
 
 
 #: RDR-180 (bead nexus-du2dw): the label for the ENGINE-ROUTE chash
@@ -4697,6 +4893,11 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     # resolve in T3 — the class `nx catalog reconcile` does not cover
     # (it handles chunk_count>0 with an EMPTY manifest, GH #1397).
     results.extend(_check_dangling_manifests())
+    # T2 nexus/chroma-residue-plan-2026-08-10 §C2: the population
+    # _check_dangling_manifests / manifest_orphans structurally cannot see
+    # (collection IS NULL, pre-backfill state) — reported explicitly so
+    # their clean verdicts are never mistaken for complete coverage.
+    results.extend(_check_manifest_null_collection())
     # RDR-180 (bead nexus-du2dw): managed/cloud-mode chash width-conformance
     # coverage via the engine route — the local nexus_diag psql probe inside
     # _check_migration_state (above) is LOCAL-ONLY by design (nexus-y3wuu)

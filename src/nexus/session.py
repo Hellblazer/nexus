@@ -528,21 +528,49 @@ def find_immediate_claude_pid(start_pid: int | None = None) -> int:
 #: Code's ``.mcp.json`` spawns as direct children of the claude process.
 _MCP_SIBLING_COMMANDS = ("nx-mcp", "nx-mcp-catalog")
 
+#: Executables that count as "an interpreter running a console script" for
+#: :func:`find_mcp_sibling_pids`. Both entry points above are Python console
+#: scripts, so on a real box ``ps`` reports the interpreter as the executable
+#: and the script as argv[1]; without this the matcher would have to accept
+#: ANY argv[1] match and would then also match ``vim ~/.local/bin/nx-mcp``.
+_PYTHON_EXECUTABLE_RE = re.compile(r"^python[0-9.]*$")
+
 
 def _list_processes() -> list[tuple[int, int, str]]:
-    """Return ``(pid, ppid, comm)`` for every live process, best-effort.
+    """Return ``(pid, ppid, command_line)`` for every live process,
+    best-effort.
 
-    Real process-table enumeration via ``ps -eo pid,ppid,comm=`` (portable
+    Real process-table enumeration via ``ps -eo pid,ppid,args=`` (portable
     across macOS + Linux; unlike :func:`_ppid_of` this has no ``/proc``
     fast path since a single ``ps`` call already returns the whole table
     in one shot, cheaper than a ``/proc`` walk for this use). Empty list
     on any failure -- callers treat that as "no siblings found", never a
     crash (mirrors :func:`_command_name_of`'s empty-string-on-error
     posture).
+
+    **``args=``, NOT ``comm=``.** ``comm`` is the EXECUTABLE, and every
+    process this module cares about finding is a ``[project.scripts]``
+    console script -- a shebang wrapper the kernel runs via the
+    interpreter -- so ``comm`` reports ``.../bin/python3`` and the script
+    name lives in argv[1]. Enumerating by ``comm`` therefore could never
+    match ``nx-mcp``, which is why the nexus-d76vc T1 handoff silently
+    never fired on any real machine from the day it shipped. See
+    :func:`find_mcp_sibling_pids` for the matching rule this feeds.
+
+    **``-ww`` is load-bearing, not decoration.** Without it procps truncates
+    the whole line to the terminal width (80 when stdout is not a tty), and
+    the real invocation --
+    ``/Users/x/.local/share/uv/tools/conexus/bin/python3 /Users/x/.local/bin/nx-mcp``
+    at ~104 characters -- loses the ``nx-mcp`` argument that identifies it.
+    Measured on a GitHub Actions runner 2026-08-10: rows came back cut at
+    exactly 80 columns (``.../.venv/bin/python /tmp/pytest-of-ru``), so the
+    matcher below found nothing. macOS ps does not truncate a piped stream,
+    which is why this reproduced only in CI; BSD and procps both accept
+    ``-ww``.
     """
     try:
         out = subprocess.check_output(
-            ["ps", "-eo", "pid,ppid,comm="],
+            ["ps", "-ww", "-eo", "pid,ppid,args="],
             stderr=subprocess.DEVNULL, text=True, timeout=5,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
@@ -579,14 +607,44 @@ def find_mcp_sibling_pids(claude_pid: int) -> list[int]:
     Returns an empty list for a non-positive *claude_pid* or when process
     enumeration fails (see :func:`_list_processes`) -- fail-safe: no
     siblings found means no markers get written, never a guess.
+
+    **Matching rule.** ``_list_processes`` yields the full command line. A
+    row matches when either
+
+    * the EXECUTABLE's basename is an MCP command (``nx-mcp`` exec'd
+      directly), or
+    * the executable is a PYTHON INTERPRETER and argv[1]'s basename is an
+      MCP command (``.../conexus/bin/python3 .../bin/nx-mcp`` -- the shape a
+      shebang console script actually produces, and the one the original
+      ``comm``-only matcher could never see).
+
+    The interpreter check is what keeps this from matching a child that
+    merely NAMES nx-mcp in an argument -- ``vim ~/.local/bin/nx-mcp`` and
+    ``grep -r nx-mcp src/`` are both argv[1] matches and neither is an MCP
+    server. Writing a marker keyed on such a pid would target an unrelated
+    process.
+
+    Note the fail-safe posture cuts both ways: an empty return is
+    indistinguishable from "the matcher is broken", which is exactly how
+    this function returned ``[]`` for every live MCP server for its whole
+    shipped life without producing a single log line. The regression test
+    for it enumerates a REAL process table rather than a fabricated one.
     """
     if claude_pid <= 0:
         return []
     matches: list[int] = []
-    for pid, ppid, comm in _list_processes():
+    for pid, ppid, command_line in _list_processes():
         if ppid != claude_pid:
             continue
-        if Path(comm).name in _MCP_SIBLING_COMMANDS:
+        tokens = command_line.split()
+        if not tokens:
+            continue
+        executable = Path(tokens[0]).name
+        if executable in _MCP_SIBLING_COMMANDS:
+            matches.append(pid)
+            continue
+        if _PYTHON_EXECUTABLE_RE.match(executable) and len(tokens) > 1 \
+                and Path(tokens[1]).name in _MCP_SIBLING_COMMANDS:
             matches.append(pid)
     return matches
 

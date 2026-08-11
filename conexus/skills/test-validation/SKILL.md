@@ -38,6 +38,7 @@ Test coverage report with gap analysis
 - [ ] All changed files have corresponding tests
 - [ ] Test coverage meets project standards
 - [ ] Edge cases covered
+- [ ] Every regression test FALSIFIED, or an explicit NOT FALSIFIED reason
 ```
 
 For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
@@ -53,6 +54,20 @@ The agent will:
 6. Recommend additional tests if needed
 
 **REQUIRED:** Run all tests and verify output before claiming coverage is adequate.
+
+**REQUIRED: falsify every regression test.** Coverage counts tests; it does
+not tell you whether any of them can fail. Break the production code the test
+covers (revert the guard, delete the call, invert the condition), watch it go
+red, restore. The agent emits one line per test:
+
+```
+FALSIFIED: <test> — reverted <change>, failed with <error>
+NOT FALSIFIED: <test> — <why>
+```
+
+`NOT FALSIFIED` is an acceptable answer. Emitting neither is not: it reports a
+test as verified when it was only read. A green suite is evidence about the
+suite, never about the individual test that was supposed to catch this bug.
 
 ## Agent-Specific PRODUCE
 

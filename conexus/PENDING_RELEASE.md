@@ -29,6 +29,8 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release (pinned: v7.5.0)
+## Awaiting the next release (pinned: v7.6.0)
 
-_(empty — everything previously listed here went live with the v7.5.0 pin advance; see `conexus/CHANGELOG.md` [7.5.0] for what activated.)_
+_(empty — the test-falsification obligation previously listed here went live
+with the v7.6.0 pin advance; see `conexus/CHANGELOG.md` [7.6.0] for what
+activated.)_

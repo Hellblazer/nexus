@@ -109,7 +109,12 @@ set -euo pipefail
 # absent from the line (pytest omits zero-count categories) yields 0.
 parse_summary_count() {
   local label="$1" text="$2" n
-  n="$(grep -oE "[0-9]+ ${label}" <<<"$text" | grep -oE '^[0-9]+' | head -1)"
+  # Pipe-free tail (nexus-i66g4/wbeyi class): take the first line via
+  # parameter expansion instead of `| head -1` -- under this script's
+  # `set -euo pipefail`, a still-writing grep closed early by head risks
+  # its SIGPIPE getting promoted over head's own (successful) exit status.
+  n="$(grep -oE "[0-9]+ ${label}" <<<"$text" | grep -oE '^[0-9]+')"
+  n="${n%%$'\n'*}"
   echo "${n:-0}"
 }
 

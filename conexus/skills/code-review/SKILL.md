@@ -78,6 +78,8 @@ Structured code review with severity-rated findings
 - [ ] All changed files analyzed
 - [ ] Security vulnerabilities flagged
 - [ ] Specific remediation guidance provided
+- [ ] Every added/modified test rated CAN FAIL or CANNOT FAIL, with the
+      concrete production edit that would turn it red
 ```
 
 For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).

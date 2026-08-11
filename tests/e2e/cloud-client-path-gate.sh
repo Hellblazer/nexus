@@ -133,7 +133,12 @@ else
     HEALTH_BODY="$(cat /tmp/cloud-gate-health.$$ 2>/dev/null; rm -f /tmp/cloud-gate-health.$$)"
     if [ "$HEALTH_STATUS" != "200" ]; then
         _leg_fail "B: authenticated /health returned HTTP $HEALTH_STATUS (body: $HEALTH_BODY) — the edge contract (conexus [21082]) is 200 + verbatim engine {status, db} for bearers; guided_upgrade's managed-target readiness gate will time out 'service not ready'"
-    elif ! echo "$HEALTH_BODY" | grep -q '"db"[[:space:]]*:[[:space:]]*"up"'; then
+    # Pipe-free (nexus-i66g4/wbeyi class): match the already-captured
+    # variable directly instead of `echo ... | grep -q ...` -- under this
+    # script's `set -o pipefail`, a still-writing echo closed early by
+    # grep risks its SIGPIPE getting promoted over grep's own (successful)
+    # exit status.
+    elif ! [[ "$HEALTH_BODY" =~ \"db\"[[:space:]]*:[[:space:]]*\"up\" ]]; then
         _leg_fail "B: authenticated /health 200 but body lacks db=up (body: $HEALTH_BODY)"
     else
         echo "  ok: 200 + db=up (authenticated)"

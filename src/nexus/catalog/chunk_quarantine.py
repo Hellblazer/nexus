@@ -78,6 +78,82 @@ def quarantine_days() -> int:
     return val
 
 
+def now_stamp() -> str:
+    """The GC quarantine timestamp format: ``2026-08-10T12:00:00Z``.
+
+    Shared by the client-side stamp (:func:`quarantine_orphans`'s ``now``)
+    and the RDR-191 server-side path (:func:`quarantine_orphans_serverside`
+    passes this same shape through as ``quarantined_at``/compares against
+    it as ``cutoff`` in :func:`expire_quarantine_serverside`) so both
+    remain lexicographically comparable — see the catalog-023 changelog
+    header for why that matters.
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ── RDR-191 Phase 1: server-side prune (catalog-023) ────────────────────────
+#
+# These three ``*_serverside`` wrappers try the engine's anti-join GC route
+# (``HttpVectorClient.gc_quarantine_orphans`` / ``gc_restore_rereferenced`` /
+# ``gc_expire_quarantine``) and return ``None`` when ``db`` has no such method
+# — local/in-memory mode, where the InMemoryVectorClient unit-test double has
+# no server to route to. That branch is permanent: it is about CAPABILITY, not
+# engine version, so no floor bump ever retires it.
+#
+# The 404 branch that used to sit alongside it is GONE (retired at
+# REQUIRED_ENGINE_VERSION (0, 1, 70), the tag that ships catalog-023's
+# routes, by ``TestGcServersideFallbackDoesNotOutliveItsRoute`` in
+# ``tests/test_engine_version.py``). It is unreachable at this floor in both
+# directions, verified before deleting: a local box converges its engine to
+# ``REQUIRED_ENGINE_VERSION`` on any ordinary ``nx`` command
+# (``upgrade_finish.converge_engine``, unattended), and a cloud client
+# refuses a below-identity managed engine outright (GH #1402) rather than
+# reaching a route call. A VectorServiceError from these calls is now a real
+# failure and propagates, which is the point.
+#
+# Callers (``indexer._prune_deleted_files``) fall back to the client-side
+# fetch-diff-copy-delete path on ``None``. That client-side implementation
+# stays — retiring it is RDR-191 Phase 5, a separate and much larger change.
+#
+# A ``None`` return is a ROUTE-UNAVAILABLE signal, never "nothing to do" —
+# the caller must not mistake it for a zero-orphan result.
+
+def quarantine_orphans_serverside(
+    db: Any, collection_name: str, quarantine_name: str,
+    quarantined_at: str, sample_limit: int = 20,
+) -> tuple[int, list[dict]] | None:
+    """Try the server-side anti-join move. ``(moved, sample)`` or ``None``
+    if the route is unavailable (caller falls back to :func:`quarantine_orphans`)."""
+    fn = getattr(db, "gc_quarantine_orphans", None)
+    if fn is None:
+        return None
+    result = fn(collection_name, quarantine_name, quarantined_at, sample_limit)
+    return int(result.get("moved", 0)), list(result.get("sample") or [])
+
+
+def restore_rereferenced_serverside(db: Any, quarantine_name: str, origin_name: str) -> int | None:
+    """Try the server-side re-reference restore. Restored count, or ``None``
+    if the route is unavailable (caller falls back to :func:`restore_rereferenced`)."""
+    fn = getattr(db, "gc_restore_rereferenced", None)
+    if fn is None:
+        return None
+    return fn(quarantine_name, origin_name)
+
+
+def expire_quarantine_serverside(
+    db: Any, quarantine_name: str, origin_name: str, cutoff: str,
+    *, floor_fraction: float, floor_min_chunks: int, force: bool = False,
+) -> tuple[int, int] | None:
+    """Try the server-side grace-window expiry. ``(expired, refused)`` or
+    ``None`` if the route is unavailable (caller falls back to
+    :func:`expire_quarantine`)."""
+    fn = getattr(db, "gc_expire_quarantine", None)
+    if fn is None:
+        return None
+    result = fn(quarantine_name, origin_name, cutoff, floor_fraction, floor_min_chunks, force)
+    return int(result.get("expired", 0)), int(result.get("refused", 0))
+
+
 def _fetch_full(db: Any, col: Any, collection_name: str, ids: list[str]):
     """(ids, embeddings, metadatas, documents) for *ids*, both modes.
 
@@ -160,7 +236,7 @@ def quarantine_orphans(
     if not orphan_ids:
         return 0
     qname = quarantine_collection_name(collection_name)
-    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = now_stamp()
     moved = 0
     for i in range(0, len(orphan_ids), _WRITE_BATCH):
         batch = orphan_ids[i:i + _WRITE_BATCH]

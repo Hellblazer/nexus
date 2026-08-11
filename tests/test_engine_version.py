@@ -257,7 +257,47 @@ class TestRequiredEngineVersion:
         # (flush path sends the combined call; ack-echo RAISES against an
         # engine below this identity, so the floor bump is mandatory, not
         # optional).
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 69)
+        # -> (0,1,70) 2026-08-10, conexus 7.6.0 (PAIRED release). Carries the
+        # RDR-191 Phase 1 engine half — catalog-023's three
+        # `POST /v1/vectors/gc/*` anti-join routes (gc_quarantine_orphans /
+        # gc_restore_rereferenced / gc_expire_quarantine) — plus
+        # `GET /v1/catalog/descendants`, whose absence made every `subtree`
+        # query silently return at most one 500-row page. BOTH client halves
+        # ship in this same release, so the bump is mandatory, not optional:
+        # floor-lag would ship a client whose pinned engine lacks the engine
+        # halves of its own features (the 7.1.0/v0.1.62 inversion).
+        # Cut on e1cb78a1, `service/` tree identical to green-service-ci
+        # c84480ec. Gated: --shakeout PASSED pre-tag (it caught a Phase D
+        # census that had never run in-container, and then caught a wrong
+        # first fix for it), --acquire PASSED post-publish against the
+        # published bytes (/version release_version=0.1.70). Cloud deploy
+        # fires at client-tag push under the paired-release choreography;
+        # the floor gate ran in --paired-deploy mode and its POST-TAG VERIFY
+        # (re-run WITHOUT the flag) is owed once the deploy lands.
+        # -> (0,1,71) 2026-08-11, conexus 7.6.0 (PAIRED release).
+        # v0.1.70 IS A SKIPPED VERSION: cut, published and fully gated, but
+        # never pinned by any release. This release's own sandbox shakedown
+        # caught a defect in it at step 11/11 — gc_quarantine_orphans and
+        # gc_restore_rereferenced registered their destination collection in
+        # catalog_collections UNCONDITIONALLY and BEFORE the anti-join ran,
+        # so a pass that moved zero rows left an unreferenced projection row
+        # behind permanently (nx catalog doctor --collections-drift reports
+        # it as projection_not_in_t3). Bead nexus-syfes. Fixed by catalog-024
+        # via CREATE OR REPLACE over an untouched catalog-023 (never edit a
+        # shipped changelog in place), cut as v0.1.71. Everything the
+        # (0,1,70) note above describes is CARRIED FORWARD by v0.1.71 — it is
+        # a superset, not a replacement, so both client halves named there
+        # still ship against this floor.
+        # Cut on 8c2e9fa6. Gated: engine suite 1974/0/0 (1 skipped),
+        # --shakeout CANDIDATE SHAKEOUT PASSED pre-tag, --acquire ACQUIRE
+        # GATE PASSED post-publish against the published bytes
+        # (/version release_version=0.1.71). DEPLOYED + cloud-gate GREEN
+        # 2026-08-11, a single hop 0.1.69 -> 0.1.71 since v0.1.70 was never
+        # deployed either (STEP-6 PASS, 0 failures, 0 advisories, no parity
+        # regressions). POST-DEPLOY VERIFY DONE, not owed:
+        # check_engine_release_floor.py WITHOUT --paired-deploy exits 0,
+        # cloud release_version=0.1.71 == floor.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 71)
 
 
 class TestParseEngineVersion:
@@ -502,4 +542,143 @@ class Test8hpadAllowlistDoesNotOutliveItsTrigger:
             "comment block) from tests/e2e/fresh-install-mvv.sh "
             "(nexus-8hpad) in the SAME change, or the entry silently "
             "outlives its own removal trigger."
+        )
+
+
+class TestDescendantsFallbackDoesNotOutliveItsRoute:
+    """Substantive critique 2026-08-10 finding 1 (T2
+    nexus/chroma-residue-C1-T0.1-critique-2026-08-10), on top of ab7907fb
+    (T2 nexus/chroma-residue-plan-2026-08-10 §C1).
+
+    ``HttpCatalogClient.descendants()`` prefers the dedicated ``GET
+    /v1/catalog/descendants`` engine route (one unbounded query, complete
+    by construction) and falls back to ``_descendants_via_paginated_list``
+    — an EXHAUSTIVE paginated ``/list`` walk — on a 404, because
+    ``REQUIRED_ENGINE_VERSION`` was pinned at ``(0, 1, 69)`` when the route
+    was added and the route ships in a LATER engine tag. That fallback was
+    the exact shape of a real, measured bug (0% coverage on 11 of 12 large
+    subtrees) before this fix, so it is a deliberate, temporary safety net
+    — not a design commitment. Named risk (critique finding 1): a
+    "temporary" Chroma-era page loop with no retirement mechanism becomes
+    permanent dead code nobody notices, because once every client-served
+    engine carries the route (``REQUIRED_ENGINE_VERSION`` >= the route's
+    ship version), the 404 branch can never fire again and the fallback
+    method is unreachable.
+
+    The route's exact ship version is NOT established with certainty here
+    (the ``descendants()`` docstring in ``http_catalog_client.py`` guesses
+    "v0.1.70+", but that file was out of this fix's edit surface and the
+    guess is unverified) — so this tripwire keys on the one fact that IS
+    certain: the route did not exist at ``REQUIRED_ENGINE_VERSION ==
+    (0, 1, 69)``, so it ships in some tag strictly after that. The instant
+    the floor advances past ``(0, 1, 69)``, every engine a client is
+    permitted to run against is required to carry the route, and the
+    paginated fallback becomes dead code that should be deleted in the
+    same change that bumps the floor.
+
+    THIS test, not human memory or a bead comment, IS the revisit trigger
+    (nexus-i5c2u: eyeball steps get skipped). It stays green while the
+    floor is pinned at or below ``(0, 1, 69)`` and goes RED the moment
+    ``REQUIRED_ENGINE_VERSION`` advances past it, unless
+    ``_descendants_via_paginated_list`` and its 404-triggered call site
+    have already been deleted from ``http_catalog_client.py`` in that SAME
+    change.
+    """
+
+    def test_floor_at_0_1_69_or_fallback_removed(self) -> None:
+        from pathlib import Path
+
+        from nexus.engine_version import REQUIRED_ENGINE_VERSION
+
+        if REQUIRED_ENGINE_VERSION <= (0, 1, 69):
+            return  # route not guaranteed present on every servable engine yet
+
+        client = (
+            Path(__file__).resolve().parent.parent
+            / "src" / "nexus" / "catalog" / "http_catalog_client.py"
+        )
+        text = client.read_text(encoding="utf-8")
+        assert "_descendants_via_paginated_list" not in text, (
+            f"REQUIRED_ENGINE_VERSION={REQUIRED_ENGINE_VERSION} has moved "
+            "past (0, 1, 69) — the version pinned when GET "
+            "/v1/catalog/descendants was added (ab7907fb, T2 "
+            "nexus/chroma-residue-plan-2026-08-10 §C1). The exact tag that "
+            "ships the route was not established with certainty (this "
+            "tripwire keys on the one certain fact: it postdates 0.1.69), "
+            "but a floor bump past that point means every engine a client "
+            "is permitted to run against now carries the route, so the "
+            "404-triggered pagination fallback can never fire again. "
+            "DELETE: the `_descendants_via_paginated_list` method in "
+            "src/nexus/catalog/http_catalog_client.py, the `except "
+            "httpx.HTTPStatusError` / `status_code == 404` branch in "
+            "`descendants()` that calls it, and the matching fallback "
+            "tests in tests/catalog/test_descendants_pagination_"
+            "completeness.py (TestDescendantsFallbackOn404) — in the SAME "
+            "change that bumps the floor, or this becomes exactly the "
+            "'permanent Chroma-era page loop under a temporary label' "
+            "named in critique finding 1 "
+            "(T2 nexus/chroma-residue-C1-T0.1-critique-2026-08-10)."
+        )
+
+
+class TestGcServersideFallbackDoesNotOutliveItsRoute:
+    """RDR-191 Phase 1: ``nexus.gc_quarantine_orphans`` / ``gc_restore_rereferenced``
+    / ``gc_expire_quarantine`` (catalog-023) ship at ``REQUIRED_ENGINE_VERSION
+    == (0, 1, 69)`` — the route did not exist yet at that pin, so it ships in
+    SOME tag strictly after it. Same shape as
+    ``TestDescendantsFallbackDoesNotOutliveItsRoute`` (ab7907fb): this test is
+    the revisit trigger, not human memory or a bead comment.
+
+    IMPORTANT ASYMMETRY vs. the ``descendants`` tripwire, spelled out so a
+    future editor does not over-delete: ``descendants()``'s fallback was
+    PURELY an engine-version workaround (a 404-triggered branch with no other
+    reason to exist), so the whole fallback method retires. The GC
+    ``*_serverside`` wrappers in ``nexus/catalog/chunk_quarantine.py``
+    (``quarantine_orphans_serverside`` / ``restore_rereferenced_serverside``
+    / ``expire_quarantine_serverside``) have TWO independent reasons to
+    return ``None`` — a 404 (engine predates the route: retires once the
+    floor passes) AND ``getattr(db, "gc_quarantine_orphans", None) is None``
+    (``db`` has no HTTP capability at all — local/in-memory mode, which
+    NEVER retires, engine version is irrelevant to it). Only the
+    ``VectorServiceError`` / ``code == 404`` branches in those three
+    functions are what this floor bump makes unreachable — the
+    ``fn is None`` attribute-absence branches, the functions themselves, and
+    the client-side ``quarantine_orphans``/``restore_rereferenced``/
+    ``expire_quarantine`` implementations they fall back to (RDR-191's own
+    apparatus-retirement is Phase 5, a separate and much larger change) MUST
+    NOT be deleted by this trigger.
+    """
+
+    def test_floor_at_0_1_69_or_404_branches_revisited(self) -> None:
+        from pathlib import Path
+
+        from nexus.engine_version import REQUIRED_ENGINE_VERSION
+
+        if REQUIRED_ENGINE_VERSION <= (0, 1, 69):
+            return  # route not guaranteed present on every servable HTTP-capable engine yet
+
+        cq = (
+            Path(__file__).resolve().parent.parent
+            / "src" / "nexus" / "catalog" / "chunk_quarantine.py"
+        )
+        text = cq.read_text(encoding="utf-8")
+        assert "code == 404" not in text and "getattr(exc, \"code\", None) == 404" not in text, (
+            f"REQUIRED_ENGINE_VERSION={REQUIRED_ENGINE_VERSION} has moved "
+            "past (0, 1, 69) — the version pinned when the RDR-191 "
+            "gc_quarantine_orphans/gc_restore_rereferenced/gc_expire_quarantine "
+            "routes were added (catalog-023-quarantine-functions.xml). Every "
+            "HTTP-capable engine a client is now permitted to run against "
+            "carries the route, so the 404-triggered fallback branches in "
+            "quarantine_orphans_serverside/restore_rereferenced_serverside/"
+            "expire_quarantine_serverside (nexus/catalog/chunk_quarantine.py) "
+            "can never fire again FOR AN HTTP db. REVISIT (do not blind-"
+            "delete): decide whether to simplify those three functions' "
+            "exception handling now that a 404 can only mean a genuine "
+            "server error, not a version-skew fallback trigger — but leave "
+            "the `fn is None` branch, the three *_serverside functions "
+            "themselves, and the client-side quarantine_orphans/"
+            "restore_rereferenced/expire_quarantine apparatus they fall "
+            "back to firmly in place (local/in-memory mode has no HTTP "
+            "route ever, independent of engine version; and RDR-191's own "
+            "apparatus retirement is Phase 5, not triggered by this floor)."
         )

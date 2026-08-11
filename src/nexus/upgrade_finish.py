@@ -1518,16 +1518,41 @@ def pending_data_rung_callout() -> list[str]:
     (RDR-180 / critic-180-cohort finding 2). The chash-rekey rung gets an
     explicit consequence statement — its not-yet-run state silently breaks
     citation resolution for pre-existing content, unlike earlier rungs
-    whose unconverted rows were merely inert. Best-effort and read-only:
-    detect() failures degrade to no callout (doctor remains the backstop).
+    whose unconverted rows were merely inert. Read-only: a raising detect()
+    surfaces as an explicit unknown/unavailable line (never silently
+    dropped — nexus-v2mdd: ``except Exception: continue`` used to make a
+    raising detect() indistinguishable from "not pending", silently
+    deleting exactly the chash-rekey warning this function exists to emit).
+    ``nx doctor`` remains the backstop for full detail either way.
+
+    nexus-jgac3: v2mdd fixed the per-rung ``detect()`` leak above but left
+    the construction of the registry itself (the deferred import and the
+    ``default_registry()`` call that FEEDS the loop) unguarded — a raising
+    ``default_registry()`` used to propagate out of this function entirely,
+    to be silently swallowed by the sole caller's own outer try/except
+    (``check_version_transition``), the identical fail-open-to-silence
+    shape one frame up. Guarded here the same way, mirroring
+    ``health._check_pending_rungs``' outer handler (its twin fix in the
+    same v2mdd commit).
     """
-    from nexus.upgrade_ladder.registry import default_registry  # noqa: PLC0415 — deferred, CLI startup cost
+    try:
+        from nexus.upgrade_ladder.registry import default_registry  # noqa: PLC0415 — deferred, CLI startup cost
+
+        rungs = default_registry()
+    except Exception as exc:  # noqa: BLE001 — must surface, not silently drop
+        return [
+            "pending data rungs status unknown — could not load the "
+            f"upgrade-ladder registry: {exc}"
+        ]
 
     lines: list[str] = []
-    for rung in default_registry():
+    for rung in rungs:
         try:
             status = rung.detect()
-        except Exception:  # noqa: BLE001 — callout is best-effort; doctor is the backstop
+        except Exception as exc:  # noqa: BLE001 — must surface, not silently drop
+            lines.append(
+                f"rung '{rung.name}' status unknown — detect failed: {exc}"
+            )
             continue
         if not status.pending:
             continue
@@ -1685,6 +1710,21 @@ def check_version_transition(
     # PRE-EXISTING content silently unresolvable until `nx upgrade` runs the
     # chash-rekey rung. Surface that state in THIS summary, loudly, instead
     # of leaving it to nx doctor alone.
+    #
+    # nexus-jgac3: this try/except is now DEFENSE-IN-DEPTH ONLY, not the
+    # last line against a known-raising path. pending_data_rung_callout()
+    # itself guards BOTH of its actual failure points (default_registry()
+    # construction and each rung's detect()) and always returns a list —
+    # one that names the failure in an explicit line when either guard
+    # trips. What THIS handler can still catch is a genuinely unexpected
+    # bug in pending_data_rung_callout()'s own list-building code, which
+    # degrades to a structlog WARNING with no user-visible action line —
+    # identical, deliberately, to every sibling leg above (process-skew
+    # detection, engine convergence, diag-view heal, launchagent unloads):
+    # none of them promote their own outer catch to a visible "NOTE: leg
+    # X failed" line either. Left as-is rather than special-cased, so this
+    # leg does not diverge from the established pattern the other legs
+    # share.
     try:
         actions = actions + pending_data_rung_callout()
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup

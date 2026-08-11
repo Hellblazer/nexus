@@ -791,6 +791,83 @@ class TestReadTimeoutSelfHeal:
         assert len(calls) == 2
 
 
+class TestReadTimeoutRetryOptOut:
+    """nexus-y9t08 CRITICAL 1: ``retry_read_timeout=False`` is the narrow,
+    per-call opt-out from ``TestReadTimeoutSelfHeal``'s self-heal-on-
+    ReadTimeout default. Matches the predecessor ``HttpVectorClient``
+    path's deliberate exclusion of ALL timeouts from its own retry
+    classifier (``http_vector_client.py:779-784`` — "TimeoutError is
+    intentionally NOT in this retry classifier"). Every OTHER exception
+    this classifier retries (ConnectionResetError et al.) is UNAFFECTED
+    by this flag — see the second test below."""
+
+    def test_read_timeout_not_retried_when_opted_out(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = _make_echo_store()
+        calls: list[str] = []
+
+        def _always_timeout(method: str, path: str, **kwargs: Any) -> Any:
+            calls.append(method)
+            raise httpx.ReadTimeout("hang mid-read")
+
+        monkeypatch.setattr(store, "_request_once", _always_timeout)
+
+        with pytest.raises(httpx.ReadTimeout):
+            store._post("/v1/echo", {"value": "rt"}, retry_read_timeout=False)
+
+        # Exactly ONE attempt — the self-heal retry never fires for this
+        # call. (Contrast TestReadTimeoutSelfHeal's default-True test,
+        # which sees 2.)
+        assert len(calls) == 1
+
+    def test_connection_reset_still_retries_when_read_timeout_opted_out(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Narrowness guard: the opt-out is ReadTimeout-specific, not a
+        blanket 'never self-heal this call' switch."""
+        store = _make_echo_store()
+        real_request_once = store._request_once
+        calls: list[str] = []
+
+        def _flaky(method: str, path: str, **kwargs: Any) -> Any:
+            calls.append(method)
+            if len(calls) == 1:
+                raise ConnectionResetError("reset by peer")
+            return real_request_once(method, path, **kwargs)
+
+        monkeypatch.setattr(store, "_request_once", _flaky)
+
+        result = store._post("/v1/echo", {"value": "rt"}, retry_read_timeout=False)
+
+        assert result == {"echo": {"value": "rt"}}
+        assert len(calls) == 2
+
+    def test_default_omits_opt_out_and_still_self_heals(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every OTHER catalog/T2 call site (the overwhelming majority)
+        never passes ``retry_read_timeout`` at all — confirms the default
+        (omitted) preserves ``TestReadTimeoutSelfHeal``'s exact behavior,
+        not just a `True` value someone could pass explicitly."""
+        store = _make_echo_store()
+        real_request_once = store._request_once
+        calls: list[str] = []
+
+        def _flaky(method: str, path: str, **kwargs: Any) -> Any:
+            calls.append(method)
+            if len(calls) == 1:
+                raise httpx.ReadTimeout("hang mid-read")
+            return real_request_once(method, path, **kwargs)
+
+        monkeypatch.setattr(store, "_request_once", _flaky)
+
+        result = store._post("/v1/echo", {"value": "rt"})
+
+        assert result == {"echo": {"value": "rt"}}
+        assert len(calls) == 2
+
+
 class TestLeaseGapReresolveRetry:
     """nexus-7dsgp (GH #1405 defect 1): the retry path (``_invalidate_and_reresolve``)
     must opt into the bounded lease-wait mitigation, bounded and non-stacking,
@@ -1091,3 +1168,57 @@ class TestTokenOnlyConstructionTimeEvidenceGate:
 
         with pytest.raises(RuntimeError, match="no service token is resolvable"):
             _make_echo_store(base_url="http://127.0.0.1:1")  # never dialed
+
+
+class TestPostPerRequestTimeoutOverride:
+    """nexus-y9t08: ``_post`` accepts an optional per-call ``timeout=``
+    override that reaches httpx's per-request timeout WITHOUT touching the
+    client-wide ``_DEFAULT_TIMEOUT_S`` (30.0s) baked into ``self._client`` at
+    construction. This is the primitive the combined-write path
+    (``HttpCatalogClient.write_manifest_many``'s ``chunks=`` branch) uses to
+    get an embed-appropriate timeout for ONE call without bumping every
+    other catalog call's timeout (see ``tests/catalog/test_manifest_write_many.py``
+    ``TestWriteManifestManyCombinedTimeout`` for the catalog-level pin)."""
+
+    def test_post_with_timeout_reaches_the_request(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = _make_echo_store()
+        captured: list[dict[str, Any]] = []
+        real_request_once = store._request_once
+
+        def _capturing(method: str, path: str, **kwargs: Any) -> Any:
+            captured.append(kwargs)
+            return real_request_once(method, path, **kwargs)
+
+        monkeypatch.setattr(store, "_request_once", _capturing)
+
+        result = store._post("/v1/echo", {"value": "with-timeout"}, timeout=600.0)
+
+        assert result == {"echo": {"value": "with-timeout"}}
+        assert captured[-1].get("timeout") == 600.0
+
+    def test_post_without_timeout_omits_the_override(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The default (no ``timeout=`` kwarg at the call site) must NOT
+        inject a ``timeout`` key at all — httpx then falls back to the
+        client-wide default (30.0s, ``_DEFAULT_TIMEOUT_S``). Asserting
+        absence, not a specific value, is what makes this non-vacuous
+        against a regression that starts always passing SOME timeout
+        (which would silently convert every plain call into the (b)
+        blanket-bump shape the bead explicitly rejected)."""
+        store = _make_echo_store()
+        captured: list[dict[str, Any]] = []
+        real_request_once = store._request_once
+
+        def _capturing(method: str, path: str, **kwargs: Any) -> Any:
+            captured.append(kwargs)
+            return real_request_once(method, path, **kwargs)
+
+        monkeypatch.setattr(store, "_request_once", _capturing)
+
+        result = store._post("/v1/echo", {"value": "no-timeout"})
+
+        assert result == {"echo": {"value": "no-timeout"}}
+        assert "timeout" not in captured[-1]

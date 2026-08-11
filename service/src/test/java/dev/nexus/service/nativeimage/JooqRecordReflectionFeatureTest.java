@@ -82,7 +82,15 @@ class JooqRecordReflectionFeatureTest {
     // three per-dim RETURNS TABLE functions (server-side compute-and-persist
     // taxonomy assignment from just-upserted chashes), one generated Record
     // type each. This is the deliberate bump the assertion message demands.
-    private static final int EXPECTED_RECORD_TYPES = 67;
+    // 67 -> 69: RDR-191 Phase 1 (catalog-023-quarantine-functions.xml) added
+    // nexus.gc_quarantine_orphans(...) and nexus.gc_expire_quarantine(...) —
+    // both RETURNS TABLE, one generated Record type each
+    // (GcQuarantineOrphansRecord, GcExpireQuarantineRecord). The third new
+    // function, nexus.gc_restore_rereferenced(...), RETURNS bigint (a
+    // scalar routine, not a table function) and generates NO Record type —
+    // it is the reason this bump is +2, not +3. This is the deliberate
+    // bump the assertion message demands.
+    private static final int EXPECTED_RECORD_TYPES = 69;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

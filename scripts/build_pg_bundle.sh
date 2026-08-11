@@ -232,9 +232,15 @@ fixup_linux_relocatability() {
     # must actually carry $ORIGIN — the patchelf loop tolerates per-file
     # failure, so each one is proven individually (review: a psql-only
     # check let partial failures ship).
-    local bcheck
+    local bcheck bcheck_rpath
     for bcheck in psql initdb pg_ctl pg_config createdb postgres; do
-        if ! patchelf --print-rpath "${BUNDLE_PREFIX}/bin/${bcheck}" | grep -q '\$ORIGIN'; then
+        # Pipe-free (nexus-i66g4/wbeyi class): capture first, then match
+        # with a bash-native glob test -- a `patchelf ... | grep -q` pipe
+        # under this script's `set -o pipefail` risks the producer's
+        # SIGPIPE getting promoted over grep's own (successful) exit
+        # status if patchelf is still writing when grep closes the pipe.
+        bcheck_rpath="$(patchelf --print-rpath "${BUNDLE_PREFIX}/bin/${bcheck}")"
+        if [[ "$bcheck_rpath" != *'$ORIGIN'* ]]; then
             echo "FATAL: ${bcheck} RUNPATH does not carry \$ORIGIN after fixup" >&2
             exit 1
         fi

@@ -476,15 +476,57 @@ class RefreshableHttpStoreMixin:
 
     # ── Public transport (subclasses call these, never self._client directly) ──
 
-    def _post(self, path: str, payload: dict[str, Any], *, idempotent: bool = True) -> Any:
+    def _post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        idempotent: bool = True,
+        timeout: float | None = None,
+        retry_read_timeout: bool = True,
+    ) -> Any:
         """POST JSON *payload* to *path*; self-heals once on a retryable error.
 
         ``idempotent=False`` (nexus-tjvgf) disables BOTH retry axes for
         operations where a lost-response retry double-applies server-side
         (queue claims, counter increments, content-appending merges) —
         see :meth:`_send`.
+
+        ``timeout`` (nexus-y9t08) is an OPTIONAL per-request override —
+        omitted (``None``, the default) means "no override", so the call
+        rides the client-wide ``_DEFAULT_TIMEOUT_S`` exactly as before this
+        kwarg existed. When supplied, it is forwarded to httpx's own
+        per-request ``timeout=`` (``Client.request(..., timeout=...)``),
+        which overrides the client-wide default for THIS call only — the
+        underlying ``httpx.Client``'s constructor-time timeout, and every
+        other call through this same instance, is untouched. This is the
+        primitive a caller with one occasionally-slow endpoint (e.g. a
+        synchronous server-side embed) reaches for instead of bumping the
+        whole client's timeout, which would make a genuinely hung ordinary
+        call take just as long to surface.
+
+        ``retry_read_timeout`` (nexus-y9t08 CRITICAL 1 correction): default
+        ``True`` preserves the existing self-heal behavior — a
+        ``httpx.ReadTimeout`` on this call is retried exactly once, same
+        as every other exception :func:`_is_retryable_endpoint_error`
+        recognizes. Pass ``False`` to opt THIS call out of retrying a
+        ``ReadTimeout`` specifically (every other retryable exception type
+        — ``ConnectError``/``ConnectionRefusedError``/
+        ``ConnectionResetError``/etc. — is unaffected by this flag and
+        still retries normally). The combined-write chunk-carrying POST
+        (``HttpCatalogClient.write_manifest_many``) is the only caller
+        that passes ``False``, matching the predecessor
+        ``HttpVectorClient.upsert_chunks`` path's deliberate exclusion of
+        ALL timeouts from ITS retry classifier
+        (``http_vector_client.py:779-784``) for the identical
+        synchronous-server-side-embed shape, where a retried timeout
+        starts a second, uncancelled embed on top of one that may still
+        be running server-side.
         """
-        return self._send("POST", path, json=payload, idempotent=idempotent)
+        kwargs: dict[str, Any] = {"json": payload, "idempotent": idempotent, "retry_read_timeout": retry_read_timeout}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return self._send("POST", path, **kwargs)
 
     def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
         """GET *path*; self-heals once on a retryable error."""
@@ -503,8 +545,25 @@ class RefreshableHttpStoreMixin:
 
     # ── Internal ─────────────────────────────────────────────────────────────
 
-    def _send(self, method: str, path: str, *, idempotent: bool = True, **kwargs: Any) -> Any:
+    def _send(
+        self,
+        method: str,
+        path: str,
+        *,
+        idempotent: bool = True,
+        retry_read_timeout: bool = True,
+        **kwargs: Any,
+    ) -> Any:
         """One round-trip, with ONE re-resolve-and-retry on a retryable error.
+
+        ``retry_read_timeout=False`` (nexus-y9t08): a caught
+        ``httpx.ReadTimeout`` raises immediately, bypassing the self-heal
+        retry below, WITHOUT changing how any other exception type in the
+        except tuple is classified — see :meth:`_post`'s docstring for the
+        narrow, single-caller rationale. Consumed here (never forwarded
+        into ``**kwargs``, which flows all the way to
+        ``httpx.Client.request(...)`` and would TypeError on an unknown
+        kwarg).
 
         ``idempotent=False`` (nexus-tjvgf): the request is issued EXACTLY
         ONCE — no gateway 502/503/504 backoff loop, no endpoint
@@ -552,6 +611,8 @@ class RefreshableHttpStoreMixin:
             ConnectionRefusedError,
             ConnectionResetError,
         ) as exc:
+            if isinstance(exc, httpx.ReadTimeout) and not retry_read_timeout:
+                raise
             if not _is_retryable_endpoint_error(exc):
                 raise
             _log.info(

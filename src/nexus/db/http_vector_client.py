@@ -38,6 +38,8 @@ from typing import Any, NoReturn
 
 import structlog
 
+from nexus.logging_setup import emit_import_time_warning
+
 _log = structlog.get_logger(__name__)
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -503,10 +505,120 @@ _GATEWAY_RETRY_CODES = frozenset({502, 503, 504})
 _CCE_UPSERT_CHUNK_CAP = 64
 _CODE_UPSERT_CHUNK_CAP = 300
 
+#: Hardcoded onnx-local memory-safety default (nexus-33hpq) — the ONE
+#: value :func:`_resolve_onnx_local_upsert_chunk_cap` falls back to when
+#: ``NX_ONNX_LOCAL_UPSERT_CHUNK_CAP`` is unset, and the floor its
+#: validation messages reference.
+_ONNX_LOCAL_UPSERT_CHUNK_CAP_DEFAULT = 16
+
+
+def _resolve_onnx_local_upsert_chunk_cap(raw: str | None) -> int:
+    """Validate and resolve ``NX_ONNX_LOCAL_UPSERT_CHUNK_CAP`` (nexus-97dp4).
+
+    *raw* is the literal ``os.environ.get("NX_ONNX_LOCAL_UPSERT_CHUNK_CAP")``
+    result, threaded in as a parameter rather than read internally — this
+    keeps every validation branch directly unit-testable with no env-var/
+    module-reload gymnastics. The module-level assignment below still
+    calls ``os.environ.get`` exactly ONCE at import time, preserving the
+    existing "every caller reads the SAME constant" contract (ChunkBatcher's
+    flush cap and this client's oversize paging must never disagree
+    mid-run — see :func:`per_collection_chunk_cap`'s docstring).
+
+    VALIDATION (nexus-97dp4 CRITICAL fix — the original
+    ``int(os.environ.get(...) or 16)`` had none): a non-numeric value used
+    to raise an UNCAUGHT ``ValueError`` at import time, crashing every
+    ``nx`` invocation with a bare traceback. Now it raises a
+    ``RuntimeError`` with an actionable message instead — FAIL LOUD, not a
+    silent fall-through to the safe default. Per this project's standing
+    "no silent fallbacks for data-correctness/safety problems" directive:
+    this constant directly defeats the nexus-33hpq 77.4GB-RSS memory-
+    safety cap when misconfigured, and this is a low-traffic, test-harness-
+    only knob (``tests/e2e/local-index-memory-gate.sh``) — real users
+    essentially never set it, so failing loud on a typo costs nothing in
+    practice and surfaces a misconfiguration immediately instead of
+    silently running with an unintended cap. A non-positive value (<=0)
+    also raises: it would make :func:`per_collection_chunk_cap` return a
+    cap that blocks every onnx-local upsert outright, a confusing
+    downstream failure far removed from its actual cause.
+
+    NO UPPER BOUND (considered and deliberately rejected): this override's
+    entire documented purpose is letting the e2e memory gate RAISE the cap
+    toward the pre-nexus-33hpq 300 (or beyond) to prove the gate's corpus
+    actually binds a higher ceiling too — clamping it to the safe default
+    would defeat that harness's whole reason for existing. The risk this
+    validation closes is malformed/nonsensical input (a typo, a negative
+    number), never "someone might raise it" — raising it IS the intended
+    use, and nexus-rn9n7 (a SEPARATE, still-open bug: a probe failure
+    silently falls through to the unsafe cap=300 branch of
+    :func:`per_collection_chunk_cap`) is the other, independent route to
+    an unsafe cap this fix does NOT touch.
+
+    Emits a WARNING-level structured log line whenever the override is
+    ACTIVE (the env var is present at all, regardless of value) — a run
+    using a non-default cap must never be invisible in the logs.
+    """
+    if raw is None or raw.strip() == "":
+        return _ONNX_LOCAL_UPSERT_CHUNK_CAP_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError(
+            f"NX_ONNX_LOCAL_UPSERT_CHUNK_CAP={raw!r} is not a valid integer. "
+            "This overrides the nexus-33hpq onnx-local memory-safety cap "
+            f"(default {_ONNX_LOCAL_UPSERT_CHUNK_CAP_DEFAULT} — see "
+            "per_collection_chunk_cap's docstring for the 77.4GB-RSS "
+            "incident this cap prevents); unset it, or set it to a "
+            "positive integer."
+        ) from None
+    if value <= 0:
+        raise RuntimeError(
+            f"NX_ONNX_LOCAL_UPSERT_CHUNK_CAP={value} must be a positive "
+            "integer — a non-positive cap would block every onnx-local "
+            f"upsert outright. Unset it, or set it to a positive integer "
+            f"(default {_ONNX_LOCAL_UPSERT_CHUNK_CAP_DEFAULT})."
+        )
+    # nexus D9: this function runs at MODULE (import) scope — see the
+    # assignment below — before any entry point has called
+    # ``configure_logging``. The shared ``_log`` logger is unsafe here:
+    # structlog's unconfigured default writes to STDOUT, which would
+    # corrupt ``nx <cmd> --json`` for every invocation while this env var
+    # is set, regardless of whether the invoked subcommand ever reaches
+    # an onnx-local upsert. ``emit_import_time_warning`` is the safe
+    # primitive for exactly this case — see its docstring.
+    emit_import_time_warning(
+        "onnx_local_upsert_chunk_cap_overridden",
+        value=value,
+        default=_ONNX_LOCAL_UPSERT_CHUNK_CAP_DEFAULT,
+        note=(
+            "NX_ONNX_LOCAL_UPSERT_CHUNK_CAP overrides the nexus-33hpq "
+            "memory-safety cap — expected only from "
+            "tests/e2e/local-index-memory-gate.sh; an unintended override "
+            "in a real install can reproduce the 77.4GB-RSS incident this "
+            "cap exists to prevent."
+        ),
+    )
+    return value
+
+
 #: onnx-local memory-bounded cap (nexus-33hpq), applies to EVERY prefix once
 #: the serving engine is onnx-local — see :func:`per_collection_chunk_cap`'s
 #: docstring for the memory arithmetic behind the number 16.
-_ONNX_LOCAL_UPSERT_CHUNK_CAP = 16
+#:
+#: ``NX_ONNX_LOCAL_UPSERT_CHUNK_CAP`` (nexus-97dp4): read ONCE at import
+#: time, deliberately — every caller (ChunkBatcher's flush cap AND this
+#: client's oversize paging) reads the SAME module-level constant, so a
+#: per-request re-read would let the two choke points disagree mid-run.
+#: This exists so tests/e2e/local-index-memory-gate.sh can deliberately
+#: raise the cap toward the pre-nexus-33hpq 300 (or beyond) to prove the
+#: gate's corpus actually binds a HIGHER ceiling too, without editing this
+#: file — a real mechanism, not a runtime sed. Unset (the default) leaves
+#: this byte-identical to before the env var existed: 16. Validated (see
+#: :func:`_resolve_onnx_local_upsert_chunk_cap`) — a malformed value now
+#: fails loud at import time with an actionable message instead of an
+#: uncaught ValueError, and an active override always logs a WARNING.
+_ONNX_LOCAL_UPSERT_CHUNK_CAP = _resolve_onnx_local_upsert_chunk_cap(
+    os.environ.get("NX_ONNX_LOCAL_UPSERT_CHUNK_CAP")
+)
 _CCE_COLLECTION_PREFIXES = frozenset({"docs", "knowledge", "rdr"})
 
 
@@ -609,10 +721,17 @@ def per_collection_chunk_cap(collection: str) -> int:
     against a large batch arriving some other way — engine-side sub-batching in
     ``Bge768Embedder`` (nexus-zu4ma, next engine cut) is the defense-in-depth
     half (option B): a client sending 300 must never be able to OOM the engine.
-    Trade-off, stated plainly: a smaller onnx-local batch means ~19x more round
-    trips than the old 300 cap for the same corpus, so local-mode `nx index repo`
-    is measurably slower. That is the correct trade against an unusable (wedged)
-    install.
+    Trade-off, stated only as far as it was measured: a smaller batch means more
+    round trips, and the increase grows with corpus size — it approaches the cap
+    ratio (300/16) only for a corpus large enough that flushes actually REACH the
+    cap. It is far smaller for anything that flushes on file-grain boundaries
+    first. NO throughput regression has been measured: on the shakedown fixture
+    the whole indexing step ran 3m20s for 92 chunks / 8 flushes with ~29s of that
+    in upload, and the full gate finished inside its documented cold-run band.
+    There is no clean before/after to quote, because the cap=300 case WEDGED
+    rather than completing. Do not restate a speed cost as fact without measuring
+    it (nexus-fdn1c); the correct trade here is against an unusable install, and
+    that argument does not need a throughput number to stand up.
     """
     prefix = collection.split("__", 1)[0]
     # nexus-33hpq: onnx-local is a MEMORY-bound mode, not a timeout-bound one —
@@ -1952,6 +2071,72 @@ class HttpVectorClient:
         """
         result = _get("/v1/vectors/stats", tenant=self._tenant)
         return result if isinstance(result, list) else []
+
+    # ── RDR-191 Phase 1: server-side GC prune (catalog-023) ─────────────────
+    #
+    # These three route straight to ``nexus.gc_quarantine_orphans`` /
+    # ``gc_restore_rereferenced`` / ``gc_expire_quarantine`` — the anti-join
+    # move/restore/expire that replaces
+    # ``chunk_quarantine.py``'s get-all-metadata-then-diff-then-copy-then-
+    # delete dance. Zero chunk rows and zero embeddings cross this wire.
+    # ``REQUIRED_ENGINE_VERSION`` is ``(0, 1, 69)`` and this route ships in
+    # the NEXT engine tag, so a 404 (``VectorServiceError.code == 404``) is
+    # an EXPECTED pre-route-engine condition, not exceptional — callers
+    # (``chunk_quarantine.py``'s ``*_serverside`` wrappers) catch it and fall
+    # back to the client-side path, same shape as :meth:`list_collections`'s
+    # ``/stats`` -> ``/collections`` + ``/count`` fallback above.
+
+    def gc_quarantine_orphans(
+        self, collection: str, quarantine_collection: str,
+        quarantined_at: str, sample_limit: int = 20,
+    ) -> dict:
+        """POST /v1/vectors/gc/quarantine-orphans.
+
+        Returns ``{"moved": N, "sample": [{"chash": hex, "title": ...}, ...]}``.
+        Raises :class:`VectorServiceError` (``code=404`` on a pre-route engine).
+        """
+        return _post(
+            "/v1/vectors/gc/quarantine-orphans",
+            {
+                "collection": collection,
+                "quarantine_collection": quarantine_collection,
+                "quarantined_at": quarantined_at,
+                "sample_limit": sample_limit,
+            },
+            tenant=self._tenant,
+        )
+
+    def gc_restore_rereferenced(self, quarantine_collection: str, origin_collection: str) -> int:
+        """POST /v1/vectors/gc/restore-rereferenced. Returns the restored count."""
+        result = _post(
+            "/v1/vectors/gc/restore-rereferenced",
+            {"quarantine_collection": quarantine_collection, "origin_collection": origin_collection},
+            tenant=self._tenant,
+        )
+        return int(result.get("restored", 0))
+
+    def gc_expire_quarantine(
+        self, quarantine_collection: str, origin_collection: str, cutoff: str,
+        floor_fraction: float, floor_min_chunks: int, force: bool,
+    ) -> dict:
+        """POST /v1/vectors/gc/expire-quarantine.
+
+        Returns ``{"expired": N, "refused": M}`` — the nexus-mr89x safety
+        floor (see catalog-023 changelog): ``refused > 0`` means the floor
+        fired and nothing was deleted this call.
+        """
+        return _post(
+            "/v1/vectors/gc/expire-quarantine",
+            {
+                "quarantine_collection": quarantine_collection,
+                "origin_collection": origin_collection,
+                "cutoff": cutoff,
+                "floor_fraction": floor_fraction,
+                "floor_min_chunks": floor_min_chunks,
+                "force": force,
+            },
+            tenant=self._tenant,
+        )
 
     def list_collections(self) -> list[dict]:
         """List the tenant's vector collections with live chunk counts.

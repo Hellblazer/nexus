@@ -312,6 +312,56 @@ class IndexRunVerifyRefused(NexusError):
         super().__init__(message)
 
 
+class CombinedWriteEmbedTimeoutError(NexusError):
+    """A ``httpx.ReadTimeout`` on the combined write's chunk-carrying POST
+    (``HttpCatalogClient.write_manifest_many``'s ``chunks=`` branch,
+    nexus-y9t08 CRITICAL fix).
+
+    That POST makes the engine run a SYNCHRONOUS server-side embed inside
+    the request; the engine has no cancellation path for it, so a retried
+    timeout starts a second (third, ...) uncancelled embed on top of one
+    that may still be running. The predecessor path
+    (``HttpVectorClient.upsert_chunks``) deliberately excludes ALL timeout
+    types from its own retry classifier for exactly this shape
+    (``http_vector_client.py:779-784`` — "TimeoutError is intentionally
+    NOT in this retry classifier ... it propagates straight to the
+    _get/_post handler").
+
+    ``write_manifest_many`` converts the raw ``httpx.ReadTimeout`` into
+    THIS type, raised with no ``__cause__``/``__context__`` chain back to
+    it (see the raise site), specifically so
+    ``nexus.retry._is_connectivity_error`` — the classifier
+    ``nexus.retry._manifest_write_with_retry`` uses to decide whether to
+    retry the WHOLE ``write_manifest_many`` call from
+    ``indexer.py``/``mcp_infra.py`` — sees a non-connectivity error and
+    does not retry. A bare re-raised ``httpx.ReadTimeout`` would still be
+    classified as connectivity (it IS-A ``httpx.TransportError``) and
+    retried at that OUTER layer even after the inner self-heal layer
+    (``RefreshableHttpStoreMixin._send``'s ``retry_read_timeout=False``
+    opt-out passed for this one call) stopped retrying it — this type
+    conversion is what closes that outer amplification path too, with no
+    change to ``nexus.retry``'s general classifier (every other catalog
+    call keeps its existing connectivity-retry behavior unchanged).
+
+    Every OTHER exception this call can raise (``ConnectionResetError``,
+    ``httpx.ConnectError``, etc. — genuine connectivity blips, GH #1371)
+    is NOT converted and propagates unchanged, so the ordinary
+    connectivity retry stays intact for this call.
+    """
+
+    def __init__(self, *, collection: str, chunk_count: int, original: str) -> None:
+        self.collection = collection
+        self.chunk_count = chunk_count
+        super().__init__(
+            f"combined write to collection {collection!r} ({chunk_count} "
+            f"chunk(s)) timed out waiting for the server-side embed and "
+            f"was NOT retried (nexus-y9t08 — the engine has no "
+            f"cancellation path for an in-flight embed, so a retry would "
+            f"start an uncancelled duplicate on top of a possibly-still-"
+            f"running one): {original}"
+        )
+
+
 #: NexusError subclasses that a per-record/per-file BATCH loop (``nx dt
 #: index``, ``nx index pdf --dir``) must catch, log, and continue past —
 #: never let escape and abort the whole batch (nexus-rlkgu; recurrence-

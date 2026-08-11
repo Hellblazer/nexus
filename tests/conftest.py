@@ -1735,6 +1735,30 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # embedder ran.
     "tests/catalog/test_manifest_write_many.py::TestWriteManifestManyCombined::test_combined_wire_shape",
     "tests/catalog/test_manifest_write_many.py::TestWriteManifestManyCombined::test_ack_echo_raises_when_chunks_written_absent",
+    #
+    # nexus-y9t08 / nexus-n2w4q (2026-08-10, the combined-write timeout and
+    # retry follow-ups to wxjr6 immediately above): "string-literal-as-name",
+    # the SAME reason class, same file, same call. All four tests exercise
+    # `write_manifest_many(..., chunks=..., collection=...)` and need a
+    # conformant RDR-103 collection name to reach the chunk-carrying branch
+    # at all (that branch raises ValueError without a `collection` — see
+    # `test_chunks_requires_collection`); they then assert on the POST's
+    # kwargs (`timeout=600.0`, `retry_read_timeout=False`), the POST COUNT,
+    # and the exception TYPE/classification. Nothing asserts on the
+    # collection string itself, and no embedder can run: `_client()` is
+    # `HttpCatalogClient.__new__` (no `__init__`, no config read, no
+    # credential) and every one of the four monkeypatches `_post`, so the
+    # name never leaves the request body. Requesting `cloud_mode` would add
+    # a mode dependency to a fully-monkeypatched wire-behaviour unit test
+    # without changing one assertion — the opposite of what that fixture is
+    # for. Landed red on develop for the usual reason recorded throughout
+    # this block: both authoring commits (127f2dbc, 47c5a39a) ran targeted
+    # path-scoped batteries, and this census only fires on a whole-session
+    # collection.
+    "tests/catalog/test_manifest_write_many.py::TestWriteManifestManyCombinedTimeout::test_combined_write_gets_an_embed_grade_timeout",
+    "tests/catalog/test_manifest_write_many.py::TestCombinedWriteReadTimeoutNotRetried::test_read_timeout_raises_converted_type_after_exactly_one_post",
+    "tests/catalog/test_manifest_write_many.py::TestCombinedWriteReadTimeoutNotRetried::test_converted_exception_is_not_classified_as_connectivity",
+    "tests/catalog/test_manifest_write_many.py::TestCombinedWriteReadTimeoutNotRetried::test_connection_reset_still_propagates_unconverted_for_retry",
 })
 
 

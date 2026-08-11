@@ -23,6 +23,9 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
+import static dev.nexus.service.jooq.nexus.Tables.GC_EXPIRE_QUARANTINE;
+import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS;
+import dev.nexus.service.jooq.nexus.Routines;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_384;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_768;
@@ -223,6 +226,22 @@ public final class PgVectorRepository {
     private final EmbedderRouter queryRouter;    // nullable; preferred over queryEmbedder
 
     /**
+     * Effective cap on {@link #getAllMetadata} result size — see {@link
+     * #GET_ALL_METADATA_MAX_ROWS}. Fixed for the lifetime of the instance at
+     * construction time: every public constructor wires this to {@link
+     * #GET_ALL_METADATA_MAX_ROWS}; only the package-private test-only
+     * constructor overloads (see {@code PgVectorRepositoryGetAllMetadataCapBoundaryTest})
+     * pass a smaller value so the cap-crossing/raises-not-truncates property
+     * can be exercised for real against a handful of rows instead of
+     * 200,001. Converted from a mutable test-setter field to this {@code
+     * final} constructor-injected field per substantive critique 2026-08-10
+     * finding 1 (T2 nexus/chroma-residue-C1-T0.1-critique-2026-08-10) — this
+     * repo serves live requests and the project convention is constructor
+     * injection, no mutable test hooks on production classes.
+     */
+    private final int getAllMetadataMaxRows;
+
+    /**
      * Simple constructor: no collection-aware routing (single fixed embedder - test
      * fixtures and single-model local mode).
      *
@@ -234,11 +253,28 @@ public final class PgVectorRepository {
      */
     public PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
                               Embedder queryEmbedder) {
+        this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS);
+    }
+
+    /**
+     * Package-private test-only overload of the simple constructor — see
+     * {@link #getAllMetadataMaxRows}. Production code always goes through the
+     * public 3-arg constructor above, which fixes the cap at {@link
+     * #GET_ALL_METADATA_MAX_ROWS}; only {@code
+     * PgVectorRepositoryGetAllMetadataCapBoundaryTest} (same package) calls
+     * this overload, with a small cap so the raises-not-truncates property at
+     * the boundary can be exercised for real against a handful of rows
+     * instead of 200,001 (substantive critique 2026-08-10 finding 1, T2
+     * nexus/chroma-residue-C1-T0.1-critique-2026-08-10).
+     */
+    PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
+                       Embedder queryEmbedder, int getAllMetadataMaxRows) {
         this.tenantScope   = tenantScope;
         this.docEmbedder   = docEmbedder;
         this.queryEmbedder = queryEmbedder;
         this.docRouter     = null;
         this.queryRouter   = null;
+        this.getAllMetadataMaxRows = getAllMetadataMaxRows;
     }
 
     /**
@@ -252,11 +288,23 @@ public final class PgVectorRepository {
      */
     public PgVectorRepository(TenantScope tenantScope, EmbedderRouter docRouter,
                               EmbedderRouter queryRouter) {
+        this(tenantScope, docRouter, queryRouter, GET_ALL_METADATA_MAX_ROWS);
+    }
+
+    /**
+     * Package-private test-only overload of the collection-aware constructor
+     * — see {@link #getAllMetadataMaxRows}. Not used by any production call
+     * site; kept symmetric with the simple-constructor overload above in
+     * case a future test needs router-based wiring with a small cap.
+     */
+    PgVectorRepository(TenantScope tenantScope, EmbedderRouter docRouter,
+                       EmbedderRouter queryRouter, int getAllMetadataMaxRows) {
         this.tenantScope   = tenantScope;
         this.docEmbedder   = docRouter;   // EmbedderRouter implements Embedder (ONNX fallback)
         this.queryEmbedder = queryRouter;
         this.docRouter     = docRouter;
         this.queryRouter   = queryRouter;
+        this.getAllMetadataMaxRows = getAllMetadataMaxRows;
     }
 
     /**
@@ -1591,6 +1639,7 @@ public final class PgVectorRepository {
                                               Map<String, Object> where) {
         int dim = dimForCollection(collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        int cap = getAllMetadataMaxRows;
         org.jooq.Condition cond = ch.collection().eq(collection);
         if (where != null) {
             for (Map.Entry<String, Object> e : where.entrySet()) {
@@ -1606,13 +1655,13 @@ public final class PgVectorRepository {
                // nexus-3ck2g searchWithTokens/hybridSearch fix and its gate.
                .where(finalCond.and(liveChunksCondition(ctx, ch)))
                .orderBy(ch.chash().asc())
-               .limit(GET_ALL_METADATA_MAX_ROWS + 1)
+               .limit(cap + 1)
                .fetch());
 
-        if (result.size() > GET_ALL_METADATA_MAX_ROWS) {
+        if (result.size() > cap) {
             throw new IllegalStateException(
                 "getAllMetadata: collection '" + collection + "' has more than "
-                + GET_ALL_METADATA_MAX_ROWS + " matching rows; caller must fall "
+                + cap + " matching rows; caller must fall "
                 + "back to paginated /v1/vectors/get");
         }
 
@@ -2107,6 +2156,83 @@ public final class PgVectorRepository {
                                             + "': " + c);
         }
         return (int) c;
+    }
+
+    /**
+     * RDR-191 Phase 1 (bead-less, RDR §Decision item 5 / Phasing "Phase 1 —
+     * Prune into SQL"): the server-side anti-join move that replaces the
+     * client's get-all-metadata -&gt; diff-in-Python -&gt; copy-with-
+     * embeddings -&gt; delete dance ({@code chunk_quarantine.py}'s
+     * {@code quarantine_orphans}). Zero chunk rows and zero embeddings
+     * cross the {@code /v1/vectors} wire — only the moved count and a
+     * capped sample (id + title, for logging) come back.
+     *
+     * @param collection          the origin collection (dim derives from this)
+     * @param quarantineCollection the sibling quarantine collection name
+     * @param quarantinedAt       caller-formatted stamp (matches the existing
+     *                            {@code %Y-%m-%dT%H:%M:%SZ} shape so string
+     *                            comparison against a later cutoff stays
+     *                            chronologically correct — see the
+     *                            catalog-023 changelog header)
+     * @param sampleLimit         cap on the logging sample's size
+     */
+    public record QuarantineOutcome(long moved, List<Map<String, Object>> sample) {}
+
+    public QuarantineOutcome quarantineOrphans(String tenant, String collection,
+                                                String quarantineCollection,
+                                                String quarantinedAt, int sampleLimit) {
+        int dim = dimForCollection(collection);
+        // nexus-syfes: the quarantine sibling's catalog_collections registration
+        // (needed to satisfy chunks_<dim>.collection's FK) now happens INSIDE
+        // nexus.gc_quarantine_orphans itself, guarded on there being an orphan
+        // to move — see catalog-024-quarantine-collection-registration.xml.
+        // A separate, unconditionally-committed Java-side registration here
+        // (the pre-fix shape) left a permanently-orphaned projection row behind
+        // for every zero-orphan pass; do not reintroduce it.
+        var rec = tenantScope.withTenant(tenant, ctx ->
+            ctx.selectFrom(GC_QUARANTINE_ORPHANS.call(
+                    dim, tenant, collection, quarantineCollection, quarantinedAt, sampleLimit))
+               .fetchOne());
+        long moved = rec.get(GC_QUARANTINE_ORPHANS.MOVED);
+        JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS.SAMPLE);
+        return new QuarantineOutcome(moved, fromJsonList(sampleJson != null ? sampleJson.data() : null));
+    }
+
+    /**
+     * RDR-191 Phase 1: restores quarantined chunks whose chash is referenced
+     * again by the catalog manifest (a heal re-referenced them, or content
+     * returned) — {@code chunk_quarantine.py}'s {@code restore_rereferenced},
+     * server-side. Dim derives from {@code originCollection}.
+     */
+    public long restoreRereferenced(String tenant, String quarantineCollection, String originCollection) {
+        int dim = dimForCollection(originCollection);
+        // nexus-syfes: same shape as quarantineOrphans above — the origin
+        // collection's registration now happens INSIDE
+        // nexus.gc_restore_rereferenced, guarded on there being a restore to
+        // perform (see catalog-024-quarantine-collection-registration.xml).
+        return tenantScope.withTenant(tenant, ctx ->
+            Routines.gcRestoreRereferenced(ctx.configuration(), dim, tenant, quarantineCollection, originCollection));
+    }
+
+    /**
+     * RDR-191 Phase 1: hard-deletes quarantine rows past the grace window —
+     * {@code chunk_quarantine.py}'s {@code expire_quarantine}, server-side.
+     * Carries the nexus-mr89x safety floor verbatim (see the catalog-023
+     * changelog header): {@code refused &gt; 0} means the floor fired and
+     * nothing was deleted.
+     */
+    public record ExpireOutcome(long expired, long refused) {}
+
+    public ExpireOutcome expireQuarantine(String tenant, String quarantineCollection, String originCollection,
+                                           String cutoff, double floorFraction, int floorMinChunks,
+                                           boolean force) {
+        int dim = dimForCollection(originCollection);
+        var rec = tenantScope.withTenant(tenant, ctx ->
+            ctx.selectFrom(GC_EXPIRE_QUARANTINE.call(
+                    dim, tenant, quarantineCollection, originCollection, cutoff,
+                    floorFraction, floorMinChunks, force))
+               .fetchOne());
+        return new ExpireOutcome(rec.get(GC_EXPIRE_QUARANTINE.EXPIRED), rec.get(GC_EXPIRE_QUARANTINE.REFUSED));
     }
 
     /**
@@ -3375,6 +3501,18 @@ public final class PgVectorRepository {
             return MAPPER.readValue(json, MAP_TYPE);
         } catch (Exception e) {
             throw new IllegalStateException("stored metadata is not valid JSON: " + json, e);
+        }
+    }
+
+    private static final TypeReference<List<Map<String, Object>>> LIST_TYPE = new TypeReference<>() {};
+
+    /** RDR-191: parses {@code gc_quarantine_orphans}'s capped {@code sample} column. */
+    private static List<Map<String, Object>> fromJsonList(String json) {
+        if (json == null || json.isBlank()) return List.of();
+        try {
+            return MAPPER.readValue(json, LIST_TYPE);
+        } catch (Exception e) {
+            throw new IllegalStateException("stored sample is not valid JSON array: " + json, e);
         }
     }
 }

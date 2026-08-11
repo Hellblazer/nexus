@@ -253,6 +253,118 @@ class TestFindMcpSiblingPids:
         with patch("nexus.session._list_processes", return_value=table):
             assert find_mcp_sibling_pids(1200) == [1300]
 
+    def test_matches_console_script_launched_via_interpreter(self):
+        """THE SHAPE A REAL BOX PRODUCES, and the one every other test in
+        this class missed.
+
+        ``nx-mcp`` / ``nx-mcp-catalog`` are ``[project.scripts]`` console
+        scripts: shebang wrappers the kernel executes via the interpreter.
+        So the process's EXECUTABLE is python and the script name is in
+        argv[1]. Matching the executable alone can never see them, which is
+        why the nexus-d76vc handoff silently never fired on any real
+        machine -- while every fabricated table in this class asserted
+        against ``comm="nx-mcp"``, a value ``ps`` cannot report for these
+        processes.
+        """
+        from nexus.session import find_mcp_sibling_pids
+
+        py = "/Users/x/.local/share/uv/tools/conexus/bin/python3"
+        table = [
+            (1200, 1, "claude --resume 99c368fc"),
+            (1300, 1200, f"{py} /Users/x/.local/bin/nx-mcp"),
+            (1301, 1200, f"{py} /Users/x/.local/bin/nx-mcp-catalog"),
+            (1302, 1200, f"{py} /Users/x/.local/bin/nx-other"),
+        ]
+        with patch("nexus.session._list_processes", return_value=table):
+            assert sorted(find_mcp_sibling_pids(1200)) == [1300, 1301]
+
+    def test_does_not_match_an_incidental_mention_in_a_later_argument(self):
+        """Only the executable and the script it runs count. A child that
+        merely NAMES nx-mcp in a later argument (an editor, a grep, a
+        wrapper) is not an MCP server, and writing a handoff marker for it
+        would target an unrelated pid."""
+        from nexus.session import find_mcp_sibling_pids
+
+        table = [
+            (1200, 1, "claude"),
+            (1300, 1200, "/bin/grep -r nx-mcp /Users/x/src"),
+            (1301, 1200, "/usr/bin/vim /Users/x/.local/bin/nx-mcp"),
+        ]
+        with patch("nexus.session._list_processes", return_value=table):
+            assert find_mcp_sibling_pids(1200) == []
+
+    def test_against_the_REAL_process_table(self, tmp_path):
+        """No fabricated table: spawn an actual child process named
+        ``nx-mcp`` and find it through a real ``ps`` enumeration.
+
+        This is the test that would have caught the defect. The mocked
+        cases above all encode an assumption about what ``ps`` reports;
+        this one asks ``ps``.
+        """
+        import os
+        import subprocess
+        import sys
+        import time
+
+        from nexus.session import find_mcp_sibling_pids
+
+        script = tmp_path / "nx-mcp"
+        script.write_text("import time; time.sleep(30)\n")
+
+        from nexus.session import _list_processes
+
+        me = os.getpid()
+
+        # NON-VACUITY PRECONDITION: if this environment cannot enumerate its
+        # own processes, the mechanism under test is unobservable here and a
+        # failure below would say nothing about the matcher. Skip LOUDLY on
+        # that specific condition only -- never on "the child was not found",
+        # which is the actual assertion.
+        table = _list_processes()
+        if not any(pid == me for pid, _ppid, _cmd in table):
+            pytest.skip(
+                f"process enumeration cannot see this test's own pid ({me}); "
+                f"`ps -eo pid,ppid,args=` returned {len(table)} row(s). The "
+                "handoff mechanism cannot work in this environment at all, so "
+                "the matcher is untestable here."
+            )
+
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+            [sys.executable, str(script)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            # ps needs a moment to see a freshly forked child.
+            found: list[int] = []
+            for _ in range(100):
+                found = find_mcp_sibling_pids(me)
+                if proc.pid in found:
+                    break
+                time.sleep(0.1)
+            # Diagnose rather than merely fail: report what ps ACTUALLY said
+            # about this child. A bare "got []" cost a full CI cycle of
+            # guesswork on 2026-08-10 because the message named no cause.
+            if proc.pid not in found:
+                rows = [
+                    f"pid={p} ppid={pp} cmd={c!r}"
+                    for p, pp, c in _list_processes()
+                    if p == proc.pid or pp == me
+                ]
+                alive = proc.poll() is None
+                raise AssertionError(
+                    f"real ps enumeration did not find the live nx-mcp child "
+                    f"{proc.pid} parented to {me}; got {found}.\n"
+                    f"child still running: {alive} (exit={proc.poll()})\n"
+                    f"sys.executable: {sys.executable}\n"
+                    f"script: {script}\n"
+                    f"ps rows for that child or parented to this test:\n  "
+                    + ("\n  ".join(rows) if rows else "(none -- ps reported "
+                       "no row for the child AND none parented to this test)")
+                )
+        finally:
+            proc.kill()
+            proc.wait(timeout=10)
+
 
 class TestT1DatabaseFlagOnRaisesOnMisconfiguration:
     """Path D (RDR-105 P2 / nexus-mj2o, narrowed further at nexus-4lkmz):

@@ -59,8 +59,8 @@ def _entry_dict(**kwargs: Any) -> dict:
     stateful fake.
 
     nexus-u26b4: ``metadata``/``source_mtime``/``bib_*`` added so the
-    ``/list``-backed ``descendants()`` parity entry (which does NOT go
-    through ``_to_entry()`` — it forwards the raw wire dict) sees the same
+    ``descendants()`` parity entry (which does NOT go through
+    ``_to_entry()`` — it forwards the raw wire dict) sees the same
     Java-normalized document-row shape (metadata as a parsed nested dict,
     the full ``bib_*`` field set) as local ``Catalog.descendants()``'s now
     -normalized rows. Harmless to every other ``_entry_dict()`` consumer:
@@ -160,6 +160,11 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     #: (CatalogHandler returns ALL matching rows ignoring limit/offset — used to prove
     #: the client issues a single request and does not loop).
     list_content_type_count: int = 0
+    #: how many rows /descendants returns (all under the requested prefix).
+    #: Default 2 matches /list's seeded pair so existing descendants-parity
+    #: expectations carry over unchanged; raise it to prove completeness past
+    #: the old 500-row single-page cap.
+    descendants_count: int = 2
     #: /link response shape: None omits the key (old-JAR skew), bool sets created (njrcn.3).
     link_created: "bool | None" = True
 
@@ -199,6 +204,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         cls.post_ops = []
         cls.last_link_body = {}
         cls.list_content_type_count = 0
+        cls.descendants_count = 2
         cls.show_alias_map = {}
         cls.last_show_follow_alias = None
         cls.manifest_verify_response = {"referenced": 0, "present": 0, "missing": 0}
@@ -294,6 +300,38 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     ],
                     "count": 2,
                 })
+        elif op == "/descendants":
+            # T2 nexus/chroma-residue-plan-2026-08-10 §C1: the dedicated
+            # descendants route. Mirrors CatalogHandler.handleDescendants —
+            # `prefix` is REQUIRED (400 when absent/blank) and the response
+            # envelope is /list's ({"documents": [...], "count": N}).
+            #
+            # The filtering is done HERE, server-side, exactly as the real
+            # route does it (SQL `tumbler LIKE prefix || '.%'`). That is
+            # load-bearing for this fake: the pre-fix client pulled one
+            # unfiltered /list page and filtered client-side, so a fake that
+            # returned unfiltered rows would let a client that never filters
+            # at all pass just as happily as a correct one.
+            #
+            # Absent this branch, do_GET's catchall answers 404 — which is
+            # precisely the status the client's paginated fallback triggers
+            # on, so every fake-server test would have silently exercised the
+            # fallback and NEVER this route.
+            params = self._query_params()
+            prefix = params.get("prefix", "")
+            if not prefix.strip():
+                self._send_json({"error": "prefix query param required"}, code=400)
+            else:
+                n = FakeCatalogHandler.descendants_count
+                # Same metadata heterogeneity as /list (nexus-u26b4): the
+                # first row carries populated metadata, the rest empty.
+                docs = [
+                    _entry_dict(tumbler=f"{prefix}.{i + 1}")
+                    if i == 0
+                    else _entry_dict(tumbler=f"{prefix}.{i + 1}", title=f"Desc {i + 1}", metadata={})
+                    for i in range(n)
+                ]
+                self._send_json({"documents": docs, "count": len(docs)})
         elif op == "/search":
             self._send_json({"documents": [_entry_dict()], "count": 1})
         elif op == "/resolve":
@@ -367,6 +405,11 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                      "collection": "knowledge__o__minilm-l6-v2-384__v1"},
                 ],
             })
+        elif op == "/manifest/null_collection":
+            # T2 nexus/chroma-residue-plan-2026-08-10 §C2: GET
+            # /manifest/null_collection -> {total, backfillable} — mirrors
+            # CatalogRepository.manifestNullCollectionReport's shape.
+            self._send_json({"total": 0, "backfillable": 0})
         elif op == "/chash/conformance":
             # RDR-180 (nexus-du2dw): GET /chash/conformance?dim= ->
             # {dim, tables: [{table_name, total, non_conformant, sample_chashes}]}
@@ -1108,6 +1151,47 @@ class TestHttpCatalogClientRoundTrip:
         docs = client.all_documents(content_type="code")  # limit defaults to 0 (unbounded)
         assert len(docs) == 1500
         assert FakeCatalogHandler.get_ops.count("/list") == 1
+
+    def test_descendants_uses_the_dedicated_route_not_a_list_page(
+        self, client: HttpCatalogClient
+    ) -> None:
+        """descendants() hits GET /descendants — never a /list page.
+
+        T2 nexus/chroma-residue-plan-2026-08-10 §C1: the pre-fix client issued
+        ONE unfiltered ``GET /list?limit=500`` and filtered client-side, so
+        every subtree not wholly inside that first page came back silently
+        short (measured against the live 19,824-document catalog: 0% coverage
+        on 11 of the 12 largest subtrees, no error raised).
+
+        Pinning the ROUTE, not just the result, is the point. The client keeps
+        a paginated /list fallback for engines predating the route, and that
+        fallback is triggered by a 404 — which is exactly what the fake's
+        catchall returns for an unrecognized GET. Asserting only the returned
+        rows would therefore pass identically whether the route was used or
+        silently skipped.
+        """
+        FakeCatalogHandler.reset_log()
+        docs = client.descendants("1.2")
+        assert FakeCatalogHandler.get_ops.count("/descendants") == 1
+        assert FakeCatalogHandler.get_ops.count("/list") == 0
+        assert [d["tumbler"] for d in docs] == ["1.2.1", "1.2.2"]
+
+    def test_descendants_is_complete_past_the_old_single_page_cap(
+        self, client: HttpCatalogClient
+    ) -> None:
+        """A subtree larger than the old 500-row page comes back WHOLE.
+
+        The defect was not slowness, it was silent truncation: 4,797 documents
+        under a prefix returned as 0 with no error. This pins the property that
+        actually regressed — completeness — at a size the old implementation
+        could not have satisfied, in a single request.
+        """
+        FakeCatalogHandler.reset_log()
+        FakeCatalogHandler.descendants_count = 1500  # >> the old 500 cap
+        docs = client.descendants("1.2")
+        assert len(docs) == 1500
+        assert FakeCatalogHandler.get_ops.count("/descendants") == 1
+        assert all(d["tumbler"].startswith("1.2.") for d in docs)
 
     def test_link_if_absent_journey(self, client: HttpCatalogClient) -> None:
         """Existing link → skip (return False), NO /link write (no overwrite).
@@ -2475,3 +2559,77 @@ class TestDanglingEndpointBecomesValueError:
         c = self._client_raising(monkeypatch, 400, {"error": "malformed body"})
         with pytest.raises(httpx.HTTPStatusError):
             c.link("1.1.1", "1.1.2", "cites", "someone")
+
+
+class TestManifestNullCollectionReport:
+    """Substantive critique finding 4 (T2 nexus/chroma-residue-C2-durability-
+    critique-2026-08-10): only the 200-with-data path had ANY coverage
+    (FakeCatalogHandler's default response) before this class — the
+    404/malformed-body 'unavailable' branches every real user hits TODAY
+    (no engine tag ships the route yet) had zero test coverage on either
+    the client or the health-check side.
+    """
+
+    def _client_get_raising(
+        self, monkeypatch: pytest.MonkeyPatch, status: int, body: dict,
+    ) -> HttpCatalogClient:
+        c = object.__new__(HttpCatalogClient)
+
+        def _boom(path, **params):
+            request = httpx.Request(
+                "GET", "http://svc/v1/catalog/manifest/null_collection",
+            )
+            response = httpx.Response(status, json=body, request=request)
+            raise httpx.HTTPStatusError("boom", request=request, response=response)
+
+        monkeypatch.setattr(c, "_get", _boom, raising=False)
+        return c
+
+    def _client_get_returning(
+        self, monkeypatch: pytest.MonkeyPatch, body: Any,
+    ) -> HttpCatalogClient:
+        c = object.__new__(HttpCatalogClient)
+        monkeypatch.setattr(c, "_get", lambda path, **params: body, raising=False)
+        return c
+
+    def test_200_with_data_returns_available(self, client: HttpCatalogClient) -> None:
+        """The pre-existing, already-covered-by-precedent shape (via
+        FakeCatalogHandler's default /manifest/null_collection response) —
+        pinned explicitly here so this class documents the full contract in
+        one place."""
+        report = client.manifest_null_collection_report()
+        assert report == {"total": 0, "backfillable": 0, "unavailable": False}
+
+    def test_404_returns_unavailable_not_a_false_clean_zero(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A pre-route engine 404s this route (today's real state — no
+        engine tag ships it yet). Must degrade to an HONEST 'cannot
+        determine', never a false-clean total=0."""
+        c = self._client_get_raising(monkeypatch, 404, {"error": "not found"})
+        report = c.manifest_null_collection_report()
+        assert report == {"total": 0, "backfillable": 0, "unavailable": True}
+
+    def test_other_http_status_error_also_returns_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        c = self._client_get_raising(monkeypatch, 500, {"error": "boom"})
+        report = c.manifest_null_collection_report()
+        assert report == {"total": 0, "backfillable": 0, "unavailable": True}
+
+    def test_malformed_body_missing_total_returns_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A 200 response stripped of the `total` field must NOT read as a
+        clean zero — same fail-honest contract as manifest_orphans' `count`
+        field (this method's own docstring)."""
+        c = self._client_get_returning(monkeypatch, {"backfillable": 0})
+        report = c.manifest_null_collection_report()
+        assert report == {"total": 0, "backfillable": 0, "unavailable": True}
+
+    def test_none_body_returns_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        c = self._client_get_returning(monkeypatch, None)
+        report = c.manifest_null_collection_report()
+        assert report == {"total": 0, "backfillable": 0, "unavailable": True}

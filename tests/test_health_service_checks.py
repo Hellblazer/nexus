@@ -1991,6 +1991,116 @@ class TestCheckChashConformanceReport:
         assert "3 chunk row(s)" in r.detail, r.detail
 
 
+class TestCheckManifestNullCollection:
+    """Substantive critique finding 1 (T2
+    nexus/chroma-residue-C2-durability-critique-2026-08-10):
+    ``_check_manifest_null_collection``'s ``unavailable`` branch used to
+    render an unconditional loud WARN, which broke
+    ``tests/e2e/fresh-install-mvv.sh`` on every virgin box today — no
+    engine tag ships GET /v1/catalog/manifest/null_collection yet
+    (``REQUIRED_ENGINE_VERSION`` pinned at ``(0,1,69)``, before the route).
+    These tests pin the fix: severity GATED on the live
+    ``REQUIRED_ENGINE_VERSION`` constant, not a static allowlist entry.
+    """
+
+    def _cat(self, *, report: dict | None = None, raise_exc: Exception | None = None):
+        class _Cat:
+            def manifest_null_collection_report(self) -> dict:
+                if raise_exc is not None:
+                    raise raise_exc
+                return report if report is not None else {"total": 0, "backfillable": 0, "unavailable": False}
+        return _Cat()
+
+    def _run(self, monkeypatch, cat):
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: cat, raising=False,
+        )
+        return h._check_manifest_null_collection()[0]
+
+    def test_unavailable_at_or_below_route_floor_renders_informational_not_warn(
+        self, monkeypatch,
+    ) -> None:
+        """THE FIX: today's real state (every shipped engine predates the
+        route) must render ok=True informational, never a WARN — otherwise
+        fresh-install-mvv.sh's empty-by-design allowlist fails on every
+        virgin box."""
+        import nexus.engine_version as ev
+
+        monkeypatch.setattr(ev, "REQUIRED_ENGINE_VERSION", (0, 1, 69))
+        cat = self._cat(report={"total": 0, "backfillable": 0, "unavailable": True})
+        r = self._run(monkeypatch, cat)
+        assert r.ok is True, f"expected informational (ok=True), got ok={r.ok} warn={r.warn}"
+        assert r.warn is not True
+        assert "informational" in r.detail, r.detail
+        assert "EXPECTED" in r.detail, r.detail
+
+    def test_unavailable_below_route_floor_also_renders_informational(
+        self, monkeypatch,
+    ) -> None:
+        import nexus.engine_version as ev
+
+        monkeypatch.setattr(ev, "REQUIRED_ENGINE_VERSION", (0, 1, 65))
+        cat = self._cat(report={"total": 0, "backfillable": 0, "unavailable": True})
+        r = self._run(monkeypatch, cat)
+        assert r.ok is True
+        assert "informational" in r.detail, r.detail
+
+    def test_unavailable_above_route_floor_renders_loud_warn(self, monkeypatch) -> None:
+        """Once the floor moves past the route's ship version, "unavailable"
+        is genuinely wrong (every servable engine should carry the route) —
+        must flip to a loud WARN, matching the established fail-open-but-
+        loud contract used elsewhere in this module."""
+        import nexus.engine_version as ev
+
+        monkeypatch.setattr(ev, "REQUIRED_ENGINE_VERSION", (0, 1, 70))
+        cat = self._cat(report={"total": 0, "backfillable": 0, "unavailable": True})
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True, (
+            f"expected loud WARN once the floor has moved past the route's "
+            f"ship version, got ok={r.ok} warn={r.warn}"
+        )
+        assert "UNKNOWN" in r.detail, r.detail
+
+    def test_client_without_the_method_degrades_to_the_same_gated_branch(
+        self, monkeypatch,
+    ) -> None:
+        """An older client / test double lacking the method entirely must
+        take the exact same severity-gated path as an engine 404, not a
+        different (unconditional) one."""
+        import nexus.engine_version as ev
+
+        monkeypatch.setattr(ev, "REQUIRED_ENGINE_VERSION", (0, 1, 69))
+
+        class _NoMethodCat:
+            pass
+
+        r = self._run(monkeypatch, _NoMethodCat())
+        assert r.ok is True
+        assert "informational" in r.detail, r.detail
+
+    def test_available_report_with_rows_still_renders_loud_warn_regardless_of_floor(
+        self, monkeypatch,
+    ) -> None:
+        """The floor-gating applies ONLY to the `unavailable` branch — a
+        successful read reporting real pre-backfill rows must still WARN,
+        independent of REQUIRED_ENGINE_VERSION."""
+        import nexus.engine_version as ev
+
+        monkeypatch.setattr(ev, "REQUIRED_ENGINE_VERSION", (0, 1, 69))
+        cat = self._cat(report={"total": 3, "backfillable": 2, "unavailable": False})
+        r = self._run(monkeypatch, cat)
+        assert r.ok is False and r.warn is True
+        assert "3 manifest row(s)" in r.detail, r.detail
+
+    def test_clean_report_of_zero_still_renders_plain_clean(self, monkeypatch) -> None:
+        cat = self._cat(report={"total": 0, "backfillable": 0, "unavailable": False})
+        r = self._run(monkeypatch, cat)
+        assert r.ok is True
+        assert r.detail == "none"
+
+
 class TestManifestOrphanReportCompleteness:
     """nexus-heizf code-review fix round (2026-08-05): manifest_orphan_report
     must never treat a truncated or failed refetch as a complete result —

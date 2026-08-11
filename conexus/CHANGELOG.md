@@ -4,6 +4,36 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.6.0] - 2026-08-11
+
+### Changed
+- **Regression tests must be FALSIFIED, not merely read.** Two agents gain a
+  mandatory output obligation:
+  - `test-validator` emits one line per regression test — `FALSIFIED: <test>
+    — reverted <change>, failed with <error>` or `NOT FALSIFIED: <test> —
+    <why>` — obtained by breaking the PRODUCTION code, never by editing the
+    test. `NOT FALSIFIED` is an acceptable answer; emitting neither is not,
+    since that reports a test as verified when it was only read. When the
+    change under test IS a gate, the obligation extends to its denominator:
+    a gate that scanned zero items passes silently.
+  - `code-review-expert` rates each added or modified test CAN FAIL /
+    CANNOT FAIL with the concrete production edit that would turn it red, and
+    names the doubtful ones. It does not run the falsification itself.
+
+  Both name the four shapes that have shipped past green suites: a test
+  double accepting a call production rejects, a fixture encoding a value the
+  real producer cannot emit, an assertion on the absence of a negative
+  signal, and a gate whose failure path returns success.
+
+  Earned 2026-08-10, in one session, by three defects that had each already
+  survived being read and judged sound: `nx index pdf --force` silently
+  skipping T3 cleanup for ~2 months behind a bare `MagicMock`; a `/clear` T1
+  handoff that had NEVER fired, covered by tests patching a process table
+  with a `comm` value the kernel cannot report; and an RDR phase gate written
+  against a doctor check that returns `ok=True` when the engine is
+  unreachable. All three were caught by the same physical act — break it,
+  watch the detector — and none by reading.
+
 ## [7.5.0] - 2026-08-09
 
 ### Activated by this pin advance (from PENDING_RELEASE.md)

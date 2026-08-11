@@ -90,7 +90,7 @@ from nexus.catalog.catalog_spans import parse_chash_span
 from nexus.catalog.types import ManifestRow, _CROSS_PROJECT_OVERRIDE_ENV
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
-from nexus.errors import IndexRunVerifyRefused
+from nexus.errors import CombinedWriteEmbedTimeoutError, IndexRunVerifyRefused
 
 _log = structlog.get_logger(__name__)
 
@@ -151,6 +151,80 @@ _MANIFEST_GET_MANY_PAGE = 1000
 #: cap (nexus-9dvqy). ~24 columns/row keeps a full page under PostgreSQL's
 #: 32767 bind-parameter ceiling.
 _REGISTER_MANY_PAGE = 1000
+
+# nexus-y9t08: the combined write (write_manifest_many's ``chunks=``
+# branch) makes the engine run a SYNCHRONOUS server-side embed inside the
+# request/transaction — the exact same shape ``HttpVectorClient.upsert_chunks``
+# (its predecessor for this workload) passes ``timeout=600`` for
+# (``src/nexus/db/http_vector_client.py:1413``, docstring reasoning at
+# :837-843: "a 300-chunk CCE (voyage-context-3) upsert batch routinely
+# exceeds 120s server-side (embed is synchronous in the request)" — and
+# note that docstring's own closing point, that the raise is deliberately
+# NOT global because a slow search should still fail fast, which is the
+# same reasoning driving the per-request scoping below). The v7.5.0 combined
+# write REGRESSED this: HttpCatalogClient's ``__init__`` builds on
+# RefreshableHttpStoreMixin without an explicit ``timeout``, so it silently
+# inherited the mixin's ``_DEFAULT_TIMEOUT_S`` (30.0s) — a control-plane
+# default sized for ordinary catalog calls (registration, linking,
+# listing), not a synchronous embed.
+#
+# SCOPING DECISION (bead nexus-y9t08, option (a) over (b)): this constant
+# is applied as a PER-REQUEST override on the chunk-carrying POST only
+# (see write_manifest_many's ``page_carries_chunks`` branch below), never
+# as a client-wide bump on ``HttpCatalogClient``. A blanket 600s default on
+# every catalog call would make a genuinely hung ordinary control-plane
+# request (one with no embed at all) take 10 minutes to surface instead of
+# 30 seconds — its own defect, and unjustified for the ~100+ other call
+# sites through this client that do no embedding.
+#
+# RETRY DECISION — CORRECTED (nexus-y9t08 round 2; the original text
+# below this line, shipped in 127f2dbc, made a FALSE claim about the old
+# path and has been struck):
+#
+# The 127f2dbc version of this comment claimed "the 600s budget matches
+# the OLD path's own accepted behavior, under which a ReadTimeout on this
+# workload was rare enough in practice to never surface as a retry-storm
+# complaint." That is FALSE, verified directly against the predecessor's
+# own source: ``HttpVectorClient``'s retry classifier
+# (``src/nexus/db/http_vector_client.py:779-784``) catches ONLY
+# ``(urllib.error.URLError, ConnectionRefusedError, ConnectionResetError)``
+# — its own comment states explicitly "TimeoutError is intentionally NOT
+# in this retry classifier (it is not an auto-restart signature); it
+# propagates straight to the _get/_post handler". The old path FAILS ONCE
+# on a timeout, by deliberate design — it does not retry it "rarely
+# enough to not matter"; it never retries it at all.
+#
+# The retained retry-on-ReadTimeout in 127f2dbc was therefore a NEW
+# amplifier introduced in 7.5.0, not a restoration of prior behavior: up
+# to 8 POSTs total across the mixin's self-heal layer (one retry) and the
+# outer ``nexus.retry._manifest_write_with_retry`` wrapper (up to 4
+# attempts), each starting a fresh — and, since the engine has no
+# cancellation path, UNCANCELLED — server-side embed on a timeout, firing
+# hardest exactly when the engine is already under the memory pressure
+# that caused the original incident (nexus-33hpq, nexus-b32rx).
+#
+# FIX: a ``httpx.ReadTimeout`` on THIS call (the chunk-carrying POST) is
+# no longer retried, matching the old path's actual behavior. See
+# ``write_manifest_many``'s ``page_carries_chunks`` branch below —
+# ``retry_read_timeout=False`` closes the inner self-heal retry
+# (``RefreshableHttpStoreMixin._send``), and catching+converting the
+# ``httpx.ReadTimeout`` into :class:`~nexus.errors.CombinedWriteEmbedTimeoutError`
+# closes the outer ``_manifest_write_with_retry`` retry too (that
+# classifier — ``nexus.retry._is_connectivity_error`` — inspects
+# exception type/chain only, so a bare re-raised ``httpx.ReadTimeout``
+# would still be retried there even after the inner layer stopped).
+# Every OTHER exception this call can raise
+# (``ConnectionResetError``/``httpx.ConnectError``/etc. — genuine
+# connectivity blips, GH #1371) is UNCHANGED at both layers; this
+# narrowing applies to ReadTimeout on this ONE call only, never to
+# ``nexus.retry``'s general classifier or any other catalog call.
+#
+# Deeper mitigation (bounded embed concurrency / engine-side admission
+# control / cancellation) remains Phase 2 (engine-tag-cut) scope per T2
+# ``nexus/assess-local-index-cluster-2026-08-10`` items 6-7 — explicitly
+# NOT this fix.
+_COMBINED_WRITE_EMBED_TIMEOUT_S = 600.0
+
 #: Page size for update_many POSTs — same MAX_BATCH_DOC_IDS cap as
 #: register_many (nexus-xedhp).
 _UPDATE_MANY_PAGE = 1000
@@ -346,8 +420,29 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         filtered = {k: v for k, v in params.items() if v is not None and v != ""}
         return super()._get(f"/v1/catalog{path}", params=filtered)
 
-    def _post(self, path: str, body: dict | None = None) -> Any:
-        return super()._post(f"/v1/catalog{path}", body or {})
+    def _post(
+        self,
+        path: str,
+        body: dict | None = None,
+        *,
+        timeout: float | None = None,
+        retry_read_timeout: bool = True,
+    ) -> Any:
+        """``timeout`` (nexus-y9t08): optional per-call override forwarded
+        to the mixin's ``_post`` — see that method's docstring. ``None``
+        (the default) means every existing call site is byte-identical to
+        before this kwarg existed; only ``write_manifest_many``'s
+        chunk-carrying (combined-write) branch passes a non-default value.
+
+        ``retry_read_timeout`` (nexus-y9t08 CRITICAL 1 correction):
+        forwarded to the mixin's ``_post`` unchanged — default ``True``
+        means every existing call site keeps retrying a ``ReadTimeout``
+        exactly as before this kwarg existed. Only
+        ``write_manifest_many``'s chunk-carrying branch passes ``False``.
+        """
+        return super()._post(
+            f"/v1/catalog{path}", body or {}, timeout=timeout, retry_read_timeout=retry_read_timeout,
+        )
 
     def _docs_from(self, result: Any) -> list[CatalogEntry]:
         if not result:
@@ -644,6 +739,61 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             "dim": int(result.get("dim", dim)),
             "count": int(result["count"]),
             "orphans": result.get("orphans", []),
+        }
+
+    def manifest_null_collection_report(self) -> dict:
+        """Read-only census of the manifest population :meth:`manifest_orphans`
+        cannot see (T2 nexus/chroma-residue-plan-2026-08-10 §C2): rows with
+        ``collection IS NULL``.
+
+        Returns ``{"total": <n>, "backfillable": <m>, "unavailable": <bool>}``.
+        ``total`` is every live-document manifest row with a NULL collection;
+        ``backfillable`` is the subset :meth:`manifest_backfill` would stamp
+        (the owning document has a ``physical_collection``). ``total -
+        backfillable`` is PERMANENTLY excluded from every orphan/verify check
+        — ghost/sourceless documents, whose manifest rows never get a
+        collection stamp (backfill or no backfill; see
+        ``CatalogRepository.manifestNullCollectionReport``'s javadoc).
+
+        Degrades gracefully on a pre-route engine (404): the route ships
+        after this bead's engine tag, and ``REQUIRED_ENGINE_VERSION`` may
+        still be pinned below it at any given moment — an expected, not
+        exceptional, condition (same shape as :meth:`descendants`). Unlike
+        ``descendants``, there is no client-side fallback computation that
+        would not itself be the O(catalog) full-corpus walk this route
+        exists to avoid — so a 404 (or any other failure) returns
+        ``{"total": 0, "backfillable": 0, "unavailable": True}``: an HONEST
+        "cannot determine," never a silent clean zero. Callers MUST check
+        ``unavailable`` before trusting ``total == 0`` as a real answer.
+        """
+        try:
+            result = self._get("/manifest/null_collection")
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            _log.warning(
+                "http_catalog_client.manifest_null_collection_report_failed",
+                status=status,
+            )
+            return {"total": 0, "backfillable": 0, "unavailable": True}
+        except Exception as exc:  # noqa: BLE001 — best-effort read-only diagnostic; never crash the caller
+            _log.warning(
+                "http_catalog_client.manifest_null_collection_report_failed",
+                error=str(exc),
+            )
+            return {"total": 0, "backfillable": 0, "unavailable": True}
+        result = result or {}
+        if "total" not in result:
+            # Same fail-honest contract as manifest_orphans' `count` field —
+            # a stripped `total` key must not read as a clean zero.
+            _log.warning(
+                "http_catalog_client.manifest_null_collection_report_malformed",
+                keys=sorted(result),
+            )
+            return {"total": 0, "backfillable": 0, "unavailable": True}
+        return {
+            "total": int(result.get("total", 0) or 0),
+            "backfillable": int(result.get("backfillable", 0) or 0),
+            "unavailable": False,
         }
 
     def chash_conformance_report(self, dim: int) -> dict:
@@ -1577,10 +1727,38 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return int(self.stats().get("doc_count", 0))
 
     def descendants(self, prefix: str) -> list[dict]:
-        # Server has no dedicated descendants route; pull all and filter
-        result = self._get("/list", limit=500)
-        docs = result.get("documents", []) if result else []
-        return [d for d in docs if d.get("tumbler", "").startswith(prefix + ".")]
+        """All documents whose tumbler starts with ``prefix + "."`` (T2 nexus/chroma-residue-plan-2026-08-10 §C1).
+
+        Uses the dedicated ``GET /descendants`` engine route — one unbounded
+        query, complete by construction. The route ships in engine-service
+        v0.1.70, which is ``REQUIRED_ENGINE_VERSION`` as of this release, so
+        every engine a client may run against carries it; the 404-triggered
+        paginated fallback that existed while the floor was below that tag
+        was deleted by its own retirement tripwire
+        (``TestDescendantsFallbackDoesNotOutliveItsRoute``) in the same
+        change that bumped the floor. A 404 here is now a real failure and
+        propagates.
+
+        The PRE-FIX behaviour pulled a single unfiltered ``limit=500``
+        ``/list`` page and filtered client-side — silently truncating any
+        subtree larger than one page with no error (verified 0% coverage on
+        11 of the 12 largest cloud-catalog subtrees, reproduced against the
+        live 19,824-document catalog). That is what this route replaced.
+
+        Do NOT read "one server-side query" as "one INDEX SEEK". The route's
+        predicate is ``tumbler LIKE prefix || '.%'``, which a B-tree can
+        accelerate only under a pattern-indexable collation (C locale, which
+        the bundled local PG uses — ``initdb --no-locale`` in
+        ``scripts/build_pg_bundle.sh``) and with no ``text_pattern_ops``
+        index present anywhere. The managed cloud deployment's collation is
+        not provisioned or verified anywhere in this repo, so on cloud this
+        may be a sequential scan. What the route guarantees unconditionally
+        is COMPLETENESS; index acceleration is unverified there. (Carried
+        forward from the deleted fallback's docstring, which corrected
+        ab7907fb's commit message for asserting more than was established.)
+        """
+        result = self._get("/descendants", prefix=prefix)
+        return result.get("documents", []) if result else []
 
     def set_alias(self, tumbler: Tumbler | str, canonical: Tumbler | str) -> None:
         self._post("/update", {"tumbler": str(tumbler), "alias_of": str(canonical)})
@@ -2969,7 +3147,47 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 body["chunks"] = chunks
                 if force_re_embed:
                     body["force_re_embed"] = True
-            result = self._post("/manifest/write_many", body)
+            if page_carries_chunks:
+                # nexus-y9t08: this page's POST triggers a synchronous
+                # server-side embed — give it the embed-appropriate
+                # budget, not the 30s control-plane default. See the
+                # constant's docstring above for the (a)-vs-(b) scoping
+                # decision and the CORRECTED retry decision.
+                #
+                # retry_read_timeout=False: a ReadTimeout here must fail
+                # ONCE, not retry — matches the predecessor path's
+                # deliberate exclusion of timeouts (see the constant's
+                # docstring). Caught below and converted to
+                # CombinedWriteEmbedTimeoutError so the OUTER
+                # nexus.retry._manifest_write_with_retry wrapper (around
+                # this whole call, from indexer.py's flush path) also does
+                # not retry — that classifier is type/chain-based only, so
+                # a bare re-raised httpx.ReadTimeout (which IS-A
+                # httpx.TransportError) would still be retried there even
+                # after this inner self-heal opt-out. The deferred-raise
+                # below (store the exception, raise it OUTSIDE the except
+                # block) deliberately avoids implicit __context__ chaining
+                # back to the original ReadTimeout — a chained context
+                # would still classify as connectivity at the outer layer
+                # despite the new top-level type (verified: `raise ... from
+                # None` clears __cause__ but NOT __context__).
+                _pending_timeout: httpx.ReadTimeout | None = None
+                try:
+                    result = self._post(
+                        "/manifest/write_many", body,
+                        timeout=_COMBINED_WRITE_EMBED_TIMEOUT_S,
+                        retry_read_timeout=False,
+                    )
+                except httpx.ReadTimeout as _rt:
+                    _pending_timeout = _rt
+                if _pending_timeout is not None:
+                    raise CombinedWriteEmbedTimeoutError(
+                        collection=collection or "",
+                        chunk_count=len(chunks) if chunks else 0,
+                        original=str(_pending_timeout),
+                    )
+            else:
+                result = self._post("/manifest/write_many", body)
             result = result if isinstance(result, dict) else {}
             if page_carries_chunks:
                 # nexus-wxjr6 ack-echo (design memo §5.2) — see docstring.

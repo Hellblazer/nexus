@@ -115,6 +115,13 @@ COPY --chown=nexus:nexus native/ /opt/nexus-service-native/
 COPY rehearse.sh /home/nexus/rehearse.sh
 COPY rehearse_guided.sh /home/nexus/rehearse_guided.sh
 COPY rehearse_shakeout.sh /home/nexus/rehearse_shakeout.sh
+# lib/ MUST ship with the driver that sources it. rehearse_shakeout.sh sources
+# lib/store_put_census.sh for its Phase D census (nexus-xm0cp); without this
+# COPY the source fails, census_concurrent_store_puts is undefined, and
+# `set -u` kills the run at STORE_FAILS before Phase E — which is how the
+# 2026-08-10 engine cut was caught. Copying the DIRECTORY, not the one file,
+# so a second lib does not repeat this.
+COPY lib/ /home/nexus/lib/
 COPY seed_legacy.py /home/nexus/seed_legacy.py
 
 # Default: the full manual rehearsal. run.sh --guided overrides the command to

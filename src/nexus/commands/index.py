@@ -315,9 +315,103 @@ class _ETATicker:
         with self._lock:
             n, total, chunks = self._n, self._total, self._chunks
             elapsed = time.monotonic() - self._start_mono
-        if total <= 0:
+        if total <= 0 or n == 0:
+            # Mutual exclusion with _PhaseHeartbeat (heartbeat double-fire
+            # fix, T2 22168 follow-up): start() fires from on_start, which
+            # precedes the whole pre-file-loop window (catalog
+            # registration, staleness caches) — n stays 0 throughout that
+            # window. A meaningless "0/N files … pending" tick there would
+            # fire concurrently with _PhaseHeartbeat's own "still running"
+            # tick for whichever pre-loop phase is currently armed.
+            # Suppressing emission until the first file genuinely completes
+            # confines this ticker's live window to exactly the per-file
+            # loop, where _PhaseHeartbeat is disarmed (see on_file below).
             return
         self._emit(_format_eta(n, total, chunks, elapsed))
+
+
+# ── phase liveness heartbeat (index-output-ux-assessment-2026-08-10 §7.1) ───
+
+
+class _PhaseHeartbeat:
+    """Guarantee no ``[post]`` phase goes silent for more than *interval*
+    seconds.
+
+    Armed with the just-announced phase label on every ``on_phase`` call;
+    disarmed by the NEXT ``on_phase`` call (or by the command's own
+    ``finally`` block at run end). While armed, a background thread emits
+    ``  [post] <label> still running (Xs elapsed)`` every *interval*
+    seconds: 10s on a TTY (rendered in place with a leading ``\\r``, no
+    scrollback cost) or 30s non-TTY (appended as a real line — a 14-minute
+    silent phase adds at most ~28 lines, never a ``\\r``).
+
+    A 60s interval (the existing ``_ETATicker``'s cadence) was rejected:
+    it would tick the observed 74.6s misclassified-prune phase exactly
+    once — not a believable "still alive" signal. This class is
+    deliberately separate from ``_ETATicker``: the ticker's file-count
+    ETA format is meaningless once the per-file loop ends, whereas this
+    heartbeat covers every phase, including the ones the ticker never
+    saw at all.
+    """
+
+    def __init__(
+        self,
+        *,
+        is_tty: bool,
+        echo: Callable[[str, bool], None],
+        interval: float | None = None,
+    ) -> None:
+        self._interval = interval if interval is not None else (10.0 if is_tty else 30.0)
+        self._is_tty = is_tty
+        self._echo = echo
+        self._done = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._label = ""
+        self._start_mono = 0.0
+        self._ticked = False
+
+    def arm(self, label: str) -> None:
+        # Disarm any still-running heartbeat for the PREVIOUS phase first —
+        # only one phase is ever live at a time.
+        self.disarm()
+        with self._lock:
+            self._label = label
+            self._start_mono = time.monotonic()
+            self._done.clear()
+        self._thread = threading.Thread(
+            target=self._loop, name="nx-phase-heartbeat", daemon=True,
+        )
+        self._thread.start()
+
+    def disarm(self) -> None:
+        self._done.set()
+        thread = self._thread
+        self._thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        if self._ticked and self._is_tty:
+            # Move off the in-place \r line before the caller prints the
+            # next real phase-transition message on a fresh line.
+            self._echo("", True)
+        self._ticked = False
+
+    def _loop(self) -> None:
+        while not self._done.wait(self._interval):
+            self._tick()
+
+    def _tick(self) -> None:
+        with self._lock:
+            label, start = self._label, self._start_mono
+        if not label:
+            return
+        elapsed = time.monotonic() - start
+        msg = f"  [post] {label} still running ({elapsed:.0f}s elapsed)"
+        self._ticked = True
+        if self._is_tty:
+            self._echo(f"\r{msg}", False)
+        else:
+            self._echo(msg, True)
 
 
 @index.command("repo")
@@ -523,6 +617,10 @@ def index_repo_cmd(
         total_chunks = 0
         skipped_files = 0
         eta_ticker = _ETATicker(emit=lambda msg: click.echo(f"  {msg}", err=True))
+        phase_heartbeat = _PhaseHeartbeat(
+            is_tty=sys.stdout.isatty(),
+            echo=lambda msg, nl: click.echo(msg, nl=nl, err=True),
+        )
 
         def on_start(count: int) -> None:
             nonlocal bar, total
@@ -539,7 +637,30 @@ def index_repo_cmd(
             total_chunks += chunks
             if not chunks:
                 skipped_files += 1
+            if n == 1:
+                # Heartbeat double-fire fix (T2 22168 follow-up): the FIRST
+                # genuine per-file completion is real "still alive"
+                # evidence that supersedes whatever pre-loop phase
+                # heartbeat (catalog registration / staleness caches) is
+                # still armed from the last on_phase call — nothing
+                # disarms it otherwise until the NEXT on_phase call, which
+                # in production doesn't fire again until well after the
+                # code/prose/pdf loops finish (RDR phase announcement).
+                # From here through the end of the loop, _ETATicker's own
+                # "n/total files" ticks are the liveness signal, so the
+                # two background tickers must never both be live at once.
+                # Idempotent: disarm() on an already-disarmed heartbeat is
+                # a documented no-op.
+                phase_heartbeat.disarm()
             eta_ticker.record(chunks)
+            if n >= total:
+                # The file-count ETA ticker's job ends when the per-file
+                # loop does — its "N/total files" format is meaningless
+                # during post-processing (see on_phase below for the
+                # post-processing heartbeat). Idempotent: safe even if
+                # a later loop (e.g. RDR files, uncounted in `total`)
+                # keeps calling on_file past this point.
+                eta_ticker.stop()
             if bar is not None:
                 bar.update(1)
                 # nexus-6xqk: cumulative chunks + skipped count alongside
@@ -561,21 +682,28 @@ def index_repo_cmd(
                 else:
                     click.echo(line)
 
-        post_pass_started = False
-
         def on_phase(msg: str) -> None:
             # nexus-vatx Gap 2: surface post-processing phases so the operator
             # knows the indexer is still busy after the per-file bar finishes.
             # Stderr so the line is visible even when stdout is redirected.
-            nonlocal post_pass_started
-            if not post_pass_started:
-                # nexus-6xqk follow-up: file walk is done by the time the
-                # first post-pass phase fires. Stop the ETA ticker so its
-                # 60-second loop doesn't spam the same "done" line on top
-                # of the post-pass output.
-                post_pass_started = True
-                eta_ticker.stop()
+            #
+            # index-output-ux-assessment-2026-08-10: this used to stop the
+            # ETA ticker HERE, on the FIRST on_phase call, on the theory
+            # that "the file walk is done by the time the first post-pass
+            # phase fires". That premise is false — the first on_phase
+            # call (e.g. "Registering N catalog entries…") fires from
+            # indexer.py BEFORE the per-file loop even starts (on_start at
+            # indexer.py:3496 precedes the first run_file_loop call at
+            # :4252), so the ticker was being killed within seconds of
+            # every run, never alive for either the file loop or
+            # post-processing. The ticker now stops itself from on_file
+            # once the file loop actually completes (see above). This
+            # callback's own job is now the phase heartbeat: guarantee no
+            # phase — pre-loop OR post-processing — goes silent for more
+            # than 10s (TTY) / 30s (non-TTY).
+            phase_heartbeat.disarm()
             click.echo(f"  [post] {msg}", err=True)
+            phase_heartbeat.arm(msg)
 
         def _emit_retry_summary() -> None:
             # Review remediation (Reviewer A/I-2): emit the retry-time summary
@@ -693,6 +821,7 @@ def index_repo_cmd(
                                      on_stage_timers=on_stage_timers) or {}
         finally:
             eta_ticker.stop()
+            phase_heartbeat.disarm()
             if bar:
                 bar.close()
             _emit_retry_summary()
@@ -818,6 +947,32 @@ def index_repo_cmd(
                 f"'nx index pdf --allow-degraded-extraction <file>' to accept "
                 f"the extraction deliberately, or 'nx index pdf <file>' after "
                 f"fixing the underlying extraction (e.g. --extractor mineru)."
+            )
+        # nexus-4s1ww / GH #1432: when every (or some) file's chunk-batch
+        # flush permanently fails (post bisect-retry — ChunkBatcher.
+        # failed_files, see indexer._run_index), the write path silently
+        # dropped chunks while the run still printed "Done." and exited 0.
+        # A stdout WARNING (click.echo(), plain — never print(), never
+        # structlog for the user-facing line) plus a non-zero exit close
+        # both channels a human or a script would check. ANY count > 0
+        # fails the run, matching the pdf_quality_gate_failed precedent
+        # above: one file's chunks permanently missing is the same
+        # severity class as all of them, just smaller in count — not
+        # gated on "every file failed."
+        chunk_flush_failed_files = (stats or {}).get("chunk_flush_failed_files", 0)
+        if chunk_flush_failed_files:
+            click.echo(
+                f"Warning: {chunk_flush_failed_files}/{n} file(s) failed to "
+                f"flush chunk uploads (zero chunks landed for the affected "
+                f"file(s)) — see the chunk_batch_flush_failed log events "
+                f"for details. Re-run 'nx index repo' to retry; the "
+                f"affected files are stale and will be retried "
+                f"automatically."
+            )
+            raise click.ClickException(
+                f"{chunk_flush_failed_files} file(s) failed to flush chunk "
+                f"uploads this run (nexus-4s1ww) — see the WARNING line "
+                f"above."
             )
 
 
