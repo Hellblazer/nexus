@@ -125,6 +125,40 @@ stamping. After **any** pull/rebase that touches `service/`, rebuild with
 client probe hard-rejects it). Symptom of forgetting: the entire suite errors
 instantly at setup (thousands of `E`s in seconds).
 
+## E2E isolation: a sandboxed HOME does NOT isolate a service install
+
+**Only a container isolates the service unit. `HOME` / `NEXUS_CONFIG_DIR` do
+not.** The developer box runs Hal's real cloud-mode install beside this
+checkout, so a harness that registers the autostart unit collides with
+production, not with a sandbox.
+
+- `_activate_cmd` (`src/nexus/daemon/installer.py`) runs
+  `launchctl bootstrap gui/$UID <plist>` — the GUI session domain is keyed on
+  **uid**, not HOME. Linux: `systemctl --user enable --now`, same shape.
+- The label is a hard constant, `_SERVICE_LAUNCHD_LABEL = "com.nexus.service"`
+  (`src/nexus/commands/daemon.py`). A swapped HOME only relocates the plist
+  FILE; it still loads into the production domain under the production label.
+
+Two things keep the harnesses safe today, neither of them HOME:
+
+1. **The consent gate** — `_decide_autostart` (`src/nexus/commands/init.py`):
+   a non-interactive run with no flag DECLINES; a unit is never written without
+   an explicit `--yes`. This is why `local-service-gate.sh`'s bare
+   `nx init --service` writes nothing.
+2. **Explicit `--no-autostart`** at the host-side sites (`fresh-install-mvv.sh`,
+   `release-sandbox.sh`).
+
+**Rule when authoring or moving an E2E script:** any `nx init` carrying
+`-y`/`--yes` without `--no-autostart` must be **container-executed**. Every
+current such site is under `tests/e2e/migration-rehearsal/rehearse_*.sh`. Adding
+a host-side one, or making a container script host-runnable, arms a collision
+whose blast radius is the developer's live machine, not a red CI job.
+Un-linted — tracked on `nexus-d5yu5`, which also records the subtler hazard:
+`InstallStatus.ALREADY_PRESENT` reports an existing identical unit as success,
+so a harness on that path can poll **production's** lease and pass green while
+measuring the wrong service. A differing unit is fail-loud
+(`InstallerError` -> `SystemExit(1)`); an identical one is not.
+
 ## Mode defaults (RDR-109 Phase 1)
 
 The suite runs in **local mode by default** — no API keys, ONNX MiniLM embedding function via `chromadb.DefaultEmbeddingFunction`. This matches CI (which has no credentials) and reproduces a clean-install developer environment.

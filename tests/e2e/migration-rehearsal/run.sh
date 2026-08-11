@@ -137,6 +137,15 @@ COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.70}"
 # collapses to zero (equals the current floor), but does NOT itself detect
 # "two releases behind" — that still needs a human/agent check at the next
 # floor bump.
+# THE UNIT IS RELEASES, NOT ENGINE TAGS (2026-08-11). PREV_ENGINE_TAG is the
+# engine the PREVIOUS RELEASE PINNED. An engine tag that is cut, published and
+# gated but never pinned by any release is a SKIPPED version and must NOT be
+# rotated onto — it would point this leg's "previous install" at a hop no user
+# ever made. Worked example: v0.1.70 was cut, then a defect (nexus-syfes) sent
+# 7.6.0 out on v0.1.71 instead, so at that floor bump COLD_TAG moved to
+# v0.1.71 while these two correctly STAYED at 7.5.0 / v0.1.69 — 7.5.0 being
+# the previous release and v0.1.69 what it pinned. The guard below does not
+# catch this case either; only a human/agent check does.
 PREV_RELEASE="${NEXUS_PREV_RELEASE:-7.5.0}"
 PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.69}"
 # RDR-185 P4.3 (nexus-n7u38.30): the ERA-HOP's starting point. Deliberately NOT
