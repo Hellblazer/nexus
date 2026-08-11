@@ -474,11 +474,23 @@ def _run_check_plan_library() -> None:
         raise click.exceptions.Exit(1)
 
 
-def _run_trim_telemetry(days: int) -> None:
-    """Delete aged audit-log rows older than *days* (RDR-087 P2.4; nexus-7365x).
+def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
+    """Delete (or, with ``dry_run=True``, PREVIEW) aged audit-log rows older
+    than *days* (RDR-087 P2.4; nexus-7365x).
 
     Trims both ``search_telemetry`` (RDR-087) and ``hook_failures`` (RDR-164 P0
     audit-table TTL parity) — the two age-reaped, no-cascade audit tables.
+
+    ``dry_run=True`` reports what WOULD be removed without deleting anything
+    (the search_telemetry trim-preview gap this closes: until now there was
+    no way to learn the row count before ``--trim-telemetry`` deleted it —
+    see T2 ``nexus/shakedown-2026-08-11-s11-telemetry``). Both tables are
+    previewed together under one ``--dry-run`` — trimming ``search_telemetry``
+    for real while only previewing ``hook_failures`` (or vice versa) would be
+    a worse footgun than the missing feature, so
+    :meth:`HttpTelemetryStore.trim_hook_failures` grew the identical
+    ``dry_run`` contract alongside :meth:`trim_search_telemetry` rather than
+    leaving it a partial, single-table preview.
     """
     # nexus-ingey: this used to construct Telemetry(db_path) unconditionally.
     # On a migrated box that is the FROZEN SQLite — the verb trimmed a file
@@ -494,8 +506,8 @@ def _run_trim_telemetry(days: int) -> None:
 
     try:
         store = HttpTelemetryStore()
-        deleted_search = store.trim_search_telemetry(days=days)
-        deleted_hooks = store.trim_hook_failures(days=days)
+        deleted_search = store.trim_search_telemetry(days=days, dry_run=dry_run)
+        deleted_hooks = store.trim_hook_failures(days=days, dry_run=dry_run)
     except (httpx.HTTPError, RuntimeError) as exc:
         # Same class as _report_aspect_queue_service above (review
         # 2026-07-25): store CONSTRUCTION resolves the endpoint and raises
@@ -507,18 +519,20 @@ def _run_trim_telemetry(days: int) -> None:
         # Reporting nothing trimmed would be the false-clean this whole
         # commit exists to remove — say UNKNOWN and exit non-zero so a
         # scripted caller cannot mistake a failed trim for a completed one.
+        verb = "preview" if dry_run else "trim"
         click.echo(
-            f"Error: telemetry trim unavailable ({exc}). Nothing was "
+            f"Error: telemetry {verb} unavailable ({exc}). Nothing was "
             "trimmed and the live retention state is UNKNOWN.",
             err=True,
         )
         raise click.exceptions.Exit(2)
+    verb = "Would trim" if dry_run else "Trimmed"
     for table, deleted in (
         ("search_telemetry", deleted_search),
         ("hook_failures", deleted_hooks),
     ):
         noun = "row" if deleted == 1 else "rows"
-        click.echo(f"Trimmed {deleted} {table} {noun} older than {days} days.")
+        click.echo(f"{verb} {deleted} {table} {noun} older than {days} days.")
 
 
 # ── --check-aspect-queue (nexus-1pfq) ────────────────────────────────────────
@@ -1186,7 +1200,8 @@ def _run_check_mineru() -> None:
     "--dry-run",
     is_flag=True,
     default=False,
-    help="Report affected entries without writing changes (use with --fix-paths).",
+    help="Report affected entries without writing changes "
+         "(use with --fix-paths or --trim-telemetry).",
 )
 @click.option(
     "--check-schema",
@@ -1322,7 +1337,8 @@ def _run_check_mineru() -> None:
     is_flag=True,
     default=False,
     help="Delete search_telemetry rows older than --days (default 30) to "
-         "cap T2 disk use. RDR-087 Phase 2.4.",
+         "cap T2 disk use. RDR-087 Phase 2.4. Combine with --dry-run to "
+         "preview the count without deleting.",
 )
 @click.option(
     "--check-post-store-hooks",
@@ -1466,7 +1482,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if trim_telemetry:
-        _run_trim_telemetry(days=days)
+        _run_trim_telemetry(days=days, dry_run=dry_run)
         return
 
     if check_post_store_hooks:

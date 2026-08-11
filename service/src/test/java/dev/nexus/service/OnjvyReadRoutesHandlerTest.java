@@ -279,6 +279,55 @@ class OnjvyReadRoutesHandlerTest {
         assertThat(resp.statusCode()).isNotEqualTo(200);
     }
 
+    // ── search_telemetry trim dry-run preview ─────────────────────────────────
+    //
+    // Routing-seam counterpart to TelemetryRepositoryTest's
+    // trimSearchTelemetry_dryRun_* tests: proves dry_run is actually parsed
+    // off the wire and threaded to the repository, not just implemented at
+    // the Java-method level a route could still fail to reach.
+
+    @Test
+    void searchTrim_dryRun_isRoutedAndPreviewMatchesRealTrim() throws Exception {
+        var batch = post("/v1/telemetry/search/batch",
+            "{\"rows\":[[\"2024-01-15T10:30:00Z\",\"route-trim-old\",\"code__routes\",5,2,0.3,0.5]]}");
+        assertThat(batch.statusCode()).isEqualTo(200);
+
+        var preview = post("/v1/telemetry/search/trim", "{\"days\":30,\"dry_run\":true}");
+        assertThat(preview.statusCode())
+            .as("a non-200 here means dry_run is not wired through the route")
+            .isEqualTo(200);
+        var previewBody = mapper.readValue(preview.body(), MAP_T);
+        assertThat(previewBody).containsKeys("deleted", "dry_run");
+        assertThat(previewBody.get("dry_run")).isEqualTo(true);
+        int previewCount = ((Number) previewBody.get("deleted")).intValue();
+        assertThat(previewCount)
+            .as("must count at least the seeded aged row").isGreaterThanOrEqualTo(1);
+
+        var real = post("/v1/telemetry/search/trim", "{\"days\":30,\"dry_run\":false}");
+        assertThat(real.statusCode()).isEqualTo(200);
+        var realBody = mapper.readValue(real.body(), MAP_T);
+        assertThat(realBody.get("dry_run")).isEqualTo(false);
+        assertThat(((Number) realBody.get("deleted")).intValue())
+            .as("real trim over HTTP must delete exactly what the preview reported")
+            .isEqualTo(previewCount);
+    }
+
+    @Test
+    void searchTrim_omittedDryRun_defaultsToRealDelete() throws Exception {
+        // Backward compatibility: a caller that never sends dry_run (every
+        // pre-existing client call) must still get the OLD real-delete
+        // behavior, not an accidental no-op.
+        var batch = post("/v1/telemetry/search/batch",
+            "{\"rows\":[[\"2024-01-15T10:30:00Z\",\"route-trim-compat\",\"code__routes\",1,1,0.1,0.5]]}");
+        assertThat(batch.statusCode()).isEqualTo(200);
+
+        var resp = post("/v1/telemetry/search/trim", "{\"days\":30}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body.get("dry_run"))
+            .as("omitted dry_run must default to false").isEqualTo(false);
+    }
+
     private HttpResponse<String> post(String path, String body) throws Exception {
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))

@@ -1373,4 +1373,128 @@ class TelemetryRepositoryTest {
         List<Map<String, Object>> rows = (List<Map<String, Object>>) out.get("rows");
         assertThat(rows.get(0).get("question")).isEqualTo("live question");
     }
+
+    // ── search_telemetry / hook_failures: trim dry-run preview ────────────────
+    //
+    // The gap this closes: trimSearchTelemetry(tenant, days) DELETES with no
+    // way to learn the count first. Recommendation adopted (not a separate
+    // count endpoint): dry-run reuses the EXACT SAME WHERE predicate as the
+    // delete — a SELECT count(*) substituted for the DELETE — so the census
+    // and the action it authorises can never diverge (the nexus-3rr3x class:
+    // purge-trash's dry-run once reported 340 against a live census of
+    // 11,156 because the two were computed by different queries). The tests
+    // below are the non-vacuity proof: seed rows straddling the cutoff, take
+    // the preview, run the real trim, and assert the numbers match AND that
+    // the dry run left the table untouched.
+
+    @Test
+    void trimSearchTelemetry_dryRun_countsWithoutDeleting_thenRealTrimMatches() {
+        String tenant = "tel-trim-dryrun-" + System.nanoTime();
+        // Three rows older than the 30-day cutoff (2024 dates).
+        repo.importSearchRow(tenant, PAST_TS, "dr-old-1", "code__nexus", 10, 5, 0.3, 0.5);
+        repo.importSearchRow(tenant, "2024-02-01T00:00:00Z", "dr-old-2", "code__nexus", 8, 4, 0.2, 0.5);
+        repo.importSearchRow(tenant, "2024-03-01T00:00:00Z", "dr-old-3", "code__nexus", 6, 3, 0.4, 0.5);
+        // One recent row (inside the window) that must survive both calls.
+        String nowTs = OffsetDateTime.now(ZoneOffset.UTC).toString();
+        repo.importSearchRow(tenant, nowTs, "dr-recent", "code__nexus", 5, 2, 0.1, 0.5);
+
+        int preview = repo.trimSearchTelemetry(tenant, 30, true);
+        assertThat(preview).as("dry-run must count exactly the 3 aged rows").isEqualTo(3);
+        assertThat(countSearchTelemetryRows(tenant))
+            .as("dry-run must leave every row in place — nothing physically deleted")
+            .isEqualTo(4);
+
+        int deleted = repo.trimSearchTelemetry(tenant, 30, false);
+        assertThat(deleted)
+            .as("real trim must delete EXACTLY the previewed count — same predicate")
+            .isEqualTo(preview);
+        assertThat(countSearchTelemetryRows(tenant))
+            .as("only the recent row survives the real trim").isEqualTo(1);
+
+        assertThat(repo.trimSearchTelemetry(tenant, 30, true))
+            .as("nothing left to preview after the real trim — preview tracks live state")
+            .isZero();
+    }
+
+    @Test
+    void trimSearchTelemetry_dryRun_isTenantScoped() {
+        String mine = "tel-trim-dr-mine-" + System.nanoTime();
+        String theirs = "tel-trim-dr-theirs-" + System.nanoTime();
+        repo.importSearchRow(mine, PAST_TS, "iso-mine", "code__nexus", 1, 1, 0.1, 0.5);
+        repo.importSearchRow(theirs, PAST_TS, "iso-theirs", "code__nexus", 1, 1, 0.1, 0.5);
+
+        assertThat(repo.trimSearchTelemetry(mine, 30, true))
+            .as("dry-run for tenant A must not count tenant B's rows (RLS)").isEqualTo(1);
+        assertThat(repo.trimSearchTelemetry(theirs, 30, true))
+            .as("tenant B's row is still there and still visible to tenant B").isEqualTo(1);
+    }
+
+    @Test
+    void trimSearchTelemetry_twoArgOverload_stillDeletesForBackwardCompat() {
+        // The pre-existing 2-arg call site (searchTelemetry_batchAndTrim,
+        // Order(6)) must keep compiling and behaving as a real (non-preview)
+        // trim — the 3-arg dry-run overload must not change default behavior.
+        String tenant = "tel-trim-2arg-" + System.nanoTime();
+        repo.importSearchRow(tenant, PAST_TS, "2arg-old", "code__nexus", 1, 1, 0.1, 0.5);
+        int deleted = repo.trimSearchTelemetry(tenant, 30);
+        assertThat(deleted).isEqualTo(1);
+        assertThat(countSearchTelemetryRows(tenant)).isZero();
+    }
+
+    @Test
+    void trimHookFailures_dryRun_countsWithoutDeleting_thenRealTrimMatches() {
+        String tenant = "tel-trim-hooks-dryrun-" + System.nanoTime();
+        repo.importHookFailureRow(tenant, "th-dr-old-1", "code__nexus", "hook_a",
+            "boom", PAST_TS, null, false, "single");
+        repo.importHookFailureRow(tenant, "th-dr-old-2", "code__nexus", "hook_b",
+            "boom", "2024-02-01T00:00:00Z", null, false, "single");
+        String nowTs = OffsetDateTime.now(ZoneOffset.UTC).toString();
+        repo.importHookFailureRow(tenant, "th-dr-recent", "code__nexus", "hook_c",
+            "boom", nowTs, null, false, "single");
+
+        int preview = repo.trimHookFailures(tenant, 30, true);
+        assertThat(preview).as("dry-run must count exactly the 2 aged rows").isEqualTo(2);
+        assertThat(countHookFailuresRows(tenant))
+            .as("dry-run must leave every row in place").isEqualTo(3);
+
+        int deleted = repo.trimHookFailures(tenant, 30, false);
+        assertThat(deleted)
+            .as("real trim must delete EXACTLY the previewed count").isEqualTo(preview);
+        assertThat(countHookFailuresRows(tenant))
+            .as("only the recent row survives the real trim").isEqualTo(1);
+    }
+
+    @Test
+    void trimHookFailures_twoArgOverload_stillDeletesForBackwardCompat() {
+        String tenant = "tel-trim-hooks-2arg-" + System.nanoTime();
+        repo.importHookFailureRow(tenant, "2arg-old", "code__nexus", "hook_a",
+            "boom", PAST_TS, null, false, "single");
+        int deleted = repo.trimHookFailures(tenant, 30);
+        assertThat(deleted).isEqualTo(1);
+        assertThat(countHookFailuresRows(tenant)).isZero();
+    }
+
+    private int countSearchTelemetryRows(String tenant) {
+        try (Connection conn = pg.createConnection("")) {
+            conn.createStatement().execute("SET nexus.tenant = '" + tenant + "'");
+            var rs = conn.createStatement().executeQuery(
+                "SELECT COUNT(*) FROM nexus.search_telemetry WHERE tenant_id='" + tenant + "'");
+            rs.next();
+            return rs.getInt(1);
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private int countHookFailuresRows(String tenant) {
+        try (Connection conn = pg.createConnection("")) {
+            conn.createStatement().execute("SET nexus.tenant = '" + tenant + "'");
+            var rs = conn.createStatement().executeQuery(
+                "SELECT COUNT(*) FROM nexus.hook_failures WHERE tenant_id='" + tenant + "'");
+            rs.next();
+            return rs.getInt(1);
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
 }

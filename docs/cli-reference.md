@@ -2124,9 +2124,12 @@ chroma-backed `T3Database` directly.
 ```
 nx doctor --trim-telemetry              # Delete aged search_telemetry + hook_failures rows (default 30 days)
 nx doctor --trim-telemetry --days 7     # Aggressive retention (minimum 1 day)
+nx doctor --trim-telemetry --dry-run    # Preview the row count WITHOUT deleting
 ```
 
 `--trim-telemetry` trims both age-reaped, no-cascade audit tables: `search_telemetry` (RDR-087, one row per (query, collection) pair on every `nx search` / MCP search call when `telemetry.search_enabled` is true) and `hook_failures` (RDR-164 P0 audit-table TTL parity). Both trims go through the engine (`POST /v1/telemetry/{search,hook_failures}/trim` via `HttpTelemetryStore`) in every mode — there is no longer a local-SQLite arm (nexus-i711w Stage 2 sub-stage A collapsed the seam; nexus-ingey). Run periodically from cron or a CI job; the default 30-day window keeps an analytical signal long enough to detect slow-burn silent-threshold-drop patterns.
+
+Combine with the global `--dry-run` flag to preview the count before deleting anything — the engine computes the preview from the exact same `WHERE` predicate the real delete uses (never a separate count query), so the previewed number is guaranteed to match what a follow-up non-dry-run call removes. `--dry-run` applies to BOTH tables together; there is no way to preview one while trimming the other in the same invocation.
 
 ```
 nx doctor --check-quotas            # Vector-store limits + embedder caps + reranker + retry headroom

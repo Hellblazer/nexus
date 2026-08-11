@@ -375,10 +375,37 @@ public final class TelemetryRepository {
      * Delete search_telemetry rows older than {@code days} days.
      */
     public int trimSearchTelemetry(String tenant, int days) {
+        return trimSearchTelemetry(tenant, days, false);
+    }
+
+    /**
+     * Delete (or, with {@code dryRun=true}, COUNT without deleting) search_telemetry
+     * rows older than {@code days} days.
+     *
+     * <p>DESIGN NOTE (search_telemetry trim preview gap): the dry-run path reuses the
+     * EXACT SAME {@code ts < cutoff} predicate as the delete — a {@code SELECT
+     * count(*)} substituted for the {@code DELETE}, never a second, independently
+     * maintained WHERE clause or a separate count endpoint. This is deliberate: a
+     * census computed by a DIFFERENT predicate than the action it authorises can
+     * drift from that action (the nexus-3rr3x class — {@code purge-trash}'s dry-run
+     * once reported 340 against a live census of 11,156 because the two were
+     * computed by different queries). Sharing the cutoff computation and the
+     * {@link org.jooq.Condition} object between both branches here makes that
+     * drift impossible by construction, not merely unlikely.
+     */
+    public int trimSearchTelemetry(String tenant, int days, boolean dryRun) {
         return tenantScope.withTenant(tenant, ctx -> {
             OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
+            var predicate = SEARCH_TELEMETRY.TS.lt(cutoff);
+            if (dryRun) {
+                Integer count = ctx.selectCount()
+                    .from(SEARCH_TELEMETRY)
+                    .where(predicate)
+                    .fetchOne(0, Integer.class);
+                return count != null ? count : 0;
+            }
             return ctx.deleteFrom(SEARCH_TELEMETRY)
-                .where(SEARCH_TELEMETRY.TS.lt(cutoff))
+                .where(predicate)
                 .execute();
         });
     }
@@ -391,10 +418,29 @@ public final class TelemetryRepository {
      * RLS-scoped via {@code withTenant}.
      */
     public int trimHookFailures(String tenant, int days) {
+        return trimHookFailures(tenant, days, false);
+    }
+
+    /**
+     * Delete (or, with {@code dryRun=true}, COUNT without deleting) hook_failures
+     * rows older than {@code days} days. Same dry-run-reuses-the-delete's-own-
+     * predicate discipline as {@link #trimSearchTelemetry(String, int, boolean)} —
+     * required so {@code nx doctor --trim-telemetry --dry-run} cannot preview one
+     * of the two trimmed tables while silently mutating the other.
+     */
+    public int trimHookFailures(String tenant, int days, boolean dryRun) {
         return tenantScope.withTenant(tenant, ctx -> {
             OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
+            var predicate = HOOK_FAILURES.OCCURRED_AT.lt(cutoff);
+            if (dryRun) {
+                Integer count = ctx.selectCount()
+                    .from(HOOK_FAILURES)
+                    .where(predicate)
+                    .fetchOne(0, Integer.class);
+                return count != null ? count : 0;
+            }
             return ctx.deleteFrom(HOOK_FAILURES)
-                .where(HOOK_FAILURES.OCCURRED_AT.lt(cutoff))
+                .where(predicate)
                 .execute();
         });
     }
