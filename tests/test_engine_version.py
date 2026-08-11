@@ -274,7 +274,30 @@ class TestRequiredEngineVersion:
         # fires at client-tag push under the paired-release choreography;
         # the floor gate ran in --paired-deploy mode and its POST-TAG VERIFY
         # (re-run WITHOUT the flag) is owed once the deploy lands.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 70)
+        # -> (0,1,71) 2026-08-11, conexus 7.6.0 (PAIRED release).
+        # v0.1.70 IS A SKIPPED VERSION: cut, published and fully gated, but
+        # never pinned by any release. This release's own sandbox shakedown
+        # caught a defect in it at step 11/11 — gc_quarantine_orphans and
+        # gc_restore_rereferenced registered their destination collection in
+        # catalog_collections UNCONDITIONALLY and BEFORE the anti-join ran,
+        # so a pass that moved zero rows left an unreferenced projection row
+        # behind permanently (nx catalog doctor --collections-drift reports
+        # it as projection_not_in_t3). Bead nexus-syfes. Fixed by catalog-024
+        # via CREATE OR REPLACE over an untouched catalog-023 (never edit a
+        # shipped changelog in place), cut as v0.1.71. Everything the
+        # (0,1,70) note above describes is CARRIED FORWARD by v0.1.71 — it is
+        # a superset, not a replacement, so both client halves named there
+        # still ship against this floor.
+        # Cut on 8c2e9fa6. Gated: engine suite 1974/0/0 (1 skipped),
+        # --shakeout CANDIDATE SHAKEOUT PASSED pre-tag, --acquire ACQUIRE
+        # GATE PASSED post-publish against the published bytes
+        # (/version release_version=0.1.71). DEPLOYED + cloud-gate GREEN
+        # 2026-08-11, a single hop 0.1.69 -> 0.1.71 since v0.1.70 was never
+        # deployed either (STEP-6 PASS, 0 failures, 0 advisories, no parity
+        # regressions). POST-DEPLOY VERIFY DONE, not owed:
+        # check_engine_release_floor.py WITHOUT --paired-deploy exits 0,
+        # cloud release_version=0.1.71 == floor.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 71)
 
 
 class TestParseEngineVersion:

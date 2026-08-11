@@ -29,36 +29,8 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release (pinned: v7.5.0)
+## Awaiting the next release (pinned: v7.6.0)
 
-### Test-falsification obligation (2026-08-10)
-
-- `conexus/agents/test-validator.md` — new MANDATORY "Falsification" section:
-  every regression test gets a `FALSIFIED:` or `NOT FALSIFIED:` line, obtained
-  by breaking the PRODUCTION code and watching the test go red, never by
-  editing the test. Names the four shapes that shipped past green suites (a
-  double accepting a call production rejects; a fixture reality cannot emit; an
-  assertion on the absence of a negative; a gate whose failure path returns
-  success) and requires a scanned-item count when the change under test IS a
-  gate.
-- `conexus/agents/code-review-expert.md` — new MANDATORY "Test Falsifiability"
-  output section: each added/modified test rated CAN FAIL / CANNOT FAIL with
-  the concrete production edit that would turn it red. Reviewer names the
-  doubtful ones; test-validator does the actual falsification.
-- `conexus/skills/test-validation/SKILL.md` — falsification added to the relay
-  quality criteria and the methodology.
-- `conexus/skills/code-review/SKILL.md` — falsifiability rating added to the
-  relay quality criteria.
-
-Earned 2026-08-10. In one session: a `--force` regression test survived a real
-bug because a bare `MagicMock` accepted a call signature the service-mode
-collection rejects; a T1 handoff mechanism that had NEVER fired in production
-was covered by tests patching a process table with a `comm` value the kernel
-cannot report; and an RDR phase gate was written against a doctor check that
-returns `ok=True` when the engine is unreachable. Every one was caught by the
-same physical act (break it, watch the detector), and every one had previously
-survived being read and judged sound. 2026-08-09 produced five more instances
-of the same shape and is recorded in memory as "the vacuous-verification day".
-
-Until the pin advances, this obligation exists only for agents dispatched from
-a working tree that has it — the installed plugin's reviewers do not ask for it.
+_(empty — the test-falsification obligation previously listed here went live
+with the v7.6.0 pin advance; see `conexus/CHANGELOG.md` [7.6.0] for what
+activated.)_

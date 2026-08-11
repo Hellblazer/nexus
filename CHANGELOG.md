@@ -6,6 +6,115 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.6.0] - 2026-08-11
+
+Paired release with engine-service-v0.1.71 (cut, shakeout-gated,
+acquire-gated on the published bytes, and cloud-deployed 2026-08-11;
+`REQUIRED_ENGINE_VERSION` bumps to it in this release, so fresh local
+installs and package upgrades converge to the same engine identity). Two of
+this release's headline fixes have engine halves in that tag and are inert
+without it, which is why the two ship together.
+
+**engine-service-v0.1.70 is a skipped version.** It was cut, published and
+fully gated, but no release ever pinned it: this release's own sandbox
+shakedown caught a defect in it (the quarantine-registration entry below),
+so the fix was cut as v0.1.71 and that is the identity 7.6.0 ships.
+
+### Fixed
+- **A GC pass that moved no rows permanently registered an empty
+  collection.** `gc_quarantine_orphans` and `gc_restore_rereferenced`
+  registered their destination collection in `catalog_collections`
+  unconditionally, before the anti-join ran. That registration is required
+  because `chunks_<dim>.collection` carries a `catalog_collections` FK and
+  those functions insert directly rather than through the upsert path's
+  auto-stub, but on a pass that moves nothing there is no insert, so the
+  registration was left behind with nothing referencing it. Every prune of a
+  clean collection minted an orphaned projection row, which
+  `nx catalog doctor --collections-drift` reports as `projection_not_in_t3`.
+  Registration now happens inside each function, guarded on there actually
+  being a row to move. Shipped as `catalog-024` via `CREATE OR REPLACE`;
+  `catalog-023` is unmodified. (Requires engine v0.1.71.)
+- **`subtree` queries silently returned at most 500 documents, usually 0**
+  (T2 `nexus/chroma-residue-plan-2026-08-10` §C1). The `query` MCP tool's
+  `subtree` parameter had no server-side implementation: the client issued a
+  single unfiltered `GET /list?limit=500&offset=0` and filtered client-side,
+  with no pagination. On a 19,696-document catalog that is ~2.5% coverage,
+  returned as a plausible short answer with no error. Now wired to a
+  dedicated `GET /v1/catalog/descendants` engine route — one unbounded query,
+  complete by construction. (Requires engine v0.1.71.)
+- **`nx index pdf --force` never cleaned T3 orphan chunks in service mode.**
+  The cleanup called `col.delete(where=...)` while the service-mode
+  collection's signature is `delete(ids)`; the resulting `TypeError` was
+  swallowed by a blanket `except Exception` and downgraded to a warning, so
+  every service-mode `--force` re-ingest silently skipped the cleanup it
+  reported doing. The swallow is gone — a cleanup failure now propagates.
+- **`nx --json` emitted non-JSON on stdout at import time** (nexus-f93r1),
+  breaking any consumer parsing the output.
+- **`nx index repo` could exit 0 when chunk flushes failed** (nexus-4s1ww).
+- **`nx index` output went dark for long stretches** — the ETA ticker was
+  stopped before the file loop and never fired, post-processing phases
+  emitted no heartbeat, and mid-loop flushes reported no progress
+  (nexus-p7tp3, nexus-mx22w, nexus-fx5oe, nexus-rhwg5).
+- **`nx doctor` read clean on manifest rows it structurally could not see**,
+  and two fail-open-to-GREEN surfaces in the upgrade-ladder health path
+  returned `ok=True` on any exception (nexus-v2mdd).
+- **The `/clear` and `/resume` T1 session handoff had never once fired.**
+  `find_mcp_sibling_pids` matched `ps comm`, which for a console script is
+  the interpreter — the script name lives in argv[1], which `comm` excludes
+  by definition — so no handoff marker was ever written and MCP-tool T1
+  silently diverged from CLI T1 on every `/clear`. It failed safe (no
+  siblings found means no marker and no log line), which is why total
+  inertness was indistinguishable from "no MCP running". Now matches on argv,
+  with `ps -ww` so an 80-column truncation cannot hide the argument again.
+- **A transient 5xx on the code path could fail a whole index run**, and the
+  heartbeat double-fired (nexus-nn6vb, nexus-1iw8k, nexus-lkwes).
+- **An uncancellable embed was retried, and the cap override went
+  unvalidated** (nexus-n2w4q); the combined write regained an embed-grade
+  timeout (nexus-y9t08).
+
+### Performance
+- **`nx index repo .` pruning is 11-17x faster** (RDR-191 Phase 1). The
+  orphan sweep was a full-corpus read plus a Python set-difference, and the
+  quarantine "move" round-tripped every chunk's 1024-float embedding and
+  document text over the wire to change one string column. Both are now
+  single SQL statements: an anti-join `UPDATE` behind three
+  `POST /v1/vectors/gc/*` routes. Zero chunk rows and zero embeddings cross
+  the wire; the call returns counts. Measured on this repo (cloud/voyage, no
+  `--force`): pruning 547.8s -> 32.6-48.4s across two runs. It was 70% of
+  wall time. (Requires engine v0.1.71.)
+- **Catalog link generation is ~14x faster on a typical re-index** (37.0s ->
+  2.7s on matched conditions): link generators no longer each fetch the full
+  tenant catalog, and generation is skipped entirely when no new document is
+  of a linkable type.
+- **Two N+1 loops removed from `query()`**, and subtree seeding is now
+  bounded and discloses its bound.
+
+  Per-phase deltas above are measured on matched conditions. Wall-clock is
+  deliberately not quoted as a point estimate: the same prune path varied
+  32.6s to 48.4s across two runs of identical code, so single-run wall
+  comparisons in this environment carry roughly +/-50% on network-bound
+  phases.
+
+### Changed
+- **`REQUIRED_ENGINE_VERSION` -> `(0, 1, 70)`**, which also moves
+  `PINNED_SERVICE_TAG` (derived, not a second hand-typed constant). Bumping
+  the floor retired the 404 fallbacks it obsoletes — the paginated
+  `descendants` walk and the pre-route branches in the GC wrappers — because
+  every engine a client may now run against carries those routes. The
+  capability-based fallbacks (local/in-memory mode) are untouched, as are the
+  client-side GC implementations, whose retirement is RDR-191 Phase 5.
+
+### Plugin (activated by this release's tag)
+- **Regression tests must now be FALSIFIED, not merely read.**
+  `test-validator` emits `FALSIFIED:` / `NOT FALSIFIED:` per regression test,
+  obtained by breaking the production code and watching the detector go red;
+  `code-review-expert` rates each added test CAN FAIL / CANNOT FAIL with the
+  concrete edit that would turn it red. Earned in one session by three tests
+  that could not fail: a `MagicMock` accepting a call signature production
+  rejects, a fixture encoding a `ps` value the kernel cannot emit, and a
+  phase gate written against a health check that returns `ok=True` when its
+  subject is unreachable.
+
 ### Corrected
 - **The 7.5.0 note for `nx index repo` overstated a throughput cost that was
   never measured** (nexus-fdn1c). It said the memory-derived local batch cap
