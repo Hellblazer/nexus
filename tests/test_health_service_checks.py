@@ -2364,6 +2364,17 @@ class TestDoctorFenceCoverageDistinction:
             "tumbler": tumbler,
         })()
 
+    def _baseline(self, indexed_at="2026-08-07T17:00:00+00:00"):
+        """nexus-oiu1t: a STAMPED document — the install's own evidence that it
+        has run a fully-fenced client. Without one in the fixture the check can
+        no longer attribute anything, by design, so every producer-regression
+        test must establish a baseline first."""
+        return self._entry(
+            index_state="complete", index_state_reported=True,
+            indexed_at=indexed_at,
+            source_uri="chroma://code__nexus/baseline.py",
+        )
+
     def _cat(self, entries):
         class _Cat:
             def all_documents(self, limit=0):
@@ -2382,16 +2393,23 @@ class TestDoctorFenceCoverageDistinction:
         return h._check_stale_indexing_runs()
 
     def test_reported_null_after_fence_release_warns(self, monkeypatch) -> None:
-        """The vw594 signature: index_state reported-but-NULL on the WHOLE
-        corpus, with at least one document indexed AFTER the fence's
-        release date — an unfenced producer wrote it. Must WARN, never
-        ok=True, and must NOT reuse the pre-fence "predates" wording (that
-        wording asserts something false: this engine DOES report the
-        fence field)."""
+        """The producer-regression signature: index_state reported-but-NULL,
+        with at least one document indexed AFTER FULL PRODUCER COVERAGE
+        shipped (v7.3.0, 2026-08-07T16:00:35Z) — an unfenced producer wrote
+        it. Must WARN, never ok=True, and must NOT reuse the pre-fence
+        "predates" wording (that wording asserts something false: this
+        engine DOES report the fence field).
+
+        nexus-apig6: this fixture's date used to be 2026-08-04, which is
+        BEFORE full coverage shipped and is therefore no longer the
+        signature at all — see
+        ``test_indexed_between_first_fence_and_full_coverage_does_not_warn``.
+        """
         entries = [
+            self._baseline(),
             self._entry(
                 index_state=None, index_state_reported=True,
-                indexed_at="2026-08-04T16:03:00+00:00",
+                indexed_at="2026-08-10T16:03:00+00:00",
                 source_uri="chroma://code__nexus/foo.py",
             ),
         ]
@@ -2399,7 +2417,348 @@ class TestDoctorFenceCoverageDistinction:
         assert r.ok is False
         assert r.warn is True
         assert "predates the index-run fence" not in r.detail
-        assert "coverage gap" in r.detail or "never calling" in r.detail
+        assert "Two explanations fit" in r.detail
+        # nexus-apig6: the offending document is NAMED, so the operator can
+        # scope the remedy instead of re-embedding the corpus.
+        assert "chroma://code__nexus/foo.py" in r.detail
+
+    def test_indexed_between_first_fence_and_full_coverage_does_not_warn(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-apig6 REGRESSION PIN — the false positive that reached a
+        downstream install (460 of 462 documents flagged, filed as an open
+        upstream bug).
+
+        The threshold used to be v7.1.0's 2026-08-02T22:26Z, the tag time of
+        the FIRST client fence — which stamped at exactly 4 PDF/md/dt ingest
+        sites. Every other producer (repo-index ``_batch_flush``,
+        ``store_put``, code/prose indexers, memory, MCP) was legitimately
+        unfenced until f55435eb, public at v7.3.0 on 2026-08-07T16:00:35Z.
+
+        A document written anywhere in that five-day window by one of those
+        producers is expected, permanent no-backfill debt. It must NOT be
+        reported as a producer regression, and must NOT draw a
+        whole-corpus-re-embed remedy.
+        """
+        entries = [
+            self._baseline(),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-04T16:03:00+00:00",
+                source_uri="chroma://code__nexus/foo.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True, (
+            "a document indexed inside the 08-02..08-07 partial-coverage "
+            f"window is not a producer regression: {r.detail}"
+        )
+        assert r.warn is not True
+        assert "Two explanations fit" not in r.detail
+        assert "chroma://code__nexus/foo.py" not in r.detail, (
+            "a pre-coverage document must not be NAMED as a regression: "
+            f"{r.detail}"
+        )
+
+    def test_regression_just_after_v7_3_0_is_not_absorbed_as_legacy(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-apig6 ROUND-2 PIN (code-review-expert, 2026-08-11).
+
+        The first fix attempt anchored on v7.5.0 (2026-08-09T22:45:30Z) on the
+        unverified claim that full producer coverage shipped there. It did
+        not: f55435eb is an ancestor of v7.3.0 (2026-08-07T16:00:35Z), two
+        releases earlier —
+
+            git tag --contains f55435eb --sort=creatordate | grep '^v' | head -1
+            git merge-base --is-ancestor f55435eb v7.2.0   # non-zero
+
+        so a genuine producer regression landing in the 08-07..08-09 gap was
+        silently absorbed into the "legacy, no action needed" bucket. Same
+        defect class the bead exists to close, merely narrower — and NO
+        fixture in this class exercised that window, which is exactly why the
+        wrong anchor survived a green suite.
+
+        This document is post-coverage and MUST WARN.
+        """
+        entries = [
+            self._baseline(indexed_at="2026-08-07T17:00:00+00:00"),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-08T12:00:00+00:00",
+                source_uri="chroma://code__nexus/in_the_gap.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True, (
+            "a document indexed 2026-08-08 is AFTER full producer coverage "
+            f"(v7.3.0, 2026-08-07T16:00:35Z) and must warn: {r.detail}"
+        )
+        assert "Two explanations fit" in r.detail
+        assert "chroma://code__nexus/in_the_gap.py" in r.detail
+
+    def test_undated_reported_null_is_not_claimed_as_pre_coverage(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-apig6 (code-review-expert, 2026-08-11): a reported-but-NULL
+        document with NO usable ``indexed_at`` cannot be attributed to either
+        side of the coverage boundary. The summary must not fold it into the
+        "indexed before full producer coverage shipped, no action needed"
+        claim — that asserts something no evidence supports, which is the
+        exact overclaiming class this whole bead is about.
+        """
+        entries = [
+            self._entry(
+                index_state=None, index_state_reported=True, indexed_at="",
+                source_uri="chroma://code__nexus/undated.py",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="not-a-timestamp",
+                source_uri="chroma://code__nexus/garbage_date.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True
+        assert "fence live" in r.detail
+        assert "2 carry no usable indexed_at" in r.detail
+        assert "cannot be attributed" in r.detail
+        assert "0 indexed before" in r.detail, (
+            "with both documents undated, ZERO are attributable to the "
+            f"pre-coverage side: {r.detail}"
+        )
+
+    def test_late_upgrader_docs_after_the_release_but_before_its_own_baseline(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-oiu1t — THE CORE CASE. A release-tag anchor assumes the user
+        upgraded the day the release shipped. This install did not: it kept
+        writing with a pre-coverage client until 2026-09-15, when it finally
+        upgraded and its first document got stamped.
+
+        Its documents from 2026-08-20 and 2026-09-01 are dated well AFTER full
+        producer coverage shipped (2026-08-07) and carry no stamp — under a
+        pure release-tag anchor every one of them is reported as a producer
+        regression with a re-embed prescribed. That is the exact false
+        positive nexus-apig6 was filed for, displaced onto a later population.
+
+        The install's OWN earliest stamp is the honest anchor: before it,
+        nothing here had a fenced client.
+        """
+        entries = [
+            self._baseline(indexed_at="2026-09-15T10:00:00+00:00"),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-20T00:00:00+00:00",
+                source_uri="chroma://code__nexus/late_a.py",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-09-01T00:00:00+00:00",
+                source_uri="chroma://code__nexus/late_b.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True, (
+            "documents written before this install's own first stamp were "
+            f"written by a pre-coverage client, not a broken one: {r.detail}"
+        )
+        assert "Two explanations fit" not in r.detail
+        assert "late_a.py" not in r.detail and "late_b.py" not in r.detail
+
+    def test_late_upgrader_still_catches_a_real_regression_after_baseline(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-oiu1t NON-VACUITY CONTROL for the test above. Moving the
+        anchor to install-local evidence must not blind the check: the SAME
+        late-upgrader install, with one additional unstamped document written
+        AFTER its baseline, must still WARN and name only that document.
+
+        Without this, the previous test could be satisfied by a check that
+        simply never warns.
+        """
+        entries = [
+            self._baseline(indexed_at="2026-09-15T10:00:00+00:00"),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-09-01T00:00:00+00:00",
+                source_uri="chroma://code__nexus/late_b.py",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-09-20T00:00:00+00:00",
+                source_uri="chroma://code__nexus/real_regression.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        assert "1 document(s) report index_state" in r.detail, (
+            f"only the post-baseline document is a regression: {r.detail}"
+        )
+        assert "real_regression.py" in r.detail
+        assert "late_b.py" not in r.detail
+
+    def test_pre_coverage_document_is_never_a_candidate(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-oiu1t: the coverage FLOOR is applied when candidates are
+        gathered, and it is load-bearing independently of the install-local
+        anchor.
+
+        Here the install's own earliest stamp is dated 2026-07-01 — impossible,
+        since no client could stamp before the code to stamp existed, so it is
+        clock skew, a restored backup, or a hand-edited row. If the floor were
+        dropped from the walk, that bogus stamp would become the anchor and
+        every document in the 08-02..08-07 partial-coverage window would be
+        reported as a regression again, resurrecting nexus-apig6's false
+        positive through a different door.
+
+        Kill control (run 2026-08-11): deleting the
+        ``ia_dt > _PRODUCER_FENCE_RELEASE_DT`` guard from the walk turns this
+        test RED. Note the ORIGINAL form of this test targeted a ``max()`` in
+        the anchor derivation instead and passed with that max removed — it
+        was vacuous, because the walk-level floor already subsumed it. The
+        max() was deleted as dead code and this test re-pointed at the guard
+        that actually carries the floor.
+        """
+        entries = [
+            self._baseline(indexed_at="2026-07-01T00:00:00+00:00"),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-04T00:00:00+00:00",
+                source_uri="chroma://code__nexus/in_partial_window.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True, (
+            "an impossible pre-release stamp must not lower the anchor below "
+            f"the coverage floor: {r.detail}"
+        )
+        assert "in_partial_window.py" not in r.detail
+
+    def test_early_tier_stamp_does_not_let_the_warn_assert_a_regression(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-2sa6w — the compound scenario BOTH reviewers reproduced
+        independently (code-review-expert Critical + substantive-critic
+        Critical, 2026-08-11), and which no other fixture here covers.
+
+        The fence rolled out in TWO tiers. v7.1.0 (4b0c5fb5) fenced 4 sites,
+        all PDF/md/DEVONthink ingest; the remaining producers (code_indexer,
+        prose_indexer, store_put, ...) only at f55435eb / v7.3.0. Nothing on a
+        catalog row records WHICH producer or client version stamped it.
+
+        So an install still on v7.1.0/v7.2.x can run one PDF ingest, get a
+        stamp, and establish an anchor — while its repo-index and store_put
+        writes stay LEGITIMATELY unfenced. Here: stamp at 2026-08-05, a
+        legitimate unfenced write at 2026-08-09.
+
+        The anchor is real, so this WARNs — that part is correct and must not
+        be silenced (a genuine regression looks identical from here). What it
+        must NOT do is assert the accusatory explanation, which is what the
+        first cut of oiu1t did ("this is a NEW coverage regression — find the
+        producer"). It must name BOTH explanations and point at the cheap
+        discriminator, the client version.
+
+        A real discriminator (per-document producer/client provenance, or
+        restricting anchor evidence to the late-fenced producer family) is
+        tracked as nexus-2sa6w. Until then this check states what it knows.
+        """
+        entries = [
+            self._entry(
+                index_state="complete", index_state_reported=True,
+                indexed_at="2026-08-05T00:00:00+00:00",
+                source_uri="chroma://knowledge__nexus/early_tier_pdf.pdf",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-09T00:00:00+00:00",
+                source_uri="chroma://code__nexus/legit_unfenced.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        assert "legit_unfenced.py" in r.detail
+        # The accusation must be offered as ONE of two readings, never asserted.
+        assert "Two explanations fit" in r.detail
+        assert "v7.1.0-v7.2.x" in r.detail, (
+            "the partial-coverage-client explanation must be named, not "
+            f"implied: {r.detail}"
+        )
+        assert any("nx --version" in s for s in (r.fix_suggestions or [])), (
+            "the cheap discriminator must be the first thing suggested: "
+            f"{r.fix_suggestions}"
+        )
+
+    def test_no_stamped_document_anywhere_cannot_attribute(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-oiu1t: with NO stamped document in the corpus, nothing
+        establishes that this install has ever run a fully-fenced client. A
+        late upgrader and a genuine producer regression are indistinguishable
+        from here, and the release date cannot tell them apart.
+
+        This still WARNS — staying silent here would hide a genuinely unfenced
+        producer on an install that has never once stamped, which is the exact
+        shape the vw594 incident had (and is pinned live by
+        tests/test_cotmr_cli_store_fence.py::TestAcquireGateJourneyDoctorClean
+        ::test_artificially_unfenced_document_still_warns). What nexus-apig6
+        was filed for was not the existence of a warning but its CONTENT: an
+        asserted producer bug it could not prove, remedied by re-embedding the
+        whole corpus. So the WARN must state the ambiguity, must NOT assert a
+        regression, and must prescribe ONE document.
+        """
+        entries = [
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-20T00:00:00+00:00",
+                source_uri="chroma://code__nexus/unknown.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        assert "cannot attribute" in r.detail
+        assert "no document in this corpus has ever been stamped" in r.detail
+        assert "a producer is unfenced (a regression worth finding)" not in r.detail, (
+            f"must not ASSERT a producer regression it cannot prove: {r.detail}"
+        )
+        assert any("any ONE document" in s for s in (r.fix_suggestions or [])), (
+            r.fix_suggestions
+        )
+
+    def test_warn_counts_only_post_coverage_docs_and_excuses_the_rest(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-apig6: a real corpus is MIXED — a large pre-coverage legacy
+        population plus one genuine regression. The WARN must count and name
+        only the regression, and must say out loud that the legacy rows need
+        no action, or the operator reads the total as the blast radius (which
+        is precisely what happened: 460 vs the 2 that mattered).
+        """
+        entries = [
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-07-01T00:00:00+00:00",
+                source_uri=f"chroma://code__nexus/legacy{i}.py",
+            )
+            for i in range(5)
+        ] + [
+            self._baseline(),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-10T09:00:00+00:00",
+                source_uri="chroma://code__nexus/regressed.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        assert "1 document(s) report index_state" in r.detail, (
+            f"must count only the post-coverage document, not all 6: {r.detail}"
+        )
+        assert "chroma://code__nexus/regressed.py" in r.detail
+        assert "legacy0.py" not in r.detail
+        assert "other 5 reported-but-NULL document(s)" in r.detail
+        assert "need no action" in r.detail
 
     def test_reported_null_before_fence_release_stays_ok_with_honest_message(self, monkeypatch) -> None:
         """Quiescent case (nexus-biq4x's own prescribed fix): the fence is
@@ -2442,7 +2801,7 @@ class TestDoctorFenceCoverageDistinction:
             ),
             self._entry(
                 index_state=None, index_state_reported=True,
-                indexed_at="2026-08-04T16:03:00+00:00",
+                indexed_at="2026-08-10T16:03:00+00:00",  # nexus-apig6: post-v7.5.0
                 source_uri="chroma://code__nexus/unfenced.py",
             ),
         ]
@@ -2459,7 +2818,7 @@ class TestDoctorFenceCoverageDistinction:
         )
         assert any(
             "predates the index-run fence" not in r.detail
-            and ("coverage gap" in r.detail or "never calling" in r.detail)
+            and "Two explanations fit" in r.detail
             for r in warns
         )
 

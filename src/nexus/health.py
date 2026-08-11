@@ -4498,15 +4498,59 @@ def _check_chash_conformance_report() -> list[HealthResult]:
 #: this comment instead.
 _STALE_INDEXING_THRESHOLD_HOURS = 6.0
 
-#: v7.1.0 tag time (UTC) — the first PUBLIC release carrying the CLIENT-side
-#: index-run fence (nexus-5xn3k.3, commit 4b0c5fb5). nexus-vw594 F3 / root
-#: cause of nexus-biq4x: used ONLY to distinguish a quiescent-but-fence-aware
-#: corpus (nothing indexed since the fence shipped — expected, still
-#: ok=True) from the nexus-vw594 coverage-gap signature (a document indexed
-#: AFTER this date carries no fence stamp, because its producer never calls
-#: begin/complete at all — see the investigation memo, T2
-#: nx memory get -p nexus -t "vw594-investigation-2026-08-04").
-_FENCE_RELEASE_DT = datetime(2026, 8, 2, 22, 26, 0, tzinfo=UTC)
+#: v7.3.0 tag time (UTC) — the first PUBLIC release in which EVERY producer
+#: stamps the index-run fence (nexus-vw594 F1, commit f55435eb). Used ONLY to
+#: separate a document whose producer was legitimately unfenced when it was
+#: written (permanent no-backfill debt — expected, needs no action) from a
+#: genuine producer regression (a document indexed AFTER full coverage
+#: shipped that still carries no stamp).
+#:
+#: DERIVATION — re-verify with git, never from memory or a bead's prose
+#: (nexus-apig6 got this wrong TWICE from prose, in opposite directions):
+#:     git tag --contains f55435eb --sort=creatordate | grep '^v' | head -1
+#:     git log -1 --format=%cI v7.3.0        # -> 2026-08-07T09:00:35-07:00
+#: and confirm the release BEFORE it does not contain the commit:
+#:     git merge-base --is-ancestor f55435eb v7.2.0   # -> non-zero
+#:
+#: DO NOT move this back to v7.1.0's 2026-08-02T22:26Z. That is
+#: the tag time of the FIRST client fence (nexus-5xn3k.3, commit 4b0c5fb5),
+#: which called begin/complete at exactly 4 PDF/md/dt ingest sites covering
+#: ~105 of 10,544 documents. The producers of the other 96% — the repo
+#: indexer's ``_batch_flush``, ``store_put``, the code/prose indexers, memory,
+#: MCP — were only fenced by f55435eb (2026-08-04), public at v7.3.0. Keyed on
+#: v7.1.0 this check reported every document indexed in the intervening five
+#: days as an unfenced-producer regression and prescribed a whole-corpus
+#: re-embed to fix it; that false positive reached a downstream install, which
+#: filed it as an open upstream bug (460 of 462 documents flagged). See the
+#: investigation memo, T2
+#: nx memory get -p nexus -t "vw594-investigation-2026-08-04".
+#:
+#: Nor forward to v7.5.0's 2026-08-09T22:45:30Z — apig6's first fix attempt
+#: used that date on the unverified claim that coverage shipped there. It
+#: does not: f55435eb is an ancestor of v7.3.0, two releases earlier
+#: (code-review-expert, 2026-08-11). That anchor silently absorbed any real
+#: regression in the 08-07..08-09 window into the "legacy, no action" bucket —
+#: the same defect class this constant exists to close, merely narrower.
+#:
+#: vw594 ruled NO LEGACY BACKFILL as a design decision, so a corpus indexed
+#: before this date reporting index_state=NULL on every row is the EXPECTED
+#: permanent steady state, not drift.
+_PRODUCER_FENCE_RELEASE_DT = datetime(2026, 8, 7, 16, 0, 35, tzinfo=UTC)
+
+#: NOT the anchor on its own — a LOWER BOUND on it (nexus-oiu1t). No client
+#: can have had full producer coverage before the release that carried it, so
+#: no evidence-derived anchor may ever fall below this. See
+#: ``_check_stale_indexing_runs`` for the install-local anchor this floors.
+
+#: How many post-anchor unstamped identifiers are NAMED in the WARN detail.
+_MAX_NAMED_UNSTAMPED = 10
+#: How many candidates are RETAINED during the corpus walk. The walk cannot
+#: know the anchor until it finishes (the anchor is derived from the stamped
+#: population), so candidates are gathered against the floor and filtered
+#: after. Bounded so a fully-unstamped 10k-document corpus cannot grow a list
+#: proportional to the corpus inside a diagnostic-only check; truncation is
+#: reported explicitly, never silently.
+_MAX_TRACKED_UNSTAMPED = 1000
 
 
 def _check_stale_indexing_runs() -> list[HealthResult]:
@@ -4558,7 +4602,33 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
     # CatalogEntry.index_state_reported's docstring.
     reported_null = 0
     not_reported = 0
-    newest_reported_null_dt: datetime | None = None
+    # nexus-apig6/oiu1t: candidate regressions — reported-but-NULL documents
+    # indexed after the coverage FLOOR. Gathered against the floor because the
+    # real anchor is not known until the walk ends; filtered against it after.
+    candidates: list[tuple[str, datetime]] = []
+    candidates_truncated = 0
+    # nexus-oiu1t: the install's OWN evidence that it has run a fenced
+    # producer — the earliest document carrying a real index_state. A fact
+    # about THIS install, unlike a release-tag date, which assumes the user
+    # upgraded the day the release shipped.
+    #
+    # KNOWN LIMIT — a stamp proves SOME producer was fenced, NOT that all were
+    # (code-review-expert, 2026-08-11; verified against git). v7.1.0's fence
+    # (4b0c5fb5) covered 4 PDF/md/DEVONthink ingest sites; the rest arrived at
+    # v7.3.0 (f55435eb), and NOTHING on the row records which producer or
+    # client version stamped it. So a client still on v7.1.0/v7.2.x that runs
+    # one PDF ingest establishes an anchor while its repo-index and store_put
+    # writes stay legitimately unfenced. This check CANNOT tell that from a
+    # regression, so it must not claim to: see the WARN wording below, which
+    # names both explanations rather than asserting the accusatory one. A
+    # discriminator would need per-document producer/client provenance —
+    # follow-up bead, not a claim to make here.
+    earliest_stamped_dt: datetime | None = None
+    # Reported-but-NULL with NO usable indexed_at. Cannot be attributed to
+    # either side of the boundary — counted separately so the ok=True summary
+    # never claims they predate coverage when nothing establishes that
+    # (code-review-expert, 2026-08-11).
+    undated_reported_null = 0
     try:
         # nexus-ft7eg: share this walk with _check_next_seq_drift
         # (_highest_child_seqs' identical `all_documents(limit=0)` scan) —
@@ -4574,21 +4644,42 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
             if state is None:
                 # Fence-aware engine, but this document has never been
                 # stamped (unfenced producer, or simply not re-indexed
-                # since the fence shipped — §_FENCE_RELEASE_DT below tells
-                # these two apart).
+                # since full producer coverage shipped —
+                # §_PRODUCER_FENCE_RELEASE_DT below tells these two apart).
                 reported_null += 1
                 indexed_at = str(getattr(entry, "indexed_at", "") or "")
+                ia_dt = None
                 if indexed_at:
                     try:
                         ia_dt = datetime.fromisoformat(indexed_at.replace("Z", "+00:00"))
                     except ValueError:
                         ia_dt = None
-                    if ia_dt is not None and (
-                        newest_reported_null_dt is None or ia_dt > newest_reported_null_dt
-                    ):
-                        newest_reported_null_dt = ia_dt
+                if ia_dt is None:
+                    undated_reported_null += 1
+                elif ia_dt > _PRODUCER_FENCE_RELEASE_DT:
+                    if len(candidates) < _MAX_TRACKED_UNSTAMPED:
+                        ident = (
+                            str(getattr(entry, "source_uri", "") or "")
+                            or str(getattr(entry, "tumbler", "") or "")
+                            or "?"
+                        )
+                        candidates.append((ident, ia_dt))
+                    else:
+                        candidates_truncated += 1
                 continue
             checked += 1
+            # nexus-oiu1t: a real index_state is proof of a fully-fenced
+            # client at this document's write time.
+            stamped_at = str(getattr(entry, "indexed_at", "") or "")
+            if stamped_at:
+                try:
+                    st_dt = datetime.fromisoformat(stamped_at.replace("Z", "+00:00"))
+                except ValueError:
+                    st_dt = None
+                if st_dt is not None and (
+                    earliest_stamped_dt is None or st_dt < earliest_stamped_dt
+                ):
+                    earliest_stamped_dt = st_dt
             if state != "indexing":
                 continue
             started = getattr(entry, "index_started_at", "") or ""
@@ -4627,28 +4718,125 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
     # NONE fired.
     results: list[HealthResult] = []
 
-    if (
-        reported_null > 0
-        and newest_reported_null_dt is not None
-        and newest_reported_null_dt > _FENCE_RELEASE_DT
-    ):
-        # The vw594 signature: a document landed AFTER the fence existed
-        # with no stamp at all — an unfenced producer wrote it. Never
-        # ok=True for this (nexus-biq4x's misdiagnosis was exactly
-        # rendering this case as a green pre-fence skip).
+    # nexus-oiu1t: derive the anchor from THIS INSTALL's evidence, floored by
+    # the release that first carried full coverage. A release-tag date alone
+    # assumes the user upgraded the day it shipped; an install that upgraded
+    # late wrote legitimately-unfenced documents well after the tag, and
+    # anchoring on the tag reports every one of them as a producer regression
+    # — the identical false positive nexus-apig6 was filed for, merely on a
+    # later population. The floor still applies because no client can have had
+    # full coverage before the release existed, so a stamp claiming to predate
+    # it is clock skew, not evidence.
+    # No floor is applied HERE: candidates were already gathered against
+    # _PRODUCER_FENCE_RELEASE_DT during the walk, so every candidate is above
+    # the floor by construction and an anchor below it cannot change any
+    # outcome. (A max() here was written first and proven dead by its own kill
+    # control — the walk-level floor subsumes it. The floor is pinned by
+    # test_pre_coverage_document_is_never_a_candidate.)
+    anchor = earliest_stamped_dt
+    post_anchor = [c for c in candidates if anchor is not None and c[1] > anchor]
+
+    if post_anchor:
+        # A document landed AFTER this install demonstrably had a fully-fenced
+        # client and still carries no stamp — a NEW producer regression. Never
+        # ok=True for this (nexus-biq4x's misdiagnosis was exactly rendering
+        # this case as a green pre-fence skip).
+        #
+        # nexus-apig6: scoped to the post-anchor population and NAMED. The old
+        # shape reported the whole ``reported_null`` count and prescribed an
+        # unqualified `nx index <path> --force`, which on a corpus indexed
+        # before v7.3.0 reads as "re-embed all 462 of your documents" —
+        # contradicting vw594's own no-backfill decision.
+        post_anchor_count = len(post_anchor)
+        names = "; ".join(
+            f"{ident} ({at.isoformat()})"
+            for ident, at in post_anchor[:_MAX_NAMED_UNSTAMPED]
+        )
+        if post_anchor_count > _MAX_NAMED_UNSTAMPED:
+            names += f"; +{post_anchor_count - _MAX_NAMED_UNSTAMPED} more"
+        truncation_note = (
+            f" (plus {candidates_truncated} candidate(s) beyond the "
+            f"{_MAX_TRACKED_UNSTAMPED}-document tracking cap, not individually "
+            "attributed)"
+            if candidates_truncated else ""
+        )
+        # Truncated candidates were never anchor-filtered, so they are
+        # UNATTRIBUTED — excluded from `legacy` rather than folded into
+        # "predate the anchor, need no action", which would contradict the
+        # truncation note in the same message (code-review-expert, 2026-08-11).
+        legacy = (
+            reported_null - post_anchor_count - undated_reported_null
+            - candidates_truncated
+        )
+        legacy_note = (
+            f" The other {legacy} reported-but-NULL document(s) predate "
+            f"{anchor.isoformat()} and need no action (no legacy backfill by "
+            "design)."
+            if legacy > 0 else ""
+        )
+        undated_note = (
+            f" {undated_reported_null} further reported-but-NULL document(s) "
+            "carry no usable indexed_at and could fall on either side of that "
+            "boundary — this check cannot attribute them."
+            if undated_reported_null > 0 else ""
+        )
         results.append(HealthResult(
             label=label, ok=False, warn=True,
             detail=(
-                f"{reported_null} document(s) report index_state but it "
-                "is NULL on every one of them, and at least one was "
-                f"indexed {newest_reported_null_dt.isoformat()} — after "
-                f"the fence's {_FENCE_RELEASE_DT.isoformat()} release. "
-                "The fence engine is live; a producer wrote this document "
-                "without ever calling index-run begin/complete "
-                "(nexus-vw594 coverage gap), not a pre-fence engine."
+                f"{post_anchor_count} document(s) report index_state but "
+                "carry no stamp, despite being indexed after this install's "
+                f"fence baseline ({anchor.isoformat()}, its earliest stamped "
+                f"document): {names}{truncation_note}. Two explanations fit, "
+                "and the stamp cannot distinguish them: a producer is "
+                "unfenced (a regression worth finding), OR this install was "
+                "running a client whose fence covered only PDF/md/DEVONthink "
+                "ingest (v7.1.0-v7.2.x), leaving its repo-index and store_put "
+                "writes legitimately unstamped. Check the client version "
+                f"first — it is the cheaper of the two.{legacy_note}"
+                f"{undated_note}"
             ),
             fix_suggestions=[
-                "nx index <path> --force   (re-index through a fenced producer)",
+                "nx --version   (a client below 7.3.0 explains this with no "
+                "regression at all)",
+                "nx index <path> --force   (on a 7.3.0+ client, re-index ONLY "
+                "the named document(s) above — this clears the symptom, not "
+                "the unfenced producer)",
+            ],
+        ))
+    elif anchor is None and (candidates or candidates_truncated):
+        # nexus-oiu1t: post-floor unstamped documents exist, but NO document in
+        # this corpus has ever been stamped — nothing establishes whether this
+        # install has run a fully-fenced client at all. A late upgrader and a
+        # genuinely unfenced producer are indistinguishable from here.
+        #
+        # This still WARNS. Declining to warn would hide a real producer
+        # regression on an install that has never once stamped — the exact
+        # shape the vw594 incident had. What nexus-apig6 was filed for was not
+        # that a warning existed, but that it ASSERTED a producer bug it could
+        # not prove and prescribed re-embedding the whole corpus; so this arm
+        # states the ambiguity and prescribes ONE document.
+        ambiguous_total = len(candidates) + candidates_truncated
+        results.append(HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"cannot attribute: {ambiguous_total} document(s) indexed "
+                "after full producer coverage shipped "
+                f"{_PRODUCER_FENCE_RELEASE_DT.date().isoformat()} carry no "
+                "index-run stamp, and "
+                + (
+                    "no document in this corpus has ever been stamped"
+                    if checked == 0 else
+                    f"none of the {checked} stamped document(s) carries a "
+                    "usable indexed_at"
+                )
+                + " — so no fence baseline can be established for this "
+                "install. Either a producer is unfenced, or this install "
+                "upgraded late and these are its own pre-coverage writes. "
+                "Re-indexing ONE document tells them apart."
+            ),
+            fix_suggestions=[
+                "nx index <path> --force   (re-index any ONE document to "
+                "establish this install's fence baseline, then re-run doctor)",
             ],
         ))
 
@@ -4678,9 +4866,28 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
 
     # Nothing WARN-worthy found — build the single honest ok=True summary.
     if checked > 0:
+        # nexus-oiu1t (code-review-expert, 2026-08-11): do NOT collapse to a
+        # bare "none (N checked)" here. On a real corpus this is the COMMON
+        # branch — a few stamped documents alongside a large pre-coverage
+        # population — and dropping the reported_null/undated counts hides
+        # exactly the state a downstream install misread as an upstream bug.
+        extra = ""
+        if reported_null:
+            attributed = reported_null - undated_reported_null
+            extra = (
+                f"; {attributed} unstamped document(s) predate this install's "
+                "fence baseline and need no action (no legacy backfill by "
+                "design)"
+                if attributed else ""
+            )
+            if undated_reported_null:
+                extra += (
+                    f"; {undated_reported_null} unstamped document(s) carry no "
+                    "usable indexed_at and cannot be attributed"
+                )
         return [HealthResult(
             label=label, ok=True,
-            detail=f"none ({checked} fenced document(s) checked)",
+            detail=f"none ({checked} fenced document(s) checked){extra}",
         )]
     if reported_null > 0:
         # Quiescent: the fence is live but nothing has run through it yet
@@ -4688,8 +4895,20 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
         # shipped — catalog-020 does not retro-populate by design).
         return [HealthResult(
             label=label, ok=True,
-            detail=f"fence live, 0 stale runs ({reported_null} document(s) "
-                   "report index_state but none has run through the fence yet)",
+            detail=(
+                f"fence live, 0 stale runs ({reported_null} document(s) "
+                "report index_state but none has run through the fence yet — "
+                f"{reported_null - undated_reported_null} indexed before full "
+                "producer coverage shipped "
+                f"{_PRODUCER_FENCE_RELEASE_DT.date().isoformat()}, not "
+                "backfilled by design, no action needed"
+                + (
+                    f"; {undated_reported_null} carry no usable indexed_at "
+                    "and cannot be attributed to either side of that date"
+                    if undated_reported_null else ""
+                )
+                + ")"
+            ),
         )]
     # NON-VACUITY: a genuinely pre-fence engine omits index_state entirely
     # on every row (not_reported > 0 and nothing else), or the corpus
