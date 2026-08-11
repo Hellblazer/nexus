@@ -298,6 +298,112 @@ class TestValidateStatements:
             assert f"ALTER TABLE {table}" in xml
 
 
+class TestExistenceGateIntegration:
+    """F14a (nexus-o8dil.1) at the RUNG level: converge() must complete
+    without raising when a VALIDATE target relation is absent, driving the
+    REAL ``run_admin_sql`` + ``validate_statements`` wiring (not a
+    rung-level fake) — and the store must read as NOT converged afterward
+    (fewer than ``len(OCTET_CHECKS)`` constraints ever got VALIDATEd)."""
+
+    def test_absent_relation_does_not_crash_converge_and_stays_unconverged(
+        self, tmp_path, monkeypatch,
+    ):
+        from subprocess import CompletedProcess
+
+        from nexus.db.admin_sql import AdminCredentials, run_admin_sql
+
+        monkeypatch.setattr(
+            "nexus.db.admin_sql.resolve_admin_credentials",
+            lambda creds_path=None: AdminCredentials(port=1, user="a", password="p"),
+        )
+        (tmp_path / "bundle" / "bin").mkdir(parents=True)
+        (tmp_path / "bundle" / "lib").mkdir(parents=True)
+        psql = tmp_path / "bundle" / "bin" / "psql"
+        psql.write_text("")
+
+        # One of the four real octet-check tables is gone — the chash_index
+        # shape, generalized: ANY tracked relation can vanish out from under
+        # this rung, not just the one already hard-removed from OCTET_CHECKS.
+        absent_table = "nexus.catalog_document_chunks"
+        validated_statements: list[str] = []
+
+        def runner(argv, env):
+            stmt = argv[-1]
+            if "to_regclass" in stmt:
+                table = stmt.split("'")[1]
+                stdout = "" if table == absent_table else "t"
+                return CompletedProcess(argv, 0, stdout=stdout, stderr="")
+            validated_statements.append(stmt)
+            return CompletedProcess(argv, 0, stdout="", stderr="")
+
+        def _validate(checks=None):
+            return run_admin_sql(
+                validate_statements(checks if checks is not None else OCTET_CHECKS),
+                psql_bin=psql, psql_runner=runner,
+            )
+
+        rung, _ = _rung(validate_fn=_validate)
+        result = rung.converge(_Report())
+
+        assert result.outcome is ConvergeOutcome.COMPLETED, (
+            "an absent relation must not raise — it must be skipped"
+        )
+        assert not any(absent_table in s for s in validated_statements), (
+            f"the absent relation must never be VALIDATEd: {validated_statements!r}"
+        )
+        assert len(validated_statements) == len(OCTET_CHECKS) - 1
+
+        # The overall store must NOT read as converged: only 3 of the 4
+        # constraints were ever VALIDATEd, so a validated_probe-style count
+        # (which requires len(OCTET_CHECKS)) reports pending, never crashed.
+        rung_pending, _ = _rung(
+            detect_probe_fn=lambda: ConformanceProbe.measured(0),
+            validated_probe_fn=lambda: len(validated_statements) == len(OCTET_CHECKS),
+        )
+        st = rung_pending.detect()
+        assert st.applicable and not st.converged, (
+            "a store missing one VALIDATEd constraint must detect as pending, "
+            "not converged"
+        )
+
+    def test_present_relations_unchanged_full_convergence(self, tmp_path, monkeypatch):
+        """Regression: nothing missing means every statement still runs and
+        the store still converges — the existence gate is a no-op on a
+        clean store."""
+        from subprocess import CompletedProcess
+
+        from nexus.db.admin_sql import AdminCredentials, run_admin_sql
+
+        monkeypatch.setattr(
+            "nexus.db.admin_sql.resolve_admin_credentials",
+            lambda creds_path=None: AdminCredentials(port=1, user="a", password="p"),
+        )
+        (tmp_path / "bundle" / "bin").mkdir(parents=True)
+        (tmp_path / "bundle" / "lib").mkdir(parents=True)
+        psql = tmp_path / "bundle" / "bin" / "psql"
+        psql.write_text("")
+
+        validated_statements: list[str] = []
+
+        def runner(argv, env):
+            stmt = argv[-1]
+            if "to_regclass" in stmt:
+                return CompletedProcess(argv, 0, stdout="t", stderr="")
+            validated_statements.append(stmt)
+            return CompletedProcess(argv, 0, stdout="", stderr="")
+
+        def _validate(checks=None):
+            return run_admin_sql(
+                validate_statements(checks if checks is not None else OCTET_CHECKS),
+                psql_bin=psql, psql_runner=runner,
+            )
+
+        rung, _ = _rung(validate_fn=_validate)
+        result = rung.converge(_Report())
+        assert result.outcome is ConvergeOutcome.COMPLETED
+        assert len(validated_statements) == len(OCTET_CHECKS)
+
+
 class TestSentinelFreeze:
     def test_snapshot_and_restore_prior_state(self, tmp_path, monkeypatch):
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))

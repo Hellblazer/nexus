@@ -1112,4 +1112,65 @@ class StagingPromoteOpsIntegrationTest {
                 + "alias arm actually ran (not merely the decode arm)")
             .isEqualTo(1);
     }
+
+    // ── Order 25: F12b — finalize's manifest INSERT must stamp `collection` ──
+
+    private static final String COLL_F12B = "knowledge__kf12b__bge-base-en-v15-768__v1";
+
+    /**
+     * nexus-o8dil.3 (RDR-191 F12b(ii)): {@code finalizeTenant}'s manifest
+     * {@code INSERT...SELECT} never populated {@code
+     * catalog_document_chunks.collection} — the 9-column list omitted it
+     * entirely, unlike {@code promoteCollection}'s CONTENT insert, which DOES
+     * stamp it (verified anchor sheet finding C). Every finalize-promoted
+     * manifest row was a partial-NULL FK key: exactly the population GATE-2
+     * (nexus-o8dil.7) requires to be zero before the FK can validate.
+     *
+     * <p>The fix stamps {@code collection} from the SAME source every live
+     * writer uses ({@code CatalogRepository.physicalCollectionOf} —
+     * {@code catalog_documents.physical_collection}, NULL-if-empty), not from
+     * wherever the chash's content happens to physically live (which can
+     * diverge under shared-chash reuse across collections — F10c/F8d
+     * territory, not this bead's scope).
+     */
+    @Test
+    @Order(25)
+    void finalizeTenant_manifestInsert_stampsCollectionFromDocPhysicalCollection() {
+        String text = "F12b manifest collection stamp content " + System.nanoTime();
+        String canonical = digestHex(text);
+        landChunk(COLL_F12B, 768, canonical, text, vec(768));
+        Map<String, Object> promoted = ops.promoteCollection(T1, COLL_F12B, 768);
+        assertThat(promoted.get("promoted")).isEqualTo(1);
+        // The CONTENT insert's own stamp — this is the "same source the
+        // content insert uses" the bead's acceptance criterion names; a
+        // regression pin that promoteCollection's content leg still sets it.
+        assertThat(count("SELECT count(*) FROM nexus.chunks_768 "
+            + "WHERE collection = '" + COLL_F12B + "' AND encode(chash,'hex') = '" + canonical + "'"))
+            .as("regression pin: the CONTENT insert (StagingPromoteOps :410-435) "
+                + "must be left untouched by this fix — it already stamps collection")
+            .isEqualTo(1);
+
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("INSERT INTO nexus.catalog_documents "
+                + "(tenant_id, tumbler, title, physical_collection) "
+                + "VALUES (?, 'f12b-doc', 'f12b doc', ?) ON CONFLICT DO NOTHING",
+                T1, COLL_F12B);
+            ctx.execute("INSERT INTO staging.document_chunks "
+                + "(tenant_id, doc_id, position, chash) VALUES (?, 'f12b-doc', 0, ?) "
+                + "ON CONFLICT DO NOTHING", T1, canonical);
+            return null;
+        });
+
+        Map<String, Object> fin = ops.finalizeTenant(T1, false);
+        assertThat(fin.get("manifest_promoted")).isEqualTo(1);
+
+        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
+            + "WHERE doc_id = 'f12b-doc' AND encode(chash,'hex') = '" + canonical + "' "
+            + "AND collection = '" + COLL_F12B + "'"))
+            .as("F12b: the finalize manifest INSERT must stamp collection from the "
+                + "owning document's physical_collection, the same source every live "
+                + "writer (CatalogRepository.physicalCollectionOf) uses — a partial-"
+                + "NULL FK key otherwise (RDR-191 GATE-2)")
+            .isEqualTo(1);
+    }
 }

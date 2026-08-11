@@ -3855,7 +3855,16 @@ public final class CatalogRepository {
                 .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
                 .doUpdate()
                 .set(CHK_CHASH_HEX, EX_CHK_CHASH)
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, EX_CHK_COLL)
+                // nexus-o8dil.4 (RDR-191 F12c): plain EX_CHK_COLL DEMOTED an
+                // already-stamped collection to NULL whenever a later upsert
+                // for the SAME (doc, position) arrived from a source with no
+                // collection to offer (e.g. the doc has since become ghost/
+                // sourceless -- physicalCollectionOf returns null for those
+                // by design). Precedence: the incoming value wins when
+                // present, otherwise the row's EXISTING stamped value
+                // survives -- never overwrite a good value with NULL.
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    DSL.coalesce(EX_CHK_COLL, CATALOG_DOCUMENT_CHUNKS.COLLECTION))
                 .execute();
             case UPSERT_IMPORT -> insert
                 .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
@@ -3866,7 +3875,12 @@ public final class CatalogRepository {
                 .set(CATALOG_DOCUMENT_CHUNKS.LINE_END, EX_CHK_LEN)
                 .set(CATALOG_DOCUMENT_CHUNKS.CHAR_START, EX_CHK_CST)
                 .set(CATALOG_DOCUMENT_CHUNKS.CHAR_END, EX_CHK_CEN)
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, EX_CHK_COLL)
+                // nexus-o8dil.4 (RDR-191 F12c): same fix, the import arm.
+                // A SEPARATE code path from UPSERT_APPEND above (its own SET
+                // clauses), so it carries its own COALESCE rather than
+                // inheriting the append arm's fix by assumption.
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    DSL.coalesce(EX_CHK_COLL, CATALOG_DOCUMENT_CHUNKS.COLLECTION))
                 .execute();
         }
     }
@@ -5861,6 +5875,27 @@ public final class CatalogRepository {
             counts.put("chunks_384",  ctx.deleteFrom(CHUNKS_384).where(CHUNKS_384.COLLECTION.eq(name)).execute());
             counts.put("chunks_768",  ctx.deleteFrom(CHUNKS_768).where(CHUNKS_768.COLLECTION.eq(name)).execute());
             counts.put("chunks_1024", ctx.deleteFrom(CHUNKS_1024).where(CHUNKS_1024.COLLECTION.eq(name)).execute());
+            // 1b. nexus-o8dil.40 (RDR-191 F8d fix): the manifest cascade below
+            //     (step 6) reaches catalog_document_chunks ONLY via fk-001's
+            //     CASCADE off catalog_documents, scoped by the OWNING
+            //     DOCUMENT's physical_collection -- an asymmetry against step
+            //     1 above, which scopes chunk deletion by the manifest's own
+            //     denormalized `collection` column. A manifest row naming
+            //     THIS collection but whose parent document is homed
+            //     elsewhere sits outside both scopes: unreached by step 6
+            //     (wrong doc), yet its chunk (scoped by chunks.collection,
+            //     the manifest FK's actual join key) was just deleted above
+            //     -- a dangling reference produced by this very method. The
+            //     manifest's own `collection` column is the authoritative
+            //     scope for ITS deletion (mirroring renameCollectionTxn's
+            //     identical treatment of the column on the rename side,
+            //     nexus-x6kdz), so delete it directly rather than relying
+            //     solely on the document cascade. Deliberately run BEFORE
+            //     step 6: harmless overlap for rows the document cascade
+            //     would also reach (already-gone rows delete 0), and closes
+            //     the gap for rows it would miss.
+            counts.put("catalog_document_chunks",
+                ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(name)).execute());
             // 2. (chash_index leg RETIRED — RDR-187/nexus-piwya.9: the router
             //    table is dropped; conexus's rdr164 cascade EXPLAIN probe
             //    retargets in lockstep with this removal.)

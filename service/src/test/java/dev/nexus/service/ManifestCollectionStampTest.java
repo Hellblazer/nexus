@@ -150,6 +150,77 @@ class ManifestCollectionStampTest {
             .isEqualTo(COLL);
     }
 
+    /**
+     * nexus-o8dil.4 (RDR-191 F12c): {@code insertManifestChunkRows}'
+     * UPSERT_APPEND arm (CatalogRepository :3854-3859) set {@code
+     * collection} from {@code EXCLUDED.collection} unconditionally, so a
+     * manifest row that already carries a correctly-stamped collection gets
+     * DEMOTED back to NULL the moment a later upsert for the SAME (doc,
+     * position) arrives from a source with no collection to offer (a ghost /
+     * sourceless document whose {@code physical_collection} is empty —
+     * {@code physicalCollectionOf} returns {@code null} for those, by
+     * design). The precedence rule this fix implements: the incoming value
+     * wins when present, otherwise the EXISTING stamped value survives
+     * (COALESCE(EXCLUDED.collection, catalog_document_chunks.collection)) —
+     * never blindly overwrite a good value with NULL.
+     */
+    // Deliberately NOT `COLL` — these two tests leave rows permanently
+    // stamped with a real collection (that is the whole point: the fix
+    // proves the stamp SURVIVES), and `COLL` is the shared class fixture's
+    // rename/count-scoped collection (renameCollection_reHomesManifestRows
+    // asserts an EXACT row count re-homed by `WHERE collection = COLL`). A
+    // leaked extra `COLL`-stamped row from these two tests inflated that
+    // sibling test's count from 1 to 2 during authorship — isolate instead.
+    private static final String COLL_F12C_GHOST = "knowledge__mcs-f12c-ghost__voyage-context-3__v1";
+
+    @Test
+    void appendManifestChunks_upsert_neverDemotesStampedCollectionToNull() throws Exception {
+        String ghostDoc = repo.registerDocument(TENANT, "9.2", Map.of(
+            "title", "f12c append doc", "content_type", "knowledge",
+            "physical_collection", COLL_F12C_GHOST));
+        String ch = "e".repeat(64);
+        repo.appendManifestChunks(TENANT, ghostDoc, List.of(Map.of("position", 50, "chash", ch)));
+        assertThat(collectionOf(ch))
+            .as("first append, doc has a real physical_collection: stamps normally")
+            .isEqualTo(COLL_F12C_GHOST);
+
+        // The doc becomes ghost/sourceless (physicalCollectionOf -> null from here on).
+        repo.updateDocumentCollection(TENANT, ghostDoc, "");
+
+        // A later append upsert for the SAME (doc, position) — e.g. a
+        // reclassification re-run — must NOT wipe the already-stamped value
+        // just because THIS call's source collection is null.
+        repo.appendManifestChunks(TENANT, ghostDoc, List.of(Map.of("position", 50, "chash", ch)));
+        assertThat(collectionOf(ch))
+            .as("F12c: a later upsert from a collection-less source must not "
+                + "DEMOTE an already-stamped collection back to NULL")
+            .isEqualTo(COLL_F12C_GHOST);
+    }
+
+    /** Same producer, the {@code importChunksBatch}/UPSERT_IMPORT arm
+     *  (CatalogRepository :3860-3870) — a SEPARATE code path from the append
+     *  arm above (different SET clauses), covered independently per the
+     *  bead's acceptance criterion "do not assume they share a path". */
+    @Test
+    void importChunksBatch_upsert_neverDemotesStampedCollectionToNull() throws Exception {
+        String ghostDoc = repo.registerDocument(TENANT, "9.3", Map.of(
+            "title", "f12c import doc", "content_type", "knowledge",
+            "physical_collection", COLL_F12C_GHOST));
+        String ch = "f".repeat(64);
+        repo.importChunksBatch(TENANT, ghostDoc, List.of(Map.of("position", 60, "chash", ch)));
+        assertThat(collectionOf(ch))
+            .as("first import, doc has a real physical_collection: stamps normally")
+            .isEqualTo(COLL_F12C_GHOST);
+
+        repo.updateDocumentCollection(TENANT, ghostDoc, "");
+
+        repo.importChunksBatch(TENANT, ghostDoc, List.of(Map.of("position", 60, "chash", ch)));
+        assertThat(collectionOf(ch))
+            .as("F12c: the import-arm upsert must not DEMOTE an already-stamped "
+                + "collection back to NULL either")
+            .isEqualTo(COLL_F12C_GHOST);
+    }
+
     @Test
     void renameCollection_reHomesManifestRows() throws Exception {
         // The second door back into the silently-empty state (critique Q2):

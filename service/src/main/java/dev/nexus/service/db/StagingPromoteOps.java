@@ -681,18 +681,37 @@ public final class StagingPromoteOps {
 
             Condition manifestResolvable = CHASH_ALIAS.NEW_CHASH.isNotNull()
                 .or(sChash.likeRegex("^[0-9a-f]{64}$").and(ChashSqlIdioms.existsInAnyDim(ctx, sChashDecoded)));
+            // nexus-o8dil.3 (RDR-191 F12b(ii), verified anchor sheet finding
+            // C): this INSERT's 9-column list omitted `collection` entirely
+            // -- every finalize-promoted manifest row was a partial-NULL FK
+            // key, unlike promoteCollection's CONTENT insert above (:420-433),
+            // which DOES stamp it. Stamped from the SAME source every live
+            // writer uses (CatalogRepository.physicalCollectionOf ->
+            // catalog_documents.physical_collection, NULL-if-empty for
+            // ghost/sourceless docs) -- NOT from wherever the resolved
+            // chash's content happens to physically live, which is a
+            // DIFFERENT, collection-agnostic question (canonExists / the
+            // per-collection sweep-gate resolution a few lines above) that
+            // can legitimately diverge under shared-chash reuse across
+            // collections. A manifest row's `collection` is the eventual
+            // FK's join key against the OWNING document's placement, not a
+            // content-location lookup.
+            Field<String> docPhysicalCollection =
+                DSL.nullif(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "");
             counts.put("manifest_promoted", ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
                     CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.LINE_START,
                     CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START,
-                    CATALOG_DOCUMENT_CHUNKS.CHAR_END)
+                    CATALOG_DOCUMENT_CHUNKS.CHAR_END, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                 .select(ctx.select(
                         currentTenantSetting(), sDocId, sPosition,
                         DSL.coalesce(CHASH_ALIAS.NEW_CHASH, sChashDecoded),
-                        sChunkIndex, sLineStart, sLineEnd, sCharStart, sCharEnd)
+                        sChunkIndex, sLineStart, sLineEnd, sCharStart, sCharEnd,
+                        docPhysicalCollection)
                     .from(sdc)
                     .leftJoin(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(sChash))
+                    .leftJoin(CATALOG_DOCUMENTS).on(CATALOG_DOCUMENTS.TUMBLER.eq(sDocId))
                     .where(manifestResolvable))
                 .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION)
