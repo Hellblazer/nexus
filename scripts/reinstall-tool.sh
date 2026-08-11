@@ -576,11 +576,28 @@ fi
 
 # nexus-otnvr: the default dance stopped MinerU (if it was a live holder) to
 # clear the venv for the swap; restart it now on the NEW install, mirroring
-# the storage-service restart above (best-effort — MinerU's own on-demand
-# spawn policy would eventually respawn it anyway, this just avoids the
-# next PDF operation paying that latency).
+# the storage-service restart above — and mirroring it PROPERLY, which this
+# block did not until 2026-08-11.
+#
+# It used to read `nx mineru start >/dev/null 2>&1 || true`: output discarded,
+# failure swallowed. So a reinstall that stopped MinerU and then failed to
+# restart it reported success, and the operator learned about it later from a
+# `nx doctor` red or an OOM on a math-heavy PDF. Observed exactly that after
+# the 7.6.0 reinstall (stale PID 87389, server down, doctor red).
+#
+# The old comment justified the silence with "MinerU's own on-demand spawn
+# policy would eventually respawn it anyway". That justification is WRONG, and
+# it is worth stating plainly because it has been repeated as if true:
+# `_check_mineru_server` (health.py) returns NO ROW when MinerU was never
+# provisioned — it is opt-in — and reds only when a PROVISIONED server has gone
+# unreachable, because `_restart_mineru_server` writes the live port into
+# config.yml, so a dead server leaves that URL pointing at a dead port across
+# every subsequent session while math PDFs silently fall back to the in-process
+# subprocess that OOM-kills. A provisioned-but-down MinerU is drift, not a
+# lazily-unspawned optional extra.
 if [[ "$CYCLED_MINERU" == "1" ]] && command -v nx >/dev/null 2>&1; then
-    nx mineru start >/dev/null 2>&1 || true
+    nx mineru start >/dev/null 2>&1 || \
+        echo "(note: MinerU not restarted; run 'nx mineru start' manually — until then math-heavy PDFs fall back to the OOM-prone in-process path)"
 fi
 
 # nexus-103v2 item 2: aspect-worker restart symmetry with mineru/service
