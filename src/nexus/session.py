@@ -556,10 +556,21 @@ def _list_processes() -> list[tuple[int, int, str]]:
     match ``nx-mcp``, which is why the nexus-d76vc T1 handoff silently
     never fired on any real machine from the day it shipped. See
     :func:`find_mcp_sibling_pids` for the matching rule this feeds.
+
+    **``-ww`` is load-bearing, not decoration.** Without it procps truncates
+    the whole line to the terminal width (80 when stdout is not a tty), and
+    the real invocation --
+    ``/Users/x/.local/share/uv/tools/conexus/bin/python3 /Users/x/.local/bin/nx-mcp``
+    at ~104 characters -- loses the ``nx-mcp`` argument that identifies it.
+    Measured on a GitHub Actions runner 2026-08-10: rows came back cut at
+    exactly 80 columns (``.../.venv/bin/python /tmp/pytest-of-ru``), so the
+    matcher below found nothing. macOS ps does not truncate a piped stream,
+    which is why this reproduced only in CI; BSD and procps both accept
+    ``-ww``.
     """
     try:
         out = subprocess.check_output(
-            ["ps", "-eo", "pid,ppid,args="],
+            ["ps", "-ww", "-eo", "pid,ppid,args="],
             stderr=subprocess.DEVNULL, text=True, timeout=5,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
