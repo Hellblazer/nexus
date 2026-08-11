@@ -884,19 +884,24 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # outright (the old :157 "T2 database not found" pipe no longer
         # exists — the branch itself was deleted, not retargeted), so
         # this file's count drops from 14 to 13; see the ceiling below.
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:118",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:121",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:131",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:137",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:140",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:146",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:155",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:166",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:174",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:178",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:223",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:44",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:94",
+        # Retargeted again (+17 each) for the Phase E collections-drift
+        # gate (nexus-syfes class): a 17-line header-docstring insertion
+        # before line 28 shifted every one of these; the new Phase E body
+        # itself lands after all of them (past line 297) and introduces
+        # no new early-exit-consumer pipe.
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:135",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:138",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:148",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:154",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:157",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:163",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:172",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:183",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:191",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:195",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:240",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:61",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:111",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:142",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:193",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:238",
@@ -1091,8 +1096,10 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         # a "run-2 log tail for diagnosis" block -- the actual
         # indexed-content-searchable assertion runs on the next
         # (unrelated) line via a fresh, unguarded
-        # `nx search ... | grep -qi`.
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:221",
+        # `nx search ... | grep -qi`. Retargeted +17 for the Phase E
+        # collections-drift gate's header-docstring insertion (nexus-syfes
+        # class; see the EARLY_EXIT_EXEMPT block above for the same shift).
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:238",
         # tests/e2e/release-sandbox.sh (3 entries): the already-commented
         # `|| true: head is an early-exit consumer...` idiom this file's
         # own docstring cites as the sanctioned shape -- readback for
