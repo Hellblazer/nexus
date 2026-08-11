@@ -1509,7 +1509,29 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 
 Note: IDs shown by `nx store list` are 64 hex chars (the full `sha256(text)` digest — RDR-180; pre-cohort 32-hex IDs resolve via the permanent `chash_alias` route). `--title` delete is paginated and safe for multi-chunk documents. To delete an entire collection use `nx collection delete`.
 
-Deleting a `store_put`-origin document (`content_type == "knowledge"`, no `file_path`) also tombstones its catalog row, so it drops out of `nx catalog list` immediately rather than waiting for the next `nx catalog gc` sweep. This reap is chash-keyed and best-effort: when a chash's `docs_for_chashes` lookup resolves to more than one candidate catalog document, the match is ambiguous and is deliberately left alone — nothing is guessed, and the ghost row waits for `nx catalog gc` rather than risking a wrong reap (nexus-5axey).
+Deleting a `store_put`-origin document (`content_type == "knowledge"`, no `file_path`) also tombstones its catalog row via a chash-keyed, best-effort reap, so it drops out of `nx catalog list` immediately rather than waiting for the next `nx catalog gc` sweep. **The reap now runs BEFORE the T3 chunk delete, not after (RDR-191 F10c, nexus-o8dil.5).** The engine's delete is anti-join-scoped: it refuses to remove a chunk that any live catalog manifest row still references, including the note's own not-yet-tombstoned row, so reaping first is what lets the ordinary single-owner delete succeed at all.
+
+For `--id`, the id is existence-checked against `--collection` before anything else runs: `nx store delete --id X -c Y` fails with `Entry 'X' not found in Y` when X is not actually in Y, catching a bogus id, or an id paired with the wrong collection, before the reap or the T3 delete can touch anything.
+
+When the chash's catalog lookup is ambiguous (more than one candidate catalog document shares it), the reap deliberately declines to tombstone anything: nothing is guessed (nexus-5axey). That is no longer a benign no-op: with no live-manifest-row retracted, the engine's anti-join then refuses the chunk delete, and the command exits non-zero instead of silently leaving a ghost catalog row behind:
+
+```
+Error: Entry 'X' existed in Y moments ago but the delete did not remove it -- likely
+anti-join-protected by another live reference, or a concurrent modification. Any
+catalog cleanup for it has already run; check 'nx catalog list' / 'nx catalog reconcile'.
+```
+
+Run `nx catalog gc` / `nx catalog reconcile` to resolve the ambiguity, then retry the delete.
+
+`--title` reports the SERVER's actual deleted count, not the number of matching chunks found (nexus-o8dil.45): `nx store delete --title 'X' -c Y` prints `Deleted K entries with title 'X' from Y.`, where K can be less than the N chunks matched, because the same anti-join can legitimately retain a chunk another live document's manifest still references. When `K < N`, a second line on stderr reports the shortfall:
+
+```
+(N-K of N requested were retained -- still referenced by another live document, not deleted.)
+```
+
+A script that asserts an exact `Deleted N entries` count against the number of chunks it expected to match can now legitimately see a smaller number without that being a bug; check stderr for the retained-count line before treating it as a failure.
+
+`nx store expire` (removes all TTL-lapsed `knowledge__*` entries, no flags) has the same actual-count contract: it prints `Expired N entries.` where N is the count `batch_delete` actually removed, not the number of lapsed rows it found. The reap-before-delete ordering above applies here too: each expired chash's manifest row is retracted before the chunk delete is attempted, so a genuinely shared chash correctly stays retained and correctly stays out of the reported count, rather than being counted as expired while the chunk survives.
 
 **`get` flags:**
 

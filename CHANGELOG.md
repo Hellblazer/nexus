@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A background subagent's session cleanup could wipe another live session's entire scratch (T1) history** (GH #1454). Tool-free `claude -p` dispatches forward the parent session's id to a detached child process; when that child's own SessionEnd hook later ran, it resolved a *borrowed* connection to the parent's still-live scratch scope and cleared it unconditionally, destroying the parent's in-progress notes with no warning and no way to tell it had happened. SessionEnd now re-checks who actually owns the scratch scope immediately before clearing, and skips the clear (with a logged warning) whenever the scope turns out to be borrowed rather than owned.
+- **Deleting one document's T3 chunks could silently corrupt a different, unrelated document.** When two documents shared identical chunk text (the normal case for near-duplicate notes), deleting one document's chunks removed the shared content outright, even though the other document still referenced it, with no error at delete time. The damage surfaced later and elsewhere, as an unrelated-looking failure when that other document was next read. Deletes are now scoped so a chunk is only removed when no other live document still needs it; a still-referenced chunk is left in place.
+- **`nx store put --ttl` notes stopped leaking once they expired.** A TTL-lapsed note's chunk was never actually being reclaimed: `nx store expire` reported success, but the chunk survived forever because nothing had released the catalog record still pointing at it. Expiry now releases that record before deleting the chunk, so the chunk is genuinely removed and the reported count matches what was actually deleted.
+- **`nx store delete --title` and `nx store expire` now report how many entries were actually removed, not how many matched the request.** A still-referenced chunk can now be legitimately retained (see above), so the old message could overstate what happened. Both commands print the real, server-confirmed count; `nx store delete --title` also prints a line to stderr naming how many were retained and why when the two numbers differ.
+- **`nx store delete --id` on a chunk shared ambiguously between documents now fails with a clear error instead of leaving a stale catalog entry behind.** Previously the ambiguous case was silently left alone with no error at all. The command now exits non-zero and points at `nx catalog gc` / `nx catalog reconcile` to resolve it before retrying.
+- **`nx upgrade` could exit non-zero forever once a tracked database relation had already been legitimately dropped.** A one-time schema-validation step assumed every relation it checks still exists; once one was removed by an earlier migration, every later `nx upgrade` failed the same way with no way to recover short of manual intervention. The step now checks whether the relation exists before validating it, and skips cleanly when it is genuinely gone.
+- **Five remaining sources of orphaned or mis-tagged catalog records are closed**, none individually user-visible as a failure but each showing up later as an inconsistency `nx catalog doctor` reports: a schema-migration step that skipped its own existence check before validating, a collection-cleanup pass that could delete a chunk still referenced elsewhere, a tenant-promotion path that never recorded which collection a chunk belonged to, an upsert path that could erase an already-recorded collection tag when a later write arrived without one, and a collection-delete path that missed a class of manifest rows.
+- **A failed reinstall of the MinerU PDF-formula extractor now reports the failure instead of silently continuing as if nothing went wrong.** Previously a failed restart during `scripts/reinstall-tool.sh` was swallowed; the operator found out later, from a `nx doctor` red or an out-of-memory failure on a math-heavy PDF.
+
+### Internal
+- Added Dependabot configuration so the 87 SHA-pinned GitHub Actions stop rotting unnoticed.
+- A pre-tag test now catches the collections-drift class of engine-gate failure before it reaches a release tag; a second pre-tag test validates wheel metadata before publish.
+- The release workflow gained a dispatch retry path, so a failed publish attempt can no longer force a release tag to move.
+
 ## [7.6.0] - 2026-08-11
 
 Paired release with engine-service-v0.1.71 (cut, shakeout-gated,
@@ -116,6 +131,15 @@ so the fix was cut as v0.1.71 and that is the identity 7.6.0 ships.
   subject is unreachable.
 
 ### Corrected
+- **The `### Changed` entry above understated `REQUIRED_ENGINE_VERSION`.** It
+  read `(0, 1, 70)`; the constant was, and is, `(0, 1, 71)` at tag time.
+  v0.1.70 is the skipped version this section's own preamble describes: cut
+  and fully gated, but never pinned, because this release's own sandbox
+  shakedown caught a defect in it before pinning happened, and the fix
+  shipped as v0.1.71 instead. No code change accompanies this entry;
+  `src/nexus/engine_version.py` already read `(0, 1, 71)` at the 7.6.0 tag.
+  The published 7.6.0 release notes are frozen with the original wording;
+  this entry corrects the record for anyone reading it after the fact.
 - **The 7.5.0 note for `nx index repo` overstated a throughput cost that was
   never measured** (nexus-fdn1c). It said the memory-derived local batch cap
   means "roughly 19x more round trips, so a local `nx index repo` takes
