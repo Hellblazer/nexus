@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.6.1] - 2026-08-11
+
 ### Fixed
 - **A background subagent's session cleanup could wipe another live session's entire scratch (T1) history** (GH #1454). Tool-free `claude -p` dispatches forward the parent session's id to a detached child process; when that child's own SessionEnd hook later ran, it resolved a *borrowed* connection to the parent's still-live scratch scope and cleared it unconditionally, destroying the parent's in-progress notes with no warning and no way to tell it had happened. SessionEnd now re-checks who actually owns the scratch scope immediately before clearing, and skips the clear (with a logged warning) whenever the scope turns out to be borrowed rather than owned.
 - **Deleting one document's T3 chunks could silently corrupt a different, unrelated document.** When two documents shared identical chunk text (the normal case for near-duplicate notes), deleting one document's chunks removed the shared content outright, even though the other document still referenced it, with no error at delete time. The damage surfaced later and elsewhere, as an unrelated-looking failure when that other document was next read. Deletes are now scoped so a chunk is only removed when no other live document still needs it; a still-referenced chunk is left in place.

@@ -4,6 +4,17 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.6.1] - 2026-08-11
+
+Plugin version aligned with conexus 7.6.1. No plugin-side changes.
+
+The conexus release it ships alongside fixes a data-loss defect that affected
+this plugin's own workflow: a `claude -p` operator dispatch could cause a child
+process's session cleanup to delete the parent session's entire T1 scratch
+scope. Any agent using `nx scratch` as working memory in a session that also
+called `operator_*` or `nx_answer` could lose it mid-run, with no error. See the
+root changelog for detail.
+
 ## [7.6.0] - 2026-08-11
 
 ### Changed
