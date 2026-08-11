@@ -210,6 +210,34 @@ class PgVectorRepositoryGcQuarantineTest {
         }
     }
 
+    /** True when {@code nexus.catalog_collections} has a row for (tenant, name) — the
+     *  nexus-syfes regression target: a zero-orphan/zero-restore GC pass must NOT
+     *  leave one of these behind for a collection sibling that was never written to. */
+    private boolean collectionRegistered(String tenant, String name) throws SQLException {
+        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
+            var rs = st.executeQuery(
+                "SELECT 1 FROM nexus.catalog_collections WHERE tenant_id = '" + tenant
+                + "' AND name = '" + name + "'");
+            return rs.next();
+        }
+    }
+
+    /** Row values from {@code nexus.catalog_collections} for (tenant, name); null fields
+     *  if the row does not exist. Used to verify the split-on-"__" enrichment parity
+     *  (content_type/owner_id/embedding_model/model_version) the SQL fix reproduces
+     *  from {@code PgVectorRepository}'s (now-deleted) Java-side stub. */
+    private record CollectionRow(String contentType, String ownerId, String embeddingModel, String modelVersion) {}
+
+    private CollectionRow collectionRow(String tenant, String name) throws SQLException {
+        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
+            var rs = st.executeQuery(
+                "SELECT content_type, owner_id, embedding_model, model_version FROM nexus.catalog_collections "
+                + "WHERE tenant_id = '" + tenant + "' AND name = '" + name + "'");
+            if (!rs.next()) return null;
+            return new CollectionRow(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4));
+        }
+    }
+
     // ── EQUIVALENCE: orphans present ─────────────────────────────────────────
 
     @Test
@@ -323,6 +351,121 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(metadataField(originCol, chash, "origin_collection"))
             .as("restore strips the quarantine stamps")
             .isNull();
+    }
+
+    // ── nexus-syfes: quarantine/origin sibling catalog_collections registration ─
+    //
+    // Regression coverage for the collections-drift defect: catalog-023's
+    // ORIGINAL Java-side ensureCollectionRegistered() ran UNCONDITIONALLY,
+    // before the SQL anti-join, in its own committed transaction — so a
+    // zero-orphan (or zero-restore) pass over a clean collection still left
+    // a permanently-registered, permanently-empty catalog_collections row
+    // for the unused sibling. The fix (catalog-024) moves the registration
+    // INSIDE gc_quarantine_orphans/gc_restore_rereferenced, guarded on
+    // v_chashes actually being non-NULL.
+
+    @Test
+    void quarantineOrphans_zeroOrphans_leavesNoCatalogCollectionsRowForQuarantineSibling() throws Exception {
+        String originCol = originCol("reg1");
+        String quarantineCol = quarantineCol("reg1");
+        String chash = ch("gcq-reg1-live");
+        seedChunk(TENANT_A, originCol, chash, "text", "Doc");
+        seedManifest(TENANT_A, "gcq.doc.reg1", chash, originCol);
+        // quarantineCol has never been written to by anything.
+        assertThat(collectionRegistered(TENANT_A, quarantineCol))
+            .as("precondition: quarantine sibling never touched")
+            .isFalse();
+
+        var outcome = vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol, "2026-08-11T00:00:00Z", 20);
+
+        assertThat(outcome.moved()).isEqualTo(0L);
+        assertThat(collectionRegistered(TENANT_A, quarantineCol))
+            .as("a zero-orphan pass must not register the unused quarantine sibling "
+                + "(nexus-syfes: this is exactly the permanent-orphan row `nx doctor`'s "
+                + "collections-drift check flagged)")
+            .isFalse();
+    }
+
+    @Test
+    void quarantineOrphans_nonZeroOrphans_stillRegistersQuarantineSibling_firstEverQuarantine() throws Exception {
+        String originCol = originCol("reg2");
+        String quarantineCol = quarantineCol("reg2");
+        String chashOrphan = ch("gcq-reg2-orphan");
+        seedChunk(TENANT_A, originCol, chashOrphan, "orphan text", "Orphan Doc");
+        // No manifest row -> orphan. quarantineCol is untouched so far.
+        assertThat(collectionRegistered(TENANT_A, quarantineCol))
+            .as("precondition: this is the FIRST-EVER quarantine for this sibling — "
+                + "the FK-satisfying row does not pre-exist")
+            .isFalse();
+
+        var outcome = vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol, "2026-08-11T00:00:00Z", 20);
+
+        assertThat(outcome.moved()).isEqualTo(1L);
+        assertThat(collectionRegistered(TENANT_A, quarantineCol))
+            .as("a non-zero prune must still register the sibling — the FK path must keep working")
+            .isTrue();
+        var row = collectionRow(TENANT_A, quarantineCol);
+        assertThat(row).isNotNull();
+        // quarantineCol("reg2") = "quarantine-code__gcq-reg2__voyage-code-3__v1" — 4
+        // segments, so the split-on-"__" enrichment applies (parity with the deleted
+        // Java-side PgVectorRepository.ensureCollectionRegistered stub).
+        assertThat(row.contentType()).isEqualTo("quarantine-code");
+        assertThat(row.ownerId()).isEqualTo("gcq-reg2");
+        assertThat(row.embeddingModel()).isEqualTo("voyage-code-3");
+        assertThat(row.modelVersion()).isEqualTo("v1");
+    }
+
+    @Test
+    void restoreRereferenced_zeroMatches_leavesNoCatalogCollectionsRowForOrigin() throws Exception {
+        String originCol = originCol("reg3");
+        String quarantineCol = quarantineCol("reg3");
+        // Neither collection has ever been written to — restoreRereferenced finds
+        // nothing in quarantineCol at all.
+        assertThat(collectionRegistered(TENANT_A, originCol))
+            .as("precondition: origin never touched")
+            .isFalse();
+
+        long restored = vectorRepo.restoreRereferenced(TENANT_A, quarantineCol, originCol);
+
+        assertThat(restored).isEqualTo(0L);
+        assertThat(collectionRegistered(TENANT_A, originCol))
+            .as("a zero-match restore pass must not register an origin collection "
+                + "that never received anything back from quarantine")
+            .isFalse();
+    }
+
+    @Test
+    void restoreRereferenced_nonZeroMatches_stillRegistersOrigin_firstEverRestore() throws Exception {
+        String originCol = originCol("reg4");
+        String quarantineCol = quarantineCol("reg4");
+        String chash = ch("gcq-reg4-restore");
+        // Seed the chunk directly into the QUARANTINE collection (no prior origin
+        // write at all) with no origin_collection metadata stamp — gc_restore_
+        // rereferenced's COALESCE(metadata->>'origin_collection', p_origin_collection)
+        // defaults an unstamped row to "belongs to whatever origin is asked for".
+        seedChunk(TENANT_A, quarantineCol, chash, "quarantined text", "Quarantined Doc");
+        // Manifest references chash for originCol — originCol itself is NEVER
+        // written to by seedChunk/upsertChunks, so its catalog_collections row
+        // does not pre-exist: this is the first-ever-restore case.
+        seedManifest(TENANT_A, "gcq.doc.reg4", chash, originCol);
+        assertThat(collectionRegistered(TENANT_A, originCol))
+            .as("precondition: this is the FIRST-EVER restore into this origin — "
+                + "the FK-satisfying row does not pre-exist")
+            .isFalse();
+
+        long restored = vectorRepo.restoreRereferenced(TENANT_A, quarantineCol, originCol);
+
+        assertThat(restored).isEqualTo(1L);
+        assertThat(collectionRegistered(TENANT_A, originCol))
+            .as("a non-zero restore must still register the origin — the FK path must keep working")
+            .isTrue();
+        var row = collectionRow(TENANT_A, originCol);
+        assertThat(row).isNotNull();
+        // originCol("reg4") = "code__gcq-reg4__voyage-code-3__v1" — 4 segments.
+        assertThat(row.contentType()).isEqualTo("code");
+        assertThat(row.ownerId()).isEqualTo("gcq-reg4");
+        assertThat(row.embeddingModel()).isEqualTo("voyage-code-3");
+        assertThat(row.modelVersion()).isEqualTo("v1");
     }
 
     // ── expire: grace-window floor refuses a mass hard-delete, force overrides ─

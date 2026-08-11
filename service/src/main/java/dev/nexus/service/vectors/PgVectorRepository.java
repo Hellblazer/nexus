@@ -2178,44 +2178,17 @@ public final class PgVectorRepository {
      */
     public record QuarantineOutcome(long moved, List<Map<String, Object>> sample) {}
 
-    /**
-     * Ensure-registered stub for a destination collection the RDR-191 GC
-     * functions write into directly via SQL (never through
-     * {@link #upsertChunksInternal}'s own auto-stub) — same short,
-     * separately-committed-transaction shape as that method's own stub
-     * (RDR-156 P0.2, bead nexus-70r3c.2): {@code chunks_<dim>.collection}
-     * carries a {@code catalog_collections} FK, so an unregistered
-     * quarantine sibling (first orphan ever quarantined for that origin)
-     * would otherwise fail the INSERT inside {@code gc_quarantine_orphans}
-     * with a foreign-key violation.
-     */
-    private void ensureCollectionRegistered(String tenant, String collection) {
-        if (CollectionRegistry.isKnown(tenant, collection)) return;
-        String[] collSegs = collection.split("__");
-        boolean conformant = collSegs.length == 4;
-        String regContentType  = conformant ? collSegs[0] : "";
-        String regOwner        = conformant ? collSegs[1] : "";
-        String regModel        = conformant ? collSegs[2] : "";
-        String regModelVersion = conformant ? collSegs[3] : "";
-        tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(CATALOG_COLLECTIONS,
-                            CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
-                            CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
-                            CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
-               .values(tenant, collection, regContentType, regOwner, regModel, regModelVersion)
-               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .doNothing()
-               .execute();
-            return null;
-        });
-        CollectionRegistry.markKnown(tenant, collection);
-    }
-
     public QuarantineOutcome quarantineOrphans(String tenant, String collection,
                                                 String quarantineCollection,
                                                 String quarantinedAt, int sampleLimit) {
         int dim = dimForCollection(collection);
-        ensureCollectionRegistered(tenant, quarantineCollection);
+        // nexus-syfes: the quarantine sibling's catalog_collections registration
+        // (needed to satisfy chunks_<dim>.collection's FK) now happens INSIDE
+        // nexus.gc_quarantine_orphans itself, guarded on there being an orphan
+        // to move — see catalog-024-quarantine-collection-registration.xml.
+        // A separate, unconditionally-committed Java-side registration here
+        // (the pre-fix shape) left a permanently-orphaned projection row behind
+        // for every zero-orphan pass; do not reintroduce it.
         var rec = tenantScope.withTenant(tenant, ctx ->
             ctx.selectFrom(GC_QUARANTINE_ORPHANS.call(
                     dim, tenant, collection, quarantineCollection, quarantinedAt, sampleLimit))
@@ -2233,7 +2206,10 @@ public final class PgVectorRepository {
      */
     public long restoreRereferenced(String tenant, String quarantineCollection, String originCollection) {
         int dim = dimForCollection(originCollection);
-        ensureCollectionRegistered(tenant, originCollection);
+        // nexus-syfes: same shape as quarantineOrphans above — the origin
+        // collection's registration now happens INSIDE
+        // nexus.gc_restore_rereferenced, guarded on there being a restore to
+        // perform (see catalog-024-quarantine-collection-registration.xml).
         return tenantScope.withTenant(tenant, ctx ->
             Routines.gcRestoreRereferenced(ctx.configuration(), dim, tenant, quarantineCollection, originCollection));
     }
