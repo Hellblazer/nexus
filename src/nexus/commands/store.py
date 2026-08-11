@@ -511,8 +511,19 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
         # wrong-collection class of the --id bug -- expected_collection is
         # still passed as the same cheap defense-in-depth layer.
         _reap_catalog_for_doc_ids(ids, expected_collection=col_name)
-        db.batch_delete(col_name, ids)
-        click.echo(f"Deleted {len(ids)} {'entry' if len(ids) == 1 else 'entries'} with title {title!r} from {col_name}.")
+        # nexus-o8dil.45: report batch_delete's ACTUAL server-reported count,
+        # not len(ids) -- RDR-191 F10c's anti-join can legitimately retain a
+        # chash another live document's manifest still references, so this
+        # operator-facing message could otherwise claim a bigger cleanup
+        # than actually happened.
+        deleted = db.batch_delete(col_name, ids)
+        click.echo(f"Deleted {deleted} {'entry' if deleted == 1 else 'entries'} with title {title!r} from {col_name}.")
+        if deleted < len(ids):
+            click.echo(
+                f"  ({len(ids) - deleted} of {len(ids)} requested were retained -- "
+                "still referenced by another live document, not deleted.)",
+                err=True,
+            )
 
 @store.command("expire")
 def expire_cmd() -> None:

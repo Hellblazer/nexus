@@ -1292,7 +1292,7 @@ class _ServiceCollectionStub:
             "metadatas": result.get("metadatas", []),
         }
 
-    def delete(self, ids: list[str]) -> None:
+    def delete(self, ids: list[str]) -> int:
         """Delete chunks by ID from the service.
 
         nexus-ou4tb: raises :class:`VectorServiceError` rather than logging and
@@ -1301,14 +1301,28 @@ class _ServiceCollectionStub:
         agree, and the divergence is permanent until something else happens to
         rewrite them. Same "caller owns the boundary" contract as
         :meth:`count` / :meth:`get_all_metadata`.
+
+        nexus-o8dil.45 (RDR-191 F10c follow-up): returns the server's ACTUAL
+        ``{"deleted": N}`` count rather than discarding it (``-> None``).
+        ``PgVectorRepository#delete``'s anti-join (F10c fix, nexus-o8dil.5)
+        can legitimately delete fewer than requested — a chash a live
+        manifest row still references is silently skipped, not counted. Pre-
+        fix this distinction was moot (the server always deleted exactly
+        what was asked); post-fix, discarding the response made every caller
+        of this method report a REQUESTED count as an ACTUAL one. Mirrors
+        :meth:`delete_by_id`'s pre-existing ``result.get("deleted", 0)``
+        capture — same contract, generalized to the batch case. Return type
+        change is backward compatible: no caller inspected the prior
+        ``None``.
         """
         if not ids:
-            return
-        _post(
+            return 0
+        result = _post(
             "/v1/vectors/store-delete",
             {"collection": self._name, "ids": ids},
             tenant=self._tenant,
         )
+        return result.get("deleted", 0)
 
 
 # ── HttpVectorClient ─────────────────────────────────────────────────────────

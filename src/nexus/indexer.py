@@ -2490,12 +2490,23 @@ def _fetch_all_chunk_metadata(
 
 
 def _batched_delete(col: object, ids: list[str]) -> int:
-    """Delete *ids* from *col* in batches of _CHROMA_PAGE_SIZE (Cloud quota: 300)."""
+    """Delete *ids* from *col* in batches of _CHROMA_PAGE_SIZE (Cloud quota: 300).
+
+    nexus-o8dil.45 (RDR-191 F10c follow-up): returns the sum of each batch's
+    ACTUAL deleted count, not ``len(ids)``. ``col.delete()`` is duck-typed —
+    the real service-mode backend (``_ServiceCollectionStub``, post
+    nexus-o8dil.5) reports an ``int`` that can legitimately be less than
+    requested (the server's anti-join retains a chash a live document still
+    references). Test-double / legacy backends without that counting
+    contract (e.g. ``InMemoryCollection``, which returns ``None`` and never
+    partially refuses) fall back to ``len(batch)`` — unchanged prior
+    behavior for those backends.
+    """
     deleted = 0
     for i in range(0, len(ids), _CHROMA_PAGE_SIZE):
         batch = ids[i : i + _CHROMA_PAGE_SIZE]
-        _vector_with_retry(col.delete, ids=batch)
-        deleted += len(batch)
+        result = _vector_with_retry(col.delete, ids=batch)
+        deleted += result if isinstance(result, int) else len(batch)
     return deleted
 
 
@@ -2606,9 +2617,15 @@ def _prune_misclassified_in_collection(
 
     def _guarded_delete(ids: list[str]) -> int:
         """Delete *ids* from *col*, clearing any LIVE manifest reference
-        FIRST so no dangling row can result. Returns the count actually
-        handed to ``_batched_delete`` (ids refused for a failed/absent
-        manifest write are NOT counted as pruned)."""
+        FIRST so no dangling row can result. Returns ``_batched_delete``'s
+        ACTUAL deleted count (ids refused for a failed/absent manifest write
+        are NOT counted as pruned — same as before; nexus-o8dil.45: an id
+        the F8c guard approved as *deletable* can still be legitimately
+        anti-join-refused by the server, since ``chash_to_docs`` above is
+        scoped to the doc_ids in THIS prune call, not catalog-wide. A
+        mismatch between what was handed to ``_batched_delete`` and what it
+        actually reports is therefore a real, if rare, signal — logged, not
+        silently absorbed into an inflated count)."""
         deletable: list[str] = []
         # nexus-ch0gk: *catalog_writer* may already be CLOSED by the time
         # this runs -- the production call site's ``_migrate_writer.close()``
@@ -2654,9 +2671,21 @@ def _prune_misclassified_in_collection(
                          "-- refusing to delete rather than orphan the "
                          "manifest reference",
                 )
-        if deletable:
-            _batched_delete(col, deletable)
-        return len(deletable)
+        if not deletable:
+            return 0
+        actual = _batched_delete(col, deletable)
+        if actual < len(deletable):
+            _log.warning(
+                "prune_misclassified_anti_join_partial_delete",
+                requested=len(deletable), actual=actual,
+                collection=getattr(col, "name", "?"), kind=kind,
+                note="the server's anti-join refused some chashes the F8c "
+                     "manifest guard believed had no live reference -- the "
+                     "guard's chash_to_docs ground truth is scoped to this "
+                     "prune call's doc_ids, not catalog-wide, so a live "
+                     "reference elsewhere is invisible to it",
+            )
+        return actual
 
     if catalog is not None and doc_ids:
         # Manifest-based path: per-doc, fetch the chashes that document

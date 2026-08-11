@@ -725,7 +725,19 @@ def _force_t3_orphan_cleanup(t3: Any, collection: str, content_hash: str) -> int
     error: ``get_all_metadata`` returns an empty id list, ``delete`` is
     never called, and this returns 0 quietly.
 
-    Returns the number of orphan chunks deleted.
+    Returns the ACTUAL number of orphan chunks deleted, which may be less
+    than ``len(orphan_ids)`` (nexus-o8dil.45, RDR-191 F10c follow-up): this
+    function's "orphan" candidates come from a metadata-only lookup
+    (``get_all_metadata(where={"content_hash": ...})``), which cannot see
+    whether a live catalog manifest row still references one of them.
+    ``PgVectorRepository#delete``'s server-side anti-join (nexus-o8dil.5) is
+    the authoritative check and can legitimately refuse part of the batch —
+    meaning some candidates were never true orphans, and ``--force``'s
+    deadlock-break may be incomplete for this *content_hash*. That case is
+    NOT the "genuine cleanup failure" the fail-loud contract above talks
+    about (no exception; the delete call itself succeeded), so it is
+    reported via a WARNING rather than a raise, and the return value
+    reflects reality rather than the requested count.
     """
     col = t3.get_or_create_collection(collection)
     orphan_meta = col.get_all_metadata(where={"content_hash": content_hash})
@@ -737,14 +749,28 @@ def _force_t3_orphan_cleanup(t3: Any, collection: str, content_hash: str) -> int
             collection=collection,
         )
         return 0
-    col.delete(orphan_ids)
-    _log.info(
-        "force_t3_orphan_cleanup_deleted",
-        content_hash=content_hash,
-        collection=collection,
-        orphan_count=len(orphan_ids),
-    )
-    return len(orphan_ids)
+    result = col.delete(orphan_ids)
+    actual = result if isinstance(result, int) else len(orphan_ids)
+    if actual < len(orphan_ids):
+        _log.warning(
+            "force_t3_orphan_cleanup_partial_delete",
+            content_hash=content_hash,
+            collection=collection,
+            requested=len(orphan_ids),
+            actual=actual,
+            note="the server's anti-join refused to delete some candidates "
+                 "-- they are still referenced by a live catalog manifest "
+                 "row and were never true orphans; the --force deadlock-"
+                 "break may be incomplete for this content_hash",
+        )
+    else:
+        _log.info(
+            "force_t3_orphan_cleanup_deleted",
+            content_hash=content_hash,
+            collection=collection,
+            orphan_count=actual,
+        )
+    return actual
 
 
 def pipeline_index_pdf(
