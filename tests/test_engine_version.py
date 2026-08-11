@@ -257,7 +257,24 @@ class TestRequiredEngineVersion:
         # (flush path sends the combined call; ack-echo RAISES against an
         # engine below this identity, so the floor bump is mandatory, not
         # optional).
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 69)
+        # -> (0,1,70) 2026-08-10, conexus 7.6.0 (PAIRED release). Carries the
+        # RDR-191 Phase 1 engine half — catalog-023's three
+        # `POST /v1/vectors/gc/*` anti-join routes (gc_quarantine_orphans /
+        # gc_restore_rereferenced / gc_expire_quarantine) — plus
+        # `GET /v1/catalog/descendants`, whose absence made every `subtree`
+        # query silently return at most one 500-row page. BOTH client halves
+        # ship in this same release, so the bump is mandatory, not optional:
+        # floor-lag would ship a client whose pinned engine lacks the engine
+        # halves of its own features (the 7.1.0/v0.1.62 inversion).
+        # Cut on e1cb78a1, `service/` tree identical to green-service-ci
+        # c84480ec. Gated: --shakeout PASSED pre-tag (it caught a Phase D
+        # census that had never run in-container, and then caught a wrong
+        # first fix for it), --acquire PASSED post-publish against the
+        # published bytes (/version release_version=0.1.70). Cloud deploy
+        # fires at client-tag push under the paired-release choreography;
+        # the floor gate ran in --paired-deploy mode and its POST-TAG VERIFY
+        # (re-run WITHOUT the flag) is owed once the deploy lands.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 70)
 
 
 class TestParseEngineVersion:

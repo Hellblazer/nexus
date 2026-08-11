@@ -1729,41 +1729,21 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def descendants(self, prefix: str) -> list[dict]:
         """All documents whose tumbler starts with ``prefix + "."`` (T2 nexus/chroma-residue-plan-2026-08-10 §C1).
 
-        Prefers the dedicated ``GET /descendants`` engine route — one
-        unbounded query, complete by construction. Falls back to an
-        exhaustively PAGINATED ``/list`` walk (client-side filtered) when
-        the route is absent (404) — the route ships in engine-service
-        v0.1.70+ but ``REQUIRED_ENGINE_VERSION`` may still be pinned
-        below that at any given moment, so an engine predating the route
-        is an expected, not exceptional, condition here.
+        Uses the dedicated ``GET /descendants`` engine route — one unbounded
+        query, complete by construction. The route ships in engine-service
+        v0.1.70, which is ``REQUIRED_ENGINE_VERSION`` as of this release, so
+        every engine a client may run against carries it; the 404-triggered
+        paginated fallback that existed while the floor was below that tag
+        was deleted by its own retirement tripwire
+        (``TestDescendantsFallbackDoesNotOutliveItsRoute``) in the same
+        change that bumped the floor. A 404 here is now a real failure and
+        propagates.
 
         The PRE-FIX behaviour pulled a single unfiltered ``limit=500``
         ``/list`` page and filtered client-side — silently truncating any
-        subtree larger than one page with no error (verified 0% coverage
-        on 11 of the 12 largest cloud-catalog subtrees, reproduced
-        against the live 19,824-document catalog). The fallback below
-        must never repeat that: it pages to exhaustion, mirroring
-        ``all_documents``'s unfiltered branch, rather than capping.
-        """
-        try:
-            result = self._get("/descendants", prefix=prefix)
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                _log.warning(
-                    "http_catalog_client.descendants_route_missing_fallback_to_paginated_list",
-                    prefix=prefix,
-                )
-                return self._descendants_via_paginated_list(prefix)
-            raise
-        return result.get("documents", []) if result else []
-
-    def _descendants_via_paginated_list(self, prefix: str) -> list[dict]:
-        """Correctness fallback for :meth:`descendants` on a pre-route engine.
-
-        Pages ``/list`` to exhaustion (matching ``all_documents``'s
-        unfiltered-branch pattern) and filters client-side — O(catalog
-        size) round trips instead of one server-side query — but never
-        silently truncates.
+        subtree larger than one page with no error (verified 0% coverage on
+        11 of the 12 largest cloud-catalog subtrees, reproduced against the
+        live 19,824-document catalog). That is what this route replaced.
 
         Do NOT read "one server-side query" as "one INDEX SEEK". The route's
         predicate is ``tumbler LIKE prefix || '.%'``, which a B-tree can
@@ -1773,22 +1753,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         index present anywhere. The managed cloud deployment's collation is
         not provisioned or verified anywhere in this repo, so on cloud this
         may be a sequential scan. What the route guarantees unconditionally
-        is COMPLETENESS; index acceleration is unverified there. Correcting
-        the "one indexed SQL query" phrasing in ab7907fb's commit message,
-        which asserted more than was established.
+        is COMPLETENESS; index acceleration is unverified there. (Carried
+        forward from the deleted fallback's docstring, which corrected
+        ab7907fb's commit message for asserting more than was established.)
         """
-        needle = prefix + "."
-        page = 500
-        out: list[dict] = []
-        cur = 0
-        while True:
-            result = self._get("/list", limit=page, offset=cur)
-            docs = result.get("documents", []) if result else []
-            out.extend(d for d in docs if d.get("tumbler", "").startswith(needle))
-            if len(docs) < page:
-                break
-            cur += page
-        return out
+        result = self._get("/descendants", prefix=prefix)
+        return result.get("documents", []) if result else []
 
     def set_alias(self, tumbler: Tumbler | str, canonical: Tumbler | str) -> None:
         self._post("/update", {"tumbler": str(tumbler), "alias_of": str(canonical)})

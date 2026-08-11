@@ -52,9 +52,15 @@ def test_quarantine_serverside_noMethod_returnsNone():
     assert quarantine_orphans_serverside(db, "code__x", "quarantine-code__x", now_stamp()) is None
 
 
-def test_quarantine_serverside_404_returnsNone():
+def test_quarantine_serverside_404_now_RAISES_fallback_retired():
+    """RETIRED at REQUIRED_ENGINE_VERSION (0,1,70): a 404 used to mean
+    "pre-route engine, fall back client-side" and returned None. The route
+    now ships in the pinned engine, so a 404 is a real failure and must
+    propagate. Asserting the RAISE (not merely deleting the old test) is
+    what stops the fallback quietly reappearing."""
     db = type("Db", (), {"gc_quarantine_orphans": _Raises(VectorServiceError("nope", code=404))})()
-    assert quarantine_orphans_serverside(db, "code__x", "quarantine-code__x", now_stamp()) is None
+    with pytest.raises(VectorServiceError):
+        quarantine_orphans_serverside(db, "code__x", "quarantine-code__x", now_stamp())
 
 
 def test_quarantine_serverside_non404_reraises():
@@ -85,9 +91,11 @@ def test_restore_serverside_noMethod_returnsNone():
     assert restore_rereferenced_serverside(db, "quarantine-code__x", "code__x") is None
 
 
-def test_restore_serverside_404_returnsNone():
+def test_restore_serverside_404_now_RAISES_fallback_retired():
+    """See test_quarantine_serverside_404_now_RAISES_fallback_retired."""
     db = type("Db", (), {"gc_restore_rereferenced": _Raises(VectorServiceError("nope", code=404))})()
-    assert restore_rereferenced_serverside(db, "quarantine-code__x", "code__x") is None
+    with pytest.raises(VectorServiceError):
+        restore_rereferenced_serverside(db, "quarantine-code__x", "code__x")
 
 
 def test_restore_serverside_non404_reraises():
@@ -112,12 +120,14 @@ def test_expire_serverside_noMethod_returnsNone():
     ) is None
 
 
-def test_expire_serverside_404_returnsNone():
+def test_expire_serverside_404_now_RAISES_fallback_retired():
+    """See test_quarantine_serverside_404_now_RAISES_fallback_retired."""
     db = type("Db", (), {"gc_expire_quarantine": _Raises(VectorServiceError("nope", code=404))})()
-    assert expire_quarantine_serverside(
-        db, "quarantine-code__x", "code__x", now_stamp(),
-        floor_fraction=0.5, floor_min_chunks=100,
-    ) is None
+    with pytest.raises(VectorServiceError):
+        expire_quarantine_serverside(
+            db, "quarantine-code__x", "code__x", now_stamp(),
+            floor_fraction=0.5, floor_min_chunks=100,
+        )
 
 
 def test_expire_serverside_non404_reraises():

@@ -95,39 +95,42 @@ class TestDescendantsRoute:
 
 
 class TestDescendantsFallbackOn404:
-    """The pagination fallback for an engine predating the route."""
+    """The 404 fallback is RETIRED — these pin that it stays retired."""
 
-    def test_fallback_paginates_to_completeness_when_route_missing(
+    def test_404_propagates_now_that_the_route_ships_in_the_pinned_engine(
         self, t2_service_env, monkeypatch,
     ) -> None:
-        """Simulates an engine predating the ``/descendants`` route (404) — the
-        client must fall back to an EXHAUSTIVE paginated ``/list`` walk, not
-        the old truncating single-page behaviour. Only the ``/descendants``
-        call is intercepted; every ``/list`` call underneath still hits the
-        real engine, so the fallback's completeness is proven against a real
-        corpus, not a stub.
+        """RETIRED at ``REQUIRED_ENGINE_VERSION == (0, 1, 70)``, the tag that
+        ships ``GET /v1/catalog/descendants``.
+
+        While the floor was below that tag, a 404 meant "engine predates the
+        route" and the client fell back to an exhaustive paginated ``/list``
+        walk. Every engine a client may now run against carries the route, so
+        a 404 is a real failure and must propagate — verified in both
+        directions before the fallback was deleted: a local box converges its
+        engine to the pinned identity on any ordinary ``nx`` command, and a
+        cloud client refuses a below-identity managed engine outright.
+
+        Asserting the RAISE rather than deleting the test outright is
+        deliberate: it is what stops the fallback quietly returning, and it
+        keeps the retirement visible at the site that used to depend on it.
         """
         client = _client()
-        expected = _seed_descendants(client, "704", _CORPUS_SIZE)
-
-        real_get = client._get
 
         def get_with_404_on_descendants(path, **params):
             if path == "/descendants":
                 req = httpx.Request("GET", "http://fake.invalid/v1/catalog/descendants")
                 resp = httpx.Response(404, request=req)
                 raise httpx.HTTPStatusError("not found", request=req, response=resp)
-            return real_get(path, **params)
+            raise AssertionError(
+                f"no other call may be made once /descendants 404s; got {path!r} "
+                "— a resurrected client-side fallback would show up here"
+            )
 
         monkeypatch.setattr(client, "_get", get_with_404_on_descendants)
 
-        got_tumblers = {d["tumbler"] for d in client.descendants("704")}
-        missing = expected - got_tumblers
-        assert got_tumblers == expected, (
-            f"the 404 fallback must page /list to exhaustion, never silently "
-            f"truncate: expected {len(expected)}, got {len(got_tumblers)} "
-            f"(missing {len(missing)})"
-        )
+        with pytest.raises(httpx.HTTPStatusError):
+            client.descendants("704")
 
     def test_non_404_error_propagates_not_swallowed(
         self, t2_service_env, monkeypatch,
