@@ -4,6 +4,20 @@ on:
   push:
     tags:
       - "v*"
+  # Retry path for a publish that failed for CI-side reasons (a rotted action
+  # pin, a transient upload error) rather than a defect in the artifact.
+  # Without this, the tag is the ONLY trigger AND GitHub runs the workflow file
+  # from the tagged ref, so fixing the pipeline means MOVING the tag — which
+  # breaks the immutability that .claude-plugin/marketplace.json's source.ref
+  # depends on. 7.6.0 moved twice for exactly that reason (2026-08-11).
+  # Dispatch checks out the named tag, so it publishes the same tree the tag
+  # names, using the CURRENT workflow file from the default branch.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish (e.g. v7.6.0)"
+        required: true
+        type: string
 
 jobs:
   # 2026-07-06 CI-cost pass: the pytest matrix that used to run here was
@@ -24,6 +38,9 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
         with:
+          # On workflow_dispatch, check out the tag the operator named; on a
+          # tag push this is empty and checkout uses the triggering ref.
+          ref: ${{ inputs.tag }}
           # fetch-depth: 0, NOT fetch-tags (nexus-dhs30). The engine-freshness
           # gate reads `git tag -l engine-service-v*` to prove every gated engine
           # tag is pinned. `fetch-tags: true` on a depth-1 checkout does NOT
