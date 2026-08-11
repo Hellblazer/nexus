@@ -215,7 +215,7 @@ def test_store_reap_runs_on_fresh_service_box(service_mode_fresh_box):
     from nexus.commands.store import _reap_catalog_for_doc_ids
 
     _FakeHttpCatalogClient._seed = {"d" * 64: _Entry("1.1.9")}
-    _reap_catalog_for_doc_ids(["d" * 64])
+    _reap_catalog_for_doc_ids(["d" * 64], expected_collection=None)
     (client,) = _FakeHttpCatalogClient.instances
     assert client.deleted == ["1.1.9"], (
         "reap must route through the service catalog on a fresh box"

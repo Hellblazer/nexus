@@ -39,15 +39,34 @@ import static org.assertj.core.api.Assertions.assertThat;
  * shared-chash GC race (docs/rdr/rdr-181-server-side-embed-skip-on-reindex.md §Risks
  * and Mitigations / §Failure Modes).
  *
- * <p><strong>The race.</strong> A chash H shared by two catalog documents (normal per
- * RDR-108: identical chunk text collapses to one {@code chunks_<dim>} row; two manifest
- * positions can point at the same chash). A re-index of doc B sees H present via the
- * existence SELECT inside {@link PgVectorRepository#resolveNeedEmbedIdx}, intending to
- * take the metadata-only have-vector path — but a concurrent orphan-GC hard delete
- * (e.g. doc A no longer referencing H, {@link PgVectorRepository#delete}) removes H
- * between that SELECT and the have-vector UPDATE. The single-writer MVV
- * ({@code PgVectorEmbedSkipIntegrationTest}) cannot exercise this: it has no concurrent
- * second writer. This suite reproduces the exact interleaving deterministically.
+ * <p><strong>UPDATED for RDR-191 F10c (bead nexus-o8dil.5).</strong> {@link
+ * PgVectorRepository#delete} is now anti-join-scoped against
+ * {@code catalog_document_chunks} — a delete no longer removes a chunk any live
+ * manifest row still references. The race this suite reproduces therefore requires H
+ * to be a GENUINE, if transient, orphan at the moment of the concurrent delete: this
+ * fixture seeds H's manifest rows for docs A and B AFTER the racing write settles, not
+ * before — matching the real caller ordering (T3 content write, THEN manifest write;
+ * see {@code indexer.py}/{@code doc_indexer.py}: {@code upsert_chunks_with_embeddings}
+ * precedes {@code write_manifest}). Before this update the fixture seeded BOTH
+ * documents' manifest rows BEFORE the race and then asserted the concurrent delete
+ * removed H anyway — i.e. it asserted deletion of a chunk two live documents still
+ * referenced, exactly the F10c bug. That assertion is now correctly refused by the
+ * anti-join and would fail; the corrected fixture below tests the race the bug report
+ * actually describes (a transient pre-manifest-write orphan window), which remains
+ * live and worth covering — the anti-join protects REFERENCED chunks, not the brief
+ * window before a chunk's own manifest row exists.
+ *
+ * <p><strong>The race.</strong> A chash H about to be shared by two catalog documents
+ * once both are manifested (normal per RDR-108: identical chunk text collapses to one
+ * {@code chunks_<dim>} row; two manifest positions can point at the same chash). A
+ * re-index of doc B sees H present via the existence SELECT inside {@link
+ * PgVectorRepository#resolveNeedEmbedIdx}, intending to take the metadata-only
+ * have-vector path — but, in the transient window before ANY manifest row references H
+ * (both A and B's manifest writes still pending), a concurrent orphan-GC hard delete
+ * ({@link PgVectorRepository#delete}) legitimately removes H between that SELECT and
+ * the have-vector UPDATE. The single-writer MVV ({@code PgVectorEmbedSkipIntegrationTest})
+ * cannot exercise this: it has no concurrent second writer. This suite reproduces the
+ * exact interleaving deterministically.
  *
  * <p><strong>Deterministic interleaving.</strong> {@code resolveNeedEmbedIdx}'s
  * existence-SELECT-then-have-vector-UPDATE pair runs inside ONE transaction (by design,
@@ -66,9 +85,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * transaction's have-vector UPDATE now matches 0 rows (H was deleted and committed by
  * the other thread; READ COMMITTED gives the UPDATE statement a fresh snapshot). Per the
  * RDR-181 design, a 0-row UPDATE reroutes that chash into need-embed — H is re-embedded
- * and re-inserted, never silently dropped. {@code fetchDocumentChunks} for the surviving
- * document must succeed afterward with no {@link IllegalStateException}
- * ({@code PgVectorRepository#fetchDocumentChunks}'s "never a silently partial document"
+ * and re-inserted, never silently dropped. Once the racing write settles, the manifest
+ * rows for A and B are written (matching real ordering) and {@code fetchDocumentChunks}
+ * for both must succeed with no {@link IllegalStateException} ({@code
+ * PgVectorRepository#fetchDocumentChunks}'s "never a silently partial document"
  * contract).
  *
  * <p>Hermetic: Testcontainers pgvector/pgvector:pg17, {@code nexus_svc}-shaped plain
@@ -162,21 +182,21 @@ class PgVectorEmbedSkipGcRaceTest {
 
     @Test
     void concurrentGcDeleteBetweenExistenceSelectAndHaveVectorUpdate_selfHealsNoDataLoss() throws Exception {
-        // 1. Seed H once (normal insert path — it does not exist yet) and register two
-        //    manifest positions (docs A and B) pointing at the SAME chash — the RDR-108
-        //    shared-chash scenario the whole race depends on.
+        // 1. Seed H once (normal insert path — it does not exist yet). Register docs A
+        //    and B but — RDR-191 F10c fixture correction — do NOT yet write their
+        //    manifest rows: real callers write T3 content BEFORE the manifest
+        //    (upsert_chunks_with_embeddings precedes write_manifest), so at this point
+        //    in a real indexing run H is a genuine, transient orphan. Seeding both
+        //    manifest rows here (as this fixture used to) would make the concurrent
+        //    delete below target a chunk two live documents already reference — exactly
+        //    the F10c bug the anti-join now correctly refuses, which would make this
+        //    fixture untestable as originally written.
         repo.upsertChunks(TENANT, COLLECTION, List.of(CHASH_H), List.of(SHARED_TEXT),
                 List.of(Map.of("v", "1")));
         assertThat(superuserCount()).as("H exists after the initial seed insert").isEqualTo(1L);
 
         seedCatalogDocument(TUMBLER_A, "Doc A");
         seedCatalogDocument(TUMBLER_B, "Doc B");
-        seedManifestRow(TUMBLER_A, 0, CHASH_H);
-        seedManifestRow(TUMBLER_B, 0, CHASH_H);
-
-        // Sanity: both documents resolve BEFORE the race.
-        assertThat(repo.fetchDocumentChunks(TENANT, TUMBLER_A)).hasSize(1);
-        assertThat(repo.fetchDocumentChunks(TENANT, TUMBLER_B)).hasSize(1);
 
         int embedCallsBeforeRace = embedder.callCount();
 
@@ -221,8 +241,11 @@ class PgVectorEmbedSkipGcRaceTest {
                 .as("the racing writer must reach the post-existence-SELECT pause point")
                 .isTrue();
 
-            // 5. While paused: simulate the concurrent orphan-GC hard delete of H (e.g.
-            //    doc A's own re-index dropped its reference and GC swept the orphan).
+            // 5. While paused: simulate the concurrent orphan-GC hard delete of H. H is a
+            //    genuine orphan at this point — neither A nor B has a manifest row for it
+            //    yet (see the fixture-correction note above) — so the RDR-191 F10c
+            //    anti-join correctly permits this delete; it would refuse it if either
+            //    document already referenced H.
             int deleted = repo.delete(TENANT, COLLECTION, List.of(CHASH_H));
             assertThat(deleted).as("the concurrent GC delete removes exactly the one row").isEqualTo(1);
             assertThat(superuserCount())
@@ -258,7 +281,15 @@ class PgVectorEmbedSkipGcRaceTest {
             .as("the re-inserted row carries the racing writer's metadata, not the stale seed value")
             .isEqualTo("2");
 
-        // 8. The write-safety proof: fetchDocumentChunks for the surviving document
+        // 8. Now write the manifest rows — matching real ordering (T3 content settles
+        //    first, manifest write follows). Both A and B reference H, same as the
+        //    original RDR-108 shared-chash scenario this suite is named for; the point
+        //    under test is that the race resolved cleanly before either manifest row
+        //    existed, not that the anti-join was bypassed.
+        seedManifestRow(TUMBLER_A, 0, CHASH_H);
+        seedManifestRow(TUMBLER_B, 0, CHASH_H);
+
+        // 9. The write-safety proof: fetchDocumentChunks for the surviving document
         //    (B) must succeed — no IllegalStateException, no dangling manifest
         //    reference (PgVectorRepository.fetchDocumentChunks's "never a silently
         //    partial document" contract).

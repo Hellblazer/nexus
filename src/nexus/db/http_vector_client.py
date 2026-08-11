@@ -1292,7 +1292,7 @@ class _ServiceCollectionStub:
             "metadatas": result.get("metadatas", []),
         }
 
-    def delete(self, ids: list[str]) -> None:
+    def delete(self, ids: list[str]) -> int:
         """Delete chunks by ID from the service.
 
         nexus-ou4tb: raises :class:`VectorServiceError` rather than logging and
@@ -1301,14 +1301,28 @@ class _ServiceCollectionStub:
         agree, and the divergence is permanent until something else happens to
         rewrite them. Same "caller owns the boundary" contract as
         :meth:`count` / :meth:`get_all_metadata`.
+
+        nexus-o8dil.45 (RDR-191 F10c follow-up): returns the server's ACTUAL
+        ``{"deleted": N}`` count rather than discarding it (``-> None``).
+        ``PgVectorRepository#delete``'s anti-join (F10c fix, nexus-o8dil.5)
+        can legitimately delete fewer than requested — a chash a live
+        manifest row still references is silently skipped, not counted. Pre-
+        fix this distinction was moot (the server always deleted exactly
+        what was asked); post-fix, discarding the response made every caller
+        of this method report a REQUESTED count as an ACTUAL one. Mirrors
+        :meth:`delete_by_id`'s pre-existing ``result.get("deleted", 0)``
+        capture — same contract, generalized to the batch case. Return type
+        change is backward compatible: no caller inspected the prior
+        ``None``.
         """
         if not ids:
-            return
-        _post(
+            return 0
+        result = _post(
             "/v1/vectors/store-delete",
             {"collection": self._name, "ids": ids},
             tenant=self._tenant,
         )
+        return result.get("deleted", 0)
 
 
 # ── HttpVectorClient ─────────────────────────────────────────────────────────
@@ -2574,25 +2588,42 @@ class HttpVectorClient:
             offset += len(page)
         return ids
 
-    def batch_delete(self, collection: str, ids: list[str]) -> None:
+    def batch_delete(self, collection: str, ids: list[str]) -> int:
         """Delete *ids* from *collection* in service-quota-bounded batches.
 
         nexus-umvh2: was missing entirely -- the second half of the ``nx
         store delete --title`` crash (after :meth:`find_ids_by_title`
         resolves the id list). Batches at ``QUOTAS.MAX_RECORDS_PER_WRITE``
         like :meth:`update_chunks` / :meth:`delete_by_source`.
+
+        nexus-o8dil.5 (RDR-191 F10c follow-up): returns the SUM of each
+        batch's actual ``{"deleted": N}`` response, not ``len(ids)``.
+        ``PgVectorRepository#delete``'s anti-join (F10c fix) can now
+        legitimately delete fewer than requested — a chash a live
+        manifest row still references is silently skipped, not counted.
+        Pre-fix this distinction was moot (the server always deleted
+        exactly what was asked); post-fix, discarding the response body
+        here made every caller of this method (this class's own
+        :meth:`expire`, ``commands/store.py``'s ``nx store delete
+        --title``) report a REQUESTED count as an ACTUAL one — the exact
+        silent-success-on-partial-failure shape ``nx store expire``'s own
+        fix (F10c leak) exists to close. Return type change is backward
+        compatible: no caller inspected the prior ``None``.
         """
         if not ids:
-            return
+            return 0
         from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
 
         size = QUOTAS.MAX_RECORDS_PER_WRITE
+        deleted = 0
         for start in range(0, len(ids), size):
-            _post(
+            result = _post(
                 "/v1/vectors/store-delete",
                 {"collection": collection, "ids": ids[start:start + size]},
                 tenant=self._tenant,
             )
+            deleted += result.get("deleted", 0) if result else 0
+        return deleted
 
     def list_store(
         self, collection: str, limit: int = 200, offset: int = 0,
@@ -2765,8 +2796,33 @@ class HttpVectorClient:
         errors propagate (a swallowed failure would report "0 expired"
         while expired rows survive).
 
-        Returns the total number of deleted documents.
+        nexus-o8dil.5 (RDR-191 P2, CRITICAL fix): ``nx store put --ttl``
+        unconditionally registers a catalog manifest row for the note
+        (``ttl_days`` never gates catalog registration —
+        ``commands/store.py``'s ``put_cmd``). ``PgVectorRepository#delete``'s
+        anti-join (F10c fix) refuses to delete a chash any LIVE manifest
+        row still references — including the TTL note's own manifest row,
+        which nothing retracted. Pre-fix (this method's original shape)
+        that meant a TTL-lapsed note's chunk survived forever: no later GC
+        pass reclaims it (``nx t3 gc`` treats any manifest reference,
+        dangling or not, as "keep"), while this method still reported
+        "Expired N entries" — a silent permanent leak with a false-success
+        signal, violating the project's fail-loud-on-correctness rule.
+        Fixed by retracting the manifest BEFORE deleting the chunk
+        (:func:`nexus.catalog.store_hook.reap_catalog_manifest_for_chashes`
+        — the same tombstone-then-delete order ``nx store delete`` uses,
+        best-effort and silent per-chash on failure/ambiguity) and by
+        reporting :meth:`batch_delete`'s ACTUAL deleted count rather than
+        ``len(expired_ids)``: if a chash is genuinely shared with another
+        still-live document, the reap correctly leaves it alone, the
+        anti-join correctly refuses to delete it, and the returned total
+        now correctly excludes it instead of lying about it.
+
+        Returns the total number of chunks ACTUALLY deleted (may be less
+        than the number of TTL-lapsed rows found, in the rare case one
+        genuinely shares content with another still-live document).
         """
+        from nexus.catalog.store_hook import reap_catalog_manifest_for_chashes  # noqa: PLC0415 — deferred to avoid import cycle
         from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
         from nexus.metadata_schema import is_expired  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
@@ -2801,8 +2857,8 @@ class HttpVectorClient:
                 if len(page_ids) < page_limit:
                     break  # last page (short or empty)
             if expired_ids:
-                self.batch_delete(name, expired_ids)
-            total += len(expired_ids)
+                reap_catalog_manifest_for_chashes(expired_ids, expected_collection=name)
+                total += self.batch_delete(name, expired_ids)
         return total
 
     def collection_info(self, name: str) -> dict:

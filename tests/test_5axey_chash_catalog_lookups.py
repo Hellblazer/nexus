@@ -122,7 +122,7 @@ class TestDeletePathA2:
         )
         assert count_documents() == 1
 
-        deleted_tumbler, error = store_delete_catalog_cleanup(chash)
+        deleted_tumbler, error = store_delete_catalog_cleanup(chash, expected_collection=None)
 
         assert error == ""
         assert deleted_tumbler == tumbler
@@ -132,7 +132,7 @@ class TestDeletePathA2:
         from nexus.catalog.store_hook import store_delete_catalog_cleanup
 
         _make_catalog(tmp_path)
-        tumbler, error = store_delete_catalog_cleanup(_chash("nothing-here"))
+        tumbler, error = store_delete_catalog_cleanup(_chash("nothing-here"), expected_collection=None)
         assert (tumbler, error) == ("", "")
 
 
@@ -151,7 +151,7 @@ class TestTombstoneReapA4:
         )
         assert count_documents() == 1
 
-        _reap_catalog_for_doc_ids([chash])
+        _reap_catalog_for_doc_ids([chash], expected_collection=None)
 
         assert count_documents() == 0
 
@@ -159,7 +159,7 @@ class TestTombstoneReapA4:
         from nexus.commands.store import _reap_catalog_for_doc_ids
 
         _make_catalog(tmp_path)
-        _reap_catalog_for_doc_ids([_chash("never-registered")])  # must not raise
+        _reap_catalog_for_doc_ids([_chash("never-registered")], expected_collection=None)  # must not raise
 
 
 def _register_knowledge_doc_directly(cat: ActiveCatalog, *, title: str,
@@ -224,7 +224,7 @@ class TestAmbiguousChash:
             cat, title="Doc Two", chash=chash, collection="knowledge__two",
         )
 
-        tumbler, error = store_delete_catalog_cleanup(chash)
+        tumbler, error = store_delete_catalog_cleanup(chash, expected_collection=None)
 
         assert (tumbler, error) == ("", "")
         assert count_documents() == 2, "ambiguous match leaves both docs alone"

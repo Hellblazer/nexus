@@ -4,6 +4,7 @@ id: RDR-191
 type: Architecture
 status: accepted
 accepted_date: 2026-08-10
+amended: 2026-08-11
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
@@ -17,6 +18,53 @@ supersedes_decision: "RDR-156 Decision 2 (Do NOT FK the manifest to the chunk ta
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
+
+## Amendment Log
+
+**2026-08-11, eight items amended post-acceptance.** RDR-191 was accepted
+2026-08-10 (gate PASSED run 5). The items below were found during subsequent
+plan-audit and cloud-measurement work (bead nexus-o8dil.44). Each amendment
+is recorded in place, next to the text it corrects, with the original
+reasoning preserved rather than deleted: either struck through or kept
+verbatim under a "SUPERSEDED, preserved for the record" heading, followed by
+what replaced it and why. This log is an index only; read the inline notes
+for the evidence.
+
+Sources: T2 `nexus/rdr-191-cloud-measurements` (Part 2), T2
+`nexus/rdr-191-freeze-window-scope-correction` (Hal's two corrections), T2
+`nexus/rdr-191-DECISION-always-copy-accepted` (the shape decision of
+record), bead nexus-o8dil.39 (delete-funnel caller census).
+
+  - **(i)** F9's claim that `chash_rekey.py` already implements the
+    local/managed DDL split (originally at RDR line range 1017-1023)
+    describes code that does not exist. Amended in place at the F9 finding's
+    "Cloud needs a different shape" paragraph.
+  - **(ii)** F9's "CIC for cloud, in-transaction for local" recommendation is
+    retired along with adopt-in-place. Same location as (i).
+  - **(iii)** Decision item 2's original "move only the smaller two dims'
+    rows" assumed non-trivial population in those two dims; the measured
+    cloud distribution (chunks_768 = 0, chunks_384 = 1) falsifies that
+    assumption for this deployment. Recorded inside amendment (viii); moot
+    for the implemented shape but real as a critique of the retired one.
+  - **(iv)** F14b's inherited-CHECK boot-brick does NOT evaporate under a
+    degenerate distribution. A CHECK is evaluated per row, not per corpus
+    size. Amended in place immediately after F14b.
+  - **(v)** F8b's delete-funnel count is corrected from NINE to ELEVEN
+    Python calling functions (nexus-o8dil.39's independent caller census).
+    Amended in place at F8b.
+  - **(vi)** All three embedding widths (384 / 768 / 1024) are required,
+    designed-in capability. The measured cloud distribution is a dated
+    observation and licenses NO schema simplification. Amended at Decision
+    item 1.
+  - **(vii)** The freeze window is a correctness concern here, not a
+    coordination one: Hal is the sole user of the cloud deployment. Amended
+    at Phase 3.
+  - **(viii)** LARGEST AMENDMENT. The migration shape is now ALWAYS-COPY,
+    not adopt-in-place. Decision item 2 and Phase 4's `(adopt-in-place,
+    ...)` parenthetical are both rewritten; a new finding F18 records the
+    decision; a new risk, transient disk headroom (~6.3 GB peak against a
+    6953 MB database), is added and gated as go-condition C5 on
+    nexus-o8dil.10.
 
 ## Problem Statement
 
@@ -237,36 +285,117 @@ FULL costs nothing and is the adopted shape.
    `WHERE embedding_N IS NOT NULL` predicate buys nothing (HNSW does not index
    NULLs, so the two indexes are 0.11% apart in size) and costs a silent ~250×
    seq-scan whenever a query omits the predicate. Full indexes throughout.
-2. **ADOPT THE LARGEST DIM TABLE IN PLACE — do not copy all three.**
-   (Revised by F9; the draft said "migrate dim by dim, then drop them", which
-   is ~6× more expensive for no benefit.) Rename the largest `chunks_<dim>`
-   into `nexus.chunks`, rename its `embedding` column to `embedding_<dim>`,
-   `ADD COLUMN` the other two (metadata-only), and move only the smaller two
-   dims' rows. **The pre-existing HNSW index survives both renames** and keeps
-   being used, so the dominant cost of the copy strategy is never paid.
-   Which table is largest is DEPLOYMENT-DEPENDENT (cloud = voyage-1024,
-   local = bge-768), so the migration must choose dynamically and then
-   canonicalise the inherited constraint/index names.
 
-   **Canonicalise those names as hygiene, and append this RDR's changelog
-   AFTER `fk-002-validate.xml` (F11a, corrected).** `fk-002-7/8/9` guard on
-   CONSTRAINT NAME (`conname`) while their statements reference the TABLE
-   NAME, so an inherited `chunks_<dim>_collection_fk` on the renamed table
-   would satisfy the precondition and then fail on the vanished table — BUT
-   Liquibase's strict declared order (zero `<includeAll>`; `fk-002-validate`
-   at master line 100, new changelogs appended near line 392) means those
-   changesets always run first, so this is an ordering REQUIREMENT on the new
-   changelog's placement, NOT an inherent boot-brick. Contrast Decision item
-   2's inherited-CHECK item above, which IS a genuine boot-brick (F14b).
+   **AMENDMENT (vi), 2026-08-11 (Hal, direct): all three widths are
+   REQUIRED, designed-in capability, not a function of what any one
+   deployment currently holds.** "we need all 3 vector lengths afaict, so
+   don't overindex what I have in da cloud." The cloud corpus measured
+   elsewhere in this document (F15: chunks_1024 = 383,979, chunks_768 = 0,
+   chunks_384 = 1) is a snapshot of one deployment at one moment, dated
+   2026-08-10, not a constraint the schema may lean on. This item already
+   specified all three columns and all three FULL indexes unconditionally;
+   this amendment makes explicit what was previously only implicit: nothing
+   in this document licenses making any embedding column or HNSW index
+   conditional on current population. A future change that does is a
+   Critical in review, not a simplification. Reasoning: T2
+   `nexus/rdr-191-freeze-window-scope-correction`.
+2. **[SUPERSEDED 2026-08-11, see AMENDMENT (viii) below.] ORIGINAL TEXT,
+   PRESERVED FOR THE RECORD, DO NOT IMPLEMENT:**
 
-   **MANDATORY, and the item that decides whether an un-converged box boots
-   at all (F14b):** the adopted table carries an inherited `NOT VALID` octet
-   CHECK, and `NOT VALID` exempts PRE-EXISTING rows only — so the
-   `INSERT…SELECT` of the two non-adopted dims VIOLATES it on any un-rekeyed
-   store, failing Liquibase at engine boot. The migration MUST **drop the
-   check, move the rows, then re-add it `NOT VALID` under a canonical name.**
-   Measured to work. Without this the release BRICKS un-rekeyed installs
-   before the ladder rung is ever reached.
+   > **ADOPT THE LARGEST DIM TABLE IN PLACE — do not copy all three.**
+   > (Revised by F9; the draft said "migrate dim by dim, then drop them", which
+   > is ~6× more expensive for no benefit.) Rename the largest `chunks_<dim>`
+   > into `nexus.chunks`, rename its `embedding` column to `embedding_<dim>`,
+   > `ADD COLUMN` the other two (metadata-only), and move only the smaller two
+   > dims' rows. **The pre-existing HNSW index survives both renames** and keeps
+   > being used, so the dominant cost of the copy strategy is never paid.
+   > Which table is largest is DEPLOYMENT-DEPENDENT (cloud = voyage-1024,
+   > local = bge-768), so the migration must choose dynamically and then
+   > canonicalise the inherited constraint/index names.
+   >
+   > **Canonicalise those names as hygiene, and append this RDR's changelog
+   > AFTER `fk-002-validate.xml` (F11a, corrected).** `fk-002-7/8/9` guard on
+   > CONSTRAINT NAME (`conname`) while their statements reference the TABLE
+   > NAME, so an inherited `chunks_<dim>_collection_fk` on the renamed table
+   > would satisfy the precondition and then fail on the vanished table — BUT
+   > Liquibase's strict declared order (zero `<includeAll>`; `fk-002-validate`
+   > at master line 100, new changelogs appended near line 392) means those
+   > changesets always run first, so this is an ordering REQUIREMENT on the new
+   > changelog's placement, NOT an inherent boot-brick. Contrast the
+   > inherited-CHECK item below, which IS a genuine boot-brick (F14b).
+   >
+   > **MANDATORY, and the item that decides whether an un-converged box boots
+   > at all (F14b):** the adopted table carries an inherited `NOT VALID` octet
+   > CHECK, and `NOT VALID` exempts PRE-EXISTING rows only — so the
+   > `INSERT…SELECT` of the two non-adopted dims VIOLATES it on any un-rekeyed
+   > store, failing Liquibase at engine boot. The migration MUST **drop the
+   > check, move the rows, then re-add it `NOT VALID` under a canonical name.**
+   > Measured to work. Without this the release BRICKS un-rekeyed installs
+   > before the ladder rung is ever reached.
+
+   **AMENDMENT (viii), 2026-08-11, DECISION OF RECORD: ALWAYS-COPY, not
+   adopt-in-place.** Hal ruled directly: "always-copy it is, go with that."
+   Full reasoning: T2 `nexus/rdr-191-DECISION-always-copy-accepted`. The
+   migration now reads:
+
+   **Create `nexus.chunks`, copy all rows in from all three dim shards
+   (`chunks_384`, `chunks_768`, `chunks_1024`), drop the sources, on BOTH
+   deployment modes, in ONE transaction, with NO `CREATE INDEX CONCURRENTLY`
+   arm.** There is no runtime "largest shard" selection and no adoption
+   target to choose. Free atomic rollback: if the migration fails partway,
+   PostgreSQL restores everything, since this is standard transactional
+   DDL/DML throughout (the same property F9 verified for adopt-in-place's
+   rename-plus-copy shape).
+
+   **This is a simplicity and determinism choice, not a cost optimisation.**
+   Adopt-in-place was measured cheaper in wall-clock time (F9: ~17.6s vs
+   ~103s at the 2026-08-11 cloud distribution). Always-copy is accepted at a
+   cost of single-digit minutes, once, in exchange for deleting a failure
+   mode rather than working around it.
+
+   **Why adopt-in-place was retired: the fresh-install three-way tie.**
+   Adopt-in-place requires choosing, at runtime, whichever dim shard holds
+   the most rows. On a fresh install all three dim tables are empty (F14's
+   "NOT blockers" note: fresh installs replay history in order, so these
+   tables are built from nothing before any data exists). Zero rows in all
+   three is an exact three-way tie, so the natural house-convention
+   implementation (per-dim `sqlCheck`-gated Liquibase changesets) either
+   triple-fires or silently `MARK_RAN`s everywhere and never creates
+   `nexus.chunks` at all: a missing-table boot failure on every fresh
+   install. This is the forcing reason, not a preference. A future reader
+   tempted to re-propose adopt-in-place for its speed should design a
+   tie-break for this exact case first.
+
+   **AMENDMENT (iii), 2026-08-11:** the retired text above ("move only the
+   smaller two dims' rows") implicitly assumed those two dims held
+   non-trivial data. The cloud distribution measured at F15 (chunks_768 = 0
+   rows, chunks_384 = 1 row, chunks_1024 = 383,979 rows) falsifies that
+   assumption for this deployment: "moving the smaller two" would have moved
+   almost nothing. This is moot under always-copy, which moves every dim's
+   rows regardless of size, but the assumption gap in the retired text is
+   recorded here as a real defect in its reasoning, independent of which
+   shape was ultimately chosen. Per amendment (vi), the measured distribution
+   is a dated snapshot and must not be read as evidence that any dim can be
+   treated as negligible.
+
+   **What is NOT changed by this amendment:** schema completeness stays
+   unconditional (amendment vi: all three embedding columns, all three FULL
+   HNSW indexes, built regardless of population, per F13); F14b's inherited
+   `NOT VALID` octet CHECK drop, move, re-add sequence stays fully required,
+   since an `INSERT...SELECT` into a fresh `nexus.chunks` is non-trivial by
+   construction on every deployment (amendment iv); F11a's changelog-ordering
+   requirement (append after `fk-002-validate.xml`) stays required, since
+   dropping the source tables is the same class of operation F11a analysed.
+
+   **New risk, not previously recorded: transient disk headroom.**
+   Always-copy materialises a second copy of the data before dropping the
+   source: measured against a 6953 MB database, roughly 2990 MB of heap and
+   TOAST plus roughly 3313 MB of fresh indexes, about 6.3 GB peak additional
+   space. This is the one axis where adopt-in-place was strictly better; it
+   never held two copies at once. UNMEASURED against actual free disk on
+   either deployment; gated as go-condition C5 on nexus-o8dil.10. Do not
+   authorise a migration window until free space comfortably exceeds the
+   database size with margin. See also finding F18 below.
 3. **Add the FK** `catalog_document_chunks (tenant_id, collection, chash) →
    nexus.chunks` — **`ON UPDATE CASCADE`** (F10: mandatory, not optional) and
    deferrable on the delete side (F8a). NOT `ON DELETE RESTRICT`. Note F10's
@@ -318,6 +447,18 @@ FULL costs nothing and is the adopted shape.
    operator step). Liquibase `preConditions` work only with
    `onFail="CONTINUE"` (`MARK_RAN` is permanent, `HALT` bricks) and buy an
    unbounded dual-schema window — held in reserve, not adopted.
+
+   **AMENDMENT (ix), 2026-08-11: part (b)'s PHASING is corrected. This
+   RDR's own Phasing section (below) originally assigned part (b) to Phase
+   2; it must run in Phase 4 instead, in the SAME release as the DDL, which
+   is what this item's own text already says ("in the SAME engine
+   release").** The retarget cannot be tested before `nexus.chunks` exists,
+   and shipping it early strands boxes in the MIRROR direction of F14a: the
+   rung would VALIDATE against a table that does not yet exist, the same
+   "permanently un-converged" failure F14a describes for the opposite
+   ordering. Tracked as bead nexus-o8dil.15, wired to nexus-o8dil.12 and
+   nexus-o8dil.14, and named explicitly in GATE-4's acceptance criteria. See
+   the corrected Phasing entries below (Phase 2 and Phase 4).
 
 6. **Do NOT adopt `MATCH FULL`; promote `collection` to `NOT NULL` later
    instead** (Open Question 6). Order: fix the NULL-collection producers
@@ -454,9 +595,15 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
 
 8. ~~Raised by F9: the adopted dim table inherits a FULL HNSW index while the
    two added dims get PARTIAL ones.~~ — **CLOSED by F13.** The reconciliation
-   is to make all three FULL, which is what Decision item 1 now specifies. The
-   inherited index on the adopted dim is already full, so adopt-in-place
-   produces a uniform index shape with no divergence to reconcile, and F7 risk
+   is to make all three FULL, which is what Decision item 1 now specifies.
+   ~~The inherited index on the adopted dim is already full, so adopt-in-place
+   produces a uniform index shape with no divergence to reconcile,~~
+   **[AMENDED (viii), 2026-08-11: "adopt-in-place" here names the retired
+   shape and "inherited index" describes a mechanism (index survives table
+   rename) that no longer applies. Under always-copy all three indexes are
+   built fresh on the new `nexus.chunks`, so the SAME conclusion holds by
+   an even simpler route: there is no inherited index to diverge from a
+   built one, because nothing is inherited.]** and F7 risk
    1 (the predicate-dependent seq-scan) is withdrawn rather than mitigated.
 
 6. **`MATCH FULL` vs `MATCH SIMPLE` — CANNOT BE PRICED YET (F12). DEFER, with
@@ -480,6 +627,68 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
    Order: fix the producers (F12b, F12c), ship and RUN the C2 census to get
    the population size (F12d — it has never run against a real corpus), then
    promote the column. Use `MATCH SIMPLE` throughout.
+
+9. **AMENDMENT (x), 2026-08-11 — NEW, ADDED BY AMENDMENT. A SECOND
+   boot-brick, distinct from open question 7 above, and STILL OPEN — this is
+   an open question with its evidence, not a resolution.** Tracked as bead
+   nexus-o8dil.23.
+
+   **What was MEASURED.** F15 measured a non-zero pre-existing
+   dangling-manifest population on this repo's own live corpus (37 rows / 36
+   chashes / 4 documents). Phase 5 below adds the FK's `ADD CONSTRAINT NOT
+   VALID` then `VALIDATE` via Liquibase, per V5's `fk-002` precedent and the
+   all-DDL-through-Liquibase directive, and Liquibase runs UNCONDITIONALLY at
+   engine boot, before any upgrade-ladder rung walks. Phase 5's remediation
+   as drafted is a manual, operator-driven, per-deployment procedure, run
+   once, immediately before `VALIDATE` ships. That procedure only ever runs
+   against the deployment that is upgrading AT THE TIME this release ships.
+
+   **What remains UNDECIDED.** A deployment that upgrades to a LATER release
+   boots, Liquibase reaches the `VALIDATE` changeset unconditionally, and
+   VALIDATEs against THAT box's own dangling population if it has one.
+   `MigrationException`, engine exits 1. Whether this is actually reachable
+   depends on where `VALIDATE` runs and by what mechanism the population is
+   cleared first, and that is not decided in this RDR.
+
+   **A proposed resolution was checked and found wrong; it is NOT the
+   answer.** An earlier pass asserted that `fk-002-6-reconcile` already
+   supplies the missing remediation mechanism, so this collapses to "follow
+   the house pattern." Reading `fk-002-validate.xml` directly refutes that:
+   `fk-002-6-reconcile` is an ADDITIVE PARENT-STUB `INSERT ... ON CONFLICT DO
+   NOTHING` into `nexus.catalog_collections`, reconciling the
+   COLLECTION-REGISTRY direction, where the missing object is a registry row
+   that can legitimately be synthesised from the child's own values. Its
+   destructive arm is DELIBERATELY ABSENT, and the changelog states it must
+   STAY absent on this table family: *"fk-002 tables (chunks_*, chash_index,
+   topic_assignments) are the PRIMARY vector-serving layer, where an orphan
+   chunk is real data, not lifecycle debris; deleting it would be data
+   loss."* For RDR-191's manifest FK the missing object is the CHUNK itself,
+   which carries `chunk_text` and an embedding, so it cannot be stub-
+   registered without FABRICATING data — there is nothing to reconcile
+   toward. The one arm that would clear the F15-shaped population is the
+   destructive arm, which this exact precedent explicitly refuses. `fk-002`
+   is therefore evidence AGAINST treating this as already solved, not
+   evidence for it.
+
+   **Candidate dispositions, priced but not chosen:** (a) an in-Liquibase
+   anti-join remediation changeset between `NOT VALID` and `VALIDATE`,
+   matching `fk-002`'s own three-step shape, open question being whether
+   silently deleting manifest rows at engine boot is acceptable unattended
+   mutation; (b) move `VALIDATE` out of Liquibase into the RDR-185 upgrade
+   ladder, where it can fail LOUD without bricking the engine — noting the
+   repo's own precedent points here, since F11d records that nothing in
+   Liquibase ever VALIDATEs the octet checks, deliberately, for the identical
+   GH #1390 crash-loop hazard, and the owner is Python (`chash_rekey.py`),
+   not Liquibase; this collides with the all-DDL-through-Liquibase directive
+   and needs Hal's sign-off if chosen; (c) ship the constraint `NOT VALID`
+   permanently and never `VALIDATE`, cheapest and weakest, forgoes the
+   historical guarantee.
+
+   **This decision remains open** and is not resolved by this amendment.
+   Whatever is chosen must include a test that a late-upgrading deployment
+   WITH a dangling population boots successfully, and that test must fail
+   against the naive shape. See Phase 5 below, where the conflict actually
+   surfaces.
 
 ## Phasing (draft)
 
@@ -505,9 +714,11 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   `chash` the load-bearing identity everywhere, so any surface still
   consulting a metadata copy is debt on the same axis.
 - **Phase 2 — Ladder hardening + producer fixes. ENTRY GATE for everything
-  after it.** Decision item 5 (existence-gate the rung's VALIDATE, retarget
-  `OCTET_CHECKS`/`_validated_probe`) and the F8c/F12b/F12c NULL-collection
-  and dangling-manifest producers: `_prune_misclassified_in_collection`'s two
+  after it.** ~~Decision item 5 (existence-gate the rung's VALIDATE, retarget
+  `OCTET_CHECKS`/`_validated_probe`)~~ **[AMENDED (ix), 2026-08-11] Decision
+  item 5(a) ONLY (existence-gate the rung's VALIDATE statements): zero-cost
+  and testable before `nexus.chunks` exists.** and the F8c/F12b/F12c
+  NULL-collection and dangling-manifest producers: `_prune_misclassified_in_collection`'s two
   arms (`indexer.py:2635`, `:2681`), `StagingPromoteOps`' omitted
   `collection` column, and the upsert demotion arms
   (`CatalogRepository.java:3858`, `:3869`).
@@ -518,6 +729,16 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   prose is exactly what gets dropped when this is broken into beads (gate
   Significant 1, and this project's documented scope-reduction history).
 
+  **AMENDMENT (ix), 2026-08-11: Decision item 5(b) (retarget
+  `OCTET_CHECKS`/`_validated_probe` to `nexus.chunks`) does NOT belong in
+  this phase; it moves to Phase 4.** It cannot be tested before
+  `nexus.chunks` exists, and shipping it here would strand boxes in the
+  MIRROR direction of F14a (the rung would VALIDATE against a table that
+  does not exist yet). See Decision item 5's own amendment note above, and
+  Phase 4 below where it now lives. Bead nexus-o8dil.15, wired to
+  nexus-o8dil.12/nexus-o8dil.14, names this explicitly in GATE-4's
+  acceptance.
+
 - **Phase 3 — MEASURE THE CLOUD. Hard gate on the cloud DDL.** F9 could not
   establish the managed deployment's corpus size or its
   `maintenance_work_mem`, and the freeze there is GLOBAL across all tenants
@@ -525,11 +746,40 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   freeze-window estimate is derived from them.** Local installs are not
   gated on this. (Gate Significant 2.)
 
-- **Phase 4 — `nexus.chunks` + migration** (adopt-in-place, inherited CHECK
-  drop/re-add, constraint-name canonicalisation).
+  **AMENDMENT (vii), 2026-08-11 (Hal, direct): the freeze window is a
+  correctness concern here, not a coordination one.** "I'm the only user of
+  da cloud :) there's not a lot of discussion on schedules and such." Both
+  tenants in `chunks_1024` are Hal's. There is no multi-tenant coordination
+  problem and no scheduling audience for this deployment. This does NOT
+  reduce what must be measured or gated: corpus size, `maintenance_work_mem`,
+  and (amendment viii) free disk headroom still gate the cloud DDL, and the
+  decision to run the migration remains Hal's. What it removes is any
+  maintenance-window protocol, comms step, or scheduling negotiation, none of
+  which belongs in this RDR. Do not add process for an audience of one.
+  Reasoning: T2 `nexus/rdr-191-freeze-window-scope-correction`.
+
+- **Phase 4 — `nexus.chunks` + migration** (~~adopt-in-place~~ **AMENDED
+  2026-08-11: ALWAYS-COPY, see Decision item 2 and amendment (viii)**,
+  inherited CHECK drop/re-add, constraint-name canonicalisation).
+
+  **AMENDMENT (ix), 2026-08-11: Decision item 5(b) (retarget
+  `OCTET_CHECKS`/`_validated_probe` to `nexus.chunks`) belongs HERE, not in
+  Phase 2, and must ship in the SAME engine release as this phase's DDL.**
+  Moved from Phase 2 above; see that entry and Decision item 5's own
+  amendment note for the reasoning (mirror-direction-of-F14a: retargeting
+  early would VALIDATE against a table that does not exist yet). Bead
+  nexus-o8dil.15, named in GATE-4's acceptance criteria.
 - **Phase 5 — REMEDIATE THE EXISTING POPULATION, then FK `NOT VALID` →
   `VALIDATE`.** Requires Phase 2's exit criterion met (zero live PRODUCERS)
   AND, separately, that the pre-existing dangling rows are gone.
+
+  **AMENDMENT (x), 2026-08-11: this phase's remediation procedure, as
+  drafted below, is manual and per-deployment. It only covers the
+  deployment upgrading at the time this release ships and does NOT, by
+  itself, cover a deployment that upgrades to a LATER release with its own
+  dangling population. That gap is OPEN QUESTION 9 above (bead
+  nexus-o8dil.23) and is unresolved; do not assume the steps below are the
+  complete answer for every future upgrader.**
 
   **THE GATING INSTRUMENT IS `nx catalog manifest-verify --list`, NOT
   `nx doctor` (F16).** The draft of this phase named the doctor check
@@ -608,6 +858,20 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   enforces it.
 
 ## Research Findings
+
+- **F18 (DECIDED, 2026-08-11): the migration shape is ALWAYS-COPY, not
+  adopt-in-place. Supersedes Decision item 2 and F9's cutover conclusion
+  below.** Ruled by Hal, direct: "always-copy it is, go with that." Full
+  detail and reasoning at Decision item 2 (amendment viii, 2026-08-11);
+  decision of record: T2 `nexus/rdr-191-DECISION-always-copy-accepted`. In
+  short: create `nexus.chunks`, copy all three dim shards' rows in, drop the
+  sources, on BOTH deployment modes, one transaction, no CIC arm, forced by
+  a fresh-install three-way tie that adopt-in-place's runtime largest-shard
+  selection cannot resolve (all three dim tables start at zero rows). A
+  simplicity/determinism trade, not a cost win: F9 below measured
+  adopt-in-place as faster (~17.6s vs ~103s at the 2026-08-11 distribution).
+  New risk not previously recorded: transient disk headroom, ~6.3 GB peak
+  against a 6953 MB database, gated as go-condition C5 on nexus-o8dil.10.
 
 - **F1 (VERIFIED, live pgvector 0.8.2):** partitioning routes all fail; the
   three-nullable-column shape works end to end including FK enforcement in
@@ -769,6 +1033,20 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   Fix is one line and was also measured to work: DROP the check, move the
   rows, RE-ADD it `NOT VALID` under a canonical name.
 
+  **AMENDMENT (iv), 2026-08-11: this boot-brick does NOT evaporate under a
+  degenerate distribution, and it is unconditionally live under
+  always-copy.** Guard against a tempting misreading of the low cloud row
+  counts elsewhere in this document (F15, F12a): `chunks_384` holds ONE row,
+  not zero, and a CHECK constraint is evaluated PER ROW, so one row violates
+  the inherited `NOT VALID` octet CHECK exactly as thoroughly as 267,000
+  would. F14b is about SCHEMA MECHANICS (drop, move, re-add `NOT VALID`
+  under the canonical name), not about volume, and its mandate is unaffected
+  by how few rows are moved. Under the amended always-copy shape (Decision
+  item 2, amendment viii) it applies even more directly: EVERY row of EVERY
+  dim is inserted into a fresh `nexus.chunks`, so the `INSERT...SELECT` is
+  non-trivial by construction on every deployment, not only on the
+  previously "adopted" table's siblings.
+
   **F14c** — `SchemaMigrator.preflightChashConstraints` (`:198-264`) goes
   silently VACUOUS for the chunk tables post-drop. Existence-gated, so it
   stops scanning rather than crashing — no crash, no coverage.
@@ -887,6 +1165,16 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   `chunks_<dim>_*` names surviving on a table no longer called that), and it
   makes the ordering requirement above moot rather than load-bearing.
 
+  **[AMENDED (viii), 2026-08-11: this specific hygiene task is MOOT under
+  always-copy, not merely "worth doing."** `nexus.chunks` is created fresh
+  by new Liquibase DDL under always-copy, so there is no inherited
+  `chunks_<dim>_*` constraint or index name to canonicalise; the table's
+  constraints are named correctly from day one. The changelog-ordering
+  requirement two paragraphs above (append after `fk-002-validate.xml`)
+  stands independently of this and stays required, since it concerns
+  dropping the source tables, not naming the new one; see Decision item 2's
+  amendment.]**
+
   **F11b — `RekeyOps` does NOT go through `DimTables`.** The rekey and the
   serving/write machinery are two DISJOINT abstractions over the same three
   tables. `RekeyOps.java` hardcodes the three-table set FIVE separate times
@@ -987,7 +1275,13 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   8.0× slower, 1024-dim 3.4× slower. An untuned local install pays ~5.3 min
   for the copy strategy. This is invisible in advance.
 
-  **Hence Decision item 2's revision (adopt-in-place): ~17.6 s vs ~103 s**,
+  **[AMENDED (viii), 2026-08-11: "Decision item 2's revision" below named
+  adopt-in-place at the time this was written. Decision item 2 has since
+  been rewritten to ALWAYS-COPY; adopt-in-place is retired. The measurement
+  itself stands (it is why always-copy is a deliberate cost trade, not a
+  free win) but the parenthetical no longer names Decision item 2's
+  content.]** ~~Hence Decision item 2's revision (adopt-in-place):~~ **F9
+  measured adopt-in-place at ~17.6 s vs ~103 s**,
   and ~78 s vs ~5.3 min at default `maintenance_work_mem`. Verified: the
   pre-existing HNSW index SURVIVES table rename + column rename, its
   definition auto-re-reading `hnsw (embedding_1024 vector_cosine_ops)`, and
@@ -998,6 +1292,12 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   inherited index already has the target shape. Nothing to reconcile; this
   caveat and F7 risk 1 are both withdrawn.
 
+  **[AMENDED (viii): the rollback mechanics below (table rename + ADD
+  COLUMN + CREATE INDEX + bulk DELETE) describe adopt-in-place, which is
+  retired. Always-copy's mechanics differ (CREATE TABLE + INSERT...SELECT +
+  DROP the three sources), but the PROPERTY this paragraph establishes,
+  free atomic rollback from standard transactional PG DDL/DML, carries over
+  and is restated for always-copy at Decision item 2's amendment.]**
   **Rollback is free: PostgreSQL does it.** Table rename + ADD COLUMN +
   CREATE INDEX + bulk DELETE in ONE transaction, failed mid-way, restored
   everything — table name, column, index, all 267,195 rows. No compensating
@@ -1006,7 +1306,10 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   post-COMMIT reversibility.
 
   **No VACUUM needed — correcting my own hint.** `DROP TABLE` on the 792 MB
-  source took 8.8 ms and `n_dead_tup` was 0 after the rename strategy.
+  source took 8.8 ms and `n_dead_tup` was 0 after ~~the rename strategy~~
+  **[AMENDED (viii): "the rename strategy" is adopt-in-place, retired; the
+  DROP TABLE cost measured here still applies to always-copy, which also
+  ends with DROP TABLE on each of the three sources]**.
   `purge_trash`'s post-commit VACUUM exists because it DELETEs rows in place;
   a migration that DROPs its sources does not inherit that precedent.
 
@@ -1015,12 +1318,39 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   NETWORK between substrates. There is no network. The right machinery is
   RDR-185's ladder plus Liquibase.
 
-  **Cloud needs a different shape.** One database serves all tenants, so the
-  freeze is global and scales with the TOTAL cloud corpus, not any one
+  ~~**Cloud needs a different shape.** One database serves all tenants, so
+  the freeze is global and scales with the TOTAL cloud corpus, not any one
   tenant's. `CREATE INDEX CONCURRENTLY` is cheap (+11%) and non-blocking but
   cannot run in a transaction, forfeiting the atomic rollback above — so CIC
   for cloud, in-transaction for local. `chash_rekey.py` already implements
-  exactly this local/managed split and should be copied, not redesigned.
+  exactly this local/managed split and should be copied, not redesigned.~~
+
+  **AMENDMENT (i) AND (ii), 2026-08-11: both the code claim and the
+  recommendation above are wrong.**
+
+  **(i) FALSIFIED CLAIM.** "`chash_rekey.py` already implements exactly this
+  local/managed split" describes code that does not exist. Verified by a
+  full read of `src/nexus/upgrade_ladder/rungs/chash_rekey.py` (760 lines,
+  2026-08-11): there is no `CREATE INDEX` of any form in the rung, and the
+  string `CONCURRENTLY` appears nowhere in the Python tree (the only CIC
+  strings anywhere in the repo are changelog comments REJECTING it). The
+  rung's actual split, `_locally_actionable` at `:701-728`, is an
+  APPLICABILITY split ("can this process read `pg_credentials`?"), not a
+  DDL-form split between a transactional and a non-transactional arm.
+  Neither arm of the rung opens a transaction, and there is no rollback
+  routine at all. Taken at face value, the original text would have budgeted
+  work for copying an arm that does not exist.
+
+  **(ii) RECOMMENDATION RETIRED.** The "CIC for cloud, in-transaction for
+  local" recommendation was premised on cloud needing a large, non-blocking
+  index build under adopt-in-place. Under the always-copy shape (Decision
+  item 2, amendment viii) there is no large build to protect: the shape is
+  one transaction, both modes, no CIC arm at all, matching this finding's own
+  in-transaction figures above. Even independent of always-copy, CIC would
+  have been the wrong choice: it cannot run inside a transaction, so it
+  forfeits the free atomic rollback verified elsewhere in this finding, and
+  it can strand an INVALID index on failure. There is no local/managed
+  DDL-form split in the implementation; both modes take the identical path.
 
   **NOT ESTABLISHED:** the managed cloud's actual corpus size and its
   `maintenance_work_mem` — both drive the cloud freeze window and neither is
@@ -1048,12 +1378,30 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   **F8b — one method is the choke point.** `PgVectorRepository.delete`
   (J5, `:2132-2140`) has NO manifest leg at all — the javadoc assigns the
   obligation to the caller, citing T2 `nexus_rdr/155-manifest-fk-decision` —
-  and it is the funnel for **NINE** distinct Python calling functions (both
-  superseded sweeps, all three quarantine paths, the misclassified prune,
-  `nx t3 gc`, `nx store delete`, and the TTL expiry). Of those nine, **SIX
-  perform no catalog or manifest action whatsoever**; two rely on the
-  manifest having been rewritten by a prior separate call; one only
-  tombstones the parent document and leaves the manifest rows.
+  and it is the funnel for ~~**NINE**~~ **[AMENDED, see below] ELEVEN**
+  distinct Python calling functions (both superseded sweeps, all three
+  quarantine paths, the misclassified prune, `nx t3 gc`, `nx store delete`,
+  and the TTL expiry). ~~Of those nine, **SIX perform no catalog or manifest
+  action whatsoever**; two rely on the manifest having been rewritten by a
+  prior separate call; one only tombstones the parent document and leaves
+  the manifest rows.~~
+
+  **AMENDMENT (v), 2026-08-11: the count above is wrong. Corrected from NINE
+  to ELEVEN.** Re-derived independently in bead nexus-o8dil.39 (full caller
+  table: T2 `nexus/rdr-191-o8dil39-independent-census-2026-08-11`), matching
+  nexus-o8dil.5's separate audit. The two callers this census originally
+  missed: `_force_t3_orphan_cleanup` (`src/nexus/pipeline_stages.py:702`)
+  and the MCP `store_delete` tool (`src/nexus/mcp/core.py:4566`), a distinct
+  entry point from the CLI's `nx store delete` despite sharing the same
+  underlying `delete_by_id`. The word "eleven" did not appear anywhere in
+  this document before this amendment. The "SIX / two / one" disposition
+  breakdown struck through above was tied to the original nine-item
+  enumeration, and several of the eleven callers have since had
+  manifest-action fixes applied (uncommitted, as of this amendment) that
+  make that three-way split stale as a description of current code; it is
+  NOT re-derived here, to avoid recording an inference as fact. The current,
+  authoritative per-caller disposition is nexus-o8dil.39's caller table, not
+  this document.
 
   Every dangling-manifest exposure in the system traces through this single
   Java method, which cannot detect or refuse it — the failure surfaces later

@@ -25,6 +25,23 @@
 #                                              tier. No 5xx log scan: the
 #                                              candidate has no request
 #                                              logger to scan, nexus-xm0cp)
+#   Phase E  collections-drift                (nexus-syfes class: the server-
+#                                              side GC prune — catalog-023/024
+#                                              — must never leave a permanent
+#                                              catalog_collections row for a
+#                                              quarantine/origin sibling on a
+#                                              zero-orphan/zero-restore pass.
+#                                              Phase C's run 1 already drives
+#                                              a zero-orphan GC pass on a
+#                                              freshly-created collection —
+#                                              see the RED/GREEN falsification
+#                                              transcripts on nexus-syfes for
+#                                              proof this is not vacuous.
+#                                              This is the ONLY pre-tag gate
+#                                              that can catch this class —
+#                                              v0.1.70 shipped it and was
+#                                              caught only by the client
+#                                              shakedown, a full day later.)
 #
 # Exit 0 only when every phase passes: "CANDIDATE SHAKEOUT PASSED".
 set -uo pipefail
@@ -294,6 +311,39 @@ else
     grep "vector_gateway_retry" "/tmp/load-put-$i.log" | sed 's/^/       | /'
   done
 fi
+
+# ── Phase E: collections-drift (nexus-syfes class regression guard) ─────────
+say "Phase E — collections-drift: catalog_collections projection vs T3 (nexus-syfes class)"
+# nexus-syfes (engine-service-v0.1.70, 2026-08-11): gc_quarantine_orphans /
+# gc_restore_rereferenced registered their destination collection in
+# catalog_collections UNCONDITIONALLY, before the anti-join ran, so a GC
+# pass that moved zero rows still left a permanently unreferenced quarantine
+# projection row behind. Phase C above already drives exactly this
+# condition — every full ``nx index repo`` walk invokes
+# ``indexer._prune_deleted_files`` for each populated collection, which
+# calls the server-side restore+quarantine route (``_prune_collection_
+# serverside``) UNCONDITIONALLY, with no "only if there's something to
+# move" guard. Phase C's run 1 is a *zero*-orphan pass by construction (a
+# just-created repo has nothing superseded or deleted yet), so it alone
+# reproduces the pre-catalog-024 trigger without any extra workload here.
+# See the RED/GREEN falsification transcripts attached to nexus-syfes: this
+# assertion goes RED with catalog-024 neutralised and GREEN with it restored.
+#
+# Only pre-tag place this can be caught: the client release-sandbox
+# shakedown (tests/e2e/release-sandbox.sh step 11/11) runs the identical
+# ``nx catalog doctor --collections-drift`` check, but that only runs
+# AFTER an engine tag is already cut and published — the 2026-08-11
+# incident this guards against cost a full re-cut because of exactly that
+# gap. This phase closes it pre-tag.
+#
+# backfill-collections first, same as the client gate: it can only ADD a
+# missing projection row for a collection T3 legitimately already has, so
+# it cannot mask the nexus-syfes class (an orphan projection row with NO
+# backing T3 collection) — it only prevents an unrelated false FAIL from a
+# collection that legitimately hasn't been backfilled yet.
+nx catalog backfill-collections --no-dry-run >/dev/null 2>&1 || true
+run_check "collections-drift (no orphaned quarantine/projection rows, nexus-syfes class)" \
+  "collections-drift: PASS" nx catalog doctor --collections-drift
 
 # ── Verdict ──────────────────────────────────────────────────────────────────
 say "Verdict"

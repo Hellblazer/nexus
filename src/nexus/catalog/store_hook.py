@@ -564,7 +564,9 @@ def store_put_manifest_direct(catalog_doc_id: str, metadatas: list[dict]) -> Non
         )
 
 
-def store_delete_catalog_cleanup(chash_doc_id: str) -> tuple[str, str]:
+def store_delete_catalog_cleanup(
+    chash_doc_id: str, *, expected_collection: str | None,
+) -> tuple[str, str]:
     """Delete-asymmetry compensation for ``store_delete`` (nexus-b6enc C4).
 
     MCP ``store_delete`` historically removed only the T3 chunk; the
@@ -573,6 +575,29 @@ def store_delete_catalog_cleanup(chash_doc_id: str) -> tuple[str, str]:
     'knowledge'`` with no ``file_path``) whose ``meta.doc_id`` matches
     the deleted chunk's natural id, delete the catalog row too via
     ``delete_document``.
+
+    *expected_collection* is REQUIRED, no default (nexus-h7nax: a keyword
+    that is silently skippable by omission is exactly what produced this
+    bug class twice — see :func:`reap_catalog_manifest_for_chashes`'s own
+    docstring for the full history). Pass ``None`` explicitly at a call
+    site that genuinely has no collection to scope to (e.g. a test
+    exercising ambiguity-detection or the "nothing to clean" miss path,
+    where no live document exists to protect either way) — that is a
+    deliberate, visible choice, not an accident of a default nobody
+    noticed. When given (nexus-c53hy defense-in-depth): the resolved
+    entry's ``physical_collection`` must match it, or cleanup is
+    skipped (returns ``("", "")``, same as "nothing to clean"). The chash
+    -> document resolution below is GLOBAL (no collection scoping of its
+    own — see :func:`resolve_knowledge_doc_for_chash`), so without this
+    check a chash that happens to also be a live document's natural id in
+    a DIFFERENT physical collection than the one the caller is deleting
+    from would get tombstoned by mistake. Callers that have already
+    confirmed (via a collection-scoped T3 existence check) that this chash
+    exists in a specific collection should pass that collection here; this
+    is the second of two layers — see ``mcp/core.py::store_delete``'s own
+    existence pre-check, which is the primary defense and is what actually
+    stops the reap from firing on a doc_id that is not in the target
+    collection at all.
 
     CORRECTED (nexus-3ck2g; this docstring previously claimed
     ``delete_document`` cascades the manifest on both backends — false).
@@ -637,6 +662,14 @@ def store_delete_catalog_cleanup(chash_doc_id: str) -> tuple[str, str]:
     if entry is None:
         return "", ""
 
+    if expected_collection is not None and entry.physical_collection != expected_collection:
+        _log.debug(
+            "store_delete_catalog_cleanup_collection_mismatch",
+            doc_id=chash_doc_id, expected_collection=expected_collection,
+            actual_collection=entry.physical_collection, tumbler=str(entry.tumbler),
+        )
+        return "", ""
+
     tumbler = str(entry.tumbler)
     writer = None
     try:
@@ -662,3 +695,105 @@ def store_delete_catalog_cleanup(chash_doc_id: str) -> tuple[str, str]:
                 writer.close()
             except Exception:  # noqa: BLE001 — best-effort handle cleanup in finally
                 pass
+
+
+def reap_catalog_manifest_for_chashes(
+    chashes: list[str], *, expected_collection: str | None,
+) -> None:
+    """Best-effort: tombstone the catalog entry that owns each *chash*,
+    BEFORE the caller deletes the corresponding T3 chunk.
+
+    *expected_collection* is REQUIRED, no default (nexus-h7nax). This
+    function shipped its collection-scoping guard at nexus-c53hy and a
+    THIRD call site (``db/http_vector_client.py::expire()``) was still
+    found omitting it two rounds of critique later, on a defaultable
+    keyword nobody remembered to pass — the identical shape as the bug
+    the guard itself exists to close, one layer up. A required keyword
+    turns "forgot to scope it" into a ``TypeError`` at the call site
+    instead of a silent global-chash resolution; callers with genuinely
+    nothing to scope to (e.g. a test exercising the ambiguity guard or
+    the plain "no match" miss path, where no live document exists to
+    protect either way) pass ``expected_collection=None`` explicitly —
+    a visible decision, not an accident.
+
+    When given as a real collection name: a resolved entry only gets
+    reaped if its ``physical_collection`` matches. The per-chash
+    resolution below is a GLOBAL chash lookup with no collection scoping
+    of its own, so without this guard a chash that is ALSO (coincidentally,
+    or via duplicate content) a live document's natural id in a DIFFERENT
+    physical collection than the one being acted on would get tombstoned
+    by mistake. This is a second, cheap layer — the primary defense is the
+    caller doing a collection-scoped T3 existence check before calling
+    this at all (see ``commands/store.py::delete_cmd``'s ``--id`` branch).
+
+    Relocated from ``commands/store.py::_reap_catalog_for_doc_ids``
+    (nexus-o8dil.5 Fix 1, RDR-191 P2) so ``db/http_vector_client.py`` and
+    ``commands/store.py`` can both call it without either reaching into
+    the other's layer — same layering rationale as this module's own
+    header docstring for :func:`single_chunk_manifest_metadata`.
+
+    ORDERING IS LOAD-BEARING (nexus-o8dil.5 round 2 finding). Callers
+    MUST invoke this BEFORE deleting the T3 chunk(s), not after.
+    ``PgVectorRepository#delete``'s anti-join (RDR-191 F10c) refuses to
+    delete a chash while ANY live (non-tombstoned-owner) manifest row
+    still references it — including the very document whose own note is
+    being deleted, since ``delete_document`` is a soft tombstone that
+    deliberately leaves ``catalog_document_chunks`` in place. Reaping
+    AFTER the chunk delete (the pre-nexus-o8dil.5 order in both this
+    module's callers) means the manifest row is still live at delete
+    time, every deletion is silently refused, and reaping afterward
+    tombstones a document whose chunk never actually left T3 — exactly
+    the TTL-sweep leak this fix closes. Reaping first lets the chunk
+    delete succeed for the common single-owner case, while still
+    correctly leaving a GENUINELY shared chash's chunk protected (this
+    function no-ops when :func:`resolve_knowledge_doc_for_chash` finds
+    no unambiguous store_put-origin owner — see that function's own
+    ambiguity-handling docstring).
+
+    *chashes* are T3 chunk natural ids, not tumblers (nexus-5axey:
+    ``resolve_knowledge_doc_for_chash`` is the chash-appropriate lookup;
+    ``by_doc_id`` is tumbler-only and always mismatches these). Skipped
+    silently when the catalog is uninitialised, and per-chash lookup/
+    tombstone failures are logged at DEBUG and swallowed — this is a
+    best-effort cleanup, not a fail-loud boundary (contrast
+    :func:`store_delete_catalog_cleanup`, MCP ``store_delete``'s
+    fail-loud sibling). A failed reap for one chash simply means the
+    anti-join will (correctly) refuse to delete that chash's chunk; the
+    caller's own deleted-count must come from the ACTUAL server response
+    (never from ``len(requested ids)``) so a reap failure here shows up
+    as an honest under-count, not a silent lie.
+    """
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    reader = None
+    writer = None
+    try:
+        # nexus-kmo9h: presence semantics belong to the factory (None only
+        # in SQLite opt-out mode when uninitialised) — the old local
+        # is_initialized gate silently skipped the post-delete catalog
+        # tombstone reap on every fresh service-mode box.
+        reader = make_catalog_reader()
+        if reader is None:
+            return
+        writer = make_catalog_writer()
+        for chash in chashes:
+            entry = resolve_knowledge_doc_for_chash(
+                reader, chash, log_event="catalog_reap"
+            )
+            if entry is None:
+                continue
+            if expected_collection is not None and entry.physical_collection != expected_collection:
+                _log.debug(
+                    "catalog_reap_collection_mismatch",
+                    chash=chash, expected_collection=expected_collection,
+                    actual_collection=entry.physical_collection, tumbler=str(entry.tumbler),
+                )
+                continue
+            writer.delete_document(entry.tumbler)
+    except Exception:  # noqa: BLE001 — best-effort catalog reap; failure logged at debug, cleanup in finally
+        _log.debug("catalog_reap_failed", exc_info=True, doc_ids=chashes)
+    finally:
+        if writer is not None:
+            writer.close()
+        if reader is not None:
+            reader.close()

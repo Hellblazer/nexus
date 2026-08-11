@@ -2119,27 +2119,101 @@ public final class PgVectorRepository {
     }
 
     /**
-     * Delete chunks by ID.
+     * Delete chunks by ID, ANTI-JOIN SCOPED against the catalog manifest
+     * (RDR-191 F10c fix, bead nexus-o8dil.5).
+     *
+     * <p><strong>F10c — this used to be a live silent data-loss bug.</strong> By
+     * RDR-108 design, identical chunk text in a collection collapses to ONE row
+     * shared by every document that contains it. The pre-fix implementation
+     * deleted the caller's {@code ids} set unconditionally — so "delete document
+     * A's chunks" (A's own manifest chash set) silently destroyed a chunk that
+     * document B's manifest still referenced, with no error and no signal. The
+     * failure surfaced later and elsewhere, as {@link #fetchDocumentChunks}'s
+     * {@link IllegalStateException} on B's now-dangling manifest row.
+     *
+     * <p>Fix: an id is deleted only when NO LIVE {@code catalog_document_chunks}
+     * row in this {@code (tenant, collection)} still references it — the same
+     * anti-join idiom {@code nexus.gc_quarantine_orphans} uses (catalog-023/024).
+     * This is unconditional, not opt-out: every one of the nine Python callers
+     * that funnel through this method either (a) already computes its own
+     * "safe to delete" set from a manifest read before calling in (the
+     * superseded-vectors sweeps, {@code nx t3 gc}), in which case the anti-join
+     * is a no-cost second line of defense and closes a residual snapshot-to-
+     * execution TOCTOU those callers' own comments flag as accepted risk, or
+     * (b) targets a chash that carries no live manifest reference by
+     * construction (the quarantine collection siblings, TTL-expired
+     * manifest-less notes), in which case the anti-join is a no-op. The one
+     * caller that WAS a live producer of dangling manifests
+     * ({@code indexer._prune_misclassified_in_collection}, F8c) now safely
+     * REFUSES to delete a chunk whose manifest row has not yet been rewritten
+     * to the new collection, rather than silently orphaning it.
+     *
+     * <p><strong>"Live" excludes tombstoned owners (review finding, bead
+     * nexus-o8dil.5 round 2).</strong> A manifest row whose OWNING document
+     * ({@code catalog_documents} via {@code doc_id = tumbler}) is soft-deleted
+     * ({@code deleted_at IS NOT NULL}) does not count as "still referenced" —
+     * this mirrors this same file's {@code liveChunksCondition}/{@code
+     * liveChunksPredicate} idiom (~line 2903) and {@code
+     * CatalogRepository#strandedChunkCount}, both of which already treat a
+     * tombstoned-only manifest reference as dead, not live. Without this join,
+     * {@code deleteDocument}'s deliberate choice to leave {@code
+     * catalog_document_chunks} rows in place until {@code purge_trash}'s
+     * cascade (so a manual restore stays possible) would make THIS method
+     * refuse to delete a chunk belonging ONLY to documents already tombstoned
+     * — including, degenerately, blocking a caller from deleting a document's
+     * OWN chunks the instant after tombstoning that same document, which is
+     * exactly the retract-manifest-then-delete-chunk ordering the Python
+     * callers use. Bounded by {@code purge_trash}'s grace window either way —
+     * this is a consistency/predictability call, not a data-loss one — but an
+     * undocumented divergence from the file's own established liveness idiom
+     * is not acceptable, so it is closed here rather than left implicit.
+     *
+     * <p><strong>What that trade actually costs — do not soften this.</strong>
+     * The retained chunk is NOT reclaimed by routine GC. {@code nx t3 gc}
+     * treats ANY manifest reference as "keep", dangling or not, so a chunk held
+     * back by this anti-join because of an already-dangling manifest row (the
+     * RDR measured a live pre-existing population of 37 such rows across 4
+     * documents) stays until RDR-191 Phase 5 reconciles the manifest — work
+     * that has not started. For the F8c prune case, recovery depends on a
+     * re-index that may never fire. The over-retention is therefore UNBOUNDED
+     * IN TIME, not "until the next GC pass". It is still the right trade — the
+     * data loss it replaces was silent and irreversible, this is visible and
+     * repairable — but it is a deferral, not a self-healing one.
+     *
+     * <p>No caller in the census intends to delete a chunk a live manifest row
+     * still names, so there is no wholesale-purge caller this scoping defeats.
+     * Note the census itself is not trustworthy as a count: the RDR's F8b says
+     * NINE callers and the audit for this fix found a tenth
+     * ({@code pipeline_stages._force_t3_orphan_cleanup}).
      *
      * <p><strong>Manifest obligation (application-enforced FK, T2
-     * nexus_rdr/155-manifest-fk-decision):</strong> callers are responsible for removing
-     * or updating {@code catalog_document_chunks} rows that reference these chunks BEFORE
-     * deleting them. Deleting a chunk still referenced by a manifest row creates a
-     * dangling reference, and {@link #fetchDocumentChunks} on the affected document will
-     * fail loud with {@link IllegalStateException}. Whether this class should pre-check
-     * the manifest itself is a Phase 4a/5 write-path decision (recorded on nexus-1k8s1).
+     * nexus_rdr/155-manifest-fk-decision):</strong> callers remain responsible for
+     * removing or updating their OWN {@code catalog_document_chunks} rows for the
+     * document being deleted — this method protects chunks OTHER documents still
+     * reference, it does not remove the caller's own manifest rows for them.
      *
-     * @return number of rows actually deleted (RLS makes other tenants' rows invisible,
-     *         so cross-tenant attempts delete exactly 0)
+     * @return number of rows actually deleted (RLS makes other tenants' rows invisible;
+     *         a still-referenced id is silently skipped rather than counted, so this can
+     *         be less than {@code ids.size()} even with no cross-tenant ids present)
      */
     public int delete(String tenant, String collection, List<String> ids) {
         int dim = dimForCollection(collection);
         if (ids == null || ids.isEmpty()) return 0;
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(ch.table())
-               .where(ch.collection().eq(collection).and(ch.chash().in(ids)))
-               .execute());
+        return tenantScope.withTenant(tenant, ctx -> {
+            var stillReferenced = DSL.exists(
+                ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
+                   .join(CATALOG_DOCUMENTS)
+                       .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                           .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+                   .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
+                          .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection()))
+                          .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))
+                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
+            return ctx.deleteFrom(ch.table())
+               .where(ch.collection().eq(collection).and(ch.chash().in(ids)).andNot(stillReferenced))
+               .execute();
+        });
     }
 
     /**

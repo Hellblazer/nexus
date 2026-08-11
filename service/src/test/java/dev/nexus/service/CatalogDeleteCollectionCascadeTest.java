@@ -157,6 +157,69 @@ class CatalogDeleteCollectionCascadeTest {
         }
     }
 
+    // ── F8d: collection-cascade scoping asymmetry (nexus-o8dil.40) ────────────
+
+    private static final String TENANT_F8D = "del-casc-f8d";
+    private static final String COLL_HOME = "knowledge__del-casc-f8d-home__voyage-context-3__v1";
+    private static final String COLL_DEL  = "knowledge__del-casc-f8d-del__voyage-context-3__v1";
+
+    /**
+     * RDR-191 F8d: {@code deleteCollectionTxn} scopes T3 chunk deletion by
+     * {@code chunks_*.collection} (step 1) but reaches the manifest ONLY via
+     * the {@code catalog_documents} cascade, scoped by {@code
+     * physical_collection} (step 6/fk-001). A manifest row whose OWN {@code
+     * collection} column names the collection being deleted, but whose
+     * PARENT DOCUMENT is homed in a DIFFERENT collection, sits outside both
+     * scopes as currently wired: its chunk (scoped by chunks.collection) IS
+     * deleted in step 1, but its manifest row (parent doc homed elsewhere)
+     * is NOT reached by step 6's cascade -- a dangling manifest row,
+     * produced by the very operation meant to clean up after itself. This
+     * reproduces exactly that state and asserts the manifest row does not
+     * survive the deletion of the collection it (denormalized-)names.
+     */
+    @Test @Order(40)
+    void deleteCollection_scopingAsymmetry_manifestRowNamingDeletedCollection_alsoRemoved() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                + "VALUES ('" + TENANT_F8D + "', '" + COLL_HOME + "')");
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                + "VALUES ('" + TENANT_F8D + "', '" + COLL_DEL + "')");
+            // The document is homed in COLL_HOME.
+            su.createStatement().execute("INSERT INTO nexus.catalog_documents "
+                + "(tenant_id, tumbler, title, physical_collection) "
+                + "VALUES ('" + TENANT_F8D + "', 'f8d-doc', 'F8D Doc', '" + COLL_HOME + "')");
+            // Its chunk content lives in COLL_DEL (the collection about to be deleted).
+            su.createStatement().execute("INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) "
+                + "VALUES ('" + TENANT_F8D + "', '" + COLL_DEL + "', '" + chash("f8dasym") + "', 'text', " + vec(1024) + "::vector)");
+            // The manifest row's OWN denormalized `collection` names COLL_DEL
+            // too (drifted from the doc's real physical_collection -- the
+            // exact shape F8c's reclassification-without-reindex leaves
+            // behind), so it is reachable by neither scope symmetrically.
+            su.createStatement().execute("INSERT INTO nexus.catalog_document_chunks "
+                + "(tenant_id, doc_id, position, chash, collection) "
+                + "VALUES ('" + TENANT_F8D + "', 'f8d-doc', 0, '" + chash("f8dasym") + "', '" + COLL_DEL + "')");
+        }
+
+        repo.deleteCollection(TENANT_F8D, COLL_DEL);
+
+        try (Connection su = pg.createConnection("")) {
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_document_chunks "
+                + "WHERE tenant_id='" + TENANT_F8D + "' AND doc_id='f8d-doc' AND collection='" + COLL_DEL + "'"))
+                .as("F8d: a manifest row denormalized to the deleted collection must not "
+                    + "survive though its owning document is homed elsewhere")
+                .isZero();
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks_1024 "
+                + "WHERE tenant_id='" + TENANT_F8D + "' AND collection='" + COLL_DEL + "'"))
+                .as("the T3 chunk content for the deleted collection is gone").isZero();
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_documents "
+                + "WHERE tenant_id='" + TENANT_F8D + "' AND tumbler='f8d-doc'"))
+                .as("the owning document, homed in a DIFFERENT collection, must "
+                    + "survive the deletion of COLL_DEL")
+                .isEqualTo(1);
+        }
+    }
+
     // ── fixture ──────────────────────────────────────────────────────────────
 
     /** Seed one full collection (all lifecycle tables) for {@code tenant}. Superuser; bypasses RLS. */

@@ -329,6 +329,12 @@ def test_search_no_path_returns_all(runner, mock_search):
 
 @pytest.mark.parametrize("found,exit_ok,expect_text", [(True, True, "Deleted"), (False, False, "not found")])
 def test_store_delete_by_id(runner, mock_store, found, exit_ok, expect_text):
+    # nexus-c53hy: delete_cmd now does a collection-scoped existence check
+    # (get_by_id) BEFORE any catalog reap or delete_by_id call — a bare
+    # MagicMock() would otherwise be truthy here and never exercise the
+    # "not found" path at all. get_by_id mirrors delete_by_id's found/not
+    # found shape so both branches still round-trip through the mock.
+    mock_store.get_by_id.return_value = {"id": "abcdef1234567890"} if found else None
     mock_store.delete_by_id.return_value = found
     result = runner.invoke(main, ["store", "delete", "--collection", "knowledge", "--id", "abcdef1234567890"])
     assert (result.exit_code == 0) == exit_ok, result.output
@@ -339,6 +345,11 @@ def test_store_delete_by_id(runner, mock_store, found, exit_ok, expect_text):
     (["id1", "id2"], True, "Deleted 2"), ([], False, "not found")])
 def test_store_delete_by_title(runner, mock_store, ids, exit_ok, expect_text):
     mock_store.find_ids_by_title.return_value = ids
+    # nexus-o8dil.45: batch_delete now returns the server's ACTUAL deleted
+    # count (int), not None -- the CLI echo reads this return value instead
+    # of len(ids). A bare MagicMock() return (the pre-fix default) would
+    # print "Deleted <MagicMock ...>" here instead of "Deleted 2".
+    mock_store.batch_delete.return_value = len(ids)
     result = runner.invoke(main, ["store", "delete", "--collection", "knowledge",
                                   "--title", "doc.md", "--yes"])
     if exit_ok:
@@ -347,6 +358,37 @@ def test_store_delete_by_title(runner, mock_store, ids, exit_ok, expect_text):
     else:
         assert result.exit_code != 0
     assert expect_text in result.output or "No entries" in result.output
+
+
+def test_store_delete_by_title_reports_actual_deleted_count_on_partial_anti_join(
+    runner, real_http_vector_client, monkeypatch,
+):
+    """nexus-o8dil.45: RDR-191 F10c's server-side anti-join can legitimately
+    delete fewer chunks than requested (a chash another live document's
+    manifest still references). The CLI must report the ACTUAL count -- an
+    operator-facing message that was previously always wrong (reported
+    len(ids) unconditionally) in this scenario."""
+    def fake_post(path, body, **kw):
+        if path == "/v1/vectors/get":
+            return {"ids": ["id1", "id2", "id3"]}
+        if path == "/v1/vectors/store-delete":
+            return {"deleted": len(body["ids"]) - 1}
+        raise AssertionError(f"unexpected path {path}")
+
+    monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+
+    result = runner.invoke(main, [
+        "store", "delete",
+        "--collection", "knowledge__nexus__voyage-context-3__v1",
+        "--title", "doc.md", "--yes",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert "Deleted 2" in result.output, (
+        f"expected the actual server-reported count (2 of 3 requested), "
+        f"got output: {result.output!r}"
+    )
+    assert "Deleted 3" not in result.output
 
 
 # ── nx store delete --title, REAL HttpVectorClient (nexus-umvh2 regression) ──

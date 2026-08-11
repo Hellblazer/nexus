@@ -30,9 +30,11 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-#: The ONLY admin statement shape this runner executes.
+#: The ONLY admin statement shape this runner executes. Captures the table
+#: name so the existence gate (F14a, nexus-o8dil.1) can probe it before
+#: issuing the VALIDATE.
 _VALIDATE_RE = re.compile(
-    r"^ALTER TABLE nexus\.[a-z0-9_]+ VALIDATE CONSTRAINT [a-z0-9_]+$"
+    r"^ALTER TABLE (nexus\.[a-z0-9_]+) VALIDATE CONSTRAINT [a-z0-9_]+$"
 )
 
 PsqlRunner = Callable[[list[str], dict[str, str]], "subprocess.CompletedProcess[str]"]
@@ -93,15 +95,32 @@ def run_admin_sql(
 ) -> bool | None:
     """Execute allowlisted admin *statements* via the local admin role.
 
-    Returns ``True`` on success, ``None`` when no local admin path exists
-    (managed mode — the caller surfaces the operator step), and raises
-    ``RuntimeError`` on execution failure (never a silent partial).
+    F14a (nexus-o8dil.1): each ``VALIDATE`` is existence-gated first — a
+    ``SELECT to_regclass('<table>') IS NOT NULL`` probe over the SAME admin
+    connection. A relation that has been dropped out from under the rung
+    (the ``chash_index`` shape, RDR-187) is SKIPPED, never attempted: pre-fix,
+    every such statement raised ``RuntimeError`` unconditionally, so once a
+    tracked relation is gone ``nx upgrade`` exits non-zero FOREVER
+    (``chash_rekey.py``'s own ``OCTET_CHECKS`` comment documents this exact
+    shape happening once already). The probe failing to even RUN (permission
+    denied, connection refused) is a DIFFERENT case — it is not evidence the
+    relation is absent, so it still raises loud rather than silently
+    skipping a VALIDATE that might genuinely be needed.
+
+    Returns ``True`` on success (including a run where every statement was
+    skipped as absent — skipping is not a failure), ``None`` when no local
+    admin path exists (managed mode — the caller surfaces the operator
+    step), and raises ``RuntimeError`` on execution failure (never a silent
+    partial).
     """
+    matches: list[tuple[str, str]] = []
     for stmt in statements:
-        if not _VALIDATE_RE.match(stmt):
+        m = _VALIDATE_RE.match(stmt)
+        if not m:
             raise ValueError(
                 f"admin statement outside the allowlisted VALIDATE shape: {stmt!r}"
             )
+        matches.append((stmt, m.group(1)))
     creds = resolve_admin_credentials(creds_path)
     if creds is None:
         _log.info("admin_sql_no_local_credentials", note="managed mode — operator step")
@@ -118,23 +137,43 @@ def run_admin_sql(
             _log.info("admin_sql_no_psql_binaries", note="cannot validate here")
             return None
     runner = psql_runner if psql_runner is not None else _default_psql_runner
-    for stmt in statements:
+    # nexus-iytd3 loader guard — same RPATH-less-bundle class as
+    # diag_connection.run_diagnostic_sql; see GH #1414 era-hop review.
+    from nexus.db.pg_provision import _bundle_lib_env  # noqa: PLC0415 — circular-dep avoidance
+
+    def _run(stmt: str) -> "subprocess.CompletedProcess[str]":
         argv = [
             str(psql_bin), "-h", creds.host, "-p", str(creds.port),
             "-U", creds.user, "-d", creds.dbname,
             "-v", "ON_ERROR_STOP=1", "-tAc", stmt,
         ]
-        # nexus-iytd3 loader guard — same RPATH-less-bundle class as
-        # diag_connection.run_diagnostic_sql; see GH #1414 era-hop review.
-        from nexus.db.pg_provision import _bundle_lib_env  # noqa: PLC0415 — circular-dep avoidance
-
         env = _bundle_lib_env(argv, None)
         env["PGPASSWORD"] = creds.password
-        proc = runner(argv, env)
+        return runner(argv, env)
+
+    skipped = 0
+    for stmt, table in matches:
+        exists_proc = _run(f"SELECT to_regclass('{table}') IS NOT NULL")
+        if exists_proc.returncode != 0:
+            raise RuntimeError(
+                f"existence check failed (psql exit {exists_proc.returncode}) "
+                f"for {table}: {(exists_proc.stderr or '').strip()[:200]}"
+            )
+        if (exists_proc.stdout or "").strip() != "t":
+            skipped += 1
+            _log.info(
+                "admin_sql_relation_absent_skipping_validate",
+                table=table, statement=stmt,
+                note="the target relation does not exist — VALIDATE would "
+                     "raise forever; skipping rather than crash-looping "
+                     "nx upgrade",
+            )
+            continue
+        proc = _run(stmt)
         if proc.returncode != 0:
             raise RuntimeError(
                 f"admin statement failed (psql exit {proc.returncode}): {stmt} — "
                 f"{(proc.stderr or '').strip()[:200]}"
             )
-    _log.info("admin_sql_ok", statements=len(statements))
+    _log.info("admin_sql_ok", statements=len(statements), skipped=skipped)
     return True

@@ -2490,13 +2490,41 @@ def _fetch_all_chunk_metadata(
 
 
 def _batched_delete(col: object, ids: list[str]) -> int:
-    """Delete *ids* from *col* in batches of _CHROMA_PAGE_SIZE (Cloud quota: 300)."""
+    """Delete *ids* from *col* in batches of _CHROMA_PAGE_SIZE (Cloud quota: 300).
+
+    nexus-o8dil.45 (RDR-191 F10c follow-up): returns the sum of each batch's
+    ACTUAL deleted count, not ``len(ids)``. ``col.delete()`` is duck-typed —
+    the real service-mode backend (``_ServiceCollectionStub``, post
+    nexus-o8dil.5) reports an ``int`` that can legitimately be less than
+    requested (the server's anti-join retains a chash a live document still
+    references). Test-double / legacy backends without that counting
+    contract (e.g. ``InMemoryCollection``, which returns ``None`` and never
+    partially refuses) fall back to ``len(batch)`` — unchanged prior
+    behavior for those backends.
+    """
     deleted = 0
     for i in range(0, len(ids), _CHROMA_PAGE_SIZE):
         batch = ids[i : i + _CHROMA_PAGE_SIZE]
-        _vector_with_retry(col.delete, ids=batch)
-        deleted += len(batch)
+        result = _vector_with_retry(col.delete, ids=batch)
+        deleted += result if isinstance(result, int) else len(batch)
     return deleted
+
+
+def _row_to_chunk_dict(row: object) -> dict:
+    """Duck-typed ``ManifestRow`` (or test-double, e.g. ``SimpleNamespace``)
+    -> the dict shape ``CatalogWriter.atomic_manifest_replace`` expects.
+    ``getattr`` throughout (rather than ``dataclasses.asdict``) so both the
+    real dataclass and lightweight test fakes carrying only a subset of
+    fields work identically."""
+    return {
+        "chash": getattr(row, "chash", "") or "",
+        "position": getattr(row, "position", None),
+        "chunk_index": getattr(row, "chunk_index", None),
+        "line_start": getattr(row, "line_start", None),
+        "line_end": getattr(row, "line_end", None),
+        "char_start": getattr(row, "char_start", None),
+        "char_end": getattr(row, "char_end", None),
+    }
 
 
 def _prune_misclassified_in_collection(
@@ -2506,9 +2534,22 @@ def _prune_misclassified_in_collection(
     *,
     kind: str,
     catalog: object | None = None,
+    catalog_writer: object | None = None,
 ) -> int:
     """Find and delete chunks in *col* whose document matches any
-    file in *target_paths*. Returns the number of chunks pruned.
+    file in *target_paths*. Returns the number of chunks ACTUALLY deleted
+    (an id refused by the manifest guard below does not count — F8c's
+    over-report finding).
+
+    *catalog_writer* (nexus-ch0gk): when given, ``atomic_manifest_replace``
+    calls route through it instead of *catalog*. *catalog* is a
+    ``make_catalog_reader()`` handle; its forwarding of an unwhitelisted
+    write only works because ``_SharedServiceCatalogHandle.__getattr__``
+    has no whitelist (factory.py's documented "mixed sites hold BOTH a
+    reader and a writer" convention says an explicit writer is the
+    sanctioned shape). ``catalog_writer=None`` falls back to *catalog* for
+    the write, preserving prior behaviour for callers (tests) that only
+    ever pass one object playing both roles.
 
     nexus-7zcv (RDR-108 Phase 4 review D-H4): the legacy path used
     ``where={"doc_id": {"$in": [batch]}}`` against chunk metadata.
@@ -2526,6 +2567,40 @@ def _prune_misclassified_in_collection(
     real chunk row). See ``_prune_misclassified_in_collection``'s
     trailing comment for the evidence and the real backstop
     (``mcp_infra._sweep_superseded_vectors`` + ``nx t3 gc``).
+
+    F8c (nexus-o8dil.2, RDR-191): a chash's LIVE manifest reference must
+    never be left dangling by this sweep. ``chash_to_docs`` / ``doc_rows``
+    below are the manifest-guard's ground truth, built ONCE (when a
+    catalog is present) and consulted by BOTH arms before every delete:
+    an id with NO live manifest reference (the common legacy/seeded shape
+    — see ``test_indexer_e2e.py::test_migration_moves_prose_from_code_to_
+    docs``) is safe to delete outright, unchanged from before. An id WITH
+    a live reference gets that reference removed via
+    ``catalog.atomic_manifest_replace`` FIRST — only once that write
+    succeeds is the T3 chunk itself deleted, so a process abort between
+    the two steps leaves at worst an ORPHAN chunk (recoverable via
+    ``nx t3 gc`` / ``_sweep_superseded_vectors``), never a dangling
+    manifest row. A failed or unavailable manifest write REFUSES the
+    delete entirely (status quo — neither reference nor chunk touched)
+    rather than risk creating either failure mode.
+
+    nexus-ch0gk: ``PgVectorRepository.delete`` (commit 936e05a0) is
+    server-side anti-join-scoped and already refuses to physically remove
+    a chunk any live ``catalog_document_chunks`` row still references —
+    including a reference from a document OUTSIDE ``doc_ids`` that
+    legitimately shares the same chash (RDR-108 content-addressed dedup:
+    identical chunk text in a collection collapses to one row shared by
+    every document containing it). A prior revision of this function
+    added a client-side pre-check (``catalog.docs_for_chashes``, a
+    catalog-wide reverse lookup) to avoid sending a delete the server
+    would silently refuse; it was removed (nexus-ch0gk substantive
+    critique) because the unconditional catalog-wide round trip it fired
+    on every batch was measured expensive at scale (this same call class
+    cost 226s / ~11% of wall at 2,133 files — nexus-qgc4b / duoak.11)
+    while its only benefit was a marginally more accurate ``pruned``
+    count with no downstream consumer. The server-side anti-join remains
+    the sole data-safety mechanism for this case; it does not depend on
+    anything in this function.
     """
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db.http_vector_client
 
@@ -2534,6 +2609,83 @@ def _prune_misclassified_in_collection(
     ]
 
     pruned = 0
+
+    # Manifest-guard ground truth (F8c). Populated once, below, when a
+    # catalog is available; consulted by BOTH arms via _guarded_delete.
+    doc_rows: dict[str, list] = {}
+    chash_to_docs: dict[str, set[str]] = {}
+
+    def _guarded_delete(ids: list[str]) -> int:
+        """Delete *ids* from *col*, clearing any LIVE manifest reference
+        FIRST so no dangling row can result. Returns ``_batched_delete``'s
+        ACTUAL deleted count (ids refused for a failed/absent manifest write
+        are NOT counted as pruned — same as before; nexus-o8dil.45: an id
+        the F8c guard approved as *deletable* can still be legitimately
+        anti-join-refused by the server, since ``chash_to_docs`` above is
+        scoped to the doc_ids in THIS prune call, not catalog-wide. A
+        mismatch between what was handed to ``_batched_delete`` and what it
+        actually reports is therefore a real, if rare, signal — logged, not
+        silently absorbed into an inflated count)."""
+        deletable: list[str] = []
+        # nexus-ch0gk: *catalog_writer* may already be CLOSED by the time
+        # this runs -- the production call site's ``_migrate_writer.close()``
+        # (indexer.py ~4126) fires well before the prune phase reuses this
+        # same writer reference. Safe by construction: close() is a
+        # documented no-op end to end (_ServiceCatalogWriter.close() /
+        # _SharedServiceCatalogHandle.close(), factory.py:339-340,
+        # :455-456) -- do not "fix" this by re-minting or guarding on a
+        # closed check.
+        _writer_source = catalog_writer if catalog_writer is not None else catalog
+        for cid in ids:
+            owners = chash_to_docs.get(cid)
+            if not owners:
+                # No manifest anywhere currently claims this id -- nothing
+                # can go dangling. Delete exactly as before the F8c fix.
+                deletable.append(cid)
+                continue
+            writer = getattr(_writer_source, "atomic_manifest_replace", None)
+            ok = writer is not None
+            if ok:
+                for did in owners:
+                    kept = [r for r in doc_rows.get(did, []) if getattr(r, "chash", None) != cid]
+                    try:
+                        writer(did, [_row_to_chunk_dict(r) for r in kept])
+                    except Exception:  # noqa: BLE001 — refuse rather than risk a dangling manifest row
+                        ok = False
+                        _log.warning(
+                            "prune_misclassified_manifest_guard_write_failed",
+                            doc_id=did, chash=cid,
+                            collection=getattr(col, "name", "?"),
+                            kind=kind, exc_info=True,
+                        )
+                        break
+                    doc_rows[did] = kept
+            if ok:
+                deletable.append(cid)
+            else:
+                _log.warning(
+                    "prune_misclassified_manifest_guard_refused_delete",
+                    chash=cid, owners=sorted(owners),
+                    collection=getattr(col, "name", "?"), kind=kind,
+                    note="no writer available or the manifest write failed "
+                         "-- refusing to delete rather than orphan the "
+                         "manifest reference",
+                )
+        if not deletable:
+            return 0
+        actual = _batched_delete(col, deletable)
+        if actual < len(deletable):
+            _log.warning(
+                "prune_misclassified_anti_join_partial_delete",
+                requested=len(deletable), actual=actual,
+                collection=getattr(col, "name", "?"), kind=kind,
+                note="the server's anti-join refused some chashes the F8c "
+                     "manifest guard believed had no live reference -- the "
+                     "guard's chash_to_docs ground truth is scoped to this "
+                     "prune call's doc_ids, not catalog-wide, so a live "
+                     "reference elsewhere is invisible to it",
+            )
+        return actual
 
     if catalog is not None and doc_ids:
         # Manifest-based path: per-doc, fetch the chashes that document
@@ -2547,7 +2699,6 @@ def _prune_misclassified_in_collection(
         # vendored to two paths, shared boilerplate header, etc.); the
         # same chash[:32] would otherwise appear multiple times in the
         # batch and Chroma rejects with DuplicateIDError.
-        natural_id_set: set[str] = set()
         # nexus-8g79.4: bare ``continue`` on get_manifest failure silently
         # skipped doc_ids whose manifest lookup raised (catalog miss,
         # transient SQLite error). Those chunks were then never pruned
@@ -2589,9 +2740,10 @@ def _prune_misclassified_in_collection(
                 rows = manifests.get(did)
                 if rows is None:
                     continue
+                doc_rows[did] = list(rows)  # F8c manifest-guard ground truth
                 for row in rows:
                     if row.chash:
-                        natural_id_set.add(row.chash)  # RDR-180: full digest
+                        chash_to_docs.setdefault(row.chash, set()).add(did)
         else:
             for did in doc_ids:
                 try:
@@ -2606,10 +2758,11 @@ def _prune_misclassified_in_collection(
                         exc_info=True,
                     )
                     continue
+                doc_rows[did] = list(manifest)  # F8c manifest-guard ground truth
                 for row in manifest:
                     if row.chash:
-                        natural_id_set.add(row.chash)  # RDR-180: full digest
-        all_natural_ids: list[str] = list(natural_id_set)
+                        chash_to_docs.setdefault(row.chash, set()).add(did)
+        all_natural_ids: list[str] = list(chash_to_docs.keys())
         # Batched ``col.get`` to fetch the present subset, then batched
         # delete. _CHROMA_PAGE_SIZE caps the ids list per call.
         for i in range(0, len(all_natural_ids), _CHROMA_PAGE_SIZE):
@@ -2632,11 +2785,11 @@ def _prune_misclassified_in_collection(
                 continue
             present_ids = present.get("ids") or []
             if present_ids:
-                _batched_delete(col, present_ids)
-                pruned += len(present_ids)
+                n = _guarded_delete(list(present_ids))
+                pruned += n
                 _log.debug(
                     f"pruned misclassified chunks from {kind} collection (manifest)",
-                    count=len(present_ids),
+                    count=n,
                     doc_id_batch_size=len(batch_ids),
                 )
     # Legacy where-filter path: complements the manifest-chash path
@@ -2678,11 +2831,17 @@ def _prune_misclassified_in_collection(
                 _log.debug("legacy_prune_in_query_rejected", exc_info=True)
                 continue
             if existing["ids"]:
-                _batched_delete(col, existing["ids"])
-                pruned += len(existing["ids"])
+                # F8c manifest guard (nexus-o8dil.2): an id here MAY be one
+                # this same catalog's manifest still lists (e.g. a legacy
+                # Phase-2-shaped chunk whose native id happens to equal a
+                # live chash) -- _guarded_delete consults chash_to_docs and
+                # clears that reference first. An id with no live reference
+                # (the common seeded/legacy shape) is unaffected.
+                n = _guarded_delete(list(existing["ids"]))
+                pruned += n
                 _log.debug(
                     f"pruned misclassified chunks from {kind} collection (doc_id-keyed)",
-                    count=len(existing["ids"]),
+                    count=n,
                     doc_id_batch_size=len(batch),
                 )
 
@@ -2717,6 +2876,7 @@ def _prune_misclassified(
     *,
     file_to_doc_id: dict[Path, str] | None = None,
     catalog: object | None = None,
+    catalog_writer: object | None = None,
 ) -> None:
     """Remove chunks from the wrong collection after reclassification.
 
@@ -2777,7 +2937,7 @@ def _prune_misclassified(
         if code_col is not None:
             pruned_chunks += _prune_misclassified_in_collection(
                 code_col, code_targets, file_to_doc_id, kind="code",
-                catalog=catalog,
+                catalog=catalog, catalog_writer=catalog_writer,
             )
         bar.set_postfix_str(f"chunks={pruned_chunks}", refresh=False)
         bar.update(1)
@@ -2785,7 +2945,7 @@ def _prune_misclassified(
         if docs_col is not None:
             pruned_chunks += _prune_misclassified_in_collection(
                 docs_col, docs_targets, file_to_doc_id, kind="docs",
-                catalog=catalog,
+                catalog=catalog, catalog_writer=catalog_writer,
             )
         bar.set_postfix_str(f"chunks={pruned_chunks}", refresh=False)
         bar.update(1)
@@ -4962,6 +5122,15 @@ def _run_index(
                 db,
                 file_to_doc_id=file_to_doc_id,
                 catalog=_cat,
+                # nexus-ch0gk: route the manifest-guard's
+                # atomic_manifest_replace write through the writer already
+                # in scope (minted at 4089-4095, its own .close() is a
+                # documented no-op for the shared service handle) instead
+                # of forwarding a write through the READER (_cat) via
+                # _SharedServiceCatalogHandle.__getattr__'s unwhitelisted
+                # forwarding — factory.py's documented "mixed sites hold
+                # BOTH a reader and a writer" convention, made explicit.
+                catalog_writer=_migrate_writer,
             )
         _phase(f"Pruning misclassified done ({time.monotonic() - _t:.1f}s)")
 
