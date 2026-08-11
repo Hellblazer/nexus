@@ -391,51 +391,40 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
         click.echo(f"\n{entry.get('content', '')}")
 
 
-def _reap_catalog_for_doc_ids(doc_ids: list[str]) -> None:
-    """Best-effort: tombstone catalog entries for deleted T3 docs.
+def _reap_catalog_for_doc_ids(doc_ids: list[str], *, expected_collection: str | None) -> None:
+    """Best-effort: tombstone catalog entries for T3 docs about to be deleted.
 
     Why: ``nx store delete`` removed only the T3 doc, leaving the catalog
     entry visible to ``nx catalog list`` until the next ``nx catalog gc``.
     Eventual consistency surprised users who expected delete to be atomic.
     Skipped silently when the catalog is uninitialised.
 
-    *doc_ids* are T3 chunk natural ids (chashes), not tumblers — nexus-5axey:
-    this used to call ``by_doc_id(doc_id)``, a TUMBLER-only lookup on the
-    engine (settled wji11 contract), so it silently mismatched every id here
-    and the reap never fired. :func:`resolve_knowledge_doc_for_chash` is the
-    chash-appropriate replacement (``docs_for_chashes``-backed); it also
-    applies the ``content_type == "knowledge"`` / no ``file_path`` filter
-    this reap always intended (store_put-origin entries only), so a T3
-    delete cannot reach into an unrelated code/docs catalog document that
-    happens to share the deleted chunk's content.
-    """
-    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-    from nexus.catalog.store_hook import resolve_knowledge_doc_for_chash  # noqa: PLC0415 — deferred, avoids import cycle
+    Thin wrapper around :func:`nexus.catalog.store_hook.reap_catalog_manifest_for_chashes`
+    (nexus-o8dil.5: relocated to that lower layer so ``db/http_vector_client.py``'s
+    ``expire()`` can share it too, without a db-layer-imports-commands-layer
+    inversion). Kept here, at this name, because ``tests/test_5axey_chash_catalog_lookups.py``
+    and ``tests/test_kmo9h_catalog_gate_census.py`` import and call it directly.
 
-    reader = None
-    writer = None
-    try:
-        # nexus-kmo9h: presence semantics belong to the factory (None only
-        # in SQLite opt-out mode when uninitialised) — the old local
-        # is_initialized gate silently skipped the post-delete catalog
-        # tombstone reap on every fresh service-mode box.
-        reader = make_catalog_reader()
-        if reader is None:
-            return
-        writer = make_catalog_writer()
-        for doc_id in doc_ids:
-            entry = resolve_knowledge_doc_for_chash(
-                reader, doc_id, log_event="catalog_reap"
-            )
-            if entry is not None:
-                writer.delete_document(entry.tumbler)
-    except Exception:  # noqa: BLE001 — best-effort catalog reap; failure logged at debug, cleanup in finally
-        _log.debug("catalog_reap_failed", exc_info=True, doc_ids=doc_ids)
-    finally:
-        if writer is not None:
-            writer.close()
-        if reader is not None:
-            reader.close()
+    CALL BEFORE deleting the T3 chunk(s), not after — see the relocated
+    function's docstring for why the order is load-bearing (RDR-191 F10c's
+    anti-join). CALL ONLY after confirming *doc_ids* actually exist in the
+    target T3 collection (nexus-c53hy) — this function's own chash
+    resolution has no collection scoping, so calling it unconditionally
+    (e.g. before knowing whether the T3 delete will find anything) can
+    tombstone an unrelated live document that happens to share a chash
+    registered under a different collection. See ``delete_cmd``'s ``--id``
+    branch for the existence-check-first call shape.
+
+    *doc_ids* are T3 chunk natural ids (chashes), not tumblers.
+    *expected_collection* is REQUIRED, no default (nexus-h7nax — see
+    :func:`reap_catalog_manifest_for_chashes`'s docstring for why a
+    defaultable guard is the recurring failure mode here). Forwarded
+    verbatim as a defense-in-depth scoping guard; pass ``None`` explicitly
+    when there is genuinely no collection to scope to.
+    """
+    from nexus.catalog.store_hook import reap_catalog_manifest_for_chashes  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    reap_catalog_manifest_for_chashes(doc_ids, expected_collection=expected_collection)
 
 
 @store.command("delete")
@@ -469,9 +458,44 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
     col_name = t3_collection_name(collection, t3=db)
 
     if doc_id:
-        if not db.delete_by_id(col_name, doc_id):
+        # nexus-c53hy (RDR-191 P2 round-2 fix): resolve-and-VERIFY before
+        # reaping. A collection-scoped T3 existence check runs FIRST -- a
+        # doc_id that is not actually in col_name (bogus/stale, or paired
+        # with the wrong --collection) is caught here, before the catalog
+        # reap ever fires. Without this check the reap below (which
+        # resolves purely by chash, with no collection scoping of its
+        # own) could tombstone a live, unrelated document that happens to
+        # own this exact chash under a DIFFERENT collection -- the inverse
+        # of the F10c bug class this whole area exists to fix.
+        if db.get_by_id(col_name, doc_id) is None:
             raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}")
-        _reap_catalog_for_doc_ids([doc_id])
+
+        # nexus-o8dil.5 (RDR-191 F10c follow-up): reap BEFORE delete, not
+        # after. PgVectorRepository#delete's anti-join refuses to delete a
+        # chash any LIVE manifest row still references -- including this
+        # very document's own not-yet-tombstoned manifest row. Reaping
+        # first tombstones the owning document so the anti-join sees no
+        # live reference and the delete can actually succeed; reaping
+        # after (the old order) left the manifest row live at delete
+        # time, so the delete was silently refused and the reap ran too
+        # late to matter. See store_hook.reap_catalog_manifest_for_chashes.
+        # Now gated on the existence check above, and scoped to col_name
+        # as a second defense-in-depth layer.
+        _reap_catalog_for_doc_ids([doc_id], expected_collection=col_name)
+        if not db.delete_by_id(col_name, doc_id):
+            # Existence was confirmed a moment ago, so this is NOT a plain
+            # "not found" -- either a genuine race (something else deleted
+            # it concurrently) or the delete hit the anti-join because the
+            # reap above declined to act (e.g. an ambiguous chash shared
+            # with another live document). Distinguish from the true
+            # not-found case above; the reap for this id has already run.
+            raise click.ClickException(
+                f"Entry {doc_id!r} existed in {col_name} moments ago but the "
+                "delete did not remove it -- likely anti-join-protected by "
+                "another live reference, or a concurrent modification. Any "
+                "catalog cleanup for it has already run; check 'nx catalog "
+                "list' / 'nx catalog reconcile'."
+            )
         click.echo(f"Deleted: {doc_id}  from  {col_name}")
     else:
         ids = db.find_ids_by_title(col_name, title)
@@ -481,8 +505,13 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
             n = "entry" if len(ids) == 1 else "entries"
             click.echo(f"Found {len(ids)} {n} with title {title!r} in {col_name}.")
             click.confirm("Delete?", abort=True)
+        # Same reap-before-delete ordering as the --id branch above. ids
+        # here are already collection-scoped (find_ids_by_title queried
+        # col_name directly), so this branch was never exposed to the
+        # wrong-collection class of the --id bug -- expected_collection is
+        # still passed as the same cheap defense-in-depth layer.
+        _reap_catalog_for_doc_ids(ids, expected_collection=col_name)
         db.batch_delete(col_name, ids)
-        _reap_catalog_for_doc_ids(ids)
         click.echo(f"Deleted {len(ids)} {'entry' if len(ids) == 1 else 'entries'} with title {title!r} from {col_name}.")
 
 @store.command("expire")

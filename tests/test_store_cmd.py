@@ -329,6 +329,12 @@ def test_search_no_path_returns_all(runner, mock_search):
 
 @pytest.mark.parametrize("found,exit_ok,expect_text", [(True, True, "Deleted"), (False, False, "not found")])
 def test_store_delete_by_id(runner, mock_store, found, exit_ok, expect_text):
+    # nexus-c53hy: delete_cmd now does a collection-scoped existence check
+    # (get_by_id) BEFORE any catalog reap or delete_by_id call — a bare
+    # MagicMock() would otherwise be truthy here and never exercise the
+    # "not found" path at all. get_by_id mirrors delete_by_id's found/not
+    # found shape so both branches still round-trip through the mock.
+    mock_store.get_by_id.return_value = {"id": "abcdef1234567890"} if found else None
     mock_store.delete_by_id.return_value = found
     result = runner.invoke(main, ["store", "delete", "--collection", "knowledge", "--id", "abcdef1234567890"])
     assert (result.exit_code == 0) == exit_ok, result.output

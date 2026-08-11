@@ -4575,25 +4575,48 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
             return "Error: doc_id is required"
         t3 = _get_t3()
         col_name = t3_collection_name(collection, t3=t3)
+        # nexus-b6enc C4: delete asymmetry — a store_put-origin catalog row
+        # (knowledge, no file_path) keyed on this chunk id must not survive
+        # with a stale chunk_count once the T3 chunk is gone. delete_document
+        # tombstones that catalog row. CORRECTED (nexus-3ck2g): this comment
+        # previously claimed delete_document cascades the manifest rows —
+        # false. The engine soft-tombstones only; document_chunks + the T3
+        # chunks survive until `nx catalog purge-trash` reclaims them — NOT
+        # gated by a retention window (nexus-8j1zx: the chunk sweep runs on
+        # every tombstoned doc on the NEXT --no-dry-run --confirm run,
+        # regardless of age; only the catalog row itself waits for
+        # --older-than-days — see store_hook.store_delete_catalog_cleanup's
+        # docstring for the full rationale). Cleanup failure here is
+        # surfaced, never silent.
+        #
+        # nexus-c53hy (RDR-191 P2 round-2 fix): resolve-and-VERIFY before
+        # cleanup. store_delete_catalog_cleanup resolves purely by chash,
+        # with no check that doc_id is actually in col_name -- a bogus/
+        # stale doc_id, or one paired with the wrong collection, would
+        # otherwise get cleanup run unconditionally and could tombstone a
+        # live, unrelated document that owns this exact chash under a
+        # DIFFERENT collection. A collection-scoped existence check first
+        # closes that off before any catalog mutation happens.
+        if t3.get_by_id(col_name, doc_id) is None:
+            return f"Not found: {doc_id!r} in {col_name}"
+
+        # nexus-o8dil.5 (RDR-191 F10c follow-up): cleanup now runs BEFORE
+        # the T3 delete, not after. PgVectorRepository#delete's anti-join
+        # refuses to delete a chash any LIVE manifest row still
+        # references — including this entry's OWN not-yet-tombstoned
+        # manifest row. Cleaning up first lets the delete actually succeed
+        # for the common single-owner case; the old delete-then-cleanup
+        # order left the manifest row live at delete time, so a
+        # legitimate entry's delete was silently refused by the anti-join
+        # and misreported as "Not found" even though the entry
+        # demonstrably existed. Now gated on the existence check above,
+        # and scoped to col_name as a second defense-in-depth layer.
+        from nexus.catalog.store_hook import store_delete_catalog_cleanup  # noqa: PLC0415 — deferred for startup cost
+        tumbler, cleanup_error = store_delete_catalog_cleanup(doc_id, expected_collection=col_name)
+
         deleted = t3.delete_by_id(col_name, doc_id)
         if deleted:
             _page_cache_invalidate()
-            # nexus-b6enc C4: delete asymmetry — the T3 chunk is gone, so
-            # a store_put-origin catalog row (knowledge, no file_path)
-            # keyed on this chunk id must not survive with a stale
-            # chunk_count. delete_document tombstones that catalog row.
-            # CORRECTED (nexus-3ck2g): this comment previously claimed
-            # delete_document cascades the manifest rows — false. The
-            # engine soft-tombstones only; document_chunks + the T3 chunks
-            # survive until `nx catalog purge-trash` reclaims them — NOT
-            # gated by a retention window (nexus-8j1zx: the chunk sweep
-            # runs on every tombstoned doc on the NEXT --no-dry-run
-            # --confirm run, regardless of age; only the catalog row
-            # itself waits for --older-than-days — see store_hook.
-            # store_delete_catalog_cleanup's docstring for the full
-            # rationale). Cleanup failure here is surfaced, never silent.
-            from nexus.catalog.store_hook import store_delete_catalog_cleanup  # noqa: PLC0415 — deferred for startup cost
-            tumbler, cleanup_error = store_delete_catalog_cleanup(doc_id)
             if cleanup_error:
                 return (
                     f"Deleted: {doc_id} from {col_name} (WARNING: catalog "
@@ -4602,7 +4625,19 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
                     f"'nx catalog reconcile')"
                 )
             return f"Deleted: {doc_id} from {col_name}"
-        return f"Not found: {doc_id!r} in {col_name}"
+        # Existence was confirmed a moment ago, so this is NOT a plain
+        # "not found" -- either a genuine race (something else deleted it
+        # concurrently) or the delete hit the anti-join because cleanup
+        # above declined to act (e.g. an ambiguous chash shared with
+        # another live document). Distinguish from the true not-found
+        # case above; cleanup for this id has already run.
+        return (
+            f"Entry {doc_id!r} existed in {col_name} moments ago but the "
+            "delete did not remove it — likely anti-join-protected by "
+            "another live reference, or a concurrent modification. Any "
+            "catalog cleanup for it has already run; check "
+            "'nx catalog reconcile'."
+        )
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("store_delete", e)
 

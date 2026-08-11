@@ -698,15 +698,20 @@ public final class VectorHandler implements HttpHandler {
     /**
      * POST /v1/vectors/store-delete
      *
-     * <p>Manifest obligation (P4a.2 decision, recorded on nexus-1k8s1): callers are
-     * responsible for removing {@code catalog_document_chunks} rows referencing the
-     * deleted chunks — the serving path does NOT pre-check the manifest (documented
-     * caller obligation per {@link PgVectorRepository#delete}; dangling references
-     * fail loud at {@code fetchDocumentChunks}, never silently).
+     * <p>ANTI-JOIN SCOPED (RDR-191 F10c fix, bead nexus-o8dil.5): {@link
+     * PgVectorRepository#delete} now skips any id still referenced by a live
+     * {@code catalog_document_chunks} row in this collection — a chunk another
+     * document's manifest still points at survives, silently, rather than being
+     * destroyed and leaving that document's manifest dangling. Callers remain
+     * responsible for removing their OWN document's manifest rows; this only
+     * protects chunks OTHER documents still reference. See {@link
+     * PgVectorRepository#delete}'s javadoc for the full rationale.
      *
      * <p>Request: {"collection": "...", "ids": ["...", ...]}
      * <p>Response 200: {"deleted": N} — rows ACTUALLY deleted (RLS makes foreign
-     * tenants' rows invisible, so cross-tenant attempts delete exactly 0)
+     * tenants' rows invisible, and a still-referenced id is silently skipped rather
+     * than counted, so this can be less than {@code ids.length} even with no
+     * cross-tenant ids present)
      */
     private void handleStoreDelete(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
