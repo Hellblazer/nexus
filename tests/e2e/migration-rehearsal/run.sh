@@ -619,6 +619,12 @@ else
     cp service/target/*.so "$STAGE/native/"
   fi
   cp "$HERE/Dockerfile" "$HERE/rehearse.sh" "$HERE/rehearse_guided.sh" "$HERE/rehearse_shakeout.sh" "$HERE/seed_legacy.py" "$STAGE/"
+  # lib/ must reach the build context, not just the image: the Dockerfile's
+  # COPY reads from HERE-staged files only, so a driver's `source lib/...`
+  # silently resolves to nothing without this (nexus-xm0cp's Phase D census
+  # was undefined in-container for its whole life; caught 2026-08-10).
+  # Directory-wide on both sides so a second lib does not repeat it.
+  cp -R "$HERE/lib" "$STAGE/lib"
 fi
 
 # Docker Desktop's credsStore=desktop helper can't reach a locked login keychain
