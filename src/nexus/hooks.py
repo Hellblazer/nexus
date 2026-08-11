@@ -60,6 +60,60 @@ def _open_t1():
             os.environ["NX_T1_ALLOW_SHARED_FALLBACK"] = prev
 
 
+def _t1_clear_if_owned(t1) -> None:
+    """Clear ``t1`` only if this process can prove it owns the scope.
+
+    nexus-65a9k / GH #1454: re-derives the tier-1/tier-2 T1 routing
+    decision (:func:`nexus.db.t1.resolve_t1_routing_tiers`) immediately
+    before the destructive call, rather than trusting whatever
+    ``_open_t1()`` returned earlier. ``USE_LEASED`` means the store this
+    process is holding is bound to a lease published by a DIFFERENT,
+    still-live process (see :func:`session_end_flush`'s docstring for the
+    tool-free-dispatch scenario that reaches this routinely) -- clearing
+    it would delete that OTHER process's working memory, not this
+    process's own. The clear is skipped in that case; every other
+    decision (``USE_INHERITED``, or the ``MINT`` that produced the
+    genuinely-bare CLI-dedicated store) is unchanged from before this fix
+    and clears exactly as it always has.
+
+    Fails loud, never silently defaults to clearing: if the ownership
+    decision itself cannot be computed (an unexpected exception --
+    config dir unreadable, lease file corrupt, etc.), that is logged at
+    ERROR and the clear is skipped. A skipped clear only leaks rows to
+    the 24h TTL sweep; a wrongly-executed clear is an unrecoverable
+    delete of a live process's scope -- on doubt, do not delete.
+    """
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import; rare/branch-local path
+    from nexus.db.t1 import T1RoutingAction, resolve_t1_routing_tiers  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+    try:
+        decision = resolve_t1_routing_tiers(nexus_config_dir())
+    except Exception as exc:  # noqa: BLE001 — ownership cannot be proven; must never default to clearing
+        _log.error(
+            "session_end_t1_ownership_check_failed",
+            error=str(exc),
+            message=(
+                "could not determine T1 ownership; skipping clear() to avoid "
+                "deleting a scope this process may not own"
+            ),
+        )
+        return
+
+    if decision.action == T1RoutingAction.USE_LEASED:
+        _log.warning(
+            "session_end_t1_clear_skipped_leased_scope",
+            session_id=decision.session_id,
+            message=(
+                "T1 resolved via a lease borrowed from another live process; "
+                "skipping clear() -- rows age out via the 24h TTL sweep "
+                "instead of being deleted immediately"
+            ),
+        )
+        return
+
+    t1.clear()
+
+
 def _infer_repo() -> str:
     """Detect current repo name from git, or fall back to cwd name."""
     try:
@@ -296,6 +350,58 @@ def session_end_flush() -> str:
         silently dropped. Best-effort flush is the documented contract;
         a future improvement would be for the lifespan to drain the
         flagged-entries queue itself before unlinking the addr file.
+
+    ``clear()`` is gated on OWNERSHIP, not merely on ``t1 is not None``
+    (nexus-65a9k / GH #1454). A tool-free ``claude -p`` operator dispatch
+    strips this child's ``NX_T1_SESSION``/``NX_T1_SESSION_ID`` but still
+    forwards ``NX_SESSION_ID=<PARENT's session id>`` (see
+    :mod:`nexus.operators.dispatch`). When THIS grandchild's SessionEnd
+    fires, tier 1 (``USE_INHERITED``) misses -- the T1 env was stripped --
+    but tier 2 (``USE_LEASED``) resolves the parent's id, finds the
+    parent MCP's still-live, still-fresh published lease, and binds a
+    store to it. That store is real and gets flushed normally below
+    (flushing a live borrowed scope's flagged entries is not the unsafe
+    operation), but a BORROWED lease is never grounds to delete the scope
+    out from under the process that still owns it: right before the
+    ``clear()`` call, this function independently re-derives the SAME
+    tier-1/tier-2 decision
+    (:func:`nexus.db.t1.resolve_t1_routing_tiers`) and skips ``clear()``
+    whenever it comes back ``USE_LEASED``.
+
+    ACCEPTED TRADEOFF, stated at its REAL blast radius -- which is much
+    wider than "the owning MCP already tore its lease down", the narrow
+    case an earlier draft of this comment described. Measured by tracing
+    :func:`nexus.db.t1.resolve_t1_routing_tiers` against how this hook
+    actually resolves: the detached SessionEnd grandchild never inherits
+    ``NX_T1_SESSION`` from the MCP server's process env, so
+    ``USE_INHERITED`` is effectively unreachable for a genuine top-level
+    session's own hook; ``resolve_active_session_id()`` virtually always
+    lands on ``CLAUDE_CODE_SESSION_ID`` (Claude Code sets it on every
+    spawned subprocess), and the top-level MCP publishes a lease for its
+    OWN session. So when this hook wins the pre-existing stdio-EOF race
+    it resolves ``USE_LEASED`` against its own session's own lease --
+    which :mod:`nexus.db.t1` documents as the DESIGNED mechanism, not a
+    foreign borrow -- and the gate skips.
+
+    Net effect: after nexus-65a9k, ``clear()`` essentially never fires
+    for a genuine top-level SessionEnd. Rows are reaped by the 24h TTL
+    sweep (``SWEEP_TTL_HOURS`` in ``NexusService.java``, a live recurring
+    per-tenant task, verified -- not aspirational) rather than deleted
+    immediately.
+
+    That is still strictly the safe direction: leaking rows to a TTL
+    sweep is recoverable, deleting a live process's working memory is
+    not. It is written out at full width deliberately. The defect this
+    fix repairs survived review because the comment above the old
+    ``clear()`` asserted a safety property the code did not have; an
+    understated comment here would repeat that exact mistake in the
+    opposite direction.
+
+    The gate infers ownership from the ROUTING TIER, which is a proxy,
+    not a real ownership signal -- ``USE_INHERITED``'s safety currently
+    rests on discipline in :mod:`nexus.operators.dispatch` that this
+    function cannot verify. A future drift there could reopen an
+    equivalent hole. Tracked as a follow-up.
     """
     flushed = 0
     expired = 0
@@ -347,12 +453,25 @@ def session_end_flush() -> str:
         # session's markers, not just this one's -- on every lease-less
         # SessionEnd. `_open_t1()` forces `NX_T1_ALLOW_SHARED_FALLBACK` off
         # for its call, so that escape hatch can never route this
-        # particular clear() at the shared scope either. Only ever call
-        # clear() on a store this process can prove is scoped to ITS OWN
-        # session (`t1 is not None` means USE_INHERITED, USE_LEASED, or the
-        # genuinely-bare CLI-dedicated mint -- never the fail-loud branch).
+        # particular clear() at the shared scope either.
+        #
+        # nexus-65a9k / GH #1454 (CORRECTS the claim this comment used to
+        # make): `t1 is not None` does NOT by itself mean "a store this
+        # process can prove is scoped to its own session." It means
+        # USE_INHERITED, USE_LEASED, or the genuinely-bare CLI-dedicated
+        # mint -- and USE_LEASED is a BORROW of a scope a DIFFERENT, still
+        # -live process owns (see this function's docstring). A tool-free
+        # `claude -p` operator dispatch forwards `NX_SESSION_ID=<parent>`
+        # while stripping the T1 env, so this grandchild's tier-1 check
+        # misses and tier-2 binds to the parent MCP's own live, fresh
+        # lease -- `t1 is not None` is true, but `t1` is the PARENT's
+        # scope, not this process's. Ownership is therefore re-checked
+        # HERE, immediately before the destructive call, rather than
+        # trusted from whatever `_open_t1()` returned: if this process
+        # cannot prove (via the same tier-1/tier-2 decision function) that
+        # it is not merely borrowing the scope, it must not delete it.
         if t1 is not None:
-            t1.clear()
+            _t1_clear_if_owned(t1)
     except (sqlite3.Error, OSError) as exc:
         _log.warning("session_end: storage error during flush/expire", error=str(exc))
 
