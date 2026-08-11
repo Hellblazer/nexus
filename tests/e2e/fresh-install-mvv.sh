@@ -232,6 +232,30 @@ else
     WHEEL="$(ls "$WORK"/dist/conexus-*.whl)"
     echo "  $WHEEL"
 
+    # PyPI upload validation, pre-tag. Until 2026-08-11 the FIRST execution of
+    # twine's metadata check anywhere in the pipeline was the publish step
+    # itself, so a nine-gates-green release could still die at upload.
+    #
+    # SCOPE HONESTY — read this before trusting it. This does NOT reproduce the
+    # 2026-08-11 7.6.0 failure ("InvalidDistribution: '2.5' is not a valid
+    # metadata version"). That was VERSION SKEW between the uploader's bundled
+    # twine (pinned at a 2026-02 commit) and the Metadata-Version 2.5 that
+    # hatchling 1.32.0 emits. This check runs a CURRENT twine, which accepts
+    # 2.5 — verified: it passes on the exact wheel PyPI rejected. Keeping the
+    # uploader current is Dependabot's job (.github/dependabot.yml), not this
+    # check's.
+    #
+    # What this DOES catch: a wheel whose metadata is genuinely malformed or
+    # unrenderable, which PyPI refuses regardless of uploader version. That is
+    # worth catching while a fix is still cheap, but do not read a pass here as
+    # "the upload will succeed".
+    echo "  [check] twine metadata validation (what PyPI's upload gate runs)"
+    if ! uvx twine check --strict "$WHEEL" >"$LOGS/twine-check.log" 2>&1; then
+        sed 's/^/    /' "$LOGS/twine-check.log" >&2
+        _fail "twine check rejected the wheel — PyPI would refuse this upload (see $LOGS/twine-check.log)"
+    fi
+    sed 's/^/    /' "$LOGS/twine-check.log"
+
     echo "── 2/9 Virgin venv + install ──"
     uv venv --python 3.12 -q "$VENV"
     uv pip install -q --python "$VENV/bin/python" "$WHEEL"
