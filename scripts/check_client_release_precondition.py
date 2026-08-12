@@ -97,7 +97,26 @@ def is_ancestor(commit: str, tag: str) -> bool:
 def check(engine_tag: str) -> int:
     required = ENGINE_CLIENT_PRECONDITIONS.get(engine_tag, {})
     if not required:
-        print(f"OK: no client-release preconditions registered for {engine_tag}")
+        # nexus-f9z84: an empty table is a LEGITIMATE state (most engine
+        # tags carry no client-breaking coupling), but it is INDISTINGUISHABLE
+        # from "nobody filled the row in" unless the wording says so out
+        # loud. This prints "OK" because exit 0 IS still correct here --
+        # justification: this script gates the DEPLOY-ORDER precondition
+        # specifically (9ssih dangling-endpoint class), not release safety in
+        # general; an empty registry means "no KNOWN engine/client coupling
+        # for this tag", which is a fact about the registry, not a verified
+        # safety property. The engine-release skill's Step 3b is where a
+        # human is expected to add a row (or consciously leave none) when
+        # cutting the tag -- this script cannot force that decision, only
+        # report honestly that it verified NOTHING when the table is empty.
+        print(
+            f"OK (VACUOUS -- 0 preconditions registered for {engine_tag}): "
+            "this run verified NOTHING. An empty registry means either "
+            "'no known client coupling for this engine tag' or 'nobody "
+            "added the row' -- this script cannot tell the two apart. "
+            "See ENGINE_CLIENT_PRECONDITIONS's module docstring before "
+            "treating this as evidence the deploy is safe."
+        )
         return 0
     try:
         release = latest_release_tag()
@@ -128,6 +147,37 @@ def check(engine_tag: str) -> int:
         return 1
     print(f"OK: all client preconditions for {engine_tag} are in {release}")
     return 0
+
+
+def stale_precondition_rows(
+    table: dict[str, dict[str, str]] | None = None,
+    floor: tuple[int, ...] | None = None,
+) -> list[str]:
+    """Rows at or behind the floor -- dead weight per the module's own
+    contract ("Delete rows once the floor moves past the engine version that
+    carried the requirement").
+
+    nexus-f9z84 non-vacuity companion: extracted to a pure function that
+    accepts an INJECTABLE table/floor rather than closing over the live
+    (almost always empty) :data:`ENGINE_CLIENT_PRECONDITIONS` directly. The
+    original inline loop in the test suite iterated the real, empty dict --
+    zero iterations, unconditional pass, no signal that the comparison logic
+    ever actually ran. A test can now plant a deliberately stale row and
+    observe this function actually return it, which the old shape could
+    never demonstrate.
+    """
+    from nexus.engine_version import REQUIRED_ENGINE_VERSION
+
+    rows = ENGINE_CLIENT_PRECONDITIONS if table is None else table
+    active_floor = REQUIRED_ENGINE_VERSION if floor is None else floor
+    stale: list[str] = []
+    for tag in rows:
+        if tag == "next":  # the about-to-be-cut sentinel is always ahead
+            continue
+        version = tuple(int(n) for n in tag.removeprefix("engine-service-v").split("."))
+        if version <= active_floor:
+            stale.append(tag)
+    return stale
 
 
 def _pinned_engine_tag() -> str:

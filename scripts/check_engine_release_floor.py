@@ -357,6 +357,111 @@ def _tag_age_hours(tag: str, repo_root: pathlib.Path | None = None) -> object:
     return age.total_seconds() / 3600.0
 
 
+#: Scope for the source-ancestry arm (nexus-hs4xl): PRODUCTION source only.
+#: Test-only and pom-only churn between an engine tag and HEAD is routine and
+#: does NOT mean the pin is stale -- scoping wider would make this arm cry
+#: wolf on every dependency bump or test refactor (bead nexus-hs4xl design
+#: question 1). ``service/src/main`` covers both Java sources AND
+#: non-code artifacts that are equally load-bearing for the deployed
+#: engine's behavior: Liquibase changelogs live under
+#: ``src/main/resources``, and a schema change ships exactly as much
+#: undeployed behavior as a Java diff does.
+_ANCESTRY_SCOPE = "service/src/main"
+
+
+def _pinned_engine_tag() -> str:
+    """The floor's tag string -- derived, so it cannot drift from the constant."""
+    return "engine-service-v" + ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
+
+
+def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None) -> int:
+    """The nexus-hs4xl arm: version NUMBERS can agree while SOURCE disagrees.
+
+    v7.6.1 pinned ``engine-service-v0.1.71`` -- current at the time, by
+    version number -- while ALSO carrying 156 insertions of
+    ``service/src/main`` Java that v0.1.71's tag does not contain
+    (``CatalogRepository.java``, ``StagingPromoteOps.java``,
+    ``VectorHandler.java``, ``PgVectorRepository.java`` -- the RDR-191
+    F10c producer fixes). :func:`check_pin_currency` and the cloud probe in
+    :func:`check_floor` both passed: three-way version agreement (floor,
+    newest published tag, deployed cloud), zero source-tree comparison. This
+    closes that gap: for the tag actually being pinned -- or the
+    ``--paired-deploy`` tag when armed, which LEGITIMATELY carries service
+    source destined for the tag being cut in parallel, see the module
+    docstring's paired-mode section -- diff the ACTUAL source tree between
+    the pinned tag and HEAD within :data:`_ANCESTRY_SCOPE`. Non-empty means
+    the release ships engine behavior its own pinned tag does not contain.
+
+    Reuses :func:`_tag_exists_in_git` for the same fail-closed existence
+    check the paired-mode preconditions already rely on -- a checkout
+    missing the tag (shallow clone without ``fetch-depth: 0``, or the tag
+    genuinely does not exist) is UNVERIFIABLE, never a silent pass.
+
+    Returns ``0`` clean, ``1`` drift detected (named files in the message),
+    ``2`` unverifiable (tag missing / git failure -- "could not verify" is
+    never "must be fine", same doctrine as the rest of this module).
+    """
+    root = repo_root or pathlib.Path(__file__).resolve().parent.parent
+    exists = _tag_exists_in_git(pinned_tag, repo_root=root)
+    if exists is _TAGS_UNAVAILABLE:
+        print(
+            f"ENGINE SOURCE-ANCESTRY CHECK UNVERIFIABLE: could not confirm "
+            f"{pinned_tag} exists in git. Cannot compare source trees -- "
+            "treat as a failed gate, not a pass. In CI, actions/checkout "
+            "needs `fetch-depth: 0` (release.yml already sets this).",
+            file=sys.stderr,
+        )
+        return 2
+    if not exists:
+        print(
+            f"ENGINE SOURCE-ANCESTRY CHECK UNVERIFIABLE: {pinned_tag} does not "
+            "exist in this checkout's git history. Cannot compare source "
+            "trees -- treat as a failed gate, not a pass.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        out = subprocess.run(
+            ["git", "diff", "--stat", pinned_tag, "HEAD", "--", _ANCESTRY_SCOPE],
+            cwd=root, capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(
+            f"ENGINE SOURCE-ANCESTRY CHECK UNVERIFIABLE: git diff failed ({exc}). "
+            "Cannot compare source trees -- treat as a failed gate, not a pass.",
+            file=sys.stderr,
+        )
+        return 2
+    if out.returncode != 0:
+        print(
+            f"ENGINE SOURCE-ANCESTRY CHECK UNVERIFIABLE: "
+            f"`git diff {pinned_tag} HEAD -- {_ANCESTRY_SCOPE}` exited "
+            f"{out.returncode}: {out.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return 2
+    diff = out.stdout.strip()
+    if diff:
+        print(
+            f"ENGINE SOURCE-ANCESTRY CHECK FAILED: this release ships "
+            f"{_ANCESTRY_SCOPE} source that its pinned engine tag "
+            f"({pinned_tag}) does not contain:\n{diff}\n"
+            "The floor is version-CURRENT but SOURCE-STALE: a pin equal to "
+            "the newest published tag can still predate shipped engine "
+            "source (nexus-ajlz5). Cut a fresh engine tag carrying this "
+            "source (or re-pin to a tag that already does) before "
+            "releasing -- see AGENTS.md § Engine-service release, "
+            "paired-release choreography.",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"engine source is current: no {_ANCESTRY_SCOPE} drift between "
+        f"{pinned_tag} and HEAD"
+    )
+    return 0
+
+
 def check_paired_preconditions(
     tag: str,
     newest: object,
@@ -644,11 +749,20 @@ def main(argv: list[str] | None = None) -> int:
         "stale pairing across multiple releases (nexus-k1c08 fix round).",
     )
     args = parser.parse_args(argv)
-    return check_floor(
+    rc = check_floor(
         url=args.url,
         paired_deploy=args.paired_deploy,
         paired_tag_max_age_hours=args.paired_tag_max_age_hours,
     )
+    if rc != 0:
+        return rc
+    # nexus-hs4xl: version agreement (just proven above) does not imply
+    # source agreement. Compare against the SAME tag check_floor just
+    # validated -- the paired tag when armed (which legitimately carries
+    # service source destined for the parallel cut), the pinned floor's tag
+    # otherwise.
+    ancestry_tag = args.paired_deploy or _pinned_engine_tag()
+    return check_source_ancestry(ancestry_tag)
 
 
 if __name__ == "__main__":

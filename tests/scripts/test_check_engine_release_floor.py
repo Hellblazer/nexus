@@ -18,6 +18,7 @@ service, compare against the floor, exit non-zero (with a remedy) if stale.
 from __future__ import annotations
 
 import json
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -571,14 +572,24 @@ def test_default_mode_unaffected_by_paired_deploy_absence(
 
 
 def test_main_accepts_paired_deploy_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    # check_source_ancestry stubbed: this test targets the paired-deploy
+    # FLAG plumbing (nexus-k1c08), not the nexus-hs4xl ancestry arm, which
+    # has its own dedicated tests below and would otherwise run real `git
+    # diff` against this checkout's actual (possibly source-stale, see
+    # nexus-ajlz5) history.
     with patch.object(gate, "_tag_exists_in_git", return_value=True), \
          patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
          patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
          patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
+         patch.object(gate, "check_source_ancestry", return_value=0) as mock_ancestry:
         rc = gate.main(["--url", _TEST_URL, "--paired-deploy", _PAIRED_TAG])
     assert rc == 0
     assert "PAIRED MODE" in capsys.readouterr().out
+    # And the wiring itself: the paired tag, not the (unbumped) floor tag,
+    # must be what gets ancestry-checked -- see the dedicated wiring tests
+    # below for the reasoning.
+    mock_ancestry.assert_called_once_with(_PAIRED_TAG)
 
 
 def test_main_accepts_paired_tag_max_age_hours_flag(capsys: pytest.CaptureFixture[str]) -> None:
@@ -589,7 +600,8 @@ def test_main_accepts_paired_tag_max_age_hours_flag(capsys: pytest.CaptureFixtur
          patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
          patch.object(gate, "_tag_age_hours", return_value=_STALE_AGE_HOURS), \
          patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
+         patch.object(gate, "check_source_ancestry", return_value=0):
         rc_default_window = gate.main(["--url", _TEST_URL, "--paired-deploy", _PAIRED_TAG])
         capsys.readouterr()
         rc_overridden = gate.main([
@@ -869,3 +881,189 @@ def test_paired_tag_published_defaults_repo_root_to_module_parent() -> None:
         gate._paired_tag_published(_PAIRED_TAG)
     _, kwargs = mock_run.call_args
     assert kwargs.get("cwd") == expected_root
+
+
+# ── Source-ancestry arm (nexus-hs4xl) ───────────────────────────────────────
+#
+# check_pin_currency and the cloud probe both compare VERSION NUMBERS. v7.6.1
+# proved that insufficient: it pinned engine-service-v0.1.71 -- current by
+# every number the gate compared -- while shipping 156 insertions of
+# service/src/main Java (the RDR-191 F10c producer fixes) that v0.1.71's tag
+# does not contain. check_source_ancestry closes that gap by diffing the
+# ACTUAL source tree between the pinned tag and HEAD.
+
+
+def _git_repo_with_scoped_history(tmp_path):
+    """A scratch repo with a tagged commit, a fixture for building either a
+    clean or a drifted history on top of it. Returns (repo_path, run)."""
+    repo = tmp_path / "r"
+    (repo / "service" / "src" / "main" / "java").mkdir(parents=True)
+    (repo / "service" / "src" / "test" / "java").mkdir(parents=True)
+
+    def run(*args):
+        return subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.email=t@t.invalid", "-c", "user.name=t", *args],
+            capture_output=True, text=True, check=True,
+        )
+
+    (repo / "service" / "src" / "main" / "java" / "A.java").write_text("class A {}\n")
+    (repo / "service" / "src" / "test" / "java" / "ATest.java").write_text("class ATest {}\n")
+    run("init", "-q")
+    run("add", ".")
+    run("commit", "-q", "-m", "base")
+    run("tag", "engine-service-v9.9.9")
+    return repo, run
+
+
+def test_source_ancestry_clean_at_the_tag_passes(
+    tmp_path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, _run = _git_repo_with_scoped_history(tmp_path)
+    rc = gate.check_source_ancestry("engine-service-v9.9.9", repo_root=repo)
+    assert rc == 0
+    assert "current" in capsys.readouterr().out.lower()
+
+
+def test_source_ancestry_in_scope_drift_fails_and_names_the_file(
+    tmp_path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, run = _git_repo_with_scoped_history(tmp_path)
+    (repo / "service" / "src" / "main" / "java" / "A.java").write_text("class A { int x; }\n")
+    run("commit", "-aq", "-m", "drift main")
+
+    rc = gate.check_source_ancestry("engine-service-v9.9.9", repo_root=repo)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "SOURCE-ANCESTRY CHECK FAILED" in err
+    assert "A.java" in err
+    assert "engine-service-v9.9.9" in err
+
+
+def test_source_ancestry_out_of_scope_drift_is_not_flagged(
+    tmp_path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Test-only churn must NOT redden this gate (bead design question 1) --
+    only service/src/main/java/A.java's PRODUCTION scope counts."""
+    repo, run = _git_repo_with_scoped_history(tmp_path)
+    (repo / "service" / "src" / "test" / "java" / "ATest.java").write_text(
+        "class ATest { void t() {} }\n"
+    )
+    run("commit", "-aq", "-m", "drift test-only")
+
+    rc = gate.check_source_ancestry("engine-service-v9.9.9", repo_root=repo)
+
+    assert rc == 0
+    assert "SOURCE-ANCESTRY CHECK FAILED" not in capsys.readouterr().err
+
+
+def test_source_ancestry_missing_tag_fails_closed(tmp_path, capsys: pytest.CaptureFixture[str]) -> None:
+    repo, _run = _git_repo_with_scoped_history(tmp_path)
+    rc = gate.check_source_ancestry("engine-service-v0.0.0-nonexistent", repo_root=repo)
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "UNVERIFIABLE" in err
+    assert "does not exist" in err
+
+
+def test_source_ancestry_git_unavailable_fails_closed(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=gate._TAGS_UNAVAILABLE):
+        rc = gate.check_source_ancestry("engine-service-v9.9.9")
+    assert rc == 2
+    assert "UNVERIFIABLE" in capsys.readouterr().err
+
+
+def test_pinned_engine_tag_derives_from_the_floor_constant() -> None:
+    expected = "engine-service-v" + ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
+    assert gate._pinned_engine_tag() == expected
+
+
+# ── MANDATORY REGRESSION PIN: v7.6.1 + v0.1.71 must be RED (nexus-hs4xl) ───
+#
+# "Whatever ships must be proven to FAIL against the v7.6.1 tree. A gate for
+# this class that passes on the tree that motivated it is vacuous." This
+# targets THIS repository's real, already-pushed tags directly -- skipped
+# (never xfailed) when a shallow/tagless checkout cannot see them, same
+# doctrine as test_newest_published_engine_reads_real_tags above.
+#
+# `integration` + `mandatory_regression_pin` (nexus-93j33, review follow-up
+# 2026-08-12): unlike the sibling `test_newest_published_engine_reads_real_
+# tags` above -- whose own docstring justifies an unconditional skip because
+# hermetic coverage exists elsewhere for the LOGIC it would otherwise check
+# -- this test pins a SPECIFIC historical regression with no hermetic
+# equivalent, so a silent skip here is a real coverage loss, not a
+# documented redundancy. ci.yml's `test` job deliberately does NOT fetch
+# tags (nexus-dhs30 -- `fetch-tags: true` was tried there and rejected: the
+# engine-service-v* tags point at commits outside a depth-1 history and
+# never materialise), so this test structurally cannot resolve
+# `engine-service-v0.1.71` in that job and must live in `integration`
+# instead, same as the sibling live-API pins in
+# test_check_release_ci_evidence.py. `mandatory_regression_pin` is what
+# turns "silently skipped every time `-m integration` runs without tags"
+# into a failed run instead of a green one -- see tests/conftest.py's
+# `_check_mandatory_pin_non_vacuity`.
+@pytest.mark.integration
+@pytest.mark.mandatory_regression_pin
+def test_v7_6_1_source_ancestry_regression_is_red() -> None:
+    check = subprocess.run(
+        ["git", "tag", "-l", "v7.6.1", "engine-service-v0.1.71"],
+        capture_output=True, text=True,
+    )
+    seen = set(check.stdout.split())
+    if not {"v7.6.1", "engine-service-v0.1.71"} <= seen:
+        pytest.skip(
+            "checkout is missing v7.6.1 and/or engine-service-v0.1.71 "
+            "(shallow CI clone) -- the scoping/logic behavior is covered "
+            "hermetically above; this pins the SPECIFIC historical "
+            "regression where it is observable."
+        )
+    diff = subprocess.run(
+        ["git", "diff", "--stat", "engine-service-v0.1.71", "v7.6.1", "--",
+         gate._ANCESTRY_SCOPE],
+        capture_output=True, text=True, check=True,
+    )
+    assert diff.stdout.strip(), (
+        "expected v7.6.1 to carry service/src/main source that "
+        "engine-service-v0.1.71 lacks (nexus-ajlz5) -- if this is empty the "
+        "historical fixture this regression pins no longer holds and the "
+        "test should be re-evaluated, not silently passed"
+    )
+    rc = gate.check_source_ancestry("engine-service-v0.1.71")
+    assert rc == 1, (
+        "the source-ancestry gate must flag v7.6.1 as RED against its own "
+        "pinned engine tag -- this is the exact drift nexus-ajlz5 shipped "
+        "and nexus-hs4xl exists to catch"
+    )
+
+
+# ── main() wiring: the ancestry arm must actually run, on the right tag ────
+
+
+def test_main_runs_ancestry_check_after_a_clean_floor_default_mode() -> None:
+    with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())), \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
+         patch.object(gate, "check_source_ancestry", return_value=0) as mock_ancestry:
+        rc = gate.main(["--url", _TEST_URL])
+    assert rc == 0
+    mock_ancestry.assert_called_once_with(gate._pinned_engine_tag())
+
+
+def test_main_propagates_ancestry_failure_even_when_floor_is_clean() -> None:
+    """A version-current floor must NOT mask a source-stale one -- the whole
+    point of nexus-hs4xl."""
+    with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())), \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
+         patch.object(gate, "check_source_ancestry", return_value=1):
+        rc = gate.main(["--url", _TEST_URL])
+    assert rc == 1
+
+
+def test_main_skips_ancestry_check_when_floor_already_failed() -> None:
+    """CI cost discipline / ordering: don't shell out to git diff when the
+    cheap, already-failing check settled the verdict."""
+    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
+         patch.object(gate, "check_source_ancestry") as mock_ancestry:
+        rc = gate.main(["--url", _TEST_URL])
+    assert rc == 1
+    mock_ancestry.assert_not_called()

@@ -43,7 +43,11 @@ jobs:
     name: service change detection
     runs-on: ubuntu-latest
     outputs:
-      service: ${{ steps.filter.outputs.service }}
+      # nexus-hak6p: sourced from the VALIDATED `decide` step, never
+      # `steps.filter` directly -- see that step's comment. Consumers
+      # (`java-test-and-drift-guard`'s `if:`) now see only a value that
+      # already passed the true/false case check, not the raw dorny output.
+      service: ${{ steps.decide.outputs.service }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
         with:
@@ -65,16 +69,52 @@ jobs:
               - 'service/**'
               - '.github/workflows/service-ci.yml'
 
-      - name: Report the decision
+      - name: Report the decision (fail loud, never default-skip)
         # State the skip out loud. A gate that silently declines to run reads
         # identically to one that ran and passed.
+        #
+        # nexus-cqquo: the ORIGINAL two-armed if/else treated ANY non-"true"
+        # value -- including an empty or malformed paths-filter output -- as
+        # the "unchanged, skip" branch. Since `java-test-and-drift-guard`'s
+        # job-level `if: needs.changes.outputs.service == 'true'` reads
+        # exactly the same output, a malformed filter result would skip that
+        # REQUIRED check's real work while this job (which per the comment
+        # above "MUST ITSELF BE A REQUIRED CHECK" precisely so a broken
+        # detector cannot silently green-light every PR) still exits 0. The
+        # third `*)` arm closes that: an unproven predicate now fails THIS
+        # job, which is the one thing standing between a broken detector and
+        # a silent green.
+        #
+        # nexus-hak6p (review follow-up, 2026-08-12): this step ALSO now
+        # owns the `id: decide` output the job publishes below. The
+        # ORIGINAL shape had this validation run BESIDE the value flow --
+        # the job's `outputs.service` read straight from `steps.filter`,
+        # so the validated/unvalidated paths were only coupled by this
+        # step's `exit 1` (and the implicit success()-gated `needs:` skip
+        # it triggers). A guard that only observes the value and fails
+        # loud on the side is a warning; re-emitting the SAME value from
+        # THIS step, and pointing the job's public output at it, puts the
+        # guard IN the path -- nothing downstream can observe a value that
+        # didn't pass through the case statement above.
+        id: decide
         run: |
-          if [ "${{ steps.filter.outputs.service }}" = "true" ]; then
-            echo "service/** changed — the Java suite WILL run."
-          else
-            echo "service/** unchanged — the Java suite is SKIPPED (reports success)."
-            echo "This PR is NOT evidence the engine suite passes."
-          fi
+          set -euo pipefail
+          service="${{ steps.filter.outputs.service }}"
+          case "$service" in
+            true)
+              echo "service/** changed — the Java suite WILL run."
+              echo "service=true" >> "$GITHUB_OUTPUT"
+              ;;
+            false)
+              echo "service/** unchanged — the Java suite is SKIPPED (reports success)."
+              echo "This PR is NOT evidence the engine suite passes."
+              echo "service=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::paths-filter produced no usable service output ('$service') — cannot prove whether service/** changed, refusing to silently skip the Java suite"
+              exit 1
+              ;;
+          esac
 
   java-test-and-drift-guard:
     name: Java tests + jOOQ codegen drift guard
