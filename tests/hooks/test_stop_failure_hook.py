@@ -94,11 +94,9 @@ class TestStopFailureHook:
         )
         assert result.returncode == 0
 
-    def test_rate_limit_logs_remember(self) -> None:
-        """rate_limit should attempt bd remember."""
+    def test_rate_limit_exits_clean(self) -> None:
+        """rate_limit is swallowed with exit 0 and no side effects."""
         result = _run_hook(_make_payload("rate_limit"))
-        # Script runs bd remember; if bd not available, it gracefully skips.
-        # We verify exit 0 — side effect tested via integration.
         assert result.returncode == 0
 
     def test_unknown_error_type_handled(self) -> None:
@@ -127,12 +125,14 @@ class TestStopFailureHook:
         assert result.returncode == 0
         assert "skipping side effects" in result.stderr.lower()
 
-    def test_rate_limit_remembers_but_never_creates_bead(self, tmp_path: Path) -> None:
-        """Side-effect contract: log via `bd remember`, but never `bd create`.
+    def test_never_invokes_bd_at_all(self, tmp_path: Path) -> None:
+        """Side-effect contract: the hook never calls bd — no create, no remember.
 
-        Transient API failures are infra events, not actionable bugs. Filing
-        them as P1 issues pollutes `bd ready`. This pins that we record the
-        crash (remember) without ever filing an issue (create).
+        Transient API failures are infra events, not actionable bugs.
+        `bd create` pollutes `bd ready`; `bd remember` minted a permanent
+        per-event key that bd prime injected into every session (nexus-0dj7e:
+        32 of 36 bd memories were stop-failure stamps). The hook swallows the
+        event; two invocations must produce zero bd calls, not two keys.
         """
         # Fake `bd` on PATH that appends its subcommand to a log file.
         fake_bin = tmp_path / "bin"
@@ -145,14 +145,12 @@ class TestStopFailureHook:
             "exit 0\n"
         )
         bd.chmod(0o755)
-        result = _run_hook(
-            _make_payload("rate_limit"),
-            env_overrides={
-                "CLAUDECODE": "1",
-                "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
-            },
-        )
-        assert result.returncode == 0
+        env = {
+            "CLAUDECODE": "1",
+            "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+        }
+        for _ in range(2):
+            result = _run_hook(_make_payload("rate_limit"), env_overrides=env)
+            assert result.returncode == 0
         calls = log.read_text().split() if log.exists() else []
-        assert "remember" in calls, f"expected a bd remember call, got {calls}"
-        assert "create" not in calls, f"hook must not file issues, got {calls}"
+        assert calls == [], f"hook must not invoke bd at all, got {calls}"
