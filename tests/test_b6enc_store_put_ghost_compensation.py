@@ -374,7 +374,7 @@ class TestStorePutManifestDirectUnit:
         # same two whitelisted write ops on it (was Catalog.*).
         monkeypatch.setattr(
             HttpCatalogClient, "atomic_manifest_replace",
-            lambda self, d, c: None,
+            lambda self, d, c, *, collection: None,
         )
         monkeypatch.setattr(
             HttpCatalogClient, "resync_chunk_count_cache",
@@ -385,20 +385,21 @@ class TestStorePutManifestDirectUnit:
                 "chunk_text_hash": "f" * 64,
                 "chunk_start_char": 0,
                 "chunk_end_char": 10,
-            }])
+            }], collection="knowledge__x")
 
     def test_empty_metadata_raises(self, catalog_env: Path) -> None:
         from nexus.catalog.store_hook import store_put_manifest_direct
 
         with pytest.raises(RuntimeError, match="nothing to catalog"):
-            store_put_manifest_direct("1.2.3", [{}])
+            store_put_manifest_direct("1.2.3", [{}], collection="knowledge__x")
 
     def test_blank_doc_id_is_a_no_op(self) -> None:
         """No catalog tumbler (no-catalog / opt-out path): nothing to
         write, nothing to verify — must not raise."""
         from nexus.catalog.store_hook import store_put_manifest_direct
 
-        store_put_manifest_direct("", [{"chunk_text_hash": "a" * 64}])
+        store_put_manifest_direct(
+            "", [{"chunk_text_hash": "a" * 64}], collection="knowledge__x")
 
 
 # ── C2/C3: CLI nx store put ──────────────────────────────────────────────────

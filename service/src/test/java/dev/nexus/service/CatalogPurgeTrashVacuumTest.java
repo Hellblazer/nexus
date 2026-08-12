@@ -220,13 +220,19 @@ class CatalogPurgeTrashVacuumTest {
                     "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES ('"
                     + tenant + "', '" + docId + "', '" + docId + "', '" + collection + "')");
             }
+            // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
+            // (catalog-025-collection-not-null.xml) — the document already
+            // carries a real physical_collection above, so stamp the
+            // manifest row with the SAME collection rather than relying on
+            // the no-longer-existent NULL default.
             for (int i = 0; i < count; i++) {
                 try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) "
-                        + "VALUES (?, ?, 0, decode(?, 'hex'))")) {
+                        "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+                        + "VALUES (?, ?, 0, decode(?, 'hex'), ?)")) {
                     ps.setString(1, tenant);
                     ps.setString(2, docIds.get(i));
                     ps.setString(3, chashes.get(i));
+                    ps.setString(4, collection);
                     ps.execute();
                 }
             }

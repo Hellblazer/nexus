@@ -115,7 +115,7 @@ class TestB6encStoreHookEngineSubstrate:
         assert created2 is False and tumbler2 == tumbler
 
         # Direct fail-loud manifest write + its verify leg, over the wire.
-        store_put_manifest_direct(tumbler, metadatas)
+        store_put_manifest_direct(tumbler, metadatas, collection=col)
         reader = make_catalog_reader()
         assert {r.chash for r in reader.get_manifest(tumbler)} == {chash}
 

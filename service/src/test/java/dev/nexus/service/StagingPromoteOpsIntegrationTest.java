@@ -290,8 +290,13 @@ class StagingPromoteOpsIntegrationTest {
             // tumbler-keyed, non-chash, and migrate via the EXISTING catalog
             // ETL BEFORE finalize (a sequencer ordering fact for P2.2). The
             // IT stands in for that leg here.
-            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
-                + "VALUES (?, '1.1.1', 'promote-doc') ON CONFLICT DO NOTHING", T1);
+            // nexus-7nrvr: real collection — ghost-ness was incidental
+            // (cross-collection reference resolution is the point). COLL_A
+            // is this doc's real home: that is where promoteCollection(T1,
+            // COLL_A, 768) below lands its promoted rows and where the
+            // topic-x assignment resolves.
+            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
+                + "VALUES (?, '1.1.1', 'promote-doc', ?) ON CONFLICT DO NOTHING", T1, COLL_A);
             // Manifest rows: one legacy-ref pointer, one already-canonical.
             ctx.execute("INSERT INTO staging.document_chunks "
                 + "(tenant_id, doc_id, position, chash) VALUES (?, '1.1.1', 0, ?) "
@@ -471,12 +476,18 @@ class StagingPromoteOpsIntegrationTest {
     void preExistingDanglingManifestRow_abortsFinalizeLoud() throws Exception {
         // The fatal gate's falsification (review P1 Critical: the count was
         // computed but never asserted — delete the throw and THIS fails).
+        // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
+        // (catalog-025-collection-not-null.xml). The dangling nature this row
+        // exists to prove is about the CHASH (a ghost never landed anywhere,
+        // "pre-existing corruption ghost" by construction) — orthogonal to
+        // which collection value it carries. COLL_A is an arbitrary real,
+        // already-registered collection in this fixture.
         String ghost = digestHex("pre-existing corruption ghost");
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) "
-                + "VALUES ('" + T1 + "', '1.1.1', 88, decode('" + ghost + "', 'hex'))");
+                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+                + "VALUES ('" + T1 + "', '1.1.1', 88, decode('" + ghost + "', 'hex'), '" + COLL_A + "')");
         }
         try {
             org.assertj.core.api.Assertions.assertThatThrownBy(() -> ops.finalizeTenant(T1, false))
@@ -493,8 +504,8 @@ class StagingPromoteOpsIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) "
-                + "VALUES ('" + T1 + "', '1.1.1', 89, decode('" + ghost + "', 'hex'))");
+                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+                + "VALUES ('" + T1 + "', '1.1.1', 89, decode('" + ghost + "', 'hex'), '" + COLL_A + "')");
         }
         try {
             Map<String, Integer> residue = scope.withTenant(T1, ctx ->
@@ -597,8 +608,12 @@ class StagingPromoteOpsIntegrationTest {
         landChunk(collM, 768, ref, text, vec(768));
         ops.promoteCollection(T1, collM, 768);
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
-                + "VALUES (?, '1.1.9', 'mutation-doc') ON CONFLICT DO NOTHING", T1);
+            // nexus-7nrvr: real collection — ghost-ness was incidental
+            // (alias-map mutation-falsification behaviour is the point).
+            // collM is this doc's real home: that is where the content it
+            // references was landed and promoted.
+            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
+                + "VALUES (?, '1.1.9', 'mutation-doc', ?) ON CONFLICT DO NOTHING", T1, collM);
             ctx.execute("INSERT INTO staging.document_chunks "
                 + "(tenant_id, doc_id, position, chash) VALUES (?, '1.1.9', 0, ?) "
                 + "ON CONFLICT DO NOTHING", T1, ref);
@@ -1126,9 +1141,12 @@ class StagingPromoteOpsIntegrationTest {
      * manifest row was a partial-NULL FK key: exactly the population GATE-2
      * (nexus-o8dil.7) requires to be zero before the FK can validate.
      *
-     * <p>The fix stamps {@code collection} from the SAME source every live
-     * writer uses ({@code CatalogRepository.physicalCollectionOf} —
-     * {@code catalog_documents.physical_collection}, NULL-if-empty), not from
+     * <p>The fix stamps {@code collection} from {@code
+     * catalog_documents.physical_collection} (NULL-if-empty) directly — the
+     * one caller-known fact this bulk migration path has, mirroring the
+     * explicit {@code collection} parameter every live writer
+     * (CatalogRepository.writeManifestRows/appendManifestChunks/
+     * importChunksBatch) now requires the caller to supply — not from
      * wherever the chash's content happens to physically live (which can
      * diverge under shared-chash reuse across collections — F10c/F8d
      * territory, not this bead's scope).
@@ -1168,9 +1186,185 @@ class StagingPromoteOpsIntegrationTest {
             + "WHERE doc_id = 'f12b-doc' AND encode(chash,'hex') = '" + canonical + "' "
             + "AND collection = '" + COLL_F12B + "'"))
             .as("F12b: the finalize manifest INSERT must stamp collection from the "
-                + "owning document's physical_collection, the same source every live "
-                + "writer (CatalogRepository.physicalCollectionOf) uses — a partial-"
+                + "owning document's physical_collection, the same caller-supplied-"
+                + "collection contract every live writer now follows — a partial-"
                 + "NULL FK key otherwise (RDR-191 GATE-2)")
             .isEqualTo(1);
+    }
+
+    // ── Order 26-28: nexus-o8dil.7 (RDR-191 GATE-2 review finding 3) —
+    // StagingPromoteOps' case-1 and case-2 manifest-resolution logic had
+    // ZERO test coverage before this. CatalogRepository's parallel fix got
+    // five tests (ManifestCollectionStampTest); this class carries the
+    // SAME two decisions in its own bulk INSERT...SELECT shape and must not
+    // ship untested. ──
+
+    private static final String COLL_G6 = "knowledge__kg6__bge-base-en-v15-768__v1";
+
+    /**
+     * Case 1 visibility (StagingPromoteOps :783-816 as of this fix): a
+     * staged manifest pointer for a doc_id with NO catalog_documents row at
+     * all is reported via the {@code manifest_doc_not_registered} counter
+     * AND escalated to an explicit WARN log — neither half had any test
+     * coverage before this (RDR-191 GATE-2 review finding 3).
+     */
+    @Test
+    @Order(26)
+    void finalizeTenant_manifestInsert_docNotRegistered_countsAndWarns() {
+        String doc = "g6-not-registered";
+        String chash = digestHex("g6 unregistered doc content " + System.nanoTime());
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("INSERT INTO staging.document_chunks "
+                + "(tenant_id, doc_id, position, chash) VALUES (?, ?, 0, ?) "
+                + "ON CONFLICT DO NOTHING", T1, doc, chash);
+            return null;
+        });
+
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        Map<String, Object> fin;
+        try {
+            fin = ops.finalizeTenant(T1, false);
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+
+        assertThat(((Number) fin.get("manifest_doc_not_registered")).intValue())
+            .as("the unregistered doc_id is counted")
+            .isGreaterThanOrEqualTo(1);
+        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks WHERE doc_id = '" + doc + "'"))
+            .as("no manifest row is fabricated for a doc that was never registered")
+            .isEqualTo(0);
+
+        var warnLines = logs.list.stream()
+            .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+            .filter(m -> m.startsWith("event=staging_finalize_doc_not_registered"))
+            .toList();
+        assertThat(warnLines)
+            .as("the counter is escalated to an explicit WARN, not left buried in "
+                + "the per-tenant JSON envelope nobody is currently wired to read")
+            .hasSize(1);
+        assertThat(warnLines.getFirst())
+            .contains("tenant=" + T1)
+            .contains("count=" + fin.get("manifest_doc_not_registered"));
+
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("DELETE FROM staging.document_chunks WHERE tenant_id = ? AND doc_id = ?", T1, doc);
+            return null;
+        });
+    }
+
+    /**
+     * RDR-191 (Hal ruling 2026-08-12, nexus-j862l reconciliation): Order 27
+     * originally asserted a ghost doc's staged pointer resolved its
+     * collection from VERIFIED chash membership. Hal's final ruling
+     * rejected that mechanism entirely — {@code StagingPromoteOps}
+     * resolves a promoted row's {@code collection} SOLELY from the owning
+     * document's own {@code physical_collection} (see
+     * {@code docPhysicalCollection} in {@code finalizeTenant}), never from
+     * where the chash's content happens to physically live. This test now
+     * asserts THAT contract: a document with a REAL, non-empty {@code
+     * physical_collection} gets its manifest row stamped with exactly that
+     * value.
+     */
+    @Test
+    @Order(27)
+    void finalizeTenant_manifestInsert_docWithRealPhysicalCollection_stampsFromPhysicalCollection() {
+        String doc = "g7.1";
+        String newText = "g7 new content " + System.nanoTime();
+        String newCanonical = digestHex(newText);
+
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("INSERT INTO nexus.catalog_documents "
+                + "(tenant_id, tumbler, title, physical_collection) "
+                + "VALUES (?, ?, 'g7 doc', ?) ON CONFLICT DO NOTHING", T1, doc, COLL_G6);
+            return null;
+        });
+
+        landChunk(COLL_G6, 768, newCanonical, newText, vec(768));
+        assertThat(ops.promoteCollection(T1, COLL_G6, 768).get("promoted")).isEqualTo(1);
+
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("INSERT INTO staging.document_chunks "
+                + "(tenant_id, doc_id, position, chash) VALUES (?, ?, 0, ?) "
+                + "ON CONFLICT DO NOTHING", T1, doc, newCanonical);
+            return null;
+        });
+
+        ops.finalizeTenant(T1, false);
+        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
+            + "WHERE doc_id = '" + doc + "' AND encode(chash,'hex') = '" + newCanonical + "' "
+            + "AND collection = '" + COLL_G6 + "'"))
+            .as("RDR-191: the manifest row is stamped from the document's own "
+                + "physical_collection, unconditionally")
+            .isEqualTo(1);
+    }
+
+    /**
+     * RDR-191 (Hal ruling 2026-08-12, nexus-j862l reconciliation): Order 28
+     * originally asserted a genuinely ambiguous chash (verified to live in
+     * two different collections, with the doc's own sibling row naming
+     * neither) stayed unresolved. That whole ambiguity concept no longer
+     * exists — {@code finalizeTenant} never inspects where a chash's
+     * content lives, so "ambiguous chash membership" cannot occur as a
+     * distinguishable case any more. Re-based to assert the actual gate
+     * that DOES leave a row unresolved under the shipped contract
+     * (nexus-lyhac): a ghost document with an EMPTY {@code
+     * physical_collection} produces NO manifest row, even when its staged
+     * chash is genuinely resolvable (real chunk content exists and was
+     * promoted) — {@code docPhysicalCollection.isNotNull()} is the gate,
+     * not chash resolvability. The staged pointer must remain available
+     * for a future finalize once the document is given a real collection.
+     */
+    @Test
+    @Order(28)
+    void finalizeTenant_manifestInsert_ghostDoc_emptyPhysicalCollection_staysUnresolved() {
+        String doc = "g8.1";
+        String collZ = "knowledge__kg8z__bge-base-en-v15-768__v1";
+        String text = "g8 content " + System.nanoTime();
+        String canonical = digestHex(text);
+
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("INSERT INTO nexus.catalog_documents "
+                + "(tenant_id, tumbler, title, physical_collection) "
+                + "VALUES (?, ?, 'g8 ghost doc', '') ON CONFLICT DO NOTHING", T1, doc);
+            return null;
+        });
+
+        // The chash is genuinely resolvable -- real content, landed and
+        // promoted -- so a resolvability check alone would not block it.
+        landChunk(collZ, 768, canonical, text, vec(768));
+        assertThat(ops.promoteCollection(T1, collZ, 768).get("promoted")).isEqualTo(1);
+
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("INSERT INTO staging.document_chunks "
+                + "(tenant_id, doc_id, position, chash) VALUES (?, ?, 1, ?) "
+                + "ON CONFLICT DO NOTHING", T1, doc, canonical);
+            return null;
+        });
+
+        ops.finalizeTenant(T1, false);
+        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
+            + "WHERE doc_id = '" + doc + "' AND encode(chash,'hex') = '" + canonical + "'"))
+            .as("RDR-191: an empty physical_collection blocks the manifest "
+                + "row even though the chash is genuinely resolvable -- "
+                + "resolvability was never the gate")
+            .isEqualTo(0);
+        assertThat(count("SELECT count(*) FROM staging.document_chunks "
+            + "WHERE tenant_id = '" + T1 + "' AND doc_id = '" + doc + "' AND position = 1"))
+            .as("an unresolved row is never consumed from staging -- it stays "
+                + "available for a future finalize")
+            .isEqualTo(1);
+
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("DELETE FROM staging.document_chunks WHERE tenant_id = ? AND doc_id = ?", T1, doc);
+            return null;
+        });
     }
 }

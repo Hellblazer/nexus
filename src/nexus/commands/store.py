@@ -154,7 +154,8 @@ def put_cmd(
     manifest_error = ""
     if catalog_doc_id:
         try:
-            _store_put_manifest_direct(catalog_doc_id, manifest_metadatas)
+            _store_put_manifest_direct(
+                catalog_doc_id, manifest_metadatas, collection=col_name)
         except Exception as manifest_exc:  # noqa: BLE001 — captured for the explicit error below
             manifest_error = str(manifest_exc)
             # nexus-cotmr: the vector put already succeeded (db.put

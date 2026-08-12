@@ -173,7 +173,7 @@ class PgVectorRepositoryGcQuarantineTest {
             "corpus", "code",
             "physical_collection", collection
         ));
-        catalogRepo.writeManifest(tenant, docId, List.of(
+        catalogRepo.writeManifest(tenant, docId, collection, List.of(
             Map.<String, Object>of("position", 0, "chash", chash, "chunk_index", 0)
         ));
     }

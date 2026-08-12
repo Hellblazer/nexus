@@ -964,7 +964,9 @@ def test_reindex_self_heals_missing_manifest(
     # with ZERO rows plus a zeroed chunk_count cache.
     # PORT-VERIFY: relies on /manifest/write's documented atomic
     # delete+insert semantics purging all rows when ``rows=[]``.
-    cat.atomic_manifest_replace(tumbler, [], new_chunk_count=0)
+    cat.atomic_manifest_replace(
+        tumbler, [], collection=readme_docs[0].physical_collection, new_chunk_count=0,
+    )
     assert cat.get_manifest(tumbler) == [], (
         "sabotage precondition: manifest rows must be gone"
     )

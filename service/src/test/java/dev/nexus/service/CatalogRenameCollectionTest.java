@@ -454,8 +454,11 @@ class CatalogRenameCollectionTest {
         st.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '" + coll + "')");
         st.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
             + "VALUES ('" + tenant + "', 'rn-doc-1', 'Doc 1', '" + coll + "')");
-        st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) "
-            + "VALUES ('" + tenant + "', 'rn-doc-1', 0, '" + chash("rnman1") + "')");
+        // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
+        // (catalog-025-collection-not-null.xml) — the document above is
+        // already registered under coll, so stamp the manifest row the same.
+        st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+            + "VALUES ('" + tenant + "', 'rn-doc-1', 0, '" + chash("rnman1") + "', '" + coll + "')");
         // chunks: 2/1/1
         st.execute(chunkInsert(tenant, coll, "chunks_384", 384, "rn384a"));
         st.execute(chunkInsert(tenant, coll, "chunks_384", 384, "rn384b"));

@@ -301,7 +301,7 @@ class TestItem12CatalogReadsAfterRename:
         )
         cat.write_manifest(str(t), [
             {"position": 0, "chash": self._CHASH, "line_start": 1, "line_end": 10},
-        ])
+        ], collection=self._OLD)
         # Sanity: seeded reads resolve under OLD before the rename.
         assert cat.lookup_doc_id_by_collection_and_path(self._OLD, self._PATH) == str(t)
         assert self._CHASH in cat.chashes_for_collection(self._OLD)

@@ -270,6 +270,24 @@ public final class CatalogHandler implements HttpHandler {
             // /update. Same 409 shape as CollectionMergeRefused above: a
             // refusal, not a server error.
             HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+        } catch (CatalogRepository.DocumentNotFoundException e) {
+            // nexus-s13u0/RDR-191 GATE-2 review High: a manifest write
+            // (write/append/import_chunks_batch) against a doc_id with no
+            // catalog_documents row at all — the explicit-throw replacement
+            // for the fk-001 FK violation this same shape used to surface as
+            // before catalog_document_chunks.collection went NOT NULL (see
+            // CatalogRepository.DocumentNotFoundException's own javadoc for
+            // the caller-supplied collection contract). DocumentNotFoundException
+            // extends IllegalStateException, NOT IllegalArgumentException, so
+            // without this arm it fell into the generic catch below and
+            // surfaced as an opaque 500 with the message dropped — the exact
+            // mistake the CollectionMergeRefused arm above was already fixed
+            // for once. 409, not 404: pre-fix this same case was an
+            // SQLException class-23 FK violation, which the typed ladder
+            // already maps to 409 via HttpUtil.sendTypedDbError — this keeps
+            // the wire contract byte-identical rather than introducing an
+            // unrequested 404.
+            HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (CatalogRepository.IndexRunVerifyRefused e) {
             // nexus-5xn3k.2: /complete's fail-closed gate (memo §3.3, HARD spec
             // amendment T2 21350) — missing>0 OR referenced!=claimed chunk_count.
@@ -812,6 +830,22 @@ public final class CatalogHandler implements HttpHandler {
     // MANIFEST
     // ══════════════════════════════════════════════════════════════════════════
 
+    /**
+     * Extracts and validates the required top-level {@code collection} field
+     * (RDR-191, Hal ruling 2026-08-12): writers SEND the collection, the
+     * engine STAMPS it verbatim — no default, no inference, no silent
+     * omission. Sends 400 and returns {@code null} on a missing/blank value;
+     * callers must check for {@code null} and return immediately.
+     */
+    private static String requireCollection(HttpExchange exchange, Map<String, Object> body) throws IOException {
+        Object raw = body.get("collection");
+        if (!(raw instanceof String collection) || collection.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'collection' required\"}");
+            return null;
+        }
+        return collection;
+    }
+
     /** POST /v1/catalog/manifest/write — replace manifest (atomic delete + insert). */
     @SuppressWarnings("unchecked")
     private void handleManifestWrite(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -821,9 +855,11 @@ public final class CatalogHandler implements HttpHandler {
         if (docId == null || docId.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"'doc_id' required\"}"); return;
         }
+        String collection = requireCollection(exchange, body);
+        if (collection == null) return;
         List<Map<String, Object>> rows = strictRows(body.get("rows"));
         requireCanonicalChashes(rows);
-        repo.writeManifest(tenant, docId, rows);
+        repo.writeManifest(tenant, docId, collection, rows);
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + rows.size() + "}");
     }
 
@@ -835,9 +871,11 @@ public final class CatalogHandler implements HttpHandler {
         if (docId == null || docId.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"'doc_id' required\"}"); return;
         }
+        String collection = requireCollection(exchange, body);
+        if (collection == null) return;
         List<Map<String, Object>> rows = strictRows(body.get("rows"));
         requireCanonicalChashes(rows);
-        repo.appendManifestChunks(tenant, docId, rows);
+        repo.appendManifestChunks(tenant, docId, collection, rows);
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + rows.size() + "}");
     }
 
@@ -856,14 +894,19 @@ public final class CatalogHandler implements HttpHandler {
      * BACKWARD COMPATIBLE, an omitted field is byte-for-byte the pre-eslkl
      * behaviour): folds nexus-39upx's superseded-vector sweep into each
      * doc's own transaction server-side. See
-     * {@link CatalogRepository#writeManifestMany(String, List, Map, boolean)}
+     * {@link CatalogRepository#writeManifestMany(String, List, String, Map, boolean)}
      * for the exact guard. Adds {@code swept}/{@code sweep_skipped}/
      * {@code sweep_detail} to the response, zero/empty when
      * {@code sweep=false}.
      *
+     * <p><b>RDR-191 (Hal ruling 2026-08-12).</b> Top-level {@code
+     * "collection"} is REQUIRED ALWAYS — not merely when {@code chunks} is
+     * present — and applies to every doc in this call (the caller already
+     * batches per collection). Missing or blank -> 400. The engine stamps it
+     * verbatim on every manifest row; it never infers one.
+     *
      * <p><b>nexus-kl2z6 increment 1 — the COMBINED WRITE.</b> Optional
-     * top-level {@code "collection"} (required when {@code chunks} is
-     * present) and {@code "chunks": [{"chash", "text", "metadata"}, ...]}.
+     * {@code "chunks": [{"chash", "text", "metadata"}, ...]}.
      * When {@code chunks} is present, each doc's manifest write AND the
      * chunk VECTOR rows its own manifest references land in the SAME
      * per-doc transaction (T2 {@code design-kl2z6-combined-write} §0) via
@@ -899,6 +942,12 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"too many docs (max "
                 + MAX_BATCH_DOC_IDS + ")\"}"); return;
         }
+        // RDR-191 (Hal ruling 2026-08-12): top-level 'collection' is REQUIRED
+        // ALWAYS, not only when 'chunks' is present — it applies to every doc
+        // in this call (the caller already batches per collection). Validated
+        // up front, same discipline as the per-doc rows validation below.
+        String collection = requireCollection(exchange, body);
+        if (collection == null) return;
         // Validate every doc's rows up front — the whole batch 400s before
         // ANY per-doc transaction runs (nexus-z4skl: no more reason-less
         // failed_doc_ids for a malformed chash).
@@ -949,11 +998,7 @@ public final class CatalogHandler implements HttpHandler {
             if (!(rawChunks instanceof List<?> cl)) {
                 HttpUtil.send(exchange, 400, "{\"error\":\"'chunks' must be a list\"}"); return;
             }
-            Object rawCollection = body.get("collection");
-            if (!(rawCollection instanceof String collection) || collection.isBlank()) {
-                HttpUtil.send(exchange, 400,
-                    "{\"error\":\"'collection' required when 'chunks' is present\"}"); return;
-            }
+            // 'collection' already validated above (required unconditionally).
             List<Map<String, Object>> chunks = new ArrayList<>(cl.size());
             for (int i = 0; i < cl.size(); i++) {
                 if (!(cl.get(i) instanceof Map)) {
@@ -989,7 +1034,7 @@ public final class CatalogHandler implements HttpHandler {
             return;
         }
 
-        var result = repo.writeManifestMany(tenant, docs, complete, sweep);
+        var result = repo.writeManifestMany(tenant, docs, collection, complete, sweep);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
@@ -1804,11 +1849,16 @@ public final class CatalogHandler implements HttpHandler {
         if (docId == null || docId.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"'doc_id' required\"}"); return;
         }
+        // RDR-191 (Hal ruling 2026-08-12): this writes the same
+        // catalog_document_chunks manifest table as /manifest/write et al.,
+        // so it carries the SAME caller-supplied-collection discipline.
+        String collection = requireCollection(exchange, body);
+        if (collection == null) return;
         // nexus-e0hd2 (critique seam): same table + same bare-chash extraction
         // as the manifest writes — same boundary treatment.
         List<Map<String, Object>> rows = strictRows(body.get("rows"));
         requireCanonicalChashes(rows);
-        repo.importChunksBatch(tenant, docId, rows);
+        repo.importChunksBatch(tenant, docId, collection, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
     }
 

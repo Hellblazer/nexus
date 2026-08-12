@@ -150,7 +150,7 @@ class PgVectorRepositoryDeleteAntiJoinTest {
         for (int i = 0; i < chashesInOrder.size(); i++) {
             rows.add(Map.<String, Object>of("position", i, "chash", chashesInOrder.get(i), "chunk_index", i));
         }
-        catalogRepo.writeManifest(tenant, docId, rows);
+        catalogRepo.writeManifest(tenant, docId, collection, rows);
     }
 
     private void seedChunk(String tenant, String collection, String chash, String text, String title) {
@@ -206,7 +206,7 @@ class PgVectorRepositoryDeleteAntiJoinTest {
         // dealt with — cleared/rewritten — before the physical chunk delete call.
         // atomic_manifest_replace with an empty row list is exactly what a document
         // deletion / re-index-to-zero-chunks does.
-        catalogRepo.writeManifest(TENANT_A, "delaj.doc.a", List.of());
+        catalogRepo.writeManifest(TENANT_A, "delaj.doc.a", collection, List.of());
 
         // Caller deletes "document A's chunks" — its former manifest chash set,
         // including the chash it happens to share with document B. The caller

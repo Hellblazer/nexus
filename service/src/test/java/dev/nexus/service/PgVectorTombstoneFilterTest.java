@@ -191,12 +191,13 @@ class PgVectorTombstoneFilterTest {
      * must not collide with position 0. */
     private static void insertManifestRow(Connection su, String docId, String chashHex, int position) throws Exception {
         try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) "
-                + "VALUES (?, ?, ?, decode(?, 'hex'))")) {
+                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+                + "VALUES (?, ?, ?, decode(?, 'hex'), ?)")) {
             ps.setString(1, TENANT);
             ps.setString(2, docId);
             ps.setInt(3, position);
             ps.setString(4, chashHex);
+            ps.setString(5, COLLECTION);
             ps.execute();
         }
     }

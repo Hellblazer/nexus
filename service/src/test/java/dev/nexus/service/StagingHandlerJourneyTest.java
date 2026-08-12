@@ -202,9 +202,12 @@ class StagingHandlerJourneyTest {
 
         // A manifest row + its FK parent doc (docs ride the catalog ETL leg;
         // the journey stands in for it).
+        // nexus-7nrvr: real collection — ghost-ness was incidental (the
+        // embed_fill/promote/finalize journey is the point). COLL is this
+        // doc's real home: everything it references is landed there above.
         scope.withTenant(TENANT, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
-                + "VALUES (?, '9.9.1', 'journey-doc') ON CONFLICT DO NOTHING", TENANT);
+            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
+                + "VALUES (?, '9.9.1', 'journey-doc', ?) ON CONFLICT DO NOTHING", TENANT, COLL);
             return null;
         });
         postOk("/v1/staging/load/document_chunks", Map.of("rows", List.of(

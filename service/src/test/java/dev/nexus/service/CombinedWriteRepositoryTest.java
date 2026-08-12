@@ -291,7 +291,7 @@ class CombinedWriteRepositoryTest {
 
         // A drops `shared` (plain writeManifestMany, sweep=true); B still references it.
         var result = repo.writeManifestMany(TENANT_A, List.of(
-            doc("cw.2a", List.of(row(0, ch("cw2-new"))))), null, true);
+            doc("cw.2a", List.of(row(0, ch("cw2-new"))))), col, null, true);
 
         assertThat(result.get("swept"))
             .as("B's live reference (landed via the combined write) must survive the union guard")
@@ -393,7 +393,7 @@ class CombinedWriteRepositoryTest {
         String col = "code__cw6__minilm-l6-v2-384__v1";
         registerDoc(TENANT_A, "cw.6", col);
         var result = repo.writeManifestMany(TENANT_A, List.of(
-            doc("cw.6", List.of(row(0, ch("cw6-x"))))), null, true);
+            doc("cw.6", List.of(row(0, ch("cw6-x"))))), col, null, true);
         assertThat(result).as("no `chunks` field -- `chunks_written` must be ABSENT, not zero")
             .doesNotContainKey("chunks_written");
     }
@@ -514,10 +514,13 @@ class CombinedWriteRepositoryTest {
     void combinedWrite_unregisteredGhostDoc_stillGatesOnTheCollectionBeingWritten() throws Exception {
         String col = "code__cw10__minilm-l6-v2-384__v1";
         String x = ch("cw10-x");
-        // No physical_collection at all -- physicalCollectionOf(docId) returns
-        // null for this doc, so the PRE-n7umy-fix code acquired NO gate at
-        // all on the writeManifestRows path (the `if (coll != null)` guard
-        // skips it entirely).
+        // No physical_collection at all for this doc -- the PRE-n7umy-fix
+        // code derived its sweep-gate collection FROM the document's own
+        // physical_collection (RDR-191 removed that inference entirely;
+        // writeManifestRows now takes an explicit, caller-supplied
+        // collection instead), so a null physical_collection meant NO gate
+        // was acquired at all on the writeManifestRows path (the `if (coll
+        // != null)` guard skipped it entirely).
         repo.upsertDocument(TENANT_A, Map.of(
             "tumbler", "cw.10", "title", "combined-write-ghost-cw.10",
             "content_type", "code", "corpus", "code", "chunk_count", 0));

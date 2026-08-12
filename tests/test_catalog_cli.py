@@ -1241,7 +1241,7 @@ class TestVerifyCommand:
                     "char_start": None, "char_end": None,
                 }
                 for i, chash in enumerate(chashes)
-            ])
+            ], collection=coll)
         return t
 
     def _patch_t3(self, monkeypatch, present_ids_by_collection, t3_collections=None):

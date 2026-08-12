@@ -124,7 +124,7 @@ class TestChashConformanceReportWiring:
         )
 
         chash = _conformant_chash(seq)
-        cat.write_manifest(str(tumbler), [_chunk(chash, 0)])
+        cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
 
         after = active_reader().chash_conformance_report(768)
         after_row = next(
@@ -163,7 +163,7 @@ class TestChashConformanceReportWiring:
         )
 
         chash = _conformant_chash(seq + 10_000)
-        cat.write_manifest(str(tumbler), [_chunk(chash, 0)])
+        cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
 
         after = active_reader().chash_conformance_report(768)
         after_total = next(

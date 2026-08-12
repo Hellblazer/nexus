@@ -135,6 +135,7 @@ _SEED_COVERAGE_LINE_RE = re.compile(r"//\s+(\S+)\s+(\S+)\s*$", re.MULTILINE)
 #: below) — neither side can move alone:
 #:   catalog-013-0 / catalog-013-1b — legacy 64-char chash_index rows
 #:   catalog-014-0                  — un-stamped manifest rows (collection NULL)
+#:   catalog-025-0                  — NULL/dangling manifest row DELETE, NOT NULL SET
 DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
     {
         ("catalog-013-0", "nexus-e0hd2"),
@@ -145,6 +146,15 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # data leg; effect-asserted (loser tombstoned, winner survives,
         # 016-1 index exists).
         ("catalog-016-0", "nexus-78n33"),
+        # nexus-71gw2 (nexus-j862l follow-up): catalog_document_chunks.collection
+        # NOT NULL — its own NO FORCE/FORCE toggle wraps a DELETE-null +
+        # DELETE-dangling + chunk_count resync + SET NOT NULL body. Seeded as
+        # doc 1.1.101's deliberately content-less manifest row (stamped by
+        # catalog-014-0's backfill, same as 1.1.100's two rows, but with no
+        # matching chunks_384/768/1024 content); effect-asserted (the row is
+        # gone post-hop — proves the DELETE arm fires under FORCE-RLS, not
+        # just that 1.1.100's content-backed rows survive the KEEP arm).
+        ("catalog-025-0", "nexus-71gw2"),
     }
 )
 

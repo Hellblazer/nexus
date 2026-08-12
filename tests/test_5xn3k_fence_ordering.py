@@ -618,7 +618,7 @@ def test_client_sends_complete_map_and_parses_refusals() -> None:
         "complete_refused_count": 1,
     })
     result = client.write_manifest_many(
-        [(DOC_ID, rows)], complete={DOC_ID: CONTENT_HASH})
+        [(DOC_ID, rows)], complete={DOC_ID: CONTENT_HASH}, collection=COLLECTION)
 
     assert posts[0][1]["complete"] == {DOC_ID: CONTENT_HASH}
     assert result["complete_refused_count"] == 1
@@ -629,7 +629,7 @@ def test_client_sends_complete_map_and_parses_refusals() -> None:
 def test_client_omits_complete_key_when_none() -> None:
     rows = [{"chash": "a" * 64, "position": 0}]
     client, posts = _client_with_response({"failed_doc_ids": []})
-    result = client.write_manifest_many([(DOC_ID, rows)])
+    result = client.write_manifest_many([(DOC_ID, rows)], collection=COLLECTION)
     assert "complete" not in posts[0][1]
     assert result["failed_doc_ids"] == []
     assert result["complete_refused"] == []
@@ -648,7 +648,7 @@ def test_client_pages_complete_entries_with_their_docs() -> None:
 
     client, posts = _client_with_response({"failed_doc_ids": []})
     with patch.object(hcc, "_MANIFEST_GET_MANY_PAGE", 2):
-        client.write_manifest_many(docs, complete=complete)
+        client.write_manifest_many(docs, complete=complete, collection=COLLECTION)
 
     assert len(posts) == 2
     page1_ids = {d["doc_id"] for d in posts[0][1]["docs"]}
@@ -717,10 +717,14 @@ class _WhitelistWriter:
     def __getattr__(self, name):  # the closed-whitelist behaviour that matters
         raise AttributeError(f"{name!r} is not a catalog write op")
 
-    def atomic_manifest_replace(self, doc_id, chunks):
+    def atomic_manifest_replace(self, doc_id, chunks, *, collection):
+        # RDR-191: assert rather than silently accept/drop — a double that
+        # swallows a blank collection is exactly how the bug hid.
+        assert collection, "atomic_manifest_replace called with a blank collection"
         self.replaced.append((doc_id, chunks))
 
-    def append_manifest_chunks(self, doc_id, chunks):
+    def append_manifest_chunks(self, doc_id, chunks, *, collection):
+        assert collection, "append_manifest_chunks called with a blank collection"
         self.appended.append((doc_id, chunks))
 
     def resync_chunk_count_cache(self, doc_id):

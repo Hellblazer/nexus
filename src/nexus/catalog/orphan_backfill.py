@@ -365,7 +365,7 @@ def register_dt_linked(
             }
             for pos, c in enumerate(ordered_chunks)
         ]
-        catalog.write_manifest(str(tumbler), chunks_payload)
+        catalog.write_manifest(str(tumbler), chunks_payload, collection=collection)
         links += len(chunks_payload)
         _log.info(
             "orphan_backfill_dt_linked",
@@ -420,7 +420,7 @@ def register_synthetic(
                 },
             )
             docs += 1
-            catalog.write_manifest(str(tumbler), chunks_payload)
+            catalog.write_manifest(str(tumbler), chunks_payload, collection=collection)
             links += len(chunks_payload)
         else:
             # No title; bucket each chunk under its chash as a singleton doc.
@@ -446,7 +446,7 @@ def register_synthetic(
                     "chash": c.chash, "position": 0,
                     "line_start": None, "line_end": None,
                     "char_start": None, "char_end": None,
-                }])
+                }], collection=collection)
                 links += 1
     return docs, links
 
@@ -572,7 +572,7 @@ def apply_csv(
                     "char_start": None, "char_end": None,
                 }
                 for pos, c in enumerate(ordered_chunks)
-            ])
+            ], collection=collection)
             links += len(chunks)
     return docs, links
 
@@ -627,7 +627,7 @@ def link_by_title(
                 "char_start": None, "char_end": None,
             }
             for pos, c in enumerate(ordered_chunks)
-        ])
+        ], collection=collection)
         linked_chunks += len(g.chunks)
         linked_docs += 1
         _log.info(
@@ -706,7 +706,7 @@ def link_by_content_hash(
                 "char_start": None, "char_end": None,
             }
             for pos, c in enumerate(ordered_chunks)
-        ])
+        ], collection=collection)
         linked_chunks += len(chunks)
         linked_docs += 1
         _log.info(

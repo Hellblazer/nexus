@@ -337,6 +337,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   catalog-013-1b nexus-1wjmq
                 //   catalog-014-0 nexus-x6kdz
                 //   catalog-016-0 nexus-78n33
+                //   catalog-025-0 nexus-71gw2
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -367,6 +368,39 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     seedDocument(su, "t1", "1.1.100", "seeded doc", "code__x");
                     seedManifestRow(su, "t1", "1.1.100", 0, "1".repeat(32));
                     seedManifestRow(su, "t1", "1.1.100", 1, "2".repeat(32));
+                    // nexus-j862l (RDR-191 GATE-2 follow-up, item 3): catalog-025 runs
+                    // LATER in this SAME hop and deletes any non-NULL-collection
+                    // manifest row whose chash has no matching chunks_384/768/1024 row
+                    // for its (tenant_id, collection) -- the "dangling" check. A real
+                    // legacy tenant's manifest row is never written without its
+                    // matching content landing in the same transaction, so give this
+                    // fixture the same shape: matching chunks_384 content for both
+                    // seeded chashes, so catalog-014-0's stamp is still there to
+                    // observe once the hop reaches catalog-025 and beyond (diagnosed:
+                    // without this, catalog-014-0's backfill DOES run correctly, but
+                    // catalog-025's independently-correct dangling cleanup then removes
+                    // the content-less rows before this test's later assertion runs --
+                    // see the assertion's own comment below for the full trace).
+                    seedChunk384LegacyContent(su, "t1", "code__x", "1".repeat(32), "legacy chunk 1 text");
+                    seedChunk384LegacyContent(su, "t1", "code__x", "2".repeat(32), "legacy chunk 2 text");
+
+                    // nexus-j862l (RDR-191 GATE-2, seed-coverage lint follow-up,
+                    // tests/test_rehearsal_seed_coverage_lint.py::
+                    // test_hop_row_dml_changesets_equal_declared_rehearsal_seed_coverage):
+                    // catalog-025-0 is FORCE-RLS row-DML (its own NO FORCE/FORCE
+                    // toggle around the DELETE+resync+SET NOT NULL body) and was
+                    // previously undercovered by this leg -- the two rows above only
+                    // prove the KEEP arm (backed content survives). A third, DELIBERATELY
+                    // content-less row proves the DELETE arm actually fires under
+                    // FORCE-RLS, not merely that it no-ops safely: manifest_backfill()
+                    // stamps it 'code__x' exactly like the other two (so it is NOT
+                    // removed by catalog-025-0's NULL-row step), but it has no matching
+                    // chunks_384/768/1024 content, so catalog-025-0's DANGLING-row step
+                    // must delete it. A separate doc keeps the KEEP-arm and DELETE-arm
+                    // proofs independently legible.
+                    seedDocument(su, "t1", "1.1.101", "dangling-row doc", "code__x");
+                    seedManifestRow(su, "t1", "1.1.101", 0, "3".repeat(32));
+                    // Deliberately NO seedChunk384LegacyContent call for this chash.
 
                     // Duplicate LIVE source_uri rows (the RDR-156 P0 audit's
                     // 201-uri ghost class) for catalog-016-0's dedup backfill:
@@ -380,7 +414,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("superuser ground truth after seeding").isEqualTo(5);
                     assertThat(count(su,
                         "SELECT count(*) FROM nexus.catalog_document_chunks WHERE collection IS NULL"))
-                        .as("superuser ground truth after seeding").isEqualTo(2);
+                        .as("superuser ground truth after seeding — 2 content-backed "
+                            + "(1.1.100) + 1 deliberately content-less (1.1.101, the "
+                            + "dangling-row DELETE proof)")
+                        .isEqualTo(3);
                 }
 
                 // ── Lock in the 1wjmq mechanism itself: FORCE RLS hides EVERY
@@ -442,17 +479,42 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .isEqualTo(0);
 
                     // catalog-014-0 leg: every seeded manifest row stamped with the
-                    // owning document's physical_collection, none left NULL.
+                    // owning document's physical_collection, none left NULL, and
+                    // (now that the fixture backs each row with real content) still
+                    // present after catalog-025's dangling-row cleanup runs later in
+                    // this same hop.
                     assertThat(count(su,
                         "SELECT count(*) FROM nexus.catalog_document_chunks "
                         + "WHERE collection = 'code__x'"))
                         .as("catalog-014-0's manifest_backfill() must have stamped both "
-                            + "seeded rows from the owning doc's physical_collection")
+                            + "seeded rows from the owning doc's physical_collection, and "
+                            + "the stamp must survive catalog-025's later dangling-row "
+                            + "cleanup now that each row has matching chunks_384 content")
                         .isEqualTo(2);
                     assertThat(count(su,
                         "SELECT count(*) FROM nexus.catalog_document_chunks "
                         + "WHERE collection IS NULL"))
                         .as("no manifest row may remain un-stamped after catalog-014-0")
+                        .isEqualTo(0);
+
+                    // catalog-025-0 leg (nexus-j862l, seed-coverage lint follow-up): the
+                    // DELETE arm actually fired under FORCE-RLS. 1.1.101's row was
+                    // stamped 'code__x' by catalog-014-0's backfill too (same mechanism
+                    // just proven above for 1.1.100) but carries no matching chunks_384
+                    // content, so it must be GONE entirely by now -- not merely
+                    // un-stamped (the NULL-count assertion above already proves no row
+                    // anywhere is left NULL) and not merely absent from the 'code__x'
+                    // count above (which only distinguishes 1.1.100's rows from
+                    // everything else). This is the one assertion in the whole leg that
+                    // would fail if catalog-025-0's DELETE silently no-op'd under
+                    // FORCE-RLS (the exact failure class nexus-1wjmq/nexus-php10 exist
+                    // to catch) while the KEEP-arm assertions above stayed green.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.catalog_document_chunks "
+                        + "WHERE tenant_id = 't1' AND doc_id = '1.1.101'"))
+                        .as("catalog-025-0's dangling-row DELETE must actually remove a "
+                            + "correctly-stamped-but-content-less row under FORCE-RLS, "
+                            + "proving the DELETE arm fires, not just the KEEP arm")
                         .isEqualTo(0);
 
                     // catalog-016-0 leg: the dedup backfill saw the seeded rows
@@ -717,6 +779,32 @@ class SchemaUpgradeRehearsalIntegrationTest {
             ps.setString(1, tenant);
             ps.setString(2, chash);
             ps.setString(3, collection);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * nexus-j862l (RDR-191 GATE-2 follow-up): a matching {@code chunks_384}
+     * content row for a manifest pointer seeded via {@link #seedManifestRow},
+     * at the OLD (pre-rdr180) TEXT-chash schema shape — the SAME transform
+     * ({@code decode(chash, 'hex')}) rdr180-4/rdr180-6 later apply to both
+     * this row and the manifest row converts them to the IDENTICAL bytea
+     * value, so catalog-025's dangling-row check (which requires a matching
+     * {@code chunks_384}/768/1024 row for the manifest row's {@code (tenant_id,
+     * collection, chash)}) finds a match and leaves the manifest row alone —
+     * exactly as it would for a real tenant's legacy row, which never existed
+     * without its content landing alongside it.
+     */
+    private static void seedChunk384LegacyContent(Connection c, String tenant, String collection,
+                                                   String chash, String text) throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) "
+            + "VALUES (?, ?, ?, ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
+            ps.setString(1, tenant);
+            ps.setString(2, collection);
+            ps.setString(3, chash);
+            ps.setString(4, text);
+            ps.setString(5, "[" + "0,".repeat(383) + "0]");
             ps.executeUpdate();
         }
     }

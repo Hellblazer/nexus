@@ -28,8 +28,8 @@ below maps to an exact ``case`` in the Java handler's switch:
   GET   /v1/catalog/links?tumbler=X&direction=out|in|both  neighbors
   GET   /v1/catalog/link_query?...      paginated link query
   POST  /v1/catalog/traverse            BFS graph traversal {seeds, depth, ...}
-  POST  /v1/catalog/manifest/write      replace manifest {doc_id, rows}
-  POST  /v1/catalog/manifest/append     append chunks {doc_id, rows}
+  POST  /v1/catalog/manifest/write      replace manifest {doc_id, collection, rows}
+  POST  /v1/catalog/manifest/append     append chunks {doc_id, collection, rows}
   GET   /v1/catalog/manifest/get?doc_id=X
   POST  /v1/catalog/manifest/purge      {doc_id}
   GET   /v1/catalog/manifest/chashes?collection=X
@@ -2745,12 +2745,40 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             out.append(row)
         return out
 
-    def write_manifest(self, doc_id: str, chunks: list[dict]) -> None:
-        """Replace manifest for doc_id (atomic delete + insert)."""
-        self._post("/manifest/write", {"doc_id": doc_id, "rows": self._manifest_rows(chunks)})
+    def write_manifest(self, doc_id: str, chunks: list[dict], *, collection: str) -> None:
+        """Replace manifest for doc_id (atomic delete + insert).
 
-    def append_manifest_chunks(self, doc_id: str, chunks: list[dict]) -> None:
-        self._post("/manifest/append", {"doc_id": doc_id, "rows": self._manifest_rows(chunks)})
+        RDR-191 (Hal ruling 2026-08-12, "stop guessing the collection"):
+        *collection* is REQUIRED — the caller already knows which T3
+        collection the chunks belong to, so it is sent on the wire and the
+        engine stamps it verbatim rather than inferring it from chunk
+        membership. A blank/None collection is rejected here, at the
+        client boundary, so a guessable row can never leave this process.
+        """
+        if not collection:
+            raise ValueError(
+                "write_manifest: 'collection' is required and must be "
+                "non-blank (RDR-191 — the engine no longer infers it)"
+            )
+        self._post("/manifest/write", {
+            "doc_id": doc_id, "collection": collection,
+            "rows": self._manifest_rows(chunks),
+        })
+
+    def append_manifest_chunks(self, doc_id: str, chunks: list[dict], *, collection: str) -> None:
+        """Append manifest rows for doc_id.
+
+        RDR-191: *collection* is REQUIRED — see :meth:`write_manifest`.
+        """
+        if not collection:
+            raise ValueError(
+                "append_manifest_chunks: 'collection' is required and must "
+                "be non-blank (RDR-191 — the engine no longer infers it)"
+            )
+        self._post("/manifest/append", {
+            "doc_id": doc_id, "collection": collection,
+            "rows": self._manifest_rows(chunks),
+        })
 
     def get_manifest(self, doc_id: str) -> list[ManifestRow]:
         """Return ordered manifest rows — typed like local Catalog.get_manifest.
@@ -3024,11 +3052,29 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         doc_id: str,
         chunks: list[dict],
         *,
+        collection: str,
         new_collection: str | None = None,
         new_chunk_count: int | None = None,
     ) -> None:
+        """RDR-191: *collection* is REQUIRED — see :meth:`write_manifest`.
+
+        ``new_collection`` is a DIFFERENT, orthogonal concept: it is the
+        optional target for a document-level ``physical_collection``
+        RE-STAMP (a document being moved between collections), applied via
+        a follow-up ``/update`` call after the manifest replace. It is not
+        a substitute for ``collection`` — the manifest write itself always
+        needs the collection the rows being written belong to right now.
+        """
+        if not collection:
+            raise ValueError(
+                "atomic_manifest_replace: 'collection' is required and "
+                "must be non-blank (RDR-191 — the engine no longer infers it)"
+            )
         # /manifest/write performs the atomic delete+insert already
-        self._post("/manifest/write", {"doc_id": doc_id, "rows": self._manifest_rows(chunks)})
+        self._post("/manifest/write", {
+            "doc_id": doc_id, "collection": collection,
+            "rows": self._manifest_rows(chunks),
+        })
         if new_collection or new_chunk_count is not None:
             updates: dict = {}
             if new_collection:              updates["physical_collection"] = new_collection
@@ -3041,7 +3087,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         *,
         sweep: bool = False,
         chunks: "list[dict] | None" = None,
-        collection: str | None = None,
+        collection: str,
         force_re_embed: bool = False,
     ) -> dict:
         """Atomic per-doc manifest REPLACE for many docs in one POST.
@@ -3071,19 +3117,26 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``sweep_skipped``/``sweep_detail`` (zero/empty when ``sweep`` is
         False — same request-gated shape the engine already implements).
 
-        *chunks*/*collection*/*force_re_embed* (nexus-wxjr6, the CLIENT
-        half of nexus-kl2z6's combined write; design memo T2
+        *collection* (RDR-191, Hal ruling 2026-08-12, "stop guessing the
+        collection") is REQUIRED UNCONDITIONALLY — not only when *chunks*
+        is provided. It is sent as a top-level ``collection`` field on
+        EVERY page's POST body, applying to every doc in that page (the
+        caller already batches per collection); a missing/blank value
+        raises ``ValueError`` locally before any round trip, matching the
+        engine's own 400 refusal. Previously this field was sent only on
+        the chunks-carrying page — that conditional was itself the bug
+        RDR-191 closes (the engine was left to infer collection from
+        chunk membership on every OTHER page).
+
+        *chunks*/*force_re_embed* (nexus-wxjr6, the CLIENT half of
+        nexus-kl2z6's combined write; design memo T2
         design-kl2z6-combined-write §1.1) — optional top-level ``chunks``
         (``[{chash, text, metadata}, ...]``) folds the chunk VECTOR upload
-        into the SAME per-doc transaction as the manifest write.
-        *collection* is REQUIRED whenever *chunks* is provided (raises
-        ``ValueError`` locally — same shape the engine 400s on, checked
-        client-side first so a caller gets an immediate, specific error
-        instead of a round trip). *chunks* is sent on the FIRST page
-        only — it is a FLUSH-wide payload (the caller's whole upload
-        batch), not a per-page one, and a flush's doc count is bounded by
-        its own chunk cap (<=300), always far under
-        ``_MANIFEST_GET_MANY_PAGE`` (1000), so the real caller (the
+        into the SAME per-doc transaction as the manifest write. *chunks*
+        is sent on the FIRST page only — it is a FLUSH-wide payload (the
+        caller's whole upload batch), not a per-page one, and a flush's
+        doc count is bounded by its own chunk cap (<=300), always far
+        under ``_MANIFEST_GET_MANY_PAGE`` (1000), so the real caller (the
         ChunkBatcher flush path) never pages. *force_re_embed* mirrors
         ``/v1/vectors/upsert-chunks``' escape from the RDR-181
         existence-partition.
@@ -3113,12 +3166,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         (bead-amendment MUST, same discipline ``complete_refused_count``
         already established).
         """
-        if chunks is not None and not collection:
+        if not collection:
             raise ValueError(
-                "write_manifest_many: 'collection' is required when 'chunks' "
-                "is provided (design memo §1.1 — the engine 400s on this "
-                "same combination; checked here so the caller gets an "
-                "immediate, specific error)"
+                "write_manifest_many: 'collection' is required and must be "
+                "non-blank on every call (RDR-191 — the engine no longer "
+                "infers it; previously this was only enforced when 'chunks' "
+                "was provided, which was itself the bug)"
             )
         failed: list[str] = []
         refused: list[dict] = []
@@ -3129,10 +3182,17 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         chunks_written: int | None = None
         for page_num, start in enumerate(range(0, len(docs), _MANIFEST_GET_MANY_PAGE)):
             page = docs[start : start + _MANIFEST_GET_MANY_PAGE]
-            body: dict = {"docs": [
-                {"doc_id": d, "rows": self._manifest_rows(page_chunks)}
-                for d, page_chunks in page
-            ]}
+            # RDR-191: 'collection' rides EVERY page's body, not only the
+            # chunks-carrying one — it applies to every doc in the page
+            # regardless of whether this page also carries the combined-write
+            # chunk payload.
+            body: dict = {
+                "docs": [
+                    {"doc_id": d, "rows": self._manifest_rows(page_chunks)}
+                    for d, page_chunks in page
+                ],
+                "collection": collection,
+            }
             if complete:
                 page_complete = {
                     d: complete[d] for d, _ in page if d in complete
@@ -3143,7 +3203,6 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 body["sweep"] = True
             page_carries_chunks = chunks is not None and page_num == 0
             if page_carries_chunks:
-                body["collection"] = collection
                 body["chunks"] = chunks
                 if force_re_embed:
                     body["force_re_embed"] = True

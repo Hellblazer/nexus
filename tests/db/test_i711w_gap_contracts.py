@@ -163,7 +163,10 @@ class TestUpdateContracts:
             owner, "re-derive doc", content_type="prose",
             file_path=f"{slug}/doc.md", chunk_count=0,
         )
-        cat.append_manifest_chunks(str(tumbler), _manifest_rows(5, f"rederive-{slug}"))
+        cat.append_manifest_chunks(
+            str(tumbler), _manifest_rows(5, f"rederive-{slug}"),
+            collection=f"knowledge__i711w-{slug}__voyage-context-3__v1",
+        )
         # DE-CONFOUNDING (2026-07-30). The original shape — append 5 rows, then
         # assert 5 after a head_hash-only update — stopped proving anything the
         # moment nexus-e4gel ALSO made append_manifest_chunks fold the count:
@@ -204,7 +207,10 @@ class TestUpdateContracts:
             file_path=f"{slug}/doc.md", chunk_count=0,
         )
         # 3 manifest rows present, but caller wants to assert 99.
-        cat.append_manifest_chunks(str(tumbler), _manifest_rows(3, f"caller-{slug}"))
+        cat.append_manifest_chunks(
+            str(tumbler), _manifest_rows(3, f"caller-{slug}"),
+            collection=f"knowledge__i711w-{slug}__voyage-context-3__v1",
+        )
         cat.update(tumbler, chunk_count=99)
 
         entry = cat.resolve(tumbler)
@@ -379,7 +385,10 @@ class TestDeleteDocumentContracts:
             owner, "delete-cascade doc", content_type="prose",
             file_path=f"{slug}/doc.md",
         )
-        cat.append_manifest_chunks(str(tumbler), _manifest_rows(3, f"del-{slug}"))
+        cat.append_manifest_chunks(
+            str(tumbler), _manifest_rows(3, f"del-{slug}"),
+            collection=f"knowledge__i711w-{slug}__voyage-context-3__v1",
+        )
         assert len(cat.get_manifest(str(tumbler))) == 3  # precondition
 
         assert cat.delete_document(tumbler) is True

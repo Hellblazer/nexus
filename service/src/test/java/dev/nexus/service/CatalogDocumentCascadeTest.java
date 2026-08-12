@@ -210,8 +210,11 @@ class CatalogDocumentCascadeTest {
             + "ON CONFLICT DO NOTHING");
         st.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
             + "VALUES ('" + tenant + "', '" + tumbler + "', 'Doc', '" + COLL + "')");
-        st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) "
-            + "VALUES ('" + tenant + "', '" + tumbler + "', 0, '" + chash("man" + tenant + tumbler) + "')");
+        // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
+        // (catalog-025-collection-not-null.xml) — the document above is
+        // already registered under COLL, so stamp the manifest row the same.
+        st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+            + "VALUES ('" + tenant + "', '" + tumbler + "', 0, '" + chash("man" + tenant + tumbler) + "', '" + COLL + "')");
         st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id) "
             + "VALUES ('" + tenant + "', '" + COLL + "', '/p/a-" + tenant + "-" + tumbler + ".md', NOW(), 'v1', 'docling', '" + tumbler + "')");
         st.execute("INSERT INTO nexus.document_highlights (tenant_id, doc_id, collection, highlights_md, ingested_at) "

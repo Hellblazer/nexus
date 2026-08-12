@@ -2965,8 +2965,11 @@ def _prune_collection_serverside(
     targets — the old path's full-collection metadata read plus
     embedding-carrying copy) ran server-side: the caller treats this
     collection as DONE for this pass. Returns ``False`` when the route is
-    unavailable (pre-route engine — ``REQUIRED_ENGINE_VERSION`` is
-    ``(0, 1, 69)`` and this route ships in the NEXT tag — or a non-HTTP
+    unavailable (an engine predating the ``gc_quarantine_orphans`` /
+    ``gc_restore_rereferenced`` / ``gc_expire_quarantine`` server-side
+    routes — catalog-023-quarantine-functions.xml, which has shipped since
+    it merged; naming the changeset rather than a version pin here so this
+    docstring cannot go stale the way its predecessor did — or a non-HTTP
     ``db``, e.g. local/in-memory mode): the caller falls back to the
     client-side fetch-diff-copy-delete path unchanged.
 

@@ -653,10 +653,11 @@ class CollectionRegistryFkTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "chk-manifest-doc");
+            insertCollection(su, TENANT_A, "chk-manifest-coll");
             PSQLException ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) " +
-                    "VALUES ('" + TENANT_A + "', 'chk-manifest-doc', 0, '" + chashOfLen(31) + "')")
+                    "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
+                    "VALUES ('" + TENANT_A + "', 'chk-manifest-doc', 0, '" + chashOfLen(31) + "', 'chk-manifest-coll')")
             );
             assertThat(ex.getMessage())
                 .as("catalog_document_chunks_chash_len_check must reject chash of length 31")
@@ -670,10 +671,11 @@ class CollectionRegistryFkTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "chk-manifest-doc");  // idempotent via ON CONFLICT
+            insertCollection(su, TENANT_A, "chk-manifest-coll");
             PSQLException ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) " +
-                    "VALUES ('" + TENANT_A + "', 'chk-manifest-doc', 1, '" + chashOfLen(33) + "')")
+                    "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
+                    "VALUES ('" + TENANT_A + "', 'chk-manifest-doc', 1, '" + chashOfLen(33) + "', 'chk-manifest-coll')")
             );
             assertThat(ex.getMessage())
                 .as("catalog_document_chunks_chash_len_check must reject chash of length 33")
@@ -687,9 +689,10 @@ class CollectionRegistryFkTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "chk-manifest-doc");  // idempotent
+            insertCollection(su, TENANT_A, "chk-manifest-coll");
             su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) " +
-                "VALUES ('" + TENANT_A + "', 'chk-manifest-doc', 2, '" + validChash("manifestok") + "')");
+                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
+                "VALUES ('" + TENANT_A + "', 'chk-manifest-doc', 2, '" + validChash("manifestok") + "', 'chk-manifest-coll')");
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
                 "WHERE tenant_id='" + TENANT_A + "' AND chash='" + validChash("manifestok") + "'");
@@ -704,10 +707,11 @@ class CollectionRegistryFkTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "pos-chk-doc");
+            insertCollection(su, TENANT_A, "pos-chk-coll");
             PSQLException ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) " +
-                    "VALUES ('" + TENANT_A + "', 'pos-chk-doc', -1, '" + validChash("pos-neg") + "')")
+                    "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
+                    "VALUES ('" + TENANT_A + "', 'pos-chk-doc', -1, '" + validChash("pos-neg") + "', 'pos-chk-coll')")
             );
             assertThat(ex.getMessage())
                 .as("catalog_document_chunks_position_check must reject position < 0")
@@ -721,9 +725,10 @@ class CollectionRegistryFkTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "pos-chk-doc");  // idempotent
+            insertCollection(su, TENANT_A, "pos-chk-coll");
             su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) " +
-                "VALUES ('" + TENANT_A + "', 'pos-chk-doc', 0, '" + validChash("pos-zero") + "') " +
+                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
+                "VALUES ('" + TENANT_A + "', 'pos-chk-doc', 0, '" + validChash("pos-zero") + "', 'pos-chk-coll') " +
                 "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +

@@ -62,7 +62,9 @@ def _seed(cat, db, coll_name: str, owner: str, n_live: int, n_orphan: int):
             physical_collection=coll_name,
             chunk_count=1,
         ))
-        cat.write_manifest(tumbler, [{"chash": chashes[i], "position": 0}])
+        cat.write_manifest(
+            tumbler, [{"chash": chashes[i], "position": 0}], collection=coll_name,
+        )
 
     return chashes, live_chashes, chashes[n_live:]
 

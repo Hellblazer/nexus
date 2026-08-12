@@ -315,10 +315,11 @@ class SoftDeleteTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, tumbler);
+            insertCollection(su, TENANT_A, "knowledge__sd-tomb__v1");
 
             // 2 manifest rows — post-P0: needs 32-char chash
-            insertManifestRow(su, TENANT_A, tumbler, 0, validChash("tomb-chunk-0"));
-            insertManifestRow(su, TENANT_A, tumbler, 1, validChash("tomb-chunk-1"));
+            insertManifestRow(su, TENANT_A, tumbler, 0, validChash("tomb-chunk-0"), "knowledge__sd-tomb__v1");
+            insertManifestRow(su, TENANT_A, tumbler, 1, validChash("tomb-chunk-1"), "knowledge__sd-tomb__v1");
 
             // 1 document_aspects row (fk-001 ON DELETE CASCADE target)
             insertAspectRow(su, TENANT_A, tumbler, "knowledge__sd-asp__v1", "sd-aspect-path-1");
@@ -456,12 +457,12 @@ class SoftDeleteTest {
 
             // Doc A (will be tombstoned)
             insertCatalogDocument(su, TENANT_A, tumblerA);
-            insertManifestRow(su, TENANT_A, tumblerA, 0, chashA);
-            insertManifestRow(su, TENANT_A, tumblerA, 1, chashShared);
+            insertManifestRow(su, TENANT_A, tumblerA, 0, chashA, COLLECTION_A);
+            insertManifestRow(su, TENANT_A, tumblerA, 1, chashShared, COLLECTION_A);
 
             // Doc B (live — keeps chash_shared alive)
             insertCatalogDocument(su, TENANT_A, tumblerB);
-            insertManifestRow(su, TENANT_A, tumblerB, 0, chashShared);
+            insertManifestRow(su, TENANT_A, tumblerB, 0, chashShared, COLLECTION_A);
 
             // Insert the actual chunk rows into chunks_384
             insertChunk384(su, TENANT_A, COLLECTION_A, chashA,      "text for chunk A only");
@@ -586,7 +587,8 @@ class SoftDeleteTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, tumbler);
-            insertManifestRow(su, TENANT_A, tumbler, 0, validChash("age-filter-chunk0"));
+            insertCollection(su, TENANT_A, "knowledge__sd-age__v1");
+            insertManifestRow(su, TENANT_A, tumbler, 0, validChash("age-filter-chunk0"), "knowledge__sd-age__v1");
             insertAspectRow(su, TENANT_A, tumbler, "knowledge__sd-age__v1", "sd-age-asp-path-1");
         }
 
@@ -654,11 +656,11 @@ class SoftDeleteTest {
             insertCollection(su, TENANT_A, COLLECTION_B);
 
             insertCatalogDocument(su, TENANT_A, tumblerX);
-            insertManifestRow(su, TENANT_A, tumblerX, 0, chashOrphan);
-            insertManifestRow(su, TENANT_A, tumblerX, 1, chashLive);
+            insertManifestRow(su, TENANT_A, tumblerX, 0, chashOrphan, COLLECTION_B);
+            insertManifestRow(su, TENANT_A, tumblerX, 1, chashLive, COLLECTION_B);
 
             insertCatalogDocument(su, TENANT_A, tumblerY);
-            insertManifestRow(su, TENANT_A, tumblerY, 0, chashLive);
+            insertManifestRow(su, TENANT_A, tumblerY, 0, chashLive, COLLECTION_B);
 
             insertChunk384(su, TENANT_A, COLLECTION_B, chashOrphan, "orphan chunk text");
             insertChunk384(su, TENANT_A, COLLECTION_B, chashLive,   "live shared chunk text");
@@ -1108,10 +1110,11 @@ class SoftDeleteTest {
      * doc_id is the tumbler of the parent catalog_documents row (fk-001 FK).
      */
     private static void insertManifestRow(Connection su, String tenantId, String docId,
-                                           int position, String chash) throws Exception {
+                                           int position, String chash, String collection) throws Exception {
         su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", decode('" + chash + "', 'hex')) " +
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
+            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", decode('" + chash + "', 'hex'), '"
+            + collection + "') " +
             "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
     }
 

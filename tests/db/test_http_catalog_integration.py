@@ -743,7 +743,7 @@ class TestManifest:
             {"position": 1, "chash": _ch("chunk_hash_010000000000000000000"), "line_start": 11, "line_end": 20},
             {"position": 2, "chash": _ch("chunk_hash_020000000000000000000"), "line_start": 21, "line_end": 30},
         ]
-        cat.write_manifest(str(t), chunks)
+        cat.write_manifest(str(t), chunks, collection="knowledge__test__voyage-context-3__v1")
         return t, chunks
 
     def test_write_and_get_manifest(self, cat, doc_with_manifest) -> None:
@@ -765,7 +765,7 @@ class TestManifest:
         t, _ = doc_with_manifest
         cat.append_manifest_chunks(str(t), [
             {"position": 3, "chash": _ch("chunk_hash_030000000000000000000")},
-        ])
+        ], collection="knowledge__test__voyage-context-3__v1")
         rows = cat.get_manifest(str(t))
         chashes = [r.chash for r in rows]
         assert _ch("chunk_hash_030000000000000000000") in chashes
@@ -823,7 +823,7 @@ class TestManifest:
             content_type="paper",
             source_uri="file:///manifest/purge.md",
         )
-        cat.write_manifest(str(t), [{"position": 0, "chash": _ch("purge_hash_000000000000000000000")}])
+        cat.write_manifest(str(t), [{"position": 0, "chash": _ch("purge_hash_000000000000000000000")}], collection="knowledge__test__voyage-context-3__v1")
         before = cat.get_manifest(str(t))
         assert len(before) == 1
         cat.purge_manifest_for_doc(str(t))
@@ -838,11 +838,11 @@ class TestManifest:
             content_type="paper",
             source_uri="file:///manifest/atomic.md",
         )
-        cat.write_manifest(str(t), [{"position": 0, "chash": _ch("old_hash000000000000000000000000")}])
+        cat.write_manifest(str(t), [{"position": 0, "chash": _ch("old_hash000000000000000000000000")}], collection="knowledge__test__voyage-context-3__v1")
         cat.atomic_manifest_replace(str(t), [
             {"position": 0, "chash": _ch("new_hash_00000000000000000000000")},
             {"position": 1, "chash": _ch("new_hash_01000000000000000000000")},
-        ])
+        ], collection="knowledge__test__voyage-context-3__v1")
         rows = cat.get_manifest(str(t))
         chashes = [r.chash for r in rows]
         assert _ch("new_hash_00000000000000000000000") in chashes
@@ -878,10 +878,10 @@ class TestPruneUnionGuard:
         cat.write_manifest(str(doc_a), [
             {"position": 0, "chash": shared},
             {"position": 1, "chash": exclusive_a},
-        ])
+        ], collection="knowledge__test__voyage-context-3__v1")
         cat.write_manifest(str(doc_b), [
             {"position": 0, "chash": shared},
-        ])
+        ], collection="knowledge__test__voyage-context-3__v1")
 
         # Both candidates are "dropped from doc A's manifest" in the
         # caller's framing (a re-index that no longer references either).
@@ -1560,7 +1560,7 @@ class TestResyncChunkCount:
             {"position": 0, "chash": _ch("resync_chk_aaa000000000000000000"), "chunk_index": 0},
             {"position": 1, "chash": _ch("resync_chk_bbb111000000000000000"), "chunk_index": 1},
             {"position": 2, "chash": _ch("resync_chk_ccc222000000000000000"), "chunk_index": 2},
-        ])
+        ], collection="knowledge__test__voyage-context-3__v1")
 
         # Resync: must recompute from catalog_document_chunks and update documents.chunk_count
         cat.resync_chunk_count_cache(str(tumbler))

@@ -113,7 +113,9 @@ def test_prune_deleted_files_fast_path_against_real_engine(t2_service_env) -> No
             physical_collection=coll_name,
             chunk_count=1,
         ))
-        cat.write_manifest(tumbler, [{"chash": chashes[i], "position": 0}])
+        cat.write_manifest(
+            tumbler, [{"chash": chashes[i], "position": 0}], collection=coll_name,
+        )
 
     # (path, collection) per outgoing POST. chunk_quarantine.py (out of
     # this fix's scope — see the developer report) still does its own

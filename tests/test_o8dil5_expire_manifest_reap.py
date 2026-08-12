@@ -67,7 +67,7 @@ def _seed_ttl_lapsed_note(client, cat, content: str, title: str) -> str:
     assert created is True
 
     # Real production manifest write (put_cmd's exact call).
-    store_put_manifest_direct(tumbler, manifest_metadatas)
+    store_put_manifest_direct(tumbler, manifest_metadatas, collection=_COLLECTION)
 
     # The T3 chunk itself, with TTL-expired metadata baked in directly --
     # db.put() always stamps indexed_at=now with no override, so a test
@@ -164,7 +164,9 @@ def test_expire_preserves_a_chunk_genuinely_shared_with_a_live_document(t2_servi
         owner, "o8dil5-permanent-twin", content_type="knowledge",
         physical_collection=_COLLECTION, meta={"doc_id": chash},
     )
-    cat.append_manifest_chunks(str(permanent_tumbler), [{"chash": chash, "position": 0}])
+    cat.append_manifest_chunks(
+        str(permanent_tumbler), [{"chash": chash, "position": 0}], collection=_COLLECTION,
+    )
     cat.resync_chunk_count_cache(str(permanent_tumbler))
 
     assert _chunk_present(client, chash), "control: the shared chunk must exist before expire()"
@@ -245,7 +247,9 @@ def test_expire_does_not_reap_a_twin_owned_by_a_different_collection(t2_service_
         owner, twin_title, content_type="knowledge",
         physical_collection=other_collection, meta={"doc_id": chash},
     )
-    cat.append_manifest_chunks(str(twin_tumbler), [{"chash": chash, "position": 0}])
+    cat.append_manifest_chunks(
+        str(twin_tumbler), [{"chash": chash, "position": 0}], collection=other_collection,
+    )
     cat.resync_chunk_count_cache(str(twin_tumbler))
 
     assert len(documents_by_title(twin_title)) == 1, "control: twin must exist before expire()"

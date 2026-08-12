@@ -111,28 +111,41 @@ class CatalogHandlerManifestFkTest {
     }
 
     @Test
-    void manifestWrite_unregisteredDocId_returns409_withSqlstate() throws Exception {
+    void manifestWrite_unregisteredDocId_returns409_documentNotFound() throws Exception {
+        // nexus-s13u0 (RDR-191 GATE-2): catalog_document_chunks.collection going
+        // NOT NULL retired the FK-violation path this test used to exercise —
+        // requireDocumentExists's case 1 (no catalog_documents row at all, formerly
+        // physicalCollectionOf's case 1 before RDR-191 renamed it to a pure
+        // existence check) now throws DocumentNotFoundException BEFORE the INSERT
+        // is ever attempted, so Postgres never gets a chance to reject it and
+        // there is no SQLState to report. Still a refusal, still 409 — just an
+        // explicit throw instead
+        // of a caught class-23 violation.
         CapturingExchange ex = post("/v1/catalog/manifest/write",
-            "{\"doc_id\":\"unregistered-tumbler-zzz\",\"rows\":[{\"position\":0,"
+            "{\"doc_id\":\"unregistered-tumbler-zzz\",\"collection\":\"knowledge__fk__v1\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + "a".repeat(64) + "\"}]}");
         handleWithTenant(ex);
         assertThat(ex.status)
-            .as("a non-blank UNREGISTERED doc_id violates the chunks FK → typed 409, not 500")
+            .as("a non-blank UNREGISTERED doc_id is an explicit DocumentNotFoundException -> 409, not 500")
             .isEqualTo(409);
-        assertThat(ex.bodyString()).contains("\"sqlstate\":\"23503\"");
         assertThat(ex.bodyString())
-            .contains("\"error\":\"integrity constraint violation\"")
-            .doesNotContain("catalog_document_chunks");
+            .as("no SQLException in this path any more -- no \"sqlstate\" key at all")
+            .doesNotContain("sqlstate")
+            .contains("\"error\":\"manifest write refused: document not registered: unregistered-tumbler-zzz\"");
     }
 
     @Test
-    void manifestAppend_unregisteredDocId_returns409_withSqlstate() throws Exception {
+    void manifestAppend_unregisteredDocId_returns409_documentNotFound() throws Exception {
+        // Same requireDocumentExists case-1 throw as the write test above —
+        // appendManifestChunks resolves through the identical helper.
         CapturingExchange ex = post("/v1/catalog/manifest/append",
-            "{\"doc_id\":\"unregistered-tumbler-yyy\",\"rows\":[{\"position\":0,"
+            "{\"doc_id\":\"unregistered-tumbler-yyy\",\"collection\":\"knowledge__fk__v1\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + "b".repeat(64) + "\"}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(409);
-        assertThat(ex.bodyString()).contains("\"sqlstate\":\"23503\"");
+        assertThat(ex.bodyString())
+            .doesNotContain("sqlstate")
+            .contains("\"error\":\"manifest write refused: document not registered: unregistered-tumbler-yyy\"");
     }
 
     @Test
@@ -143,7 +156,7 @@ class CatalogHandlerManifestFkTest {
             "tumbler", "5.1", "title", "FK test doc", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", "knowledge__fk__v1"));
         CapturingExchange ex = post("/v1/catalog/manifest/write",
-            "{\"doc_id\":\"5.1\",\"rows\":[{\"position\":0,"
+            "{\"doc_id\":\"5.1\",\"collection\":\"knowledge__fk__v1\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + "c".repeat(64) + "\"}]}");
         handleWithTenant(ex);
         assertThat(ex.status).as("registered doc_id: manifest write succeeds").isEqualTo(200);
@@ -162,7 +175,7 @@ class CatalogHandlerManifestFkTest {
             "corpus", "knowledge", "physical_collection", "knowledge__fk__v1"));
         String full64 = "a".repeat(64);
         CapturingExchange ex = post("/v1/catalog/manifest/write",
-            "{\"doc_id\":\"5.1b\",\"rows\":[{\"position\":0,"
+            "{\"doc_id\":\"5.1b\",\"collection\":\"knowledge__fk__v1\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + full64 + "\"}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(200);
@@ -174,7 +187,7 @@ class CatalogHandlerManifestFkTest {
         // it is now a legacy reference that must resolve through chash_alias,
         // never accepted fresh at this boundary.
         CapturingExchange ex = post("/v1/catalog/manifest/write",
-            "{\"doc_id\":\"5.1\",\"rows\":[{\"position\":0,"
+            "{\"doc_id\":\"5.1\",\"collection\":\"knowledge__fk__v1\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + "a".repeat(32) + "\"}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(400);
@@ -189,7 +202,7 @@ class CatalogHandlerManifestFkTest {
         // Must be the FULL 64-char width so the rejection actually exercises the
         // lowercase check, not the (now unrelated) legacy-32-hex length branch.
         CapturingExchange ex = post("/v1/catalog/manifest/append",
-            "{\"doc_id\":\"5.1\",\"rows\":[{\"position\":0,"
+            "{\"doc_id\":\"5.1\",\"collection\":\"knowledge__fk__v1\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + "A".repeat(64) + "\"}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(400);
@@ -210,7 +223,7 @@ class CatalogHandlerManifestFkTest {
         // value (the now-invalid shape, RDR-180 inversion) — proves BOTH docs
         // are validated up front, before any per-doc transaction.
         CapturingExchange ex = post("/v1/catalog/manifest/write_many",
-            "{\"docs\":[{\"doc_id\":\"5.2\",\"rows\":[{\"position\":0,"
+            "{\"collection\":\"knowledge__fk__v1\",\"docs\":[{\"doc_id\":\"5.2\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + "d".repeat(64) + "\"}]},"
             + "{\"doc_id\":\"5.3\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + "e".repeat(32) + "\"}]}]}");
@@ -228,7 +241,7 @@ class CatalogHandlerManifestFkTest {
         // boundary reappeared mid-transaction and died reason-less into
         // failed_doc_ids. strictRows rejects the shape up front.
         CapturingExchange ex = post("/v1/catalog/manifest/write_many",
-            "{\"docs\":[{\"doc_id\":\"5.1\",\"rows\":[null,"
+            "{\"collection\":\"knowledge__fk__v1\",\"docs\":[{\"doc_id\":\"5.1\",\"rows\":[null,"
             + "{\"position\":0,\"chash\":\"cccccccccccccccccccccccccccccccc\"}]}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(400);
@@ -238,7 +251,7 @@ class CatalogHandlerManifestFkTest {
     @Test
     void manifestWrite_missingChash_returns400() throws Exception {
         CapturingExchange ex = post("/v1/catalog/manifest/write",
-            "{\"doc_id\":\"5.1\",\"rows\":[{\"position\":0}]}");
+            "{\"doc_id\":\"5.1\",\"collection\":\"knowledge__fk__v1\",\"rows\":[{\"position\":0}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(400);
         assertThat(ex.bodyString()).contains("'chash' required");
@@ -247,22 +260,30 @@ class CatalogHandlerManifestFkTest {
     // ── per-doc failure reasons (nexus-fhhwf) ────────────────────────────────
 
     @Test
-    void manifestWriteMany_unregisteredDoc_failedCarriesReasonAndSqlstate() throws Exception {
+    void manifestWriteMany_unregisteredDoc_failedCarriesReason() throws Exception {
         // nexus-fhhwf: the per-doc catch used to swallow the CAUSE — a
         // constraint violation surfaced as a bare id in failed_doc_ids
         // (3 deploy-gate iterations on the v0.1.24 probe). The response
-        // now carries {failed:[{doc_id, reason, sqlstate}]} alongside.
+        // carries {failed:[{doc_id, reason}]} alongside.
+        //
+        // nexus-s13u0 (RDR-191 GATE-2): this doc_id's failure used to be a real
+        // PSQLException (FK violation, sqlstate 23503, constraint
+        // fk_catalog_chunks_catalog_doc) because the INSERT was attempted and
+        // Postgres rejected it. Now requireDocumentExists's case 1 throws
+        // DocumentNotFoundException BEFORE any INSERT is attempted --
+        // failureDetail's non-SQL allowlist branch reports its message
+        // verbatim and sets no "sqlstate" key at all (that key only appears
+        // for a real java.sql.SQLException with a SQLState).
         CapturingExchange ex = post("/v1/catalog/manifest/write_many",
-            "{\"docs\":[{\"doc_id\":\"never-registered-zz\",\"rows\":[{\"position\":0,"
+            "{\"collection\":\"knowledge__fk__v1\",\"docs\":[{\"doc_id\":\"never-registered-zz\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + "f".repeat(64) + "\"}]}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(200);
         String body = ex.bodyString();
         assertThat(body).contains("\"failed_doc_ids\":[\"never-registered-zz\"]");  // back-compat
         assertThat(body)
-            .contains("\"reason\":\"foreign key violation")
-            .contains("\"sqlstate\":\"23503\"")
-            .contains("fk_catalog_chunks_catalog_doc");
+            .doesNotContain("sqlstate")
+            .contains("\"reason\":\"manifest write refused: document not registered: never-registered-zz\"");
     }
 
     @Test
@@ -275,7 +296,7 @@ class CatalogHandlerManifestFkTest {
             "tumbler", "5.4", "title", "pos check doc", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", "knowledge__fk__v1"));
         CapturingExchange ex = post("/v1/catalog/manifest/write_many",
-            "{\"docs\":[{\"doc_id\":\"5.4\",\"rows\":[{\"position\":-1,"
+            "{\"collection\":\"knowledge__fk__v1\",\"docs\":[{\"doc_id\":\"5.4\",\"rows\":[{\"position\":-1,"
             + "\"chash\":\"" + "e".repeat(64) + "\"}]}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(200);

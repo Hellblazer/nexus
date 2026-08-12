@@ -489,9 +489,17 @@ def rollback_minted_catalog_entry(tumbler: str, *, original_error: str = "") -> 
                 pass
 
 
-def store_put_manifest_direct(catalog_doc_id: str, metadatas: list[dict]) -> None:
+def store_put_manifest_direct(
+    catalog_doc_id: str, metadatas: list[dict], *, collection: str,
+) -> None:
     """Direct, fail-loud manifest write for the store_put path
     (nexus-b6enc C3 / F2).
+
+    RDR-191 (Hal ruling 2026-08-12): *collection* is REQUIRED — the T3
+    collection this store_put call targets, already in scope at every
+    caller (``col_name`` / ``collection``), threaded through to
+    ``atomic_manifest_replace`` so the engine stamps it verbatim instead of
+    inferring it from chunk membership.
 
     The generic ``fire_batch`` chain swallows every hook exception by
     contract (best-effort, correct for indexer batches). For store_put
@@ -532,7 +540,7 @@ def store_put_manifest_direct(catalog_doc_id: str, metadatas: list[dict]) -> Non
 
     writer = make_catalog_writer(priority="interactive")
     try:
-        writer.atomic_manifest_replace(catalog_doc_id, chunks)
+        writer.atomic_manifest_replace(catalog_doc_id, chunks, collection=collection)
         writer.resync_chunk_count_cache(catalog_doc_id)
     finally:
         try:

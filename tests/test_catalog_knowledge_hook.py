@@ -260,7 +260,9 @@ class TestStorePutHook:
         # Simulate the manifest population that follows every real re-put
         # (store_put_manifest_direct) — chunk_count becomes > 0, so the
         # ghost-by-title fallback is no longer reachable for this row.
-        cat.append_manifest_chunks(first, [{"chash": "b" * 64, "position": 0}])
+        cat.append_manifest_chunks(
+            first, [{"chash": "b" * 64, "position": 0}], collection="knowledge__legacy",
+        )
         cat.resync_chunk_count_cache(first)
         assert cat.resolve(first).chunk_count == 1
 
@@ -308,7 +310,9 @@ class TestStorePutHook:
             meta={"doc_id": "legacy-content-hash"},
             # source_uri deliberately omitted — pre-sdp0u vintage.
         )
-        cat.append_manifest_chunks(str(legacy), [{"chash": "c" * 64, "position": 0}])
+        cat.append_manifest_chunks(
+            str(legacy), [{"chash": "c" * 64, "position": 0}], collection="knowledge__legacy",
+        )
         cat.resync_chunk_count_cache(str(legacy))
         assert cat.resolve(legacy).source_uri == ""
         assert cat.resolve(legacy).chunk_count == 1, "fixture must be a populated (non-ghost) legacy row"
@@ -353,7 +357,7 @@ class TestStorePutHook:
         )
         cat.append_manifest_chunks(first, [
             {"chash": "a" * 64, "position": 0},
-        ])
+        ], collection="knowledge__real")
         cat.resync_chunk_count_cache(first)
         assert cat.resolve(first).chunk_count == 1, "fixture must not be a ghost"
 
@@ -387,7 +391,9 @@ class TestStorePutHook:
         # (title-only, no collection scoping) cannot itself reconcile the
         # second call onto this row — isolating the source_uri behavior
         # under test.
-        cat.append_manifest_chunks(first, [{"chash": "a" * 64, "position": 0}])
+        cat.append_manifest_chunks(
+            first, [{"chash": "a" * 64, "position": 0}], collection="knowledge__alpha",
+        )
         cat.resync_chunk_count_cache(first)
 
         second = _catalog_store_hook(

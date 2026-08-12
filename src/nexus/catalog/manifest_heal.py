@@ -294,7 +294,8 @@ def _heal_collections(
                     # a foreground interactive writer (GH #1046 class).
                     if yield_before_write is not None:
                         yield_before_write()
-                    writer.atomic_manifest_replace(str(entry.tumbler), chunks)
+                    writer.atomic_manifest_replace(
+                        str(entry.tumbler), chunks, collection=coll_name)
                     # atomic_manifest_replace's local-SQLite path re-derives
                     # chunk_count in-transaction, but the HTTP/service-mode
                     # path only resyncs when told to — without this the gap

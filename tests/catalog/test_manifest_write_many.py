@@ -25,6 +25,11 @@ from nexus.mcp_infra import (
 )
 from nexus.retry import _is_connectivity_error
 
+# RDR-191 (Hal ruling 2026-08-12): every manifest writer call in this file
+# now requires an explicit collection. A single shared constant keeps the
+# many call sites below from inventing their own plausible-looking values.
+_COLLECTION = "knowledge__manifest-write-many-test__voyage-context-3__v1"
+
 
 def _client() -> HttpCatalogClient:
     return HttpCatalogClient.__new__(HttpCatalogClient)
@@ -42,7 +47,7 @@ class TestWriteManifestMany:
         result = c.write_manifest_many([
             ("1.15.1", [{"chash": "a" * 64, "position": 0}]),
             ("1.15.2", [{"chash": "b" * 64, "position": 0}, {"chash": "c" * 64, "position": 1}]),
-        ])
+        ], collection=_COLLECTION)
         assert result["failed_doc_ids"] == []
         assert len(posts) == 1
         path, body = posts[0]
@@ -59,7 +64,7 @@ class TestWriteManifestMany:
             raising=False,
         )
         docs = [(f"1.9.{i}", [{"chash": "a" * 64, "position": 0}]) for i in range(1500)]
-        c.write_manifest_many(docs)
+        c.write_manifest_many(docs, collection=_COLLECTION)
         assert [len(p["docs"]) for p in posts] == [1000, 500]
 
     def test_failed_doc_ids_surface(self, monkeypatch) -> None:
@@ -69,7 +74,8 @@ class TestWriteManifestMany:
             lambda path, body: {"docs": 1, "rows": 1, "failed_doc_ids": ["1.9.7"]},
             raising=False,
         )
-        result = c.write_manifest_many([("1.9.7", [{"chash": "a" * 64, "position": 0}])])
+        result = c.write_manifest_many(
+            [("1.9.7", [{"chash": "a" * 64, "position": 0}])], collection=_COLLECTION)
         assert result["failed_doc_ids"] == ["1.9.7"]
 
     def test_failed_reasons_logged(self, monkeypatch) -> None:
@@ -95,7 +101,7 @@ class TestWriteManifestMany:
         )
         with structlog.testing.capture_logs() as logs:
             result = c.write_manifest_many(
-                [("1.9.8", [{"chash": "a" * 64, "position": 0}])]
+                [("1.9.8", [{"chash": "a" * 64, "position": 0}])], collection=_COLLECTION,
             )
         assert result["failed_doc_ids"] == ["1.9.8"]
         events = [l for l in logs if l["event"] == "manifest_write_many_doc_failed"]
@@ -114,14 +120,19 @@ class TestWriteManifestMany:
             raising=False,
         )
         assert c.write_manifest_many(
-            [("1.9.9", [{"chash": "a" * 64, "position": 0}])]
+            [("1.9.9", [{"chash": "a" * 64, "position": 0}])], collection=_COLLECTION,
         )["failed_doc_ids"] == ["1.9.9"]
 
     def test_no_chunks_no_sweep_body_unchanged(self, monkeypatch) -> None:
-        # Backward compatibility (design memo §5.1): an absent `chunks`
-        # field and sweep=False (the default) must be byte-for-byte the
-        # pre-wxjr6 request body — no `collection`, `chunks`, `sweep`, or
-        # `force_re_embed` keys at all.
+        # RDR-191 (Hal ruling 2026-08-12) superseded the old "byte-for-byte
+        # pre-wxjr6 body" backward-compat claim this docstring made: the
+        # engine no longer infers `collection` from chunk membership, so it
+        # now rides EVERY page's body unconditionally, chunks or not — that
+        # is the whole point of the fix (previously `collection` was sent
+        # only on the chunks-carrying page, which was itself the bug). An
+        # absent `chunks` field and sweep=False (the default) still omit
+        # `chunks`, `sweep`, and `force_re_embed` — only `collection` is now
+        # always present.
         c = _client()
         posts: list[dict] = []
         monkeypatch.setattr(
@@ -129,19 +140,28 @@ class TestWriteManifestMany:
             lambda path, body: posts.append(body) or {"docs": 1, "rows": 1, "failed_doc_ids": []},
             raising=False,
         )
-        c.write_manifest_many([("1.9.10", [{"chash": "a" * 64, "position": 0}])])
-        assert set(posts[0]) == {"docs"}
+        c.write_manifest_many(
+            [("1.9.10", [{"chash": "a" * 64, "position": 0}])], collection=_COLLECTION)
+        assert set(posts[0]) == {"docs", "collection"}
+        assert posts[0]["collection"] == _COLLECTION
 
 
 class TestWriteManifestManyCombined:
     """nexus-wxjr6: the client half of the kl2z6 combined write."""
 
     def test_chunks_requires_collection(self) -> None:
+        # RDR-191: collection is unconditionally required now (not only
+        # when chunks is provided), so the omission itself has become a
+        # TypeError at the Python call boundary (a required keyword-only
+        # arg with no default) rather than reaching this method's own
+        # ValueError. Passing an explicit blank collection still exercises
+        # the client-side refusal this test is pinning.
         c = _client()
         with pytest.raises(ValueError, match="collection.*required"):
             c.write_manifest_many(
                 [("1.9.11", [{"chash": "a" * 64, "position": 0}])],
                 chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
+                collection="",
             )
 
     def test_combined_wire_shape(self, monkeypatch) -> None:
@@ -201,7 +221,7 @@ class TestWriteManifestManyCombined:
             raising=False,
         )
         result = c.write_manifest_many(
-            [("1.9.14", [{"chash": "a" * 64, "position": 0}])],
+            [("1.9.14", [{"chash": "a" * 64, "position": 0}])], collection=_COLLECTION,
         )
         assert "chunks_written" not in result
 
@@ -218,6 +238,7 @@ class TestWriteManifestManyCombined:
         )
         result = c.write_manifest_many(
             [("1.9.15", [{"chash": "a" * 64, "position": 0}])], sweep=True,
+            collection=_COLLECTION,
         )
         assert result["swept"] == 2
         assert result["sweep_skipped"] == 1
@@ -284,7 +305,8 @@ class TestWriteManifestManyCombinedTimeout:
 
         monkeypatch.setattr(c, "_post", _fake_post, raising=False)
 
-        c.write_manifest_many([("1.9.17", [{"chash": "a" * 64, "position": 0}])])
+        c.write_manifest_many(
+            [("1.9.17", [{"chash": "a" * 64, "position": 0}])], collection=_COLLECTION)
 
         assert len(calls) == 1
         assert "timeout" not in calls[0]
@@ -411,7 +433,8 @@ class TestCombinedWriteReadTimeoutNotRetried:
 
         monkeypatch.setattr(c, "_post", _fake_post, raising=False)
 
-        c.write_manifest_many([("1.9.24", [{"chash": "a" * 64, "position": 0}])])
+        c.write_manifest_many(
+            [("1.9.24", [{"chash": "a" * 64, "position": 0}])], collection=_COLLECTION)
 
         assert len(calls) == 1
         assert "retry_read_timeout" not in calls[0]
@@ -446,7 +469,8 @@ class _FakeCat:
     def get_manifests(self, doc_ids):
         return {}
 
-    def write_manifest_many(self, docs):  # type: ignore[no-redef]
+    def write_manifest_many(self, docs, complete=None, *, collection):  # type: ignore[no-redef]
+        assert collection, "write_manifest_many called with a blank collection"
         if self.many_404:
             err: Any = RuntimeError("HTTP 404")
             err.code = 404
@@ -454,7 +478,8 @@ class _FakeCat:
         self.many_calls.append(list(docs))
         return []
 
-    def atomic_manifest_replace(self, doc_id, chunks, **kw):
+    def atomic_manifest_replace(self, doc_id, chunks, *, collection, **kw):
+        assert collection, "atomic_manifest_replace called with a blank collection"
         self.replace_calls.append(doc_id)
 
     def resync_chunk_count_cache(self, doc_id):
@@ -472,14 +497,14 @@ def _by_doc(n_docs: int) -> dict:
 class TestManifestWriteLoopBatching:
     def test_multi_doc_uses_write_many_once(self) -> None:
         cat = _FakeCat()
-        _manifest_write_loop(cat, _by_doc(3), reader=cat)
+        _manifest_write_loop(cat, _by_doc(3), _COLLECTION, reader=cat)
         assert len(cat.many_calls) == 1
         assert len(cat.many_calls[0]) == 3
         assert cat.replace_calls == []
 
     def test_404_falls_back_to_per_doc_with_chunk_count_resync(self) -> None:
         cat = _FakeCat(many_404=True)
-        _manifest_write_loop(cat, _by_doc(2), reader=cat)
+        _manifest_write_loop(cat, _by_doc(2), _COLLECTION, reader=cat)
         assert sorted(cat.replace_calls) == ["1.9.0", "1.9.1"]
         # chunk_count parity (critique Critical): HTTP replace does not
         # sync documents.chunk_count — the fallback must resync per doc.
@@ -489,7 +514,7 @@ class TestManifestWriteLoopBatching:
         # critique Critical: len(by_doc)==1 must STILL use write_many —
         # it is the only HTTP path that folds chunk_count in.
         cat = _FakeCat()
-        _manifest_write_loop(cat, _by_doc(1), reader=cat)
+        _manifest_write_loop(cat, _by_doc(1), _COLLECTION, reader=cat)
         assert len(cat.many_calls) == 1
         assert [d for d, _ in cat.many_calls[0]] == ["1.9.0"]
         assert cat.replace_calls == []
@@ -499,13 +524,13 @@ class TestManifestWriteLoopBatching:
         # through to the append path, not vanish in an early return.
         cat = _FakeCat()
         cat.append_calls: list[str] = []
-        cat.append_manifest_chunks = lambda doc_id, chunks: cat.append_calls.append(doc_id)
+        cat.append_manifest_chunks = lambda doc_id, chunks, collection: cat.append_calls.append(doc_id)
         by_doc = {
             f"1.9.{d}": [(i, {"chunk_text_hash": "a" * 64, "chunk_index": 3 + i})
                          for i in range(2)]
             for d in range(2)
         }
-        _manifest_write_loop(cat, by_doc, reader=cat)
+        _manifest_write_loop(cat, by_doc, _COLLECTION, reader=cat)
         assert cat.many_calls == []
         assert sorted(cat.append_calls) == ["1.9.0", "1.9.1"]
         assert cat.replace_calls == []
@@ -516,7 +541,7 @@ class TestManifestWriteLoopBatching:
         # route to the per-doc append path, never write_many.
         cat = _FakeCat()
         cat.append_calls: list[str] = []
-        cat.append_manifest_chunks = lambda doc_id, chunks: cat.append_calls.append(doc_id)
+        cat.append_manifest_chunks = lambda doc_id, chunks, collection: cat.append_calls.append(doc_id)
         cat.resync_chunk_count_cache = lambda doc_id: None
         by_doc = _by_doc(2)  # both have position 0 via chunk_index 0
         # make one doc a continuation slice (positions 5,6)
@@ -524,7 +549,7 @@ class TestManifestWriteLoopBatching:
             (i, {"chunk_text_hash": "f" * 64, "chunk_index": 5 + i})
             for i in range(2)
         ]
-        _manifest_write_loop(cat, by_doc, reader=cat)
+        _manifest_write_loop(cat, by_doc, _COLLECTION, reader=cat)
         assert len(cat.many_calls) == 1
         assert [d for d, _ in cat.many_calls[0]] == ["1.9.0"]
         assert cat.replace_calls == []  # continuation NOT replaced
@@ -532,7 +557,7 @@ class TestManifestWriteLoopBatching:
 
     def test_writer_without_capability_uses_per_doc(self) -> None:
         cat = _FakeCat(many=False)
-        _manifest_write_loop(cat, _by_doc(2), reader=cat)
+        _manifest_write_loop(cat, _by_doc(2), _COLLECTION, reader=cat)
         assert sorted(cat.replace_calls) == ["1.9.0", "1.9.1"]
 
 
@@ -548,7 +573,8 @@ class _FlakyThenOkCat:
         self.resync_calls: list[str] = []
         self.write_manifest_many = None  # type: ignore[assignment]
 
-    def atomic_manifest_replace(self, doc_id, chunks, **kw):
+    def atomic_manifest_replace(self, doc_id, chunks, *, collection, **kw):
+        assert collection, "atomic_manifest_replace called with a blank collection"
         self.calls += 1
         if self.calls <= self.fail_times:
             raise httpx.ConnectError("connection refused")
@@ -566,7 +592,7 @@ class _AlwaysDownCat:
     def __init__(self) -> None:
         self.write_manifest_many = None  # type: ignore[assignment]
 
-    def atomic_manifest_replace(self, doc_id, chunks, **kw):
+    def atomic_manifest_replace(self, doc_id, chunks, *, collection, **kw):
         raise ValueError("FK violation: doc_id not found")
 
     def resync_chunk_count_cache(self, doc_id):
@@ -581,10 +607,11 @@ class _AlwaysDownManyCat:
     def __init__(self) -> None:
         self.replace_calls: list[str] = []
 
-    def write_manifest_many(self, docs):
+    def write_manifest_many(self, docs, complete=None, *, collection):
         raise httpx.ConnectError("connection refused")
 
-    def atomic_manifest_replace(self, doc_id, chunks, **kw):
+    def atomic_manifest_replace(self, doc_id, chunks, *, collection, **kw):
+        assert collection, "atomic_manifest_replace called with a blank collection"
         self.replace_calls.append(doc_id)
 
     def resync_chunk_count_cache(self, doc_id):
@@ -604,7 +631,7 @@ class TestManifestWriteFailureSurfacing:
     def test_transient_connect_error_recovers_without_recording_failure(self) -> None:
         cat = _FlakyThenOkCat(fail_times=2)
         with patch("nexus.retry.time.sleep"):
-            _manifest_write_loop(cat, _by_doc(1), reader=cat)
+            _manifest_write_loop(cat, _by_doc(1), _COLLECTION, reader=cat)
         assert cat.replace_calls == ["1.9.0"]
         assert get_manifest_write_failures() == []
 
@@ -612,13 +639,13 @@ class TestManifestWriteFailureSurfacing:
         cat = _AlwaysDownCat()
         with patch("nexus.retry.time.sleep"):
             # Contract: must never raise out of the hook.
-            _manifest_write_loop(cat, _by_doc(2), reader=cat)
+            _manifest_write_loop(cat, _by_doc(2), _COLLECTION, reader=cat)
         assert sorted(get_manifest_write_failures()) == ["1.9.0", "1.9.1"]
 
     def test_persistent_write_many_failure_is_swallowed_and_recorded(self) -> None:
         cat = _AlwaysDownManyCat()
         with patch("nexus.retry.time.sleep"):
-            _manifest_write_loop(cat, _by_doc(2), reader=cat)
+            _manifest_write_loop(cat, _by_doc(2), _COLLECTION, reader=cat)
         assert sorted(get_manifest_write_failures()) == ["1.9.0", "1.9.1"]
         # Not re-attempted per-doc after the batch path exhausted retries.
         assert cat.replace_calls == []
@@ -626,7 +653,7 @@ class TestManifestWriteFailureSurfacing:
     def test_reset_clears_prior_run_failures(self) -> None:
         cat = _AlwaysDownCat()
         with patch("nexus.retry.time.sleep"):
-            _manifest_write_loop(cat, _by_doc(1), reader=cat)
+            _manifest_write_loop(cat, _by_doc(1), _COLLECTION, reader=cat)
         assert get_manifest_write_failures() == ["1.9.0"]
         reset_manifest_write_failures()
         assert get_manifest_write_failures() == []
@@ -775,7 +802,8 @@ class _FakeManyReaderWriter:
         return list(self._notes)
 
     # -- the batch write itself --
-    def write_manifest_many(self, docs, complete=None):
+    def write_manifest_many(self, docs, complete=None, *, collection):
+        assert collection, "write_manifest_many called with a blank collection"
         for doc_id, chunks in docs:
             if doc_id not in self._failed_doc_ids:
                 self.replaced_many.append((doc_id, chunks))

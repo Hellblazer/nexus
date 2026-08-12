@@ -1556,10 +1556,10 @@ def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
 
     cat.write_manifest(tumblers["live.py"], [
         {"chash": live_chash, "position": 0},
-    ])
+    ], collection=coll_name)
     cat.write_manifest(tumblers["gone.py"], [
         {"chash": orphan_chash, "position": 0},
-    ])
+    ], collection=coll_name)
 
     # Real ChromaDB EphemeralClient with both chunks present.
     chroma = make_vector_test_client()

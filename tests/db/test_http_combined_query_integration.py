@@ -441,6 +441,7 @@ def test_metadata_scoped_visible_after_public_api_write(
     cat_client.write_manifest(
         str(t),
         [{"position": 0, "chash": chash, "line_start": 1, "line_end": 10}],
+        collection=_COLLECTION,
     )
 
     query = "cqtripwire test1 alpha combined query visibility"
@@ -527,7 +528,7 @@ def test_manifest_rewrite_keeps_combined_query_visibility(
     ]
 
     # First write_manifest pass.
-    cat_client.write_manifest(str(t), manifest_rows)
+    cat_client.write_manifest(str(t), manifest_rows, collection=_COLLECTION)
 
     query = "cqtripwire test2 first pass manifest rewrite regression"
 
@@ -546,7 +547,7 @@ def test_manifest_rewrite_keeps_combined_query_visibility(
     # SECOND write_manifest pass — same doc, same rows. Same shared REPLACE
     # body as the first call today; must keep stamping the collection even
     # if the two calls ever diverge.
-    cat_client.write_manifest(str(t), manifest_rows)
+    cat_client.write_manifest(str(t), manifest_rows, collection=_COLLECTION)
 
     rows_after_second = vec_client.search_metadata_scoped(query, [_COLLECTION])
     matching_second = [r for r in rows_after_second if r["id"] == str(t)]
@@ -612,10 +613,12 @@ def test_graph_hop_visible_through_link(cat_client, vec_client) -> None:
     cat_client.write_manifest(
         str(doc_a),
         [{"position": 0, "chash": chash_a, "line_start": 1, "line_end": 10}],
+        collection=_COLLECTION,
     )
     cat_client.write_manifest(
         str(doc_b),
         [{"position": 0, "chash": chash_b, "line_start": 1, "line_end": 10}],
+        collection=_COLLECTION,
     )
 
     created = cat_client.link(
@@ -707,7 +710,7 @@ def test_append_and_import_seams_stamp_collection(cat_client, vec_client) -> Non
     ]
     # First append = INSERT branch: must stamp collection or the doc is
     # combined-query-invisible (the x6kdz defect class on this seam).
-    cat_client.append_manifest_chunks(str(doc_app), append_rows)
+    cat_client.append_manifest_chunks(str(doc_app), append_rows, collection=_COLLECTION)
 
     query_app = "cqtripwire test4 append seam manifest on-conflict writer"
     rows = vec_client.search_metadata_scoped(query_app, [_COLLECTION])
@@ -724,7 +727,7 @@ def test_append_and_import_seams_stamp_collection(cat_client, vec_client) -> Non
 
     # Re-append the same rows = ON CONFLICT DO UPDATE branch. Visibility
     # must survive (see docstring for what this is and isn't sensitive to).
-    cat_client.append_manifest_chunks(str(doc_app), append_rows)
+    cat_client.append_manifest_chunks(str(doc_app), append_rows, collection=_COLLECTION)
     rows2 = vec_client.search_metadata_scoped(query_app, [_COLLECTION])
     assert any(r["id"] == str(doc_app) for r in rows2), (
         f"doc {doc_app!s} vanished from combined-query results after a "

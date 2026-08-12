@@ -401,7 +401,8 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         manifest_error = ""
         if catalog_doc_id:
             try:
-                store_put_manifest_direct(catalog_doc_id, manifest_metadatas)
+                store_put_manifest_direct(
+                    catalog_doc_id, manifest_metadatas, collection=collection)
             except Exception as manifest_exc:  # noqa: BLE001 — captured for the explicit ClickException below
                 manifest_error = str(manifest_exc)
                 # nexus-cotmr: the vector put already succeeded (t3.put

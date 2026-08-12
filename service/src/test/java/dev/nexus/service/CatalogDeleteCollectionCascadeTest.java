@@ -229,8 +229,11 @@ class CatalogDeleteCollectionCascadeTest {
         // catalog_documents + manifest
         st.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
             + "VALUES ('" + tenant + "', 'dc-doc-1', 'Doc 1', '" + COLL + "')");
-        st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) "
-            + "VALUES ('" + tenant + "', 'dc-doc-1', 0, '" + chash("dcman1") + "')");
+        // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
+        // (catalog-025-collection-not-null.xml) — the document above is
+        // already registered under COLL, so stamp the manifest row the same.
+        st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+            + "VALUES ('" + tenant + "', 'dc-doc-1', 0, '" + chash("dcman1") + "', '" + COLL + "')");
         // chunks: 2/1/1
         st.execute(chunkInsert(tenant, "chunks_384", 384, "dc384a"));
         st.execute(chunkInsert(tenant, "chunks_384", 384, "dc384b"));

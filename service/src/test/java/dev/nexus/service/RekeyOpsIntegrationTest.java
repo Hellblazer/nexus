@@ -1079,11 +1079,21 @@ class RekeyOpsIntegrationTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES ('"
                 + tenant + "', 'ghost-doc', 'ghost') ON CONFLICT DO NOTHING");
+            // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
+            // (catalog-025-collection-not-null.xml). The dangling/orphan
+            // nature this row exists to prove is about the CHASH — "ghost"
+            // above and below names a chash matched by no row in ANY
+            // chunks_<dim> table, by construction — never about the
+            // collection value, which is orthogonal. col384 is an arbitrary
+            // real, already-registered collection (chosen for no reason
+            // other than existing); the dangling detection correlates on
+            // chash alone, so this does not touch the coverage.
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.catalog_document_chunks "
-                    + "(tenant_id, doc_id, position, chash) VALUES (?, 'ghost-doc', 0, ?)")) {
+                    + "(tenant_id, doc_id, position, chash, collection) VALUES (?, 'ghost-doc', 0, ?, ?)")) {
                 ps.setString(1, tenant);
                 ps.setBytes(2, ghost);
+                ps.setString(3, col384);
                 ps.executeUpdate();
             }
         }

@@ -117,18 +117,27 @@ class CatalogHandlerManifestEnvelopeTest {
     }
 
     private String registerDoc(String ownerPrefix, String title, String sourceUri) throws Exception {
+        // nexus-7nrvr: real collection — ghost-ness was incidental (both
+        // callers of this helper are about envelope count-reconciliation,
+        // not about the ghost/no-collection path).
         var resp = post("/v1/catalog/doc/register",
             mapper.writeValueAsString(Map.of(
                 "owner_prefix", ownerPrefix, "title", title,
-                "content_type", "prose", "source_uri", sourceUri)));
+                "content_type", "prose", "source_uri", sourceUri,
+                "physical_collection", "knowledge__" + ownerPrefix.replace('.', '-') + "__v1")));
         assertThat(resp.statusCode()).as("doc registration must succeed: " + resp.body()).isEqualTo(200);
         return (String) mapper.readValue(resp.body(), MAP_T).get("tumbler");
     }
 
-    private void writeManifestRow(String docId, String chash) throws Exception {
+    private void writeManifestRow(String docId, String collection, String chash) throws Exception {
+        // RDR-191 (Hal ruling 2026-08-12): 'collection' is required, caller-
+        // supplied, and stamped verbatim -- pass the SAME value the owning
+        // doc was registered under (registerDoc's physical_collection), no
+        // inference happens engine-side any more.
         var resp = post("/v1/catalog/manifest/write",
             mapper.writeValueAsString(Map.of(
                 "doc_id", docId,
+                "collection", collection,
                 "rows", List.of(Map.of("position", 0, "chash", chash)))));
         assertThat(resp.statusCode()).as("manifest write must succeed: " + resp.body()).isEqualTo(200);
     }
@@ -141,8 +150,8 @@ class CatalogHandlerManifestEnvelopeTest {
         var c2 = ch("ocf52-doc2-chunk");
         var t1 = registerDoc("ocf52.owner", "ocf52 doc 1", "file:///ocf52/doc1.md");
         var t2 = registerDoc("ocf52.owner", "ocf52 doc 2", "file:///ocf52/doc2.md");
-        writeManifestRow(t1, c1);
-        writeManifestRow(t2, c2);
+        writeManifestRow(t1, "knowledge__ocf52-owner__v1", c1);
+        writeManifestRow(t2, "knowledge__ocf52-owner__v1", c2);
 
         var resp = post("/v1/catalog/manifest/docs_for_chashes",
             mapper.writeValueAsString(Map.of("chashes", List.of(c1, c2))));
@@ -190,8 +199,8 @@ class CatalogHandlerManifestEnvelopeTest {
     void getMany_multiDoc_countMatchesManifestsSize() throws Exception {
         var t1 = registerDoc("b9puj.owner", "b9puj doc 1", "file:///b9puj/doc1.md");
         var t2 = registerDoc("b9puj.owner", "b9puj doc 2", "file:///b9puj/doc2.md");
-        writeManifestRow(t1, ch("b9puj-doc1-chunk"));
-        writeManifestRow(t2, ch("b9puj-doc2-chunk"));
+        writeManifestRow(t1, "knowledge__b9puj-owner__v1", ch("b9puj-doc1-chunk"));
+        writeManifestRow(t2, "knowledge__b9puj-owner__v1", ch("b9puj-doc2-chunk"));
 
         var resp = post("/v1/catalog/manifest/get_many",
             mapper.writeValueAsString(Map.of("doc_ids", List.of(t1, t2, "b9puj.owner.999999"))));

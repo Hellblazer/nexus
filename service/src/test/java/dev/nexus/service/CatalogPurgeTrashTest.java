@@ -176,12 +176,16 @@ class CatalogPurgeTrashTest {
     }
 
     private static void insertManifestRow(Connection su, String docId, String chashHex) throws Exception {
+        // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
+        // (catalog-025-collection-not-null.xml) — every doc in this fixture
+        // is registered under COLLECTION, so stamp the manifest row the same.
         try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) "
-                + "VALUES (?, ?, 0, decode(?, 'hex'))")) {
+                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+                + "VALUES (?, ?, 0, decode(?, 'hex'), ?)")) {
             ps.setString(1, TENANT);
             ps.setString(2, docId);
             ps.setString(3, chashHex);
+            ps.setString(4, COLLECTION);
             ps.execute();
         }
     }

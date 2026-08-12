@@ -234,16 +234,16 @@ class CatalogWriter(Protocol):
     def set_owner_head_hash(self, owner, head_hash) -> object:  # canonical
         ...
 
-    def write_manifest(self, doc_id, chunks) -> object:  # canonical
+    def write_manifest(self, doc_id, chunks, *, collection) -> object:  # canonical (RDR-191: collection now REQUIRED, 2026-08-12)
         ...
 
-    def append_manifest_chunks(self, doc_id, chunks) -> object:  # canonical
+    def append_manifest_chunks(self, doc_id, chunks, *, collection) -> object:  # canonical (RDR-191: collection now REQUIRED, 2026-08-12)
         ...
 
-    def atomic_manifest_replace(self, doc_id, chunks) -> object:  # canonical
+    def atomic_manifest_replace(self, doc_id, chunks, *, collection, new_collection=..., new_chunk_count=...) -> object:  # canonical (RDR-191: collection now REQUIRED, 2026-08-12)
         ...
 
-    def write_manifest_many(self, docs, complete=..., *, sweep=..., chunks=..., collection=..., force_re_embed=...) -> object:  # canonical (nexus-u2kwq batch write; nexus-67qsd/jk88j whitelisted 2026-08-08; nexus-wxjr6 combined-write kwargs 2026-08-09)
+    def write_manifest_many(self, docs, complete=..., *, sweep=..., chunks=..., collection, force_re_embed=...) -> object:  # canonical (nexus-u2kwq batch write; nexus-67qsd/jk88j whitelisted 2026-08-08; nexus-wxjr6 combined-write kwargs 2026-08-09; RDR-191: collection now REQUIRED, 2026-08-12)
         ...
 
     def resync_chunk_count_cache(self, doc_id) -> object:  # canonical

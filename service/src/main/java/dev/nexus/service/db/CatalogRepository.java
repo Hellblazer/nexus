@@ -3164,9 +3164,10 @@ public final class CatalogRepository {
      *
      * <p>Applies to {@link #upsertLink} — the interactive/auto-linker write
      * path — and NOT to the {@code import*} family, which legitimately writes
-     * edges for documents whose live state the ETL leg does not control (same
-     * carve-out {@code physicalCollectionOf} already documents for the manifest
-     * write path). Callers that genuinely want an unvalidated edge pass
+     * edges for documents whose live state the ETL leg does not control (the
+     * same ETL carve-out the manifest write path grants its own {@code
+     * import*} methods — {@link #importChunksBatch}, {@code doImportChunk}).
+     * Callers that genuinely want an unvalidated edge pass
      * {@code allow_dangling: true}, the parity of the local {@code link}'s own
      * {@code allow_dangling} flag.
      */
@@ -3482,10 +3483,30 @@ public final class CatalogRepository {
     // DOCUMENT CHUNKS MANIFEST
     // ══════════════════════════════════════════════════════════════════════════
 
-    /** Replace manifest for docId with the provided rows (atomic delete + insert). */
-    public void writeManifest(String tenant, String docId, List<Map<String, Object>> rows) {
+    /**
+     * RDR-191 (Hal ruling 2026-08-12): every manifest writer below requires
+     * an explicit, caller-supplied {@code collection} — no default, no
+     * inference, no silent omission. Shared guard so the refusal message is
+     * identical across every entry point.
+     */
+    private static void requireNonBlank(String value, String fieldName) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException("'" + fieldName + "' is required and must be non-blank");
+        }
+    }
+
+    /**
+     * Replace manifest for docId with the provided rows (atomic delete +
+     * insert), stamping {@code collection} on every row.
+     *
+     * @param collection caller-supplied collection (RDR-191, Hal ruling
+     *                   2026-08-12) — required, non-blank. The engine
+     *                   stamps it verbatim; it never infers one.
+     */
+    public void writeManifest(String tenant, String docId, String collection, List<Map<String, Object>> rows) {
+        requireNonBlank(collection, "collection");
         tenantScope.withTenant(tenant, ctx -> {
-            writeManifestRows(ctx, tenant, docId, rows);
+            writeManifestRows(ctx, tenant, docId, collection, rows);
             return null;
         });
     }
@@ -3500,26 +3521,38 @@ public final class CatalogRepository {
      * count, so the single-doc REPLACE left a stale count behind).
      */
     /**
-     * nexus-x6kdz: the doc's physical_collection, stamped onto every manifest
-     * row AT WRITE TIME. The combined-query functions (catalog-006/-008/-012)
-     * join {@code m.collection = c.collection}; before this stamp NO writer
-     * populated the column — only the migration-leg {@code manifest_backfill()}
-     * ever did, and the REPLACE writers wiped it again on re-index, leaving
-     * every post-migration manifest row invisible to the combined queries
-     * (silent-empty, found by the 6.5.0 live shakeout). Returns null when the
-     * doc has no physical_collection (ghost/sourceless docs) — those rows stay
-     * NULL, same as the backfill's own skip semantics.
+     * RDR-191 (Hal ruling 2026-08-12, nexus-zqlmo/nexus-71gw2 final form):
+     * writers SEND the collection; the engine STAMPS it verbatim, NEVER
+     * infers it. {@code catalog_document_chunks.collection} is NOT NULL
+     * with no sentinel and no DEFAULT (catalog-025-collection-not-null.xml).
+     * This closes the whole prior defect class in one stroke — nexus-s13u0
+     * (a write against an unregistered {@code doc_id} silently succeeding),
+     * nexus-9kj5j ({@code chunk_count} desync from a per-row SKIP), and
+     * nexus-c30ew (a stamped-but-unverified collection quarantining a
+     * still-referenced chunk) were all artifacts of the engine trying to
+     * GUESS a collection it was never told. There is nothing left to guess:
+     * every manifest writer below takes an explicit, required {@code
+     * collection} parameter and stamps it on every row, uniformly.
+     *
+     * <p>The ONE per-document fact still worth checking before writing is
+     * existence: a write against a {@code doc_id} with no {@code
+     * catalog_documents} row at all must still fail loud, exactly as the
+     * pre-catalog-025 {@code fk-001} FK violation did — propagated as
+     * {@link DocumentNotFoundException}, caught by {@code writeManifestMany}'s
+     * per-doc handler (nexus-fhhwf) and recorded in {@code failed_doc_ids}
+     * for its callers, or thrown directly out of the single-doc writers. A
+     * GHOST document (a real row with no {@code physical_collection}) is no
+     * longer a special case at all — it is registered, so it exists, so its
+     * rows are stamped with the caller-supplied collection exactly like any
+     * other document's.
      *
      * <p>nexus-23wlw: DELIBERATELY NOT tombstone-filtered. Every other read
      * gained {@code deleted_at IS NULL} because a tombstone must be invisible
      * to readers; this is not a reader. Its only callers are the manifest
      * WRITE paths ({@code writeManifestRows}, {@code appendManifestChunks},
-     * and the two import-chunk paths), where filtering would silently stamp
-     * NULL onto rows being written for a tombstoned doc — re-introducing the
-     * exact silent-empty class the nexus-x6kdz stamp above exists to fix, and
-     * doing it on the ETL/import leg, which legitimately writes manifests for
-     * documents whose live state it does not control. If a future caller uses
-     * this as a read, filter it there rather than here.
+     * and the two import-chunk paths), which legitimately write manifests
+     * for documents whose live state an ETL/import leg does not control. If
+     * a future caller uses this as a read, filter it there rather than here.
      *
      * <p>nexus-eg5gx: this is NOT "the ONE unfiltered read in this class" —
      * that claim went stale the moment other deliberate exemptions were
@@ -3527,16 +3560,28 @@ public final class CatalogRepository {
      * manifestRowCount}, {@code renameCollectionTxn}). The authoritative,
      * exhaustive list is {@link TombstoneFilterGateTest#TOMBSTONE_EXEMPT} —
      * consult that table, not a count claimed in any one method's javadoc.
+     *
+     * @throws DocumentNotFoundException {@code docId} has no {@code
+     *         catalog_documents} row.
      */
     // TOMBSTONE-EXEMPT (nexus-mqd6t): manifest WRITE-path helper, not a
-    // reader -- see the javadoc above. See TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
-    private static String physicalCollectionOf(DSLContext ctx, String tenant, String docId) {
-        String pc = ctx.select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-                       .from(CATALOG_DOCUMENTS)
-                       .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
-                       .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
-                       .fetchOne(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION);
-        return (pc == null || pc.isEmpty()) ? null : pc;
+    // reader -- see the javadoc above. NOT listed in
+    // TombstoneFilterGateTest.TOMBSTONE_EXEMPT (nexus-j862l, RDR-191 GATE-2
+    // follow-up): this EXISTS check reads via ctx.fetchExists(ctx.selectOne()
+    // ...), which is structurally outside that gate's scan (keyed off
+    // .select(/.selectFrom(/.selectCount(/.selectDistinct(, never
+    // .selectOne() -- same category as strandedChunkCount/hasLiveManifest
+    // below and PgVectorRepository.liveChunksCondition). The exemption
+    // rationale itself is unchanged and still applies; only the mechanism
+    // that would need to record it does not reach this shape.
+    private static void requireDocumentExists(DSLContext ctx, String tenant, String docId) {
+        boolean exists = ctx.fetchExists(ctx.selectOne().from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
+            .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId)));
+        if (!exists) {
+            throw new DocumentNotFoundException(docId,
+                "manifest write refused: document not registered: " + docId);
+        }
     }
 
     /**
@@ -3576,19 +3621,60 @@ public final class CatalogRepository {
      * manifest ROW writers ({@link #writeManifestRows}, {@link
      * #appendManifestChunks}, {@link #purgeManifest}) when their guarded
      * CATALOG_DOCUMENTS update affects 0 rows BECAUSE the target is
-     * tombstoned — distinct from "tumbler unknown", which stays a silent 0/no-op
-     * (the long-standing contract for a doc_id that was never registered).
-     * These three are void or return an UNRELATED count (deleted
-     * catalog_document_chunks rows, not the guarded documents-row update), so a
-     * silent no-op here would misreport success on a data-bearing write; a
-     * per-int-return-value writer (updateDocumentCollection,
-     * updateDocumentsCollectionBatch, setAlias) does not need this — the
-     * caller already sees the honest 0.
+     * tombstoned — distinct from "tumbler unknown". These three are void or
+     * return an UNRELATED count (deleted catalog_document_chunks rows, not
+     * the guarded documents-row update), so a silent no-op here would
+     * misreport success on a data-bearing write; a per-int-return-value
+     * writer (updateDocumentCollection, updateDocumentsCollectionBatch,
+     * setAlias) does not need this — the caller already sees the honest 0.
+     *
+     * <p>"Tumbler unknown" itself is no longer a single, universal contract
+     * across these three (RDR-191 nexus-s13u0). {@link #purgeManifest} does
+     * not take a collection at all and still stays a silent 0/no-op for a
+     * doc_id that was never registered. {@link #writeManifestRows} and
+     * {@link #appendManifestChunks} (and the two import-chunk paths) take
+     * the caller-supplied {@code collection} directly — no resolution — but
+     * still call {@link #requireDocumentExists}, which throws {@link
+     * DocumentNotFoundException} — not this class — for that same case: the
+     * NOT NULL {@code collection} column left no null value to silently
+     * write, so a nonexistent doc_id must fail the same way it did before
+     * catalog-025 (an fk-001 FK violation), not the tombstone shape.
      */
     public static final class TombstonedDocumentException extends IllegalStateException {
         private static final long serialVersionUID = 1L;
 
         TombstonedDocumentException(String docId, String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Refused manifest write against a doc_id with no {@code
+     * catalog_documents} row at all (RDR-191 nexus-s13u0). Thrown by {@link
+     * #requireDocumentExists} — the manifest writers' shared existence
+     * check, run after {@link #requireNonBlank} validates the caller-
+     * supplied {@code collection} — distinct from a GHOST document (which
+     * has a row, just no {@code physical_collection}; a ghost document's
+     * manifest rows are stamped with whatever {@code collection} the
+     * caller passes, unconditionally, exactly like any other document's).
+     * Before catalog-025-collection-not-null.xml made {@code
+     * catalog_document_chunks.collection} NOT NULL, this same case
+     * was caught by PostgreSQL's own fk-001 FK on {@code (tenant_id,
+     * doc_id)} when the INSERT ran with the caller-supplied {@code
+     * collection}; {@code writeManifestMany}'s per-doc
+     * {@code catch} (nexus-fhhwf) classified that SQLException and recorded
+     * the doc_id in {@code failed_doc_ids}. Throwing this explicitly, before
+     * the INSERT, preserves that same failure shape and the same per-doc
+     * isolation — it is caught nowhere in this class and propagates to
+     * every caller (the {@code writeManifestMany} loop, or directly out of
+     * {@code writeManifest}/{@code appendManifestChunks}/{@code
+     * importChunk}/{@code importChunksBatch} for their single-doc callers)
+     * exactly as that FK violation used to.
+     */
+    public static final class DocumentNotFoundException extends IllegalStateException {
+        private static final long serialVersionUID = 1L;
+
+        DocumentNotFoundException(String docId, String message) {
             super(message);
         }
     }
@@ -3749,11 +3835,14 @@ public final class CatalogRepository {
      * {@link #SWEEP_GATE_LOCK_TIMEOUT_MS} / {@link #SWEEP_STATEMENT_TIMEOUT_MS}
      * on the sweeper side.
      *
-     * <p>A {@code null} collection (ghost/sourceless docs, see {@link
-     * #physicalCollectionOf}) takes NO gate: those manifest rows carry a
-     * NULL collection, and both {@code manifest_verify} and the sweep
-     * exclude NULL-collection rows entirely, so they never participate in
-     * the invariant this gate protects.
+     * <p>Historical note: a {@code null} collection (ghost/sourceless docs)
+     * used to take NO gate, back when the manifest writers resolved a
+     * collection themselves and could resolve to nothing. RDR-191 (Hal
+     * ruling 2026-08-12) removed that resolution entirely — every public
+     * writer now requires a caller-supplied, non-blank {@code collection}
+     * ({@link #requireNonBlank}) before it ever reaches this gate, so a
+     * {@code null} collection can no longer occur here in practice; the
+     * gate itself does not special-case it.
      *
      * <p>Typed jOOQ {@code function(...)} composition (house rule —
      * {@code RawSqlGateTest}), mirroring {@code TaxonomyRepository.
@@ -3816,7 +3905,7 @@ public final class CatalogRepository {
      * helper-indirection refactor.
      *
      * <p>Every caller MUST already have taken {@link #acquireSweepGateShared}
-     * for {@code coll} (when non-null) BEFORE calling this — see the table
+     * for {@code coll} BEFORE calling this — see the table
      * on that method's javadoc. Deliberately NOT taken here: the ordering
      * rule ("gate, then {@link #acquireIndexRunLock}") needs to stay visible
      * at each call site, not buried inside a helper that runs after both
@@ -3841,6 +3930,17 @@ public final class CatalogRepository {
     private static void insertManifestChunkRows(DSLContext ctx, String tenant, String docId, String coll,
                                                  List<Map<String, Object>> rows, ManifestInsertMode mode) {
         if (rows == null || rows.isEmpty()) return;
+        // RDR-191 (Hal ruling 2026-08-12): `coll` is the CALLER-SUPPLIED
+        // collection -- validated non-blank at the HTTP boundary
+        // (CatalogHandler) and re-checked by every public writer above this
+        // method. Reaching here blank/null is a programming error in THIS
+        // class, not a runtime condition to guess past or silently skip --
+        // no more per-row SKIP (the class of defect nexus-s13u0/nexus-9kj5j/
+        // nexus-c30ew all trace back to).
+        if (coll == null || coll.isBlank()) {
+            throw new IllegalArgumentException(
+                "insertManifestChunkRows: 'coll' must be non-blank (tenant=" + tenant + " doc_id=" + docId + ")");
+        }
         var insert = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                 CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                 CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
@@ -3855,16 +3955,12 @@ public final class CatalogRepository {
                 .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
                 .doUpdate()
                 .set(CHK_CHASH_HEX, EX_CHK_CHASH)
-                // nexus-o8dil.4 (RDR-191 F12c): plain EX_CHK_COLL DEMOTED an
-                // already-stamped collection to NULL whenever a later upsert
-                // for the SAME (doc, position) arrived from a source with no
-                // collection to offer (e.g. the doc has since become ghost/
-                // sourceless -- physicalCollectionOf returns null for those
-                // by design). Precedence: the incoming value wins when
-                // present, otherwise the row's EXISTING stamped value
-                // survives -- never overwrite a good value with NULL.
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                    DSL.coalesce(EX_CHK_COLL, CATALOG_DOCUMENT_CHUNKS.COLLECTION))
+                // RDR-191: `coll` (hence EX_CHK_COLL) is validated non-blank
+                // above for every row in every call -- a plain SET is safe,
+                // never a NULL-overwrite risk (the nexus-o8dil.4 hazard this
+                // used to guard against required a ghost-resolution path
+                // that could hand back NULL; that path no longer exists).
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, EX_CHK_COLL)
                 .execute();
             case UPSERT_IMPORT -> insert
                 .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
@@ -3875,35 +3971,33 @@ public final class CatalogRepository {
                 .set(CATALOG_DOCUMENT_CHUNKS.LINE_END, EX_CHK_LEN)
                 .set(CATALOG_DOCUMENT_CHUNKS.CHAR_START, EX_CHK_CST)
                 .set(CATALOG_DOCUMENT_CHUNKS.CHAR_END, EX_CHK_CEN)
-                // nexus-o8dil.4 (RDR-191 F12c): same fix, the import arm.
-                // A SEPARATE code path from UPSERT_APPEND above (its own SET
-                // clauses), so it carries its own COALESCE rather than
-                // inheriting the append arm's fix by assumption.
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                    DSL.coalesce(EX_CHK_COLL, CATALOG_DOCUMENT_CHUNKS.COLLECTION))
+                // RDR-191: same reasoning as the UPSERT_APPEND arm above.
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, EX_CHK_COLL)
                 .execute();
         }
     }
 
     private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
-                                          List<Map<String, Object>> rows) {
-        return writeManifestRows(ctx, tenant, docId, rows, null, null, null);
+                                          String collection, List<Map<String, Object>> rows) {
+        return writeManifestRows(ctx, tenant, docId, collection, rows, null, null);
     }
 
     /**
-     * nexus-kl2z6 increment 1 (design memo §0 transaction structure): same
-     * per-doc REPLACE as the 4-arg overload, with ONE addition — when {@code
-     * resolvedChunks} is non-null (the combined-write path,
-     * {@link #writeManifestMany(String, List, Map, boolean, String, Map)}),
-     * this doc's chunk VECTOR rows are upserted into {@code chunks_<dim>}
+     * Shared per-doc REPLACE body: delete every existing row for {@code
+     * docId}, then insert {@code rows}, ALL stamped with the caller-supplied
+     * {@code collection} (RDR-191, Hal ruling 2026-08-12 — writers send the
+     * collection, the engine stamps it verbatim, never infers it). When
+     * {@code resolvedChunks} is non-null (the combined-write path, {@link
+     * #writeManifestMany(String, List, String, Map, boolean, Map)}), this
+     * doc's chunk VECTOR rows are ALSO upserted into {@code chunks_<dim>}
      * INSIDE this SAME per-doc transaction, under the sweep gate SHARED
      * already held below, BEFORE the manifest DELETE+INSERT — so a chunk row
      * from this path can never be observed committed without the manifest
      * row that references it (and vice versa).
      *
-     * @param chunkCollection the combined-write request's top-level {@code
-     *        collection} (drives {@code chunks_<dim>} table dispatch) —
-     *        required and used only when {@code resolvedChunks != null}.
+     * @param collection required, non-blank — the ONE collection every row
+     *        of THIS call is stamped with. Also drives {@code chunks_<dim>}
+     *        table dispatch when {@code resolvedChunks != null}.
      * @param resolvedChunks  pre-embedded, pre-sanitized (chash -> content)
      *        tuples from THIS call's {@code chunks} payload, resolved by
      *        {@code CombinedWriteService} entirely OUTSIDE any transaction
@@ -3918,48 +4012,29 @@ public final class CatalogRepository {
      *        rows actually written for this doc (the {@code chunks_written}
      *        response echo's per-doc contribution). Untouched when {@code
      *        resolvedChunks} is null.
+     * @return {@code collection}, unchanged — kept as the return type so the
+     *         post-commit sweep step ({@link #runSweepTransaction},
+     *         {@link #writeManifestMany}) has the collection to sweep
+     *         dropped chashes from without threading a second parameter.
      */
     private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
-                                          List<Map<String, Object>> rows,
-                                          String chunkCollection,
+                                          String collection, List<Map<String, Object>> rows,
                                           Map<String, ResolvedChunk> resolvedChunks,
                                           int[] chunksWrittenOut) {
+        requireNonBlank(collection, "collection");
+        // Case-1 duty only (RDR-191): does docId exist at all? A ghost
+        // document (exists, no physical_collection) is no longer a special
+        // case -- its rows are stamped with `collection` exactly like any
+        // other document's.
+        requireDocumentExists(ctx, tenant, docId);
         // nexus-11gh6 rev 2 §2.2: the sweep gate's SHARED half is taken
         // BEFORE acquireIndexRunLock (table in acquireSweepGateShared's
         // javadoc) — future-proofing ordering, not load-bearing under the
         // CURRENT lock set (writers only ever hold the gate SHARED, and the
         // sweep is a wait-sink, so no deadlock is possible either order).
-        String coll = physicalCollectionOf(ctx, tenant, docId);
-        if (coll != null) {
-            acquireSweepGateShared(ctx, tenant, coll);
-        }
-        // nexus-n7umy (code-review-expert Critical, adjudicated 2026-08-09):
-        // the gate above protects `coll` — the DOC's own registered
-        // collection, which the pre-existing (pre-kl2z6) sweep mechanics for
-        // THIS doc's dropped-chash union guard actually needs. It is NOT
-        // necessarily the collection the NEW chunk-vector upsert below
-        // writes into (`chunkCollection`, the combined-write request's
-        // top-level `collection`): a doc can be a ghost with no
-        // physical_collection at all (`coll == null`, gate above SKIPPED
-        // entirely), or — in principle, nothing in this method enforces
-        // otherwise — registered under a DIFFERENT collection than the one
-        // this call's `chunks` are being written into. Either way, without
-        // this second acquire, the chunk-vector upsert below would proceed
-        // UNGATED on `chunkCollection`, and a concurrent sweep on
-        // `chunkCollection` could delete the chash between
-        // `upsertManifestChunkVectors`'s mustAlreadyExist SELECT and this
-        // transaction's commit — the exact kl2z6 hazard this whole feature
-        // exists to close, reopened by a collection-identity gap. The
-        // combined write's own atomicity guarantee (design memo §0) is
-        // stated per (tenant, collection); the collection that guarantee
-        // must hold for HERE is the one being written, so gate on it
-        // explicitly whenever it is not already covered by the acquisition
-        // above (redundant-but-harmless when coll == chunkCollection, the
-        // common case: pg_advisory_xact_lock_shared is reentrant per
-        // transaction for the same key).
-        if (resolvedChunks != null && chunkCollection != null && !chunkCollection.equals(coll)) {
-            acquireSweepGateShared(ctx, tenant, chunkCollection);
-        }
+        // ONE collection for the whole call now (RDR-191) -- ONE gate
+        // acquisition, not a per-row resolved set.
+        acquireSweepGateShared(ctx, tenant, collection);
         // nexus-5xn3k.2 (stacked-review item 1): the WRITE side of the
         // completeIndexRun/writeManifestRows advisory-lock pair — see
         // acquireIndexRunLock's javadoc. Acquired BEFORE the delete+insert below
@@ -3973,7 +4048,7 @@ public final class CatalogRepository {
         // reader can only ever observe both or neither, never one without
         // the other.
         if (resolvedChunks != null) {
-            int written = upsertManifestChunkVectors(ctx, tenant, chunkCollection, rows, resolvedChunks);
+            int written = upsertManifestChunkVectors(ctx, tenant, collection, rows, resolvedChunks);
             if (chunksWrittenOut != null) {
                 chunksWrittenOut[0] = written;
             }
@@ -3981,16 +4056,25 @@ public final class CatalogRepository {
         ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
         if (!rows.isEmpty()) {
             stampIndexedAt(ctx, tenant, docId);
-        }
-        // nexus-11gh6 §7d: routed through the single-homed insert helper —
-        // one row per call, preserving this method's pre-existing per-row
-        // execute() cadence (a PLAIN insert following a full DELETE above,
-        // so no ON CONFLICT is needed or applied).
-        for (var row : rows) {
-            insertManifestChunkRows(ctx, tenant, docId, coll, List.of(row), ManifestInsertMode.PLAIN);
+            // nexus-11gh6 §7d: routed through the single-homed insert helper.
+            // ONE multi-row PLAIN insert (not a per-row loop): PLAIN mode has
+            // no ON CONFLICT, so batching every row of ONE call into a single
+            // multi-row INSERT ... VALUES statement changes only round-trip
+            // count, never failure semantics (a genuine duplicate `position`
+            // within `rows` still violates the PK exactly as it would across
+            // separate per-row INSERTs). RDR-191: every row of `rows` is
+            // stamped with the SAME `collection` -- there is no longer a
+            // per-row resolution outcome to vary on, so there is nothing to
+            // skip.
+            insertManifestChunkRows(ctx, tenant, docId, collection, rows, ManifestInsertMode.PLAIN);
         }
         // nexus-b6enc F5: the manifest IS the count's source of truth — fold
         // it in the same transaction so no REPLACE can leave a stale count.
+        // nexus-9kj5j: re-derived via manifestRowCount() (an actual
+        // post-delete-post-insert COUNT(*) of THIS doc's manifest rows),
+        // NEVER the caller's `rows.size()` -- the same discipline
+        // appendManifestChunks (below) and StagingPromoteOps's
+        // chunk_count_resynced step already apply.
         // nexus-eldyi: guarded — a tombstoned doc_id must not have its
         // CATALOG_DOCUMENTS row mutated. FAIL LOUD (not the stampIndexedAt
         // silent-noop shape): this is a data-bearing manifest writer with a
@@ -4000,7 +4084,7 @@ public final class CatalogRepository {
         // throw rolls back the whole per-doc transaction, including the
         // delete+insert above — TenantScope.withTenant wraps this in one txn).
         int updated = ctx.update(CATALOG_DOCUMENTS)
-           .set(CATALOG_DOCUMENTS.CHUNK_COUNT, rows.size())
+           .set(CATALOG_DOCUMENTS.CHUNK_COUNT, manifestRowCount(ctx, tenant, docId))
            .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId)
                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
            .execute();
@@ -4008,7 +4092,7 @@ public final class CatalogRepository {
             throw new TombstonedDocumentException(docId,
                 "writeManifest refused: document is tombstoned: " + docId);
         }
-        return coll;
+        return collection;
     }
 
     /**
@@ -4138,10 +4222,15 @@ public final class CatalogRepository {
      * a no-op.
      *
      * @param docs each entry {@code {"doc_id": "...", "rows": [<manifest row>...]}}.
+     * @param collection required, non-blank (RDR-191, Hal ruling 2026-08-12) —
+     *        the ONE collection every doc's rows in THIS call are stamped
+     *        with. The caller already batches per collection (WIRE
+     *        CONTRACT: {@code /manifest/write_many}'s top-level {@code
+     *        collection} applies to every doc in the call).
      * @return {@code {docs: <int ok>, rows: <int total written>, failed_doc_ids: [...]}}.
      */
-    public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs) {
-        return writeManifestMany(tenant, docs, null);
+    public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs, String collection) {
+        return writeManifestMany(tenant, docs, collection, null);
     }
 
     /**
@@ -4151,7 +4240,7 @@ public final class CatalogRepository {
      * ({@code ChunkBatcher}, file-atomic, position 0 always present) so the
      * hot path stamps completion inside the transaction it already runs, no
      * extra round trip. Docs not present in {@code complete} (or when
-     * {@code complete} is null) behave exactly as the two-arg overload.
+     * {@code complete} is null) behave exactly as the three-arg overload.
      *
      * <p>A doc whose completion stamp is refused (fail-closed verify:
      * missing&gt;0 or referenced!=rows.size()) does NOT fail the doc's
@@ -4161,13 +4250,13 @@ public final class CatalogRepository {
      * {@code failed_doc_ids}.
      *
      * <p>{@code sweep} defaults to {@code false} — BACKWARD COMPATIBLE with
-     * every existing caller of this overload (see the 4-arg overload below).
+     * every existing caller of this overload (see the 5-arg overload below).
      *
      * @return {@code {docs, rows, failed_doc_ids, failed, complete_refused, complete_refused_count}}
      */
-    public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs,
+    public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs, String collection,
                                                   Map<String, String> complete) {
-        return writeManifestMany(tenant, docs, complete, false);
+        return writeManifestMany(tenant, docs, collection, complete, false);
     }
 
     /**
@@ -4214,9 +4303,9 @@ public final class CatalogRepository {
      * @return {@code {docs, rows, failed_doc_ids, failed, complete_refused,
      *         complete_refused_count, swept, sweep_skipped, sweep_detail}}
      */
-    public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs,
+    public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs, String collection,
                                                   Map<String, String> complete, boolean sweep) {
-        return writeManifestMany(tenant, docs, complete, sweep, null, null);
+        return writeManifestMany(tenant, docs, collection, complete, sweep, null);
     }
 
     /**
@@ -4225,7 +4314,7 @@ public final class CatalogRepository {
      * When {@code resolvedChunks} is non-null, each doc's chunk VECTOR rows
      * are upserted into {@code chunks_<dim>} INSIDE that doc's OWN per-doc
      * transaction (see {@link #writeManifestRows(DSLContext, String,
-     * String, List, String, Map, int[])}), BEFORE the manifest
+     * String, String, List, Map, int[])}), BEFORE the manifest
      * DELETE+INSERT, under the SAME sweep gate SHARED that transaction
      * already takes. A chunk row from this path can therefore never be
      * observed committed without the manifest row that references it (and
@@ -4239,16 +4328,19 @@ public final class CatalogRepository {
      * transaction opens. No embedding work ever runs inside a
      * {@code writeManifestMany} transaction.
      *
-     * <p>{@code null} for both {@code collection} and {@code
-     * resolvedChunks} is "no combined write" — BACKWARD COMPATIBLE,
-     * byte-for-byte the pre-kl2z6 behaviour (design memo §5.1): every other
-     * overload above delegates here with both null, and the response omits
-     * {@code chunks_written} entirely in that case (adding an always-present
-     * key, even zero-valued, would NOT be byte-for-byte identical).
+     * <p>RDR-191 (Hal ruling 2026-08-12): {@code collection} is REQUIRED,
+     * unconditionally — every OTHER overload above delegates here with the
+     * SAME caller-supplied value, non-combined-write callers included.
+     * {@code resolvedChunks} alone toggles the combined-write behaviour;
+     * {@code null} means "no combined write" (byte-for-byte the pre-kl2z6
+     * manifest-only path), and the response omits {@code chunks_written}
+     * entirely in that case (adding an always-present key, even
+     * zero-valued, would NOT be byte-for-byte identical).
      *
-     * @param collection      the combined-write request's top-level {@code
-     *        collection} (drives {@code chunks_<dim>} table dispatch).
-     *        Required (non-null) when {@code resolvedChunks} is non-null.
+     * @param collection      required, non-blank — the ONE collection every
+     *        row of every doc in THIS call is stamped with. Also drives
+     *        {@code chunks_<dim>} table dispatch when {@code resolvedChunks
+     *        != null}.
      * @param resolvedChunks  pre-resolved {@code chash -> ResolvedChunk}
      *        map from this call's {@code chunks} payload, or {@code null}
      *        for no combined write.
@@ -4257,9 +4349,10 @@ public final class CatalogRepository {
      *         plus {@code chunks_written} when {@code resolvedChunks !=
      *         null}.
      */
-    public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs,
+    public Map<String, Object> writeManifestMany(String tenant, List<Map<String, Object>> docs, String collection,
                                                   Map<String, String> complete, boolean sweep,
-                                                  String collection, Map<String, ResolvedChunk> resolvedChunks) {
+                                                  Map<String, ResolvedChunk> resolvedChunks) {
+        requireNonBlank(collection, "collection");
         int okDocs = 0;
         int totalRows = 0;
         int totalSwept = 0;
@@ -4285,7 +4378,6 @@ public final class CatalogRepository {
                 // runSweepTransaction). Effectively-final array cells — a
                 // local var cannot be assigned from within the lambda.
                 Map<String, Object>[] sweepOutcome = new Map[1];
-                String[] collHolder = new String[1];
                 Set<String>[] beforeHolder = new Set[1];
                 int[] chunksWrittenHolder = new int[1];
                 try {
@@ -4318,8 +4410,8 @@ public final class CatalogRepository {
                                   tenant, docId, () -> currentManifestChashes(ctx, tenant, docId), null)
                             : Set.of();
                         boolean beforeReadFailed = sweep && beforeRead == null;
-                        collHolder[0] = writeManifestRows(ctx, tenant, docId, rows,
-                                collection, resolvedChunks, chunksWrittenHolder);
+                        writeManifestRows(ctx, tenant, docId, collection, rows,
+                                resolvedChunks, chunksWrittenHolder);
                         if (beforeReadFailed) {
                             // Nothing to compute — the before-read itself is what
                             // failed, so `dropped` was never determined. Reported
@@ -4359,8 +4451,8 @@ public final class CatalogRepository {
                     // no longer contribute a "swept" count to the response.
                     if (sweep && beforeHolder[0] != null) {
                         List<String> dropped = computeDroppedChashes(beforeHolder[0], rows);
-                        if (!dropped.isEmpty() && collHolder[0] != null) {
-                            sweepOutcome[0] = runSweepTransaction(tenant, docId, collHolder[0], dropped);
+                        if (!dropped.isEmpty()) {
+                            sweepOutcome[0] = runSweepTransaction(tenant, docId, collection, dropped);
                         }
                     }
                 } catch (Exception e) {
@@ -4875,7 +4967,14 @@ public final class CatalogRepository {
         // runtime exception's message can carry internal state (e.g. the
         // TenantScope admission-queue message wraps a null-SQLState
         // SQLTransientConnectionException and would fall through here).
-        if ((e instanceof IllegalArgumentException || e instanceof TombstonedDocumentException)
+        // nexus-s13u0: DocumentNotFoundException joins this allowlist — it is
+        // the explicit-throw replacement for the fk-001 FK violation this
+        // same catch used to classify via the SQLException branch above
+        // (case "23503" -> "foreign key violation (doc_id not registered?)")
+        // before catalog_document_chunks.collection went NOT NULL; the
+        // message here says the same thing in our own words instead.
+        if ((e instanceof IllegalArgumentException || e instanceof TombstonedDocumentException
+                || e instanceof DocumentNotFoundException)
                 && e.getMessage() != null) {
             out.put("reason", e.getMessage());
         } else {
@@ -4884,16 +4983,26 @@ public final class CatalogRepository {
         return out;
     }
 
-    /** Append manifest rows (upsert by position). */
-    public void appendManifestChunks(String tenant, String docId, List<Map<String, Object>> rows) {
+    /**
+     * Append manifest rows (upsert by position), stamping {@code collection}
+     * on every row.
+     *
+     * @param collection caller-supplied collection (RDR-191, Hal ruling
+     *                   2026-08-12) — required, non-blank. The engine
+     *                   stamps it verbatim; it never infers one.
+     */
+    public void appendManifestChunks(String tenant, String docId, String collection, List<Map<String, Object>> rows) {
+        requireNonBlank(collection, "collection");
         tenantScope.withTenant(tenant, ctx -> {
+            // Case-1 duty only (RDR-191): does docId exist at all? A ghost
+            // document is no longer a special case -- its rows are stamped
+            // with `collection` exactly like any other document's.
+            requireDocumentExists(ctx, tenant, docId);
             // nexus-11gh6 rev 2 §2.2: gate BEFORE acquireIndexRunLock — see
             // acquireSweepGateShared's javadoc (writer-site table) and
-            // writeManifestRows for the identical ordering rationale.
-            String coll = physicalCollectionOf(ctx, tenant, docId);
-            if (coll != null) {
-                acquireSweepGateShared(ctx, tenant, coll);
-            }
+            // writeManifestRows for the identical ordering rationale. ONE
+            // collection for the whole call now (RDR-191).
+            acquireSweepGateShared(ctx, tenant, collection);
             // Same manifest-mutation class as writeManifestRows: serialize
             // against completeIndexRun's verify-then-stamp (see
             // acquireIndexRunLock's javadoc) — this was the one mutation path
@@ -4908,9 +5017,11 @@ public final class CatalogRepository {
             // positions in one call must keep failing exactly as before
             // (each row its own statement), not surface a NEW "ON CONFLICT
             // DO UPDATE command cannot affect row a second time" error from
-            // a batched multi-row statement.
+            // a batched multi-row statement. RDR-191: every row is stamped
+            // with the SAME `collection` -- there is no per-row resolution
+            // outcome left to vary on.
             for (var row : rows) {
-                insertManifestChunkRows(ctx, tenant, docId, coll, List.of(row), ManifestInsertMode.UPSERT_APPEND);
+                insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_APPEND);
             }
             // nexus-e4gel: fold documents.chunk_count in the SAME transaction,
             // exactly as writeManifestRows does (nexus-b6enc F5). The REPLACE
@@ -7348,10 +7459,15 @@ public final class CatalogRepository {
      * data columns so a re-index with changed chunk content converges to the new
      * state. Idempotency is preserved: when the incoming row is identical to the
      * stored row the SET is a no-op in effect (same values written). nexus-9wz72.
+     *
+     * @param collection caller-supplied collection (RDR-191, Hal ruling
+     *                   2026-08-12) — required, non-blank. The engine
+     *                   stamps it verbatim; it never infers one.
      */
-    public void importChunk(String tenant, String docId, Map<String, Object> row) {
+    public void importChunk(String tenant, String docId, String collection, Map<String, Object> row) {
+        requireNonBlank(collection, "collection");
         tenantScope.withTenant(tenant, ctx -> {
-            doImportChunk(ctx, tenant, docId, row);
+            doImportChunk(ctx, tenant, docId, collection, row);
             return null;
         });
     }
@@ -7360,8 +7476,13 @@ public final class CatalogRepository {
      * RDR-176 P3 (Gap 1): GUC-once bulk chunk import for ONE document — all
      * *rows* land under one withTenant (one GUC set), matching the doc-scoped
      * {@code {doc_id, rows}} import envelope.
+     *
+     * @param collection caller-supplied collection (RDR-191, Hal ruling
+     *                   2026-08-12) — required, non-blank, stamped on every
+     *                   row.
      */
-    public int importChunksBatch(String tenant, String docId, List<Map<String, Object>> rows) {
+    public int importChunksBatch(String tenant, String docId, String collection, List<Map<String, Object>> rows) {
+        requireNonBlank(collection, "collection");
         if (rows == null || rows.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
             // Conflict key: (tenant_id, doc_id, position). doc_id is constant for
@@ -7370,37 +7491,34 @@ public final class CatalogRepository {
             for (var row : rows) unique.put(i(row, "position"), row);
             List<Map<String, Object>> deduped = List.copyOf(unique.values());
 
-            // nexus-x6kdz: stamp the doc's physical_collection on every row —
-            // the combined-query join key no writer previously populated.
-            String coll = physicalCollectionOf(ctx, tenant, docId);
+            // Case-1 duty only (RDR-191): does docId exist at all?
+            requireDocumentExists(ctx, tenant, docId);
             // nexus-11gh6 rev 2 §2.2: gate BEFORE the insert loop below —
             // one acquisition per transaction is enough (pg_advisory_xact_lock_shared
             // is re-entrant within a transaction; this ETL leg has no
-            // acquireIndexRunLock call to order against).
-            if (coll != null) {
-                acquireSweepGateShared(ctx, tenant, coll);
-            }
+            // acquireIndexRunLock call to order against). ONE collection for
+            // the whole call now (RDR-191).
+            acquireSweepGateShared(ctx, tenant, collection);
 
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 10);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
-                var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
                 // nexus-11gh6 §7d: routed through the single-homed insert
                 // helper, one call per chunk — `deduped` above already
                 // guarantees no two rows in `batch` share a conflict key, so
-                // batching through ONE multi-row statement per chunk is safe
-                // (preserves this method's pre-existing batching exactly).
-                insertManifestChunkRows(ctx, tenant, docId, coll, batch, ManifestInsertMode.UPSERT_IMPORT);
+                // batching through ONE multi-row statement per chunk stays
+                // safe.
+                var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+                insertManifestChunkRows(ctx, tenant, docId, collection, batch, ManifestInsertMode.UPSERT_IMPORT);
             }
             return rows.size();
         });
     }
 
-    private void doImportChunk(DSLContext ctx, String tenant, String docId, Map<String, Object> row) {
-        String coll = physicalCollectionOf(ctx, tenant, docId);
-        if (coll != null) {
-            acquireSweepGateShared(ctx, tenant, coll);
-        }
-        insertManifestChunkRows(ctx, tenant, docId, coll, List.of(row), ManifestInsertMode.UPSERT_IMPORT);
+    private void doImportChunk(DSLContext ctx, String tenant, String docId, String collection,
+                                Map<String, Object> row) {
+        requireDocumentExists(ctx, tenant, docId);
+        acquireSweepGateShared(ctx, tenant, collection);
+        insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_IMPORT);
     }
 
     /**

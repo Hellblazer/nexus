@@ -402,6 +402,15 @@
          prerequisites as catalog-023; before the runAlways grants below. -->
     <include file="db/changelog/catalog-024-quarantine-collection-registration.xml"/>
 
+    <!-- RDR-191 nexus-71gw2 (Phase C): catalog_document_chunks.collection
+         NOT NULL: resolve where knowable (chash membership plus sibling
+         tiebreak), delete what cannot be resolved, no sentinel, no DEFAULT
+         (Hal ruling 2026-08-12). Needs chunks_384/768/1024 (vectors-001) for
+         the C-membership lookup and catalog_documents for the chunk_count
+         resync; after catalog-023/024 for file-order clarity, before the
+         runAlways grants below. -->
+    <include file="db/changelog/catalog-025-collection-not-null.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

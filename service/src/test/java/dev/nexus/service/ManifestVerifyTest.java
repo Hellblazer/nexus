@@ -14,6 +14,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
@@ -37,9 +38,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <ul>
  *   <li>Tombstoned parent documents are EXCLUDED (deleted_at IS NULL) — a
  *       soft-deleted document's manifest is not damage.</li>
- *   <li>Manifest rows with {@code collection IS NULL} are pre-backfill state,
- *       NOT missing — excluded from "referenced" entirely. Get this wrong and
- *       every un-backfilled document in the corpus reads as damaged.</li>
+ *   <li>Manifest rows with {@code collection IS NULL} are excluded from
+ *       "referenced" entirely — get this wrong and every such row reads as
+ *       damaged. RDR-191 (nexus-71gw2, {@code catalog-025-collection-not-null.xml})
+ *       makes that population UNREPRESENTABLE (NOT NULL, no sentinel, no
+ *       DEFAULT) rather than merely pre-backfill state — the filter itself is
+ *       untouched by that bead (its own OUT-of-scope list) and is now
+ *       permanently vacuous rather than load-bearing.</li>
  * </ul>
  *
  * <p>Unlike manifest_orphans/manifest_backfill (admin/superuser, cross-tenant,
@@ -296,7 +301,14 @@ class ManifestVerifyTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test
-    void manifestVerify_nullCollectionRows_notCountedAsMissing() throws Exception {
+    void manifestVerify_nullCollectionRows_areUnrepresentable_andExcludedRowNeverExisted() throws Exception {
+        // RDR-191 (nexus-71gw2) rebase: the pre-backfill (collection IS NULL)
+        // row this test used to seed via insertManifestRowNullCollection is
+        // now UNREPRESENTABLE -- catalog_document_chunks.collection is NOT
+        // NULL (catalog-025-collection-not-null.xml), so the manifest's own
+        // constraint rejects the row before manifest_verify's NULL guard
+        // would ever see it. Assert the unrepresentability directly, then
+        // confirm the properly-stamped row alone still verifies clean.
         String docId  = "mvf-nullcoll-doc-1";
         String chashBackfilled = chash("mvf-nullcoll-bf");
         String chashPending    = chash("mvf-nullcoll-pending");
@@ -308,20 +320,23 @@ class ManifestVerifyTest {
             // One properly-stamped, present row.
             insertManifestRow(su, TENANT, docId, 0, chashBackfilled, COLLECTION);
             insertChunk1024(su, TENANT, COLLECTION, chashBackfilled);
-            // One pre-backfill row: collection IS NULL, no chunk either — if the
-            // NULL guard is missing this reads as +1 referenced/+1 missing.
-            insertManifestRowNullCollection(su, TENANT, docId, 1, chashPending);
+
+            PSQLException ex = org.junit.jupiter.api.Assertions.assertThrows(PSQLException.class, () ->
+                insertManifestRowNullCollection(su, TENANT, docId, 1, chashPending));
+            assertThat(ex.getSQLState())
+                .as("the state is unrepresentable -- assert the not-null-violation SQLSTATE "
+                    + "directly, not merely a row count of 0")
+                .isEqualTo("23502");
         }
 
         long[] r = verify(docId);
         assertThat(r[0])
-            .as("referenced must count ONLY the collection-stamped row — the " +
-                "pre-backfill (collection IS NULL) row is excluded entirely, not " +
-                "counted as referenced-but-missing")
+            .as("referenced counts only the real, collection-stamped row -- there is no "
+                + "pre-backfill row left to (correctly) exclude")
             .isEqualTo(1L);
         assertThat(r[1]).isEqualTo(1L);
         assertThat(r[2])
-            .as("missing must be 0 — an un-backfilled document must never read as damaged")
+            .as("missing must be 0")
             .isEqualTo(0L);
     }
 

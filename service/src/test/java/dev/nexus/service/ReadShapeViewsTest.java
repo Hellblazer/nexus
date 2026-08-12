@@ -99,8 +99,8 @@ class ReadShapeViewsTest {
             seedOwner(su, TENANT_A, "a-own-2");
             seedColl(su, TENANT_A, "c_a");
             seedColl(su, TENANT_A, "c_a2");
-            seedChunk(su, TENANT_A, "a.1", 0, "chash-a-0");
-            seedChunk(su, TENANT_A, "a.1", 1, "chash-a-1");
+            seedChunk(su, TENANT_A, "a.1", 0, "chash-a-0", "c_a");
+            seedChunk(su, TENANT_A, "a.1", 1, "chash-a-1", "c_a");
 
             seedDoc(su, TENANT_B, "b.1", "paper", "c_b");
             su.createStatement().execute(
@@ -110,7 +110,7 @@ class ReadShapeViewsTest {
             seedTopic(su, TENANT_B, "topic-b", "c_b");
             seedOwner(su, TENANT_B, "b-own-1");
             seedColl(su, TENANT_B, "c_b");
-            seedChunk(su, TENANT_B, "b.1", 0, "chash-b-0");
+            seedChunk(su, TENANT_B, "b.1", 0, "chash-b-0", "c_b");
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -200,10 +200,11 @@ class ReadShapeViewsTest {
         String tenant = "rsv-tomb-stats-" + System.nanoTime();
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            seedColl(su, tenant, "c_ts_tomb");
             seedDoc(su, tenant, "ts.live", "paper", "c_ts_tomb");
             seedDoc(su, tenant, "ts.dead", "paper", "c_ts_tomb");
-            seedChunk(su, tenant, "ts.live", 0, "chash-ts-live");
-            seedChunk(su, tenant, "ts.dead", 0, "chash-ts-dead");
+            seedChunk(su, tenant, "ts.live", 0, "chash-ts-live", "c_ts_tomb");
+            seedChunk(su, tenant, "ts.dead", 0, "chash-ts-dead", "c_ts_tomb");
         }
 
         StatsRow before = statsFor(tenant);
@@ -394,12 +395,13 @@ class ReadShapeViewsTest {
             + tenant + "', '" + name + "') ON CONFLICT (tenant_id, name) DO NOTHING");
     }
 
-    private static void seedChunk(Connection su, String tenant, String docId, int pos, String chash) throws Exception {
+    private static void seedChunk(Connection su, String tenant, String docId, int pos, String chash,
+                                   String collection) throws Exception {
         // chash must be exactly 32 chars (catalog_document_chunks_chash_len_check).
         String c = (chash + "00000000000000000000000000000000").substring(0, 32);
         su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) "
-            + "VALUES ('" + tenant + "', '" + docId + "', " + pos + ", '" + c + "')");
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+            + "VALUES ('" + tenant + "', '" + docId + "', " + pos + ", '" + c + "', '" + collection + "')");
     }
 
     // ── reloption physically set on every view ──────────────────────────────────

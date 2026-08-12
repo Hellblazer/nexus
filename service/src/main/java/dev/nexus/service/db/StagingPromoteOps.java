@@ -657,7 +657,13 @@ public final class StagingPromoteOps {
             Field<Integer> sLineEnd = DSL.field(DSL.name("s", "line_end"), Integer.class);
             Field<Integer> sCharStart = DSL.field(DSL.name("s", "char_start"), Integer.class);
             Field<Integer> sCharEnd = DSL.field(DSL.name("s", "char_end"), Integer.class);
-            var cand = ctx.selectDistinct(DSL.coalesce(CHASH_ALIAS.NEW_CHASH, sChashDecoded).as("chash"))
+            // nexus-o8dil.7 (RDR-191 GATE-2): the row's own resolved chash --
+            // shared between `cand` below (the batch-wide distinct list used
+            // for sweep-gate acquisition) and the per-row verified manifest
+            // resolution further down (which needs the SAME chash, not the
+            // batch's whole set).
+            Field<byte[]> resolvedChash = DSL.coalesce(CHASH_ALIAS.NEW_CHASH, sChashDecoded);
+            var cand = ctx.selectDistinct(resolvedChash.as("chash"))
                 .from(sdc)
                 .leftJoin(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(sChash))
                 .where(CHASH_ALIAS.NEW_CHASH.isNotNull().or(sChash.likeRegex("^[0-9a-f]{64}$")))
@@ -685,10 +691,13 @@ public final class StagingPromoteOps {
             // C): this INSERT's 9-column list omitted `collection` entirely
             // -- every finalize-promoted manifest row was a partial-NULL FK
             // key, unlike promoteCollection's CONTENT insert above (:420-433),
-            // which DOES stamp it. Stamped from the SAME source every live
-            // writer uses (CatalogRepository.physicalCollectionOf ->
-            // catalog_documents.physical_collection, NULL-if-empty for
-            // ghost/sourceless docs) -- NOT from wherever the resolved
+            // which DOES stamp it. Stamped from catalog_documents.
+            // physical_collection (NULL-if-empty for ghost/sourceless docs)
+            // -- the one caller-known fact this bulk migration path has,
+            // mirroring the explicit `collection` parameter every live
+            // writer (CatalogRepository.writeManifestRows/
+            // appendManifestChunks/importChunksBatch) now requires the
+            // caller to supply directly -- NOT from wherever the resolved
             // chash's content happens to physically live, which is a
             // DIFFERENT, collection-agnostic question (canonExists / the
             // per-collection sweep-gate resolution a few lines above) that
@@ -698,6 +707,29 @@ public final class StagingPromoteOps {
             // content-location lookup.
             Field<String> docPhysicalCollection =
                 DSL.nullif(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "");
+            // RDR-191 (Hal ruling 2026-08-12, nexus-lyhac): writers STAMP
+            // what they already know; they never INFER it. This bulk
+            // migration path's one caller-known fact about a staged chunk
+            // row's collection is the OWNING DOCUMENT's own registered
+            // `physical_collection` -- `docPhysicalCollection` above. Before
+            // this fix the INSERT below stamped it UNCONDITIONALLY,
+            // including when it was NULL (a doc_id staged here with no
+            // catalog_documents row at all, or a ghost document that has
+            // never had `physical_collection` set) -- emitting a literal
+            // NULL into a column collection now disallows (catalog-025-
+            // collection-not-null.xml is NOT NULL, no sentinel, no
+            // DEFAULT).
+            //
+            // The fix mirrors the ROOT ruling exactly, not a new mechanism:
+            // an unresolvable row is not written. A staged row whose doc has
+            // no known `physical_collection` simply stays staged -- a later
+            // finalize (this method is explicitly idempotent/re-runnable,
+            // see the class javadoc) converges it once the document is
+            // registered with one. No per-chash content-location lookup, no
+            // sibling tiebreak: `docPhysicalCollection` is a per-DOCUMENT
+            // fact, correctly scalar, and is the ONLY source this method
+            // stamps from.
+            Condition manifestPromotable = manifestResolvable.and(docPhysicalCollection.isNotNull());
             counts.put("manifest_promoted", ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
@@ -706,13 +738,13 @@ public final class StagingPromoteOps {
                     CATALOG_DOCUMENT_CHUNKS.CHAR_END, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                 .select(ctx.select(
                         currentTenantSetting(), sDocId, sPosition,
-                        DSL.coalesce(CHASH_ALIAS.NEW_CHASH, sChashDecoded),
+                        resolvedChash,
                         sChunkIndex, sLineStart, sLineEnd, sCharStart, sCharEnd,
                         docPhysicalCollection)
                     .from(sdc)
                     .leftJoin(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(sChash))
                     .leftJoin(CATALOG_DOCUMENTS).on(CATALOG_DOCUMENTS.TUMBLER.eq(sDocId))
-                    .where(manifestResolvable))
+                    .where(manifestPromotable))
                 .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION)
                 .doNothing()
@@ -722,6 +754,45 @@ public final class StagingPromoteOps {
                     .where(CHASH_ALIAS.OLD_REF.eq(sChash))))
                 .and(DSL.not(sChash.likeRegex("^[0-9a-f]{64}$").and(ChashSqlIdioms.existsInAnyDim(ctx, sChashDecoded))))
                 .fetchOne(0, Integer.class));
+            // nexus-s13u0 visibility: DISTINCT staged doc_ids with NO
+            // catalog_documents row at all -- a NARROWER diagnostic than
+            // `manifestPromotable`'s NOT-NULL gate above (which also skips a
+            // registered GHOST document with no physical_collection yet).
+            // Reported via a counter rather than a throw: aborting the
+            // WHOLE finalize transaction over one staged row referencing an
+            // unregistered doc_id would be disproportionate for this
+            // idempotent/re-runnable method (class javadoc) -- a later
+            // finalize converges it once the document exists.
+            var docsNotRegistered = ctx.selectDistinct(sDocId).from(sdc).asTable("dnr");
+            int docNotRegisteredCount = ctx.selectCount()
+                .from(docsNotRegistered)
+                .where(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENTS)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(currentTenantSetting()))
+                    .and(CATALOG_DOCUMENTS.TUMBLER.eq(docsNotRegistered.field("doc_id", String.class)))))
+                .fetchOne(0, Integer.class);
+            counts.put("manifest_doc_not_registered", docNotRegisteredCount);
+            // review finding (nexus-s13u0 follow-up): a counter alone is
+            // WEAKER than a throw against the fail-loud directive -- nobody
+            // reads a counter unless something already told them to look,
+            // and this method's own log.info("event=staging_finalize"...)
+            // below fires unconditionally, at INFO, burying this alongside
+            // routine success counts rather than calling it out. Escalate
+            // explicitly at WARN when nonzero, the same discipline
+            // insertManifestChunkRows' case-3 SKIP and writeManifestMany's
+            // aggregate failure log already apply, so this is at minimum
+            // one structured-log grep away from being found rather than
+            // silently buried in a per-tenant JSON blob nobody is currently
+            // wired to read (verified: zero Python callers of
+            // POST /v1/staging/finalize anywhere in src/nexus/, and the one
+            // E2E rehearsal script that exercises it asserts on five
+            // unrelated fields, never this one or its pre-existing sibling
+            // manifest_unresolved). A WARN log is still not a metric or an
+            // alert path -- wiring either is follow-up-bead scale, not a
+            // fit for this guard-contract change.
+            if (docNotRegisteredCount > 0) {
+                log.warn("event=staging_finalize_doc_not_registered tenant={} count={}",
+                    tenant, docNotRegisteredCount);
+            }
 
             // (2b) nexus-b6enc F3: the promote above is RESOLVABLE-ONLY, so
             // the verbatim-imported documents.chunk_count can claim more

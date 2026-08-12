@@ -206,17 +206,34 @@ class TombstoneFilterGateTest {
      * concern) — they pass on their own merits and would be an unfalsifiable
      * always-unused entry if listed. Both still carry an in-code note for
      * human readers; see their definition sites.
+     *
+     * <p>Also deliberately NOT here (nexus-j862l, RDR-191 GATE-2 follow-up):
+     * {@code requireDocumentExists} (the renamed, narrowed successor to
+     * {@code physicalCollectionOf}, which WAS listed here before RDR-191
+     * removed its collection-resolution duty). Its existence check reads via
+     * {@code ctx.fetchExists(ctx.selectOne().from(CATALOG_DOCUMENTS)...)} —
+     * {@code .selectOne(}, not one of {@link #SELECT_INITIATORS} ({@code
+     * .select(}/{@code .selectFrom(}/{@code .selectCount(}/{@code
+     * .selectDistinct(}) — so {@link #scanDocAndChunkSites} never produces a
+     * Finding for it at all; it is structurally outside this gate's scan
+     * domain, the SAME category {@code CatalogRepository.strandedChunkCount}/
+     * {@code hasLiveManifest} and {@code PgVectorRepository.liveChunksCondition}
+     * already occupy (see that method's own javadoc) — none of those appear
+     * here either. A rename-only fix (keeping the entry, renaming
+     * {@code physicalCollectionOf} to {@code requireDocumentExists}) was
+     * tried first and correctly failed {@link #test_realTree_zeroUnusedExemptEntries}
+     * / {@link #noUnguardedTombstoneReadsOrWrites} as rot: the live scan can
+     * never reproduce an entry for a method it structurally cannot see,
+     * regardless of name. Its EXISTS check still legitimately needs to see a
+     * tombstoned row (to throw the correct {@code DocumentNotFoundException}
+     * vs. {@code TombstonedDocumentException} — see its own definition-site
+     * comment) — that reasoning did not change, only its visibility to THIS
+     * particular gate mechanism did.
      */
     private static final List<ExemptEntry> TOMBSTONE_EXEMPT = List.of(
         new ExemptEntry("CatalogRepository.java", "highestChildSeq",
             "tumbler allocator: the tumbler PK does not exclude tombstones, and filtering "
             + "would re-issue an already-taken child sequence number to a NEW document"),
-        new ExemptEntry("CatalogRepository.java", "physicalCollectionOf",
-            "manifest WRITE-path helper (nexus-x6kdz): its only callers are the manifest "
-            + "writers (writeManifestRows/appendManifestChunks/the import-chunk paths), never "
-            + "a reader — filtering here would silently stamp NULL onto rows being written for "
-            + "a tombstoned document on the ETL/import leg, re-introducing the silent-empty "
-            + "class the nexus-x6kdz stamp exists to fix"),
         new ExemptEntry("CatalogRepository.java", "upsertDocument",
             "the ONE sanctioned way a tombstoned row is revived (nexus-mqd6t Hal ruling): an "
             + "explicit re-register clears deleted_at via the ON CONFLICT DO UPDATE arm, "
@@ -953,7 +970,7 @@ class TombstoneFilterGateTest {
     void attribution_nestedClassAfterExemptMethod_isStillFlagged() {
         String synthetic = String.join("\n",
             "public final class CatalogRepository {",
-            "    private static String physicalCollectionOf(DSLContext ctx, String tenant, String docId) {",
+            "    private static String exemptReadHelper(DSLContext ctx, String tenant, String docId) {",
             "        String pc = ctx.select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)",
             "                       .from(CATALOG_DOCUMENTS)",
             "                       .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))",
@@ -968,14 +985,14 @@ class TombstoneFilterGateTest {
             "    }",
             "}");
         String blanked = RawSqlGateTest.blank(synthetic);
-        List<NamedRegion> exempt = namedRegions(blanked, List.of("physicalCollectionOf"));
+        List<NamedRegion> exempt = namedRegions(blanked, List.of("exemptReadHelper"));
         var docSites = new ArrayList<Finding>();
         var chunkSites = new ArrayList<Finding>();
         scanDocAndChunkSites("CatalogRepository.java", blanked, exempt, List.of(), docSites, chunkSites);
 
         assertThat(docSites).hasSize(2);
         assertThat(docSites.stream().filter(f -> !f.excused()).count())
-            .as("the nested class's own unfiltered read must NOT inherit physicalCollectionOf's "
+            .as("the nested class's own unfiltered read must NOT inherit exemptReadHelper's "
                 + "exemption: %s", docSites)
             .isEqualTo(1);
     }
@@ -984,7 +1001,7 @@ class TombstoneFilterGateTest {
     void attribution_packagePrivateMethodAfterExemptMethod_resetsExemption() {
         String synthetic = String.join("\n",
             "public final class CatalogRepository {",
-            "    private static String physicalCollectionOf(DSLContext ctx, String tenant, String docId) {",
+            "    private static String exemptReadHelper(DSLContext ctx, String tenant, String docId) {",
             "        String pc = ctx.select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)",
             "                       .from(CATALOG_DOCUMENTS)",
             "                       .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))",
@@ -998,7 +1015,7 @@ class TombstoneFilterGateTest {
             "    }",
             "}");
         String blanked = RawSqlGateTest.blank(synthetic);
-        List<NamedRegion> exempt = namedRegions(blanked, List.of("physicalCollectionOf"));
+        List<NamedRegion> exempt = namedRegions(blanked, List.of("exemptReadHelper"));
         var docSites = new ArrayList<Finding>();
         var chunkSites = new ArrayList<Finding>();
         scanDocAndChunkSites("CatalogRepository.java", blanked, exempt, List.of(), docSites, chunkSites);
