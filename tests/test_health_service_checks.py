@@ -2354,7 +2354,8 @@ class TestDoctorFenceCoverageDistinction:
     coverage-gap regression this test exists to catch).
     """
 
-    def _entry(self, *, index_state, indexed_at="", index_state_reported=True, source_uri="", tumbler=""):
+    def _entry(self, *, index_state, indexed_at="", index_state_reported=True,
+               source_uri="", tumbler="", index_run_id=""):
         return type("E", (), {
             "index_state": index_state,
             "index_started_at": "",
@@ -2362,7 +2363,22 @@ class TestDoctorFenceCoverageDistinction:
             "index_state_reported": index_state_reported,
             "source_uri": source_uri,
             "tumbler": tumbler,
+            # nexus-2sa6w: _fence_begin mints a uuid4 PER DOCUMENT;
+            # _fence_begin_many shares ONE across a flush. A run id on 2+
+            # documents is proof of the begin-many route (v7.3.0+).
+            "index_run_id": index_run_id,
         })()
+
+    def _batch(self, run_id, indexed_at, *names):
+        """A begin-many flush: N documents sharing ONE run id."""
+        return [
+            self._entry(
+                index_state="complete", index_state_reported=True,
+                indexed_at=indexed_at, index_run_id=run_id,
+                source_uri=f"chroma://code__nexus/{n}",
+            )
+            for n in names
+        ]
 
     def _baseline(self, indexed_at="2026-08-07T17:00:00+00:00"):
         """nexus-oiu1t: a STAMPED document — the install's own evidence that it
@@ -2688,6 +2704,217 @@ class TestDoctorFenceCoverageDistinction:
         assert any("nx --version" in s for s in (r.fix_suggestions or [])), (
             "the cheap discriminator must be the first thing suggested: "
             f"{r.fix_suggestions}"
+        )
+
+    def test_proven_anchor_supersedes_an_early_tier_poisoned_anchor(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-2sa6w — THE FIX. The compound scenario, plus the evidence that
+        resolves it.
+
+        Same poisoned setup as the test above: a v7.1.0-era client stamps a PDF
+        on 2026-08-05 (unshared run id, an early-tier stamp), and writes an
+        unfenced repo-index document on 2026-08-09 while still partially
+        covered. A bare-earliest-stamp anchor lands on 08-05 and flags the
+        08-09 document.
+
+        Then the install upgrades and runs a batched index on 2026-09-01 — two
+        documents sharing ONE run id, which only `_fence_begin_many` produces,
+        and that route exists only from f55435eb/v7.3.0. THAT is the earliest
+        moment full coverage is PROVEN, so it becomes the anchor and the 08-09
+        write falls before it: correctly unflagged, no longer a false positive.
+        """
+        entries = [
+            self._entry(
+                index_state="complete", index_state_reported=True,
+                indexed_at="2026-08-05T00:00:00+00:00",
+                index_run_id="early-tier-solo-run",
+                source_uri="chroma://knowledge__nexus/early_tier.pdf",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-09T00:00:00+00:00",
+                source_uri="chroma://code__nexus/legit_unfenced.py",
+            ),
+        ] + self._batch(
+            "batched-flush-run", "2026-09-01T00:00:00+00:00", "a.py", "b.py",
+        )
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True, (
+            "the proven anchor (2026-09-01) supersedes the poisoned early-tier "
+            f"anchor (2026-08-05), so the 08-09 write is not flagged: {r.detail}"
+        )
+        assert "legit_unfenced.py" not in r.detail
+
+    def test_proven_anchor_still_flags_a_later_write_and_asserts_it(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-2sa6w NON-VACUITY CONTROL. Same install, same proven anchor —
+        one more unstamped document, written AFTER it.
+
+        With full coverage PROVEN by a shared run id, the partial-coverage
+        explanation is eliminated by evidence, so here (and only here) the
+        check may state the regression rather than hedging. Without this test,
+        the one above could be satisfied by a check that never flags anything.
+        """
+        entries = [
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-09T00:00:00+00:00",
+                source_uri="chroma://code__nexus/legit_unfenced.py",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-09-10T00:00:00+00:00",
+                source_uri="chroma://code__nexus/real_regression.py",
+            ),
+        ] + self._batch(
+            "batched-flush-run", "2026-09-01T00:00:00+00:00", "a.py", "b.py",
+        )
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        assert "real_regression.py" in r.detail
+        assert "legit_unfenced.py" not in r.detail, (
+            f"the pre-anchor write is not a regression: {r.detail}"
+        )
+        # Proven coverage: state it, do not hedge with the v7.1.0 alternative.
+        assert "coverage regression worth finding" in r.detail
+        assert "v7.1.0-v7.2.x" not in r.detail, (
+            "the partial-coverage explanation is eliminated by a shared run "
+            f"id and must not be offered: {r.detail}"
+        )
+        assert "Two explanations fit" not in r.detail
+        assert not any("nx --version" in s for s in (r.fix_suggestions or [])), (
+            "the client-version check is pointless once coverage is proven: "
+            f"{r.fix_suggestions}"
+        )
+
+    def test_single_document_flush_shares_no_run_id_so_proves_nothing(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-2sa6w: the discriminator is EVIDENCE-POSITIVE ONLY. A
+        begin-many flush containing exactly one document shares its run id with
+        nothing, and is indistinguishable from a per-document `_fence_begin`
+        stamp. Absence of sharing must therefore prove nothing and fall back to
+        the hedged wording — never be read as "not full coverage".
+        """
+        entries = [
+            self._entry(
+                index_state="complete", index_state_reported=True,
+                indexed_at="2026-08-05T00:00:00+00:00",
+                index_run_id="lonely-run",
+                source_uri="chroma://code__nexus/only.py",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-09T00:00:00+00:00",
+                source_uri="chroma://code__nexus/later.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        assert "Two explanations fit" in r.detail, (
+            f"an unshared run id proves nothing; stay hedged: {r.detail}"
+        )
+        assert "v7.1.0-v7.2.x" in r.detail
+
+    def test_crashed_batch_with_stale_indexed_at_cannot_prove_coverage(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-2sa6w round 2 — CRITICAL found by code-review-expert with a
+        standalone repro (scratchpad/test_stale_ledger_poison.py), 2026-08-11.
+
+        Verified in service/src/main/java/dev/nexus/service/db/
+        CatalogRepository.java: beginIndexRun writes INDEX_STATE / INDEX_RUN_ID
+        / INDEX_STARTED_AT; completeIndexRun writes INDEX_STATE /
+        INDEX_CONTENT_HASH / CHUNK_COUNT. NEITHER writes INDEXED_AT — only the
+        manifest-write/register path does.
+
+        So a row stuck at 'indexing' carries an indexed_at from its PREVIOUS,
+        unrelated successful index. Here a begin-many batch crashed mid-run:
+        two rows share a run id and carry stale 2026-08-07T16:0x dates. Read
+        naively that is "proof of full coverage at 08-07", which then flags a
+        2026-08-09 write AND asserts it as a regression with the hedge and the
+        `nx --version` suggestion both dropped. Nothing here is a regression —
+        those two documents just had a crashed re-index.
+
+        Only 'complete' rows may date the anchor. Kill control: removing the
+        `if state != "complete": continue` guard turns this test RED.
+        """
+        entries = [
+            self._entry(
+                index_state="indexing", index_state_reported=True,
+                indexed_at="2026-08-07T16:05:00+00:00",
+                index_run_id="crashed-batch",
+                source_uri="chroma://code__nexus/old_a.py",
+            ),
+            self._entry(
+                index_state="indexing", index_state_reported=True,
+                indexed_at="2026-08-07T16:06:00+00:00",
+                index_run_id="crashed-batch",
+                source_uri="chroma://code__nexus/old_b.py",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-09T00:00:00+00:00",
+                source_uri="chroma://code__nexus/legit_unfenced.py",
+            ),
+        ]
+        results = self._run_all(monkeypatch, entries)
+        fence = [r for r in results if "cannot attribute" in r.detail
+                 or "fence baseline" in r.detail]
+        assert fence, f"expected a fence-attribution result: {results}"
+        r = fence[0]
+        assert "coverage regression worth finding" not in r.detail, (
+            "a CRASHED begin-many batch proves nothing — its indexed_at "
+            f"belongs to a previous index: {r.detail}"
+        )
+        assert "Two explanations fit" not in r.detail or (
+            "v7.1.0-v7.2.x" in r.detail
+        )
+
+    def test_run_id_ledger_cap_reports_when_it_drops_evidence(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-2sa6w round 2 — substantive-critic Significant + code-review-
+        expert Important, 2026-08-11. The ledger fills in WALK order, so any
+        _MAX_TRACKED_RUN_IDS distinct run ids seen before a genuine
+        multi-document batch cause that batch's proof to be dropped. Solo ids
+        from interactive `nx store put` / `nx memory put` each mint their own
+        uuid4, so a dogfooded install is a plausible way to hit it.
+
+        It must fail SAFE (fall back to hedged wording, never a false
+        accusation) and must SAY SO — a silent fallback here is
+        indistinguishable from "no evidence exists", which is a different
+        claim. Cap is monkeypatched rather than building a 5000-row fixture.
+        """
+        import nexus.health as h
+        monkeypatch.setattr(h, "_MAX_TRACKED_RUN_IDS", 2, raising=True)
+        entries = [
+            self._entry(
+                index_state="complete", index_state_reported=True,
+                indexed_at="2026-08-08T00:00:00+00:00",
+                index_run_id=f"solo-{i}",
+                source_uri=f"chroma://knowledge__nexus/note{i}.md",
+            )
+            for i in range(2)
+        ] + self._batch(
+            "batched-run-past-the-cap", "2026-09-01T00:00:00+00:00",
+            "a.py", "b.py",
+        ) + [
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-20T00:00:00+00:00",
+                source_uri="chroma://code__nexus/later.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        # Fell back to hedged wording — the safe direction.
+        assert "Two explanations fit" in r.detail
+        # ...and said why, rather than implying no evidence existed.
+        assert "ledger" in r.detail and "may have been missed" in r.detail, (
+            f"cap-induced fallback must not be silent: {r.detail}"
         )
 
     def test_no_stamped_document_anywhere_cannot_attribute(

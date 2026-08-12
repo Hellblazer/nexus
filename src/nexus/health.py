@@ -4544,6 +4544,22 @@ _PRODUCER_FENCE_RELEASE_DT = datetime(2026, 8, 7, 16, 0, 35, tzinfo=UTC)
 
 #: How many post-anchor unstamped identifiers are NAMED in the WARN detail.
 _MAX_NAMED_UNSTAMPED = 10
+#: Bound on the run-id ledger built during the walk (nexus-2sa6w).
+#:
+#: WHAT IT ACTUALLY COSTS (substantive-critic, 2026-08-11 — an earlier version
+#: of this comment claimed the cap "only bites on a corpus stamped entirely
+#: one-document-at-a-time", which understates it): the ledger fills in WALK
+#: order, so ANY 5000 distinct run ids seen before a genuine multi-document
+#: batch — including solo ids from interactive `nx store put` / `nx memory
+#: put`, each minting its own uuid4 — cause that batch's proof to be dropped.
+#: A heavily dogfooded install is a plausible way to hit this, not a
+#: hypothetical one.
+#:
+#: It fails SAFE: losing the proof falls back to the weak anchor and its
+#: hedged wording, never to a false accusation. It is no longer silent —
+#: `ledger_note` below says so when the cap filled and nothing was proven.
+_MAX_TRACKED_RUN_IDS = 5000
+
 #: How many candidates are RETAINED during the corpus walk. The walk cannot
 #: know the anchor until it finishes (the anchor is derived from the stamped
 #: population), so candidates are gathered against the floor and filtered
@@ -4612,18 +4628,30 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
     # about THIS install, unlike a release-tag date, which assumes the user
     # upgraded the day the release shipped.
     #
-    # KNOWN LIMIT — a stamp proves SOME producer was fenced, NOT that all were
-    # (code-review-expert, 2026-08-11; verified against git). v7.1.0's fence
-    # (4b0c5fb5) covered 4 PDF/md/DEVONthink ingest sites; the rest arrived at
-    # v7.3.0 (f55435eb), and NOTHING on the row records which producer or
-    # client version stamped it. So a client still on v7.1.0/v7.2.x that runs
-    # one PDF ingest establishes an anchor while its repo-index and store_put
-    # writes stay legitimately unfenced. This check CANNOT tell that from a
-    # regression, so it must not claim to: see the WARN wording below, which
-    # names both explanations rather than asserting the accusatory one. A
-    # discriminator would need per-document producer/client provenance —
-    # follow-up bead, not a claim to make here.
+    # A BARE stamp proves SOME producer was fenced, NOT that all were
+    # (code-review-expert + substantive-critic, 2026-08-11; verified against
+    # git). v7.1.0's fence (4b0c5fb5) covered 4 PDF/md/DEVONthink ingest
+    # sites; the rest arrived at v7.3.0 (f55435eb), and no column records
+    # which producer or client version stamped a row. So a client still on
+    # v7.1.0/v7.2.x that runs one PDF ingest establishes a WEAK anchor while
+    # its repo-index and store_put writes stay legitimately unfenced.
+    #
+    # nexus-2sa6w — the STRONG discriminator, read off the data rather than
+    # inferred from a naming convention: `_fence_begin` mints uuid4() PER
+    # DOCUMENT, while `_fence_begin_many` mints ONE run id shared across an
+    # entire flush. A run id appearing on 2+ documents therefore proves the
+    # writing client had the begin-many route, which exists ONLY from
+    # f55435eb — i.e. FULL producer coverage. Evidence-positive only: a
+    # single-document flush shares nothing either, so ABSENCE proves nothing
+    # and falls back to the weak anchor and its hedged wording. Chosen over
+    # mapping content_type to a producer family because THIS degrades safely —
+    # if begin-many ever changes shape the evidence stops appearing and the
+    # check gets more cautious, where a stale content_type map would keep
+    # mis-attributing silently.
     earliest_stamped_dt: datetime | None = None
+    # nexus-2sa6w: run id -> [count, earliest indexed_at seen for that run].
+    run_ids: dict[str, list] = {}
+    run_ids_dropped = 0
     # Reported-but-NULL with NO usable indexed_at. Cannot be attributed to
     # either side of the boundary — counted separately so the ok=True summary
     # never claims they predate coverage when nothing establishes that
@@ -4668,18 +4696,52 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
                         candidates_truncated += 1
                 continue
             checked += 1
-            # nexus-oiu1t: a real index_state is proof of a fully-fenced
-            # client at this document's write time.
-            stamped_at = str(getattr(entry, "indexed_at", "") or "")
-            if stamped_at:
-                try:
-                    st_dt = datetime.fromisoformat(stamped_at.replace("Z", "+00:00"))
-                except ValueError:
-                    st_dt = None
-                if st_dt is not None and (
-                    earliest_stamped_dt is None or st_dt < earliest_stamped_dt
-                ):
-                    earliest_stamped_dt = st_dt
+            # nexus-oiu1t: a real index_state is proof that a fence ran on
+            # this document.
+            #
+            # ONLY 'complete' rows may date that proof (code-review-expert,
+            # 2026-08-11; verified in service/.../db/CatalogRepository.java).
+            # beginIndexRun writes INDEX_STATE/INDEX_RUN_ID/INDEX_STARTED_AT
+            # and completeIndexRun writes INDEX_STATE/INDEX_CONTENT_HASH/
+            # CHUNK_COUNT — NEITHER writes INDEXED_AT, which only the
+            # manifest-write/register path sets. So on a row stuck at
+            # 'indexing' or 'failed' (a crashed or in-flight run), indexed_at
+            # is a leftover from that document's PRIOR, unrelated successful
+            # index. Dating either anchor from it puts the anchor earlier than
+            # any evidence supports — and for the ledger it would let a
+            # CRASHED begin-many batch assert a regression, unhedged, against
+            # documents written before coverage was ever proven. Reopening the
+            # over-claiming class through a new door.
+            #
+            # NOTE the guard is an `if`, NOT an early `continue`: the
+            # stale-'indexing' detection below is this function's ORIGINAL
+            # purpose and must still see every non-complete row. A `continue`
+            # here silently disabled it (caught by
+            # TestCheckStaleIndexingRuns::test_stale_indexing_document_is_reported).
+            if state == "complete":
+                stamped_at = str(getattr(entry, "indexed_at", "") or "")
+                if stamped_at:
+                    try:
+                        st_dt = datetime.fromisoformat(stamped_at.replace("Z", "+00:00"))
+                    except ValueError:
+                        st_dt = None
+                    if st_dt is not None:
+                        if (earliest_stamped_dt is None
+                                or st_dt < earliest_stamped_dt):
+                            earliest_stamped_dt = st_dt
+                        # nexus-2sa6w: ledger the run id so a SHARED one can
+                        # prove begin-many, hence a full-coverage client.
+                        rid = str(getattr(entry, "index_run_id", "") or "")
+                        if rid:
+                            slot = run_ids.get(rid)
+                            if slot is not None:
+                                slot[0] += 1
+                                if st_dt < slot[1]:
+                                    slot[1] = st_dt
+                            elif len(run_ids) < _MAX_TRACKED_RUN_IDS:
+                                run_ids[rid] = [1, st_dt]
+                            else:
+                                run_ids_dropped += 1
             if state != "indexing":
                 continue
             started = getattr(entry, "index_started_at", "") or ""
@@ -4733,7 +4795,16 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
     # outcome. (A max() here was written first and proven dead by its own kill
     # control — the walk-level floor subsumes it. The floor is pinned by
     # test_pre_coverage_document_is_never_a_candidate.)
-    anchor = earliest_stamped_dt
+    # nexus-2sa6w: prefer the PROVEN anchor — the earliest run that stamped 2+
+    # documents, which only begin-many (v7.3.0+) can produce. It is always at
+    # or after the weak anchor, so preferring it is strictly more conservative:
+    # fewer documents are flagged, and the ones that are cannot be explained by
+    # a partial-coverage client.
+    proven_anchor: datetime | None = None
+    for _count, _first_dt in run_ids.values():
+        if _count >= 2 and (proven_anchor is None or _first_dt < proven_anchor):
+            proven_anchor = _first_dt
+    anchor = proven_anchor if proven_anchor is not None else earliest_stamped_dt
     post_anchor = [c for c in candidates if anchor is not None and c[1] > anchor]
 
     if post_anchor:
@@ -4785,23 +4856,50 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
             detail=(
                 f"{post_anchor_count} document(s) report index_state but "
                 "carry no stamp, despite being indexed after this install's "
-                f"fence baseline ({anchor.isoformat()}, its earliest stamped "
-                f"document): {names}{truncation_note}. Two explanations fit, "
-                "and the stamp cannot distinguish them: a producer is "
-                "unfenced (a regression worth finding), OR this install was "
-                "running a client whose fence covered only PDF/md/DEVONthink "
-                "ingest (v7.1.0-v7.2.x), leaving its repo-index and store_put "
-                "writes legitimately unstamped. Check the client version "
-                f"first — it is the cheaper of the two.{legacy_note}"
-                f"{undated_note}"
+                f"fence baseline ({anchor.isoformat()}, "
+                + (
+                    "a batched index run, which only a client with FULL "
+                    "producer coverage can produce"
+                    if proven_anchor is not None else
+                    "its earliest stamped document"
+                )
+                + f"): {names}{truncation_note}. "
+                + (
+                    "A producer wrote these without calling index-run "
+                    "begin/complete — a coverage regression worth finding. "
+                    "(The one alternative left: a SECOND, older client also "
+                    "writing to this corpus.)"
+                    if proven_anchor is not None else
+                    "Two explanations fit, and a bare stamp cannot "
+                    "distinguish them: a producer is unfenced (a regression "
+                    "worth finding), OR this install was running a client "
+                    "whose fence covered only PDF/md/DEVONthink ingest "
+                    "(v7.1.0-v7.2.x), leaving its repo-index and store_put "
+                    "writes legitimately unstamped. Check the client version "
+                    "first — it is the cheaper of the two."
+                )
+                + (
+                    f" (Note: {run_ids_dropped} index-run id(s) exceeded this "
+                    f"check's {_MAX_TRACKED_RUN_IDS}-run ledger and were not "
+                    "examined, so proof of full coverage may have been missed "
+                    "— this reading is the cautious one.)"
+                    if run_ids_dropped and proven_anchor is None else ""
+                )
+                + f"{legacy_note}{undated_note}"
             ),
-            fix_suggestions=[
-                "nx --version   (a client below 7.3.0 explains this with no "
-                "regression at all)",
-                "nx index <path> --force   (on a 7.3.0+ client, re-index ONLY "
-                "the named document(s) above — this clears the symptom, not "
-                "the unfenced producer)",
-            ],
+            fix_suggestions=(
+                [
+                    "nx index <path> --force   (re-index ONLY the named "
+                    "document(s) above — this clears the symptom, not the "
+                    "unfenced producer)",
+                ] if proven_anchor is not None else [
+                    "nx --version   (a client below 7.3.0 explains this with "
+                    "no regression at all)",
+                    "nx index <path> --force   (on a 7.3.0+ client, re-index "
+                    "ONLY the named document(s) above — this clears the "
+                    "symptom, not the unfenced producer)",
+                ]
+            ),
         ))
     elif anchor is None and (candidates or candidates_truncated):
         # nexus-oiu1t: post-floor unstamped documents exist, but NO document in
@@ -4826,8 +4924,10 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
                 + (
                     "no document in this corpus has ever been stamped"
                     if checked == 0 else
-                    f"none of the {checked} stamped document(s) carries a "
-                    "usable indexed_at"
+                    f"none of the {checked} stamped document(s) has a "
+                    "COMPLETED run carrying a usable indexed_at (an "
+                    "'indexing'/'failed' row's indexed_at belongs to its "
+                    "previous index, not this run)"
                 )
                 + " — so no fence baseline can be established for this "
                 "install. Either a producer is unfenced, or this install "
