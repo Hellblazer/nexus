@@ -91,7 +91,19 @@ def _ghost_write_collection(label: str, seq: int) -> str:
     tests use one shaped like a real ``knowledge__`` collection (routable to
     the 1024-dim table, matching ``test_du2dw_chash_conformance_report_engine.py``'s
     and ``test_heizf_manifest_verify_list_engine.py``'s convention) so the
-    dangling-manifest checks exercised below can actually route it."""
+    dangling-manifest checks exercised below can actually route it.
+
+    nexus-mode-lint (nexus-f1f2x): the ``voyage-context-3`` token below is a
+    hoisted string literal, invisible to
+    ``tests/test_mode_declarations_are_explicit.py``'s per-function
+    ``inspect.getsource`` census because it lives in this helper's body, not
+    inline in any calling test. Reason class "string-literal-as-name": the
+    token is one segment of a conformant RDR-103 collection-name string
+    passed straight to ``write_manifest``'s ``collection`` kwarg; no
+    embedder is constructed anywhere in this module (every test here goes
+    through the real engine catalog client, never a Voyage call). Registered
+    in ``_HOISTED_TOKEN_SITES`` in the lint file.
+    """
     return f"knowledge__c2-{label}-{seq}__voyage-context-3__v1"
 
 
