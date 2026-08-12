@@ -297,7 +297,20 @@ class TestRequiredEngineVersion:
         # regressions). POST-DEPLOY VERIFY DONE, not owed:
         # check_engine_release_floor.py WITHOUT --paired-deploy exits 0,
         # cloud release_version=0.1.71 == floor.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 71)
+        #
+        # BUMPED to (0,1,73) 2026-08-12: v0.1.72 was cut+deployed same day
+        # (cloud went 0.1.71 -> 0.1.72) but the RDR-191 manifest bundle
+        # (caller-supplied collection, catalog-025 NOT NULL, commit
+        # 498c9295) landed AFTER its cut, so v0.1.73 was cut from
+        # bd716286a to carry it — v0.1.72 is now a floor-skipped version
+        # for LOCAL installs (deployed to cloud, never pinned). Gated:
+        # full engine suite BUILD SUCCESS on bd716286a, --shakeout
+        # CANDIDATE SHAKEOUT PASSED pre-tag on the same tip. DEPLOY of
+        # 0.1.73 is the pending relay at this bump; until it lands the
+        # managed handshake legitimately reads cloud 0.1.72 < floor —
+        # check_engine_release_floor.py documents that state, and the
+        # --acquire post-publish gate covers the published bytes.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 73)
 
 
 class TestParseEngineVersion:
