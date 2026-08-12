@@ -1321,6 +1321,15 @@ class StagingPromoteOpsIntegrationTest {
      * promoted) — {@code docPhysicalCollection.isNotNull()} is the gate,
      * not chash resolvability. The staged pointer must remain available
      * for a future finalize once the document is given a real collection.
+     *
+     * <p>nexus-0dkdx (substantive-critic round-2 finding, T2
+     * nexus/critique-round2-nexus-j862l-test-reconciliation-2026-08-12
+     * [22340]): this skip was silent — no counter, no WARN — unlike the
+     * sibling {@code manifest_doc_not_registered} case (Order 26), which
+     * got both in the same round. Extended (rather than split into a
+     * sibling test) to assert the {@code manifest_doc_no_collection}
+     * counter and its WARN log fire on exactly this already-exercised skip
+     * path, mirroring Order 26's log-capture shape.
      */
     @Test
     @Order(28)
@@ -1349,7 +1358,21 @@ class StagingPromoteOpsIntegrationTest {
             return null;
         });
 
-        ops.finalizeTenant(T1, false);
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        Map<String, Object> fin;
+        try {
+            fin = ops.finalizeTenant(T1, false);
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
             + "WHERE doc_id = '" + doc + "' AND encode(chash,'hex') = '" + canonical + "'"))
             .as("RDR-191: an empty physical_collection blocks the manifest "
@@ -1361,6 +1384,24 @@ class StagingPromoteOpsIntegrationTest {
             .as("an unresolved row is never consumed from staging -- it stays "
                 + "available for a future finalize")
             .isEqualTo(1);
+
+        assertThat(((Number) fin.get("manifest_doc_no_collection")).intValue())
+            .as("nexus-0dkdx: the registered-but-collection-less doc is counted")
+            .isGreaterThanOrEqualTo(1);
+
+        var warnLines = logs.list.stream()
+            .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+            .filter(m -> m.startsWith("event=staging_finalize_doc_no_collection"))
+            .toList();
+        assertThat(warnLines)
+            .as("nexus-0dkdx: the counter is escalated to an explicit WARN, "
+                + "mirroring manifest_doc_not_registered's own escalation "
+                + "(Order 26) rather than staying buried in the per-tenant "
+                + "JSON envelope")
+            .hasSize(1);
+        assertThat(warnLines.getFirst())
+            .contains("tenant=" + T1)
+            .contains("count=" + fin.get("manifest_doc_no_collection"));
 
         scope.withTenant(T1, ctx -> {
             ctx.execute("DELETE FROM staging.document_chunks WHERE tenant_id = ? AND doc_id = ?", T1, doc);

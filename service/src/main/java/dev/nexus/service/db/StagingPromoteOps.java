@@ -794,6 +794,35 @@ public final class StagingPromoteOps {
                     tenant, docNotRegisteredCount);
             }
 
+            // nexus-0dkdx (RDR-191 GATE-2, substantive-critic round-2 finding,
+            // T2 nexus/critique-round2-nexus-j862l-test-reconciliation-2026-08-12
+            // [22340]): the OTHER half of `manifestPromotable`'s gate --
+            // `docPhysicalCollection.isNotNull()` -- was silent. A doc_id that
+            // IS registered (unlike the case above) but whose
+            // `physical_collection` is NULL/empty (a ghost/sourceless doc,
+            // see the `docPhysicalCollection` commentary above) produces NO
+            // manifest row for its staged chunks, with zero counter and zero
+            // log signal -- unlike its sibling `manifest_doc_not_registered`
+            // case, which got both in the same round. A ghost doc's staged
+            // chunks could sit stuck indefinitely with nothing to find it.
+            // Mirrors `manifest_doc_not_registered` exactly: DISTINCT staged
+            // doc_ids whose `catalog_documents` row EXISTS (that's the
+            // difference from the case above) but resolves to a NULL/empty
+            // `physical_collection`.
+            var docsNoCollection = ctx.selectDistinct(sDocId).from(sdc).asTable("dnc");
+            int docNoCollectionCount = ctx.selectCount()
+                .from(docsNoCollection)
+                .where(DSL.exists(ctx.selectOne().from(CATALOG_DOCUMENTS)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(currentTenantSetting()))
+                    .and(CATALOG_DOCUMENTS.TUMBLER.eq(docsNoCollection.field("doc_id", String.class)))
+                    .and(DSL.nullif(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "").isNull())))
+                .fetchOne(0, Integer.class);
+            counts.put("manifest_doc_no_collection", docNoCollectionCount);
+            if (docNoCollectionCount > 0) {
+                log.warn("event=staging_finalize_doc_no_collection tenant={} count={}",
+                    tenant, docNoCollectionCount);
+            }
+
             // (2b) nexus-b6enc F3: the promote above is RESOLVABLE-ONLY, so
             // the verbatim-imported documents.chunk_count can claim more
             // chunks than actually landed. Mass-resync the count from the
