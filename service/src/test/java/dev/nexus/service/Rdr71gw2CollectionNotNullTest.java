@@ -79,7 +79,13 @@ class Rdr71gw2CollectionNotNullTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.start();
+        // DEDICATED container, not the per-fork shared cluster: this class
+        // stops migration BEFORE vectors-004-1, but the shared cluster is
+        // migrated to true head by whichever class touches it first, so
+        // vectors-004-1 is never in ITS unrun list (migrateUpTo fails with
+        // idx=-1) and the per-dim tables are already gone. Partial-migrate
+        // harnesses need their own container by construction.
+        pg = PgContainerHelper.startDedicated();
         try (Connection su = pg.createConnection("")) {
             // Step G (RDR-191 repoint batch cluster A): stop BEFORE
             // vectors-004-1 (now real head, Step B registration) rather than

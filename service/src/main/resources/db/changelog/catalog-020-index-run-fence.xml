@@ -288,9 +288,26 @@ GRANT EXECUTE ON FUNCTION nexus.manifest_verify(text) TO nexus_svc;
 GRANT EXECUTE ON FUNCTION nexus.manifest_verify_all() TO nexus_svc;
         </sql>
         <rollback>
-            <sql splitStatements="true">
-                REVOKE EXECUTE ON FUNCTION nexus.manifest_verify_all() FROM nexus_svc;
-                REVOKE EXECUTE ON FUNCTION nexus.manifest_verify(text) FROM nexus_svc;
+            <!-- RDR-191 repoint batch (nexus-o8dil.18): tolerant form. In the
+                 full reverse rollback chain, vectors-005's DROP-only rollback
+                 removes both functions BEFORE this rollback runs (catalog-020
+                 precedes vectors-005 in the changelog, so its rollback fires
+                 later), and a bare REVOKE on a missing function errors. When
+                 the function IS absent its grants died with it, so skipping is
+                 exact, not lossy. Rollback-block edits on an applied changeset
+                 are checksum-safe (Liquibase hashes the changes body only;
+                 catalog-013-2 precedent). -->
+            <sql splitStatements="false">
+DO $$
+BEGIN
+    IF to_regprocedure('nexus.manifest_verify_all()') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.manifest_verify_all() FROM nexus_svc;
+    END IF;
+    IF to_regprocedure('nexus.manifest_verify(text)') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.manifest_verify(text) FROM nexus_svc;
+    END IF;
+END
+$$;
             </sql>
         </rollback>
     </changeSet>
