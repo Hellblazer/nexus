@@ -446,6 +446,67 @@
          below. -->
     <include file="db/changelog/catalog-028-quarantine-orphans-sweep-gate.xml"/>
 
+    <!-- RDR-191 Phase 4 core (beads nexus-o8dil.12 + .13 + .14): the ALWAYS-COPY
+         changeset that collapses nexus.chunks_384/768/1024 into ONE unified
+         nexus.chunks table lives at
+         db/changelog-staged/vectors-004-unify-chunks.xml — a SIBLING directory
+         of this one, not a subdirectory — fully written and independently
+         tested (VectorsUnifyChunksIntegrationTest), but is DELIBERATELY NOT
+         <include>d here yet.
+
+         WHY NOT (empirically discovered while building this changeset, not
+         assumed): jOOQ codegen (pom.xml generate-sources phase,
+         testcontainers-jooq-codegen-maven-plugin) boots a Testcontainers
+         Postgres, applies THIS ENTIRE changelog, and generates Tables.java
+         FROM THE RESULTING LIVE SCHEMA on every `mvn compile`. Registering
+         the unify changeset here regenerates Tables.java WITHOUT
+         Tables.CHUNKS_384/768/1024/COLLECTION_VECTOR_STATS (replaced by
+         Tables.CHUNKS) — which fails compilation of every one of the ~87
+         existing call sites across CatalogRepository.java,
+         PgVectorRepository.java, TaxonomyCentroidRepository.java,
+         RekeyOps.java, StagingPromoteOps.java, CombinedWriteService.java and
+         more (T2 nexus/rdr-191-p4-scoping-inventory-2026-08-13 [22416] Part
+         2A/2E). This is a COMPILE-time break across the whole service
+         module, not a runtime test failure — categorically worse than the
+         "some serving-path tests go red" case the originating brief
+         anticipated, and it would leave the checked-out tree unbuildable for
+         anyone until the full Java repoint (beads nexus-o8dil.16, .17, .18,
+         .19, .48) lands alongside it.
+
+         WHY db/changelog-staged/, NOT db/changelog/ (round 3, corrected):
+         living IN db/changelog/ without being <include>d ALSO breaks the
+         Python suite — the changelog-parity lints
+         (tests/test_rehearsal_seed_coverage_lint.py,
+         tests/test_changelog_rls_lint.py,
+         tests/test_changelog_validate_precondition_lint.py) assert the
+         master include list matches this directory's on-disk *.xml contents
+         EXACTLY, by design (RDR-191 Phase 4 was the first time anyone tried
+         to land a dormant changeset here — the repo is correctly, deliberately
+         hostile to that, and those lints must never be weakened with an
+         allowlist entry). db/changelog-staged/ is a sibling directory, so it
+         is invisible to every one of those glob-based checks while remaining
+         a normal classpath resource (everything under src/main/resources/ is
+         on the classpath) that Liquibase can load directly by path.
+         Mechanically enforced going forward by
+         tests/test_changelog_vectors004_grants_coupling_lint.py's
+         three-state invariant: staged-and-unincluded passes, fully-registered
+         (moved back here + included + both grants-nexus-svc.xml pieces
+         present) passes, any OTHER combination (moved but not included,
+         included but still staged, included without the grants fix) fails
+         naming the T2 [22433] checklist.
+
+         THE PLAN: mv db/changelog-staged/vectors-004-unify-chunks.xml back
+         into this directory AND add the <include> in the SAME batch that
+         lands the Java repoint beads above — that batch's own commit is what
+         flips this on, atomically, so the tree is never left in a
+         compiles-but-serves-wrong or does-not-compile-at-all state. Until
+         then, vectors-004-unify-chunks.xml is validated in isolation: see
+         VectorsUnifyChunksIntegrationTest, which applies a standalone
+         changelog (every real file up through catalog-028, plus this one,
+         loaded from its staged path) directly via the Liquibase API,
+         bypassing SchemaMigrator.MASTER_CHANGELOG's classpath resource so
+         this file's checked-in state is never touched by that test. -->
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
