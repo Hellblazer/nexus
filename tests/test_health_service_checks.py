@@ -1523,7 +1523,7 @@ class TestChashProbeViewFallback:
         )
         chash = [r for r in results if "chash" in r.label.lower()]
         assert chash and chash[0].ok is False and chash[0].warn is True
-        assert "8 chunk row(s)" in chash[0].detail  # 2 per table via LEGACY (4 poison tables post-RDR-187)
+        assert "4 chunk row(s)" in chash[0].detail  # 2 per table via LEGACY (2 chash-bearing tables post-RDR-191 unify)
         assert state["i"] == 1 + n  # one failed view call + the full legacy set
 
     def test_debt_over_zero_emits_nongating_warn(self, tmp_path):
