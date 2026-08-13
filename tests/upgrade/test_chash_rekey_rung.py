@@ -25,6 +25,7 @@ from nexus.upgrade_ladder.rungs.chash_rekey import (
     OCTET_CHECKS,
     POINTER_OCTET_CHECKS,
     ChashRekeyRung,
+    default_chash_rekey_rung,
     validate_statements,
 )
 
@@ -459,6 +460,108 @@ class TestExistenceGateIntegration:
         result = rung.converge(_Report())
         assert result.outcome is ConvergeOutcome.COMPLETED
         assert len(validated_statements) == len(OCTET_CHECKS)
+
+
+class TestValidateFullySkippedFailsLoud:
+    """nexus-o8dil.15 / plan [22445] risk R4 — the E1/E2 non-vacuity
+    pairing. E1 (nexus-o8dil.19, commit 6a2c456e5) added
+    ``AdminSqlResult.fully_skipped`` to ``admin_sql.py`` precisely so a
+    convergence gate could tell "genuinely validated" apart from "every
+    target relation was absent, nothing was ever attempted". These tests
+    drive the REAL PRODUCTION ``_validate`` closure
+    (``default_chash_rekey_rung()._validate_fn``) — not a test fake — so
+    they prove the wiring itself, not just the behaviour a fake could be
+    written to match.
+
+    Post-Phase-2 (F14a's existence gate), a missed OCTET_CHECKS retarget
+    used to report permanently-not-converged SILENTLY forever; pre-wiring,
+    it would have been worse still — the legacy ``run_admin_sql`` wrapper
+    collapses ``fully_skipped`` into a bare ``True`` (see the CONTRAST test
+    below), so the rung would have reported "validated=yes" after
+    genuinely validating NOTHING.
+    """
+
+    @staticmethod
+    def _wire_fake_psql(monkeypatch, tmp_path, *, all_absent: bool):
+        """Same fixture shape as TestExistenceGateIntegration above, but
+        wired at the MODULE level (``_default_psql_runner`` /
+        ``discover_pg_binaries``) rather than via psql_bin/psql_runner
+        kwargs — the production ``_validate`` closure calls
+        ``run_admin_sql_detailed(validate_statements(checks))`` with NO
+        kwargs, so the seam under test is the module-level default, not an
+        injectable parameter."""
+        from subprocess import CompletedProcess
+
+        from nexus.db.admin_sql import AdminCredentials
+        from nexus.db.pg_provision import PgBinaries
+
+        monkeypatch.setattr(
+            "nexus.db.admin_sql.resolve_admin_credentials",
+            lambda creds_path=None: AdminCredentials(port=1, user="a", password="p"),
+        )
+        (tmp_path / "bundle" / "bin").mkdir(parents=True)
+        (tmp_path / "bundle" / "lib").mkdir(parents=True)
+        psql = tmp_path / "bundle" / "bin" / "psql"
+        psql.write_text("")
+        monkeypatch.setattr(
+            "nexus.db.pg_provision.discover_pg_binaries",
+            lambda: PgBinaries.from_dir(tmp_path / "bundle" / "bin"),
+        )
+
+        def runner(argv, env):  # noqa: ARG001 — signature match, env unused
+            stmt = argv[-1]
+            if "to_regclass" in stmt:
+                stdout = "" if all_absent else "t"
+                return CompletedProcess(argv, 0, stdout=stdout, stderr="")
+            return CompletedProcess(argv, 0, stdout="", stderr="")
+
+        monkeypatch.setattr("nexus.db.admin_sql._default_psql_runner", runner)
+
+    def test_fully_skipped_raises_with_a_named_reason(self, tmp_path, monkeypatch):
+        """THE RED CASE (pre-wiring this would have been silent True)."""
+        self._wire_fake_psql(monkeypatch, tmp_path, all_absent=True)
+        rung = default_chash_rekey_rung()
+        with pytest.raises(RuntimeError, match="fully skipped"):
+            rung._validate_fn(OCTET_CHECKS)  # noqa: SLF001 — the seam under test
+
+    def test_genuinely_clean_run_still_converges(self, tmp_path, monkeypatch):
+        """THE GREEN CASE: a real store, nothing absent, still validates and
+        returns True — the fix must not fail-loud on the common path."""
+        self._wire_fake_psql(monkeypatch, tmp_path, all_absent=False)
+        rung = default_chash_rekey_rung()
+        assert rung._validate_fn(OCTET_CHECKS) is True  # noqa: SLF001 — the seam under test
+
+    def test_the_legacy_wrapper_still_silently_collapses_this_case(
+        self, tmp_path, monkeypatch,
+    ):
+        """CONTRAST: run_admin_sql() (the legacy bool|None wrapper this
+        rung used to call) still returns bare True for the identical
+        fully-skipped input — that collapse is documented, intentional
+        backward compatibility (admin_sql.py's own docstring), not a bug in
+        the wrapper. It is exactly why chash_rekey._validate now calls
+        run_admin_sql_detailed directly instead of going through it."""
+        self._wire_fake_psql(monkeypatch, tmp_path, all_absent=True)
+        from nexus.db.admin_sql import run_admin_sql
+
+        assert run_admin_sql(validate_statements(OCTET_CHECKS)) is True
+
+    def test_converge_propagates_the_failure_and_still_restores_the_freeze(self):
+        """End-to-end at the rung level: a validate_fn that raises the
+        fully-skipped error must propagate out of converge() (never get
+        swallowed) while the writer-freeze restore still runs — the same
+        contract every other converge()-time RuntimeError already has
+        (residual mismatch, pointer-debt growth)."""
+
+        def _validate_fully_skipped(checks=None):  # noqa: ARG001 — signature match
+            raise RuntimeError(
+                "chash_rekey VALIDATE fully skipped: every target relation "
+                "for all 2 octet CHECK(s) in this VALIDATE set was absent"
+            )
+
+        rung, calls = _rung(validate_fn=_validate_fully_skipped)
+        with pytest.raises(RuntimeError, match="fully skipped"):
+            rung.converge(_Report())
+        assert calls["restored"], "the freeze must be released even when VALIDATE fully skips"
 
 
 class TestSentinelFreeze:

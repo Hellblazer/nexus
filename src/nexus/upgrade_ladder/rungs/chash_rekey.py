@@ -209,7 +209,14 @@ class ChashRekeyRung:
       and returns the counts envelope. REQUIRED.
     - ``validate_fn() -> bool | None`` — run the VALIDATE statements via
       the local admin connection. ``None`` means "not possible here"
-      (managed mode) — surfaced in the converge detail, never silent.
+      (managed mode) — surfaced in the converge detail, never silent. The
+      production wiring (``default_chash_rekey_rung``'s ``_validate``)
+      RAISES instead of returning a value when every statement's target
+      relation was absent (``AdminSqlResult.fully_skipped`` — nexus-o8dil.15
+      E1/E2 non-vacuity pairing): that shape means the checks named in
+      ``OCTET_CHECKS`` have drifted from the live schema, and this rung
+      must fail loud rather than report a converged or an
+      indistinguishable-from-unmeasured not-converged state.
     - ``reprovision_fn() -> None`` — recreate the diag counts view
       (local); no-op default for managed.
     - ``freeze_fn() -> Callable[[], None]`` — enter the writer freeze,
@@ -724,9 +731,39 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
             return None
 
     def _validate(checks: tuple[tuple[str, str], ...] = OCTET_CHECKS) -> bool | None:
-        from nexus.db.admin_sql import run_admin_sql  # noqa: PLC0415 — deferred
+        # nexus-o8dil.15 / plan [22445] risk R4 — the E1/E2 non-vacuity
+        # pairing this bead exists for. run_admin_sql_detailed's
+        # AdminSqlResult.fully_skipped is the ONLY signal that distinguishes
+        # "genuinely validated the octet CHECK(s)" from "every target
+        # relation named in `checks` was absent, so nothing was ever
+        # attempted" — the legacy run_admin_sql() wrapper collapses both
+        # into the SAME `ok=True`, which is exactly the vacuous-success
+        # shape RDR-182 forbids elsewhere in this rung (see verify()'s own
+        # docstring). Post-RDR-191, a missed OCTET_CHECKS retarget (the
+        # stale-name shape this constant's own derivation comment warns
+        # about) would otherwise report "validated=yes" — or fall through
+        # to a bare not-converged detail indistinguishable from a real
+        # unmeasured probe — FOREVER, silently. Fail loud instead: this is
+        # the F14a-existence-gate's OWN correctness bar (skip one absent
+        # relation, never crash) turned inside out — ALL of them absent,
+        # post a successful rekey, is not a skip case, it is a schema-drift
+        # bug this rung must surface, not swallow.
+        from nexus.db.admin_sql import run_admin_sql_detailed  # noqa: PLC0415 — deferred
 
-        return run_admin_sql(validate_statements(checks))
+        result = run_admin_sql_detailed(validate_statements(checks))
+        if result.fully_skipped:
+            raise RuntimeError(
+                "chash_rekey VALIDATE fully skipped: every target relation "
+                f"for all {result.total} octet CHECK(s) in this VALIDATE set "
+                "was absent (to_regclass returned NULL for each) — refusing "
+                "to report 'validated' or a not-converged state "
+                "indistinguishable from a genuine unmeasured probe. This is "
+                "the RDR-191 schema-drift shape OCTET_CHECKS's own "
+                "derivation comment warns about: a stale table/constraint "
+                f"name in `checks` no longer matches the live schema. "
+                f"checks={checks!r}"
+            )
+        return result.ok
 
     def _validated_probe() -> bool | None:
         # The data-side completion marker (see the class docstring): every
@@ -739,6 +776,13 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
         # beyond the constant's own definition moving. pg_constraint is a
         # metadata target under the diag lint, so this rides the same
         # read-only choke point as the poison probe.
+        #
+        # DOES NOT need the _validate() fully_skipped fix (nexus-o8dil.15,
+        # E1/E2 pairing): this probe never calls admin_sql at all — it is a
+        # direct pg_constraint COUNT, not a VALIDATE-with-existence-gate. A
+        # stale OCTET_CHECKS name whose relation/constraint no longer exists
+        # simply matches ZERO rows here, so `count == len(OCTET_CHECKS)` is
+        # false by construction — non-vacuous already, nothing to wire.
         try:
             from nexus.db.diag_connection import resolve_diag_credentials, run_diagnostic_sql  # noqa: PLC0415 — deferred
 
