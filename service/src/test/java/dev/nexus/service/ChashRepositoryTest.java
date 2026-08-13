@@ -35,9 +35,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>The write surface (upsert/upsertMany/doImport/deleteCollection/
  * deleteStale) is GONE — the router table was the only thing those wrote; the
- * chunks tables are written by the vector ingest paths. What remains, all
- * served from {@code chunks_384/768/1024} under RLS via the real
- * {@code nexus_svc} role:
+ * chunks table is written by the vector ingest paths. What remains, all
+ * served from the unified {@code nexus.chunks} table (RDR-191 Phase 4,
+ * repoint-batch lane D5 — formerly {@code chunks_384/768/1024}) under RLS
+ * via the real {@code nexus_svc} role:
  * <ol>
  *   <li>lookup: all (collection, created_at) rows for a chash, across dim
  *       tables, router-era key names and second-precision UTC format</li>
@@ -332,7 +333,7 @@ class ChashRepositoryTest {
     private String rawCreatedAt(Chash chash, String collection) {
         try (Connection su = pg.createConnection("");
              ResultSet rs = su.createStatement().executeQuery(
-                "SELECT created_at::text FROM nexus.chunks_384 " +
+                "SELECT created_at::text FROM nexus.chunks " +
                 "WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + collection + "' " +
                 "  AND chash = decode('" + chash.toHex() + "', 'hex')")) {
             if (!rs.next()) throw new IllegalStateException("row not found");
@@ -455,11 +456,14 @@ class ChashRepositoryTest {
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
+    // RDR-191 Phase 4 (lane D5): nexus.chunks_384/768/1024 collapsed into
+    // ONE unified nexus.chunks table — dim now selects the embedding_<dim>
+    // COLUMN, not the target table.
     private void chunk(Connection su, String tenant, int dim, String collection,
                        Chash chash, String createdAt) throws Exception {
         su.createStatement().execute(
-            "INSERT INTO nexus.chunks_" + dim +
-            " (tenant_id, collection, chash, chunk_text, embedding, created_at) VALUES " +
+            "INSERT INTO nexus.chunks" +
+            " (tenant_id, collection, chash, chunk_text, embedding_" + dim + ", created_at) VALUES " +
             "('" + tenant + "', '" + collection + "', decode('" + chash.toHex() + "', 'hex'), " +
             "'chunk " + chash.toHex().substring(0, 8) + "', " + unitVec(dim) + "::vector, " +
             "TIMESTAMPTZ '" + createdAt + "')");

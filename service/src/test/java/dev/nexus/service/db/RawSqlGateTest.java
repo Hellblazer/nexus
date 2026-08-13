@@ -182,10 +182,19 @@ class RawSqlGateTest {
                 ".fetch(sql, binds)", 1))),
         Map.entry("TaxonomyCentroidRepository.java", Map.of(
             // Same pgvector `<=>` category as PgVectorRepository.rawVectorFetch.
+            // RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-jv3ue item 5):
+            // retargeted from a bare "embedding" column + a hand-rolled
+            // "nexus.taxonomy_centroids_<dim>" table name (the latter a table
+            // dropped by the unify changeset -- would have been a SILENT
+            // RUNTIME failure, invisible to this compile-time gate) to
+            // DimTables.embeddingColumn(dim)/CENTROIDS_TABLE_NAME (via
+            // centroidTable(dim)) plus an explicit "embedding_<dim> IS NOT
+            // NULL" guard -- see the method's own javadoc for why the guard
+            // is load-bearing, not cosmetic.
             "annQuery", Map.of(
-                ".fetch( \"SELECT topic_id, (embedding <=> ?::vector) AS distance FROM \" "
-                + "+ centroidTable(dim) + \" WHERE collection \" + op + \" ?\" "
-                + "+ \" ORDER BY distance ASC, topic_id ASC LIMIT ?\", "
+                ".fetch( \"SELECT topic_id, (\" + embeddingCol + \" <=> ?::vector) AS distance FROM \" "
+                + "+ centroidTable(dim) + \" WHERE \" + embeddingCol + \" IS NOT NULL AND collection \" "
+                + "+ op + \" ?\" + \" ORDER BY distance ASC, topic_id ASC LIMIT ?\", "
                 + "vectorLiteral(embedding), collection, nResults)", 1))),
         Map.entry("CatalogRepository.java", Map.of(
             // SANCTIONED RAW (nexus-5xn3k.2): pg_advisory_xact_lock over a
@@ -799,65 +808,106 @@ class RawSqlGateTest {
     //    increment1-2026-08-08 [21850], nit 2) ──
 
     /**
-     * {@code ChashSqlIdioms.CHUNK_TABLES} silently hardcodes "three dims" in
-     * multiple independently hand-written call sites (RekeyOps' {@code DIMS},
-     * StagingPromoteOps' residual-count call site, {@code
-     * ChashSqlIdioms.danglingManifestCountDsl}'s three explicit NOT EXISTS
-     * clauses). A fourth dim table added without touching every one of
-     * those sites would drift silently. This canary fails LOUD instead:
-     * whoever adds a fourth dim must touch {@code CHUNK_TABLES}, see this
-     * test go red, and follow the checklist below.
+     * RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-o8dil.41 items 3+4)
+     * RETARGET of this canary: {@code nexus.chunks_384/768/1024} and {@code
+     * nexus.taxonomy_centroids_384/768/1024} collapsed into ONE unified
+     * table each ({@code nexus.chunks} / {@code nexus.taxonomy_centroids}),
+     * three nullable typed embedding columns apiece. Dim is now a COLUMN
+     * choice, not a TABLE identity — so "how many dim TABLES exist" (the
+     * old canary's question, {@code ChashSqlIdioms.CHUNK_TABLES.hasSize(3)})
+     * is no longer the drift signal a future dimension change needs. The
+     * live signal is {@code DimTables.CHUNKS}/{@code CENTROIDS} map size
+     * (pinned below); {@code CHUNK_TABLES} itself is now a single-element
+     * list (see its own javadoc) kept only as a checklist artifact, not a
+     * per-dim table-name enumeration.
      *
-     * <p>FOURTH-DIM CHECKLIST (update all of these when this assertion
-     * changes):
+     * <p>nexus-o8dil.41 comment 7 (2026-08-13, [22416] Part-9-derived
+     * finding): the OLD checklist covered ~16 sites against ~110 real
+     * Phase-4 decision sites — about 15%, and it grew reactively, one
+     * bullet per site that happened to bite someone. Rewritten here as a
+     * list of CHANNELS (a category of place a dim/table fact can live) so a
+     * future maintainer checks a CATEGORY, not a stale enumeration that
+     * will always be one channel short of the next drift class. Each
+     * channel names ONE representative live site as of this lane, not an
+     * exhaustive inventory — grep the category, don't trust the example.
+     *
      * <ul>
-     *   <li>{@code ChashSqlIdioms.CHUNK_TABLES} itself</li>
-     *   <li>{@code ChashSqlIdioms.danglingManifestCountDsl} (three explicit
-     *       {@code NOT EXISTS} clauses)</li>
-     *   <li>{@code RekeyOps.DIMS} (three explicit typed entries) and its
-     *       {@code orphanCond} (three explicit dim {@code NOT EXISTS}
-     *       clauses) and {@code unionAllContentRowsDsl} (three explicit
-     *       UNION ALL branches)</li>
-     *   <li>{@code StagingPromoteOps.finalizeTenant}'s residual-count call
-     *       site (three explicit {@code residualMismatchCountDsl} calls)</li>
-     *   <li>{@code StagingPromoteOps.chunkDim} (nexus-4okz4 increment 3:
-     *       three explicit switch branches resolving {@code promoteCollection}'s
-     *       per-dim content-table accessor)</li>
-     *   <li>{@code dev.nexus.service.vectors.DimTables.CHUNKS} /
-     *       {@code CENTROIDS} maps</li>
-     *   <li>{@code ChashSqlIdioms.existsInAnyDim} (nexus-4okz4 increment 4:
-     *       three explicit {@code EXISTS} disjuncts — the SINGLE-HOMED home
-     *       for this idiom since increment 5 converged {@code
-     *       StagingPromoteOps.canonExistsDsl}'s three call sites onto it and
-     *       deleted the private copy; {@code ChashCensus}' dangling-pointer
-     *       scan is a second caller)</li>
-     *   <li>nexus-sa731 round 2 (substantive-critic T2 critique-sa731-
-     *       catalog028-2026-08-13 [22404] Significant finding): this
-     *       checklist previously covered ONLY Java-side DSL constants — it
-     *       missed a parallel class of hardcoded three-way {@code
-     *       IF dim = 384 / ELSIF dim = 768 / ELSIF dim = 1024} branches
-     *       living in raw-SQL Liquibase functions, which RDR-191 Phase 4's
-     *       {@code chunks_384/768/1024 -> chunks} unification will need to
-     *       touch just as much as the Java sites above. Named here so a
-     *       fourth dim is not missed there either:
-     *       {@code nexus.gc_quarantine_orphans} (catalog-024, last replaced
-     *       by catalog-028 — 4 {@code NOT EXISTS} occurrences per dim branch,
-     *       pinned by {@code PgVectorRepositoryGcQuarantineTest
-     *       #gcQuarantineOrphans_definitionPin_hasSweepGateLock_
-     *       noStandaloneGuardSelect}), {@code nexus.gc_restore_rereferenced}
-     *       (catalog-024, unchanged by catalog-028), {@code
-     *       nexus.gc_expire_quarantine} (catalog-023, last replaced by
-     *       catalog-027), and {@code CatalogRepository}'s
-     *       {@code sweepChunks384}/{@code sweepChunks768}/
-     *       {@code sweepChunks1024} (Java methods, but each hand-written
-     *       per dim rather than driven off {@code CHUNK_TABLES}/{@code
-     *       DimTables.CHUNKS}). Also tracked on bead nexus-o8dil.41's Phase-4
-     *       retarget inventory via {@code bd comment}.</li>
+     *   <li><b>Typed jOOQ (single-table-instance-per-dim-key maps).</b>
+     *       {@code dev.nexus.service.vectors.DimTables.CHUNKS} / {@code
+     *       .CENTROIDS} — the SINGLE authority every typed call site reads
+     *       through. A dimension-count change starts and ends here for the
+     *       typed channel.</li>
+     *   <li><b>Raw-string table names.</b> Sites that build a
+     *       schema-qualified table name for string-concatenated SQL MUST
+     *       consult {@code DimTables.CHUNKS_TABLE_NAME} / {@code
+     *       .CENTROIDS_TABLE_NAME}, never re-derive {@code "nexus.chunks_"
+     *       + dim}. Representative: {@code
+     *       PgVectorRepository.chunksTable(int)}, {@code
+     *       TaxonomyCentroidRepository}'s ANN query, {@code
+     *       ChashRepository.PROBE_SQL}.</li>
+     *   <li><b>Raw-string column names.</b> Sites selecting/ordering by the
+     *       per-dim embedding column in raw SQL MUST consult {@code
+     *       DimTables.embeddingColumn(int)}, never hand-roll {@code
+     *       "embedding_" + dim} or bare {@code "embedding"}. Representative:
+     *       {@code PgVectorRepository.searchWithTokens}/{@code
+     *       hybridSearch}'s raw-SQL distance projections, {@code
+     *       TaxonomyCentroidRepository.annQuery}.</li>
+     *   <li><b>Stored-function bodies (Liquibase, {@code LANGUAGE sql} /
+     *       {@code plpgsql}).</b> Nine typed combined-query facades kept
+     *       per-dim DELIBERATELY (Decision 2, T2 [22445] — collapsing them
+     *       would reintroduce F13's silent-seq-scan regression), plus
+     *       {@code gc_quarantine_orphans}/{@code gc_restore_rereferenced}/
+     *       {@code gc_expire_quarantine}, {@code assign_from_chashes_<dim>}
+     *       (now retargeting BOTH unified tables per the o8dil.47 ruling),
+     *       {@code purge_trash}, {@code chash_conformance_report}. A
+     *       dimension-count change touches the changelog, not Java, for
+     *       this channel.</li>
+     *   <li><b>Views.</b> {@code nexus.live_chunks} (dim now DERIVED from
+     *       which embedding column is non-null, not a UNION leg), {@code
+     *       nexus.collection_vector_stats}.</li>
+     *   <li><b>Name-lists (Java constants enumerating dim-bearing table
+     *       names or dim ints).</b> {@code
+     *       dev.nexus.service.db.TenantScope.VACUUM_ALLOWED_TABLES} / {@code
+     *       CatalogRepository.PURGE_VACUUM_TABLES} (three-way lockstep with
+     *       the grants channel below, {@code
+     *       TenantScopeVacuumMaintainGrantParityTest}); {@code
+     *       ChashCensus.KNOWN_INVENTORY} / {@code TEXT_EXCLUSIONS}; {@code
+     *       CatalogRepository.MANIFEST_DIMS} / {@code
+     *       COLLECTION_SCOPED_TABLES}; every {@code DIMS}/{@code
+     *       VALID_DIMS} array (ChashRepository, TaxonomyCentroidRepository,
+     *       RekeyOps, StagingPromoteOps) — each of these is a loop-over-dim
+     *       site that, post-unification, MUST filter on {@code
+     *       embedding_<dim> IS NOT NULL} rather than relying on table
+     *       membership to scope a dim (the D1 hazard: looping the SAME
+     *       unified table N times without that filter silently
+     *       triples/N-tuples counts or duplicates rows).</li>
+     *   <li><b>Grants.</b> {@code grants-nexus-svc.xml}'s {@code
+     *       grants-005-chunks-unify-maintain} changeset (superseding {@code
+     *       grants-003}'s frozen chunks_384/768/1024 MAINTAIN list, guarded
+     *       by a checksum-neutral {@code preConditions}) — no centroid
+     *       analog exists (verified: zero grants ever named a centroid
+     *       table).</li>
+     *   <li><b>Python taxonomy.</b> {@code chash_tables.py}'s collapsed
+     *       inventory (RDR-191 E1, T2 [22463]) and its eight importers.</li>
+     *   <li><b>Shell rehearsals.</b> The upgrade-ladder / migration-
+     *       rehearsal loops that seed or assert per-dim table names
+     *       directly (E3).</li>
      * </ul>
      */
     @Test
-    void chunkTablesCanary_fourthDimNeedsAllSitesToldChecklistAbove() {
-        assertThat(ChashSqlIdioms.CHUNK_TABLES).hasSize(3);
+    void chunksSchemaCanary_dimensionCountChangeNeedsAllChannelsToldChecklistAbove() {
+        assertThat(dev.nexus.service.vectors.DimTables.CHUNKS)
+            .as("the typed-jOOQ channel's per-dim key set — the live authority for "
+                + "\"how many embedding dimensions are supported\" now that dim is a "
+                + "column choice, not a table identity")
+            .hasSize(3);
+        assertThat(dev.nexus.service.vectors.DimTables.CENTROIDS).hasSize(3);
+        assertThat(ChashSqlIdioms.CHUNK_TABLES)
+            .as("the unified chunks table is ONE physical table regardless of how "
+                + "many dims it carries — this list stays single-element; a change "
+                + "here means the unification itself was reverted, not that a dim "
+                + "was added")
+            .containsExactly(dev.nexus.service.vectors.DimTables.CHUNKS_TABLE_NAME);
     }
 
     // ── nexus-4okz4 increment 5, item (c): mechanical THE INLINE-VS-BIND

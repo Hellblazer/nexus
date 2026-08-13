@@ -61,27 +61,29 @@ public final class ChashRepository {
 
     /**
      * The lookup probe: which collections hold this chash for the current
-     * tenant, with the first-insert timestamp. Three PK-disjoint tables, so
-     * UNION ALL (a collection lives in exactly one dim table; no duplicate
-     * (collection, chash) pairs are possible across legs). The explicit
-     * tenant_id predicate binds the leading column of
-     * {@code idx_chunks_<dim>_tenant_chash}; RLS supplies the same qual for
-     * the serving role, and the plan keeps the index either way (pinned at
-     * 255k-row scale by {@code ChashProbePlanShapeTest}).
+     * tenant, with the first-insert timestamp.
+     *
+     * <p>RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-o8dil.48 part
+     * 2): {@code nexus.chunks_384/768/1024} collapsed into ONE unified
+     * {@code nexus.chunks} table sharing the SAME PK shape
+     * ({@code tenant_id, collection, chash}), so the former three-leg
+     * {@code UNION ALL} (needed because a collection lived in exactly one
+     * physical dim table) is now a SINGLE {@code SELECT} against the one
+     * table — a three-way union of the identical predicate against the
+     * identical table would triple-return every row, not merely be
+     * redundant. Table name consulted from {@link
+     * dev.nexus.service.vectors.DimTables#CHUNKS_TABLE_NAME}, never
+     * hand-rolled. The explicit {@code tenant_id} predicate binds the
+     * leading column of {@code idx_chunks_tenant_chash} (one index now,
+     * not one per dim); RLS supplies the same qual for the serving role,
+     * and the plan keeps the index either way (pinned at 255k-row scale by
+     * {@code ChashProbePlanShapeTest}).
      *
      * <p>Public so plan-shape tests EXPLAIN exactly the shipped SQL.
      */
     public static final String PROBE_SQL =
-        "SELECT collection, created_at FROM nexus.chunks_384 " +
-        " WHERE tenant_id = current_setting('nexus.tenant', true) AND chash = ? " +
-        "UNION ALL " +
-        "SELECT collection, created_at FROM nexus.chunks_768 " +
-        " WHERE tenant_id = current_setting('nexus.tenant', true) AND chash = ? " +
-        "UNION ALL " +
-        "SELECT collection, created_at FROM nexus.chunks_1024 " +
+        "SELECT collection, created_at FROM " + DimTables.CHUNKS_TABLE_NAME +
         " WHERE tenant_id = current_setting('nexus.tenant', true) AND chash = ?";
-
-    private static final int[] DIMS = {384, 768, 1024};
 
     private final TenantScope tenantScope;
 
@@ -156,7 +158,7 @@ public final class ChashRepository {
     public List<Map<String, String>> lookup(String tenant, Chash chash) {
         byte[] bytes = chash.toBytes();
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.resultQuery(PROBE_SQL, bytes, bytes, bytes).fetch();
+            var rows = ctx.resultQuery(PROBE_SQL, bytes).fetch();
             List<Map<String, String>> result = new ArrayList<>(rows.size());
             for (var r : rows) {
                 OffsetDateTime ts = r.get("created_at", OffsetDateTime.class);
@@ -177,19 +179,22 @@ public final class ChashRepository {
      * collections. Chunk-backed truth: registry stubs with zero chunks do
      * not appear (matching the router's behavior, which only knew
      * collections that had received rows).
+     *
+     * <p>RDR-191 Phase 4 (lane D5, bead nexus-o8dil.48 part 2): was a
+     * three-iteration loop over {@code DimTables.CHUNKS} — since every dim
+     * key now resolves to the SAME unified table instance, looping added
+     * nothing but two redundant round trips (the {@code Set} absorbed the
+     * duplicates silently); collapsed to one query. Any dim key works as
+     * the representative accessor since {@code .table()}/{@code
+     * .collection()}/{@code .tenantId()} are identical across dims.
      */
     public Set<String> distinctCollections(String tenant) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            Set<String> result = new HashSet<>();
-            for (int dim : DIMS) {
-                DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-                result.addAll(ctx.selectDistinct(ch.collection())
-                                 .from(ch.table())
-                                 .where(ch.tenantId().eq(tenant))
-                                 .fetch(ch.collection()));
-            }
-            return result;
-        });
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(384);
+        return tenantScope.withTenant(tenant, ctx ->
+            new HashSet<>(ctx.selectDistinct(ch.collection())
+                             .from(ch.table())
+                             .where(ch.tenantId().eq(tenant))
+                             .fetch(ch.collection())));
     }
 
     // ── rename_collection ──────────────────────────────────────────────────────
@@ -252,26 +257,33 @@ public final class ChashRepository {
                 CatalogRepository.acquireSweepGateShared(ctx, tenant, c);
             }
             ensureCollectionRegistered(ctx, tenant, newCollection);
-            int total = 0;
-            for (int dim : DIMS) {
-                DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-                // Drop OLD rows whose chash already exists under NEW (NEW-side
-                // row wins — see the collision-policy paragraph above).
-                ctx.deleteFrom(ch.table())
-                   .where(ch.tenantId().eq(tenant)
-                       .and(ch.collection().eq(oldCollection))
-                       .and(ch.chash().in(
-                           ctx.select(ch.chash())
-                              .from(ch.table())
-                              .where(ch.tenantId().eq(tenant)
-                                  .and(ch.collection().eq(newCollection))))))
-                   .execute();
-                total += ctx.update(ch.table())
-                            .set(ch.collection(), newCollection)
-                            .where(ch.tenantId().eq(tenant)
-                                .and(ch.collection().eq(oldCollection)))
-                            .execute();
-            }
+            // RDR-191 Phase 4 (lane D5, bead nexus-o8dil.48 part 2): was a
+            // three-iteration loop over DimTables.CHUNKS, one delete+update
+            // pass per dim key. Every dim key now resolves to the SAME
+            // unified table, so the FIRST iteration already re-homed (or
+            // dropped) every matching row; iterations 2 and 3 always found
+            // zero rows left to act on — correct net result by accident of
+            // execution order, not by construction, and two guaranteed-
+            // wasted round trips. Collapsed to one pass; any dim key works
+            // as the representative accessor (table()/collection()/
+            // tenantId()/chash() are identical across dims).
+            DimTables.ChunkTable ch = DimTables.CHUNKS.get(384);
+            // Drop OLD rows whose chash already exists under NEW (NEW-side
+            // row wins — see the collision-policy paragraph above).
+            ctx.deleteFrom(ch.table())
+               .where(ch.tenantId().eq(tenant)
+                   .and(ch.collection().eq(oldCollection))
+                   .and(ch.chash().in(
+                       ctx.select(ch.chash())
+                          .from(ch.table())
+                          .where(ch.tenantId().eq(tenant)
+                              .and(ch.collection().eq(newCollection))))))
+               .execute();
+            int total = ctx.update(ch.table())
+                        .set(ch.collection(), newCollection)
+                        .where(ch.tenantId().eq(tenant)
+                            .and(ch.collection().eq(oldCollection)))
+                        .execute();
             // Manifest re-home (collection is not part of its PK — no
             // collision handling needed).
             ctx.update(CATALOG_DOCUMENT_CHUNKS)
@@ -291,41 +303,47 @@ public final class ChashRepository {
     /**
      * True when no chunk rows exist for this tenant — the "fresh install"
      * guard. Used by {@code nx doc cite} short-circuit.
+     *
+     * <p>RDR-191 Phase 4 (lane D5, bead nexus-o8dil.48 part 2): was a
+     * three-iteration loop over {@code DimTables.CHUNKS} with an early-exit
+     * on the first {@code false}. Every dim key now resolves to the SAME
+     * unified table, so a populated tenant already short-circuited on
+     * iteration 1 (still correct); an EMPTY tenant ran the identical query
+     * three times before returning true (wasteful, not wrong). Collapsed
+     * to one check.
      */
     public boolean isEmpty(String tenant) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            for (int dim : DIMS) {
-                DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-                if (ctx.fetchExists(ctx.selectOne()
-                        .from(ch.table())
-                        .where(ch.tenantId().eq(tenant)))) {
-                    return false;
-                }
-            }
-            return true;
-        });
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(384);
+        return tenantScope.withTenant(tenant, ctx ->
+            !ctx.fetchExists(ctx.selectOne()
+                    .from(ch.table())
+                    .where(ch.tenantId().eq(tenant))));
     }
 
     // ── count_for_collection ───────────────────────────────────────────────────
 
     /**
-     * Return the chunk-row count for {@code collection} (summed across the
-     * dim tables; a collection lives in exactly one, the others contribute
-     * zero). Returns 0 for an unknown collection.
+     * Return the chunk-row count for {@code collection}. Returns 0 for an
+     * unknown collection.
+     *
+     * <p>RDR-191 Phase 4 (lane D5, bead nexus-o8dil.48 part 2): was a
+     * three-iteration loop over {@code DimTables.CHUNKS}, SUMMING a count
+     * query against the same physical table three times — a genuine D1-
+     * hazard correctness bug post-unification (every row triple-counted,
+     * not merely a wasted round trip: table membership no longer implies
+     * dim, so the per-dim loop's implicit scoping assumption broke here
+     * where the two prior methods' loops happened to stay accidentally
+     * correct). Collapsed to one count, no summation.
      */
     public int countForCollection(String tenant, String collection) {
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(384);
         return tenantScope.withTenant(tenant, ctx -> {
-            int total = 0;
-            for (int dim : DIMS) {
-                DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-                Integer n = ctx.selectCount()
-                               .from(ch.table())
-                               .where(ch.tenantId().eq(tenant)
-                                   .and(ch.collection().eq(collection)))
-                               .fetchOne(0, Integer.class);
-                if (n != null) total += n;
-            }
-            return total;
+            Integer n = ctx.selectCount()
+                           .from(ch.table())
+                           .where(ch.tenantId().eq(tenant)
+                               .and(ch.collection().eq(collection)))
+                           .fetchOne(0, Integer.class);
+            return n != null ? n : 0;
         });
     }
 
@@ -345,24 +363,28 @@ public final class ChashRepository {
      * @param collection physical collection name to query
      * @return set of hex-encoded chashes; empty when collection is unknown
      */
+    // RDR-191 Phase 4 (lane D5, bead nexus-o8dil.48 part 2): was a
+    // three-iteration loop over DimTables.CHUNKS, adding to a Set so the
+    // triplicated fetch was correct-but-wasteful (three redundant round
+    // trips) rather than corrupting, unlike countForCollection's sum.
+    // Collapsed to one query for the same reason as the other methods in
+    // this file: every dim key now resolves to the SAME unified table.
     public Set<String> registeredChashesForCollection(String tenant, String collection) {
         if (collection == null || collection.isBlank()) {
             throw new IllegalArgumentException("collection must not be empty");
         }
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(384);
         return tenantScope.withTenant(tenant, ctx -> {
             Set<String> result = new HashSet<>();
-            for (int dim : DIMS) {
-                DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-                // ch.chash() is the ChashHex-converted field: fetches as
-                // lowercase 64-hex directly.
-                for (String hex : ctx.selectDistinct(ch.chash())
-                                     .from(ch.table())
-                                     .where(ch.tenantId().eq(tenant)
-                                         .and(ch.collection().eq(collection)))
-                                     .fetch(ch.chash())) {
-                    if (hex != null && !hex.isEmpty()) {
-                        result.add(hex);
-                    }
+            // ch.chash() is the ChashHex-converted field: fetches as
+            // lowercase 64-hex directly.
+            for (String hex : ctx.selectDistinct(ch.chash())
+                                 .from(ch.table())
+                                 .where(ch.tenantId().eq(tenant)
+                                     .and(ch.collection().eq(collection)))
+                                 .fetch(ch.chash())) {
+                if (hex != null && !hex.isEmpty()) {
+                    result.add(hex);
                 }
             }
             return result;

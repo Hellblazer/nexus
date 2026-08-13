@@ -27,20 +27,32 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>{@code ChashProbePerfSpikeTest} (the router comparison) and
  * {@code ChashRerouteConformanceTest} both reference {@code chash_index} and
- * retire with it at nexus-piwya.9. This class does NOT: it seeds the chunks
- * tables alone at production cardinality (255k rows across the three dim
- * tables — the cloud store's magnitude) and pins, permanently:
+ * retire with it at nexus-piwya.9. This class does NOT: it seeds the unified
+ * {@code nexus.chunks} table at production cardinality (255k rows across the
+ * three embedding-column populations — the cloud store's magnitude) and
+ * pins, permanently:
  * <ol>
  *   <li>EXPLAIN of the SHIPPED probe SQL ({@link ChashRepository#PROBE_SQL},
  *       the exact statement {@code lookup} executes) through the real
- *       {@code nexus_svc}/FORCE-RLS path chooses
- *       {@code idx_chunks_<dim>_tenant_chash} on all three legs with no
- *       sequential scan — on real statistics, no planner coercion. Without
- *       the router (which would have masked a slow lookup), this is the only
- *       guard against the reroute silently degrading to a 255k-row scan.</li>
+ *       {@code nexus_svc}/FORCE-RLS path chooses {@code
+ *       idx_chunks_tenant_chash} with no sequential scan — on real
+ *       statistics, no planner coercion. Without the router (which would
+ *       have masked a slow lookup), this is the only guard against the
+ *       reroute silently degrading to a 255k-row scan.</li>
  *   <li>{@code lookup} answers correctly at that scale (multi-collection
  *       membership sample).</li>
  * </ol>
+ *
+ * <p>RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-o8dil.48 part 2):
+ * retargeted from three per-dim tables ({@code nexus.chunks_384/768/1024},
+ * each with its own {@code idx_chunks_<dim>_tenant_chash}) to the ONE
+ * unified {@code nexus.chunks} table (vectors-004-unify-chunks.xml) with a
+ * SINGLE {@code idx_chunks_tenant_chash} index — seeding now writes all
+ * three embedding populations into the same table (one row per generated
+ * id, embedding landing in its dim-typed column), and {@code PROBE_SQL} is
+ * a single-leg SELECT rather than a three-leg {@code UNION ALL} (see that
+ * constant's own javadoc for why a union of the identical predicate against
+ * the identical post-unification table would triple-return every row).
  *
  * <p>Method mirrors the spike class: server-side {@code generate_series}
  * seeding; HNSW / tsv-GIN / trgm-GIN indexes dropped first (superuser,
@@ -106,56 +118,58 @@ class ChashProbePlanShapeTest {
             su.setAutoCommit(true);
             Statement st = su.createStatement();
 
+            // RDR-191 Phase 4 (lane D5): one unified nexus.chunks table now
+            // carries all three embedding columns and ONE (tenant_id, chash)
+            // index (idx_chunks_tenant_chash), not one per dim.
             for (int dim : new int[] {384, 768, 1024}) {
-                st.execute("DROP INDEX IF EXISTS nexus.idx_chunks_" + dim + "_embedding");
-                st.execute("DROP INDEX IF EXISTS nexus.idx_chunks_" + dim + "_tsv");
-                st.execute("DROP INDEX IF EXISTS nexus.idx_chunks_" + dim + "_trgm");
+                st.execute("DROP INDEX IF EXISTS nexus.idx_chunks_embedding_" + dim);
             }
+            st.execute("DROP INDEX IF EXISTS nexus.idx_chunks_tsv");
+            st.execute("DROP INDEX IF EXISTS nexus.idx_chunks_trgm");
 
             for (int dim : new int[] {384, 768, 1024}) {
                 st.execute(
                     "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
                     "VALUES ('" + TENANT + "', 'plan-" + dim + "') ON CONFLICT DO NOTHING");
                 st.execute(
-                    "INSERT INTO nexus.chunks_" + dim +
-                    " (tenant_id, collection, chash, chunk_text, embedding) " +
+                    "INSERT INTO nexus.chunks" +
+                    " (tenant_id, collection, chash, chunk_text, embedding_" + dim + ") " +
                     "SELECT '" + TENANT + "', 'plan-" + dim + "', " +
                     "       decode(md5('p" + dim + "-' || i) || md5('q" + dim + "-' || i), 'hex'), " +
                     "       'plan chunk ' || i, v.vec " +
                     "FROM generate_series(1, " + CHUNKS_PER_DIM + ") i " +
                     "CROSS JOIN (SELECT ('[1' || repeat(',0', " + (dim - 1) + ") || ']')::vector AS vec) v");
-                st.execute("ANALYZE nexus.chunks_" + dim);
             }
 
             // A multi-collection sample: one 768-derived chash also lands in
             // the 384-dim collection (chunk text identity, different model).
+            // Different collection ('plan-384' vs 'plan-768') means no PK
+            // collision on (tenant_id, collection, chash).
             st.execute(
-                "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) " +
                 "SELECT '" + TENANT + "', 'plan-384', " +
                 "       decode('" + liveChash(768, 42) + "', 'hex'), 'cross-model copy', " +
                 "       ('[1' || repeat(',0', 383) || ']')::vector");
-            st.execute("ANALYZE nexus.chunks_384");
+            st.execute("ANALYZE nexus.chunks");
         }
     }
 
     @Test
-    void shippedProbeSqlKeepsAllThreeIndexesUnderRlsAtScale() {
+    void shippedProbeSqlKeepsTenantChashIndexUnderRlsAtScale() {
         byte[] bytes = Chash.fromHex(liveChash(768, 42)).toBytes();
         String plan = tenantScope.withTenant(TENANT, ctx -> {
             StringBuilder sb = new StringBuilder();
             for (var r : ctx.resultQuery(
-                    "EXPLAIN " + ChashRepository.PROBE_SQL, bytes, bytes, bytes).fetch()) {
+                    "EXPLAIN " + ChashRepository.PROBE_SQL, bytes).fetch()) {
                 sb.append(r.get(0, String.class)).append('\n');
             }
             return sb.toString();
         });
-        for (int dim : new int[] {384, 768, 1024}) {
-            assertThat(plan)
-                .as("lookup leg on chunks_%d must use its (tenant_id, chash) index at 255k-row scale", dim)
-                .contains("idx_chunks_" + dim + "_tenant_chash");
-        }
         assertThat(plan)
-            .as("no lookup leg may degrade to a sequential scan")
+            .as("lookup must use the unified table's (tenant_id, chash) index at 255k-row scale")
+            .contains("idx_chunks_tenant_chash");
+        assertThat(plan)
+            .as("lookup may not degrade to a sequential scan")
             .doesNotContain("Seq Scan");
     }
 
@@ -173,9 +187,7 @@ class ChashProbePlanShapeTest {
     void seededCardinalityIsReal() throws Exception {
         try (Connection su = pg.createConnection("");
              ResultSet rs = su.createStatement().executeQuery(
-                "SELECT (SELECT count(*) FROM nexus.chunks_384) + " +
-                "       (SELECT count(*) FROM nexus.chunks_768) + " +
-                "       (SELECT count(*) FROM nexus.chunks_1024)")) {
+                "SELECT count(*) FROM nexus.chunks")) {
             rs.next();
             assertThat(rs.getLong(1))
                 .as("the plan-shape claim is only meaningful at cardinality")
