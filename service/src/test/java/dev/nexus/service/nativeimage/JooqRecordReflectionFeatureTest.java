@@ -90,7 +90,15 @@ class JooqRecordReflectionFeatureTest {
     // scalar routine, not a table function) and generates NO Record type —
     // it is the reason this bump is +2, not +3. This is the deliberate
     // bump the assertion message demands.
-    private static final int EXPECTED_RECORD_TYPES = 69;
+    // 69 -> 65: RDR-191 repoint batch (nexus-o8dil.18/.48, the
+    // vectors-004-unify-chunks.xml + taxonomy-007-unify-centroids.xml
+    // changeset pair) collapsed SIX per-dim tables — chunks_384/768/1024
+    // and taxonomy_centroids_384/768/1024 — into TWO unified tables,
+    // nexus.chunks and nexus.taxonomy_centroids. jOOQ generates one Record
+    // type per table, so this is -6 record types for the retired shards
+    // +2 for their unified replacements = a net -4. This is the
+    // deliberate bump (downward, for once) the assertion message demands.
+    private static final int EXPECTED_RECORD_TYPES = 65;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

@@ -742,36 +742,32 @@ AS $$
 $$
         </sql>
         <rollback>
-            <sql splitStatements="false" stripComments="false">
-CREATE OR REPLACE FUNCTION nexus.document_text(doc_id text)
-RETURNS TABLE(
-    "position"  int,
-    chunk_text  text
-)
-LANGUAGE sql
-SECURITY INVOKER
-AS $$
-    SELECT m.position::int, k.chunk_text::text
-      FROM nexus.catalog_document_chunks m
-      JOIN nexus.catalog_documents d
-        ON d.tenant_id = m.tenant_id
-       AND d.tumbler   = m.doc_id
-       AND d.deleted_at IS NULL
-      JOIN (
-          SELECT tenant_id, collection, chash, chunk_text FROM nexus.chunks_384
-          UNION ALL
-          SELECT tenant_id, collection, chash, chunk_text FROM nexus.chunks_768
-          UNION ALL
-          SELECT tenant_id, collection, chash, chunk_text FROM nexus.chunks_1024
-      ) k
-        ON k.tenant_id  = m.tenant_id
-       AND k.collection = m.collection
-       AND k.chash      = m.chash
-     WHERE m.tenant_id = current_setting('nexus.tenant', true)
-       AND m.doc_id    = $1
-     ORDER BY m.position
-$$
-            </sql>
+            <!-- Category (A) object (this changeset's own header, "part 3" /
+                 line ~163): vectors-004's DROP TABLE ... CASCADE already
+                 removed document_text (LANGUAGE sql, pg_depend-tracked)
+                 immediately before this changeset ran, so this changeset's
+                 own forward direction brought it from ABSENT to PRESENT.
+                 Rollback must undo exactly that — DROP, restoring absence —
+                 not recreate the pre-vectors-004 body: at THIS point in the
+                 reverse rollback chain (vectors-005 rolls back before
+                 vectors-004), nexus.chunks_384/768/1024 do not exist yet
+                 (vectors-004's rollback, which recreates them, runs later),
+                 so a CREATE OR REPLACE FUNCTION ... LANGUAGE sql body
+                 referencing them fails at CREATE time (LANGUAGE sql bodies
+                 are validated against the catalog immediately, unlike
+                 plpgsql). Resurrecting the pre-vectors-004 body is
+                 catalog-004's own rollback+reapply job once those tables
+                 exist again (see this file's header, category (A) strategy)
+                 — this changeset's rollback restores only what THIS
+                 changeset changed. Matches the sibling DROP-only rollbacks
+                 already used for the two views (vectors-005-1/2), the nine
+                 combined-query functions (vectors-005-3/4/5), and
+                 manifest_verify/manifest_verify_all (vectors-005-9); this
+                 changeset and remap_membership's below were the two outliers
+                 that hadn't followed the category (A) pattern the header
+                 already documents (nexus-o8dil.18/.48, SchemaRollbackRoundTrip
+                 regression fix). -->
+            <sql splitStatements="true">DROP FUNCTION IF EXISTS nexus.document_text(text);</sql>
         </rollback>
     </changeSet>
 
@@ -811,45 +807,24 @@ AS $fn$
 $fn$;
         </sql>
         <rollback>
-            <sql splitStatements="false" stripComments="false">
-CREATE OR REPLACE FUNCTION nexus.remap_membership(
-    p_source_collection text,
-    p_target_collection text
-) RETURNS TABLE(mapped_total bigint, present_count bigint)
-LANGUAGE sql
-STABLE
-SECURITY INVOKER
-AS $fn$
-    WITH fact AS (
-        SELECT CASE WHEN r.new_chash ~ '^[0-9a-f]+$' AND length(r.new_chash) % 2 = 0
-                    THEN decode(r.new_chash, 'hex')
-                    ELSE convert_to(r.new_chash, 'UTF8') END AS key_bytes
-        FROM nexus.chash_remap r
-        WHERE r.source_collection = p_source_collection
-          AND r.target_collection = p_target_collection
-    ),
-    resolved AS (
-        SELECT COALESCE(a.new_chash, f.key_bytes) AS chash
-        FROM fact f
-        LEFT JOIN nexus.chash_alias a
-          ON a.old_bytes = f.key_bytes
-    )
-    SELECT
-        count(*)::bigint AS mapped_total,
-        count(*) FILTER (WHERE
-            EXISTS (SELECT 1 FROM nexus.chunks_384 c
-                     WHERE c.collection = p_target_collection
-                       AND c.chash = resolved.chash)
-         OR EXISTS (SELECT 1 FROM nexus.chunks_768 c
-                     WHERE c.collection = p_target_collection
-                       AND c.chash = resolved.chash)
-         OR EXISTS (SELECT 1 FROM nexus.chunks_1024 c
-                     WHERE c.collection = p_target_collection
-                       AND c.chash = resolved.chash)
-        )::bigint AS present_count
-    FROM resolved
-$fn$;
-            </sql>
+            <!-- Category (A) object (this changeset's own header, "part 3" /
+                 line ~163) — same defect and same fix as document_text's
+                 rollback above (vectors-005-7): vectors-004's DROP TABLE ...
+                 CASCADE already removed remap_membership (LANGUAGE sql)
+                 immediately before this changeset ran. Rolling THIS
+                 changeset back must restore that absence via DROP, not
+                 recreate the pre-vectors-004 body — nexus.chunks_384/768/
+                 1024 do not exist yet at this point in the reverse rollback
+                 chain (vectors-004's rollback, which recreates them, runs
+                 later), so CREATE OR REPLACE FUNCTION ... LANGUAGE sql
+                 referencing them fails at CREATE time. This is the exact
+                 root cause of the SchemaRollbackRoundTripIntegrationTest
+                 failure ("relation nexus.chunks_384 does not exist" while
+                 rolling back this changeset) — fixed by matching the
+                 category (A) DROP-only pattern already used by the two
+                 views, the nine combined-query functions, and
+                 manifest_verify/manifest_verify_all (nexus-o8dil.18/.48). -->
+            <sql splitStatements="true">DROP FUNCTION IF EXISTS nexus.remap_membership(text, text);</sql>
         </rollback>
     </changeSet>
 
