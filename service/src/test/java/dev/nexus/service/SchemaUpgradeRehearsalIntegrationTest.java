@@ -213,36 +213,55 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "on the old->HEAD hop, exactly as it is on the fresh-DB path")
                         .isEqualTo("MARK_RAN");
 
-                    // RDR-180 era end-state: the TEXT-era len_checks are gone
-                    // (rdr180-2 drops all five — the injected divergence is
-                    // tolerated via DROP IF EXISTS), replaced by the octet
-                    // CHECKs added NOT VALID (validated ONLY by the client
-                    // rung's admin connection post-rekey, never at boot —
-                    // the GH #1390 crash-loop class, retired by design).
-                    for (String t : new String[] {
-                        "chunks_384", "chunks_768", "chunks_1024",
-                        "catalog_document_chunks"}) {
+                    // RDR-180 era end-state, RE-DERIVED for RDR-191 Phase 4
+                    // unify: the TEXT-era len_checks are gone (rdr180-2 drops
+                    // all five — the injected divergence is tolerated via
+                    // DROP IF EXISTS), replaced by the octet CHECKs added NOT
+                    // VALID (validated ONLY by the client rung's admin
+                    // connection post-rekey, never at boot — the GH #1390
+                    // crash-loop class, retired by design). vectors-004-1
+                    // then runs LATER in the same old-tag->HEAD hop and
+                    // collapses chunks_384/768/1024 into ONE nexus.chunks
+                    // table via DROP TABLE ... CASCADE, so their per-table
+                    // octet CHECKs die with them too — only the unified
+                    // chunks_chash_octet_check survives in their place.
+                    // catalog_document_chunks is untouched by the unify.
+                    assertThat(constraintExists(conn, "chunks_chash_octet_check"))
+                        .as("unified nexus.chunks carries the octet CHECK post-RDR-191-unify, "
+                            + "reached at the end of this same old-tag->HEAD hop")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "chunks_chash_octet_check"))
+                        .as("chunks_chash_octet_check stays NOT VALID at boot (rung validates)")
+                        .isFalse();
+                    for (String t : new String[] {"chunks_384", "chunks_768", "chunks_1024"}) {
                         assertThat(constraintExists(conn, t + "_chash_len_check"))
-                            .as("%s_chash_len_check must be gone post-rdr180-2", t)
+                            .as("%s no longer exists post-vectors-004-1 unify -- no len_check to find", t)
                             .isFalse();
                         assertThat(constraintExists(conn, t + "_chash_octet_check"))
-                            .as("%s_chash_octet_check must exist post-rdr180-11", t)
-                            .isTrue();
-                        assertThat(constraintValidated(conn, t + "_chash_octet_check"))
-                            .as("%s octet CHECK stays NOT VALID at boot (rung validates)", t)
+                            .as("%s's own octet CHECK died with its table at the unify DROP", t)
                             .isFalse();
                     }
+                    assertThat(constraintExists(conn, "catalog_document_chunks_chash_len_check"))
+                        .as("catalog_document_chunks_chash_len_check must be gone post-rdr180-2")
+                        .isFalse();
+                    assertThat(constraintExists(conn, "catalog_document_chunks_chash_octet_check"))
+                        .as("catalog_document_chunks_chash_octet_check must exist post-rdr180-11")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "catalog_document_chunks_chash_octet_check"))
+                        .as("catalog_document_chunks octet CHECK stays NOT VALID at boot")
+                        .isFalse();
 
                     assertThat(tablesInSchema(conn, "nexus"))
                         .as("core catalog/chunk tables must exist after the old-tag->HEAD hop")
-                        .containsAll(Set.of(
-                            "chunks_384", "chunks_768", "chunks_1024",
-                            "catalog_document_chunks", "memory"));
-                    // RDR-187 (nexus-piwya.9): the router died at the DROP —
-                    // the hop's END STATE has no chash_index at all.
+                        .containsAll(Set.of("chunks", "catalog_document_chunks", "memory"));
+                    // RDR-187 (nexus-piwya.9): chash_index died at the DROP —
+                    // the hop's END STATE has no chash_index at all. RDR-191
+                    // Phase 4 (vectors-004-1): the three per-dim chunks tables
+                    // likewise die at the DROP, collapsed into nexus.chunks.
                     assertThat(tablesInSchema(conn, "nexus"))
-                        .as("chash_index must be GONE at HEAD (rdr187-2)")
-                        .doesNotContain("chash_index");
+                        .as("chash_index and chunks_384/768/1024 must all be GONE at HEAD "
+                            + "(rdr187-2 and vectors-004-1 respectively)")
+                        .doesNotContain("chash_index", "chunks_384", "chunks_768", "chunks_1024");
                 }
             }
         } finally {
@@ -801,6 +820,18 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * collection, chash)}) finds a match and leaves the manifest row alone —
      * exactly as it would for a real tenant's legacy row, which never existed
      * without its content landing alongside it.
+     *
+     * <p><strong>RDR-191 Phase 4 unify — verified PRE-hop, unchanged.</strong>
+     * This helper is invoked from the SEED block, which runs strictly between
+     * {@link #applyOldLeg} (the old {@link #OLD_TAG} tree, ending before the
+     * unify) and the HEAD-leg {@link SchemaMigrator#migrate}. At the moment
+     * this INSERT executes, {@code nexus.chunks_384} is the table
+     * {@code vectors-001-baseline.xml} created in the OLD leg — it still has
+     * the old per-dim shape and has not yet been touched by vectors-004-1
+     * (which only runs later, inside the HEAD leg, and copies this very row
+     * into the unified {@code nexus.chunks.embedding_384} column before
+     * dropping this table). This call targets the correct, live schema for
+     * its position in the hop and needs no change for the unify.
      */
     private static void seedChunk384LegacyContent(Connection c, String tenant, String collection,
                                                    String chash, String text) throws Exception {
