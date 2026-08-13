@@ -831,6 +831,28 @@ class RawSqlGateTest {
      *       StagingPromoteOps.canonExistsDsl}'s three call sites onto it and
      *       deleted the private copy; {@code ChashCensus}' dangling-pointer
      *       scan is a second caller)</li>
+     *   <li>nexus-sa731 round 2 (substantive-critic T2 critique-sa731-
+     *       catalog028-2026-08-13 [22404] Significant finding): this
+     *       checklist previously covered ONLY Java-side DSL constants — it
+     *       missed a parallel class of hardcoded three-way {@code
+     *       IF dim = 384 / ELSIF dim = 768 / ELSIF dim = 1024} branches
+     *       living in raw-SQL Liquibase functions, which RDR-191 Phase 4's
+     *       {@code chunks_384/768/1024 -> chunks} unification will need to
+     *       touch just as much as the Java sites above. Named here so a
+     *       fourth dim is not missed there either:
+     *       {@code nexus.gc_quarantine_orphans} (catalog-024, last replaced
+     *       by catalog-028 — 4 {@code NOT EXISTS} occurrences per dim branch,
+     *       pinned by {@code PgVectorRepositoryGcQuarantineTest
+     *       #gcQuarantineOrphans_definitionPin_hasSweepGateLock_
+     *       noStandaloneGuardSelect}), {@code nexus.gc_restore_rereferenced}
+     *       (catalog-024, unchanged by catalog-028), {@code
+     *       nexus.gc_expire_quarantine} (catalog-023, last replaced by
+     *       catalog-027), and {@code CatalogRepository}'s
+     *       {@code sweepChunks384}/{@code sweepChunks768}/
+     *       {@code sweepChunks1024} (Java methods, but each hand-written
+     *       per dim rather than driven off {@code CHUNK_TABLES}/{@code
+     *       DimTables.CHUNKS}). Also tracked on bead nexus-o8dil.41's Phase-4
+     *       retarget inventory via {@code bd comment}.</li>
      * </ul>
      */
     @Test

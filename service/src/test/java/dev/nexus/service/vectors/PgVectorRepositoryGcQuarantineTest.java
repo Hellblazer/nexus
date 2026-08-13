@@ -620,4 +620,138 @@ class PgVectorRepositoryGcQuarantineTest {
             .as("tenant A's row survives a tenant B GC pass untouched")
             .isEqualTo("tenant A only");
     }
+
+    // ── nexus-sa731: definition pin — sweep gate + inline-guard collapse ────
+    //
+    // catalog-024's gc_quarantine_orphans evaluated its manifest-reference
+    // guard SELECT and its DELETE/move as two separate READ COMMITTED
+    // statements with no lock on the path -- a manifest write committing
+    // between the two could get quarantined out from under it (write-skew).
+    // catalog-028 fixes this by taking the SAME per-(tenant, collection)
+    // advisory sweep gate CatalogRepository#runSweepTransaction uses, plus
+    // (belt and braces) folding the guard inline into each move statement's
+    // own WHERE instead of a precomputed chash array.
+    //
+    // This is a DEFINITION PIN, not a concurrency reproduction -- a
+    // deterministic race test is exactly what this structural fix exists to
+    // avoid needing (see the catalog-028 changeset header). It asserts the
+    // LIVE function body, via pg_get_functiondef, rather than trying to
+    // provoke the race under test. Kill-controlled: temporarily removing the
+    // lock line from the catalog-028 changeset was confirmed to turn this
+    // test RED (see T2 nexus-sa731-fix-gc-quarantine-lock-2026-08-13 for the
+    // recorded run), then the line was restored and the suite re-verified
+    // GREEN.
+    //
+    // ROUND 2 (stacked review, T2 nexus/review-sa731-catalog028-2026-08-13
+    // [22403] Important finding + nexus/critique-sa731-catalog028-2026-08-13
+    // [22404] Significant finding): the initial fix's EXCLUSIVE acquisition
+    // had no lock_timeout/statement_timeout, unlike the
+    // acquireSweepGateExclusive model it claims to mirror -- an unbounded
+    // wait here would hang the synchronous HTTP handler
+    // (VectorHandler#handleGcQuarantineOrphans) indefinitely behind a
+    // long-running manifest writer holding the SHARED half. Extended below
+    // to also pin the timeout pair and the lock_not_available handler,
+    // kill-controlled the same way (removing the set_config lines turns the
+    // new assertions RED; see T2 nexus-sa731-fix-gc-quarantine-lock-2026-08-13
+    // round-2 section for the recorded run).
+
+    @Test
+    void gcQuarantineOrphans_definitionPin_hasSweepGateLock_noStandaloneGuardSelect() throws Exception {
+        String functionDef = functionDefinition(
+            "nexus.gc_quarantine_orphans(int, text, text, text, text, int)");
+
+        assertThat(functionDef)
+            .as("must take the EXCLUSIVE half of the same advisory sweep-gate key "
+                + "CatalogRepository#acquireSweepGateExclusive uses, closing the "
+                + "manifest-insert-vs-quarantine-move write-skew window")
+            .contains("pg_advisory_xact_lock(hashtext('sweepgate:'")
+            .doesNotContain("pg_advisory_xact_lock_shared");
+
+        assertThat(functionDef)
+            .as("the old precomputed-array guard (SELECT array_agg(...) INTO v_chashes, "
+                + "then chash = ANY(v_chashes)) must be gone -- the guard now lives inline "
+                + "in each move statement's own WHERE, re-evaluated at that statement's own "
+                + "snapshot, not trusted from an array computed earlier in the transaction")
+            .doesNotContain("v_chashes")
+            .doesNotContain("= ANY(v_chashes)");
+
+        assertThat(functionDef)
+            .as("the registration guard is now driven by a cheap pre-flight EXISTS "
+                + "check (used only to decide whether to bother, and to sequence "
+                + "catalog_collections registration before the FK-dependent copy "
+                + "INSERT), not a precomputed array's nullness")
+            .doesNotContain("array_agg");
+
+        // "NOT EXISTS" occurrences: FOUR per dim branch (384/768/1024) = 12. The
+        // pre-flight is itself an `IF NOT EXISTS (SELECT 1 FROM chunks_<dim> ...
+        // AND NOT EXISTS (guard))` -- its own outer existence check PLUS one guard
+        // evaluation (2), then the copy-to-quarantine INSERT's own inline guard (1)
+        // and the remove-from-origin DELETE's own inline guard (1) -- each an
+        // INDEPENDENT re-evaluation of the manifest-reference predicate, none of
+        // them handing a precomputed chash array to another. catalog-024's shape
+        // had exactly 3 total (one array-building `SELECT array_agg(...) ... WHERE
+        // NOT EXISTS(...)` guard per dim branch, feeding BOTH move statements via
+        // `chash = ANY(v_chashes)`) -- this count is the load-bearing signal that
+        // the guard collapsed INTO each statement rather than merely surviving
+        // alongside them.
+        int notExistsCount = functionDef.split("NOT EXISTS", -1).length - 1;
+        assertThat(notExistsCount)
+            .as("inline/pre-flight NOT EXISTS occurrences must be 4x per dim branch "
+                + "(pre-flight's outer + inner, INSERT, DELETE) x 3 dim branches = "
+                + "12, not 3x total via a standalone array-building guard SELECT")
+            .isEqualTo(12);
+    }
+
+    // ── nexus-sa731 ROUND 2: definition pin — bounded-wait timeout mirror ───
+    //
+    // Stacked review (T2 nexus/review-sa731-catalog028-2026-08-13 [22403]
+    // Important finding + nexus/critique-sa731-catalog028-2026-08-13 [22404]
+    // Significant finding): the round-1 fix's EXCLUSIVE acquisition
+    // (PERFORM pg_advisory_xact_lock(...), asserted by the pin test above)
+    // had NO lock_timeout/statement_timeout, unlike the
+    // acquireSweepGateExclusive model the changeset header claims to
+    // mirror (CatalogRepository.java:3898-3907). This function is invoked
+    // synchronously from VectorHandler#handleGcQuarantineOrphans, an HTTP
+    // handler with no request-level timeout of its own -- an unbounded wait
+    // behind a long-running manifest writer holding the SHARED half would
+    // hang that thread indefinitely, the exact failure direction the sweep
+    // gate's own design exists to avoid.
+    //
+    // Separate test (not folded into the round-1 pin above) so a break in
+    // either invariant is unambiguous from the failing test name alone.
+    // Kill-controlled the same way as the round-1 pin: temporarily removing
+    // the two `set_config` lines from the catalog-028 changeset was
+    // confirmed to turn this test RED, then the lines were restored and the
+    // suite re-verified GREEN (see T2 nexus-sa731-fix-gc-quarantine-lock-
+    // 2026-08-13's round-2 section for the recorded run).
+
+    @Test
+    void gcQuarantineOrphans_definitionPin_boundsAcquisitionWithSweepGateTimeouts() throws Exception {
+        String functionDef = functionDefinition(
+            "nexus.gc_quarantine_orphans(int, text, text, text, text, int)");
+
+        assertThat(functionDef)
+            .as("must bound the EXCLUSIVE acquisition with the same "
+                + "lock_timeout/statement_timeout values acquireSweepGateExclusive "
+                + "sets (2000ms/5000ms), and re-raise a timed-out acquisition as an "
+                + "explicit, retryable, gate-naming error rather than blocking forever")
+            .contains("set_config('lock_timeout', '2000', true)")
+            .contains("set_config('statement_timeout', '5000', true)")
+            .contains("WHEN lock_not_available THEN")
+            .contains("ERRCODE = 'lock_not_available'");
+    }
+
+    /** {@code pg_get_functiondef} for {@code signature} (schema-qualified, e.g.
+     *  {@code "nexus.fn(int, text)"}) -- a definition pin needs no RLS/role
+     *  concern (reading a function's own source, not tenant data), so the plain
+     *  superuser connection used by the other raw-SQL fixture helpers above
+     *  suffices. */
+    private String functionDefinition(String signature) throws SQLException {
+        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
+            var rs = st.executeQuery(
+                "SELECT pg_get_functiondef('" + signature + "'::regprocedure)");
+            rs.next();
+            return rs.getString(1);
+        }
+    }
 }

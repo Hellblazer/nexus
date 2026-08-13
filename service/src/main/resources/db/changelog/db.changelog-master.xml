@@ -431,6 +431,21 @@
          file-order clarity, before the runAlways grants below. -->
     <include file="db/changelog/catalog-027-gc-expire-quarantine-manifest-guard.xml"/>
 
+    <!-- nexus-sa731 (RDR-191 GATE-2 census cell 5a, concurrent axis): CREATE OR
+         REPLACE of nexus.gc_quarantine_orphans — takes the EXCLUSIVE half of the
+         same per-(tenant, collection) advisory sweep gate
+         CatalogRepository#runSweepTransaction uses, closing the write-skew
+         window between the manifest-reference guard SELECT and the chunk
+         move/delete (two separate READ COMMITTED statements, previously
+         unlocked). Also collapses the guard into the move statements' own
+         WHERE (inline NOT EXISTS) instead of a precomputed chash array,
+         deleting the now-redundant standalone guard SELECT. Layered on top of
+         catalog-024-quarantine-collection-registration.xml via CREATE OR
+         REPLACE — that file already shipped and is never edited in place.
+         After catalog-027 for file-order clarity, before the runAlways grants
+         below. -->
+    <include file="db/changelog/catalog-028-quarantine-orphans-sweep-gate.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
