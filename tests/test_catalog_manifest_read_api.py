@@ -137,6 +137,15 @@ class TestManifestRow:
         assert row.line_end is None
         assert row.char_start is None
         assert row.char_end is None
+        # nexus-kzso5: collection defaults to None (absence-tolerant, never
+        # fabricated) when the constructor doesn't pass it.
+        assert row.collection is None
+
+    def test_manifestrow_collection_field(self):
+        """nexus-kzso5: ManifestRow carries the row's own stamped collection."""
+        from nexus.catalog.types import ManifestRow
+        row = ManifestRow(position=0, chash="c" * 64, collection="knowledge__kzso5__v1")
+        assert row.collection == "knowledge__kzso5__v1"
 
 
 # ── K6: get_manifest ─────────────────────────────────────────────────────────
@@ -217,6 +226,22 @@ class TestGetManifest:
 
         rows = cat.get_manifest(d1)
         assert rows == []
+
+    def test_get_manifest_rows_carry_own_collection(self, tmp_path):
+        """nexus-kzso5 (RDR-191 follow-up): each row carries the row's OWN
+        stamped collection, independent of the doc's physical_collection —
+        register under one collection, write the manifest under a
+        DIFFERENT one, and assert the row reports the write-time value.
+        """
+        cat = _make_catalog(tmp_path)
+        d1 = _seed_doc(cat, "code__kzso5-doc-collection")
+        cat.write_manifest(
+            d1, [_make_chunk("a" * 64, 0)], collection="code__kzso5-explicit-collection",
+        )
+
+        rows = cat.get_manifest(d1)
+        assert len(rows) == 1
+        assert rows[0].collection == "code__kzso5-explicit-collection"
 
     def test_get_manifest_isolates_by_doc_id(self, tmp_path):
         """get_manifest returns rows only for the requested doc_id."""

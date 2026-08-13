@@ -215,6 +215,48 @@ class CatalogHandlerManifestEnvelopeTest {
             .isEqualTo(manifests.size());
     }
 
+    // ── nexus-kzso5: manifest rows carry their own `collection` on the wire ────
+
+    @Test
+    void getMany_rowsCarryOwnCollection_independentOfDocPhysicalCollection() throws Exception {
+        // RDR-191: the manifest row's stamped collection is caller-supplied,
+        // NOT NULL truth -- decoupled from the owning doc's
+        // physical_collection. Register the doc under one collection, write
+        // the manifest row under a DIFFERENT one, and assert the wire row
+        // reports the row's own value, not the doc's.
+        var t1 = registerDoc("kzso5.owner", "kzso5 doc 1", "file:///kzso5/doc1.md");
+        writeManifestRow(t1, "knowledge__kzso5-explicit__v1", ch("kzso5-doc1-chunk"));
+
+        var resp = post("/v1/catalog/manifest/get_many",
+            mapper.writeValueAsString(Map.of("doc_ids", List.of(t1))));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        @SuppressWarnings("unchecked")
+        var manifests = (Map<String, Object>) body.get("manifests");
+        @SuppressWarnings("unchecked")
+        var rows = (List<Map<String, Object>>) manifests.get(t1);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).get("collection"))
+            .as("get_many rows must carry the row's own collection, additive field")
+            .isEqualTo("knowledge__kzso5-explicit__v1");
+    }
+
+    @Test
+    void get_singleDoc_rowCarriesOwnCollection() throws Exception {
+        var t1 = registerDoc("kzso5.owner", "kzso5 doc 2", "file:///kzso5/doc2.md");
+        writeManifestRow(t1, "knowledge__kzso5-single__v1", ch("kzso5-doc2-chunk"));
+
+        var resp = get("/v1/catalog/manifest/get?doc_id=" + t1);
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        @SuppressWarnings("unchecked")
+        var rows = (List<Map<String, Object>>) body.get("rows");
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).get("collection"))
+            .as("single-doc get must carry the row's own collection, additive field")
+            .isEqualTo("knowledge__kzso5-single__v1");
+    }
+
     @Test
     void getMany_emptyInput_returns200WithZeroCount() throws Exception {
         var resp = post("/v1/catalog/manifest/get_many",
@@ -232,6 +274,16 @@ class CatalogHandlerManifestEnvelopeTest {
             .header("X-Nexus-Tenant", TENANT)
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(body))
+            .build();
+        return http.send(req, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> get(String path) throws Exception {
+        var req = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
+            .header("Authorization", "Bearer " + TOKEN)
+            .header("X-Nexus-Tenant", TENANT)
+            .GET()
             .build();
         return http.send(req, HttpResponse.BodyHandlers.ofString());
     }

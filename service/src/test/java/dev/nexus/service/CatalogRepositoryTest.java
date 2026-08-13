@@ -1171,6 +1171,10 @@ class CatalogRepositoryTest {
         assertThat(got).hasSize(2);
         assertThat(got.get(0).get("chash")).isEqualTo(ch("aaaa"));
         assertThat(got.get(1).get("chash")).isEqualTo(ch("bbbb"));
+        // nexus-kzso5: each row carries its own stamped collection (RDR-191
+        // caller-supplied truth), additive wire field.
+        assertThat(got.get(0).get("collection")).isEqualTo("knowledge__mfst1__v1");
+        assertThat(got.get(1).get("collection")).isEqualTo("knowledge__mfst1__v1");
     }
 
     @Test @Order(51)
@@ -1340,6 +1344,27 @@ class CatalogRepositoryTest {
         assertThat(result.get("gmm.1").get(0).get("chash")).isEqualTo(ch("gmm1aa"));
         assertThat(result.get("gmm.1").get(1).get("chash")).isEqualTo(ch("gmm1bb"));
         assertThat(result.get("gmm.2").get(0).get("chash")).isEqualTo(ch("gmm2cc"));
+        // nexus-kzso5: batch rows carry their own stamped collection too.
+        assertThat(result.get("gmm.1").get(0).get("collection")).isEqualTo("knowledge__gmm1__v1");
+        assertThat(result.get("gmm.2").get(0).get("collection")).isEqualTo("knowledge__gmm2__v1");
+    }
+
+    @Test @Order(55)
+    void manifest_getManifest_rowCollection_independentOfDocPhysicalCollection() {
+        // nexus-kzso5: prove the row's collection is the CALLER-SUPPLIED
+        // write-time value, decoupled from the doc's own physical_collection
+        // -- the exact RDR-191 contract this wire field exposes.
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.kzso5", "title", "Kzso5 Doc",
+            "content_type", "paper", "corpus", "knowledge",
+            "physical_collection", "knowledge__mfst-kzso5-doc__v1"));
+        repo.writeManifest(TENANT_A, "mfst.kzso5", "knowledge__mfst-kzso5-explicit__v1", List.of(
+            Map.<String, Object>of("position", 0, "chash", ch("kzso5row"), "chunk_index", 0)
+        ));
+        var got = repo.getManifest(TENANT_A, "mfst.kzso5");
+        assertThat(got).hasSize(1);
+        assertThat(got.get(0).get("collection"))
+            .as("row collection must be the write-time value, not the doc's physical_collection")
+            .isEqualTo("knowledge__mfst-kzso5-explicit__v1");
     }
 
     @Test @Order(56)

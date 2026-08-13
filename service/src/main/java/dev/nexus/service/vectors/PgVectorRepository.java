@@ -2148,37 +2148,116 @@ public final class PgVectorRepository {
      * REFUSES to delete a chunk whose manifest row has not yet been rewritten
      * to the new collection, rather than silently orphaning it.
      *
-     * <p><strong>"Live" excludes tombstoned owners (review finding, bead
-     * nexus-o8dil.5 round 2).</strong> A manifest row whose OWNING document
-     * ({@code catalog_documents} via {@code doc_id = tumbler}) is soft-deleted
-     * ({@code deleted_at IS NOT NULL}) does not count as "still referenced" —
-     * this mirrors this same file's {@code liveChunksCondition}/{@code
-     * liveChunksPredicate} idiom (~line 2903) and {@code
-     * CatalogRepository#strandedChunkCount}, both of which already treat a
-     * tombstoned-only manifest reference as dead, not live. Without this join,
-     * {@code deleteDocument}'s deliberate choice to leave {@code
-     * catalog_document_chunks} rows in place until {@code purge_trash}'s
-     * cascade (so a manual restore stays possible) would make THIS method
-     * refuse to delete a chunk belonging ONLY to documents already tombstoned
-     * — including, degenerately, blocking a caller from deleting a document's
-     * OWN chunks the instant after tombstoning that same document, which is
-     * exactly the retract-manifest-then-delete-chunk ordering the Python
-     * callers use. Bounded by {@code purge_trash}'s grace window either way —
-     * this is a consistency/predictability call, not a data-loss one — but an
-     * undocumented divergence from the file's own established liveness idiom
-     * is not acceptable, so it is closed here rather than left implicit.
+     * <p><strong>"Live" INCLUDES tombstoned owners (RDR-191 GATE-2, nexus-mmkqe
+     * — this REVERSES the nexus-o8dil.5 round-2 decision recorded below, kept
+     * for provenance).</strong> A manifest row whose OWNING document ({@code
+     * catalog_documents} via {@code doc_id = tumbler}) is soft-deleted ({@code
+     * deleted_at IS NOT NULL}) STILL counts as "still referenced" and protects
+     * its chunk. This is the definition-of-record three-way partition (T2
+     * nexus/rdr-191-dangling-definition-of-record [22364], synthesizing Hal's
+     * 2026-08-12 ruling): class (a) owner LIVE with no backing chunk is real
+     * dangling; class (b) owner TOMBSTONED is the soft-tombstone contract
+     * WORKING AS DESIGNED — {@code delete_document}/{@code deleteDocument}
+     * deliberately leaves {@code catalog_document_chunks} rows in place so a
+     * manual restore stays possible ({@code src/nexus/catalog/store_hook.py}
+     * :738-741), and those rows must go on protecting their chunk until {@code
+     * purge_trash}'s cascade reaps BOTH together (bounded by the grace
+     * window — see {@code nexus.purge_trash}, catalog-003-soft-delete.xml,
+     * fixed by nexus-5da44 to apply that same grace-window scoping to its own
+     * chunk sweep). Dropping the tombstoned-owner join here is what makes this
+     * method agree with that contract instead of racing it: without it, a
+     * chunk this method leaves behind mid-grace-window could be swept by a
+     * SEPARATE caller (a stale-manifest GC pass, a superseded-vectors sweep)
+     * while the tombstoned document's manifest row still names it — producing
+     * exactly the class-b-row-then-orphaned-early defect nexus-mmkqe reported
+     * as live on this, the single most-travelled chunk-delete site.
      *
-     * <p><strong>What that trade actually costs — do not soften this.</strong>
-     * The retained chunk is NOT reclaimed by routine GC. {@code nx t3 gc}
-     * treats ANY manifest reference as "keep", dangling or not, so a chunk held
-     * back by this anti-join because of an already-dangling manifest row (the
-     * RDR measured a live pre-existing population of 37 such rows across 4
-     * documents) stays until RDR-191 Phase 5 reconciles the manifest — work
-     * that has not started. For the F8c prune case, recovery depends on a
-     * re-index that may never fire. The over-retention is therefore UNBOUNDED
-     * IN TIME, not "until the next GC pass". It is still the right trade — the
-     * data loss it replaces was silent and irreversible, this is visible and
-     * repairable — but it is a deferral, not a self-healing one.
+     * <p>THE PRIOR RULING'S OWN CONCERN WAS REAL, NOT HYPOTHETICAL — CORRECTED
+     * 2026-08-12 (nexus-rnqbw, critic finding on this very fix, verified
+     * empirically via {@code tests/test_o8dil5_expire_manifest_reap.py} going
+     * red under the working tree). An earlier revision of this paragraph
+     * claimed no production caller performs the retract-manifest-then-
+     * delete-chunk ordering in one call — false. THREE Python callers do
+     * exactly that, all funneling through {@code nexus.catalog.store_hook}'s
+     * {@code reap_catalog_manifest_for_chashes} / {@code
+     * store_delete_catalog_cleanup}: {@code nx store delete --id}, MCP
+     * {@code store_delete}, and {@code HttpVectorClient.expire()}. Each
+     * tombstones the owning document via {@code delete_document} and then
+     * deletes the T3 chunk in the SAME call — the exact ordering the
+     * round-2 decision below was built around, and the exact ordering this
+     * fix's tombstone-inclusive join reopened as a leak (a false
+     * anti-join-protected refusal on an ordinary single-owner delete). THE
+     * FIX IS NOT a weaker anti-join here — that would reopen the
+     * independent-deleter hole this method's join exists to close — it is
+     * an EXPLICIT manifest-row retraction one layer up, in Python:
+     * {@code store_hook.py}'s {@code _retract_manifest_rows_for_chash}
+     * removes the reaped chash's own manifest row(s) BEFORE tombstoning, so
+     * by the time this method's join runs there is nothing left for it to
+     * (correctly) protect for that one chash, while every OTHER document's
+     * manifest row referencing the same chash (RDR-108 collapse-by-design)
+     * stays fully protected. See that function's own "RETRACTION, NOT JUST
+     * TOMBSTONE" docstring section for the full mechanism. This method's
+     * join is UNCONDITIONAL class-b protection (tier 1, below); the Python
+     * retraction step is what lets an OWNER's own same-call delete coexist
+     * with it, by construction rather than by narrowing this join.
+     *
+     * <p>PRIOR RULING (nexus-o8dil.5 round 2, SUPERSEDED above — kept so the
+     * history of this decision is legible, not silently erased): "Live"
+     * excludes tombstoned owners; this mirrors this same file's {@code
+     * liveChunksCondition}/{@code liveChunksPredicate} idiom (~line 2903) and
+     * {@code CatalogRepository#strandedChunkCount}, both of which STILL treat
+     * a tombstoned-only manifest reference as dead for THEIR OWN purposes
+     * (live_chunks visibility / stranded-count reporting — read-only views,
+     * not a delete-path protection decision, so they are NOT reversed by this
+     * fix and remain deliberately divergent from this method's join).
+     *
+     * <p><strong>TWO-TIER PROTECTION ACROSS THE RDR-191 DELETE-PATH QUARTET
+     * — name both, do not "reconcile" them toward each other.</strong> This
+     * fix, {@code gc_expire_quarantine}'s manifest guard (nexus-wnpet), and
+     * {@code purge_trash}'s chunk sweep (nexus-5da44) sit in TWO DELIBERATELY
+     * DIFFERENT tiers, both correct for their own surface:
+     * <ul>
+     *   <li><b>Tier 1 — UNCONDITIONAL class-b protection</b> (this method;
+     *       {@code nexus.gc_expire_quarantine}'s manifest-reference refusal,
+     *       not overridable by {@code force}). Surfaces where the actor is a
+     *       GENERIC anti-join or a GC-lifecycle boundary with no notion of
+     *       "this document's own grace window" in scope — a tombstoned
+     *       owner's manifest row protects its chunk with no time limit
+     *       attached to the protection itself. Bounded only indirectly, by
+     *       {@code purge_trash} eventually reaping the tombstone.</li>
+     *   <li><b>Tier 2 — GRACE-WINDOW-SCOPED protection</b> ({@code
+     *       purge_trash}'s chunk sweep; {@code CatalogRepository#
+     *       strandedChunkCount}'s reporting pair, nexus-erwvd). Surfaces
+     *       where the actor IS the grace-window mechanism itself — a
+     *       tombstoned owner protects its chunk ONLY while still inside
+     *       {@code older_than}; past it, chunk/document/manifest are reaped
+     *       together in one call. This is time-bounded protection BY
+     *       DESIGN, because bounding it is the entire point of the surface.</li>
+     * </ul>
+     * A tombstoned-but-past-window owner is therefore Tier-1-protected
+     * (this method still won't delete its chunk out from under a
+     * still-live manifest row on some OTHER document) but NOT Tier-2-
+     * protected (its OWN purge_trash sweep proceeds). That is not a
+     * contradiction to fix by narrowing Tier 1 to match Tier 2's window,
+     * or widening Tier 2 to match Tier 1's unconditional stance — each
+     * tier answers a different question ("does ANY other reference exist"
+     * vs. "has THIS document's own grace period elapsed") and collapsing
+     * them would either reopen a Tier-1 hole (an independent deleter
+     * racing a fresh tombstone) or break Tier 2's whole purpose (a grace
+     * window that never actually reaps anything).
+     *
+     * <p><strong>What this trade still costs — do not soften this.</strong>
+     * A chunk protected here by an already-dangling class-b/(a) manifest row
+     * is NOT reclaimed by routine GC. {@code nx t3 gc} treats ANY manifest
+     * reference as "keep", dangling or not, so retention stays until either
+     * {@code purge_trash} ages the tombstone past its grace window (class b)
+     * or RDR-191 Phase 5 reconciles a genuinely class-(a) dangling row — work
+     * that has not started. The over-retention for an unreconciled class-(a)
+     * row is therefore UNBOUNDED IN TIME, not "until the next GC pass"; a
+     * class-(b) row is bounded by the grace window by construction. It is
+     * still the right trade — the data loss the anti-join replaces was silent
+     * and irreversible, this is visible and repairable — but it is a
+     * deferral, not a self-healing one.
      *
      * <p>No caller in the census intends to delete a chunk a live manifest row
      * still names, so there is no wholesale-purge caller this scoping defeats.
@@ -2201,6 +2280,11 @@ public final class PgVectorRepository {
         if (ids == null || ids.isEmpty()) return 0;
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         return tenantScope.withTenant(tenant, ctx -> {
+            // RDR-191 GATE-2 (nexus-mmkqe): NO deleted_at predicate on the join —
+            // a manifest row protects its chunk whether its owning document is
+            // live (class a) or tombstoned (class b, soft-tombstone contract
+            // still in force). See the method javadoc "Live INCLUDES tombstoned
+            // owners" for the full definition-of-record citation.
             var stillReferenced = DSL.exists(
                 ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
                    .join(CATALOG_DOCUMENTS)
@@ -2208,8 +2292,7 @@ public final class PgVectorRepository {
                            .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
                           .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection()))
-                          .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))
-                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
+                          .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))));
             return ctx.deleteFrom(ch.table())
                .where(ch.collection().eq(collection).and(ch.chash().in(ids)).andNot(stillReferenced))
                .execute();

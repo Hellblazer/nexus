@@ -517,6 +517,91 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(chunkText(quarantineCol, chash)).isNull();
     }
 
+    // ── nexus-wnpet: manifest-referenced chunks are never hard-deleted ───────
+    //
+    // gc_expire_quarantine previously never read catalog_document_chunks at
+    // all -- a past-cutoff quarantined chash still named by a manifest row
+    // (e.g. gc_restore_rereferenced has not yet run, or a heal re-referenced
+    // it after quarantine) was permanently destroyed unconditionally. The
+    // fix mirrors gc_restore_rereferenced's own rescue predicate as a guard.
+
+    @Test
+    void expireQuarantine_manifestReferencedChunk_isRefusedNotExpired_survivesEvenWithForce() throws Exception {
+        String originCol = originCol("case9");
+        String quarantineCol = quarantineCol("case9");
+        String chash = ch("gcq-manifest-guard-1");
+
+        seedChunk(TENANT_A, originCol, chash, "still needed text", "Still Needed");
+        var q = vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol, "2026-07-01T00:00:00Z", 20);
+        assertThat(q.moved()).isEqualTo(1L);
+
+        // A manifest row re-references the origin collection for this chash AFTER
+        // quarantine -- simulating gc_restore_rereferenced not having run yet, or a
+        // heal landing between quarantine and expire. This is the ordering-violation
+        // case the guard exists for.
+        seedManifest(TENANT_A, "gcq.doc.guard9", chash, originCol);
+
+        var outcome = vectorRepo.expireQuarantine(
+            TENANT_A, quarantineCol, originCol,
+            "2026-08-01T00:00:00Z", /* cutoff, after quarantined_at */
+            0.5, /* floor_fraction */ 50, /* floor_min_chunks -- never trips at n=1 */ false /* force */);
+
+        assertThat(outcome.expired())
+            .as("a manifest-referenced chash must never be counted as expired")
+            .isEqualTo(0L);
+        assertThat(outcome.refused())
+            .as("a manifest-referenced chash is refused, same population class as a floor refusal")
+            .isEqualTo(1L);
+        assertThat(chunkText(quarantineCol, chash))
+            .as("the chunk must physically survive")
+            .isEqualTo("still needed text");
+
+        // force=true overrides the population-size safety heuristic (the floor), never
+        // the manifest-reference correctness guarantee -- a still-referenced chunk must
+        // stay protected regardless.
+        var forced = vectorRepo.expireQuarantine(
+            TENANT_A, quarantineCol, originCol,
+            "2026-08-01T00:00:00Z", 0.5, 50, true /* force */);
+
+        assertThat(forced.expired())
+            .as("force must not free a manifest-referenced chash")
+            .isEqualTo(0L);
+        assertThat(forced.refused()).isEqualTo(1L);
+        assertThat(chunkText(quarantineCol, chash))
+            .as("the chunk must still survive even under force=true")
+            .isEqualTo("still needed text");
+    }
+
+    @Test
+    void expireQuarantine_mixedBatch_expiresUnreferenced_refusesManifestReferenced() throws Exception {
+        String originCol = originCol("case10");
+        String quarantineCol = quarantineCol("case10");
+        String chashFree = ch("gcq-manifest-guard-free");
+        String chashHeld = ch("gcq-manifest-guard-held");
+
+        seedChunk(TENANT_A, originCol, chashFree, "free text", "Free");
+        seedChunk(TENANT_A, originCol, chashHeld, "held text", "Held");
+        var q = vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol, "2026-07-01T00:00:00Z", 20);
+        assertThat(q.moved()).isEqualTo(2L);
+
+        // Only chashHeld gets re-referenced; chashFree stays genuinely orphaned.
+        seedManifest(TENANT_A, "gcq.doc.guard10", chashHeld, originCol);
+
+        var outcome = vectorRepo.expireQuarantine(
+            TENANT_A, quarantineCol, originCol,
+            "2026-08-01T00:00:00Z", 0.9, /* floor_fraction high -- must not trip at 1/2 */
+            50, false);
+
+        assertThat(outcome.expired())
+            .as("the genuinely unreferenced chash still expires exactly as before")
+            .isEqualTo(1L);
+        assertThat(outcome.refused())
+            .as("the manifest-referenced chash is refused, not silently dropped from the count")
+            .isEqualTo(1L);
+        assertThat(chunkText(quarantineCol, chashFree)).isNull();
+        assertThat(chunkText(quarantineCol, chashHeld)).isEqualTo("held text");
+    }
+
     // ── tenant isolation (RLS, SECURITY INVOKER) ─────────────────────────────
 
     @Test

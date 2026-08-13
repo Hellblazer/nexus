@@ -2221,19 +2221,36 @@ public final class CatalogRepository {
 
     /**
      * Per-dim stranded-chunk count (nexus-3ck2g E3) — the SELECT-only mirror of
-     * {@code nexus.purge_trash}'s Step 1-3 DELETE predicate (catalog-003-soft-delete.xml
-     * :200-296): a chunk row is stranded iff it has at least one manifest row
-     * ({@code catalog_document_chunks}) AND none of its manifest rows belong to a live
-     * ({@code deleted_at IS NULL}) document. This is the logical negation of the
-     * live_chunks predicate ({@link dev.nexus.service.vectors.PgVectorRepository}'s
-     * inlined {@code liveChunksPredicate}), restricted to manifest-backed chunks —
-     * manifest-less chunks (RDR-145 MCP/{@code store_put} note chunks) are never
-     * stranded by construction (the {@code hasManifest} EXISTS excludes them, same
-     * safety contract {@code purge_trash} itself enforces).
+     * {@code nexus.purge_trash}'s Step 1-3 DELETE predicate. As of nexus-erwvd this
+     * mirrors catalog-026-purge-trash-chunk-age.xml's grace-window-scoped predicate
+     * (NOT catalog-003-soft-delete.xml's original, superseded, age-independent one): a
+     * chunk row is stranded iff it has at least one manifest row ({@code
+     * catalog_document_chunks}) AND none of its manifest rows PROTECT it, where a
+     * manifest row protects when its owning document is either LIVE ({@code deleted_at
+     * IS NULL}) or TOMBSTONED but still inside the {@code older_than} grace window
+     * ({@code deleted_at > NOW() - older_than}) — the exact complement of {@code
+     * nexus.purge_trash}'s own Step 4 purge predicate, same as the SQL function's Steps
+     * 1-3. This is the logical negation of the live_chunks predicate ({@link
+     * dev.nexus.service.vectors.PgVectorRepository}'s inlined {@code
+     * liveChunksPredicate}) widened by the grace window, restricted to manifest-backed
+     * chunks — manifest-less chunks (RDR-145 MCP/{@code store_put} note chunks) are
+     * never stranded by construction (the {@code hasManifest} EXISTS excludes them,
+     * same safety contract {@code purge_trash} itself enforces).
+     *
+     * <p><b>PARITY OBLIGATION (nexus-erwvd, cf. nexus-5uoxu's preview-lies class):</b>
+     * this method and {@code nexus.purge_trash}'s chunk-sweep predicate
+     * (catalog-026-purge-trash-chunk-age.xml) are TWO INDEPENDENT implementations of
+     * the SAME predicate — one Java/jOOQ, one plpgsql — and must be kept in lock-step
+     * by hand. A future edit to either predicate (a new protection condition, a
+     * different age comparison) MUST be mirrored in the other, or the dry-run preview
+     * ({@link #purgeTrashPreview}) will silently diverge from what {@link #purgeTrash}
+     * actually sweeps again. {@code CatalogPurgeTrashTest}'s parity pin
+     * (preview's {@code chunks_384_stranded} vs. rows actually removed by execute in
+     * the same call) is the mechanical backstop for this obligation — see that test.
      */
     // nexus-msz9i: this method deliberately RETAINS the old two-subquery liveness shape
-    // (hasManifest AND NOT hasLiveManifest) that PgVectorRepository#liveChunksPredicate was
-    // rewritten away from. That shape makes PostgreSQL build hashed SubPlans which seq-scan
+    // (hasManifest AND NOT hasProtectingManifest) that PgVectorRepository#liveChunksPredicate
+    // was rewritten away from. That shape makes PostgreSQL build hashed SubPlans which seq-scan
     // the ENTIRE catalog_document_chunks manifest once per call — a cost fixed per query and
     // linear in total manifest size. Acceptable HERE and not worth the churn: this is a
     // diagnostics/reporting count (purge-trash dry-run preview and the stranded-chunk census,
@@ -2243,21 +2260,29 @@ public final class CatalogRepository {
     // per-request census — port it to the dead-set form first; see
     // PgVectorRepository#liveChunksPredicate and T2 nexus/msz9i-explain-verdict for the
     // plan evidence and the FK-dependent equivalence argument.
-    private static long strandedChunkCount(DSLContext ctx, String tenant, DimTables.ChunkTable ch) {
+    private static long strandedChunkCount(
+            DSLContext ctx, String tenant, DimTables.ChunkTable ch, int olderThanDays) {
+        // nexus-erwvd: same server-side, olderThanInterval-derived threshold expression
+        // agedTombstoneCount uses (nexus-ff85q) — identical dialect, identical clock, no
+        // second Java-computed cutoff to drift against the SQL function's own NOW() call.
+        Field<OffsetDateTime> threshold = DSL.field(
+            "now() - {0}", OffsetDateTime.class,
+            DSL.val(olderThanInterval(olderThanDays), SQLDataType.INTERVAL));
         Condition hasManifest = DSL.exists(
             ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
                       .and(CHK_CHASH_HEX.eq(ch.chash()))));
-        Condition hasLiveManifest = DSL.exists(
+        Condition hasProtectingManifest = DSL.exists(
             ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
                .join(CATALOG_DOCUMENTS)
                  .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
                       .and(CHK_CHASH_HEX.eq(ch.chash()))
-                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
+                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()
+                           .or(CATALOG_DOCUMENTS.DELETED_AT.gt(threshold)))));
         Long count = ctx.selectCount().from(ch.table())
-            .where(ch.tenantId().eq(tenant).and(hasManifest).and(hasLiveManifest.not()))
+            .where(ch.tenantId().eq(tenant).and(hasManifest).and(hasProtectingManifest.not()))
             .fetchOne(0, Long.class);
         return count != null ? count : 0L;
     }
@@ -2328,9 +2353,9 @@ public final class CatalogRepository {
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("dry_run", true);
             out.put("documents_purged", agedTombstoneCount(ctx, tenant, olderThanDays));
-            out.put("chunks_384_stranded", strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(384)));
-            out.put("chunks_768_stranded", strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(768)));
-            out.put("chunks_1024_stranded", strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024)));
+            out.put("chunks_384_stranded", strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(384), olderThanDays));
+            out.put("chunks_768_stranded", strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(768), olderThanDays));
+            out.put("chunks_1024_stranded", strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024), olderThanDays));
             return out;
         });
     }
@@ -2398,9 +2423,9 @@ public final class CatalogRepository {
     public Map<String, Object> purgeTrash(String tenant, int olderThanDays) {
         long[] totalRowsAffectedHolder = new long[1];
         Map<String, Object> out = tenantScope.withTenant(tenant, ctx -> {
-            long chunks384  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(384));
-            long chunks768  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(768));
-            long chunks1024 = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024));
+            long chunks384  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(384), olderThanDays);
+            long chunks768  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(768), olderThanDays);
+            long chunks1024 = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024), olderThanDays);
             long eligible   = agedTombstoneCount(ctx, tenant, olderThanDays);
 
             Long purgedRaw = dev.nexus.service.jooq.nexus.Routines.purgeTrash(
@@ -3570,7 +3595,7 @@ public final class CatalogRepository {
     // follow-up): this EXISTS check reads via ctx.fetchExists(ctx.selectOne()
     // ...), which is structurally outside that gate's scan (keyed off
     // .select(/.selectFrom(/.selectCount(/.selectDistinct(, never
-    // .selectOne() -- same category as strandedChunkCount/hasLiveManifest
+    // .selectOne() -- same category as strandedChunkCount/hasProtectingManifest
     // below and PgVectorRepository.liveChunksCondition). The exemption
     // rationale itself is unchanged and still applies; only the mechanism
     // that would need to record it does not reach this shape.
@@ -5072,11 +5097,21 @@ public final class CatalogRepository {
                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
     }
 
-    /** Get manifest rows for docId, ordered by position. Tombstoned docs read empty (nexus-mqd6t). */
+    /**
+     * Get manifest rows for docId, ordered by position. Tombstoned docs read empty (nexus-mqd6t).
+     *
+     * <p>nexus-kzso5 (RDR-191 follow-up, ADDITIVE wire change): each row now
+     * also carries the row's own {@code collection} — the caller-supplied,
+     * NOT NULL truth RDR-191 stamps verbatim on write, independent of the
+     * owning document's {@code physical_collection}. Old clients that don't
+     * know the key simply ignore it; {@link #getManifestMany} carries the
+     * identical field for the same reason.
+     */
     public List<Map<String, Object>> getManifest(String tenant, String docId) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
-                       CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
+                       CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
+                       CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                .from(CATALOG_DOCUMENT_CHUNKS)
                .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId).and(liveParentDoc(ctx, tenant)))
                .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
@@ -5090,6 +5125,7 @@ public final class CatalogRepository {
                    m.put("line_end",    r.value6());
                    m.put("char_start",  r.value7());
                    m.put("char_end",    r.value8());
+                   m.put("collection",  r.value9());
                    return m;
                })
         );
@@ -5616,7 +5652,8 @@ public final class CatalogRepository {
         if (docIds == null || docIds.isEmpty()) return Map.of();
         return tenantScope.withTenant(tenant, ctx -> {
             var rows = ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
-                                  CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
+                                  CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
+                                  CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                           .from(CATALOG_DOCUMENT_CHUNKS)
                           // nexus-mqd6t: batch twin of getManifest's tombstone filter.
                           // Load-bearing beyond parity — HttpCatalogClient.docs_for_chashes
@@ -5636,6 +5673,8 @@ public final class CatalogRepository {
                 m.put("line_end",    r.value6());
                 m.put("char_start",  r.value7());
                 m.put("char_end",    r.value8());
+                // nexus-kzso5: row's own collection, same additive field as getManifest.
+                m.put("collection",  r.value9());
                 result.computeIfAbsent(docId, k -> new ArrayList<>()).add(m);
             }
             return result;

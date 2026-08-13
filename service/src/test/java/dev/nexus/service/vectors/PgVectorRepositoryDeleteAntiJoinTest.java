@@ -300,16 +300,18 @@ class PgVectorRepositoryDeleteAntiJoinTest {
     }
 
     @Test
-    void delete_tombstonedOwner_doesNotBlockDeletion() throws Exception {
-        // deleteDocument is a deliberate SOFT tombstone (CatalogRepository
-        // javadoc): it sets catalog_documents.deleted_at but leaves the
-        // catalog_document_chunks manifest row in place until purge_trash's
-        // cascade. A manifest row belonging ONLY to a tombstoned document
-        // must not count as "still referenced" -- otherwise the
-        // retract-manifest-then-delete-chunk ordering every Python caller
-        // uses (tombstone the document, then delete its chunks) would be
-        // permanently self-blocking. See PgVectorRepository#delete javadoc,
-        // "Live excludes tombstoned owners".
+    void delete_tombstonedOwner_stillProtectsChunk_untilPurgeTrashReapsBoth() throws Exception {
+        // RDR-191 GATE-2 (nexus-mmkqe) REVERSES the prior "tombstoned owner
+        // does not block deletion" behavior. deleteDocument is a deliberate
+        // SOFT tombstone (CatalogRepository javadoc): it sets
+        // catalog_documents.deleted_at but leaves the catalog_document_chunks
+        // manifest row in place until purge_trash's cascade. Per the
+        // definition-of-record (T2 nexus/rdr-191-dangling-definition-of-record
+        // [22364]), a manifest row belonging to a TOMBSTONED document is class
+        // (b) -- the soft-tombstone contract working as designed, not
+        // dangling -- and must go on protecting its chunk until purge_trash
+        // reaps manifest row and chunk together. See PgVectorRepository#delete
+        // javadoc, "Live INCLUDES tombstoned owners".
         String collection = col("case5");
         String chash = ch("delaj-tombstoned-owner");
 
@@ -322,9 +324,11 @@ class PgVectorRepositoryDeleteAntiJoinTest {
         int deleted = vectorRepo.delete(TENANT_A, collection, List.of(chash));
 
         assertThat(deleted)
-            .as("a manifest row whose only owner is tombstoned must not block deletion")
-            .isEqualTo(1);
-        assertThat(chunkText(collection, chash)).isNull();
+            .as("a manifest row whose only owner is tombstoned must still protect its chunk")
+            .isEqualTo(0);
+        assertThat(chunkText(collection, chash))
+            .as("the chunk must survive -- purge_trash, not this delete path, reaps it")
+            .isEqualTo("tombstoned-owner text");
     }
 
     @Test

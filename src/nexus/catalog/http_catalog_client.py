@@ -101,7 +101,7 @@ def _manifest_row_from_dict(d: dict) -> ManifestRow:
     """Build a typed ``ManifestRow`` from a wire dict (return-type parity, RDR-168).
 
     The Java ``/manifest/get`` rows carry an extra ``doc_id`` key the dataclass does not
-    model; only the seven schema fields are mapped.
+    model; only the eight schema fields are mapped.
     """
     return ManifestRow(
         position=int(d.get("position", 0)),
@@ -113,6 +113,10 @@ def _manifest_row_from_dict(d: dict) -> ManifestRow:
         line_end=d.get("line_end"),
         char_start=d.get("char_start"),
         char_end=d.get("char_end"),
+        # nexus-kzso5: absent on a pre-field engine -> None (tolerate
+        # absence, never fabricate). Present -> the row's own stamped
+        # collection, verbatim.
+        collection=d.get("collection"),
     )
 
 

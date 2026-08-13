@@ -115,15 +115,26 @@ _DOCUMENTED_EXCLUSIONS: dict[tuple[str, str], str] = {
         "would mutate in-flight work."
     ),
     ("chash_remap", "source_collection"): (
-        "RF-186-1 raw-fact migration ledger. source_collection is INSIDE the primary "
-        "key (tenant_id, source_collection, old_id), so re-homing rewrites a PK and can "
-        "collide 23505; and because the ledger is permanent, counting it as data would "
-        "block a legitimate undo rename FOREVER. Genuine design question, not an "
-        "oversight — tracked as nexus-4nll0."
+        "RULING (nexus-4nll0, decided): chash_remap is RF-186-1 raw-fact substrate -- "
+        "append-only, no verdict surface, audit outlives the collection it describes -- "
+        "and raw facts are NOT collection-lifecycle-scoped, so exclusion from BOTH "
+        "collection-scoped cascades (re-home AND emptiness) is correct. Mechanically: "
+        "source_collection is INSIDE the primary key (tenant_id, source_collection, "
+        "old_id), so re-homing would rewrite a PK and can collide 23505; and because "
+        "the ledger is permanent, counting it as live data would block a legitimate "
+        "undo rename FOREVER. This is option (b) of nexus-4nll0's three options "
+        "(exclude, accept the rename-detach consequence, file the detach separately) "
+        "-- NOT gc_audit's treatment (gc_audit IS re-homed): the raw-fact "
+        "classification settles the EMPTINESS axis the same way for both tables, but "
+        "gc_audit's collection column is not inside its primary key, so it re-homes "
+        "safely where chash_remap cannot. The accepted consequence -- a rename does "
+        "not re-home chash_remap, so its ledger detaches from the renamed collection's "
+        "current name -- is tracked as its own bug: nexus-lgef3."
     ),
     ("chash_remap", "target_collection"): (
-        "Same ledger as above; the target leg is historical fact about a completed "
-        "migration, not a live pointer. See nexus-4nll0."
+        "Same ledger and same ruling as source_collection above; the target leg is "
+        "historical fact about a completed migration, not a live pointer. See "
+        "nexus-4nll0 (ruling) and nexus-lgef3 (the accepted rename-detach consequence)."
     ),
     ("migration_jobs", "collections"): (
         "JSONB ARRAY of collection names (a job's whole input set), not a scalar "

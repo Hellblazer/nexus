@@ -411,6 +411,26 @@
          runAlways grants below. -->
     <include file="db/changelog/catalog-025-collection-not-null.xml"/>
 
+    <!-- nexus-5da44 (RDR-191 GATE-2 delete-path quartet): CREATE OR REPLACE of
+         nexus.purge_trash — the chunk-orphan sweep (Steps 1-3) now applies the
+         SAME older_than grace-window scoping Step 4's document delete already
+         applies, so an in-grace-window tombstone keeps chunks, document, and
+         manifest rows together until cutoff. Layered on top of
+         catalog-003-soft-delete.xml via CREATE OR REPLACE — that file already
+         shipped and is never edited in place. After catalog-025 for file-order
+         clarity, before the runAlways grants below. -->
+    <include file="db/changelog/catalog-026-purge-trash-chunk-age.xml"/>
+
+    <!-- nexus-wnpet (RDR-191 GATE-2 delete-path quartet): CREATE OR REPLACE of
+         nexus.gc_expire_quarantine — the hard-delete of past-cutoff quarantined
+         chunks now refuses (counts as `refused`, not `expired`) any chash still
+         named by a live-or-tombstoned catalog_document_chunks manifest row,
+         mirroring gc_restore_rereferenced's rescue predicate. Layered on top of
+         catalog-023-quarantine-functions.xml via CREATE OR REPLACE — that file
+         already shipped and is never edited in place. After catalog-026 for
+         file-order clarity, before the runAlways grants below. -->
+    <include file="db/changelog/catalog-027-gc-expire-quarantine-manifest-guard.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

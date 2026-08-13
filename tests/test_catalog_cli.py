@@ -1718,20 +1718,24 @@ class TestVerifyCommand:
     ):
         """nexus-bo2d1, CLI-level twin of the direct-helper test above.
 
-        ``_verify_full``'s own ``all_entries`` filter (``if not e.alias_of
-        and e.physical_collection``, integrity.py ~963-966) already excludes
-        ghost docs from the Class C census entirely -- so the literal
-        phantom ``{"collection": "", ...}`` entry this bead's title names
-        can never surface through ``nx catalog verify`` (asserted below).
-        But the exclusion has a sharper, previously-unhandled consequence:
-        the ghost's rows still count toward the engine's
+        This pins the PRE-nexus-kzso5 wire shape: manifest rows carry no
+        ``.collection`` of their own (plain ``object()`` placeholders below,
+        same as a pre-field engine), so ``_census_lost_and_never_chunked``'s
+        ``getattr(row, "collection", None)`` falls back to ``e.
+        physical_collection`` for attribution -- the ghost's own
+        ``physical_collection`` is ``""`` (falsy), so its rows are still
+        excluded from ``manifest_row_totals`` even though nexus-kzso5 now
+        fetches the ghost's manifest too (``_verify_full`` merges
+        ``ghost_entries`` into the census purely so a FIELD-AWARE engine can
+        attribute them -- see ``test_verify_ghost_doc_contamination_resolved_
+        when_engine_reports_row_collection`` below for that case). The
+        ghost's rows still count toward the engine's
         ``referenced_by_collection`` (Class B, a global anti-join
         independent of which docs this census walked) while NEVER counting
-        toward the client's ``manifest_row_totals`` (Class C, built only
-        from docs this census actually fetched manifests for) -- so a real,
-        healthy collection's client-side total can legitimately fall BELOW
-        the engine's authoritative referenced count with no bug on that
-        collection's own docs at all.
+        toward the client's ``manifest_row_totals`` under this pre-field
+        shape -- so a real, healthy collection's client-side total can
+        legitimately fall BELOW the engine's authoritative referenced count
+        with no bug on that collection's own docs at all.
 
         Pre-fix, ``_class_c_unverifiable_rows`` only handled ``delta > 0``
         -- a negative delta was silently dropped, reporting a false "All
@@ -1764,9 +1768,12 @@ class TestVerifyCommand:
             manifests={
                 "1.1.1": [object()],
                 "1.1.2": [object()],
-                # Never actually fetched -- 1.1.3 is excluded from
-                # all_entries before get_manifests is called. Present here
-                # only to show what the ghost's own rows would look like.
+                # nexus-kzso5: 1.1.3 (the ghost) IS now fetched -- _verify_full
+                # merges ghost_entries into the census -- but these plain
+                # object() rows carry no .collection attribute (the pre-field
+                # wire shape), so getattr(...) falls back to e.physical_
+                # collection (""), and the rows are STILL excluded from
+                # manifest_row_totals. Outcome is unchanged from pre-kzso5.
                 "1.1.3": [object(), object(), object()],
             },
         )
@@ -1784,6 +1791,66 @@ class TestVerifyCommand:
             f"un-backfilled finding, phantom or otherwise: {data.get('unverifiable_rows')}"
         )
         assert any("code__ghosted" in u for u in data["unreadable"]), data["unreadable"]
+        assert not any("code__clean" in u for u in data["unreadable"]), data["unreadable"]
+
+    def test_verify_ghost_doc_contamination_resolved_when_engine_reports_row_collection(
+        self, catalog_env, monkeypatch,
+    ):
+        """nexus-kzso5 (RDR-191 follow-up to nexus-bo2d1): once the engine's
+        wire response carries each manifest row's OWN stamped ``collection``
+        (engine floor >= v0.1.74), the ghost-doc INCOMPLETE hedge from the
+        test above DISAPPEARS -- the ghost's rows now attribute correctly
+        to their real collection (``code__ghosted``) instead of being
+        invisible to the client-side census, so ``client_total`` reconciles
+        exactly with the engine's ``referenced`` count and the collection
+        reads clean. Same fixture shape as the test above, but manifest
+        rows are real ``ManifestRow`` instances carrying ``collection``
+        (the RDR-191 field this bead adds), not bare ``object()``
+        placeholders."""
+        from nexus.catalog.types import ManifestRow
+
+        entries = [
+            _FakeEntry("1.1.1", "Clean doc", physical_collection="code__clean", chunk_count=1),
+            _FakeEntry(
+                "1.1.2", "Doc sharing a collection with a ghost",
+                physical_collection="code__ghosted", chunk_count=1,
+            ),
+            _FakeEntry("1.1.3", "Ghost doc", physical_collection="", chunk_count=0),
+        ]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"code__clean": 1, "code__ghosted": 1},
+            mv_all={"collections": [
+                {"collection": "code__clean", "referenced": 1, "present": 1, "missing": 0},
+                # 4 = 1.1.2's own row + 3 rows the ghost (1.1.3) stamped into
+                # this SAME real collection.
+                {"collection": "code__ghosted", "referenced": 4, "present": 4, "missing": 0},
+            ], "count": 2},
+            manifests={
+                "1.1.1": [ManifestRow(position=0, chash="a" * 64, collection="code__clean")],
+                "1.1.2": [ManifestRow(position=0, chash="b" * 64, collection="code__ghosted")],
+                # The ghost's rows carry their OWN stamped collection --
+                # this is what nexus-kzso5 adds and what resolves the hedge.
+                "1.1.3": [
+                    ManifestRow(position=0, chash="c" * 64, collection="code__ghosted"),
+                    ManifestRow(position=1, chash="d" * 64, collection="code__ghosted"),
+                    ManifestRow(position=2, chash="e" * 64, collection="code__ghosted"),
+                ],
+            },
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"code__clean", "code__ghosted"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data.get("unverifiable_rows", []) == [], (
+            "row-collection attribution must resolve the ghost contamination "
+            f"entirely, not still report it unverifiable: {data.get('unverifiable_rows')}"
+        )
+        assert not any("code__ghosted" in u for u in data["unreadable"]), data["unreadable"]
         assert not any("code__clean" in u for u in data["unreadable"]), data["unreadable"]
 
     # ── code-review IMPORTANT: engine reads must be exception-isolated ─────

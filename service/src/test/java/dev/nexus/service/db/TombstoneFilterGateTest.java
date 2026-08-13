@@ -217,7 +217,7 @@ class TombstoneFilterGateTest {
      * .selectDistinct(}) — so {@link #scanDocAndChunkSites} never produces a
      * Finding for it at all; it is structurally outside this gate's scan
      * domain, the SAME category {@code CatalogRepository.strandedChunkCount}/
-     * {@code hasLiveManifest} and {@code PgVectorRepository.liveChunksCondition}
+     * {@code hasProtectingManifest} and {@code PgVectorRepository.liveChunksCondition}
      * already occupy (see that method's own javadoc) — none of those appear
      * here either. A rename-only fix (keeping the entry, renaming
      * {@code physicalCollectionOf} to {@code requireDocumentExists}) was

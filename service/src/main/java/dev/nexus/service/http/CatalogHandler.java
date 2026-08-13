@@ -1038,7 +1038,16 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
-    /** GET /v1/catalog/manifest/get?doc_id=X */
+    /**
+     * GET /v1/catalog/manifest/get?doc_id=X
+     *
+     * <p>nexus-kzso5 (RDR-191 follow-up, ADDITIVE wire change): each row in
+     * {@code rows} now also carries the row's own {@code collection} —
+     * {@link dev.nexus.service.db.CatalogRepository#getManifest}'s
+     * caller-supplied, NOT NULL RDR-191 truth, independent of the owning
+     * document's {@code physical_collection}. Old clients that don't know
+     * the key simply ignore it.
+     */
     private void handleManifestGet(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         String docId = queryParam(exchange, "doc_id");
@@ -1120,6 +1129,11 @@ public final class CatalogHandler implements HttpHandler {
      * Response body:   {@code {"manifests": {"tumbler1": [rows...], "tumbler2": [rows...]}}}
      *
      * <p>Doc_ids with no manifest rows are absent from the response map.
+     *
+     * <p>nexus-kzso5 (RDR-191 follow-up, ADDITIVE wire change): each row now
+     * also carries the row's own {@code collection} — same field, same
+     * rationale as {@link #handleManifestGet}'s javadoc above. Old clients
+     * that don't know the key simply ignore it.
      */
     @SuppressWarnings("unchecked")
     private void handleManifestGetMany(HttpExchange exchange, String tenant, String method) throws IOException {

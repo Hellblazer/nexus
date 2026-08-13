@@ -1,0 +1,349 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-wnpet (RDR-191 GATE-2 delete-path integrity quartet) — nexus.gc_expire_quarantine
+    (catalog-023-quarantine-functions.xml, changeset catalog-023-3) never read
+    catalog_document_chunks at all: it hard-deleted every quarantined chunk whose
+    stamped quarantined_at cleared the cutoff, unconditionally. A chunk still named
+    by a live-or-tombstoned manifest row — e.g. because gc_restore_rereferenced
+    could not rescue it before this fix landed, or a heal re-referenced it after
+    the cutoff was already computed — was PERMANENTLY destroyed with no check.
+    Unlike purge_trash's chunk sweep (nexus-5da44, a soft/reversible-until-cutoff
+    reap) or the delete-path anti-join (nexus-mmkqe, an application-level
+    protection), a hard DELETE here has no purge-window recovery path at all: this
+    is the one place in the quartet where getting it wrong is unrecoverable.
+
+    THE FIX: mirrors nexus.gc_restore_rereferenced's own rescue predicate exactly
+    (the same EXISTS check against catalog_document_chunks, keyed on
+    p_origin_collection) as a guard in front of the hard delete. A past-cutoff
+    quarantined chash still named by a manifest row in the origin collection is
+    NEVER hard-deleted — it is counted in `refused`, not `expired`, alongside
+    the existing grace-window-floor refusal population. Unlike the floor
+    refusal, this manifest-reference refusal is NOT overridable by p_force:
+    force overrides a population-size SAFETY HEURISTIC (don't nuke most of a
+    quarantine collection in one call), never a correctness guarantee that a
+    still-referenced chunk cannot be destroyed. gc_restore_rereferenced already
+    runs before gc_quarantine_orphans/gc_expire_quarantine in the documented GC
+    pass ordering (catalog-023-2's own comment), so this guard should normally
+    be a no-op in the steady state — it exists for the race/ordering-violation
+    case where a chunk was re-referenced or never got rescued.
+
+    Layered on top of catalog-023-quarantine-functions.xml via CREATE OR REPLACE
+    FUNCTION — that file already shipped and has run on dev machines and in
+    production; editing a shipped changeset's checksum is a rug-pull (same
+    discipline as catalog-024 layering on catalog-023). Only
+    gc_expire_quarantine changes; gc_quarantine_orphans and gc_restore_rereferenced
+    are untouched by this changeset.
+
+    Test-first: PgVectorRepositoryGcQuarantineTest (service/src/test/java/dev/nexus/
+    service/vectors) proves a manifest-referenced, past-cutoff quarantined chunk
+    survives expire (counted as refused, not expired) and is NOT freed by
+    p_force=true, while a genuinely unreferenced past-cutoff chunk still expires
+    exactly as before.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-027-1" author="nexus-wnpet">
+        <comment>
+            CREATE OR REPLACE nexus.gc_expire_quarantine(dim, tenant, quarantine_collection,
+            origin_collection, cutoff, floor_fraction, floor_min_chunks, force) RETURNS
+            TABLE(expired bigint, refused bigint): a past-cutoff quarantined chash still
+            named by a catalog_document_chunks manifest row in the origin collection is
+            now refused (never hard-deleted, never overridable by force), mirroring
+            gc_restore_rereferenced's own rescue predicate. Signature and return shape
+            unchanged.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.gc_expire_quarantine(
+    dim                      int,
+    p_tenant_id              text,
+    p_quarantine_collection  text,
+    p_origin_collection      text,
+    p_cutoff                 text,
+    p_floor_fraction         float8,
+    p_floor_min_chunks       int,
+    p_force                  boolean
+)
+RETURNS TABLE(expired bigint, refused bigint)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_mine      bigint;
+    v_chashes   bytea[];
+    v_protected bytea[];
+    v_expired   bigint;
+    v_refused   bigint;
+    v_frac      float8;
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_expire_quarantine: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    IF dim = 384 THEN
+        SELECT count(*),
+               array_agg(chash) FILTER (
+                   WHERE COALESCE(metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff
+                     AND NOT EXISTS (
+                           SELECT 1 FROM nexus.catalog_document_chunks m
+                            WHERE m.tenant_id  = chunks_384.tenant_id
+                              AND m.collection = p_origin_collection
+                              AND m.chash      = chunks_384.chash
+                         )),
+               array_agg(chash) FILTER (
+                   WHERE COALESCE(metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff
+                     AND EXISTS (
+                           SELECT 1 FROM nexus.catalog_document_chunks m
+                            WHERE m.tenant_id  = chunks_384.tenant_id
+                              AND m.collection = p_origin_collection
+                              AND m.chash      = chunks_384.chash
+                         ))
+          INTO v_mine, v_chashes, v_protected
+          FROM nexus.chunks_384
+         WHERE tenant_id  = p_tenant_id
+           AND collection = p_quarantine_collection
+           AND COALESCE(metadata->>'origin_collection', p_origin_collection) = p_origin_collection;
+
+        v_expired := COALESCE(array_length(v_chashes, 1), 0);
+        v_refused := COALESCE(array_length(v_protected, 1), 0);
+
+        IF v_expired = 0 THEN
+            RETURN QUERY SELECT 0::bigint, v_refused;
+            RETURN;
+        END IF;
+
+        v_frac := v_expired::float8 / v_mine::float8;
+        IF v_expired >= p_floor_min_chunks AND v_frac > p_floor_fraction AND NOT p_force THEN
+            RETURN QUERY SELECT 0::bigint, v_expired + v_refused;
+            RETURN;
+        END IF;
+
+        DELETE FROM nexus.chunks_384
+         WHERE tenant_id = p_tenant_id AND collection = p_quarantine_collection
+           AND chash = ANY(v_chashes);
+
+        RETURN QUERY SELECT v_expired, v_refused;
+        RETURN;
+
+    ELSIF dim = 768 THEN
+        SELECT count(*),
+               array_agg(chash) FILTER (
+                   WHERE COALESCE(metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff
+                     AND NOT EXISTS (
+                           SELECT 1 FROM nexus.catalog_document_chunks m
+                            WHERE m.tenant_id  = chunks_768.tenant_id
+                              AND m.collection = p_origin_collection
+                              AND m.chash      = chunks_768.chash
+                         )),
+               array_agg(chash) FILTER (
+                   WHERE COALESCE(metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff
+                     AND EXISTS (
+                           SELECT 1 FROM nexus.catalog_document_chunks m
+                            WHERE m.tenant_id  = chunks_768.tenant_id
+                              AND m.collection = p_origin_collection
+                              AND m.chash      = chunks_768.chash
+                         ))
+          INTO v_mine, v_chashes, v_protected
+          FROM nexus.chunks_768
+         WHERE tenant_id  = p_tenant_id
+           AND collection = p_quarantine_collection
+           AND COALESCE(metadata->>'origin_collection', p_origin_collection) = p_origin_collection;
+
+        v_expired := COALESCE(array_length(v_chashes, 1), 0);
+        v_refused := COALESCE(array_length(v_protected, 1), 0);
+
+        IF v_expired = 0 THEN
+            RETURN QUERY SELECT 0::bigint, v_refused;
+            RETURN;
+        END IF;
+
+        v_frac := v_expired::float8 / v_mine::float8;
+        IF v_expired >= p_floor_min_chunks AND v_frac > p_floor_fraction AND NOT p_force THEN
+            RETURN QUERY SELECT 0::bigint, v_expired + v_refused;
+            RETURN;
+        END IF;
+
+        DELETE FROM nexus.chunks_768
+         WHERE tenant_id = p_tenant_id AND collection = p_quarantine_collection
+           AND chash = ANY(v_chashes);
+
+        RETURN QUERY SELECT v_expired, v_refused;
+        RETURN;
+
+    ELSIF dim = 1024 THEN
+        SELECT count(*),
+               array_agg(chash) FILTER (
+                   WHERE COALESCE(metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff
+                     AND NOT EXISTS (
+                           SELECT 1 FROM nexus.catalog_document_chunks m
+                            WHERE m.tenant_id  = chunks_1024.tenant_id
+                              AND m.collection = p_origin_collection
+                              AND m.chash      = chunks_1024.chash
+                         )),
+               array_agg(chash) FILTER (
+                   WHERE COALESCE(metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff
+                     AND EXISTS (
+                           SELECT 1 FROM nexus.catalog_document_chunks m
+                            WHERE m.tenant_id  = chunks_1024.tenant_id
+                              AND m.collection = p_origin_collection
+                              AND m.chash      = chunks_1024.chash
+                         ))
+          INTO v_mine, v_chashes, v_protected
+          FROM nexus.chunks_1024
+         WHERE tenant_id  = p_tenant_id
+           AND collection = p_quarantine_collection
+           AND COALESCE(metadata->>'origin_collection', p_origin_collection) = p_origin_collection;
+
+        v_expired := COALESCE(array_length(v_chashes, 1), 0);
+        v_refused := COALESCE(array_length(v_protected, 1), 0);
+
+        IF v_expired = 0 THEN
+            RETURN QUERY SELECT 0::bigint, v_refused;
+            RETURN;
+        END IF;
+
+        v_frac := v_expired::float8 / v_mine::float8;
+        IF v_expired >= p_floor_min_chunks AND v_frac > p_floor_fraction AND NOT p_force THEN
+            RETURN QUERY SELECT 0::bigint, v_expired + v_refused;
+            RETURN;
+        END IF;
+
+        DELETE FROM nexus.chunks_1024
+         WHERE tenant_id = p_tenant_id AND collection = p_quarantine_collection
+           AND chash = ANY(v_chashes);
+
+        RETURN QUERY SELECT v_expired, v_refused;
+        RETURN;
+    END IF;
+END;
+$$
+        </sql>
+        <rollback>
+            <!-- Restores catalog-023-3's original body verbatim (the manifest-blind
+                 hard delete) — same precedent as catalog-024's rollback of catalog-023. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.gc_expire_quarantine(
+    dim                      int,
+    p_tenant_id              text,
+    p_quarantine_collection  text,
+    p_origin_collection      text,
+    p_cutoff                 text,
+    p_floor_fraction         float8,
+    p_floor_min_chunks       int,
+    p_force                  boolean
+)
+RETURNS TABLE(expired bigint, refused bigint)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_mine     bigint;
+    v_chashes  bytea[];
+    v_expired  bigint;
+    v_frac     float8;
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_expire_quarantine: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    IF dim = 384 THEN
+        SELECT count(*),
+               array_agg(chash) FILTER (
+                   WHERE COALESCE(metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff)
+          INTO v_mine, v_chashes
+          FROM nexus.chunks_384
+         WHERE tenant_id  = p_tenant_id
+           AND collection = p_quarantine_collection
+           AND COALESCE(metadata->>'origin_collection', p_origin_collection) = p_origin_collection;
+
+        v_expired := COALESCE(array_length(v_chashes, 1), 0);
+        IF v_expired = 0 THEN
+            RETURN QUERY SELECT 0::bigint, 0::bigint;
+            RETURN;
+        END IF;
+
+        v_frac := v_expired::float8 / v_mine::float8;
+        IF v_expired >= p_floor_min_chunks AND v_frac > p_floor_fraction AND NOT p_force THEN
+            RETURN QUERY SELECT 0::bigint, v_expired;
+            RETURN;
+        END IF;
+
+        DELETE FROM nexus.chunks_384
+         WHERE tenant_id = p_tenant_id AND collection = p_quarantine_collection
+           AND chash = ANY(v_chashes);
+
+        RETURN QUERY SELECT v_expired, 0::bigint;
+        RETURN;
+
+    ELSIF dim = 768 THEN
+        SELECT count(*),
+               array_agg(chash) FILTER (
+                   WHERE COALESCE(metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff)
+          INTO v_mine, v_chashes
+          FROM nexus.chunks_768
+         WHERE tenant_id  = p_tenant_id
+           AND collection = p_quarantine_collection
+           AND COALESCE(metadata->>'origin_collection', p_origin_collection) = p_origin_collection;
+
+        v_expired := COALESCE(array_length(v_chashes, 1), 0);
+        IF v_expired = 0 THEN
+            RETURN QUERY SELECT 0::bigint, 0::bigint;
+            RETURN;
+        END IF;
+
+        v_frac := v_expired::float8 / v_mine::float8;
+        IF v_expired >= p_floor_min_chunks AND v_frac > p_floor_fraction AND NOT p_force THEN
+            RETURN QUERY SELECT 0::bigint, v_expired;
+            RETURN;
+        END IF;
+
+        DELETE FROM nexus.chunks_768
+         WHERE tenant_id = p_tenant_id AND collection = p_quarantine_collection
+           AND chash = ANY(v_chashes);
+
+        RETURN QUERY SELECT v_expired, 0::bigint;
+        RETURN;
+
+    ELSIF dim = 1024 THEN
+        SELECT count(*),
+               array_agg(chash) FILTER (
+                   WHERE COALESCE(metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff)
+          INTO v_mine, v_chashes
+          FROM nexus.chunks_1024
+         WHERE tenant_id  = p_tenant_id
+           AND collection = p_quarantine_collection
+           AND COALESCE(metadata->>'origin_collection', p_origin_collection) = p_origin_collection;
+
+        v_expired := COALESCE(array_length(v_chashes, 1), 0);
+        IF v_expired = 0 THEN
+            RETURN QUERY SELECT 0::bigint, 0::bigint;
+            RETURN;
+        END IF;
+
+        v_frac := v_expired::float8 / v_mine::float8;
+        IF v_expired >= p_floor_min_chunks AND v_frac > p_floor_fraction AND NOT p_force THEN
+            RETURN QUERY SELECT 0::bigint, v_expired;
+            RETURN;
+        END IF;
+
+        DELETE FROM nexus.chunks_1024
+         WHERE tenant_id = p_tenant_id AND collection = p_quarantine_collection
+           AND chash = ANY(v_chashes);
+
+        RETURN QUERY SELECT v_expired, 0::bigint;
+        RETURN;
+    END IF;
+END;
+$$
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
