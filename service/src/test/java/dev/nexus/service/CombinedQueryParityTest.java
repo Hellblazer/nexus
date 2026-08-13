@@ -920,14 +920,14 @@ class CombinedQueryParityTest {
             "  FROM nexus.catalog_documents d " +
             "  JOIN nexus.catalog_document_chunks m " +
             "    ON m.tenant_id = d.tenant_id AND m.doc_id = d.tumbler " +
-            "  JOIN nexus.chunks_" + dim + " c " +
+            "  JOIN " + DimTables.CHUNKS_TABLE_NAME + " c " +
             "    ON c.tenant_id = m.tenant_id AND c.collection = m.collection " +
             "   AND c.chash = m.chash " +
             " WHERE m.collection = '" + collection + "' " +
             "   AND d.deleted_at IS NULL " +
             (contentType == null ? "" : "   AND d.content_type = " + sqlText(contentType) + " ") +
             (author == null ? "" : "   AND d.author ILIKE '%' || " + sqlText(author) + " || '%' ") +
-            " ORDER BY c.embedding <=> " + queryVecLiteral(dim) + " ASC";
+            " ORDER BY c." + DimTables.embeddingColumn(dim) + " <=> " + queryVecLiteral(dim) + " ASC";
         return runIds(conn, sql);
     }
 
@@ -936,7 +936,7 @@ class CombinedQueryParityTest {
                                              String topicLabel) throws Exception {
         String sql =
             "SELECT encode(c.chash, 'hex') AS id " +
-            "  FROM nexus.chunks_" + dim + " c " +
+            "  FROM " + DimTables.CHUNKS_TABLE_NAME + " c " +
             "  JOIN nexus.topic_assignments ta " +
             "    ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex') " +
             "  JOIN nexus.topics t " +
@@ -951,7 +951,7 @@ class CombinedQueryParityTest {
             "                       ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id " +
             "                    WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash " +
             "                      AND d.deleted_at IS NULL)) " +
-            " ORDER BY c.embedding <=> " + queryVecLiteral(dim) + " ASC";
+            " ORDER BY c." + DimTables.embeddingColumn(dim) + " <=> " + queryVecLiteral(dim) + " ASC";
         return runIds(conn, sql);
     }
 

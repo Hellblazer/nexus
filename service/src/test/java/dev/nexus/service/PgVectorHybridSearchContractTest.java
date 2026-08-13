@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -180,10 +181,10 @@ class PgVectorHybridSearchContractTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            for (int dim : new int[] {384, 768, 1024}) {
-                su.createStatement().execute(
-                    "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chunks_" + dim + " TO " + SVC_ROLE);
-            }
+            // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
+            // a single GRANT now covers what three did.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
             // ensureCollectionRegistered() in PgVectorRepository.upsertChunks() needs
             // INSERT (for the ON CONFLICT DO NOTHING upsert) and SELECT (implicit in
             // ON CONFLICT clause resolution) on catalog_collections.
@@ -445,7 +446,7 @@ class PgVectorHybridSearchContractTest {
 
         assertThat(ids(rows))
             .as("hybrid dispatches per-dim exactly like search(): same gate + rank "
-                + "behaviour on chunks_384, text-unrelated row excluded")
+                + "behaviour on nexus.chunks dim=384, text-unrelated row excluded")
             .containsExactly(M384_C1, M384_C2);
     }
 

@@ -681,14 +681,14 @@ class GraphHopParityTest {
             "      AND (" + sqlText(linkType) + " IS NULL OR l.link_type = " + sqlText(linkType) + ") " +
             "), reached AS (SELECT DISTINCT tumbler FROM reach) " +
             "SELECT d.tumbler AS id " +
-            "  FROM nexus.chunks_" + dim + " c " +
+            "  FROM " + DimTables.CHUNKS_TABLE_NAME + " c " +
             "  JOIN nexus.catalog_document_chunks m " +
             "    ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash " +
             "  JOIN nexus.catalog_documents d " +
             "    ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id " +
             "  JOIN reached rd ON rd.tumbler = d.tumbler " +
             " WHERE c.collection = '" + collection + "' AND d.deleted_at IS NULL " +
-            " ORDER BY c.embedding <=> " + queryVecLiteral(dim) + " ASC";
+            " ORDER BY c." + DimTables.embeddingColumn(dim) + " <=> " + queryVecLiteral(dim) + " ASC";
         return runIds(conn, sql);
     }
 
@@ -711,8 +711,8 @@ class GraphHopParityTest {
             "VALUES ('" + tenant + "', '" + tumbler + "', 0, decode('" + chash + "', 'hex'), '" + collection + "') " +
             "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
         su.createStatement().execute(
-            "INSERT INTO nexus.chunks_" + dim +
-            " (tenant_id, collection, chash, chunk_text, embedding) VALUES ('" +
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
+            " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ") VALUES ('" +
             tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + tumbler + "', " +
             vec2(dim, x, y) + "::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }

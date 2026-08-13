@@ -42,7 +42,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * functions and {@code CatalogRepository#liveParentDoc}, was simply absent here).
  *
  * <p>Fixture: two documents in the same collection, each with one manifest-backed
- * chunk in {@code chunks_384}, plus one THIRD manifest-less chunk (no {@code
+ * chunk in {@code nexus.chunks} (dim=384), plus one THIRD manifest-less chunk (no {@code
  * catalog_document_chunks} row at all — the RDR-145 MCP/{@code store_put} note-chunk
  * shape {@code SoftDeleteTest}:814-867 pins as "never swept"). One document is
  * tombstoned via the real production path ({@link CatalogRepository#deleteDocument}) —
@@ -167,7 +167,7 @@ class PgVectorTombstoneFilterTest {
             // RDR-145 note-chunk shape).
         }
 
-        // Chunk storage rows (chunks_384) for all three chashes, via the repository under
+        // Chunk storage rows (nexus.chunks, dim=384) for all three chashes, via the repository under
         // test — same path a real store_put/index would use.
         vecRepo.upsertChunks(TENANT, COLLECTION,
             List.of(CHASH_LIVE, CHASH_DEAD, CHASH_ORPHAN),
