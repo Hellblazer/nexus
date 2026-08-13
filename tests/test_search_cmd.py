@@ -1007,7 +1007,7 @@ def test_vector_service_error_renders_clean_message(runner: CliRunner, cloud_env
     err = VectorServiceError(
         "all 1 collections failed: knowledge__test: POST /v1/vectors/search "
         "→ HTTP 400: query embedder produced a 1024-dim vector but the "
-        "collections dispatch to chunks_384",
+        "collections dispatch to the embedding_384 column",
     )
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=err), \

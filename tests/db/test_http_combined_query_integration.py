@@ -394,8 +394,9 @@ def vec_client(local_service: tuple[str, str], monkeypatch: pytest.MonkeyPatch):
 # ── Integration tests ─────────────────────────────────────────────────────────
 
 # Collection uses bge-base-en-v15-768 (the ONNX local embedder) — service
-# embeds server-side into chunks_768 tables, exercised through the
-# search_*_768 combined-query SQL functions.
+# embeds server-side into the embedding_768 column of the unified
+# nexus.chunks table, exercised through the search_*_768 combined-query
+# SQL functions.
 _COLLECTION = "knowledge__cq-tripwire__bge-base-en-v15-768__v1"
 
 

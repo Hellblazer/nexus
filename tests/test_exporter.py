@@ -1291,7 +1291,7 @@ class TestUpsertHintWrapping:
 
         db = MagicMock()
         db.upsert_chunks_with_embeddings.side_effect = RuntimeError(
-            'duplicate key value violates unique constraint "chunks_1024_pkey"'
+            'duplicate key value violates unique constraint "chunks_pk"'
         )
         with pytest.raises(NexusError) as exc_info:
             _upsert_with_hint(db, "code__x", ["id1"], ["doc"], [[0.1]], [{}], MagicMock())

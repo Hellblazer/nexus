@@ -110,11 +110,7 @@ def _dangling_count(state: dict, tenant: str) -> int:
         "JOIN nexus.catalog_documents d "
         "  ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id "
         f"WHERE m.tenant_id = '{tenant}' AND d.deleted_at IS NULL "
-        "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.tenant_id = m.tenant_id "
-        "  AND c.collection = m.collection AND c.chash = m.chash) "
-        "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.tenant_id = m.tenant_id "
-        "  AND c.collection = m.collection AND c.chash = m.chash) "
-        "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.tenant_id = m.tenant_id "
+        "AND NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.tenant_id = m.tenant_id "
         "  AND c.collection = m.collection AND c.chash = m.chash)"
     ))
     return int(rows[0]) if rows else 0
@@ -137,11 +133,7 @@ def _dangling_count_any_owner_state(state: dict, tenant: str) -> int:
         "JOIN nexus.catalog_documents d "
         "  ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id "
         f"WHERE m.tenant_id = '{tenant}' "
-        "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.tenant_id = m.tenant_id "
-        "  AND c.collection = m.collection AND c.chash = m.chash) "
-        "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.tenant_id = m.tenant_id "
-        "  AND c.collection = m.collection AND c.chash = m.chash) "
-        "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.tenant_id = m.tenant_id "
+        "AND NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.tenant_id = m.tenant_id "
         "  AND c.collection = m.collection AND c.chash = m.chash)"
     ))
     return int(rows[0]) if rows else 0
@@ -518,7 +510,7 @@ def test_inverted_control_handseeded_dangling_row_detected(t2_service_env):
     # Correlation pin: one unrelated LIVE chunk in the same collection, so
     # the anti-join cannot pass by "the chunk table happens to be empty".
     _psql(state, (
-        "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) "
+        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024) "
         f"VALUES ('{tenant}', '{coll}', decode('{pin_chash}', 'hex'), 'pin', '{vec_1024}'::vector)"
     ))
     _psql(state, (
