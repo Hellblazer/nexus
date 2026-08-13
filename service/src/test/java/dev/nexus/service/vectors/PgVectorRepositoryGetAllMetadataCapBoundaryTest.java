@@ -63,7 +63,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * <p>Real Postgres round trip throughout (Testcontainers pgvector/pgvector:pg17,
  * plain LOGIN NOSUPERUSER role, PER_CLASS) — house rule: prefer a real
  * substrate over a mock. Setup mirrors {@code PgVectorMetadataBatchParityTest}.
- * Uses the {@code chunks_384} table (smallest vector width) and a
+ * Uses embedding_384 (smallest vector width) on the unified nexus.chunks
+ * table (RDR-191 Phase 4) and a
  * zero-vector fake embedder so inserting rows costs no real embedding work.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -113,7 +114,7 @@ class PgVectorRepositoryGetAllMetadataCapBoundaryTest {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chunks_384 TO " + SVC_ROLE);
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
             su.createStatement().execute(

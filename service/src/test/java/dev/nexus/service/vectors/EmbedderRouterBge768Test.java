@@ -103,7 +103,7 @@ class EmbedderRouterBge768Test {
 
         try (Bge768Embedder bge = new Bge768Embedder(modelPath, tokPath)) {
             EmbedderRouter real = new EmbedderRouter(bge, "document");
-            // a conformant bge collection (→ chunks_768) routes to the real embedder
+            // a conformant bge collection (→ embedding_768) routes to the real embedder
             List<double[]> vecs = real.embedDoubleForCollection(
                     "knowledge__nexus__bge-base-en-v15-768__v1", List.of("fresh --service boot smoke"));
             assertThat(vecs).hasSize(1);

@@ -186,7 +186,7 @@ class PgVectorRepositoryGcQuarantineTest {
     private long chunkCount(String collection) throws SQLException {
         try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
             var rs = st.executeQuery(
-                "SELECT count(*) FROM nexus.chunks_1024 WHERE collection = '" + collection + "'");
+                "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection + "' AND " + DimTables.embeddingColumn(1024) + " IS NOT NULL");
             rs.next();
             return rs.getLong(1);
         }
@@ -195,7 +195,7 @@ class PgVectorRepositoryGcQuarantineTest {
     private String chunkText(String collection, String chash) throws SQLException {
         try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
             var rs = st.executeQuery(
-                "SELECT chunk_text FROM nexus.chunks_1024 WHERE collection = '" + collection
+                "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
                 + "' AND chash = decode('" + chash + "', 'hex')");
             return rs.next() ? rs.getString(1) : null;
         }
@@ -204,7 +204,7 @@ class PgVectorRepositoryGcQuarantineTest {
     private String metadataField(String collection, String chash, String key) throws SQLException {
         try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
             var rs = st.executeQuery(
-                "SELECT metadata->>'" + key + "' FROM nexus.chunks_1024 WHERE collection = '" + collection
+                "SELECT metadata->>'" + key + "' FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
                 + "' AND chash = decode('" + chash + "', 'hex')");
             return rs.next() ? rs.getString(1) : null;
         }
@@ -299,7 +299,7 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThatThrownBy(() -> {
             try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
                 st.execute(
-                    "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) "
+                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
                     + "VALUES ('" + TENANT_A + "', '" + originCol + "', NULL, 'x', "
                     + "('[' || repeat('0,', 1023) || '0]')::vector)");
             }

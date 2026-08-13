@@ -6,6 +6,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.TokenHashing;
+import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Contexts;
@@ -286,7 +287,7 @@ class StagingHandlerJourneyTest {
         assertThat(((Number) fin.get("dangling_manifest")).intValue()).isEqualTo(0);
 
         String canon = digestHex(TEXT_REUSE);
-        assertThat(count("SELECT count(*) FROM nexus.chunks_1024 "
+        assertThat(count("SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " "
             + "WHERE encode(chash,'hex') = '" + canon + "'")).isEqualTo(1);
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
             + "WHERE doc_id = '9.9.1' AND encode(chash,'hex') = '" + canon + "'")).isEqualTo(1);
@@ -317,7 +318,7 @@ class StagingHandlerJourneyTest {
         }
         // Promoted data survives the clear (staging rows are transient; the
         // nexus rows are the migration's product).
-        assertThat(count("SELECT count(*) FROM nexus.chunks_1024 "
+        assertThat(count("SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " "
             + "WHERE encode(chash,'hex') = '" + digestHex(TEXT_REUSE) + "'")).isEqualTo(1);
     }
 }

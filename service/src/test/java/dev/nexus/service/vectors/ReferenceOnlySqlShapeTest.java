@@ -35,8 +35,12 @@ class ReferenceOnlySqlShapeTest {
             .toLowerCase();
 
         assertThat(sql)
-            .as("INSERT targets the correct per-dim table")
-            .contains("chunks_1024");
+            .as("INSERT targets the unified nexus.chunks table, not a retired per-dim table")
+            .doesNotContain("chunks_1024");
+        assertThat(sql)
+            .as("INSERT targets the correct per-dim embedding column (RDR-191 Phase 4: "
+                + "dim selects embedding_<dim>, not a table)")
+            .contains("embedding_1024");
         assertThat(sql)
             .as("column list includes retention")
             .contains("retention");
@@ -50,7 +54,8 @@ class ReferenceOnlySqlShapeTest {
             .as("DO UPDATE does NOT set chunk_text (defense-in-depth against full→ref clobber)")
             .doesNotContainPattern("chunk_text\"?\\s*=\\s*excluded");
         assertThat(sql)
-            .as("DO UPDATE refreshes embedding from EXCLUDED")
-            .containsPattern("embedding\"?\\s*=\\s*excluded");
+            .as("DO UPDATE refreshes embedding_1024 from EXCLUDED (RDR-191 Phase 4: "
+                + "dim selects the embedding_<dim> column, not a table)")
+            .containsPattern("embedding_1024\"?\\s*=\\s*excluded");
     }
 }
