@@ -213,9 +213,9 @@ class CollectionVectorStatsTest {
         // CONTROL: raw tables hold exactly what we inserted
         try (Connection su = pg.createConnection("")) {
             assertThat(rawChunkCount(su, 384, TENANT_A, COLL_A_384))
-                .as("CONTROL: 3 chunks_384 rows must exist").isEqualTo(3);
+                .as("CONTROL: 3 nexus.chunks rows (dim=384) must exist").isEqualTo(3);
             assertThat(rawChunkCount(su, 1024, TENANT_A, COLL_A_1024))
-                .as("CONTROL: 2 chunks_1024 rows must exist").isEqualTo(2);
+                .as("CONTROL: 2 nexus.chunks rows (dim=1024) must exist").isEqualTo(2);
         }
 
         try (Connection su = pg.createConnection("")) {
