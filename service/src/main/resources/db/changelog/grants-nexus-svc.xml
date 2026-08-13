@@ -253,4 +253,81 @@ $$;
         </rollback>
     </changeSet>
 
+    <changeSet id="grants-004-monitor-wal-visibility" author="nexus-hzhgl" runAlways="true">
+        <comment>
+            nexus-hzhgl (RDR-191 Phase 3/4 pre-flight, conexus relay [22411] ASK B): grant
+            the built-in pg_monitor role to nexus_svc so the engine can read
+            pg_ls_waldir() and the pg_stat_* monitoring views/functions -- WAL-retention
+            visibility during the Phase 4 always-copy trough window (trough = 11,360 MiB
+            - X; breaches the 10,000 MiB floor if retained WAL X exceeds ~1,360 MiB).
+            Before this grant pg_ls_waldir() is permission-denied to nexus_svc, so retained
+            WAL was entirely unobservable.
+
+            CAVEAT (conexus relay [22411], correcting an earlier assumption): pg_monitor
+            does NOT provide filesystem free space. It is WAL-retention visibility ONLY --
+            the disk-free-space gate is a separate ask, conexus's own Crunchy Bridge API
+            key path. Neither substitutes for the other.
+
+            WHY THIS SUCCEEDS UNDER A NOSUPERUSER MIGRATION ROLE: granting membership in a
+            role requires the grantor to already hold that role WITH ADMIN OPTION (or be
+            superuser) -- nexus_admin (NOCREATEROLE, NOSUPERUSER) cannot self-provision that
+            the way it can an ordinary schema-owned GRANT. The bootstrap superuser must
+            first run `GRANT pg_monitor TO nexus_admin WITH ADMIN OPTION`, exactly the same
+            shape as nexus_diag's BYPASSRLS in grants-nexus-diag.xml -- an attribute/
+            privilege only a superuser can confer, so it lives OUTSIDE this changelog:
+            src/nexus/db/pg_provision.py for the local bundle (_create_roles for a
+            from-scratch provision, _backfill_pg_monitor_admin_option from provision()'s
+            fast idempotency path for an EXISTING install -- round 2, code-review-expert
+            Critical 2026-08-13: _create_roles alone is unreached on every already-
+            provisioned local install, the steady state for upgrades), and
+            docs/configuration.md's bring-your-own-Postgres DBA prerequisites for managed
+            deployments.
+
+            TRADEOFF, recorded deliberately (substantive-critic round 2, T2 [22418]):
+            WITH ADMIN OPTION lets nexus_admin grant or revoke pg_monitor membership to
+            ANY role, not just nexus_svc -- a small widening of nexus_admin's role-grant
+            blast radius. Accepted because the changelog (running as nexus_admin) is
+            exactly where such grants are supposed to originate as the durable record;
+            the narrower alternative (superuser grants pg_monitor to nexus_svc directly)
+            would bypass the changelog and drift on any credential-domain rebuild.
+
+            FAIL-LOUD WITH A NAMED REMEDY, NEVER A SILENT SKIP (round 2, code-review-expert
+            Important 2026-08-13): unlike grants-nexus-diag-1's clean skip-when-absent (an
+            OPTIONAL diagnostic role), nexus_svc's WAL-retention visibility is not optional
+            once shipped, and nothing in code enforces that a bring-your-own/managed
+            deployment's DBA has run the ADMIN OPTION prerequisite before this changeset
+            executes -- especially on the FIRST boot after upgrading to an engine that
+            carries this changeset. Rather than let that surface as a bare "permission
+            denied to grant role pg_monitor" (which names no remedy), the inner GRANT is
+            wrapped to catch exactly that failure and re-raise a self-explanatory error
+            naming the fix -- the same "loud, not silent" posture as
+            grants-nexus-svc-1's REQUIRED-nexus_svc fail-fast, applied to a permission gap
+            instead of a missing role. No MARK_RAN degrade, no preConditions skip: a
+            reproducible, WAL-visibility-is-a-probe absence must never masquerade as a
+            vacuous pass.
+
+            IDEMPOTENCY: GRANT of role membership is naturally idempotent in PostgreSQL
+            (re-granting an already-held membership is a no-op); runAlways="true" self-heals
+            a nexus_svc created after the first migration run, same as every other
+            changeset in this file.
+
+            pg_monitor is a built-in PostgreSQL role (PG10+) -- no version guard needed,
+            unlike the PG17+-only MAINTAIN privilege above.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    BEGIN
+        GRANT pg_monitor TO nexus_svc;
+    EXCEPTION WHEN insufficient_privilege THEN
+        RAISE EXCEPTION 'grants-004-monitor-wal-visibility: nexus_admin lacks ADMIN OPTION on pg_monitor, so it cannot grant pg_monitor onward to nexus_svc. REMEDY: as a PostgreSQL superuser, run: GRANT pg_monitor TO nexus_admin WITH ADMIN OPTION; -- the local bundle installer does this automatically (src/nexus/db/pg_provision.py); bring-your-own/managed Postgres deployments must run it manually per docs/configuration.md prerequisite 2. Original error: %', SQLERRM;
+    END;
+END
+$$;
+        </sql>
+        <rollback>
+            <sql>REVOKE pg_monitor FROM nexus_svc;</sql>
+        </rollback>
+    </changeSet>
+
 </databaseChangeLog>

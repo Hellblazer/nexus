@@ -199,6 +199,14 @@ run:
    design** (nexus-y3wuu): it reaches only a local Postgres via the local
    `pg_credentials` file, so on a remote/managed store the role serves
    server-side diagnostics run with your own credentials, not `nx forensics`.
+   Also run `GRANT pg_monitor TO nexus_admin WITH ADMIN OPTION;` (nexus-hzhgl,
+   RDR-191 Phase 3/4 pre-flight) — PostgreSQL only lets a role grant
+   membership in another role it already holds WITH ADMIN OPTION (or as
+   superuser), and `nexus_admin` is neither by default, so without this
+   one-time superuser step the changelog's `grants-004-monitor-wal-visibility`
+   changeset (which grants `pg_monitor` onward to `nexus_svc` for WAL-
+   retention visibility — `pg_ls_waldir()` / `pg_stat_*`, **not** filesystem
+   free space) fails loud on every migration run.
 3. **Diagnostic counts view (RDR-182 Amendment A6).** After the first
    migration run has created the chunk tables, create the superuser-owned
    counts view and grant it to `nexus_diag` — under FORCE row-level security a

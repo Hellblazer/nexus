@@ -630,6 +630,13 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
         su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + ADMIN_ROLE);
         su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
+        // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
+        // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
+        // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc, and
+        // PostgreSQL refuses that GRANT unless the migration role already holds
+        // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
+        // the falsification proof of this exact prerequisite.
+        su.createStatement().execute("GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
         su.createStatement().execute(
             "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
                 + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");

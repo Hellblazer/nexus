@@ -58,8 +58,9 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  *
  * <p><strong>WHY THIS TEST BOOTS TWICE BEFORE ROLLING BACK — order fidelity.</strong>
  * Liquibase rolls back in DATABASECHANGELOG <em>execution</em> order
- * ({@code ORDEREXECUTED}), NOT in master-file order. The tree has exactly six
- * {@code runAlways} changesets (nexus-0ys55 added {@code
+ * ({@code ORDEREXECUTED}), NOT in master-file order. The tree has exactly seven
+ * {@code runAlways} changesets (nexus-hzhgl added {@code
+ * grants-004-monitor-wal-visibility}, after nexus-0ys55's {@code
  * grants-003-purge-vacuum-maintain}), and they re-execute on every boot, so on
  * any cluster that has booted more than once they float to the tail of
  * execution order (master positions as of this commit, which the floor
@@ -70,14 +71,16 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  *   master pos 205  grants-nexus-svc-1
  *   master pos 206  grants-002-changelog-read
  *   master pos 207  grants-003-purge-vacuum-maintain
- *   master pos 208  grants-nexus-diag-1
- *   master pos 209  grants-nexus-diag-2
+ *   master pos 208  grants-004-monitor-wal-visibility
+ *   master pos 209  grants-nexus-diag-1
+ *   master pos 210  grants-nexus-diag-2
  * </pre>
  *
  * That is exactly, and in order, the five changesets the manual {@code
  * rollbackCount(10)} repro rolled back before dying on staging-4 — it was run
  * against a re-booted cluster, where staging-4 had floated from master position
- * 194 to execution depth 5 (now depth 6, after nexus-0ys55's addition).
+ * 194 to execution depth 5 (now depth 7, after nexus-0ys55's and nexus-hzhgl's
+ * additions).
  *
  * <p>Rolling back to a TAG reaches every changeset above the floor regardless of
  * execution order, so the second boot is NOT what makes staging-4 reachable —
@@ -159,9 +162,10 @@ class SchemaRollbackRoundTripIntegrationTest {
 
 
     /**
-     * The six {@code runAlways} changesets, in master order (nexus-0ys55 added
-     * {@code grants-003-purge-vacuum-maintain}, formerly five). Their identity is
-     * asserted (not merely their count) so that adding or removing a
+     * The seven {@code runAlways} changesets, in master order (nexus-hzhgl added
+     * {@code grants-004-monitor-wal-visibility}, formerly six after nexus-0ys55
+     * added {@code grants-003-purge-vacuum-maintain}, formerly five). Their
+     * identity is asserted (not merely their count) so that adding or removing a
      * {@code runAlways} changeset forces a deliberate look at this test rather
      * than silently changing which changesets the rollback leg reaches first.
      */
@@ -170,6 +174,7 @@ class SchemaRollbackRoundTripIntegrationTest {
         "grants-nexus-svc-1",
         "grants-002-changelog-read",
         "grants-003-purge-vacuum-maintain",
+        "grants-004-monitor-wal-visibility",
         "grants-nexus-diag-1",
         "grants-nexus-diag-2");
 
@@ -656,6 +661,13 @@ class SchemaRollbackRoundTripIntegrationTest {
                 + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
         su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + ADMIN_ROLE);
         su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
+        // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
+        // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
+        // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc, and
+        // PostgreSQL refuses that GRANT unless the migration role already holds
+        // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
+        // the falsification proof of this exact prerequisite.
+        su.createStatement().execute("GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
         su.createStatement().execute(
             "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
                 + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");

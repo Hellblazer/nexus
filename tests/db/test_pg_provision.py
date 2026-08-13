@@ -476,6 +476,59 @@ class TestIdempotency:
         )
         assert creds.get("NX_DB_DIAG_PASS"), "diag password missing after backfill"
 
+    def test_idempotent_rerun_backfills_missing_pg_monitor_admin_option(self, provisioned, bins):
+        """nexus-hzhgl round 2 (code-review-expert Critical, 2026-08-13): the
+        fast idempotency path must backfill nexus_admin's ADMIN OPTION on
+        pg_monitor on an ALREADY-RUNNING cluster -- the steady state for every
+        existing install, and exactly what an engine-service upgrade re-run
+        hits. Without this, the runAlways grants-004-monitor-wal-visibility
+        Liquibase changeset (which grants pg_monitor onward to nexus_svc)
+        fails PERMANENTLY at every subsequent engine-service boot, since
+        Main.java calls System.exit(1) on any MigrationException -- a total
+        local-engine outage on upgrade, not a degraded WAL-visibility
+        feature. Simulate a pre-round-2 cluster (revoke the grant), re-run
+        provision(), assert nexus_admin's ADMIN OPTION is restored via the
+        fast path.
+
+        NOTE: mutates the module-scoped ``provisioned`` cluster; restores the
+        grant via the very backfill under test, so sibling order is safe.
+        """
+        result, config_dir = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+
+        # Simulate a pre-round-2 install: nexus_admin holds no pg_monitor
+        # membership at all (a from-scratch _create_roles run only ever grants
+        # it WITH ADMIN OPTION, so a plain REVOKE cleanly reproduces the
+        # "never granted" precondition -- there is no bare-membership state to
+        # distinguish it from here).
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "REVOKE pg_monitor FROM nexus_admin")
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT pg_has_role('nexus_admin', 'pg_monitor', 'member')",
+        ) == "f", "revoke precondition failed"
+
+        result2 = provision(config_dir)
+
+        assert result2.already_provisioned, "repair re-run must hit the fast path"
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT pg_has_role('nexus_admin', 'pg_monitor', 'member')",
+        ) == "t", (
+            "nexus_admin's pg_monitor membership not restored by the fast-path backfill -- "
+            "this is exactly what makes grants-004-monitor-wal-visibility crash-loop the "
+            "engine service on every already-provisioned local install"
+        )
+        # Must be WITH ADMIN OPTION specifically -- plain membership is not
+        # enough, since nexus_admin must be able to grant pg_monitor ONWARD to
+        # nexus_svc (that is the entire point of the backfill).
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT m.admin_option FROM pg_auth_members m "
+            "JOIN pg_roles r ON r.oid = m.roleid AND r.rolname = 'pg_monitor' "
+            "JOIN pg_roles g ON g.oid = m.member AND g.rolname = 'nexus_admin'",
+        ) == "t", "nexus_admin's pg_monitor grant not restored WITH ADMIN OPTION"
+
 
 # ── heal_diag_view_grants_and_ownership (nexus-cfgo9, GH #1402 2nd symptom) ────
 
