@@ -348,7 +348,7 @@ from __future__ import annotations
 #: v0.1.71 gates on this tree: engine suite 1974/0/0 (1 skipped),
 #: run.sh --shakeout CANDIDATE SHAKEOUT PASSED, and
 #: run.sh --acquire ACQUIRE GATE PASSED against the published bytes.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 73)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 74)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

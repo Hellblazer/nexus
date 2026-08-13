@@ -310,7 +310,19 @@ class TestRequiredEngineVersion:
         # managed handshake legitimately reads cloud 0.1.72 < floor —
         # check_engine_release_floor.py documents that state, and the
         # --acquire post-publish gate covers the published bytes.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 73)
+        #
+        # BUMPED to (0,1,74) 2026-08-12, same day: v0.1.74 cut from
+        # d784d8c6e carries the RDR-191 wave-2 delete-path family
+        # (catalog-026 purge-trash grace-window chunk sweep, catalog-027
+        # quarantine manifest guard, the tombstone-aware delete anti-join
+        # + explicit reap retraction, and the manifest-read wire field
+        # kzso5 — the client half of which is version-tolerant and only
+        # fully activates against this engine). v0.1.73 was deployed and
+        # recorded the same day, so this is a one-step floor move, not a
+        # skip. Gated: full engine suite 2010/0/0 on d784d8c6e,
+        # --shakeout CANDIDATE SHAKEOUT PASSED pre-tag on the same tip;
+        # deploy relay is the pending step at this bump.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 74)
 
 
 class TestParseEngineVersion:
