@@ -376,6 +376,54 @@
          already included above; before the runAlways grants below. -->
     <include file="db/changelog/taxonomy-006-assign-from-chashes.xml"/>
 
+    <!-- RDR-191 Phase 4, centroid family (bead nexus-jv3ue, Hal ruling
+         o8dil.47 "unify the centroids too, one era"): the SIBLING of the
+         chunks unify changeset above lives at
+         db/changelog-staged/taxonomy-007-unify-centroids.xml — a SIBLING
+         directory of this one, not a subdirectory — fully written and
+         independently tested (VectorsUnifyCentroidsIntegrationTest), but is
+         DELIBERATELY NOT <include>d here yet, for the SAME two reasons as
+         vectors-004-unify-chunks.xml above: (a) registering it regenerates
+         jOOQ's Tables.java without Tables.TAXONOMY_CENTROIDS_384/768/1024,
+         breaking compilation of every existing call site
+         (TaxonomyCentroidRepository.java, DimTables.java's CENTROIDS map,
+         CatalogRepository.java's deleteCollectionTxn + COLLECTION_SCOPED_TABLES,
+         taxonomy-006's assign_from_chashes_<dim> Java callers — beads
+         nexus-o8dil.18/.19's scope, not this changeset's) until the Java
+         repoint lands alongside it; (b) living IN db/changelog/ while
+         unincluded trips the same changelog-parity drift lints (glob("*.xml")
+         vs the master include list) that vectors-004-unify-chunks.xml
+         already triggered — db/changelog-staged/ is invisible to those
+         non-recursive globs while remaining a normal classpath resource.
+
+         UNLIKE the chunks changeset, this one causes NO grants-nexus-svc.xml
+         boot-brick when registered — verified by direct grep: no changeset
+         anywhere GRANTs MAINTAIN on any taxonomy_centroids_<dim> table, and
+         neither CatalogRepository.PURGE_VACUUM_TABLES nor
+         TenantScope.VACUUM_ALLOWED_TABLES names one. Registration here is
+         therefore just mv + <include>, no grants-nexus-svc.xml edit
+         required (see taxonomy-007-unify-centroids.xml's own header for the
+         full grants-conclusion derivation and the CASCADE-fallout
+         enumeration against assign_from_chashes_<dim>).
+
+         THE PLAN: mv db/changelog-staged/taxonomy-007-unify-centroids.xml
+         back into this directory AND add the <include> in the SAME batch
+         that lands the centroid-side Java repoint (o8dil.18/.19), atomically
+         with (or immediately alongside) vectors-004-unify-chunks.xml's own
+         registration batch — Hal's o8dil.47 ruling is that both unify
+         changesets ship in the SAME engine release. Until then, this
+         changeset is validated in isolation: see
+         VectorsUnifyCentroidsIntegrationTest, which applies a standalone
+         changelog (every real file up through staging-002, plus this one,
+         loaded from its staged path) directly via the Liquibase API,
+         bypassing SchemaMigrator.MASTER_CHANGELOG's classpath resource so
+         this file's checked-in state is never touched by that test.
+         Mechanically enforced going forward by
+         tests/test_changelog_taxonomy007_coupling_lint.py's three-state
+         invariant (staged-and-unincluded passes, fully-registered
+         moved-back-plus-included passes, any other combination fails
+         naming the mismatch). -->
+
     <!-- nexus-kl2z6 increment 2 / nexus-vc6dh: staging.document_chunks(chash)
          probe index for the sweep's third guard (design memo §4.2 REV 2
          corrected shape). Needs staging.document_chunks (staging-001);
