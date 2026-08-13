@@ -10,6 +10,7 @@ import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -122,7 +123,7 @@ class CatalogHandlerSweepAndChashesManyTest {
             su.createStatement().execute("SET nexus.tenant = '" + TENANT + "'");
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding)"
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ")"
                 + " VALUES (?, ?, ?, ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             ps.setString(1, TENANT);
             ps.setString(2, collection);

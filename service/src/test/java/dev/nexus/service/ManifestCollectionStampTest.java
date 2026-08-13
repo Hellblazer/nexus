@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -101,7 +102,7 @@ class ManifestCollectionStampTest {
         try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
             st.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
                 + "VALUES ('" + TENANT + "', '" + COLL + "') ON CONFLICT DO NOTHING");
-            st.execute("INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) "
+            st.execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
                 + "VALUES ('" + TENANT + "', '" + COLL + "', decode('" + CH_A + "', 'hex'), 'alpha text', "
                 + "('[' || repeat('0.1,', 1023) || '0.1]')::vector)");
         }
@@ -114,7 +115,7 @@ class ManifestCollectionStampTest {
     }
 
     /**
-     * Plants a REAL chunks_1024 row so a test can seed genuine chunk
+     * Plants a REAL nexus.chunks row (RDR-191 unified; formerly chunks_1024) so a test can seed genuine chunk
      * content under an arbitrary collection name (used by the multi-row
      * batch tests below to prove the engine does NOT consult where a
      * chash's content actually lives when stamping the manifest).
@@ -123,7 +124,7 @@ class ManifestCollectionStampTest {
         try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
             st.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
                 + "VALUES ('" + TENANT + "', '" + coll + "') ON CONFLICT DO NOTHING");
-            st.execute("INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) "
+            st.execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
                 + "VALUES ('" + TENANT + "', '" + coll + "', decode('" + chash + "', 'hex'), '"
                 + text + "', ('[' || repeat('0.1,', 1023) || '0.1]')::vector) "
                 + "ON CONFLICT DO NOTHING");

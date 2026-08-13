@@ -4,6 +4,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -135,12 +136,14 @@ class DenseGateScanBudgetIntegrationTest {
                     "INSERT INTO nexus.catalog_collections (tenant_id, name, content_type) "
                     + "VALUES ('" + TENANT + "', '" + col + "', 'rdr') ON CONFLICT DO NOTHING");
             }
-            su.createStatement().execute("DROP INDEX nexus.idx_chunks_384_embedding");
+            // RDR-191 Phase 4: idx_chunks_384_embedding -> idx_chunks_embedding_384 on
+            // the unified nexus.chunks table.
+            su.createStatement().execute("DROP INDEX nexus.idx_chunks_embedding_384");
             // Noise: random vectors (normalized-ish is irrelevant for cosine
             // ordering realism at this granularity), text that can NEVER pass
             // the gate for QUERY.
             su.createStatement().execute(
-                "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) "
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") "
                 + "SELECT '" + TENANT + "', '" + COL_NOISE + "', "
                 + "  sha256(convert_to('noise doc ' || g, 'UTF8')), "
                 + "  'filler noise document number ' || g, "
@@ -153,7 +156,7 @@ class DenseGateScanBudgetIntegrationTest {
             // cluster would defeat the reproduction (HNSW yields a whole
             // mutual-neighbor cluster the moment the scan touches it).
             su.createStatement().execute(
-                "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) "
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") "
                 + "SELECT '" + TENANT + "', '" + COL_TARGET + "', "
                 + "  sha256(convert_to('gpu batch row ' || g, 'UTF8')), "
                 + "  'gpu batch scheduling design row ' || g, "
@@ -173,9 +176,9 @@ class DenseGateScanBudgetIntegrationTest {
                 + "\" SET hnsw.max_scan_tuples = 512");
             // The cloud's post-conversion state: a freshly REBUILT graph.
             su.createStatement().execute(
-                "CREATE INDEX idx_chunks_384_embedding ON nexus.chunks_384 "
-                + "USING hnsw (embedding vector_cosine_ops)");
-            su.createStatement().execute("ANALYZE nexus.chunks_384");
+                "CREATE INDEX idx_chunks_embedding_384 ON " + DimTables.CHUNKS_TABLE_NAME + " "
+                + "USING hnsw (" + DimTables.embeddingColumn(384) + " vector_cosine_ops)");
+            su.createStatement().execute("ANALYZE " + DimTables.CHUNKS_TABLE_NAME);
         }
     }
 
@@ -192,7 +195,7 @@ class DenseGateScanBudgetIntegrationTest {
 
         // Sanity: the gate really is dense-branch territory (> 128 matches).
         Integer gateMatches = scope.withTenant(TENANT, ctx -> ctx.fetchOne(
-            "SELECT count(*) FROM nexus.chunks_384 "
+            "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " "
             + "WHERE collection = '" + COL_TARGET + "' "
             + "AND (chunk_tsv @@ plainto_tsquery('english', '" + QUERY + "') "
             + "     OR '" + QUERY + "' <% chunk_text)").get(0, Integer.class));

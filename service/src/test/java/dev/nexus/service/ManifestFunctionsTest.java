@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.vectors.DimTables;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -107,9 +108,10 @@ class ManifestFunctionsTest {
     // ── Test collections (must be registered in catalog_collections per fk-002) ─
     // Collection names follow the conformant shape: <type>__<owner>__<model>__<version>
     // The model segment (split_part(name, '__', 3)) must match the _MODEL_DIMS tokens
-    // used by manifest_orphans to route to the correct chunks_<dim> table.
-    // 384: model token = 'minilm-l6-v2-384' (maps chunks_384)
-    // 1024: model token = 'voyage-context-3' (maps chunks_1024)
+    // used by manifest_orphans to route to the correct embedding_<dim> column of the
+    // unified nexus.chunks table (RDR-191 Phase 4; formerly a chunks_<dim> table).
+    // 384: model token = 'minilm-l6-v2-384' (maps embedding_384)
+    // 1024: model token = 'voyage-context-3' (maps embedding_1024)
     private static final String COLLECTION_384  = "knowledge__mf-owner-a__minilm-l6-v2-384__v1";
     private static final String COLLECTION_1024 = "knowledge__mf-owner-a__voyage-context-3__v1";
 
@@ -162,13 +164,14 @@ class ManifestFunctionsTest {
                     "catalog_document_chunks",
                     "document_aspects",
                     "document_highlights",
-                    "aspect_extraction_queue",
-                    "chunks_384",
-                    "chunks_768",
-                    "chunks_1024")) {
+                    "aspect_extraction_queue")) {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
             }
+            // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
+            // a single GRANT now covers what three did.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT USAGE ON SEQUENCE nexus.document_aspects_id_seq TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -201,8 +204,8 @@ class ManifestFunctionsTest {
     // EXPECTED RED: nexus.manifest_orphans function absent until catalog-004.
     //
     // Fixture: 1 live doc, 2 manifest rows:
-    //   - chash_present: has a chunks_384 row    → NOT an orphan
-    //   - chash_missing:  NO chunks_384 row      → IS an orphan
+    //   - chash_present: has a nexus.chunks row (embedding_384)    → NOT an orphan
+    //   - chash_missing:  NO nexus.chunks row                       → IS an orphan
     //
     // Assert: manifest_orphans(384) returns exactly 1 row (chash_missing).
     // ══════════════════════════════════════════════════════════════════════════
@@ -934,14 +937,15 @@ class ManifestFunctionsTest {
     }
 
     /**
-     * Insert a chunks_384 row. Collection must be pre-registered (fk-002 NOT VALID FK).
+     * Insert a nexus.chunks row (RDR-191 unified; formerly chunks_384) with embedding_384
+     * populated. Collection must be pre-registered (fk-002 NOT VALID FK).
      * chash MUST be exactly 32 hex characters. PK: (tenant_id, collection, chash).
      * Superuser insert bypasses FORCE RLS so direct fixture setup is possible.
      */
     private static void insertChunk384(Connection su, String tenantId, String collection,
                                         String chash, String chunkText) throws Exception {
         su.createStatement().execute(
-            "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
             "VALUES ('" + tenantId + "', '" + collection + "', '" + chash + "', " +
             "'" + chunkText.replace("'", "''") + "', " + vectorLiteral(384) + "::vector) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
@@ -960,13 +964,14 @@ class ManifestFunctionsTest {
     }
 
     /**
-     * Count chunks_384 rows for (tenantId, collection).
+     * Count nexus.chunks rows with embedding_384 populated for (tenantId, collection).
      */
     private static int countChunks384(Connection conn, String tenantId, String collection)
             throws Exception {
         ResultSet rs = conn.createStatement().executeQuery(
-            "SELECT COUNT(*) FROM nexus.chunks_384 " +
-            "WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'");
+            "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
+            "WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'" +
+            " AND " + DimTables.embeddingColumn(384) + " IS NOT NULL");
         rs.next();
         return rs.getInt(1);
     }
