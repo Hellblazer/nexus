@@ -5239,7 +5239,7 @@ public final class CatalogRepository {
                    .and(DSL.notExists(ctx.selectOne().from(CHUNKS)
                            .where(CHUNKS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
                                   .and(CHUNKS.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
-                                  .and(CHUNKS.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH)))))
+                                  .and(CHUNKS.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))))
             .limit(limit)
             .fetch(CHK_CHASH_HEX);
     }

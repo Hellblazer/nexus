@@ -640,21 +640,16 @@ public final class TaxonomyRepository {
             // hex text, so the existence probe goes through ChashHex.hex(...) — the
             // house-blessed jOOQ seam that binds hex->bytes / fetches bytes->hex
             // uniformly (same idiom PgVectorRepository uses for catalog_document_chunks).
-            List<String> found = switch (dim) {
-                case 384  -> ctx.select(ChashHex.hex(CHUNKS_384.CHASH)).from(CHUNKS_384)
-                                .where(CHUNKS_384.COLLECTION.eq(collection)
-                                    .and(ChashHex.hex(CHUNKS_384.CHASH).in(chashArr)))
-                                .fetch(ChashHex.hex(CHUNKS_384.CHASH));
-                case 768  -> ctx.select(ChashHex.hex(CHUNKS_768.CHASH)).from(CHUNKS_768)
-                                .where(CHUNKS_768.COLLECTION.eq(collection)
-                                    .and(ChashHex.hex(CHUNKS_768.CHASH).in(chashArr)))
-                                .fetch(ChashHex.hex(CHUNKS_768.CHASH));
-                case 1024 -> ctx.select(ChashHex.hex(CHUNKS_1024.CHASH)).from(CHUNKS_1024)
-                                .where(CHUNKS_1024.COLLECTION.eq(collection)
-                                    .and(ChashHex.hex(CHUNKS_1024.CHASH).in(chashArr)))
-                                .fetch(ChashHex.hex(CHUNKS_1024.CHASH));
-                default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-            };
+            // RDR-191 (nexus-o8dil.48): the three per-dim existence probes
+            // collapsed onto the unified nexus.chunks. (tenant RLS, collection,
+            // chash) identifies the row regardless of dim, so no embedding-column
+            // predicate is needed for THIS probe; dim stays load-bearing for the
+            // per-dim assign_from_chashes_<dim>() calls below, whose own switch
+            // keeps the unsupported-dim fail-loud arm.
+            List<String> found = ctx.select(ChashHex.hex(CHUNKS.CHASH)).from(CHUNKS)
+                    .where(CHUNKS.COLLECTION.eq(collection)
+                        .and(ChashHex.hex(CHUNKS.CHASH).in(chashArr)))
+                    .fetch(ChashHex.hex(CHUNKS.CHASH));
             java.util.Set<String> foundSet = new java.util.HashSet<>(found);
             List<String> unmatched = chashes.stream()
                 .filter(c -> !foundSet.contains(c))
