@@ -457,11 +457,14 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         """RDR-164 P2: atomically delete a collection + all its in-Postgres
         derived state via the service's single transactional deleteCollection.
 
-        Returns the per-table deleted-row count map (``chunks_384``,
-        ``chash_index``, ``topic_assignments``, ``topics``,
-        ``taxonomy_centroids_*``, ``document_aspects``, ``document_highlights``,
-        ``aspect_extraction_queue``, ``catalog_documents``,
-        ``catalog_collections``). The streaming pipeline buffer is swept via
+        Returns the per-table deleted-row count map (``chunks`` — the
+        RDR-191 unified relation, was ``chunks_384/768/1024`` —
+        ``topic_assignments``, ``topics``, ``taxonomy_centroids``
+        — the RDR-191 unified centroid relation, was
+        ``taxonomy_centroids_*`` — ``document_aspects``,
+        ``document_highlights``, ``aspect_extraction_queue``,
+        ``catalog_documents``, ``catalog_collections``; ``chash_index`` is
+        retired, RDR-187). The streaming pipeline buffer is swept via
         its own engine endpoint (``/v1/pipeline/delete_collection``, RDR-186
         .16); the local-mode cascade stays client-side (see
         ``purge_collection_cascade``).
@@ -2686,10 +2689,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         derived state via the service's single transactional renameCollection.
 
         Returns the per-table re-home count map (``catalog_collections_inserted``,
-        ``chunks_384/768/1024``, ``chash_index``, ``topic_assignments``, ``topics``,
-        ``taxonomy_meta``, ``taxonomy_centroids_*``, ``document_aspects``,
-        ``document_highlights``, ``aspect_extraction_queue``, ``catalog_documents``,
-        ``search_telemetry``, ``hook_failures``, ``catalog_collections_deleted``).
+        ``chunks`` — the RDR-191 unified relation, was ``chunks_384/768/1024``
+        — ``topic_assignments``, ``topics``, ``taxonomy_meta``,
+        ``taxonomy_centroids`` — the RDR-191 unified centroid relation, was
+        ``taxonomy_centroids_*`` — ``document_aspects``,
+        ``document_highlights``, ``aspect_extraction_queue``,
+        ``catalog_documents``, ``search_telemetry``, ``hook_failures``,
+        ``catalog_collections_deleted``; ``chash_index`` is retired, RDR-187).
         The cross-model COPY branch (target already registered) returns only
         ``catalog_documents``. The streaming pipeline buffer lives engine-side
         (``nexus.pdf_pipeline``, RDR-186 .16); the local-mode fan-out stays

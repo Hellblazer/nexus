@@ -10,13 +10,21 @@ tables. Keeping ONE list here means the operator's ``nx doctor`` warning, the
 drift to checking different tables (which would let a poisoned table slip past
 one surface but not another).
 
+RDR-191 (nexus-o8dil.19): ``chunks_384`` / ``chunks_768`` / ``chunks_1024``
+unify into ONE physical relation, :data:`CHUNKS_TABLE` (three mutually
+exclusive nullable ``embedding_<dim>`` columns, exactly-one CHECK). Every
+site below that used to iterate the three per-dim tables now needs only
+this one name — the dim CONCEPT survives (which embedding column is
+populated), but it is no longer a reason to iterate tables, since there is
+only one. ``nexus.chash_index`` was already retired ahead of this (RDR-187
+/ nexus-piwya.5) and is independent of the unify.
+
 Two severity classes (nexus-z5j0t), decided by ONE structural criterion —
 whether the table carries a width CHECK constraint that a Liquibase
 ``VALIDATE CONSTRAINT`` will run on the next engine upgrade:
 
-- **poison** (``chunks_{384,768,1024}``, ``chash_index``,
-  ``catalog_document_chunks``): these carry ``*_chash_len_check`` /
-  ``*_chash_octet_check`` width constraints
+- **poison** (``chunks``, ``catalog_document_chunks``): these carry
+  ``*_chash_len_check`` / ``*_chash_octet_check`` width constraints
   (catalog-002/catalog-013), so a non-conformant row crash-loops the next
   upgrade (GH #1390 / nexus-pnwu0). Counts here GATE ``install-binary``.
 - **legacy debt** (``topic_assignments.doc_id``, ``frecency.chunk_id``,
@@ -100,30 +108,29 @@ class ChashBearingTable(NamedTuple):
     poison: bool  #: True → counts gate install-binary (GH #1390 class)
 
 
+#: The unified chunk-storage relation (RDR-191, nexus-o8dil.19): the ONE
+#: declaration every chunk-table reference in this module derives from —
+#: both the tuple entry below and the debt-leg anti-join in
+#: :func:`diag_conformance_view_ddl` name this constant, never a re-typed
+#: literal, so the three-per-dim -> one-unified collapse cannot drift
+#: between the two sites that used to need it independently.
+CHUNKS_TABLE: str = "nexus.chunks"
+
 #: The authoritative chash-bearing set. A non-32-char value in a ``poison``
 #: entry is the GH #1390 / nexus-pnwu0 poison class; in a non-poison entry it
 #: is legacy debt (see module doc). Column names are NOT uniform — the
 #: RDR-185 .13 audit's chunk_id-naming blind spot is exactly why the entry
 #: shape is column-aware (nexus-z5j0t).
 CHASH_BEARING_TABLES: tuple[ChashBearingTable, ...] = (
-    ChashBearingTable("nexus.chunks_384", "chash", poison=True),
-    ChashBearingTable("nexus.chunks_768", "chash", poison=True),
-    ChashBearingTable("nexus.chunks_1024", "chash", poison=True),
-    # RDR-187 (nexus-piwya.5): nexus.chash_index is RETIRED from the set
-    # ahead of the table DROP (nexus-piwya.9). The gate/forensics statements
-    # filter by table_name, so any deployed view generation (5-, 7- or
-    # 8-leg) still satisfies the narrowed gate; the LEGACY direct-table
-    # fallback would otherwise query the dropped relation and error. Poison
-    # in router rows is moot: the rows die at the DROP regardless.
-    #
-    # Window chain (.5 critique S2, verified): between this release and the
-    # DROP, chash_index-only width poison is no longer refused CLIENT-side
-    # (pre-binary-swap); the guard is SchemaMigrator.preflightChashConstraints
-    # engine-side, which fail-louds BEFORE Liquibase. That entry must die IN
-    # the .9 commit with the table, never before (pinned on the .9 bead).
-    # Old-client x newer-view cell: the retired leg's NULL sum degrades to a
-    # non-gating "could not probe" WARN via health.py's outer handler —
-    # never false-clean, never a hard block.
+    # RDR-191 (nexus-o8dil.19): chunks_384/768/1024 unify into ONE physical
+    # relation (CHUNKS_TABLE, above) — three mutually exclusive nullable
+    # embedding_<dim> columns behind one table, so this is one entry, not
+    # three. nexus.chash_index was already retired (RDR-187 / nexus-piwya.5,
+    # ahead of the table DROP) and is independent of this unify; the
+    # gate/forensics statements filter by table_name, so any deployed view
+    # generation still satisfies the gate unchanged, and the LEGACY
+    # direct-table fallback no longer queries a dropped relation.
+    ChashBearingTable(CHUNKS_TABLE, "chash", poison=True),
     ChashBearingTable("nexus.catalog_document_chunks", "chash", poison=True),
     ChashBearingTable("nexus.topic_assignments", "doc_id", poison=False),
     ChashBearingTable("nexus.frecency", "chunk_id", poison=False),
@@ -131,9 +138,10 @@ CHASH_BEARING_TABLES: tuple[ChashBearingTable, ...] = (
 )
 
 #: The upgrade-gating subset — the probe statements the install-binary gate
-#: and the forensics topic run. Four tables post-RDR-187 (chash_index
-#: retired, nexus-piwya.5); per-table table_name filtering keeps every
-#: deployed view generation (5/7/8-leg) satisfying the gate unchanged.
+#: and the forensics topic run. Two tables post-RDR-191 unify (was four
+#: post-RDR-187: chunks_384/768/1024 collapsed to one, chash_index already
+#: retired); per-table table_name filtering keeps every deployed view
+#: generation satisfying the gate unchanged.
 POISON_CHASH_TABLES: tuple[ChashBearingTable, ...] = tuple(
     t for t in CHASH_BEARING_TABLES if t.poison
 )
@@ -214,22 +222,28 @@ def diag_conformance_view_ddl() -> str:
     text-era store the CREATE fails and provisioning's best-effort catch
     degrades the probe to legacy statements (the converged-pair floor makes
     that window transient).
+
+    RDR-191 (nexus-o8dil.19): the anti-join used to be a 3-way ``AND`` over
+    ``chunks_384``/``chunks_768``/``chunks_1024`` (a debt chash counted as
+    "referenced" only if it matched none of the three per-dim tables). With
+    the chunk tables unified into :data:`CHUNKS_TABLE`, a chash either has a
+    row there or it does not — dim was never part of the debt predicate's
+    identity, only an artifact of it having to probe three tables to answer
+    one question. The anti-join collapses to ONE ``NOT EXISTS``, derived
+    from the same :data:`CHUNKS_TABLE` declaration :data:`CHASH_BEARING_TABLES`
+    uses, so the two sites cannot re-diverge on the table name.
     """
     poison_legs = [
         f"SELECT '{t.table}' AS table_name, count(*) AS non_conformant "
         f"FROM {t.table} WHERE octet_length({t.column}) <> 32"
         for t in POISON_CHASH_TABLES
     ]
-    chunk_anti_join = " AND ".join(
-        f"NOT EXISTS (SELECT 1 FROM nexus.chunks_{dim} c "
-        f"WHERE c.chash = decode(t.{{col}}, 'hex'))"
-        for dim in (384, 768, 1024)
-    )
     debt_legs = [
         f"SELECT '{t.table}' AS table_name, count(*) AS non_conformant "
         f"FROM {t.table} t "
         f"WHERE t.{t.column} ~ '^[0-9a-f]+$' AND length(t.{t.column}) % 2 = 0 "
-        f"AND " + chunk_anti_join.format(col=t.column)
+        f"AND NOT EXISTS (SELECT 1 FROM {CHUNKS_TABLE} c "
+        f"WHERE c.chash = decode(t.{t.column}, 'hex'))"
         for t in DEBT_CHASH_TABLES
     ]
     union = "\nUNION ALL\n".join(poison_legs + debt_legs)
