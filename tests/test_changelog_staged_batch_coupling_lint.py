@@ -115,21 +115,30 @@ def _grants_violations(changelog_dir: Path) -> list[str]:
             "-- cannot verify the boot-brick guard at all"
         )
     else:
-        pc = grants_003.find(f"{_XSD_NS}preConditions")
+        # The guard is an early-RETURN in the runAlways BODY, deliberately NOT
+        # a <preConditions onFail="MARK_RAN"> (nexus-ixsxa /
+        # test_changelog_markran_lint.py: runAlways + MARK_RAN appends one
+        # DATABASECHANGELOG row per unmet boot, unbounded). Require BOTH the
+        # to_regclass existence probe AND a RETURN in grants-003's <sql> body,
+        # and require that no MARK_RAN preConditions crept back in.
         guarded = False
-        if pc is not None:
-            for sc in pc.iter(f"{_XSD_NS}sqlCheck"):
-                body = "".join(sc.itertext())
-                if "chunks_384" in body and "regclass" in body.lower():
-                    guarded = True
-                    break
+        for sql in grants_003.iter(f"{_XSD_NS}sql"):
+            body = "".join(sql.itertext())
+            if (
+                "chunks_384" in body
+                and "to_regclass" in body.lower()
+                and "return" in body.lower()
+            ):
+                guarded = True
+                break
         if not guarded:
             violations.append(
-                f"{VECTORS_004} is registered but {GRANTS_003_ID} has no "
-                "existence-guard <preConditions> naming chunks_384 via to_regclass -- "
+                f"{VECTORS_004} is registered but {GRANTS_003_ID} has no in-body "
+                "existence guard (to_regclass('nexus.chunks_384') ... RETURN) -- "
                 "it is runAlways=true and will unconditionally GRANT MAINTAIN on the "
                 "now-dropped chunks_384/768/1024, crash-looping the service on the "
-                "very next boot"
+                "very next boot. (A <preConditions onFail=MARK_RAN> guard is NOT "
+                "acceptable here: nexus-ixsxa, see test_changelog_markran_lint.py.)"
             )
 
     if grants_005 is None:
@@ -335,6 +344,23 @@ _UNGUARDED_GRANTS_003 = f"""
 
 _GUARDED_GRANTS_003 = f"""
     <changeSet id="{GRANTS_003_ID}" author="nexus-0ys55" runAlways="true">
+        <sql>DO $$
+BEGIN
+    IF to_regclass('nexus.chunks_384') IS NULL THEN
+        RETURN;
+    END IF;
+    EXECUTE 'GRANT MAINTAIN ON nexus.chunks_384 TO nexus_svc';
+END
+$$;</sql>
+    </changeSet>
+"""
+
+# The nexus-ixsxa ANTI-shape: a preConditions MARK_RAN guard is functionally an
+# existence guard but appends a DATABASECHANGELOG row per unmet boot on a
+# runAlways changeset (see test_changelog_markran_lint.py). The coupling lint
+# must NOT accept it as "guarded".
+_MARKRAN_GUARDED_GRANTS_003 = f"""
+    <changeSet id="{GRANTS_003_ID}" author="nexus-0ys55" runAlways="true">
         <preConditions onFail="MARK_RAN">
             <sqlCheck expectedResult="1">SELECT (to_regclass('nexus.chunks_384') IS NOT NULL)::int</sqlCheck>
         </preConditions>
@@ -522,8 +548,28 @@ def test_state_c_registered_batch_with_unguarded_grants003_and_no_grants005(tmp_
     )
     violations = analyze_batch_registration_coupling(changelog_dir, master)
     assert len(violations) == 2, violations
-    assert any(GRANTS_003_ID in v and "preConditions" in v for v in violations), violations
+    assert any(
+        GRANTS_003_ID in v and "in-body existence guard" in v for v in violations
+    ), violations
     assert any(GRANTS_005_ID in v for v in violations), violations
+
+
+def test_state_c_markran_precondition_guard_is_rejected_not_accepted(tmp_path):
+    """The nexus-ixsxa anti-shape: a preConditions MARK_RAN guard must NOT
+    satisfy the coupling lint's guard requirement -- on a runAlways changeset
+    it appends one DATABASECHANGELOG row per unmet-precondition boot,
+    unbounded (test_changelog_markran_lint.py owns the shape ban; this arm
+    keeps THIS lint from steering anyone back into it)."""
+    changelog_dir, master = _write_synthetic_batch(
+        tmp_path,
+        placements={b: "target" for b in BATCH_FILES},
+        include_order=BATCH_FILES,
+        grants_changesets_xml=_MARKRAN_GUARDED_GRANTS_003 + _GRANTS_005,
+    )
+    violations = analyze_batch_registration_coupling(changelog_dir, master)
+    assert len(violations) == 1, violations
+    assert GRANTS_003_ID in violations[0], violations
+    assert "in-body existence guard" in violations[0], violations
 
 
 def test_state_c_registered_batch_with_guarded_grants003_but_missing_grants005(tmp_path):

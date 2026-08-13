@@ -72,8 +72,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * this changeset's own DROP causes (grants-003-purge-vacuum-maintain is
  * {@code runAlways} and unconditionally GRANTs MAINTAIN on
  * chunks_384/768/1024 by name — the very next execution after this changeset
- * drops them would crash-loop). The fix (a checksum-neutral {@code
- * <preConditions onFail="MARK_RAN">} on grants-003 plus a new grants-005
+ * drops them would crash-loop). The fix (an in-body early-RETURN existence
+ * guard on grants-003 — NOT a {@code <preConditions onFail="MARK_RAN">},
+ * which on a runAlways changeset appends one DATABASECHANGELOG row per unmet
+ * boot, nexus-ixsxa — plus a new grants-005
  * changeset) is fully designed and written but cannot be integration-tested
  * without EITHER registering this changeset for real (which breaks
  * compilation as above) OR maintaining a throwaway duplicate of a 250+ line

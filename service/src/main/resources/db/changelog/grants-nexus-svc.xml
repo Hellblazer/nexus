@@ -195,17 +195,18 @@ GRANT SELECT ON public.databasechangeloglock TO nexus_svc;
         <!-- RDR-191 Phase 4 (vectors-004-unify-chunks.xml): once the unify changeset
              drops nexus.chunks_384/768/1024, this runAlways grant would raise
              "relation does not exist" on every subsequent boot and crash-loop the
-             service. The existence guard below re-evaluates every boot (runAlways
-             means MARK_RAN here is per-run, not a permanent freeze): pre-unify boxes
-             keep executing it unchanged; post-unify boxes cleanly self-skip forever.
-             grants-005-chunks-unify-maintain below takes over the MAINTAIN
-             responsibility with the post-unify table set. Checksum-safe: Liquibase
-             hashes only the changes body, never preConditions (catalog-013-2
-             precedent). See vectors-004-unify-chunks.xml's header for the full
-             boot-brick analysis. -->
-        <preConditions onFail="MARK_RAN">
-            <sqlCheck expectedResult="1">SELECT (to_regclass('nexus.chunks_384') IS NOT NULL)::int</sqlCheck>
-        </preConditions>
+             service. The guard is an EARLY-RETURN IN THE BODY below, deliberately
+             NOT a <preConditions onFail="MARK_RAN"> (nexus-ixsxa /
+             tests/test_changelog_markran_lint.py: runAlways + MARK_RAN INSERTs a
+             fresh DATABASECHANGELOG row on every boot the precondition is unmet,
+             unbounded, and corrupts rollbackCount depth arithmetic; a body guard
+             keeps the changeset RERAN — one row, updated in place). Editing this
+             runAlways body is checksum-safe: ValidatingVisitor skips the MD5SUM
+             comparison for shouldAlwaysRun(). Pre-unify boxes execute the grants
+             unchanged; post-unify boxes hit the RETURN and no-op forever.
+             grants-005-chunks-unify-maintain below takes over MAINTAIN with the
+             post-unify table set. See vectors-004-unify-chunks.xml's header for
+             the full boot-brick analysis. -->
         <comment>
             nexus-0ys55: MAINTAIN on the five purge-trash VACUUM targets (nexus.chunks_384,
             nexus.chunks_768, nexus.chunks_1024, nexus.catalog_document_chunks,
@@ -249,6 +250,12 @@ GRANT SELECT ON public.databasechangeloglock TO nexus_svc;
         <sql splitStatements="false" stripComments="false">
 DO $$
 BEGIN
+    -- RDR-191 era guard (see changeset comment): post-unify the per-dim
+    -- tables are gone and grants-005 owns MAINTAIN. Body guard, not
+    -- preConditions MARK_RAN (nexus-ixsxa).
+    IF to_regclass('nexus.chunks_384') IS NULL THEN
+        RETURN;
+    END IF;
     IF current_setting('server_version_num')::int >= 170000 THEN
         EXECUTE 'GRANT MAINTAIN ON nexus.chunks_384 TO nexus_svc';
         EXECUTE 'GRANT MAINTAIN ON nexus.chunks_768 TO nexus_svc';
