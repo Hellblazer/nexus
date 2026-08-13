@@ -419,10 +419,14 @@
          bypassing SchemaMigrator.MASTER_CHANGELOG's classpath resource so
          this file's checked-in state is never touched by that test.
          Mechanically enforced going forward by
-         tests/test_changelog_taxonomy007_coupling_lint.py's three-state
-         invariant (staged-and-unincluded passes, fully-registered
-         moved-back-plus-included passes, any other combination fails
-         naming the mismatch). -->
+         tests/test_changelog_staged_batch_coupling_lint.py (RDR-191 repoint
+         batch Step A, nexus-o8dil.18: consolidates this file's former
+         per-file lint plus vectors-004's into ONE directory-driven batch
+         invariant covering all three staged repoint-batch changesets:
+         staged-and-unincluded passes, fully-registered
+         moved-back-plus-included-in-order passes, any other combination
+         (including a split batch where some files register ahead of
+         others) fails naming the mismatch). -->
 
     <!-- nexus-kl2z6 increment 2 / nexus-vc6dh: staging.document_chunks(chash)
          probe index for the sweep's third guard (design memo §4.2 REV 2
@@ -536,12 +540,16 @@
          a normal classpath resource (everything under src/main/resources/ is
          on the classpath) that Liquibase can load directly by path.
          Mechanically enforced going forward by
-         tests/test_changelog_vectors004_grants_coupling_lint.py's
-         three-state invariant: staged-and-unincluded passes, fully-registered
-         (moved back here + included + both grants-nexus-svc.xml pieces
-         present) passes, any OTHER combination (moved but not included,
-         included but still staged, included without the grants fix) fails
-         naming the T2 [22433] checklist.
+         tests/test_changelog_staged_batch_coupling_lint.py (RDR-191 repoint
+         batch Step A, nexus-o8dil.18: consolidates this file's former
+         per-file lint plus taxonomy-007's into ONE directory-driven batch
+         invariant covering all three staged repoint-batch changesets:
+         staged-and-unincluded passes, fully-registered (moved back here +
+         included, IN ORDER, + both grants-nexus-svc.xml pieces present)
+         passes, any OTHER combination (moved but not included, included but
+         still staged, included without the grants fix, or a SPLIT BATCH
+         where some of the three files register ahead of the others) fails
+         naming the mismatch. T2 [22433] checklist content unchanged.
 
          THE PLAN: mv db/changelog-staged/vectors-004-unify-chunks.xml back
          into this directory AND add the <include> in the SAME batch that
