@@ -136,6 +136,9 @@ _SEED_COVERAGE_LINE_RE = re.compile(r"//\s+(\S+)\s+(\S+)\s*$", re.MULTILINE)
 #:   catalog-013-0 / catalog-013-1b — legacy 64-char chash_index rows
 #:   catalog-014-0                  — un-stamped manifest rows (collection NULL)
 #:   catalog-025-0                  — NULL/dangling manifest row DELETE, NOT NULL SET
+#:   vectors-004-1 / taxonomy-007-1 — RDR-191 Phase 4 unify: straddling
+#:                                     per-dim chunks_384/768/1024 and
+#:                                     taxonomy_centroids_384/768/1024 content
 DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
     {
         ("catalog-013-0", "nexus-e0hd2"),
@@ -155,6 +158,21 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # gone post-hop — proves the DELETE arm fires under FORCE-RLS, not
         # just that 1.1.100's content-backed rows survive the KEEP arm).
         ("catalog-025-0", "nexus-71gw2"),
+        # nexus-o8dil.12 (RDR-191 Phase 4 unify): vectors-004-1 collapses
+        # chunks_384/768/1024 into nexus.chunks -- FORCE-RLS row-DML solely
+        # via its own step-0 NO FORCE toggle (defusing the DML-blindness trap
+        # before the copy), no literal top-level DML keyword. Seeded as
+        # straddling per-dim content (chunks_384 reuses the existing j862l
+        # rows; chunks_768/1024 get fresh rows); effect-asserted (each row
+        # lands in nexus.chunks under the correct typed embedding_<dim>
+        # column, the three source tables are gone).
+        ("vectors-004-1", "nexus-o8dil.12"),
+        # nexus-jv3ue (RDR-191 Phase 4 unify, Hal ruling o8dil.47): the
+        # analogous collapse of taxonomy_centroids_384/768/1024 into
+        # nexus.taxonomy_centroids, same FORCE-RLS row-DML mechanism and same
+        # straddling-seed/effect-assert shape as vectors-004-1 (all three
+        # dims freshly seeded here, no chunks-style reuse available).
+        ("taxonomy-007-1", "nexus-jv3ue"),
     }
 )
 

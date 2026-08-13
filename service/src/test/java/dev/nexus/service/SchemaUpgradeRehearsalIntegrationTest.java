@@ -83,14 +83,18 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * chash-length CHECK constraints, the root of the ms57z divergence per
  * nexus-4m6i0.1's analysis) is byte-identical between v0.1.17 and HEAD, so the
  * old leg reaches the same constraint-bearing state the real fleet did. For the
- * data leg, the v0.1.17-to-HEAD hop adds exactly six changelog files
- * (catalog-012/-013/-014, migration-001, service-tokens-003/-004; verified via
- * {@code git ls-tree} diff), of which exactly two contain migration-time
- * row-DML against FORCE-RLS tables: catalog-013's chash normalization and
- * catalog-014-0's manifest collection stamp — both genuinely execute during
- * the HEAD leg here. (taxonomy-004's root-topic dedup is already IN the
- * v0.1.17 tree — the old leg applies it and its unique root-topic index, so
- * duplicate-root seeding is neither possible nor a real fleet exposure.)
+ * data leg, the v0.1.17-to-HEAD hop keeps growing (originally six changelog
+ * files — catalog-012/-013/-014, migration-001, service-tokens-003/-004 —
+ * verified via {@code git ls-tree} diff at the time this leg was first
+ * written; RDR-191 Phase 4's vectors-004-1/taxonomy-007-1 are the latest
+ * additions). The subset that genuinely carries migration-time row-DML
+ * against FORCE-RLS tables is NOT restated here as a count (a stale number
+ * is worse than none) — the data leg's own SEED-COVERAGE contract block is
+ * the mechanically-enforced source of truth (nexus-gm38i,
+ * {@code tests/test_rehearsal_seed_coverage_lint.py}). (taxonomy-004's
+ * root-topic dedup is already IN the v0.1.17 tree — the old leg applies it
+ * and its unique root-topic index, so duplicate-root seeding is neither
+ * possible nor a real fleet exposure.)
  *
  * <p><strong>RED before nexus-4m6i0.1 / GREEN after.</strong> nexus-4m6i0.1 is
  * already merged (commit 1ac12e1f) with its own RED-then-GREEN regression proof
@@ -297,9 +301,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * structurally cannot reproduce.
      *
      * <p>Scope: only the hop's migration-time row-DML changesets get seeded
-     * inputs here — catalog-013 and catalog-014-0 are the ONLY two in the
-     * current v0.1.17-to-HEAD hop ({@code git ls-tree} diff, see class
-     * javadoc). The toggle-wrapped discipline itself is additionally enforced
+     * inputs here — see the SEED-COVERAGE contract block inside this method
+     * for the current, exact set (restating the count in prose here is how
+     * it drifted stale before; the block is parsed and enforced
+     * mechanically, so it cannot). The toggle-wrapped discipline itself is additionally enforced
      * statically for every current and future changeset by
      * {@code tests/test_changelog_rls_lint.py} (nexus-php10); this leg is the
      * dynamic proof that the discipline actually WORKS on the real hop, and
@@ -357,6 +362,8 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   catalog-014-0 nexus-x6kdz
                 //   catalog-016-0 nexus-78n33
                 //   catalog-025-0 nexus-71gw2
+                //   vectors-004-1 nexus-o8dil.12
+                //   taxonomy-007-1 nexus-jv3ue
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -428,6 +435,33 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         "file:///seed/dup.md", 1);
                     seedDocumentWithUri(su, "t1", "1.1.202", "dup winner", "code__x",
                         "file:///seed/dup.md", 7);
+
+                    // vectors-004-1 / taxonomy-007-1 (nexus-97gii seed-coverage
+                    // follow-up, RDR-191 Phase 4 unify): straddling per-dim
+                    // content, the reference semantics of
+                    // VectorsUnifyChunksIntegrationTest#straddlingDistribution_
+                    // rowsLandInCorrectTypedColumn /
+                    // VectorsUnifyCentroidsIntegrationTest's analogous test.
+                    // Both changesets are FORCE-RLS row-DML solely via their
+                    // own NO FORCE toggle (step 0's DML-blindness defuse before
+                    // the copy) -- this leg is the dynamic proof that toggle
+                    // actually lets the NOBYPASSRLS owner's copy see and move
+                    // real rows, on the SAME old-tag-to-HEAD hop as every other
+                    // leg here. chunks_384 is already covered by the j862l rows
+                    // seeded above (collection code__x, tenant t1); only 768
+                    // and 1024 need fresh rows to complete the straddle.
+                    // taxonomy_centroids_<dim> carries no FK to
+                    // catalog_collections or nexus.topics (verified against
+                    // taxonomy-002-centroids.xml, mirroring
+                    // VectorsUnifyCentroidsIntegrationTest#seedCentroid's own
+                    // note), so no stub registration is needed for it.
+                    seedChunkDimLegacyContent(su, 768, "t1", "code__y",
+                        "6".repeat(32), "legacy chunk dim768");
+                    seedChunkDimLegacyContent(su, 1024, "t2", "code__z",
+                        "7".repeat(32), "legacy chunk dim1024");
+                    seedTaxonomyCentroidLegacyContent(su, 384, "t1", "code__x", 900L, "centroid-384");
+                    seedTaxonomyCentroidLegacyContent(su, 768, "t1", "code__y", 901L, "centroid-768");
+                    seedTaxonomyCentroidLegacyContent(su, 1024, "t2", "code__z", 902L, "centroid-1024");
 
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("superuser ground truth after seeding").isEqualTo(5);
@@ -573,6 +607,70 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         + "'nexus.catalog_documents'::regclass)"))
                         .as("FORCE ROW LEVEL SECURITY restored on every toggled surviving table")
                         .isEqualTo(2);
+
+                    // vectors-004-1 leg (nexus-o8dil.12): the straddling
+                    // per-dim content seeded above landed in the unified
+                    // nexus.chunks under the CORRECT typed embedding_<dim>
+                    // column -- proving the changeset's NOBYPASSRLS-owner
+                    // copy actually saw and moved rows for EVERY dim, not
+                    // merely completed without throwing. chunks_384's rows
+                    // (the j862l seed, collection code__x) prove the same for
+                    // that dim without a fresh seed.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.chunks WHERE tenant_id = 't1' "
+                        + "AND collection = 'code__x' AND embedding_384 IS NOT NULL "
+                        + "AND embedding_768 IS NULL AND embedding_1024 IS NULL"))
+                        .as("the two j862l chunks_384 rows landed under embedding_384 only")
+                        .isEqualTo(2);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.chunks WHERE tenant_id = 't1' "
+                        + "AND collection = 'code__y' AND embedding_768 IS NOT NULL "
+                        + "AND embedding_384 IS NULL AND embedding_1024 IS NULL"))
+                        .as("the seeded chunks_768 row landed under embedding_768 only")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.chunks WHERE tenant_id = 't2' "
+                        + "AND collection = 'code__z' AND embedding_1024 IS NOT NULL "
+                        + "AND embedding_384 IS NULL AND embedding_768 IS NULL"))
+                        .as("the seeded chunks_1024 row landed under embedding_1024 only")
+                        .isEqualTo(1);
+                    for (String t : new String[] {"chunks_384", "chunks_768", "chunks_1024"}) {
+                        assertThat(count(su,
+                            "SELECT count(*) FROM information_schema.tables "
+                            + "WHERE table_schema = 'nexus' AND table_name = '" + t + "'"))
+                            .as(t + " gone at HEAD (vectors-004-1 unify, same old-tag->HEAD hop)")
+                            .isEqualTo(0);
+                    }
+
+                    // taxonomy-007-1 leg (nexus-jv3ue): the analogous straddle
+                    // for nexus.taxonomy_centroids, all three dims fresh-seeded
+                    // above (no chunks-style j862l reuse available here).
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.taxonomy_centroids WHERE tenant_id = 't1' "
+                        + "AND collection = 'code__x' AND embedding_384 IS NOT NULL "
+                        + "AND embedding_768 IS NULL AND embedding_1024 IS NULL"))
+                        .as("the seeded taxonomy_centroids_384 row landed under embedding_384 only")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.taxonomy_centroids WHERE tenant_id = 't1' "
+                        + "AND collection = 'code__y' AND embedding_768 IS NOT NULL "
+                        + "AND embedding_384 IS NULL AND embedding_1024 IS NULL"))
+                        .as("the seeded taxonomy_centroids_768 row landed under embedding_768 only")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.taxonomy_centroids WHERE tenant_id = 't2' "
+                        + "AND collection = 'code__z' AND embedding_1024 IS NOT NULL "
+                        + "AND embedding_384 IS NULL AND embedding_768 IS NULL"))
+                        .as("the seeded taxonomy_centroids_1024 row landed under embedding_1024 only")
+                        .isEqualTo(1);
+                    for (String t : new String[] {
+                            "taxonomy_centroids_384", "taxonomy_centroids_768", "taxonomy_centroids_1024"}) {
+                        assertThat(count(su,
+                            "SELECT count(*) FROM information_schema.tables "
+                            + "WHERE table_schema = 'nexus' AND table_name = '" + t + "'"))
+                            .as(t + " gone at HEAD (taxonomy-007-1 unify, same old-tag->HEAD hop)")
+                            .isEqualTo(0);
+                    }
 
                     // Contrast pin vs the schema-divergence test: with no injected
                     // divergence all five constraints exist, so catalog-013-2's
@@ -843,6 +941,60 @@ class SchemaUpgradeRehearsalIntegrationTest {
             ps.setString(3, chash);
             ps.setString(4, text);
             ps.setString(5, "[" + "0,".repeat(383) + "0]");
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * nexus-97gii seed-coverage follow-up (RDR-191 Phase 4 unify,
+     * vectors-004-1): legacy content row for {@code nexus.chunks_768} or
+     * {@code nexus.chunks_1024}, the OLD per-dim schema shape -- generalized
+     * over {@code dim} since these two need no j862l-specific dangling-row
+     * companion, only vectors-004-1's straddle coverage (chunks_384 is
+     * already covered by {@link #seedChunk384LegacyContent}'s existing
+     * rows). Same PRE-hop timing determination applies verbatim: called from
+     * the SEED block, strictly between {@link #applyOldLeg} and the HEAD-leg
+     * {@link SchemaMigrator#migrate}, so {@code nexus.chunks_<dim>} is still
+     * the live OLD-schema table at INSERT time.
+     */
+    private static void seedChunkDimLegacyContent(Connection c, int dim, String tenant, String collection,
+                                                   String chash, String text) throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.chunks_" + dim
+            + " (tenant_id, collection, chash, chunk_text, embedding) "
+            + "VALUES (?, ?, ?, ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
+            ps.setString(1, tenant);
+            ps.setString(2, collection);
+            ps.setString(3, chash);
+            ps.setString(4, text);
+            ps.setString(5, "[" + "0,".repeat(dim - 1) + "0]");
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * nexus-97gii seed-coverage follow-up (RDR-191 Phase 4 unify,
+     * taxonomy-007-1): legacy centroid row for {@code
+     * nexus.taxonomy_centroids_<dim>}, the OLD per-dim schema shape. No
+     * collection-FK stub needed first -- unlike chunks, {@code
+     * taxonomy_centroids_<dim>} carries no FK to {@code catalog_collections}
+     * or {@code nexus.topics} (verified directly against
+     * taxonomy-002-centroids.xml; mirrors
+     * {@code VectorsUnifyCentroidsIntegrationTest#seedCentroid}'s own note).
+     */
+    private static void seedTaxonomyCentroidLegacyContent(Connection c, int dim, String tenant,
+                                                           String collection, long topicId, String label)
+            throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.taxonomy_centroids_" + dim
+            + " (tenant_id, collection, topic_id, embedding, label, doc_count) "
+            + "VALUES (?, ?, ?, ?::vector, ?, ?)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, collection);
+            ps.setLong(3, topicId);
+            ps.setString(4, "[" + "0.01,".repeat(dim - 1) + "0.01]");
+            ps.setString(5, label);
+            ps.setInt(6, 3);
             ps.executeUpdate();
         }
     }
