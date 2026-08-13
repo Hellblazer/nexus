@@ -31,7 +31,7 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release (pinned: v7.6.0)
 
-- `hooks/scripts/stop_failure_hook.py` — no longer writes a `bd remember`
+- `conexus/hooks/scripts/stop_failure_hook.py` — no longer writes a `bd remember`
   entry per StopFailure event (nexus-0dj7e: per-event keys accumulated
   unboundedly and `bd prime` injected them into every session; 32 of 36 bd
   memories were this class). The hook now swallows the event with debug
