@@ -579,7 +579,14 @@ class GraphHopParityTest {
             "         WHERE from_tumbler = 'exseed' AND link_type = 'cites') rd " +
             "    ON rd.tumbler = d.tumbler " +
             " WHERE c.collection = '" + COLL_EXPLAIN + "' AND d.deleted_at IS NULL " +
-            " ORDER BY c.embedding <=> " + queryVecLiteral(1024) + " LIMIT 10";
+            // RDR-191 repoint (nexus-o8dil.16/.48, Step G cluster-B triage): the unified
+            // nexus.chunks table carries three nullable embedding_384/768/1024 columns,
+            // not one bare `embedding` column - this test's own hand-rolled probe SQL
+            // (not production code; DimTables.CHUNKS_TABLE_NAME above already targets the
+            // unified table) was never updated post-repoint, so `c.embedding` no longer
+            // resolves (PSQLException: column c.embedding does not exist). The assertion
+            // below already targets idx_chunks_embedding_1024, so name that dim's column.
+            " ORDER BY c.embedding_1024 <=> " + queryVecLiteral(1024) + " LIMIT 10";
         String plan = explain(inner);
         assertThat(plan)
             .as("materialize-reached-then-rank must use the HNSW index "

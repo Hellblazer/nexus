@@ -59,6 +59,8 @@ import static org.assertj.core.api.Assertions.within;
 class TaxonomyCentroidAnnPlanShapeTest {
 
     private static final String SVC_ROLE = "svc_centroid_planshape_test";
+    /** Dedicated ef_search-boosted role for the real-call companions — see startAll(). */
+    private static final String SVC_ROLE_REALCALL = "svc_centroid_planshape_realcall";
     private static final String SVC_PASS = "svc_centroid_planshape_pass";
     private static final String TENANT = "centroid-planshape-tenant";
 
@@ -75,6 +77,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     HikariDataSource svcDs;
+    HikariDataSource realCallDs;
     TaxonomyCentroidRepository repo;
 
     @BeforeAll
@@ -109,6 +112,39 @@ class TaxonomyCentroidAnnPlanShapeTest {
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
 
+        // Second role + pool, DEDICATED to the real-call companions (found during Step G
+        // cluster-B triage, nexus-o8dil.16/.48 — same fix as
+        // PgVectorRepositoryRawSqlPlanShapeTest, see that class's startAll() javadoc for
+        // the full two-revision history and why the final fix is "force Seq Scan for
+        // this role" rather than "raise ef_search": ef_search on the shared SVC_ROLE
+        // flips the EXPLAIN shape tests' planner choice, and even an isolated boosted-
+        // ef_search role stayed flaky (~1 in 3) when run in the same mvn invocation
+        // alongside other EXPLAIN-heavy classes, because pgvector's HNSW graph build
+        // uses its OWN internal randomness independent of this suite's seeded SQL-level
+        // random() filler vectors - no ef_search value makes that graph's shape (and
+        // therefore recall for a borderline row) reproducible run to run. repo (used by
+        // both annQuery_realCall_... and annQuery_mixedDimCollection_...) connects via
+        // this role, forced away from any index scan (Seq Scan + exact Sort is
+        // deterministic); explain() keeps using the unmodified SVC_ROLE/tenantScope
+        // above for the actual HNSW-bind proof.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '"
+                + SVC_ROLE_REALCALL + "') THEN CREATE ROLE " + SVC_ROLE_REALCALL
+                + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
+            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE_REALCALL);
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.taxonomy_centroids TO "
+                + SVC_ROLE_REALCALL);
+            su.createStatement().execute(
+                "ALTER ROLE " + SVC_ROLE_REALCALL + " SET search_path TO nexus, public");
+            su.createStatement().execute(
+                "ALTER ROLE " + SVC_ROLE_REALCALL + " SET enable_indexscan = off");
+            su.createStatement().execute(
+                "ALTER ROLE " + SVC_ROLE_REALCALL + " SET enable_bitmapscan = off");
+        }
+
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(SVC_ROLE);
@@ -117,7 +153,15 @@ class TaxonomyCentroidAnnPlanShapeTest {
         cfg.setAutoCommit(true);
         svcDs = new HikariDataSource(cfg);
         tenantScope = new TenantScope(svcDs);
-        repo = new TaxonomyCentroidRepository(tenantScope);
+
+        var realCallCfg = new HikariConfig();
+        realCallCfg.setJdbcUrl(pg.getJdbcUrl());
+        realCallCfg.setUsername(SVC_ROLE_REALCALL);
+        realCallCfg.setPassword(SVC_PASS);
+        realCallCfg.setMaximumPoolSize(2);
+        realCallCfg.setAutoCommit(true);
+        realCallDs = new HikariDataSource(realCallCfg);
+        repo = new TaxonomyCentroidRepository(new TenantScope(realCallDs));
 
         seedFixtures();
     }
@@ -125,6 +169,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
     @AfterAll
     void stopAll() {
         if (svcDs != null) svcDs.close();
+        if (realCallDs != null) realCallDs.close();
         if (pg != null) pg.stop();
     }
 
@@ -136,23 +181,39 @@ class TaxonomyCentroidAnnPlanShapeTest {
      * collection ({@code COL_MIXED}) holding centroids at both 384 and 768 under
      * disjoint topic_ids — the fixture {@link #annQuery_mixedDimCollection_onlyMatchesQueriedDim}
      * needs.
+     *
+     * <p><strong>Filler vectors are randomized, not a single repeated literal</strong>
+     * (found during Step G cluster-B triage, nexus-o8dil.16/.48 — same defect class as
+     * {@code PgVectorRepositoryRawSqlPlanShapeTest}'s seeding, see that method's javadoc
+     * for the full explanation). {@link #CENTROIDS_PER_DIM} byte-identical filler points
+     * is an adversarial fixture for HNSW — one dense clique the graph search can get stuck
+     * inside — and {@link #annQuery_realCall_findsNearestTopicByCorrectDimColumn_1024}
+     * measurably missed the true (distance-0) nearest topic in favor of a filler
+     * duplicate. {@code CROSS JOIN LATERAL} over a fresh {@code random()} draw forces
+     * genuine per-row evaluation (a plain, non-lateral subquery is computed once and
+     * reused for every outer row), giving each filler row an independent, well-spread
+     * position.
      */
     private void seedFixtures() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var st = su.createStatement();
+            // Deterministic filler positions (CLAUDE.md: seeded randomness) — the exact
+            // values don't matter, only that they are NOT all identical.
+            st.execute("SELECT setseed(0.42)");
 
             for (int dim : new int[] {1024, 768, 384}) {
                 String coll = dim == 1024 ? COL_1024 : dim == 768 ? COL_768 : COL_384;
                 String embCol = DimTables.embeddingColumn(dim);
-                // Filler: a vector far from the query point (all-ones direction), so it
-                // never collides with the single "nearest" row seeded below.
+                // Filler: CENTROIDS_PER_DIM independently-random vectors (never collides
+                // with the single "nearest" row seeded below — see the method javadoc).
                 st.execute(
                     "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, "
                     + embCol + ", label, doc_count) "
                     + "SELECT '" + TENANT + "', '" + coll + "', i, v.vec, 'filler', 1 "
                     + "FROM generate_series(1, " + CENTROIDS_PER_DIM + ") i "
-                    + "CROSS JOIN (SELECT ('[1' || repeat(',1', " + (dim - 1) + ") || ']')::vector AS vec) v");
+                    + "CROSS JOIN LATERAL (SELECT (array_agg(random() * 2 - 1))::vector AS vec"
+                    + "                    FROM generate_series(1, " + dim + ")) v");
                 // The single nearest row: unit vector along the first axis.
                 st.execute(
                     "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, "

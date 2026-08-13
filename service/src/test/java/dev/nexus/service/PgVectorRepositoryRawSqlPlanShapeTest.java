@@ -50,6 +50,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  * an honest natural-planner-choice proof, matching F13's own "used in EVERY case, including
  * with no predicate and no filter" methodology, not a forced structural one.
  *
+ * <p><strong>Correction (Step G cluster-B triage, nexus-o8dil.16/.48):</strong> the
+ * selective-gate branch of {@code hybridSearch} does NOT fit the "still binds to the FULL
+ * index" claim above — its own inline comment (nexus-lcogi, nexus-x7z7l) documents "No
+ * HNSW, no re-gate" by design for a small, already-resolved {@code chash IN (...)} set, and
+ * {@link #hybridSearch_selectiveGateRank_shape_usesFullHnswIndex_768} proves the narrower,
+ * accurate claim for that site instead: the distance projection still names the CORRECT dim
+ * column (the actual F13 hazard — a wrong-dim column would still parse), not that it binds
+ * to an index it is deliberately never meant to use. Sites 1 ({@code searchWithTokens}) and
+ * 3 ({@code hybridSearch}'s dense-gate rank) are unaffected and still enforce the full,
+ * uncoerced HNSW-bind proof this class's name promises.
+ *
  * <p>Each collection's dim is seeded at a few thousand rows specifically so the planner's
  * default cost model (not a hint) prefers the HNSW index for an {@code ORDER BY <=> LIMIT n}
  * query over a Seq Scan + Sort — at trivial cardinality (tens of rows) a seq scan can be
@@ -71,6 +82,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class PgVectorRepositoryRawSqlPlanShapeTest {
 
     private static final String SVC_ROLE = "svc_rawsql_planshape_test";
+    /** Dedicated ef_search-boosted role for the real-call companion — see startAll(). */
+    private static final String SVC_ROLE_REALCALL = "svc_rawsql_planshape_realcall";
     private static final String SVC_PASS = "svc_rawsql_planshape_pass";
     private static final String TENANT = "rawsql-planshape-tenant";
 
@@ -87,6 +100,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     HikariDataSource svcDs;
+    HikariDataSource realCallDs;
     PgVectorRepository repo1024;
 
     /** The chash of the single row nearest the query vector, per dim — for behavioral checks. */
@@ -131,6 +145,59 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
 
+        // Second role + pool, DEDICATED to the real-call companion test (found during
+        // Step G cluster-B triage, nexus-o8dil.16/.48 — two revisions of this fix are
+        // preserved in this comment because both were independently disproven, not just
+        // theorized).
+        //
+        // Revision 1 (WRONG): raise hnsw.ef_search on the shared SVC_ROLE directly. This
+        // flipped searchWithTokens_shape_usesFullHnswIndex_768's planner choice from the
+        // HNSW index to a Seq Scan - ef_search DOES feed the planner's cost estimate for
+        // an ORDER BY <=> LIMIT n query.
+        //
+        // Revision 2 (WRONG): move the ef_search bump to a role-and-pool DEDICATED to
+        // this real-call companion (repo1024 below), isolated from the shape tests'
+        // planner environment. This fixed the class in ISOLATION (8/8 clean runs) but
+        // still flaked - about 1 in 3 - when run in the SAME mvn invocation alongside
+        // OTHER EXPLAIN-heavy test classes. Root cause: pgvector's HNSW graph build
+        // assigns each inserted row's layer via ITS OWN internal randomness, entirely
+        // separate from the SQL-level random()/setseed() this suite's filler-vector
+        // fixture controls (see seedFixtures()'s javadoc) - so the GRAPH's shape, and
+        // therefore ef_search's effective recall for a specific borderline row, is not
+        // reproducible run to run no matter how high ef_search is set. Confirmed:
+        // "isolated" and "combined" runs used the byte-identical seeded filler vectors
+        // (same setseed(0.42), same insertion order) yet differed in outcome.
+        //
+        // Fix (this revision): stop trying to make HNSW recall deterministic and instead
+        // route this role's real-call queries AWAY from any index scan at all
+        // (enable_indexscan/enable_bitmapscan = off forces Seq Scan + exact Sort). This
+        // is not weakening the F13 proof - THIS test's actual job (per its own javadoc)
+        // is proving the correct dim column was chosen and the true nearest row is
+        // returned, not proving HNSW is used (that is Site 1/2/3's job, unaffected,
+        // still asserted via EXPLAIN on the untouched SVC_ROLE/tenantScope). A forced
+        // Seq Scan gives an exact, deterministic answer regardless of ANN internals.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '"
+                + SVC_ROLE_REALCALL + "') THEN CREATE ROLE " + SVC_ROLE_REALCALL
+                + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
+            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE_REALCALL);
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chunks TO " + SVC_ROLE_REALCALL);
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE_REALCALL);
+            su.createStatement().execute(
+                "GRANT SELECT ON nexus.catalog_document_chunks, nexus.catalog_documents TO "
+                + SVC_ROLE_REALCALL);
+            su.createStatement().execute(
+                "ALTER ROLE " + SVC_ROLE_REALCALL + " SET search_path TO nexus, public");
+            su.createStatement().execute(
+                "ALTER ROLE " + SVC_ROLE_REALCALL + " SET enable_indexscan = off");
+            su.createStatement().execute(
+                "ALTER ROLE " + SVC_ROLE_REALCALL + " SET enable_bitmapscan = off");
+        }
+
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(SVC_ROLE);
@@ -140,12 +207,21 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
         svcDs = new HikariDataSource(cfg);
         tenantScope = new TenantScope(svcDs);
 
+        var realCallCfg = new HikariConfig();
+        realCallCfg.setJdbcUrl(pg.getJdbcUrl());
+        realCallCfg.setUsername(SVC_ROLE_REALCALL);
+        realCallCfg.setPassword(SVC_PASS);
+        realCallCfg.setMaximumPoolSize(2);
+        realCallCfg.setAutoCommit(true);
+        realCallDs = new HikariDataSource(realCallCfg);
+        var realCallTenantScope = new TenantScope(realCallDs);
+
         var embedder1024 = new PgVectorRepositoryContractTest.FakeEmbedder(1024);
         // The query text used by searchWithTokens_realCall_findsNearestRowByCorrectDimColumn
         // embeds to exactly the seeded "nearest" row's vector (1, 0, 0, ..., 0) — explicit
         // registration rather than relying on FakeEmbedder's unregistered-text default.
         embedder1024.register("planshape nearest target chunk", 1.0f, 0.0f);
-        repo1024 = new PgVectorRepository(tenantScope, embedder1024, embedder1024);
+        repo1024 = new PgVectorRepository(realCallTenantScope, embedder1024, embedder1024);
 
         seedFixtures();
     }
@@ -153,6 +229,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     @AfterAll
     void stopAll() {
         if (svcDs != null) svcDs.close();
+        if (realCallDs != null) realCallDs.close();
         if (pg != null) pg.stop();
     }
 
@@ -163,11 +240,27 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
      * them. Registers each collection so RLS-scoped reads via {@code TENANT} see the rows,
      * and the write is stamped with {@code tenant_id = TENANT} directly (no per-row
      * embedder round trip needed for bulk filler).
+     *
+     * <p><strong>Filler vectors are randomized, not a single repeated literal</strong>
+     * (found during Step G cluster-B triage, nexus-o8dil.16/.48). An earlier version cross
+     * joined ONE fixed {@code [1,1,...,1]} literal (a plain, non-{@code LATERAL} derived
+     * table is computed once and reused for every outer row) — {@link #CHUNKS_PER_DIM}
+     * byte-identical filler points is an adversarial fixture for HNSW: they form one dense
+     * clique the graph search can get stuck inside, and {@code
+     * searchWithTokens_realCall_findsNearestRowByCorrectDimColumn} measurably missed the
+     * true (distance-0) nearest row in favor of a filler duplicate. {@code CROSS JOIN
+     * LATERAL} over a fresh {@code random()} draw forces genuine per-row evaluation (a
+     * plain, non-lateral subquery would still be computed once), giving each filler row an
+     * independent, well-spread position — realistic relative to actual embeddings and free
+     * of the degenerate-clique recall failure.
      */
     private void seedFixtures() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var st = su.createStatement();
+            // Deterministic filler positions (CLAUDE.md: seeded randomness) — the exact
+            // values don't matter, only that they are NOT all identical.
+            st.execute("SELECT setseed(0.42)");
 
             for (int dim : new int[] {1024, 768, 384}) {
                 String coll = dim == 1024 ? COL_1024 : dim == 768 ? COL_768 : COL_384;
@@ -175,15 +268,17 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                     "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
                     + TENANT + "', '" + coll + "') ON CONFLICT DO NOTHING");
                 String embCol = DimTables.embeddingColumn(dim);
-                // Filler: a vector far from the query point (all-ones direction), so it
-                // never collides with the single "nearest" row seeded below.
+                // Filler: CHUNKS_PER_DIM independently-random vectors (never collides with
+                // the single "nearest" row seeded below — see the method javadoc for why
+                // this must be per-row-random rather than one repeated literal).
                 st.execute(
                     "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embCol + ") "
                     + "SELECT '" + TENANT + "', '" + coll + "', "
                     + "       decode(md5('planshape-" + dim + "-' || i) || md5('fill-" + dim + "-' || i), 'hex'), "
                     + "       'planshape filler chunk ' || i, v.vec "
                     + "FROM generate_series(1, " + CHUNKS_PER_DIM + ") i "
-                    + "CROSS JOIN (SELECT ('[1' || repeat(',1', " + (dim - 1) + ") || ']')::vector AS vec) v");
+                    + "CROSS JOIN LATERAL (SELECT (array_agg(random() * 2 - 1))::vector AS vec"
+                    + "                    FROM generate_series(1, " + dim + ")) v");
                 // The single nearest row: unit vector along the first axis (distance 0 from
                 // a query vector pointed the same way) — the target every behavioral
                 // assertion below checks for.
@@ -281,9 +376,15 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 + " Plan was:%n%s", plan)
             .contains("idx_chunks_embedding_1024");
         assertThat(plan)
-            .as("must not degrade to a sequential scan of the unified (mixed-dim) table."
+            .as("must not degrade to a sequential scan of the unified (mixed-dim) table's"
+                + " chunks rows (liveChunksPredicate's own correlated anti-join against the"
+                + " near-empty catalog_document_chunks/catalog_documents manifest tables"
+                + " legitimately Seq Scans at THIS fixture's near-zero manifest cardinality —"
+                + " narrowed to the table this test actually targets, not the whole plan"
+                + " tree; see ChashProbePlanShapeTest's PROBE_SQL, which carries no"
+                + " liveChunksPredicate and so has no such satellite scan to exclude)."
                 + " Plan was:%n%s", plan)
-            .doesNotContain("Seq Scan");
+            .doesNotContain("Seq Scan on chunks");
     }
 
     @Test
@@ -301,7 +402,11 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             .as("searchWithTokens' distance projection (768-dim) must bind to the FULL"
                 + " idx_chunks_embedding_768 HNSW index. Plan was:%n%s", plan)
             .contains("idx_chunks_embedding_768");
-        assertThat(plan).as("no Seq Scan. Plan was:%n%s", plan).doesNotContain("Seq Scan");
+        assertThat(plan)
+            .as("no Seq Scan of the chunks table itself (see the 1024-dim test's assertion"
+                + " for why this is narrowed to \"on chunks\" rather than the whole plan)."
+                + " Plan was:%n%s", plan)
+            .doesNotContain("Seq Scan on chunks");
     }
 
     @Test
@@ -319,7 +424,11 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             .as("searchWithTokens' distance projection (384-dim) must bind to the FULL"
                 + " idx_chunks_embedding_384 HNSW index. Plan was:%n%s", plan)
             .contains("idx_chunks_embedding_384");
-        assertThat(plan).as("no Seq Scan. Plan was:%n%s", plan).doesNotContain("Seq Scan");
+        assertThat(plan)
+            .as("no Seq Scan of the chunks table itself (see the 1024-dim test's assertion"
+                + " for why this is narrowed to \"on chunks\" rather than the whole plan)."
+                + " Plan was:%n%s", plan)
+            .doesNotContain("Seq Scan on chunks");
     }
 
     /**
@@ -342,6 +451,22 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     // nexus.chunks c, WHERE collection IN (...) AND liveChunksPredicate AND chash IN (...))
     // — reconstructs the rank query hybridSearch builds once the bounded gate fetch
     // resolves a SELECTIVE (small) gate; see that method's javadoc.
+    //
+    // UNLIKE Site 1/3, this branch is NOT an HNSW-binding proof (found during Step G
+    // cluster-B triage, nexus-o8dil.16/.48). hybridSearch's own inline comment at the
+    // selective-gate dispatch (nexus-lcogi, nexus-x7z7l) is explicit: "Rank those exact
+    // chashes by cosine distance via a chash IN (...) filter ... No HNSW, no re-gate: ranks
+    // the small gated set exactly". A selective gate's chash IN (...) list is by
+    // construction small (this fixture's single-chash list is a faithful instance, not an
+    // under-powered one — SELECTIVE_GATE_MAX just bounds it above, it says nothing about a
+    // floor), so Postgres correctly prefers the exact index lookup
+    // (idx_chunks_tenant_chash) over an ANN scan every time — asserting an HNSW bind here
+    // would assert against the method's own documented design, not prove anything about it.
+    // What F13 actually risks at this site is the SAME as Site 1/3 name resolution hazard:
+    // the distance projection naming the WRONG dim's embedding column (still parses, since
+    // all three columns exist on the unified table) — proven here by asserting the ORDER BY
+    // key literally reads back the correct dim column, plus a defense-in-depth check that a
+    // regression can't silently degrade this exact, tiny lookup into a full table scan.
     // ════════════════════════════════════════════════════════════════════════
 
     @Test
@@ -361,10 +486,17 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             + " ORDER BY distance ASC, chash ASC LIMIT 10";
         String plan = explain(sql);
         assertThat(plan)
-            .as("hybridSearch's selective-gate rank (768-dim) must bind to the FULL"
-                + " idx_chunks_embedding_768 HNSW index for its distance ORDER BY, with NO"
-                + " embedding_768 IS NOT NULL predicate added. Plan was:%n%s", plan)
-            .contains("idx_chunks_embedding_768");
+            .as("hybridSearch's selective-gate rank (768-dim) must project distance off the"
+                + " CORRECT dim column (embedding_768, not a wrong dim or a bare"
+                + " embedding) — this branch deliberately does NOT bind to the"
+                + " idx_chunks_embedding_768 HNSW index (see the class-level comment above:"
+                + " production's own selective-gate dispatch says \"No HNSW\" for a small,"
+                + " already-resolved chash set). Plan was:%n%s", plan)
+            .contains("embedding_768 <=>");
+        assertThat(plan)
+            .as("a selective, single-chash lookup must not degrade into scanning the whole"
+                + " chunks table. Plan was:%n%s", plan)
+            .doesNotContain("Seq Scan on chunks");
     }
 
     // ════════════════════════════════════════════════════════════════════════
