@@ -2244,12 +2244,12 @@ $$
 
     <!-- ═══════════════════════════════════════════════════════════════════
          Category (B), part 2: assign_from_chashes_384/768/1024 (DECISION 2
-         reasoning applies again -- three typed entry points, NOT collapsed).
+         reasoning applies again: three typed entry points, NOT collapsed).
          Retargeted to BOTH unified tables per the .47 ruling ("unify the
          centroids too, one era"). CRITICAL correctness addition versus the
          pre-batch body: explicit c.embedding_&lt;dim&gt; IS NOT NULL AND
          ct.embedding_&lt;dim&gt; IS NOT NULL filters on BOTH sides of the
-         join -- without them, a cross-dim row pair (e.g. a 768-dim chunk
+         join; without them, a cross-dim row pair (e.g. a 768-dim chunk
          joined to a 384-dim centroid) would compute a NULL &lt;=&gt;
          distance instead of being excluded outright, relying on NULLS LAST
          ordering by accident rather than being structurally impossible.
