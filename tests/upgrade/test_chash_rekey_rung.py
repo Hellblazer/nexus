@@ -21,7 +21,9 @@ from nexus.db.t2.rekey_client import (
 from nexus.db.chash_tables import ConformanceProbe
 from nexus.upgrade_ladder.protocol import ConvergeOutcome
 from nexus.upgrade_ladder.rungs.chash_rekey import (
+    CONTENT_OCTET_CHECKS,
     OCTET_CHECKS,
+    POINTER_OCTET_CHECKS,
     ChashRekeyRung,
     validate_statements,
 )
@@ -282,20 +284,75 @@ class TestVerify:
 class TestValidateStatements:
     def test_statements_shape(self):
         stmts = validate_statements()
-        # 5 -> 4: the chash_index entry died with its table (RDR-187/
-        # nexus-piwya.9); the four survivors are the whole VALIDATE surface.
-        assert len(stmts) == 4
+        # 5 -> 4 (RDR-187 dropped chash_index) -> 2 (RDR-191 vectors-004
+        # collapses chunks_384/768/1024 into the one unified nexus.chunks
+        # check; catalog_document_chunks is untouched). See OCTET_CHECKS's
+        # own derivation comment for the full chain — this assertion is
+        # DERIVED from len(OCTET_CHECKS), never a bare literal, so it cannot
+        # silently drift from the constant it is meant to pin.
+        assert len(stmts) == len(OCTET_CHECKS) == 2
         for s in stmts:
             assert s.startswith("ALTER TABLE nexus.")
             assert "VALIDATE CONSTRAINT" in s
 
     def test_constraint_names_pinned_to_the_changeset(self):
-        """The rung's VALIDATE set and the rdr180-001 changeset must name the
-        SAME constraints — drift here validates nothing, silently."""
-        xml = (_REPO / "service/src/main/resources/db/changelog/rdr180-001-bytea-chash.xml").read_text()
+        """The rung's VALIDATE set and the changeset that DEFINES each
+        constraint must name the SAME table/constraint pair — drift here
+        validates nothing, silently. RDR-191 split this pin across TWO
+        changesets: the unified content check now lives in
+        vectors-004-unify-chunks.xml, while the untouched pointer/manifest
+        check remains in rdr180-001-bytea-chash.xml."""
+        rdr180_xml = (
+            _REPO / "service/src/main/resources/db/changelog/rdr180-001-bytea-chash.xml"
+        ).read_text()
+        vectors004_xml = (
+            _REPO / "service/src/main/resources/db/changelog/vectors-004-unify-chunks.xml"
+        ).read_text()
+        sources = {
+            ("nexus.chunks", "chunks_chash_octet_check"): vectors004_xml,
+            (
+                "nexus.catalog_document_chunks",
+                "catalog_document_chunks_chash_octet_check",
+            ): rdr180_xml,
+        }
+        assert set(OCTET_CHECKS) == set(sources), (
+            "OCTET_CHECKS drifted from the pin table below — update both "
+            "together"
+        )
         for table, name in OCTET_CHECKS:
-            assert name in xml, f"constraint {name} not found in rdr180-001"
+            xml = sources[(table, name)]
+            assert name in xml, f"constraint {name} not found in its owning changeset"
             assert f"ALTER TABLE {table}" in xml
+
+
+class TestOctetCheckPartition:
+    """nexus-o8dil.15 CRITICAL fix: CONTENT_OCTET_CHECKS / POINTER_OCTET_CHECKS
+    are explicit membership, never a positional slice of OCTET_CHECKS. At 4
+    entries `[:3]`/`[3:]` happened to align with CONTENT/POINTER; at 2 they
+    would have silently gone (BOTH, EMPTY) with neither slice raising. These
+    tests fail if the arms are swapped, if either is empty, or if they
+    overlap or drop an entry relative to OCTET_CHECKS."""
+
+    def test_content_is_the_unified_chunks_table_only(self):
+        assert CONTENT_OCTET_CHECKS == (("nexus.chunks", "chunks_chash_octet_check"),)
+
+    def test_pointer_is_the_manifest_table_only(self):
+        assert POINTER_OCTET_CHECKS == (
+            ("nexus.catalog_document_chunks", "catalog_document_chunks_chash_octet_check"),
+        )
+
+    def test_neither_arm_is_empty(self):
+        assert CONTENT_OCTET_CHECKS, "an empty CONTENT arm silently VALIDATEs nothing"
+        assert POINTER_OCTET_CHECKS, "an empty POINTER arm silently VALIDATEs nothing"
+
+    def test_arms_do_not_overlap(self):
+        assert not (set(CONTENT_OCTET_CHECKS) & set(POINTER_OCTET_CHECKS))
+
+    def test_arms_partition_octet_checks_exactly(self):
+        """Every OCTET_CHECKS entry lands in EXACTLY one arm — this is what
+        a swapped or a dropped-entry regression would break."""
+        assert set(CONTENT_OCTET_CHECKS) | set(POINTER_OCTET_CHECKS) == set(OCTET_CHECKS)
+        assert len(CONTENT_OCTET_CHECKS) + len(POINTER_OCTET_CHECKS) == len(OCTET_CHECKS)
 
 
 class TestExistenceGateIntegration:
@@ -499,20 +556,21 @@ class TestPointerDebtValidatePolicy:
         )
         stmts = calls.get("validated_statements") or []
         joined = " ".join(stmts)
-        assert "chunks_384" in joined and "chunks_768" in joined and "chunks_1024" in joined, (
-            f"the three CONTENT octet CHECKs must still be VALIDATEd: {stmts!r}"
+        # RDR-191: the three per-dim CONTENT checks collapsed into the one
+        # unified nexus.chunks check.
+        assert "ALTER TABLE nexus.chunks VALIDATE CONSTRAINT chunks_chash_octet_check" in joined, (
+            f"the unified CONTENT octet CHECK must still be VALIDATEd: {stmts!r}"
         )
         assert "chash_index" not in joined and "catalog_document_chunks" not in joined, (
             f"pointer-table CHECKs must be SKIPPED while debt exists: {stmts!r}"
         )
 
-    def test_zero_debt_validates_all_four(self):
+    def test_zero_debt_validates_all_checks(self):
         rung, calls = _rung(pointer_debt_fn=lambda: {})
         rung.converge(_Report())
         joined = " ".join(calls.get("validated_statements") or [])
-        for name in ("chunks_384", "chunks_768", "chunks_1024",
-                     "catalog_document_chunks"):
-            assert name in joined, f"a clean store must VALIDATE all four; missing {name}"
+        for name in ("chunks_chash_octet_check", "catalog_document_chunks"):
+            assert name in joined, f"a clean store must VALIDATE every check; missing {name}"
         # RDR-187 (nexus-piwya.9): the router's VALIDATE must NEVER be issued
         # again — against a dropped table it is a guaranteed RuntimeError on
         # every upgrade (the .9 critique Critical 1).
