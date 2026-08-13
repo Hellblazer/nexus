@@ -42,6 +42,37 @@ a COPY of one arm's body (adds an extra AND clause not present in its
 siblings) and asserts the comparison goes RED -- demonstrating the lint
 would actually catch the class of bug it exists to prevent, not just prove
 today's three arms happen to already agree.
+
+PER-ARM SELF-CONSISTENCY (added 2026-08-13, substantive-critic finding on
+T2 nexus/rdr-191-repoint-batch-step-a-critique-2026-08-13 [22454]):
+blanket-normalizing EVERY 384/768/1024 token to one placeholder before the
+cross-arm comparison discards WHICH digit appeared WHERE. A body whose
+distance/ORDER BY/JOIN wrongly references the WRONG embedding_<dim> column
+-- e.g. the 768 arm ranking by embedding_384 instead of embedding_768, the
+exact F13 shape (an untyped/mismatched embedding column defeating HNSW
+index binding) -- normalizes to text IDENTICAL to a correctly-transposed
+sibling, so the cross-arm check alone reports PASS on precisely the bug
+class DECISION 2's mitigation exists to prevent.
+
+analyze_self_consistency (below) closes that gap: for each of the nine
+arms, it knows the arm's OWN dim from its function name suffix, and
+asserts every dim-token occurrence remaining in that arm's OWN body
+(after removing the function name's own token) equals that OWN dim --
+any OTHER dim token is an immediate, named violation. This check runs
+INDEPENDENTLY of, and BEFORE, the cross-arm structural comparison; a body
+can pass self-consistency and still fail cross-arm drift (a genuinely
+different predicate), and -- as the kill-control below demonstrates -- a
+body can pass the OLD cross-arm check while failing self-consistency (a
+wrong-column transposition that "looks" structurally identical after
+blanket normalization).
+
+KILL-CONTROL (self-consistency): test_kill_control_b_wrong_embedding_
+column_in_one_arm_is_caught mutates ONLY the 768 arm's ORDER BY clause to
+rank by embedding_384 instead of embedding_768 (single-token F13-shape
+mutation) and asserts (a) analyze_self_consistency flags exactly that
+function, AND (b) analyze_nine_body_drift -- the ORIGINAL, pre-existing
+cross-arm check -- does NOT flag it, proving the blanket-normalization
+blind spot is real, not hypothetical.
 """
 from __future__ import annotations
 
@@ -135,6 +166,46 @@ def _normalize_dim_tokens(body: str, function_name_with_dim: str) -> str:
     return _DIM_TOKEN_RE.sub("DIM", body)
 
 
+def _own_dim(function_name: str) -> str:
+    """Extract the arm's own declared dim from its typed function name
+    suffix (e.g. "search_metadata_scoped_768" -> "768")."""
+    m = re.search(r"_(\d+)$", function_name)
+    assert m, f"cannot extract a trailing dim token from function name {function_name!r}"
+    return m.group(1)
+
+
+def analyze_self_consistency(xml_path: Path = None) -> dict[str, list[str]]:
+    """Return {function_name: [reasons]} for every one of the nine typed
+    arms whose body contains a dim token OTHER than its own declared dim
+    (see module docstring's PER-ARM SELF-CONSISTENCY section for why this
+    check exists alongside, not instead of, analyze_nine_body_drift).
+    Empty dict means every arm is internally consistent."""
+    path = xml_path if xml_path is not None else _vectors_005_path()
+    all_sql = _extract_sql_bodies(path)
+
+    violations: dict[str, list[str]] = {}
+    for fn_names in _FAMILIES.values():
+        for name in fn_names:
+            own_dim = _own_dim(name)
+            body = _extract_function_body(all_sql, name)
+            # Drop the function's own name occurrence first -- its name
+            # necessarily embeds its own (correct) dim token and is not
+            # itself a body reference to check.
+            body_without_name = body.replace(name, "")
+            alien = sorted({
+                tok for tok in _DIM_TOKEN_RE.findall(body_without_name)
+                if tok != own_dim
+            })
+            if alien:
+                violations[name] = [
+                    f"{name} (own dim {own_dim}) contains alien dim token(s) {alien} "
+                    "in its body -- a wrong-embedding-column reference (F13 shape) "
+                    "that blanket DIM-token normalization would hide from the "
+                    "cross-arm drift check"
+                ]
+    return violations
+
+
 def analyze_nine_body_drift(xml_path: Path = None) -> dict[str, list[str]]:
     """Return {family_name: [reasons]} for every family whose three
     normalized bodies do NOT all match. Empty dict means every family's
@@ -214,6 +285,82 @@ def test_kill_control_a_divergent_where_clause_is_caught(tmp_path):
     # touched one family, so a correct lint's blast radius is exactly one.
     assert "search_graph_hop" not in violations, violations
     assert "search_topic_scoped" not in violations, violations
+
+
+def test_real_repo_nine_bodies_are_self_consistent_per_arm():
+    """The live vectors-005-repoint-functions-views.xml: every one of the
+    nine arms must reference ONLY its own declared dim in its body. This is
+    the permanent guard for the wrong-embedding-column (F13) regression
+    class -- see module docstring's PER-ARM SELF-CONSISTENCY section."""
+    violations = analyze_self_consistency()
+    assert violations == {}, violations
+
+
+def test_kill_control_b_wrong_embedding_column_in_one_arm_is_caught(tmp_path):
+    """F13-shape kill-control: mutate ONLY the 768 arm of
+    search_metadata_scoped so its ORDER BY ranks by embedding_384 instead
+    of embedding_768 (a single wrong-column token transposition -- the
+    exact defect class DECISION 2's nine-typed-entry-points design exists
+    to keep bound to the right HNSW index). Asserts:
+
+      (a) analyze_self_consistency flags exactly
+          search_metadata_scoped_768, naming the alien '384' token.
+      (b) analyze_nine_body_drift -- the ORIGINAL, pre-existing cross-arm
+          check -- does NOT flag it: blanket DIM-token normalization
+          converts both the correct '768' tokens and the alien '384' token
+          to the same placeholder, so the mutated body remains
+          byte-identical to its normalized siblings. This is the concrete
+          demonstration that the drift check alone has a blind spot for
+          this bug class, and that the self-consistency check closes it.
+    """
+    real_path = _vectors_005_path()
+    original = real_path.read_text()
+
+    # Scoped to ONLY the 768 arm's ORDER BY, immediately before the 1024
+    # arm's CREATE begins -- unique in the file (verified via the assert
+    # below), unlike the bare "ORDER BY c.embedding_768" fragment which
+    # also appears in search_graph_hop and search_topic_scoped.
+    marker = (
+        "     ORDER BY c.embedding_768 &lt;=&gt; p_query\n"
+        "     LIMIT p_n\n"
+        "$$;\n"
+        "\n"
+        "CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_1024("
+    )
+    assert original.count(marker) == 1, (
+        "kill-control fixture assumption broken -- the expected 768-arm "
+        "ORDER BY marker was not found exactly once verbatim in the real "
+        "file; update this test's marker to match the current body shape"
+    )
+    mutated = original.replace(
+        marker,
+        (
+            "     ORDER BY c.embedding_384 &lt;=&gt; p_query\n"
+            "     LIMIT p_n\n"
+            "$$;\n"
+            "\n"
+            "CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_1024("
+        ),
+        1,
+    )
+    assert mutated != original
+
+    mutated_path = tmp_path / VECTORS_005_BASENAME
+    mutated_path.write_text(mutated)
+
+    self_consistency_violations = analyze_self_consistency(mutated_path)
+    assert "search_metadata_scoped_768" in self_consistency_violations, self_consistency_violations
+    assert "384" in self_consistency_violations["search_metadata_scoped_768"][0]
+
+    # The other eight arms must NOT be flagged -- the mutation touched only one.
+    assert len(self_consistency_violations) == 1, self_consistency_violations
+
+    drift_violations = analyze_nine_body_drift(mutated_path)
+    assert drift_violations == {}, (
+        "expected the ORIGINAL cross-arm drift check to be BLIND to this "
+        "mutation (proving the gap self-consistency closes) -- got "
+        f"{drift_violations!r} instead"
+    )
 
 
 def test_all_nine_functions_are_individually_locatable():

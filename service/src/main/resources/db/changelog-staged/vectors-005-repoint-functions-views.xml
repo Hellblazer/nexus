@@ -31,7 +31,77 @@
       F13's measured ~250x silent seq-scan (deployment-dependent: cloud 1024
       / local 768). Mitigated MECHANICALLY (not by review) by the nine-body
       drift lint, tests/test_changelog_vectors005_nine_body_drift_lint.py,
-      shipped in this same diff.
+      shipped in this same diff. That lint's cross-arm check normalizes
+      away WHICH dim token appeared WHERE, so a wrong-embedding-column
+      transposition (the F13 shape verbatim) inside a single arm can
+      normalize identically to a correct sibling and pass; a per-arm
+      SELF-consistency check (same file, same diff, 2026-08-13 round 2
+      per substantive-critic finding T2 [22454]) closes that gap by
+      asserting every dim token remaining in an arm's OWN body equals that
+      arm's OWN declared dim, independently of the cross-arm comparison.
+
+    CRITICAL-1 FIX — CROSS-DIM COLLISION GUARD ON THE GC WRITERS (added
+    2026-08-13 round 2, substantive-critic finding, T2
+    nexus/rdr-191-repoint-batch-step-a-critique-2026-08-13 [22454] and
+    nexus/rdr-191-batch-stepA-critique-fixes-2026-08-13): unification
+    removed a structural safety net vectors-004's own N7 guard exists to
+    name — pre-migration, each dim wrote to its OWN table
+    (chunks_384/768/1024), so a (tenant, collection, chash) PK collision
+    was STRUCTURALLY confined to same-dim rows; post-migration all three
+    dims share ONE table/PK space (nexus.chunks, CONSTRAINT
+    exactly_one_embedding). gc_quarantine_orphans's and
+    gc_restore_rereferenced's copy-INSERTs both carry an
+    `ON CONFLICT (tenant_id, collection, chash) DO UPDATE SET ...
+    embedding_384 = EXCLUDED.embedding_384, embedding_768 =
+    EXCLUDED.embedding_768, embedding_1024 = EXCLUDED.embedding_1024, ...`
+    that — pre-fix — blindly overwrote ALL THREE embedding columns on a
+    collision, silently destroying whichever row's embedding did not
+    happen to be EXCLUDED's.
+
+    DECISION (chosen from the semantics, not convenience): each function
+    now runs a targeted, N7-style pre-flight guard immediately before its
+    own copy-INSERT that detects any row whose chash already exists at the
+    move target under a DIFFERENT populated embedding_<dim> column than
+    the moving row's own, and RAISEs EXCEPTION naming the collision count,
+    target, tenant, and a capped sample of the colliding chashes, before
+    any row moves. Three options were on the table:
+
+      (a) RAISE loudly, mirroring N7 verbatim — CHOSEN, with the blast
+          radius explicitly bounded: N7 aborts a one-time migration; this
+          guard aborts only the ONE (tenant, collection) sweep call in
+          progress (gc_quarantine_orphans/gc_restore_rereferenced each
+          already operate on exactly one such pair per invocation, inside
+          their own transaction), so a genuine collision costs one GC
+          cycle's pass over one collection, retried next cycle — not the
+          whole sweep, not the whole batch. This matches the "no silent
+          fallbacks for correctness; FAIL LOUD" project directive and
+          gives an operator a diagnosable, sampled error instead of a
+          silently vanished chunk.
+      (b) A COALESCE-preserving ON CONFLICT (SET embedding_384 =
+          COALESCE(chunks.embedding_384, EXCLUDED.embedding_384), ...) —
+          REJECTED: for a genuine cross-dim collision this would populate
+          TWO embedding_<dim> columns on the same row, which VIOLATES
+          exactly_one_embedding outright — the failure would still be
+          loud (a CHECK violation) but undiagnosable (no sample, no named
+          collision count, an opaque constraint-violation error instead of
+          a purpose-written one) and arrives AFTER the INSERT has already
+          attempted the write, not before.
+      (c) DO NOTHING with the skip counted in the return row — REJECTED:
+          for gc_quarantine_orphans specifically, the DELETE that follows
+          the copy-INSERT re-derives its own row set independently (same
+          NOT EXISTS predicate, not "whatever the INSERT actually
+          affected"), so a DO-NOTHING'd copy would still have its SOURCE
+          row deleted by the unconditional DELETE immediately after —
+          copy skipped AND source deleted is a worse outcome than the
+          pre-fix blind overwrite, not a safer one.
+
+    Kill-controlled: VectorsRepointFunctionsIntegrationTest carries a
+    dedicated collision test per function that constructs a real cross-dim
+    (tenant, collection, chash) collision, asserts the RAISE fires (proven
+    to fail against the pre-fix body during this fix's own development),
+    and asserts BOTH the pre-existing target row AND the source row
+    survive untouched — proving the guard aborts before either side
+    moves, not merely before the write "looks" applied.
 
     THE DIM-COLLAPSE DECISION PER OBJECT (recorded here, not assumed,
     because "think it through per function" was this bead's own
@@ -346,7 +416,7 @@ DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_1024(vector, text[], text, 
     </changeSet>
 
     <changeSet id="vectors-005-4" author="nexus-o8dil.18">
-        <comment>search_graph_hop_384/768/1024: retargeted to nexus.chunks, embedding_&lt;dim&gt; column per typed entry point (DECISION 2)</comment>
+        <comment>search_graph_hop_384/768/1024: retargeted to nexus.chunks, embedding_&lt;dim&gt; column per typed entry point (DECISION 2). CARRIES FORWARD catalog-019-5/6/7's (nexus-t7m8e) tombstone-relay guard verbatim: the recursive `reach` CTE's traversal step JOINs BOTH endpoints (fd/td) against nexus.catalog_documents with deleted_at IS NULL, so a tombstoned document cannot act as a live relay forwarding reachability to documents beyond it. A first draft of this changeset silently dropped these two JOINs while doing the embedding_&lt;dim&gt; retarget (code-review-expert finding, T2 nexus/review-rdr191-stepA-critical-graphhop-tombstone-regression-2026-08-13 [22455]) -- fixed here before Step B; see GraphHopParityTest.tombstonedRelay_blocksReachabilityBeyondIt for the pinning test against the live layer and VectorsRepointFunctionsIntegrationTest.searchGraphHop_tombstonedRelay_blocksReachabilityBeyondIt (this diff) for the staged-layer equivalent.</comment>
         <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.search_graph_hop_384(
     p_query       vector(384),
@@ -372,6 +442,8 @@ AS $$
                 ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
                  OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
                  OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
              WHERE r.d &lt; p_depth
                AND (p_link_type IS NULL OR l.link_type = p_link_type)
     ),
@@ -419,6 +491,8 @@ AS $$
                 ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
                  OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
                  OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
              WHERE r.d &lt; p_depth
                AND (p_link_type IS NULL OR l.link_type = p_link_type)
     ),
@@ -466,6 +540,8 @@ AS $$
                 ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
                  OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
                  OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
              WHERE r.d &lt; p_depth
                AND (p_link_type IS NULL OR l.link_type = p_link_type)
     ),
@@ -610,7 +686,7 @@ DROP FUNCTION IF EXISTS nexus.search_topic_scoped_1024(vector, text, text, int);
     </changeSet>
 
     <changeSet id="vectors-005-6" author="nexus-o8dil.18">
-        <comment>Defensive GRANT EXECUTE on nexus_svc for the nine combined-query functions: they carry no explicit GRANT anywhere in catalog-006/007/008 (PostgreSQL's function-level default is PUBLIC EXECUTE at CREATE time, which a fresh CREATE after CASCADE-drop restores automatically) — this changeset makes the nexus_svc grant explicit rather than relying on that default silently continuing to hold, matching catalog-004-4's explicit-grant precedent for the sibling manifest functions.</comment>
+        <comment>Defensive GRANT EXECUTE on nexus_svc for the nine combined-query functions PLUS document_text/remap_membership/manifest_verify/manifest_verify_all: none of these thirteen carry a SURVIVING explicit GRANT after this changeset's own CASCADE-drop-then-CREATE-OR-REPLACE (a fresh CREATE re-establishes only the PostgreSQL function-level default of PUBLIC EXECUTE, not any grant a now-superseded earlier changeset issued against the pre-CASCADE object) — this changeset makes the nexus_svc grant explicit rather than relying on the PUBLIC default silently continuing to hold, matching catalog-004-4's explicit-grant precedent for document_text/manifest_orphans/manifest_backfill, catalog-020's own explicit grant for manifest_verify/manifest_verify_all, and remap-002's for remap_membership -- all four of which lapse the same way once vectors-004's CASCADE removes the object those changesets granted on (code-review-expert MEDIUM finding, T2 [22455]: apply the changeset's own stated policy consistently, not just to the nine facades).</comment>
         <sql splitStatements="true" stripComments="false">
 GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_384(vector, text[], text, text, int, text, text, jsonb, int)  TO nexus_svc;
 GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_768(vector, text[], text, text, int, text, text, jsonb, int)  TO nexus_svc;
@@ -621,6 +697,10 @@ GRANT EXECUTE ON FUNCTION nexus.search_graph_hop_1024(vector, text[], text[], te
 GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_384(vector, text, text, int)  TO nexus_svc;
 GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_768(vector, text, text, int)  TO nexus_svc;
 GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_1024(vector, text, text, int) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.document_text(text)          TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.remap_membership(text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.manifest_verify(text)        TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.manifest_verify_all()        TO nexus_svc;
         </sql>
         <rollback>
             <!-- Revoke is a DBA operation; not automated (matches grants-nexus-svc.xml precedent). -->
@@ -1244,7 +1324,7 @@ $$
     </changeSet>
 
     <changeSet id="vectors-005-12" author="nexus-o8dil.18">
-        <comment>gc_quarantine_orphans: dim DOES NOT MATTER (a (tenant, collection) pair's rows are already fully identified without knowing dim -- quarantine moves whatever embedding_&lt;dim&gt; column is populated straight through the copy). The three dim-branched bodies collapse to ONE dim-agnostic body against nexus.chunks; `dim` stays in the signature for Java call-surface compat and the existing bad-dim validation contract. Sweep-gate acquisition (nexus-sa731, catalog-028) and the pre-flight/inline-NOT-EXISTS guard shape are preserved verbatim.</comment>
+        <comment>gc_quarantine_orphans: dim DOES NOT MATTER (a (tenant, collection) pair's rows are already fully identified without knowing dim -- quarantine moves whatever embedding_&lt;dim&gt; column is populated straight through the copy). The three dim-branched bodies collapse to ONE dim-agnostic body against nexus.chunks; `dim` stays in the signature for Java call-surface compat and the existing bad-dim validation contract. Sweep-gate acquisition (nexus-sa731, catalog-028) and the pre-flight/inline-NOT-EXISTS guard shape are preserved verbatim. ADDS a cross-dim collision guard (Critical-1 fix, T2 nexus/rdr-191-repoint-batch-step-a-critique-2026-08-13 [22454] and nexus/rdr-191-batch-stepA-critique-fixes-2026-08-13) -- see this file's own header for the full derivation.</comment>
         <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans(
     dim                      int,
@@ -1259,9 +1339,11 @@ LANGUAGE plpgsql
 SECURITY INVOKER
 AS $$
 DECLARE
-    v_moved   bigint;
-    v_sample  jsonb;
-    v_seg     text[];
+    v_moved            bigint;
+    v_sample           jsonb;
+    v_seg              text[];
+    v_collision_count  bigint;
+    v_collision_sample text[];
 BEGIN
     IF dim NOT IN (384, 768, 1024) THEN
         RAISE EXCEPTION
@@ -1300,6 +1382,55 @@ BEGIN
     ) THEN
         RETURN QUERY SELECT 0::bigint, NULL::jsonb;
         RETURN;
+    END IF;
+
+    -- N7-STYLE cross-dim collision guard (Critical-1 fix, T2 [22454]): the
+    -- unified PK (tenant_id, collection, chash) cannot hold two different-
+    -- dim rows. Detect, BEFORE any row moves, any orphan whose chash
+    -- already exists at p_quarantine_collection under a DIFFERENT
+    -- populated embedding_&lt;dim&gt; column than the orphan's own -- the blind
+    -- ON CONFLICT ... DO UPDATE ... EXCLUDED below would otherwise
+    -- silently overwrite (destroy) one of the two chunks' text/embedding.
+    -- RAISE aborts only THIS (tenant, collection) sweep call -- an ongoing
+    -- GC cycle, not vectors-004's one-time migration, so the bounded
+    -- blast radius is one collection's pass, retried next cycle, not the
+    -- whole batch.
+    WITH orphan AS (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim
+          FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND NOT EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = c.collection
+                    AND m.chash      = c.chash
+               )
+    ),
+    collision AS (
+        SELECT o.chash, o.src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM orphan o
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND e.collection = p_quarantine_collection
+           AND e.chash      = o.chash
+    )
+    SELECT count(*),
+           COALESCE(array_agg(encode(chash, 'hex') ORDER BY chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM collision
+     WHERE src_dim IS DISTINCT FROM existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans: % cross-dim (tenant_id, collection, chash) collision(s) at quarantine target % for tenant=%, origin collection=% -- the unified PK cannot hold two different-dim rows for the same chash (mirrors vectors-004''s N7 guard, T2 22454). Sample chashes: %. Refusing to overwrite; verify the quarantine-collection naming keeps distinct dims/collections separated before retrying.',
+            v_collision_count, p_quarantine_collection, p_tenant_id, p_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
     END IF;
 
     -- Registration MUST precede the copy INSERT below (FK on collection).
@@ -1601,7 +1732,7 @@ $$
     </changeSet>
 
     <changeSet id="vectors-005-13" author="nexus-o8dil.18">
-        <comment>gc_restore_rereferenced: dim DOES NOT MATTER, same reasoning as gc_quarantine_orphans. Collapses to one dim-agnostic body against nexus.chunks; `dim` stays in the signature.</comment>
+        <comment>gc_restore_rereferenced: dim DOES NOT MATTER, same reasoning as gc_quarantine_orphans. Collapses to one dim-agnostic body against nexus.chunks; `dim` stays in the signature. ADDS the same cross-dim collision guard as gc_quarantine_orphans (Critical-1 fix, T2 [22454]) at its own copy-INSERT -- see this file's own header.</comment>
         <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.gc_restore_rereferenced(
     dim                      int,
@@ -1614,9 +1745,11 @@ LANGUAGE plpgsql
 SECURITY INVOKER
 AS $$
 DECLARE
-    v_chashes  bytea[];
-    v_restored bigint := 0;
-    v_seg      text[];
+    v_chashes          bytea[];
+    v_restored         bigint := 0;
+    v_seg              text[];
+    v_collision_count  bigint;
+    v_collision_sample text[];
 BEGIN
     IF dim NOT IN (384, 768, 1024) THEN
         RAISE EXCEPTION
@@ -1638,6 +1771,44 @@ BEGIN
 
     IF v_chashes IS NULL THEN
         RETURN 0;
+    END IF;
+
+    -- N7-STYLE cross-dim collision guard (Critical-1 fix, T2 [22454]):
+    -- same reasoning as gc_quarantine_orphans's guard -- detect, BEFORE
+    -- any row moves, any restore candidate whose chash already exists at
+    -- p_origin_collection under a DIFFERENT populated embedding_&lt;dim&gt;
+    -- column than the candidate's own.
+    WITH candidate AS (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim
+          FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes)
+    ),
+    collision AS (
+        SELECT cand.chash, cand.src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM candidate cand
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND e.collection = p_origin_collection
+           AND e.chash      = cand.chash
+    )
+    SELECT count(*),
+           COALESCE(array_agg(encode(chash, 'hex') ORDER BY chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM collision
+     WHERE src_dim IS DISTINCT FROM existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: % cross-dim (tenant_id, collection, chash) collision(s) at restore target % for tenant=%, quarantine collection=% -- the unified PK cannot hold two different-dim rows for the same chash (mirrors vectors-004''s N7 guard, T2 22454). Sample chashes: %. Refusing to overwrite; verify the origin-collection naming keeps distinct dims/collections separated before retrying.',
+            v_collision_count, p_origin_collection, p_tenant_id, p_quarantine_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
     END IF;
 
     v_seg := string_to_array(p_origin_collection, '__');
