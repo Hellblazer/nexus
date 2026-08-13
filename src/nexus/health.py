@@ -2200,6 +2200,14 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     # check is the consumer that matters. The completeness guard carries a
     # matching dropped-tables exemption.)
     "nexus.chash_remap",
+    # nexus.chunks: RDR-191 Phase 4 unify (nexus-o8dil.51). Added in the SAME
+    # engine release as vectors-004-unify-chunks.xml, which creates the
+    # unified table WITH RLS in the same changeset that drops chunks_384/
+    # chunks_768/chunks_1024 (never listed here — see the absent-table
+    # handling in _check_rls_present, which is what makes this addition
+    # safe rather than a future permanent false FATAL like the chash_index
+    # episode above).
+    "nexus.chunks",
     "nexus.claude_assisted_remediation_consents",
     "nexus.document_aspects",
     "nexus.document_highlights",
@@ -2217,6 +2225,12 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.relevance_log",
     "nexus.retention_markers",
     "nexus.search_telemetry",
+    # nexus.taxonomy_centroids: RDR-191 Phase 4 unify (nexus-o8dil.51/.47 "one
+    # era" ruling). Same rationale as nexus.chunks above: added alongside
+    # taxonomy-007-unify-centroids.xml, which drops taxonomy_centroids_384/
+    # _768/_1024 (never listed here) in the same changeset it grants RLS on
+    # the unified table.
+    "nexus.taxonomy_centroids",
     "nexus.taxonomy_meta",
     "nexus.tier_writes",
     "nexus.topic_assignments",
@@ -3268,12 +3282,33 @@ ORDER BY tbl.schema_name, tbl.table_name;
             policy_count = 0
         rls_by_table[key] = (rls_on, rls_force, policy_count)
 
+    # nexus-o8dil.51: a listed table can legitimately be ABSENT from pg_class
+    # (not yet migrated, or -- post RDR-191 Phase 4 -- a dropped per-dim
+    # shard that was never listed in the first place but whose sibling
+    # unified table might not have landed yet on an older box). The VALUES
+    # driving table + LEFT JOIN means an absent table's relrowsecurity /
+    # relforcerowsecurity come back NULL, which -t -A prints as an empty
+    # string -- distinct from the 't'/'f' pg_class always assigns to a row
+    # that actually exists (relrowsecurity is NOT NULL in every real pg_class
+    # row). That is the ONLY signal absence has here; do not confuse it with
+    # "RLS explicitly disabled" (rls_on == 'f'), which is a real table with
+    # bad RLS and must stay FATAL.
     failed: list[str] = []
+    absent: list[str] = []
     for table in _RLS_TENANT_TABLES:
         if table not in rls_by_table:
             failed.append(f"{table} (not in query output)")
             continue
         rls_on, rls_force, policy_count = rls_by_table[table]
+
+        if rls_on == "" and rls_force == "":
+            # LEFT JOIN produced no pg_class match: table does not exist.
+            # Not fatal (chash_index precedent: a listed-but-dropped table
+            # must never be a permanent false FATAL), but must not be
+            # silently folded into the "all present and correct" ok result
+            # either -- it is its own reported outcome, below.
+            absent.append(table)
+            continue
 
         if rls_on != "t" or rls_force != "t" or policy_count == 0:
             reasons = []
@@ -3285,13 +3320,20 @@ ORDER BY tbl.schema_name, tbl.table_name;
                 reasons.append("no policies")
             failed.append(f"{table} ({', '.join(reasons)})")
 
+    present_count = len(_RLS_TENANT_TABLES) - len(absent)
+
     if failed:
+        absent_note = (
+            f" ({len(absent)} listed table(s) not yet present, reported "
+            f"separately: {', '.join(sorted(absent))})"
+            if absent else ""
+        )
         return [HealthResult(
             label="RLS policies",
             ok=False,
             detail=(
-                f"RLS missing on {len(failed)}/{len(_RLS_TENANT_TABLES)} "
-                f"tenant table(s): {', '.join(failed)}"
+                f"RLS missing on {len(failed)}/{present_count} "
+                f"present tenant table(s): {', '.join(failed)}{absent_note}"
             ),
             fix_suggestions=[
                 "Re-run migrations: nx init --service",
@@ -3299,6 +3341,26 @@ ORDER BY tbl.schema_name, tbl.table_name;
                 "check service/src/main/resources/db/changelog/",
             ],
             fatal=True,
+        )]
+
+    if absent:
+        # Its own reported outcome (nexus-o8dil.51 acceptance): not FATAL
+        # (the table may simply predate a migration that hasn't run yet, or
+        # -- transiently, mid-upgrade -- postdate one), and not a silent
+        # pass either (ok=False, warn=True) since a doctor run that reports
+        # "RLS policies: OK" while N listed tables are actually missing
+        # from the database would hide a real convergence gap.
+        return [HealthResult(
+            label="RLS policies",
+            ok=False,
+            warn=True,
+            detail=(
+                f"RLS policies: present and correct on {present_count}/"
+                f"{present_count} migrated tenant table(s); "
+                f"{len(absent)} listed table(s) not yet present in the "
+                f"database (pre-migration or upgrade in progress): "
+                f"{', '.join(sorted(absent))}"
+            ),
         )]
 
     return [HealthResult(

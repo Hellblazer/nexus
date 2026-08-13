@@ -860,6 +860,7 @@ _ALL_TENANT_TABLES = [
     # ("nexus.chash_index" removed — RDR-187/nexus-piwya.9: dropped table,
     # mirrors health._RLS_TENANT_TABLES)
     "nexus.chash_remap",
+    "nexus.chunks",  # RDR-191 Phase 4 (nexus-o8dil.51)
     "nexus.claude_assisted_remediation_consents",
     "nexus.document_aspects",
     "nexus.document_highlights",
@@ -877,6 +878,7 @@ _ALL_TENANT_TABLES = [
     "nexus.relevance_log",
     "nexus.retention_markers",
     "nexus.search_telemetry",
+    "nexus.taxonomy_centroids",  # RDR-191 Phase 4 (nexus-o8dil.51/.47)
     "nexus.taxonomy_meta",
     "nexus.tier_writes",
     "nexus.topic_assignments",
@@ -926,6 +928,41 @@ def _psql_rls_one_table_disabled(disabled_schema_table: str):
         for st in sorted_tables:
             if st == disabled_schema_table:
                 rows.append(_rls_row(st, "f", "f", 0))
+            else:
+                rows.append(_rls_row(st, "t", "t", 2))
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0,
+            stdout="\n".join(rows) + "\n",
+            stderr="",
+        )
+    return runner
+
+
+def _psql_rls_one_table_absent(absent_schema_table: str):
+    """Runner that reports one specific listed table as ABSENT from pg_class
+    (the LEFT JOIN NULL case: relrowsecurity/relforcerowsecurity/policy_count
+    all come back empty, since ``psql -t -A`` prints a NULL as ''). Every
+    real pg_class row always has relrowsecurity 't' or 'f' -- never NULL --
+    so an all-empty row can ONLY mean the driving VALUES row found no match.
+
+    nexus-o8dil.51 defect 2 regression harness: against the pre-fix
+    ``_check_rls_present`` (which never distinguished this from "RLS
+    explicitly disabled"), this runner made the check report FATAL forever
+    for a table that simply hadn't been migrated yet (or, post RDR-191, a
+    dropped per-dim shard) -- the permanent-false-FATAL bug this bead fixes.
+    """
+    sorted_tables = sorted(_ALL_TENANT_TABLES)
+
+    def runner(cmd: list[str], *, capture_output: bool, text: bool,
+               check: bool) -> subprocess.CompletedProcess:
+        rows = []
+        for st in sorted_tables:
+            if st == absent_schema_table:
+                # relrowsecurity/relforcerowsecurity are NULL (LEFT JOIN
+                # miss on pg_class) -> '' in -t -A output; policy_count is
+                # COUNT(p.policyname), an aggregate that is always an
+                # integer (0 here), never NULL.
+                rows.append(_rls_row(st, "", "", 0))
             else:
                 rows.append(_rls_row(st, "t", "t", 2))
         return subprocess.CompletedProcess(
@@ -1093,6 +1130,114 @@ class TestCheckRlsPresent:
         assert r.ok is False
         assert r.warn is True
         assert r.fatal is False
+
+    # ── nexus-o8dil.51 defect 2: absent listed table must not be a false FATAL ──
+
+    def test_absent_table_is_not_fatal_and_not_a_silent_pass(self, tmp_path):
+        """A listed-but-absent table (LEFT JOIN NULL) is its OWN reported
+        outcome: ok=False (so it's visible, not folded into a clean pass),
+        fatal=False (never a permanent false FATAL -- the chash_index
+        precedent), warn=True.
+
+        Against the pre-fix implementation (which only ever compared
+        rls_on/rls_force against 't', treating '' the same as 'f') this
+        exact fixture produced a FATAL result -- the bug nexus-o8dil.51
+        defect 2 describes.
+        """
+        creds = _make_creds_file(tmp_path)
+        psql = Path("/fake/psql")
+
+        results = _check_rls_present(
+            creds_path=creds,
+            psql_bin=psql,
+            psql_runner=_psql_rls_one_table_absent("nexus.chunks"),
+        )
+        assert len(results) == 1
+        r = results[0]
+        assert r.fatal is False, "an absent listed table must never be FATAL"
+        assert r.ok is False, "absence must not be folded into a silent clean pass"
+        assert r.warn is True
+        assert "nexus.chunks" in r.detail
+
+    def test_absent_table_message_distinguishes_from_disabled_rls(self, tmp_path):
+        """The absent-table detail must not read as 'RLS not enabled' --
+        that phrase is reserved for a table that EXISTS with bad RLS."""
+        creds = _make_creds_file(tmp_path)
+        psql = Path("/fake/psql")
+
+        results = _check_rls_present(
+            creds_path=creds,
+            psql_bin=psql,
+            psql_runner=_psql_rls_one_table_absent("nexus.taxonomy_centroids"),
+        )
+        r = results[0]
+        assert "RLS not enabled" not in r.detail
+        assert "not yet present" in r.detail
+
+    def test_chunks_rls_disabled_is_fatal(self, tmp_path):
+        """nexus.chunks EXISTS with RLS disabled -> FATAL, non-vacuous:
+        proves the check covers the table the RLS doctor never listed
+        before nexus-o8dil.51 (defect 1)."""
+        creds = _make_creds_file(tmp_path)
+        psql = Path("/fake/psql")
+
+        results = _check_rls_present(
+            creds_path=creds,
+            psql_bin=psql,
+            psql_runner=_psql_rls_one_table_disabled("nexus.chunks"),
+        )
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is False
+        assert r.fatal is True
+        assert r.warn is False
+        assert "nexus.chunks" in r.detail
+
+    def test_taxonomy_centroids_rls_disabled_is_fatal(self, tmp_path):
+        """nexus.taxonomy_centroids EXISTS with RLS disabled -> FATAL,
+        same coverage proof as nexus.chunks above (RDR-191 .47 "one era")."""
+        creds = _make_creds_file(tmp_path)
+        psql = Path("/fake/psql")
+
+        results = _check_rls_present(
+            creds_path=creds,
+            psql_bin=psql,
+            psql_runner=_psql_rls_one_table_disabled("nexus.taxonomy_centroids"),
+        )
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is False
+        assert r.fatal is True
+
+    def test_mixed_absent_and_disabled_reports_fatal_for_the_disabled_table(self, tmp_path):
+        """A table with bad RLS stays FATAL even when a DIFFERENT listed
+        table is simultaneously absent -- absence must never mask a real
+        failure elsewhere, and a real failure must not suppress the
+        absent-table note."""
+        creds = _make_creds_file(tmp_path)
+        psql = Path("/fake/psql")
+        sorted_tables = sorted(_ALL_TENANT_TABLES)
+
+        def runner(cmd, *, capture_output, text, check):
+            rows = []
+            for st in sorted_tables:
+                if st == "nexus.chunks":
+                    rows.append(_rls_row(st, "", "", 0))  # absent
+                elif st == "nexus.memory":
+                    rows.append(_rls_row(st, "f", "f", 0))  # present, RLS off
+                else:
+                    rows.append(_rls_row(st, "t", "t", 2))
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="\n".join(rows) + "\n", stderr="",
+            )
+
+        results = _check_rls_present(creds_path=creds, psql_bin=psql, psql_runner=runner)
+        assert len(results) == 1
+        r = results[0]
+        assert r.fatal is True
+        assert r.ok is False
+        assert "nexus.memory" in r.detail
+        assert "nexus.chunks" in r.detail  # noted, not silently dropped
 
     def test_psql_error_returns_fatal(self, tmp_path):
         """psql failure (non-zero returncode) -> fatal."""
