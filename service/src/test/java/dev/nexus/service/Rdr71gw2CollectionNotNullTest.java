@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.vectors.DimTables;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -179,9 +180,10 @@ class Rdr71gw2CollectionNotNullTest {
         return Chash.ofText(seed).toHex();
     }
 
-    /** chunks_384/768/1024 carry an FK on (tenant_id, collection) ->
-     *  catalog_collections -- every collection a fixture writes a chunk into
-     *  must be registered first. */
+    /** nexus.chunks (RDR-191 unified; formerly chunks_384/768/1024) carries an FK
+     *  on (tenant_id, collection) -> catalog_collections in the eventual Phase 5
+     *  shape (not yet landed as of this bead) -- registering first keeps every
+     *  fixture forward-compatible regardless of when that FK ships. */
     private static void insertCollection(Connection su, String tenantId, String name) throws Exception {
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_collections (tenant_id, name) "
@@ -216,11 +218,13 @@ class Rdr71gw2CollectionNotNullTest {
             + "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
     }
 
-    private static void insertChunk(Connection su, String dimTable, String tenantId,
+    /** RDR-191 Phase 4: nexus.chunks_<dim> unified into nexus.chunks -- dim now
+     *  selects the target embedding_<dim> column, not a table. */
+    private static void insertChunk(Connection su, int dim, String tenantId,
                                      String collection, String chashHex, int vecLen) throws Exception {
         insertCollection(su, tenantId, collection);
         su.createStatement().execute(
-            "INSERT INTO nexus." + dimTable + " (tenant_id, collection, chash, chunk_text, embedding) "
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ") "
             + "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "
             + "'chunk text', ('[1" + ",0".repeat(vecLen - 1) + "]')::vector) "
             + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
@@ -228,7 +232,7 @@ class Rdr71gw2CollectionNotNullTest {
 
     private static void insertChunk1024(Connection su, String tenantId, String collection,
                                          String chashHex) throws Exception {
-        insertChunk(su, "chunks_1024", tenantId, collection, chashHex, 1024);
+        insertChunk(su, 1024, tenantId, collection, chashHex, 1024);
     }
 
     private static String collectionOf(Connection su, String tenantId, String docId, int position)
