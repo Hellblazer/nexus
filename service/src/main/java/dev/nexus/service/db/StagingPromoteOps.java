@@ -542,30 +542,68 @@ public final class StagingPromoteOps {
                     .execute();
                 // chunk_text_hash mirrors the SURROGATE chash (RDR-086
                 // metadata parity, same rationale as the content INSERT).
-                // Hardcoded to chunks_768/dim=768 — preserved VERBATIM from
-                // the deleted raw SQL (a pre-existing behavior of this
-                // branch, not something this representation-only pass
-                // changes; the raw form never synthesized 384/1024 orphans
-                // either).
+                //
+                // FIXED (nexus-o8dil.50, RDR-191 P4): this branch used to be
+                // hardcoded to chunks_768/dim=768 only, "preserved verbatim"
+                // from the deleted raw SQL. That was not a merely-incomplete
+                // convenience: the CHASH_ALIAS insert directly above is
+                // dim-agnostic (aliases EVERY row matching orphanCond,
+                // regardless of scDim), so a 384/1024 orphan got a committed
+                // alias with NO backing content row in any dim table. If a
+                // staged manifest pointer (staging.document_chunks) later
+                // resolved through that alias — precisely the case Item8
+                // exists to handle — this method's own dangling_manifest
+                // fatal check (below, (7) in-txn verify) would find a
+                // catalog_document_chunks row whose chash has no content
+                // anywhere and throw IllegalStateException, ABORTING THE
+                // WHOLE finalizeTenant TRANSACTION for the tenant. Because
+                // finalize is documented idempotent/re-runnable, every retry
+                // hits the identical alias again — a repeatable, tenant-wide
+                // finalize blocker, not a silent skip.
+                //
+                // Both non-768 dims are reachable in production, not
+                // hypothetical: 384 is Tier-0 MiniLM (nexus.db.local_ef,
+                // the fastembed-less local-mode default — installs without
+                // `conexus[local]` embed at 384d), 1024 is Voyage (the
+                // cloud-mode default). staging.chunks.dim is a VALUE column
+                // by design for exactly this reason — see
+                // staging-001-landing-tables.xml's own comment: "mixed dims
+                // legal, no ANN index — never searched". A guided-upgrade
+                // migration from either of those installs can legitimately
+                // land 384/1024 orphan rows.
+                //
+                // Fix: loop over all three dims via the same chunkDim(int)
+                // accessor promoteCollection's content INSERT (5) already
+                // uses, explicit-three (not a loop over a shared dim
+                // registry — same no-common-typed-interface discipline as
+                // RekeyOps.DIMS / ChashSqlIdioms.danglingManifestCountDsl,
+                // see the chunkDim javadoc). "orphans_synthesized" stays a
+                // single summed count — same convention residual_mismatched
+                // already uses for its three explicit per-dim calls.
                 Field<JSONB> synthStamp = ChashSqlIdioms.jsonbBuildObject(
                     "chash_origin", "synthetic", "chunk_text_hash", hex(CHASH_ALIAS.NEW_CHASH));
-                Field<Vector> scEmbeddingTyped =
-                    DSL.field(DSL.name("s", "embedding"), CHUNKS_768.EMBEDDING.getDataType());
-                counts.put("orphans_synthesized", ctx.insertInto(CHUNKS_768,
-                        CHUNKS_768.TENANT_ID, CHUNKS_768.COLLECTION, CHUNKS_768.CHASH,
-                        CHUNKS_768.CHUNK_TEXT, CHUNKS_768.EMBEDDING, CHUNKS_768.METADATA)
-                    .select(ctx.select(
-                            currentTenantSetting(), scCollection, CHASH_ALIAS.NEW_CHASH, DSL.val(""),
-                            scEmbeddingTyped, ChashSqlIdioms.mergeMetadata(scChunkMeta, synthStamp))
-                        .from(sc)
-                        .join(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(scLegacyRef)
-                            .and(CHASH_ALIAS.SOURCE.eq("staging:synthetic")))
-                        .where(scChunkText.eq(""))
-                        .and(scDim.eq(768))
-                        .and(scEmbeddingRaw.isNotNull()))
-                    .onConflict(CHUNKS_768.TENANT_ID, CHUNKS_768.COLLECTION, CHUNKS_768.CHASH)
-                    .doNothing()
-                    .execute());
+                int synthesized = 0;
+                for (int d : new int[] {384, 768, 1024}) {
+                    ChunkDim dim = chunkDim(d);
+                    Field<Vector> scEmbeddingTyped =
+                        DSL.field(DSL.name("s", "embedding"), dim.embedding().getDataType());
+                    synthesized += ctx.insertInto(dim.table(),
+                            dim.tenantId(), dim.collection(), dim.chash(),
+                            dim.chunkText(), dim.embedding(), dim.metadata())
+                        .select(ctx.select(
+                                currentTenantSetting(), scCollection, CHASH_ALIAS.NEW_CHASH, DSL.val(""),
+                                scEmbeddingTyped, ChashSqlIdioms.mergeMetadata(scChunkMeta, synthStamp))
+                            .from(sc)
+                            .join(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(scLegacyRef)
+                                .and(CHASH_ALIAS.SOURCE.eq("staging:synthetic")))
+                            .where(scChunkText.eq(""))
+                            .and(scDim.eq(d))
+                            .and(scEmbeddingRaw.isNotNull()))
+                        .onConflict(dim.tenantId(), dim.collection(), dim.chash())
+                        .doNothing()
+                        .execute();
+                }
+                counts.put("orphans_synthesized", synthesized);
                 counts.put("orphans_dropped", 0);
             } else {
                 counts.put("orphans_synthesized", 0);

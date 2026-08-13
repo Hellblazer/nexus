@@ -57,6 +57,14 @@ class StagingPromoteOpsIntegrationTest {
     private static final String SVC_ROLE = "svc_promote_test";
     private static final String SVC_PASS = "svc_promote_pw";
     private static final String T1 = "t-promote-a";
+    // nexus-o8dil.50: dedicated tenant for the orphan-synthesize dim-
+    // coverage tests, RLS-isolated from T1's own multi-order state so
+    // orphan/alias counts assert exact values instead of deltas against
+    // whatever earlier @Order tests left behind (several leave staged
+    // "dropped" orphan rows in place permanently -- drop never deletes,
+    // only counts -- which would otherwise get swept up the first time
+    // ANY test on the same tenant calls finalizeTenant(tenant, true)).
+    private static final String T_DIM = "t-promote-dim";
 
     private static final String COLL_A = "knowledge__ka__bge-base-en-v15-768__v1";
     private static final String COLL_B = "knowledge__kb__bge-base-en-v15-768__v1";
@@ -161,6 +169,17 @@ class StagingPromoteOpsIntegrationTest {
 
     private int count(String sql) {
         return scope.withTenant(T1, ctx -> ctx.fetchOne(sql).get(0, Integer.class));
+    }
+
+    // nexus-o8dil.50: count() above is hardcoded to T1 -- every nexus.* table
+    // is FORCE ROW LEVEL SECURITY on current_setting('nexus.tenant'), so a
+    // query run under T1's session context returns ZERO rows for T_DIM data
+    // regardless of an explicit `tenant_id = ...` predicate in the SQL text
+    // (RLS filters before the WHERE clause is evaluated against visible
+    // rows). The dim-coverage tests below run under T_DIM and need this
+    // tenant-parameterized twin.
+    private int countAs(String tenant, String sql) {
+        return scope.withTenant(tenant, ctx -> ctx.fetchOne(sql).get(0, Integer.class));
     }
 
     // ── Order 1: the full happy path, all three legacy widths ────────────────
@@ -1407,5 +1426,115 @@ class StagingPromoteOpsIntegrationTest {
             ctx.execute("DELETE FROM staging.document_chunks WHERE tenant_id = ? AND doc_id = ?", T1, doc);
             return null;
         });
+    }
+
+    // ── nexus-o8dil.50: orphan-synthesize dim coverage ───────────────────────
+    //
+    // Prior to this fix, finalizeTenant(tenant, true)'s orphan-synthesize
+    // branch was hardcoded to chunks_768 only (inherited verbatim from the
+    // deleted raw SQL). No test in this file ever called finalizeTenant
+    // with synthesizeOrphans=true for ANY dim before nexus-o8dil.50 — the
+    // three tests below are the first coverage of this branch at all, not
+    // merely the first per-dim coverage. Each test proves two things
+    // together: (a) the orphan's content row lands in the CORRECT dim
+    // table and nowhere else, and (b) a manifest pointer that resolves
+    // through the orphan's synthetic alias promotes cleanly instead of
+    // tripping the dangling_manifest fatal check — the actual production
+    // hazard the pre-fix hardcoding created for 384/1024 (a committed
+    // alias with no backing content anywhere, aborting the WHOLE
+    // finalizeTenant transaction the moment anything referenced it).
+
+    private void assertOrphanSynthesizesIntoDim(int dim, int order) {
+        String coll = "knowledge__dimcheck" + dim + "__model-" + dim + "__v1";
+        String doc = "9." + order + ".1";
+        String legacyRef = "orphan-dim-" + dim + "-ref-" + order;
+
+        scope.withTenant(T_DIM, ctx -> {
+            ctx.execute("INSERT INTO nexus.catalog_documents "
+                + "(tenant_id, tumbler, title, physical_collection) "
+                + "VALUES (?, ?, 'dim-check doc', ?) ON CONFLICT DO NOTHING", T_DIM, doc, coll);
+            // chunks_<dim> FK-references catalog_collections(tenant_id, name)
+            // (fk-002-collection-registry.xml) — the orphan content INSERT
+            // below needs the stub row promoteCollection's own step (4)
+            // would normally create; this collection is never promoted
+            // through that path so it must be stubbed directly here.
+            ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name, content_type) "
+                + "VALUES (?, ?, 'knowledge') ON CONFLICT DO NOTHING", T_DIM, coll);
+            return null;
+        });
+        // The orphan itself: an empty-text staged chunk row at this dim —
+        // orphanCond requires no pre-existing alias and no non-empty
+        // sibling row sharing the ref (neither holds here, fresh ref).
+        scope.withTenant(T_DIM, ctx -> {
+            ctx.execute("INSERT INTO staging.chunks "
+                + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) "
+                + "VALUES (?, ?, ?, ?, '', '" + vec(dim) + "'::vector, 'model-" + dim + "') "
+                + "ON CONFLICT (tenant_id, collection, legacy_ref) DO NOTHING",
+                T_DIM, coll, dim, legacyRef);
+            return null;
+        });
+        // A manifest pointer referencing the SAME legacy ref — the Item8
+        // scenario: this can only resolve through the synthetic alias
+        // finalize is about to build.
+        scope.withTenant(T_DIM, ctx -> {
+            ctx.execute("INSERT INTO staging.document_chunks "
+                + "(tenant_id, doc_id, position, chash) VALUES (?, ?, 0, ?) "
+                + "ON CONFLICT DO NOTHING", T_DIM, doc, legacyRef);
+            return null;
+        });
+
+        Map<String, Object> fin = ops.finalizeTenant(T_DIM, true);
+
+        assertThat(((Number) fin.get("orphans_synthesized")).intValue())
+            .as("dim " + dim + ": exactly this one new orphan synthesizes")
+            .isEqualTo(1);
+        assertThat(fin.get("dangling_manifest"))
+            .as("dim " + dim + ": the manifest row that resolves through the "
+                + "synthetic alias has real backing content -- the fatal "
+                + "dangling-manifest abort this bug used to trip for "
+                + "384/1024 must not fire")
+            .isEqualTo(0);
+        assertThat(fin.get("residual_mismatched")).isEqualTo(0);
+
+        String targetTable = "nexus.chunks_" + dim;
+        assertThat(countAs(T_DIM, "SELECT count(*) FROM " + targetTable + " c "
+            + "JOIN nexus.chash_alias a ON a.new_chash = c.chash "
+            + "WHERE c.tenant_id = '" + T_DIM + "' AND a.old_ref = '" + legacyRef + "' "
+            + "AND a.source = 'staging:synthetic' AND c.chunk_text = '' "
+            + "AND c.metadata->>'chash_origin' = 'synthetic'"))
+            .as("dim " + dim + ": the surrogate content row landed in the "
+                + "dim-correct table with the synthetic stamp")
+            .isEqualTo(1);
+        for (int other : new int[] {384, 768, 1024}) {
+            if (other == dim) continue;
+            assertThat(countAs(T_DIM, "SELECT count(*) FROM nexus.chunks_" + other + " c "
+                + "JOIN nexus.chash_alias a ON a.new_chash = c.chash "
+                + "WHERE a.old_ref = '" + legacyRef + "'"))
+                .as("dim " + dim + ": no cross-dim leakage into chunks_" + other)
+                .isEqualTo(0);
+        }
+        assertThat(countAs(T_DIM, "SELECT count(*) FROM nexus.catalog_document_chunks "
+            + "WHERE tenant_id = '" + T_DIM + "' AND doc_id = '" + doc + "'"))
+            .as("dim " + dim + ": the referencing manifest pointer promoted "
+                + "instead of aborting or staying stuck")
+            .isEqualTo(1);
+    }
+
+    @Test
+    @Order(29)
+    void orphanSynthesize_dim384_populatesChunks384AndResolvesManifest() {
+        assertOrphanSynthesizesIntoDim(384, 29);
+    }
+
+    @Test
+    @Order(30)
+    void orphanSynthesize_dim768_populatesChunks768AndResolvesManifest() {
+        assertOrphanSynthesizesIntoDim(768, 30);
+    }
+
+    @Test
+    @Order(31)
+    void orphanSynthesize_dim1024_populatesChunks1024AndResolvesManifest() {
+        assertOrphanSynthesizesIntoDim(1024, 31);
     }
 }
