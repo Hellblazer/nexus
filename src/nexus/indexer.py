@@ -2648,8 +2648,55 @@ def _prune_misclassified_in_collection(
             if ok:
                 for did in owners:
                     kept = [r for r in doc_rows.get(did, []) if getattr(r, "chash", None) != cid]
+                    # nexus-7ygt0: RDR-191 made ``collection`` a required
+                    # keyword-only argument on ``atomic_manifest_replace`` --
+                    # the engine no longer infers it. Derive it from the
+                    # manifest rows' OWN stamped ``.collection`` (ManifestRow,
+                    # nexus-kzso5's wire field), never from ``col``'s
+                    # physical_collection (Hal ruling, T2 [22364]/[22367],
+                    # nexus-pewng: "writers SEND it, stamped verbatim, NO
+                    # resolution"). Source rows are ``kept`` if non-empty,
+                    # else the PRE-filter ``doc_rows[did]`` (covers retracting
+                    # the last row, where ``kept`` is empty but the row being
+                    # retracted still carries the correct collection).
+                    source_rows = kept if kept else doc_rows.get(did, [])
+                    observed_collections = {getattr(r, "collection", None) for r in source_rows}
+                    resolved_collection = (
+                        next(iter(observed_collections))
+                        if len(observed_collections) == 1
+                        else None
+                    )
+                    if not resolved_collection:
+                        # Either no rows to derive from, an older engine
+                        # that never sent the wire field (None present), or
+                        # a mixed-collection manifest (nexus-pewng
+                        # territory, unreachable today). Do NOT guess and
+                        # do NOT fall back to physical_collection -- refuse
+                        # fail-visibly with a DISTINCT event name so this
+                        # refusal class is distinguishable from a write
+                        # failure.
+                        ok = False
+                        _log.warning(
+                            "prune_misclassified_manifest_guard_collection_unresolved",
+                            doc_id=did, chash=cid,
+                            collection=getattr(col, "name", "?"),
+                            kind=kind,
+                            observed_collections=sorted(
+                                c for c in observed_collections if c
+                            ),
+                            note="manifest rows carry no single resolvable "
+                                 "collection -- refusing to guess or fall "
+                                 "back to physical_collection (RDR-191: "
+                                 "writers send it, stamped verbatim, zero "
+                                 "resolution)",
+                        )
+                        break
                     try:
-                        writer(did, [_row_to_chunk_dict(r) for r in kept])
+                        writer(
+                            did,
+                            [_row_to_chunk_dict(r) for r in kept],
+                            collection=resolved_collection,
+                        )
                     except Exception:  # noqa: BLE001 — refuse rather than risk a dangling manifest row
                         ok = False
                         _log.warning(

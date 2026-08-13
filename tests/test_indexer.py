@@ -1185,8 +1185,8 @@ def test_prune_misclassified_uses_catalog_manifest_for_phase3_chunks(tmp_path):
     catalog = MagicMock()
     catalog.get_manifests.return_value = {
         "1.1.5": [
-            SimpleNamespace(chash=chash_a, position=0),
-            SimpleNamespace(chash=chash_b, position=1),
+            SimpleNamespace(chash=chash_a, position=0, collection="docs__repo"),
+            SimpleNamespace(chash=chash_b, position=1, collection="docs__repo"),
         ]
     }
 

@@ -34,6 +34,8 @@ import structlog
 
 from nexus.indexer import _batched_delete, _prune_misclassified_in_collection
 
+_TEST_COLLECTION = "code__test-owner__voyage-3__v1"
+
 
 # ── _batched_delete ──────────────────────────────────────────────────────────
 
@@ -115,10 +117,21 @@ class _FakeCatalog:
     def get_manifest(self, doc_id):
         return self.manifests.get(doc_id, [])
 
-    def atomic_manifest_replace(self, doc_id, chunks, **_kw):
+    def atomic_manifest_replace(
+        self, doc_id, chunks, *, collection, new_collection=None, new_chunk_count=None,
+    ):
+        # Mirrors the real protocol (catalog_protocol.py:243,
+        # HttpCatalogClient.atomic_manifest_replace) -- ``collection`` is
+        # REQUIRED and keyword-only since RDR-191. A double that accepted
+        # it via ``**_kw`` never raised on a missing/absent collection --
+        # exactly why nexus-7ygt0 shipped unseen.
+        assert isinstance(collection, str) and collection, (
+            "atomic_manifest_replace called without a non-blank 'collection' "
+            "kwarg -- RDR-191 requires it, no default"
+        )
         self.replace_calls.append((doc_id, list(chunks)))
         self.manifests[doc_id] = [
-            SimpleNamespace(chash=c["chash"], position=c.get("position"))
+            SimpleNamespace(chash=c["chash"], position=c.get("position"), collection=collection)
             for c in chunks
         ]
 
@@ -170,8 +183,8 @@ def test_prune_misclassified_manifest_arm_reports_actual_server_count(tmp_path: 
 
     col = _FakeColAntiJoin(ids=[kept_chash, gone_chash], refuse={kept_chash})
     catalog = _FakeCatalog({doc_id: [
-        SimpleNamespace(chash=kept_chash, position=0),
-        SimpleNamespace(chash=gone_chash, position=1),
+        SimpleNamespace(chash=kept_chash, position=0, collection=_TEST_COLLECTION),
+        SimpleNamespace(chash=gone_chash, position=1, collection=_TEST_COLLECTION),
     ]})
 
     pruned = _prune_misclassified_in_collection(
@@ -224,8 +237,8 @@ def test_prune_misclassified_partial_delete_logs_a_warning(tmp_path: Path):
 
     col = _FakeColAntiJoin(ids=[kept_chash, gone_chash], refuse={kept_chash})
     catalog = _FakeCatalog({doc_id: [
-        SimpleNamespace(chash=kept_chash, position=0),
-        SimpleNamespace(chash=gone_chash, position=1),
+        SimpleNamespace(chash=kept_chash, position=0, collection=_TEST_COLLECTION),
+        SimpleNamespace(chash=gone_chash, position=1, collection=_TEST_COLLECTION),
     ]})
 
     with structlog.testing.capture_logs() as logs:
@@ -248,7 +261,7 @@ def test_prune_misclassified_full_success_no_warning(tmp_path: Path):
     file_path.write_text("t = 1\n")
 
     col = _FakeColAntiJoin(ids=[chash])
-    catalog = _FakeCatalog({doc_id: [SimpleNamespace(chash=chash, position=0)]})
+    catalog = _FakeCatalog({doc_id: [SimpleNamespace(chash=chash, position=0, collection=_TEST_COLLECTION)]})
 
     with structlog.testing.capture_logs() as logs:
         pruned = _prune_misclassified_in_collection(
