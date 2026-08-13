@@ -3,8 +3,8 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.vectors.DimTables;
 import liquibase.Contexts;
+import liquibase.LabelExpression;
 import liquibase.Liquibase;
 import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
@@ -81,11 +81,51 @@ class Rdr71gw2CollectionNotNullTest {
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db)
-                .update(new Contexts());
+            // Step G (RDR-191 repoint batch cluster A): stop BEFORE
+            // vectors-004-1 (now real head, Step B registration) rather than
+            // migrating to true head. catalog-025-0's own raw SQL (replayed
+            // verbatim below by runChangeset/changesetSql) reads
+            // nexus.chunks_384/768/1024 DIRECTLY -- it ran historically
+            // BEFORE the RDR-191 unify in changelog order (still true post-
+            // Step B: catalog-025's <include> precedes vectors-004's in
+            // db.changelog-master.xml). Migrating past vectors-004-1 would
+            // drop those tables before this class ever seeds them, so every
+            // runChangeset() call would fail with "relation does not exist"
+            // -- not a fixture bug, a harness/head mismatch. Stopping here
+            // mirrors exactly what a real box had on disk when catalog-025
+            // ran in production; catalog-025-0 itself is still fully applied
+            // by this call (its <include> is well before vectors-004-1's).
+            migrateUpTo(su, "vectors-004-1");
+        }
+    }
+
+    /**
+     * Runs the master changelog up to (but NOT including) {@code changesetId}
+     * against a raw {@link Connection}, mirroring {@code
+     * SchemaMigratorIntegrationTest}'s aged-box idiom and {@code
+     * VectorsUnifyChunksIntegrationTest#migrateUpTo}'s HikariDataSource-based
+     * sibling (this class runs migrations directly against the container's
+     * superuser connection, not a separate admin DataSource).
+     */
+    private static void migrateUpTo(Connection su, String changesetId) throws Exception {
+        Database database = DatabaseFactory.getInstance()
+            .findCorrectDatabaseImplementation(new JdbcConnection(su));
+        try (Liquibase liquibase = new Liquibase(
+                "db/changelog/db.changelog-master.xml",
+                new ClassLoaderResourceAccessor(),
+                database)) {
+            var unrun = liquibase.listUnrunChangeSets(new Contexts(), new LabelExpression());
+            int idx = -1;
+            for (int i = 0; i < unrun.size(); i++) {
+                if (changesetId.equals(unrun.get(i).getId())) {
+                    idx = i;
+                    break;
+                }
+            }
+            assertThat(idx)
+                .as("%s must be present in the master changelog", changesetId)
+                .isGreaterThanOrEqualTo(0);
+            liquibase.update(idx, new Contexts(), new LabelExpression());
         }
     }
 
@@ -218,13 +258,21 @@ class Rdr71gw2CollectionNotNullTest {
             + "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
     }
 
-    /** RDR-191 Phase 4: nexus.chunks_<dim> unified into nexus.chunks -- dim now
-     *  selects the target embedding_<dim> column, not a table. */
+    /** Step G correction (RDR-191 repoint batch cluster A): seeds the
+     *  PRE-unify {@code nexus.chunks_<dim>} table directly, NOT the
+     *  post-unify {@code nexus.chunks} the F1-gap-trio retarget pointed this
+     *  at. catalog-025-0's own raw SQL (the changeset under test here) reads
+     *  {@code chunks_384/768/1024} by name -- it ran historically BEFORE the
+     *  RDR-191 unify, and {@link #startAll} now stops the class-level
+     *  migration before {@code vectors-004-1} for exactly this reason. Each
+     *  per-dim table carries a single {@code embedding} column (not
+     *  {@code embedding_<dim>} -- that naming belongs to the unified table
+     *  {@code vectors-004-unify-chunks.xml} creates). */
     private static void insertChunk(Connection su, int dim, String tenantId,
                                      String collection, String chashHex, int vecLen) throws Exception {
         insertCollection(su, tenantId, collection);
         su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ") "
+            "INSERT INTO nexus.chunks_" + dim + " (tenant_id, collection, chash, chunk_text, embedding) "
             + "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "
             + "'chunk text', ('[1" + ",0".repeat(vecLen - 1) + "]')::vector) "
             + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");

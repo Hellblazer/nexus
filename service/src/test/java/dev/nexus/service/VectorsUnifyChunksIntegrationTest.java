@@ -27,23 +27,23 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@code nexus.chunks} table ({@code vectors-004-unify-chunks.xml}, changeset
  * {@code vectors-004-1}).
  *
- * <p><strong>Isolation strategy (this changeset is NOT yet {@code <include>}d
- * in {@code db.changelog-master.xml} — see that file's own comment for why:
- * jOOQ codegen regenerates {@code Tables.java} from whatever the master
- * changelog currently produces, and registering this changeset today would
- * fail COMPILATION of ~87 existing call sites across CatalogRepository.java /
- * PgVectorRepository.java / etc. that are bead nexus-o8dil.16/.17/.18/.48's
- * scope, not this one's).</strong> Every test therefore runs the REAL,
- * UNMODIFIED master changelog to head first via {@link SchemaMigrator#migrate}
- * (chunks_384/768/1024 exist exactly as they do in production today), then
- * applies {@code vectors-004-unify-chunks.xml} as its OWN standalone root
- * changelog via a second {@link Liquibase} instance pointed directly at that
- * file's classpath-relative path. Liquibase tracks DATABASECHANGELOG rows by
- * {@code (id, author, filename)}, not by which changelog was used to REACH a
- * changeset, so this produces byte-identical end state and history to what a
- * real {@code <include>} would — validated in two {@code liquibase.update()}
- * calls instead of one, which is semantically equivalent for a changeset with
- * no {@code <include>} dependencies of its own.
+ * <p><strong>Isolation strategy — UPDATED at Step G (RDR-191 repoint batch,
+ * bead nexus-o8dil.48): this changeset IS NOW registered in {@code
+ * db.changelog-master.xml} (Step B, plan T2 [22445]) alongside the full Java
+ * repoint (o8dil.16/.17/.18/.48).</strong> Tests that need the SOURCE
+ * (pre-unify) shape — chunks_384/768/1024 present, {@code nexus.chunks} not
+ * yet created — therefore run the real master changelog only UP TO (not
+ * including) {@code vectors-004-1} via {@link #migrateUpTo}, seed their
+ * fixture against the per-dim tables, then apply {@code
+ * vectors-004-unify-chunks.xml} as its own standalone root changelog via a
+ * second {@link Liquibase} instance pointed directly at that file's
+ * classpath-relative path (identical filename to the {@code <include>} in
+ * master, so Liquibase's {@code (id, author, filename)} DATABASECHANGELOG key
+ * resolves it as the SAME changeset either way). Tests that only assert
+ * against the FINAL unified state run {@link SchemaMigrator#migrate} to real
+ * head (the changeset already applied as part of that run) and treat a
+ * subsequent {@code applyUnifyChangeset} call as the idempotent no-op it now
+ * is.
  *
  * <p>Coverage against the bead acceptance criteria:
  * <ul>
@@ -350,7 +350,10 @@ class VectorsUnifyChunksIntegrationTest {
     void straddlingDistribution_rowsLandInCorrectTypedColumn() throws Exception {
         Rig rig = newRig("straddle");
         try {
-            SchemaMigrator.migrate(rig.adminDs());
+            // Stop BEFORE vectors-004-1 (now real head, Step B registration) so
+            // chunks_384/768/1024 still exist to seed pre-unify -- see class
+            // javadoc's Step G note and migrateUpTo's own javadoc.
+            migrateUpTo(rig.adminDs(), "vectors-004-1");
 
             seedChunk(rig.pg(), 384, "t1", "code__demo__minilm__v1", chash32(1), "alpha");
             seedChunk(rig.pg(), 768, "t1", "docs__demo__bge__v1", chash32(2), "beta");
@@ -397,7 +400,9 @@ class VectorsUnifyChunksIntegrationTest {
     void degenerateSingleRow_migratesCleanly() throws Exception {
         Rig rig = newRig("degenerate");
         try {
-            SchemaMigrator.migrate(rig.adminDs());
+            // Stop BEFORE vectors-004-1 -- chunks_384/768/1024 must still exist
+            // to seed pre-unify (Step G).
+            migrateUpTo(rig.adminDs(), "vectors-004-1");
             seedChunk(rig.pg(), 384, "t1", "code__demo__minilm__v1", chash32(7), "solo");
             // chunks_768 and chunks_1024 stay EMPTY -- the real cloud/local shape.
 
@@ -431,7 +436,9 @@ class VectorsUnifyChunksIntegrationTest {
     void crossShardPkCollision_haltsMigrationLoudly() throws Exception {
         Rig rig = newRig("collision");
         try {
-            SchemaMigrator.migrate(rig.adminDs());
+            // Stop BEFORE vectors-004-1 -- chunks_384/768/1024 must still exist
+            // to seed pre-unify (Step G).
+            migrateUpTo(rig.adminDs(), "vectors-004-1");
             byte[] sharedChash = chash32(9);
             seedChunk(rig.pg(), 384, "t1", "same__collection__v1", sharedChash, "one");
             seedChunk(rig.pg(), 768, "t1", "same__collection__v1", sharedChash, "two");
@@ -644,7 +651,9 @@ class VectorsUnifyChunksIntegrationTest {
     void rollback_restoresSourcesFaithfully() throws Exception {
         Rig rig = newRig("rollback");
         try {
-            SchemaMigrator.migrate(rig.adminDs());
+            // Stop BEFORE vectors-004-1 -- chunks_384/768/1024 must still exist
+            // to seed pre-unify (Step G).
+            migrateUpTo(rig.adminDs(), "vectors-004-1");
             seedChunk(rig.pg(), 384, "t1", "code__demo__minilm__v1", chash32(50), "r1");
             seedChunk(rig.pg(), 768, "t1", "docs__demo__bge__v1", chash32(52), "r3");
             seedChunk(rig.pg(), 1024, "t1", "knowledge__demo__voyage__v1", chash32(51), "r2");
