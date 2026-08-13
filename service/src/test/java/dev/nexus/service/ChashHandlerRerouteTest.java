@@ -3,6 +3,7 @@ package dev.nexus.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.vectors.DimTables;
 import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -313,21 +314,22 @@ class ChashHandlerRerouteTest {
         StringBuilder vec = new StringBuilder("'[1");
         for (int i = 1; i < dim; i++) vec.append(",0");
         vec.append("]'");
+        // RDR-191 Phase 4 (repoint-batch lane F1): nexus.chunks_<dim> unified
+        // into nexus.chunks -- table name is now fixed, dim selects the
+        // target embedding_<dim> column instead.
         su.createStatement().execute(
-            "INSERT INTO nexus.chunks_" + dim +
-            " (tenant_id, collection, chash, chunk_text, embedding, created_at) VALUES " +
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
+            " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ", created_at) VALUES " +
             "('" + TENANT + "', '" + collection + "', decode('" + chash.toHex() + "', 'hex'), " +
             "'wire chunk " + chash.toHex().substring(0, 8) + "', " + vec + "::vector, " +
             "TIMESTAMPTZ '" + createdAt + "')");
     }
 
-    /** Total chunk rows across the three dim tables — the no-op invariant. */
+    /** Total chunk rows in the unified table — the no-op invariant. */
     private long chunkRowCount() throws Exception {
         try (Connection su = pg.createConnection("");
              ResultSet rs = su.createStatement().executeQuery(
-                "SELECT (SELECT count(*) FROM nexus.chunks_384) + " +
-                "       (SELECT count(*) FROM nexus.chunks_768) + " +
-                "       (SELECT count(*) FROM nexus.chunks_1024)")) {
+                "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME)) {
             rs.next();
             return rs.getLong(1);
         }
