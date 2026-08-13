@@ -200,7 +200,7 @@ class StagingPromoteOpsIntegrationTest {
             .as("only the two GENUINELY legacy refs alias; the canonical ref maps to itself")
             .isEqualTo(2);
 
-        assertThat(count("SELECT count(*) FROM nexus.chunks_768 "
+        assertThat(count("SELECT count(*) FROM nexus.chunks "
             + "WHERE collection = '" + COLL_A + "' AND octet_length(chash) = 32"))
             .isEqualTo(3);
         // Both legacy refs resolve through the alias to their digests.
@@ -218,7 +218,7 @@ class StagingPromoteOpsIntegrationTest {
         // so promote stamps the digest hex at INSERT — a verbatim
         // chunk_meta copy leaves every migrated chunk invisible to
         // citations.
-        assertThat(count("SELECT count(*) FROM nexus.chunks_768 "
+        assertThat(count("SELECT count(*) FROM nexus.chunks "
             + "WHERE collection = '" + COLL_A + "' "
             + "AND metadata->>'chunk_text_hash' IS DISTINCT FROM encode(chash,'hex')"))
             .as("every promoted row's metadata chunk_text_hash mirrors its chash")
@@ -236,7 +236,7 @@ class StagingPromoteOpsIntegrationTest {
         landChunk(COLL_A, 768, refY, TEXT_DUP, vec(768));
 
         Map<String, Object> counts = ops.promoteCollection(T1, COLL_A, 768);
-        assertThat(count("SELECT count(*) FROM nexus.chunks_768 "
+        assertThat(count("SELECT count(*) FROM nexus.chunks "
             + "WHERE encode(chash,'hex') = '" + digestHex(TEXT_DUP) + "'"))
             .as("identical text collapses to ONE content row").isEqualTo(1);
         for (String r : new String[] {refX, refY}) {
@@ -405,7 +405,7 @@ class StagingPromoteOpsIntegrationTest {
     @Test
     @Order(7)
     void rePromoteAndReFinalize_convergeNeverDuplicate() {
-        int chunksBefore = count("SELECT count(*) FROM nexus.chunks_768");
+        int chunksBefore = count("SELECT count(*) FROM nexus.chunks");
         int aliasBefore = count("SELECT count(*) FROM nexus.chash_alias");
         int manifestBefore = count("SELECT count(*) FROM nexus.catalog_document_chunks");
         int relevanceBefore = count("SELECT count(*) FROM nexus.relevance_log");
@@ -414,7 +414,7 @@ class StagingPromoteOpsIntegrationTest {
         assertThat(again.get("promoted")).as("re-promote inserts nothing").isEqualTo(0);
         ops.finalizeTenant(T1, false);
 
-        assertThat(count("SELECT count(*) FROM nexus.chunks_768")).isEqualTo(chunksBefore);
+        assertThat(count("SELECT count(*) FROM nexus.chunks")).isEqualTo(chunksBefore);
         assertThat(count("SELECT count(*) FROM nexus.chash_alias")).isEqualTo(aliasBefore);
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks")).isEqualTo(manifestBefore);
         assertThat(count("SELECT count(*) FROM nexus.relevance_log"))
@@ -600,7 +600,7 @@ class StagingPromoteOpsIntegrationTest {
         Map<String, Object> fin = ops.finalizeTenant(T1, false);
 
         String lateCanon = digestHex(lateText);
-        assertThat(count("SELECT count(*) FROM nexus.chunks_768 "
+        assertThat(count("SELECT count(*) FROM nexus.chunks "
             + "WHERE encode(chash,'hex') = '" + lateCanon + "'")).isEqualTo(1);
         assertThat(count("SELECT count(*) FROM nexus.frecency WHERE chunk_id = '" + lateCanon + "'"))
             .as("the late collection's pointer promoted on the RE-run — 'exactly once' is dead (C2)")
@@ -758,7 +758,7 @@ class StagingPromoteOpsIntegrationTest {
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
                 + T1 + "', 'code__kmd5b2') ON CONFLICT DO NOTHING");
             su.createStatement().execute(
-                "INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding) "
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768) "
                 + "VALUES ('" + T1 + "', 'code__kmd5b2', decode('" + liveHex + "', 'hex'), '"
                 + text + "', '" + vec(768) + "'::vector)");
             su.createStatement().execute(
@@ -785,7 +785,7 @@ class StagingPromoteOpsIntegrationTest {
                 su.createStatement().execute("DELETE FROM nexus.relevance_log WHERE query = 'kmd5b2'");
                 su.createStatement().execute("DELETE FROM nexus.chash_alias WHERE source = 'kmd5b2'");
                 su.createStatement().execute(
-                    "DELETE FROM nexus.chunks_768 WHERE collection = 'code__kmd5b2'");
+                    "DELETE FROM nexus.chunks WHERE collection = 'code__kmd5b2'");
             }
         }
     }
@@ -959,7 +959,7 @@ class StagingPromoteOpsIntegrationTest {
                 st.execute();
             }
             try (var ps = connA.prepareStatement(
-                    "INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding) "
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768) "
                     + "VALUES (?, ?, decode(?, 'hex'), ?, ?::vector)")) {
                 ps.setString(1, T1);
                 ps.setString(2, col);
@@ -985,7 +985,7 @@ class StagingPromoteOpsIntegrationTest {
             connA.commit();
         }
 
-        assertThat(count("SELECT count(*) FROM nexus.chunks_768 WHERE collection = '" + col
+        assertThat(count("SELECT count(*) FROM nexus.chunks WHERE collection = '" + col
             + "' AND encode(chash,'hex') = '" + chash + "'"))
             .as("the freshly-landed row survives the race and is ready for finalizeTenant "
                 + "to manifest later").isEqualTo(1);
@@ -1181,7 +1181,7 @@ class StagingPromoteOpsIntegrationTest {
         // The CONTENT insert's own stamp — this is the "same source the
         // content insert uses" the bead's acceptance criterion names; a
         // regression pin that promoteCollection's content leg still sets it.
-        assertThat(count("SELECT count(*) FROM nexus.chunks_768 "
+        assertThat(count("SELECT count(*) FROM nexus.chunks "
             + "WHERE collection = '" + COLL_F12B + "' AND encode(chash,'hex') = '" + canonical + "'"))
             .as("regression pin: the CONTENT insert (StagingPromoteOps :410-435) "
                 + "must be left untouched by this fix — it already stamps collection")
@@ -1437,12 +1437,19 @@ class StagingPromoteOpsIntegrationTest {
     // three tests below are the first coverage of this branch at all, not
     // merely the first per-dim coverage. Each test proves two things
     // together: (a) the orphan's content row lands in the CORRECT dim
-    // table and nowhere else, and (b) a manifest pointer that resolves
-    // through the orphan's synthetic alias promotes cleanly instead of
-    // tripping the dangling_manifest fatal check — the actual production
-    // hazard the pre-fix hardcoding created for 384/1024 (a committed
-    // alias with no backing content anywhere, aborting the WHOLE
+    // column and no OTHER dim column, and (b) a manifest pointer that
+    // resolves through the orphan's synthetic alias promotes cleanly
+    // instead of tripping the dangling_manifest fatal check — the actual
+    // production hazard the pre-fix hardcoding created for 384/1024 (a
+    // committed alias with no backing content anywhere, aborting the WHOLE
     // finalizeTenant transaction the moment anything referenced it).
+    //
+    // RDR-191 repoint (nexus-o8dil.17): nexus.chunks_384/768/1024 collapsed
+    // into ONE table, nexus.chunks, with a per-dim embedding_<dim> column.
+    // (a) above was originally phrased as "the CORRECT dim TABLE and
+    // nowhere else"; see assertOrphanSynthesizesIntoDim's own comment for
+    // why "table" became "column" without weakening what is actually
+    // proven.
 
     private void assertOrphanSynthesizesIntoDim(int dim, int order) {
         String coll = "knowledge__dimcheck" + dim + "__model-" + dim + "__v1";
@@ -1496,21 +1503,33 @@ class StagingPromoteOpsIntegrationTest {
             .isEqualTo(0);
         assertThat(fin.get("residual_mismatched")).isEqualTo(0);
 
-        String targetTable = "nexus.chunks_" + dim;
-        assertThat(countAs(T_DIM, "SELECT count(*) FROM " + targetTable + " c "
+        // RDR-191 repoint (nexus-o8dil.17): nexus.chunks_384/768/1024
+        // collapsed into ONE table, nexus.chunks, with a per-dim
+        // embedding_<dim> column (exactly one non-null, DB CHECK-enforced).
+        // "landed in the dim-correct TABLE and nowhere else" is no longer
+        // expressible -- there is only one table -- so the equivalent,
+        // still-meaningful assertion is "landed in the dim-correct COLUMN":
+        // embedding_<dim> IS NOT NULL on the surrogate row, and each OTHER
+        // dim's embedding_<other> column carries NO row for this alias (the
+        // direct analogue of "no cross-dim leakage into chunks_<other>" --
+        // this is the actual regression a09e6b486 fixed: the orphan-
+        // synthesize INSERT choosing the wrong embedding column, not the
+        // wrong physical table).
+        assertThat(countAs(T_DIM, "SELECT count(*) FROM nexus.chunks c "
             + "JOIN nexus.chash_alias a ON a.new_chash = c.chash "
             + "WHERE c.tenant_id = '" + T_DIM + "' AND a.old_ref = '" + legacyRef + "' "
             + "AND a.source = 'staging:synthetic' AND c.chunk_text = '' "
-            + "AND c.metadata->>'chash_origin' = 'synthetic'"))
-            .as("dim " + dim + ": the surrogate content row landed in the "
-                + "dim-correct table with the synthetic stamp")
+            + "AND c.metadata->>'chash_origin' = 'synthetic' "
+            + "AND c.embedding_" + dim + " IS NOT NULL"))
+            .as("dim " + dim + ": the surrogate content row landed with the "
+                + "synthetic stamp AND its vector in the dim-correct column")
             .isEqualTo(1);
         for (int other : new int[] {384, 768, 1024}) {
             if (other == dim) continue;
-            assertThat(countAs(T_DIM, "SELECT count(*) FROM nexus.chunks_" + other + " c "
+            assertThat(countAs(T_DIM, "SELECT count(*) FROM nexus.chunks c "
                 + "JOIN nexus.chash_alias a ON a.new_chash = c.chash "
-                + "WHERE a.old_ref = '" + legacyRef + "'"))
-                .as("dim " + dim + ": no cross-dim leakage into chunks_" + other)
+                + "WHERE a.old_ref = '" + legacyRef + "' AND c.embedding_" + other + " IS NOT NULL"))
+                .as("dim " + dim + ": no cross-dim leakage into embedding_" + other)
                 .isEqualTo(0);
         }
         assertThat(countAs(T_DIM, "SELECT count(*) FROM nexus.catalog_document_chunks "

@@ -169,21 +169,21 @@ class RekeyOpsIntegrationTest {
     //    checks are dropped around seeding and re-added NOT VALID, the same
     //    reconstruction the pre-flip incident tests used) ───────────────────
 
+    // RDR-191 repoint (nexus-o8dil.17): the former per-dim octet-check
+    // constraints (chunks_768_chash_octet_check / chunks_384_chash_octet_check
+    // on their own physical tables) collapse to ONE constraint,
+    // chunks_chash_octet_check, on the single unified nexus.chunks table
+    // (vectors-004-unify-chunks.xml). One DROP/ADD pair instead of two.
     private void withChecksDropped(Connection su, Runnable seed) throws Exception {
         su.createStatement().execute(
-            "ALTER TABLE nexus.chunks_768 DROP CONSTRAINT chunks_768_chash_octet_check");
-        su.createStatement().execute(
-            "ALTER TABLE nexus.chunks_384 DROP CONSTRAINT chunks_384_chash_octet_check");
+            "ALTER TABLE nexus.chunks DROP CONSTRAINT chunks_chash_octet_check");
         su.createStatement().execute(
             "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT catalog_document_chunks_chash_octet_check");
         try {
             seed.run();
         } finally {
             su.createStatement().execute(
-                "ALTER TABLE nexus.chunks_768 ADD CONSTRAINT chunks_768_chash_octet_check "
-                + "CHECK (octet_length(chash) = 32) NOT VALID");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.chunks_384 ADD CONSTRAINT chunks_384_chash_octet_check "
+                "ALTER TABLE nexus.chunks ADD CONSTRAINT chunks_chash_octet_check "
                 + "CHECK (octet_length(chash) = 32) NOT VALID");
             su.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks ADD CONSTRAINT catalog_document_chunks_chash_octet_check "
@@ -191,10 +191,16 @@ class RekeyOpsIntegrationTest {
         }
     }
 
-    private static void insertChunk(Connection su, String tenant, String table, int dim,
+    // RDR-191 repoint (nexus-o8dil.17): nexus.chunks_384/768/1024 collapsed
+    // into ONE table, nexus.chunks, with a per-dim embedding_<dim> column
+    // (exactly one non-null). The `table` parameter is gone -- there is
+    // only one table to insert into now -- and the fixed "embedding" column
+    // name becomes "embedding_" + dim, selecting which column this row's
+    // vector lands in.
+    private static void insertChunk(Connection su, String tenant, int dim,
                                     String collection, byte[] chash, String text) {
         try (PreparedStatement ps = su.prepareStatement(
-            "INSERT INTO " + table + " (tenant_id, collection, chash, chunk_text, embedding) "
+            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_" + dim + ") "
             + "VALUES (?, ?, ?, ?, ?::vector)")) {
             ps.setString(1, tenant);
             ps.setString(2, collection);
@@ -247,41 +253,62 @@ class RekeyOpsIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             exec(su, "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES "
-                + "('" + TA + "', 'code__k') ON CONFLICT DO NOTHING");
+                + "('" + TA + "', 'code__k'), ('" + TA + "', 'code__k2') ON CONFLICT DO NOTHING");
             exec(su, "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
                 + "VALUES ('" + TA + "', '1.1', 'doc') ON CONFLICT DO NOTHING");
             withChecksDropped(su, () -> {
                 // (a) content row, legacy 16-byte key
-                insertChunk(su, TA, "nexus.chunks_768", 768, "code__k", legacyA, TEXT_A);
+                insertChunk(su, TA, 768, "code__k", legacyA, TEXT_A);
                 // ETL-era 32-byte ASCII id with content (the width-predicate blindspot)
-                insertChunk(su, TA, "nexus.chunks_768", 768, "code__k", etlB, TEXT_B);
+                insertChunk(su, TA, 768, "code__k", etlB, TEXT_B);
                 // duplicate-content collapse pair (same collection, same text)
-                insertChunk(su, TA, "nexus.chunks_768", 768, "code__k", legacyDup1, TEXT_DUP);
-                insertChunk(su, TA, "nexus.chunks_768", 768, "code__k", legacyDup2, TEXT_DUP);
-                // (b) reference-only row in ANOTHER dim sharing A's old key
-                insertChunk(su, TA, "nexus.chunks_384", 384, "code__k", legacyA, "");
+                insertChunk(su, TA, 768, "code__k", legacyDup1, TEXT_DUP);
+                insertChunk(su, TA, 768, "code__k", legacyDup2, TEXT_DUP);
+                // (b) reference-only row sharing A's old key, in a DIFFERENT
+                // collection ('code__k2'). RDR-191 repoint (nexus-o8dil.17):
+                // before unification this lived in chunks_384 while A's
+                // content lived in chunks_768 -- "another dim, same
+                // collection" was schema-legal because each dim had its own
+                // table/PK. Under the unified nexus.chunks table the PK is
+                // (tenant_id, collection, chash) with NO dim component, so a
+                // content row and an empty-text row can no longer coexist at
+                // the identical (tenant, collection, chash) key -- that
+                // configuration is now a PK violation, not a fixture this
+                // schema can express. orphanCond's own scoping was ALWAYS
+                // chash-only (no collection filter -- "a content-bearing row
+                // ANYWHERE shares this chash"), so a different collection is
+                // the faithful, schema-valid re-expression of the exact same
+                // scenario the class javadoc's disposition (b) documents,
+                // not a weakened substitute.
+                insertChunk(su, TA, 384, "code__k2", legacyA, "");
                 // (c) orphan: empty text, no content sibling anywhere
-                insertChunk(su, TA, "nexus.chunks_384", 384, "code__k", orphanKey, "");
+                insertChunk(su, TA, 384, "code__k", orphanKey, "");
                 // nexus-4okz4 increment 2 REWORK (code-review-expert C1, T2
                 // review [21863] / critique [21864]): adjudicating fixture for
-                // orphanCond's same-dim (384) content-sibling NOT EXISTS
-                // clause. Every content-bearing row seeded above for TA lives
-                // in chunks_768 -- this tenant previously had ZERO
-                // content-bearing rows in chunks_384 itself, so a
-                // de-correlated same-dim subquery (self-shadowed unaliased
-                // table reference, degenerating "chash = c.chash AND
-                // chunk_text <> ''" to just "chunk_text <> ''" -- "does this
-                // dim have ANY content") was indistinguishable from the
-                // correlated form. This row is digest-matching (chash =
-                // sha256(text)) so it is inert to rekey's own mismatch/
-                // collapse predicates (rehashed/collapsed_duplicates counts
-                // below are unaffected) -- its only job is to make chunks_384
-                // non-empty for TA so a de-correlated same-dim clause and the
-                // correlated one disagree.
+                // orphanCond's content-sibling NOT EXISTS clause -- pins the
+                // self-shadowing regression class (an unaliased same-table
+                // subquery degenerating "chash = c.chash AND chunk_text <>
+                // ''" to just "chunk_text <> ''", i.e. "does ANY content
+                // exist", independent of which key is being checked).
+                //
+                // RDR-191 repoint (nexus-o8dil.17): this fixture's ORIGINAL
+                // purpose was to make chunks_384 non-empty, because before
+                // unification a de-correlated same-dim subquery and the
+                // correlated one only disagreed once THAT dim's table held
+                // some content. Post-unification there is exactly ONE
+                // physical table (nexus.chunks) and it is ALREADY non-empty
+                // from TEXT_A/TEXT_B/TEXT_DUP above, so this insert is no
+                // longer load-bearing for non-emptiness -- kept anyway as an
+                // independent, defense-in-depth pin (a second, differently
+                // -chashed content row) so a self-shadowing regression is
+                // caught even if a future edit changes which rows precede it
+                // in insertion order. Digest-matching (chash =
+                // sha256(text)), so it stays inert to rekey's own
+                // mismatch/collapse predicates exactly as before.
                 String sameDimContentText =
-                    "rekey same-dim orphanCond correlation fixture ta " + System.nanoTime();
+                    "rekey self-shadow orphanCond correlation fixture ta " + System.nanoTime();
                 byte[] sameDimChash = sha256(sameDimContentText);
-                insertChunk(su, TA, "nexus.chunks_384", 384, "code__k",
+                insertChunk(su, TA, 384, "code__k",
                     sameDimChash, sameDimContentText);
                 // this row is digest-matching so rekey never touches it (see
                 // above) -- stamp metadata.chunk_text_hash here to mirror
@@ -290,7 +317,7 @@ class RekeyOpsIntegrationTest {
                 // below (that sweep scans the WHOLE table for the tenant,
                 // not just rows rekey actually rewrote).
                 try (PreparedStatement mps = su.prepareStatement(
-                        "UPDATE nexus.chunks_384 SET metadata = "
+                        "UPDATE nexus.chunks SET metadata = "
                         + "jsonb_build_object('chunk_text_hash', encode(chash, 'hex')) "
                         + "WHERE tenant_id = ? AND chash = ?")) {
                     mps.setString(1, TA);
@@ -345,19 +372,23 @@ class RekeyOpsIntegrationTest {
 
         String newAHex = HexFormat.of().formatHex(sha256(TEXT_A));
         // (a) rehashable → full digest key
-        assertThat(count("SELECT count(*) FROM nexus.chunks_768 WHERE tenant_id='" + TA
-            + "' AND chash = decode('" + newAHex + "', 'hex')")).isEqualTo(1);
+        assertThat(count("SELECT count(*) FROM nexus.chunks WHERE tenant_id='" + TA
+            + "' AND chash = decode('" + newAHex + "', 'hex') AND collection = 'code__k'")).isEqualTo(1);
         // ETL-era 32-byte ASCII id also rekeyed (width-free predicate)
-        assertThat(count("SELECT count(*) FROM nexus.chunks_768 WHERE tenant_id='" + TA
+        assertThat(count("SELECT count(*) FROM nexus.chunks WHERE tenant_id='" + TA
             + "' AND chash = sha256(convert_to('" + TEXT_B + "', 'UTF8'))")).isEqualTo(1);
         // duplicate pair collapsed to ONE row at the digest key
-        assertThat(count("SELECT count(*) FROM nexus.chunks_768 WHERE tenant_id='" + TA
+        assertThat(count("SELECT count(*) FROM nexus.chunks WHERE tenant_id='" + TA
             + "' AND chunk_text = '" + TEXT_DUP + "'")).isEqualTo(1);
-        // (b) reference-only row remapped to the sibling's new key, NOT dropped
-        assertThat(count("SELECT count(*) FROM nexus.chunks_384 WHERE tenant_id='" + TA
-            + "' AND chash = decode('" + newAHex + "', 'hex') AND chunk_text = ''")).isEqualTo(1);
+        // (b) reference-only row (seeded in 'code__k2' -- see the fixture
+        // comment above for why a DIFFERENT collection now stands in for
+        // "another dim, same key") remapped to the sibling's new key, NOT
+        // dropped.
+        assertThat(count("SELECT count(*) FROM nexus.chunks WHERE tenant_id='" + TA
+            + "' AND collection = 'code__k2' AND chash = decode('" + newAHex
+            + "', 'hex') AND chunk_text = ''")).isEqualTo(1);
         // (c) orphan row GONE and pointers CASCADED — no dangling scan hits
-        assertThat(count("SELECT count(*) FROM nexus.chunks_384 WHERE tenant_id='" + TA
+        assertThat(count("SELECT count(*) FROM nexus.chunks WHERE tenant_id='" + TA
             + "' AND chash = decode('" + "f".repeat(32) + "', 'hex')")).isZero();
         // RDR-086 metadata parity (critic-1010, nexus-jxizy.10.10): every
         // row the rekey touched must carry metadata.chunk_text_hash
@@ -365,12 +396,16 @@ class RekeyOpsIntegrationTest {
         // reads it; the seeded rows here deliberately carry NO metadata, so
         // this fails unless the rekey statements stamp it (backfill +
         // invariant-by-construction, parity with StagingPromoteOps).
-        for (String t : new String[] {"nexus.chunks_768", "nexus.chunks_384"}) {
-            assertThat(count("SELECT count(*) FROM " + t + " WHERE tenant_id='" + TA
-                + "' AND metadata->>'chunk_text_hash' IS DISTINCT FROM encode(chash,'hex')"))
-                .as("rekeyed rows in " + t + " mirror their chash into metadata chunk_text_hash")
-                .isZero();
-        }
+        //
+        // RDR-191 repoint (nexus-o8dil.17): collapsed from a loop over two
+        // former per-dim tables to ONE query -- nexus.chunks now holds every
+        // rekeyed row for this tenant (both collections) in the single
+        // table, so a single tenant-scoped scan covers the same row set the
+        // two-table loop used to cover.
+        assertThat(count("SELECT count(*) FROM nexus.chunks WHERE tenant_id='" + TA
+            + "' AND metadata->>'chunk_text_hash' IS DISTINCT FROM encode(chash,'hex')"))
+            .as("rekeyed rows in nexus.chunks mirror their chash into metadata chunk_text_hash")
+            .isZero();
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks WHERE tenant_id='" + TA
             + "' AND octet_length(chash) <> 32")).isZero();
         // alias facts: the 16-byte era row's old_ref is its 32-hex; the
@@ -420,17 +455,18 @@ class RekeyOpsIntegrationTest {
             exec(su, "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
                 + "VALUES ('" + TB + "', '2.1', 'doc') ON CONFLICT DO NOTHING");
             withChecksDropped(su, () -> {
-                insertChunk(su, TB, "nexus.chunks_384", 384, "code__s", orphanKey, "");
+                insertChunk(su, TB, 384, "code__s", orphanKey, "");
                 // nexus-4okz4 increment 2 REWORK (code-review-expert C1, T2
                 // review [21863] / critique [21864]): same adjudicating
                 // fixture as rekey_fullPass_dispositionsAtoC_andCascade,
                 // digest-matching so it is inert to rekey's own predicates --
-                // makes chunks_384 non-empty for TB so orphanCond's same-dim
-                // NOT EXISTS clause is actually exercised for the SYNTHESIZE
-                // policy too, not just DROP.
+                // exercises orphanCond's content-sibling NOT EXISTS
+                // self-shadowing pin (see that test's fixture comment,
+                // RDR-191 nexus-o8dil.17) for the SYNTHESIZE policy too, not
+                // just DROP.
                 String sameDimContentText =
-                    "rekey same-dim orphanCond correlation fixture tb " + System.nanoTime();
-                insertChunk(su, TB, "nexus.chunks_384", 384, "code__s",
+                    "rekey self-shadow orphanCond correlation fixture tb " + System.nanoTime();
+                insertChunk(su, TB, 384, "code__s",
                     sha256(sameDimContentText), sameDimContentText);
                 try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.catalog_document_chunks "
@@ -454,7 +490,7 @@ class RekeyOpsIntegrationTest {
         String oldRef = "e".repeat(32);
         String surrogateHex = HexFormat.of().formatHex(
             sha256("nexus:synthetic-chash:v1|" + TB + "|code__s|" + oldRef));
-        assertThat(scalar("SELECT metadata->>'chash_origin' FROM nexus.chunks_384 "
+        assertThat(scalar("SELECT metadata->>'chash_origin' FROM nexus.chunks "
             + "WHERE tenant_id='" + TB + "' AND chash = decode('" + surrogateHex + "', 'hex')"))
             .isEqualTo("synthetic");
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks WHERE tenant_id='" + TB
@@ -505,8 +541,8 @@ class RekeyOpsIntegrationTest {
             exec(su, "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES "
                 + "('" + tenant + "', 'code__m') ON CONFLICT DO NOTHING");
             withChecksDropped(su, () -> {
-                insertChunk(su, tenant, "nexus.chunks_768", 768, "code__m", old1, text);
-                insertChunk(su, tenant, "nexus.chunks_768", 768, "code__m", old2, text);
+                insertChunk(su, tenant, 768, "code__m", old1, text);
+                insertChunk(su, tenant, 768, "code__m", old2, text);
                 try {
                     // (chash_index seeds removed — RDR-187/nexus-piwya.9: the
                     // router and its two-phase repoint died; topic_assignments
@@ -533,7 +569,7 @@ class RekeyOpsIntegrationTest {
         assertThat((int) counts.get("residual_mismatched")).isZero();
 
         // chunks collapsed to ONE row at the digest key
-        assertThat(count("SELECT count(*) FROM nexus.chunks_768 WHERE tenant_id='" + tenant + "'"))
+        assertThat(count("SELECT count(*) FROM nexus.chunks WHERE tenant_id='" + tenant + "'"))
             .isEqualTo(1);
         // topic_assignments two-phase: one surviving assignment at the 64-hex
         assertThat(count("SELECT count(*) FROM nexus.topic_assignments WHERE tenant_id='" + tenant + "'"))
@@ -564,15 +600,15 @@ class RekeyOpsIntegrationTest {
             exec(su, "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES "
                 + "('" + TC + "', 'code__c1'), ('" + TC + "', 'code__c2') ON CONFLICT DO NOTHING");
             withChecksDropped(su, () -> {
-                insertChunk(su, TC, "nexus.chunks_768", 768, "code__c1", sharedOldKey, "text one");
-                insertChunk(su, TC, "nexus.chunks_768", 768, "code__c2", sharedOldKey, "text two");
+                insertChunk(su, TC, 768, "code__c1", sharedOldKey, "text one");
+                insertChunk(su, TC, 768, "code__c2", sharedOldKey, "text two");
             });
         }
         assertThatThrownBy(() -> rekeyOps.rekey(TC, false))
             .isInstanceOf(RekeyOps.RekeyConflictException.class)
             .hasMessageContaining("refusing");
         // nothing mutated (transactional): both rows still hold the old key
-        assertThat(count("SELECT count(*) FROM nexus.chunks_768 WHERE tenant_id='" + TC
+        assertThat(count("SELECT count(*) FROM nexus.chunks WHERE tenant_id='" + TC
             + "' AND chash = decode('" + "d".repeat(32) + "', 'hex')")).isEqualTo(2);
         assertThat(count("SELECT count(*) FROM nexus.chash_alias WHERE tenant_id='" + TC + "'"))
             .isZero();
@@ -621,7 +657,7 @@ class RekeyOpsIntegrationTest {
             withChecksDropped(su, () -> {
                 for (int i = 0; i < 40; i++) {
                     String text = "stats fixture chunk " + i;
-                    insertChunk(su, tenant, "nexus.chunks_768", 768, "code__stats",
+                    insertChunk(su, tenant, 768, "code__stats",
                         legacyKeyOf(text), text);
                 }
             });
@@ -822,7 +858,7 @@ class RekeyOpsIntegrationTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
                 + tenant + "', '" + col + "') ON CONFLICT DO NOTHING");
-            insertChunk(su, tenant, "nexus.chunks_768", 768, col, bogusOldChash, text);
+            insertChunk(su, tenant, 768, col, bogusOldChash, text);
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES ('"
                 + tenant + "', 'gate-doc', 'gate doc') ON CONFLICT DO NOTHING");
@@ -934,7 +970,7 @@ class RekeyOpsIntegrationTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
                 + tenant + "', '" + col + "') ON CONFLICT DO NOTHING");
-            insertChunk(su, tenant, "nexus.chunks_768", 768, col, bogusOldChash, text);
+            insertChunk(su, tenant, 768, col, bogusOldChash, text);
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES ('"
                 + tenant + "', 'gate-b-doc', 'gate doc b') ON CONFLICT DO NOTHING");
@@ -979,7 +1015,7 @@ class RekeyOpsIntegrationTest {
                     probe.setAutoCommit(false);
                     try {
                         try (PreparedStatement ps = probe.prepareStatement(
-                                "SELECT 1 FROM nexus.chunks_768 WHERE tenant_id = ? "
+                                "SELECT 1 FROM nexus.chunks WHERE tenant_id = ? "
                                 + "AND chash = decode(?, 'hex') FOR UPDATE NOWAIT")) {
                             ps.setString(1, tenant);
                             ps.setString(2, bogusOldHex);
@@ -1008,7 +1044,7 @@ class RekeyOpsIntegrationTest {
             }
         }
 
-        assertThat(count("SELECT count(*) FROM nexus.chunks_768 WHERE tenant_id='" + tenant
+        assertThat(count("SELECT count(*) FROM nexus.chunks WHERE tenant_id='" + tenant
             + "' AND chash = decode('" + trueHex + "', 'hex')"))
             .as("after the gate releases, content rekey completes too").isEqualTo(1);
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks WHERE tenant_id='" + tenant
@@ -1037,34 +1073,34 @@ class RekeyOpsIntegrationTest {
         // nexus-4okz4 increment 1, critic ROUND 3 pin-sensitivity finding
         // (T2 critique-t76bp-rekey-gate-2026-08-08 [21807], "Site 2
         // correlation is unpinned"): ChashSqlIdioms.danglingManifestCountDsl
-        // is THREE correlated NOT EXISTS subqueries (m.chash matched against
-        // each dim table's own chash). A de-correlated rewrite (e.g. a
-        // dropped .where() turning "NOT EXISTS(SELECT 1 FROM chunks_768
-        // WHERE chash = m.chash)" into the unconditional "NOT EXISTS(SELECT
-        // 1 FROM chunks_768)") passed every fixture that predates this row:
-        // this tenant previously had ZERO content rows in any dim table, so
-        // the de-correlated form's "table is empty" check was ALSO true,
-        // giving the identical count=1/abort-fires result as the correlated
-        // form -- no discrimination. Inserting one UNRELATED, live content
-        // row into chunks_768 for this tenant changes nothing for the
-        // CORRELATED form (the ghost chash still matches no row in any dim,
-        // by construction -- it is never referenced by any INSERT here) but
-        // flips the DE-CORRELATED form: chunks_768 is no longer empty, so
-        // its NOT EXISTS(SELECT 1 FROM chunks_768) collapses to false, the
-        // three-way AND goes false, the ghost is no longer counted, and the
-        // abort would silently stop firing.
+        // was THREE correlated NOT EXISTS subqueries (m.chash matched
+        // against each dim table's own chash) prior to RDR-191. A
+        // de-correlated rewrite (e.g. a dropped .where() turning
+        // "NOT EXISTS(SELECT 1 FROM <table> WHERE chash = m.chash)" into the
+        // unconditional "NOT EXISTS(SELECT 1 FROM <table>)") passed every
+        // fixture that predates this row: this tenant previously had ZERO
+        // content rows anywhere, so the de-correlated form's "table is
+        // empty" check was ALSO true, giving the identical
+        // count=1/abort-fires result as the correlated form -- no
+        // discrimination. One unrelated, live content row per collection
+        // (all schema-valid: same chash, three DIFFERENT collections, so no
+        // PK collision under the unified table either) closes that gap
+        // regardless of dim.
         //
-        // nexus-4okz4 increment 2 critic follow-up (T2 critique-4okz4-
-        // increment1-2026-08-08 [21850], nit 1 — "honest partial"): the
-        // ORIGINAL fixture inserted the unrelated row into chunks_768 ONLY,
-        // so it pinned correlation for that ONE dim's NOT EXISTS clause —
-        // a regression de-correlating solely the chunks_384 or chunks_1024
-        // subquery (while 768 stayed correlated) would still pass, since
-        // those tables remained empty for this tenant. One unrelated row
-        // per dim closes that gap: EVERY dim's NOT EXISTS clause is now
-        // exercised against a non-empty table, so a single-dim copy-paste
-        // regression in danglingManifestCountDsl is caught regardless of
-        // which dim it hits.
+        // RDR-191 repoint (nexus-o8dil.17): ChashSqlIdioms.java (including
+        // danglingManifestCountDsl) is OUT OF THIS FILE'S SCOPE -- it is a
+        // separate, as-yet-unrepointed census file (T2
+        // nexus/rdr-191-batch-D1-2026-08-13 [22460] flags it "unassigned to
+        // a specific D-slot" pending orchestrator triage). This fixture is
+        // left schema-valid either way (three distinct collections, so no
+        // PK collision regardless of whether that method collapses to one
+        // correlated NOT EXISTS against the unified nexus.chunks or stays
+        // structurally three) and the assertion below only checks the
+        // coarse "dangling manifest" message, so it does not assume that
+        // method's post-repoint internal shape. Once ChashSqlIdioms is
+        // repointed, re-verify this fixture still exercises real
+        // correlation (not vacuously passing because the table is
+        // non-empty for unrelated reasons).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             for (String c : new String[] {col384, col768, col1024}) {
@@ -1073,9 +1109,9 @@ class RekeyOpsIntegrationTest {
                     + tenant + "', '" + c + "') ON CONFLICT DO NOTHING");
             }
             String unrelatedText = "rekey dangling-count correlation fixture " + System.nanoTime();
-            insertChunk(su, tenant, "nexus.chunks_384", 384, col384, sha256(unrelatedText), unrelatedText);
-            insertChunk(su, tenant, "nexus.chunks_768", 768, col768, sha256(unrelatedText), unrelatedText);
-            insertChunk(su, tenant, "nexus.chunks_1024", 1024, col1024, sha256(unrelatedText), unrelatedText);
+            insertChunk(su, tenant, 384, col384, sha256(unrelatedText), unrelatedText);
+            insertChunk(su, tenant, 768, col768, sha256(unrelatedText), unrelatedText);
+            insertChunk(su, tenant, 1024, col1024, sha256(unrelatedText), unrelatedText);
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES ('"
                 + tenant + "', 'ghost-doc', 'ghost') ON CONFLICT DO NOTHING");
@@ -1101,9 +1137,9 @@ class RekeyOpsIntegrationTest {
         assertThatThrownBy(() -> rekeyOps.rekey(tenant, false))
             .as("the step-6 detection must be ENFORCED, not merely computed and returned in the "
                 + "envelope -- a caller that never inspects the envelope must not be able to miss "
-                + "this, AND the count must be CORRELATED per row in EVERY dim (an unrelated "
-                + "content row in chunks_384/768/1024 must not mask the ghost manifest row's "
-                + "dangling reference)")
+                + "this, AND the count must be CORRELATED per row (an unrelated content row in "
+                + "nexus.chunks, any collection, must not mask the ghost manifest row's dangling "
+                + "reference)")
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("dangling manifest");
     }

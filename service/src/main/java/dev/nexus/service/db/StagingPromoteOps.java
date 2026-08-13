@@ -16,14 +16,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import dev.nexus.service.vectors.DimTables;
+
 import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
 import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
@@ -185,28 +185,38 @@ public final class StagingPromoteOps {
     }
 
     /**
-     * Per-dim content-table accessor for {@link #promoteCollection}'s
-     * content INSERT (nexus-4okz4 increment 3) — same explicit-three-
-     * branches discipline as {@code RekeyOps.DIMS} /
-     * {@code ChashSqlIdioms.danglingManifestCountDsl} (no common typed
-     * interface across the three generated chunk-table classes to derive
-     * this from {@link ChashSqlIdioms#CHUNK_TABLES} mechanically). See
-     * RawSqlGateTest's {@code chunkTablesCanary_fourthDimNeedsAllSitesToldChecklistAbove}
-     * fourth-dim checklist, extended to name this method.
+     * Content-table accessor for {@link #promoteCollection}'s content
+     * INSERT (nexus-4okz4 increment 3, RDR-191 repoint nexus-o8dil.17).
+     *
+     * <p>Unlike {@code RekeyOps.Dim} (which carries no embedding field —
+     * RekeyOps never INSERTs content rows), this record genuinely needs a
+     * per-dim {@code embedding} accessor: {@link #promoteCollection} writes
+     * a NEW content row whose embedding lands in the dim-specific column.
+     * Post-unification all three dims share the SAME {@code table}
+     * ({@link dev.nexus.service.jooq.nexus.Tables#CHUNKS}) and the SAME
+     * tenantId/collection/chash/chunkText/metadata fields — only {@code
+     * embedding} differs, selected via {@link DimTables#embeddingColumn(int)}
+     * (the single name authority the raw-SQL/typed-DSL split shares, per
+     * DimTables' own class javadoc) rather than hand-rolling
+     * {@code "embedding_" + dim} here. byte[]-typed {@code chash} kept
+     * (built directly off the generated table, not {@code
+     * DimTables.ChunkTable}'s hex-string accessor) for the same reason as
+     * {@code RekeyOps.Dim}: {@link ChashSqlIdioms#digestField} and the
+     * {@code chash_alias} joins below are byte[]-typed, and {@code
+     * Tables.CHUNKS.CHASH} is already byte[]-typed natively.
      */
     private record ChunkDim(Table<?> table, Field<String> tenantId, Field<String> collection,
                              Field<byte[]> chash, Field<String> chunkText, Field<Vector> embedding,
                              Field<JSONB> metadata) {
     }
 
+    @SuppressWarnings("unchecked")
     private static ChunkDim chunkDim(int impliedDim) {
         return switch (impliedDim) {
-            case 384 -> new ChunkDim(CHUNKS_384, CHUNKS_384.TENANT_ID, CHUNKS_384.COLLECTION,
-                CHUNKS_384.CHASH, CHUNKS_384.CHUNK_TEXT, CHUNKS_384.EMBEDDING, CHUNKS_384.METADATA);
-            case 768 -> new ChunkDim(CHUNKS_768, CHUNKS_768.TENANT_ID, CHUNKS_768.COLLECTION,
-                CHUNKS_768.CHASH, CHUNKS_768.CHUNK_TEXT, CHUNKS_768.EMBEDDING, CHUNKS_768.METADATA);
-            case 1024 -> new ChunkDim(CHUNKS_1024, CHUNKS_1024.TENANT_ID, CHUNKS_1024.COLLECTION,
-                CHUNKS_1024.CHASH, CHUNKS_1024.CHUNK_TEXT, CHUNKS_1024.EMBEDDING, CHUNKS_1024.METADATA);
+            case 384, 768, 1024 -> new ChunkDim(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION,
+                CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                (Field<Vector>) CHUNKS.field(DimTables.embeddingColumn(impliedDim)),
+                CHUNKS.METADATA);
             // unreachable in practice: promoteCollection's own
             // PromotePreconditionException guard validates impliedDim is one
             // of 384/768/1024 before this method is ever invoked.
@@ -473,8 +483,9 @@ public final class StagingPromoteOps {
             // Object-typed for the isNotNull() predicate below only; the
             // orphan-synthesize INSERT's select list needs a SEPARATE
             // Vector-typed accessor (scEmbeddingTyped, built where it's used)
-            // matching CHUNKS_768.EMBEDDING's exact Java type so
-            // insertInto(...).select(...) type-checks.
+            // matching the target ChunkDim's embedding Field's exact Java
+            // type (dim-selected via DimTables.embeddingColumn — see
+            // chunkDim(int)) so insertInto(...).select(...) type-checks.
             Field<Object> scEmbeddingRaw = DSL.field(DSL.name("s", "embedding"), Object.class);
             Field<JSONB> scChunkMeta = DSL.field(DSL.name("s", "chunk_meta"), JSONB.class);
 
@@ -706,10 +717,14 @@ public final class StagingPromoteOps {
                 .leftJoin(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(sChash))
                 .where(CHASH_ALIAS.NEW_CHASH.isNotNull().or(sChash.likeRegex("^[0-9a-f]{64}$")))
                 .asTable("cand");
-            var phys = ctx.select(CHUNKS_384.COLLECTION, CHUNKS_384.CHASH).from(CHUNKS_384)
-                .unionAll(ctx.select(CHUNKS_768.COLLECTION, CHUNKS_768.CHASH).from(CHUNKS_768))
-                .unionAll(ctx.select(CHUNKS_1024.COLLECTION, CHUNKS_1024.CHASH).from(CHUNKS_1024))
-                .asTable("phys");
+            // RDR-191 repoint (nexus-o8dil.17): the former three-dim UNION
+            // ALL collapses to a single SELECT — nexus.chunks is now the
+            // single table every dim's content lives in (dim-independent
+            // PK: tenant_id, collection, chash), so it already IS the union
+            // the three branches used to compute; re-unioning it with
+            // itself would triple-count. Same collapse as RekeyOps' own
+            // step-2b `phys` (see T2 nexus/rdr-191-batch-D3-2026-08-13).
+            var phys = ctx.select(CHUNKS.COLLECTION, CHUNKS.CHASH).from(CHUNKS).asTable("phys");
             var targetCollections = ctx.selectDistinct(phys.field("collection", String.class))
                 .from(cand)
                 .join(phys).on(phys.field("chash", byte[].class).eq(cand.field("chash", byte[].class)))
@@ -1145,20 +1160,20 @@ public final class StagingPromoteOps {
             // nexus-4okz4 increment 2: residualMismatchCount (the raw-string
             // form) was deleted when RekeyOps' step 6 converted to typed DSL
             // — this SHARED fragment's only remaining form is
-            // ChashSqlIdioms.residualMismatchCountDsl. Three explicit calls
-            // (not a loop over ChashSqlIdioms.CHUNK_TABLES) since there is no
-            // local typed per-dim registry in this class — mirrors RekeyOps'
-            // own explicit-three-constants discipline for the identical
-            // reason (no common typed interface across the three generated
-            // chunk-table classes). Same predicate, same three tables, same
-            // order — behavior-preserving swap, not a rewrite of the check.
-            int residual = 0;
-            residual += ChashSqlIdioms.residualMismatchCountDsl(
-                ctx, CHUNKS_384, CHUNKS_384.CHASH, CHUNKS_384.CHUNK_TEXT);
-            residual += ChashSqlIdioms.residualMismatchCountDsl(
-                ctx, CHUNKS_768, CHUNKS_768.CHASH, CHUNKS_768.CHUNK_TEXT);
-            residual += ChashSqlIdioms.residualMismatchCountDsl(
-                ctx, CHUNKS_1024, CHUNKS_1024.CHASH, CHUNKS_1024.CHUNK_TEXT);
+            // ChashSqlIdioms.residualMismatchCountDsl.
+            //
+            // RDR-191 repoint (nexus-o8dil.17): collapsed from three
+            // explicit per-table calls (one per former physical dim table)
+            // to ONE — nexus.chunks is now the single table holding every
+            // dim's content rows, dim-independent (tenant_id, collection,
+            // chash) identity. Summing three calls against the SAME table
+            // with the SAME predicate would now triple-count every
+            // mismatched row (the DimTables D1 hazard: table membership no
+            // longer implies dim). A single call over the unified table is
+            // the byte-for-byte same predicate over the same row set that
+            // the three summed calls used to cover — not an approximation.
+            int residual = ChashSqlIdioms.residualMismatchCountDsl(
+                ctx, CHUNKS, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT);
             counts.put("residual_mismatched", residual);
             Integer danglingManifest = ChashSqlIdioms.danglingManifestCountDsl(ctx);
             counts.put("dangling_manifest", danglingManifest);
