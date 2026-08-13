@@ -12,9 +12,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_CONFORMANCE_REPORT;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_DOC_COUNTS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_HEALTH_META;
 import static dev.nexus.service.jooq.nexus.Tables.COVERAGE_BY_CONTENT_TYPE;
@@ -28,9 +26,7 @@ import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_VERIFY;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_VERIFY_ALL;
 import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY;
-import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS_1024;
-import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS_384;
-import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS_768;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_META;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
@@ -278,9 +274,13 @@ public final class CatalogRepository {
     // RDR-180 (nexus-jxizy.7): bytea chash columns carried as hex in Java —
     // the ChashHex converted type binds/fetches through the codec uniformly.
     private static final Field<String>  CHK_CHASH_HEX   = ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH);
-    private static final Field<String>  C384_CHASH_HEX  = ChashHex.hex(CHUNKS_384.CHASH);
-    private static final Field<String>  C768_CHASH_HEX  = ChashHex.hex(CHUNKS_768.CHASH);
-    private static final Field<String>  C1024_CHASH_HEX = ChashHex.hex(CHUNKS_1024.CHASH);
+    // RDR-191 (nexus-o8dil.48): CHUNKS_384/768/1024 unified into nexus.chunks
+    // (vectors-004-unify-chunks.xml) -- one hex-chash field now serves every
+    // call site that used to pick a per-dim variant of this constant
+    // (resolveSpan/resolveChash below; formerly C384_CHASH_HEX/C768_CHASH_HEX/
+    // C1024_CHASH_HEX, three identical expressions once the underlying table
+    // became one).
+    private static final Field<String>  CHUNKS_CHASH_HEX = ChashHex.hex(CHUNKS.CHASH);
     // nexus-eslkl / nexus-nl3fn: the engine-side mirror of the client's
     // is_note_shaped(entry) predicate (indexer_utils.py) — a manifest-less
     // MCP store_put / nx store put note's OWN catalog_documents row stamps
@@ -295,11 +295,11 @@ public final class CatalogRepository {
     // directly: ChashHex's Converter operates ONLY at the JDBC value-binding
     // layer (Java String <-> byte[] when a VALUE is bound), never by
     // rewriting the SQL for a bare field-to-field reference — a call site
-    // comparing DOC_META_DOC_ID.eq(C384_CHASH_HEX) renders literally as
-    // `metadata->>'doc_id' = chunks_384.chash` (text = bytea) and PostgreSQL
+    // comparing DOC_META_DOC_ID.eq(CHUNKS_CHASH_HEX) renders literally as
+    // `metadata->>'doc_id' = chunks.chash` (text = bytea) and PostgreSQL
     // rejects it with no implicit cast. Every call site instead compares
-    // against `encode(chunks_<dim>.chash, 'hex')` (an explicit TEXT-to-TEXT
-    // comparison) — see sweepChunks384/768/1024.
+    // against `encode(chunks.chash, 'hex')` (an explicit TEXT-to-TEXT
+    // comparison) — see sweepChunks.
     private static final Field<String>  DOC_META_DOC_ID =
         DSL.field("{0} ->> 'doc_id'", String.class, CATALOG_DOCUMENTS.METADATA);
     private static final Field<String>  EX_CHK_COLL   = DSL.field("EXCLUDED.collection",  String.class);
@@ -2282,7 +2282,16 @@ public final class CatalogRepository {
                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()
                            .or(CATALOG_DOCUMENTS.DELETED_AT.gt(threshold)))));
         Long count = ctx.selectCount().from(ch.table())
-            .where(ch.tenantId().eq(tenant).and(hasManifest).and(hasProtectingManifest.not()))
+            .where(ch.tenantId().eq(tenant)
+                   // RDR-191 D1 hazard: ch.table() is now the SAME physical
+                   // nexus.chunks for all three dims -- table membership no
+                   // longer implies dim. Without this guard, all three
+                   // strandedChunkCount(384/768/1024) calls below would
+                   // report the IDENTICAL whole-collection count instead of
+                   // their own per-dim slice (the callers sum them, so a
+                   // missed guard here silently triples the reported total).
+                   .and(ch.embedding().isNotNull())
+                   .and(hasManifest).and(hasProtectingManifest.not()))
             .fetchOne(0, Long.class);
         return count != null ? count : 0L;
     }
@@ -2389,10 +2398,11 @@ public final class CatalogRepository {
      * <p>POST-COMMIT VACUUM, ASYNCHRONOUS (nexus-0ys55, made async by nexus-tyxnh):
      * after the transaction above commits (inside {@link TenantScope#withTenant}'s own
      * return path), {@link #applyPostPurgeVacuum} SUBMITS a {@code VACUUM (ANALYZE)}
-     * sweep of every table the DELETE above swept — {@code chunks_384/768/1024},
-     * {@code catalog_document_chunks} (fk-001 CASCADE), and {@code catalog_documents}
-     * itself — to {@link #vacuumExecutor} and returns IMMEDIATELY; it does NOT wait for
-     * the vacuum to finish. Deliberately OUTSIDE the {@code withTenant} lambda: VACUUM
+     * sweep of every table the DELETE above swept — {@code nexus.chunks} (unified,
+     * RDR-191), {@code catalog_document_chunks} (fk-001 CASCADE), and
+     * {@code catalog_documents} itself — to {@link #vacuumExecutor} and returns
+     * IMMEDIATELY; it does NOT wait for the vacuum to finish. Deliberately OUTSIDE
+     * the {@code withTenant} lambda: VACUUM
      * cannot run inside a transaction block, and by the time this method's caller sees
      * the map, {@code withTenant} has already committed and returned the connection to
      * the pool.
@@ -2485,19 +2495,18 @@ public final class CatalogRepository {
      * catalog_document_chunks alongside +41,358 on chunks_1024 in the same 11,594-doc
      * purge).
      *
-     * <p>LOCKSTEP (nexus-0ys55): must name the SAME five tables as {@link
-     * TenantScope#VACUUM_ALLOWED_TABLES} (this is the list {@link
-     * TenantScope#vacuumAnalyze} validates any call against) and the {@code
-     * grants-003-purge-vacuum-maintain} changeset in {@code grants-nexus-svc.xml}
+     * <p>LOCKSTEP (nexus-0ys55, retargeted RDR-191 nexus-o8dil.48): must name the SAME
+     * THREE tables as {@link TenantScope#VACUUM_ALLOWED_TABLES} (this is the list
+     * {@link TenantScope#vacuumAnalyze} validates any call against) and the
+     * {@code grants-005-chunks-unify-maintain} changeset in {@code grants-nexus-svc.xml}
      * (the MAINTAIN grant that lets {@code nexus_svc} actually vacuum these tables
-     * rather than PostgreSQL warning-and-skipping every one of them). {@code
-     * TenantScopeVacuumMaintainGrantParityTest} pins the Java-side half of that
+     * rather than PostgreSQL warning-and-skipping every one of them; supersedes the
+     * retired {@code grants-003-purge-vacuum-maintain}'s five-table/three-dim list).
+     * {@code TenantScopeVacuumMaintainGrantParityTest} pins the Java-side half of that
      * agreement. Package-private (not private) so that test can read it directly.
      */
     static final List<String> PURGE_VACUUM_TABLES = List.of(
-        "nexus.chunks_384",
-        "nexus.chunks_768",
-        "nexus.chunks_1024",
+        "nexus.chunks",
         "nexus.catalog_document_chunks",
         "nexus.catalog_documents");
 
@@ -3744,27 +3753,40 @@ public final class CatalogRepository {
      * statement_timeout} resets its clock at the START of EACH statement,
      * not once per transaction).
      *
-     * <p>{@link #runSweepTransaction} issues up to THREE sequential DELETE
-     * statements ({@link #sweepChunks384}/{@link #sweepChunks768}/{@link
-     * #sweepChunks1024}) under ONE {@code set_config} call, so this constant
-     * bounds each of the three INDIVIDUALLY, not their sum: the true
-     * worst-case EXCLUSIVE-hold duration for one sweeping doc is up to
-     * {@code 3 * SWEEP_STATEMENT_TIMEOUT_MS} (~15s at the default), not 1x —
-     * and the worst-case writer STALL is therefore {@code (sweeps queued
-     * ahead, bounded by flush_concurrency) * 3 * SWEEP_STATEMENT_TIMEOUT_MS},
-     * not the {@code queued * SWEEP_STATEMENT_TIMEOUT_MS} formula rev 2 §5.2
-     * and the rev-2-delta critique (T2 nexus/critique-design-11gh6-sweep-
-     * gate-2026-08-08 [21774] §1(c)) both stated. This does NOT change the
-     * SAFETY property (still finite, still fail-open on {@code 57014}) — it
-     * corrects the documented MAGNITUDE of that finite bound.
+     * <p>PRE-RDR-191, {@link #runSweepTransaction} issued up to THREE
+     * sequential DELETE statements (one per dim table) under ONE
+     * {@code set_config} call, so this constant bounded each of the three
+     * INDIVIDUALLY, not their sum: the worst-case EXCLUSIVE-hold duration for
+     * one sweeping doc was up to {@code 3 * SWEEP_STATEMENT_TIMEOUT_MS}
+     * (~15s at the default), not 1x — and the worst-case writer STALL was
+     * therefore {@code (sweeps queued ahead, bounded by flush_concurrency) *
+     * 3 * SWEEP_STATEMENT_TIMEOUT_MS}, not the {@code queued *
+     * SWEEP_STATEMENT_TIMEOUT_MS} formula rev 2 §5.2 and the rev-2-delta
+     * critique (T2 nexus/critique-design-11gh6-sweep-gate-2026-08-08 [21774]
+     * §1(c)) both stated.
      *
-     * <p>Tempered in practice, not a reason to lower the constant: RDR-103
+     * <p>POST-RDR-191 (nexus-o8dil.48): {@code chunks_384/768/1024} unified
+     * into one {@code nexus.chunks} table, so {@link #sweepChunks} issues a
+     * SINGLE DELETE per sweeping doc, not three. The 3x worst-case bound
+     * above is HISTORICAL — the true worst-case EXCLUSIVE-hold duration for
+     * one sweeping doc is now exactly {@code 1 * SWEEP_STATEMENT_TIMEOUT_MS},
+     * and the worst-case writer STALL is {@code queued *
+     * SWEEP_STATEMENT_TIMEOUT_MS} — the simpler formula rev 2 §5.2 originally
+     * assumed, now actually true rather than merely tempered-in-practice (the
+     * RDR-103 one-dim-per-collection observation below is no longer needed to
+     * explain why the realistic case is cheap: there is only one statement to
+     * begin with). {@code SWEEP_GATE_LOCK_TIMEOUT_MS}'s own bound is
+     * unaffected either way (it gates lock ACQUISITION, not DELETE count).
+     * This does NOT change the SAFETY property (still finite, still
+     * fail-open on {@code 57014}) — it corrects the documented MAGNITUDE.
+     *
+     * <p>Historical note (pre-unification, kept for the record): RDR-103
      * collection naming ties one collection to one embedding model/dim, so
-     * for any given sweeping doc only ONE of the three dim tables ever holds
-     * real candidate rows — the other two DELETEs are near-instant indexed
-     * no-ops against an empty candidate set. The realistic worst case stays
-     * close to ONE table's cost; the 3x figure is the correct WORST-CASE
-     * bound to document, not the expected one.
+     * for any given sweeping doc only ONE of the three dim tables ever held
+     * real candidate rows — the other two DELETEs were near-instant indexed
+     * no-ops against an empty candidate set. That is WHY collapsing to one
+     * statement is safe and not merely convenient: the two dropped DELETEs
+     * were never doing real work for a given collection.
      */
     private static final String SWEEP_STATEMENT_TIMEOUT_MS = "5000";
 
@@ -3794,7 +3816,8 @@ public final class CatalogRepository {
      *       {@code ManifestInsertGateTest} (jOOQ-typed pattern, one file) were both structurally
      *       blind to it. Added post-review (T2 nexus/critique-11gh6-gate-impl-2026-08-08 [21798]
      *       Critical finding). Gates once per DISTINCT target collection resolved by joining the
-     *       INSERT's own candidate chashes against {@code chunks_384/768/1024} directly (round 3
+     *       INSERT's own candidate chashes against {@code nexus.chunks} (RDR-191 unified;
+     *       formerly {@code chunks_384/768/1024}) directly (round 3
      *       fix — resolving via the referencing doc's {@code physical_collection} instead, as
      *       round 2 did, could diverge from where the content actually lives, since chunk rows are
      *       duplicated per collection and the method's own {@code canonExists} check is
@@ -3829,7 +3852,8 @@ public final class CatalogRepository {
      *       per DISTINCT target collection, resolved BEFORE step 3 begins (not immediately before
      *       step 5), joining the alias map's {@code old_bytes} values — every mismatched row's
      *       CURRENT physical chash, since nothing has been rekeyed yet at that point — against
-     *       {@code chunks_384/768/1024}; coextensive with what steps 3-4 are about to touch since
+     *       {@code nexus.chunks} (RDR-191 unified; formerly {@code chunks_384/768/1024});
+     *       coextensive with what steps 3-4 are about to touch since
      *       neither ever moves a physical row's {@code collection}, only its {@code chash}. Held
      *       continuously through step 5's commit. NAMED RESIDUAL: step 3's orphan-synthesize
      *       sub-branch mints alias rows with no prior {@code old_bytes} fact, so its collections
@@ -4662,7 +4686,7 @@ public final class CatalogRepository {
      * <p><b>What this closes, precisely</b> (nexus-11gh6 rev 2 §0/§2.4): the
      * engine-side manifest-insert-vs-sweep-delete write-skew. At the
      * instant this method's two {@code NOT EXISTS} guards (unchanged, see
-     * {@link #sweepChunks384}) are evaluated, it holds the gate EXCLUSIVE
+     * {@link #sweepChunks}) are evaluated, it holds the gate EXCLUSIVE
      * for {@code (tenant, collection)}, so every manifest INSERT for THAT
      * collection has either already committed (visible to this statement's
      * READ COMMITTED snapshot, so the guard sees it and skips) or has not
@@ -4685,7 +4709,7 @@ public final class CatalogRepository {
      *
      * <p>Two independent {@code NOT EXISTS} guards, both required, run
      * unchanged inside the exclusive-gated DELETE (see {@link
-     * #sweepChunks384} for the exact SQL): the shared-chash union guard
+     * #sweepChunks} for the exact SQL): the shared-chash union guard
      * (a live manifest reference to the same chash in ANY collection
      * proves "someone references this") and the nl3fn notes guard (a live,
      * note-shaped {@code catalog_documents} row whose identity chash
@@ -4708,16 +4732,15 @@ public final class CatalogRepository {
         try {
             return tenantScope.withTenant(tenant, ctx -> {
                 acquireSweepGateExclusive(ctx, tenant, collection);
-                // nexus-kl2z6 increment 2 / nexus-vc6dh: checked ONCE per sweep
-                // transaction, not per dim — a tenant with no active guided
-                // migration has an EMPTY staging.document_chunks, so the three
-                // per-dim DELETEs below add NO staging predicates at all and
-                // their plan stays byte-identical to pre-staging-guard behaviour
-                // (design memo §4.2's conditional-skip requirement).
+                // nexus-kl2z6 increment 2 / nexus-vc6dh: a tenant with no
+                // active guided migration has an EMPTY staging.document_chunks,
+                // so the DELETE below adds NO staging predicate at all and its
+                // plan stays byte-identical to pre-staging-guard behaviour
+                // (design memo §4.2's conditional-skip requirement). RDR-191
+                // (nexus-o8dil.48): formerly checked once and reused across
+                // THREE per-dim DELETEs; now feeds the single unified DELETE.
                 boolean stagingActive = stagingHasRowsForTenant(ctx, tenant);
-                int swept = sweepChunks384(ctx, tenant, collection, dropped, stagingActive)
-                          + sweepChunks768(ctx, tenant, collection, dropped, stagingActive)
-                          + sweepChunks1024(ctx, tenant, collection, dropped, stagingActive);
+                int swept = sweepChunks(ctx, tenant, collection, dropped, stagingActive);
                 if (swept > 0) {
                     log.info("event=write_manifest_many_swept tenant={} doc_id={} collection={} dropped={} swept={}",
                               tenant, docId, collection, dropped.size(), swept);
@@ -4839,13 +4862,23 @@ public final class CatalogRepository {
     }
 
     /**
-     * Per-dim sweep DELETE against {@code chunks_384} — see
-     * {@link #runSweepTransaction} for the full guard rationale (nl3fn:
-     * TWO independent {@code NOT EXISTS} clauses, shared-chash union guard
-     * AND notes guard — neither alone is sufficient). The nested selects
-     * reference the OUTER delete target's own row ({@code CHUNKS_384.TENANT_ID}/
-     * {@code CHUNKS_384.CHASH}) — a standard correlated-subquery DELETE, the
+     * Sweep DELETE against the unified {@code nexus.chunks} table (RDR-191,
+     * nexus-o8dil.48 — collapsed from three per-dim methods, {@code
+     * sweepChunks384}/{@code sweepChunks768}/{@code sweepChunks1024}, now
+     * that {@code chunks_384/768/1024} are one physical table). See {@link
+     * #runSweepTransaction} for the full guard rationale (nl3fn: TWO
+     * independent {@code NOT EXISTS} clauses, shared-chash union guard AND
+     * notes guard — neither alone is sufficient). The nested selects
+     * reference the OUTER delete target's own row ({@code CHUNKS.TENANT_ID}/
+     * {@code CHUNKS.CHASH}) — a standard correlated-subquery DELETE, the
      * same shape {@code purge_trash}'s raw SQL uses with an explicit alias.
+     *
+     * <p>No embedding-column guard is needed here (unlike {@link
+     * #strandedChunkCount}'s per-dim breakdown): {@code collection} is
+     * already dim-homogeneous (RDR-103 — a collection name is bound to one
+     * embedding model/dim), so scoping by {@code collection} alone already
+     * confines the DELETE to the correct dim's rows without needing to name
+     * the dim explicitly.
      *
      * @param stagingActive {@link #stagingHasRowsForTenant} for this sweep
      *        transaction — when {@code false} the staging guard
@@ -4854,25 +4887,25 @@ public final class CatalogRepository {
      *        matches pre-staging-guard behaviour exactly.
      */
     /**
-     * Builds (does NOT execute) the {@code chunks_384} sweep DELETE — extracted from
-     * {@link #sweepChunks384} (nexus-ajt86) so {@link #renderSweepChunks384DeleteSql}
+     * Builds (does NOT execute) the {@code nexus.chunks} sweep DELETE — extracted from
+     * {@link #sweepChunks} (nexus-ajt86) so {@link #renderSweepChunksDeleteSql}
      * (test-support) can EXPLAIN the EXACT statement production issues, eliminating
      * the hand-copied-mirror drift risk {@code CatalogManifestSweepRepositoryTest}'s
      * original plan-shape test carried (a raw string reconstruction of this method's
      * SQL that could silently fall out of sync if this method ever changed).
      */
-    private static DeleteConditionStep<?> sweepChunks384Query(
+    private static DeleteConditionStep<?> sweepChunksQuery(
             DSLContext ctx, String tenant, String collection, List<String> dropped, boolean stagingActive) {
-        return ctx.deleteFrom(CHUNKS_384)
-            .where(CHUNKS_384.TENANT_ID.eq(tenant))
-            .and(CHUNKS_384.COLLECTION.eq(collection))
-            .and(C384_CHASH_HEX.in(dropped))
+        return ctx.deleteFrom(CHUNKS)
+            .where(CHUNKS.TENANT_ID.eq(tenant))
+            .and(CHUNKS.COLLECTION.eq(collection))
+            .and(CHUNKS_CHASH_HEX.in(dropped))
             .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
                 .join(CATALOG_DOCUMENTS)
                   .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
                       .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
-                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CHUNKS_384.TENANT_ID))
-                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS_384.CHASH))
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CHUNKS.TENANT_ID))
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS.CHASH))
                 .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())))
             // nl3fn NOTES GUARD: is this chash a live note's OWN identity
             // chash (is_note_shaped mirror)? Collection-scoped, matching
@@ -4882,78 +4915,30 @@ public final class CatalogRepository {
                 .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))
                 .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
                 .and(CATALOG_DOCUMENTS.FILE_PATH.isNull().or(CATALOG_DOCUMENTS.FILE_PATH.eq("")))
-                .and(DOC_META_DOC_ID.eq(DSL.field("encode({0}, 'hex')", String.class, CHUNKS_384.CHASH)))))
+                .and(DOC_META_DOC_ID.eq(DSL.field("encode({0}, 'hex')", String.class, CHUNKS.CHASH)))))
             // nexus-kl2z6 increment 2 / nexus-vc6dh STAGING GUARD (§4.2).
-            .and(stagingActive ? stagingGuardCondition(ctx, tenant, CHUNKS_384.CHASH) : DSL.noCondition());
+            .and(stagingActive ? stagingGuardCondition(ctx, tenant, CHUNKS.CHASH) : DSL.noCondition());
     }
 
-    private static int sweepChunks384(DSLContext ctx, String tenant, String collection, List<String> dropped,
-                                       boolean stagingActive) {
-        return sweepChunks384Query(ctx, tenant, collection, dropped, stagingActive).execute();
+    private static int sweepChunks(DSLContext ctx, String tenant, String collection, List<String> dropped,
+                                    boolean stagingActive) {
+        return sweepChunksQuery(ctx, tenant, collection, dropped, stagingActive).execute();
     }
 
     /**
-     * TEST-SUPPORT ONLY (nexus-ajt86) — renders the {@code chunks_384} sweep DELETE's
+     * TEST-SUPPORT ONLY (nexus-ajt86) — renders the {@code nexus.chunks} sweep DELETE's
      * real, jOOQ-generated SQL with every bind parameter inlined, for EXPLAIN-based
      * plan-shape tests ({@code CatalogManifestSweepRepositoryTest
      * .stagingGuard_isIndexCapable_notFunctionWrappedOnStagingSide}). {@code public} rather than
      * package-private because the test class lives in {@code dev.nexus.service}, a
      * different package than this one ({@code dev.nexus.service.db}) — package-
      * private visibility would not reach it. Never call this from request-handling
-     * code; use {@link #sweepChunks384} for the real execution path.
+     * code; use {@link #sweepChunks} for the real execution path.
      */
-    public static String renderSweepChunks384DeleteSql(
+    public static String renderSweepChunksDeleteSql(
             DSLContext ctx, String tenant, String collection, List<String> dropped, boolean stagingActive) {
-        return sweepChunks384Query(ctx, tenant, collection, dropped, stagingActive)
+        return sweepChunksQuery(ctx, tenant, collection, dropped, stagingActive)
             .getSQL(ParamType.INLINED);
-    }
-
-    /** Per-dim sweep DELETE against {@code chunks_768} — see {@link #sweepChunks384}. */
-    private static int sweepChunks768(DSLContext ctx, String tenant, String collection, List<String> dropped,
-                                       boolean stagingActive) {
-        return ctx.deleteFrom(CHUNKS_768)
-            .where(CHUNKS_768.TENANT_ID.eq(tenant))
-            .and(CHUNKS_768.COLLECTION.eq(collection))
-            .and(C768_CHASH_HEX.in(dropped))
-            .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
-                .join(CATALOG_DOCUMENTS)
-                  .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
-                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
-                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CHUNKS_768.TENANT_ID))
-                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS_768.CHASH))
-                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())))
-            .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENTS)
-                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
-                .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))
-                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
-                .and(CATALOG_DOCUMENTS.FILE_PATH.isNull().or(CATALOG_DOCUMENTS.FILE_PATH.eq("")))
-                .and(DOC_META_DOC_ID.eq(DSL.field("encode({0}, 'hex')", String.class, CHUNKS_768.CHASH)))))
-            .and(stagingActive ? stagingGuardCondition(ctx, tenant, CHUNKS_768.CHASH) : DSL.noCondition())
-            .execute();
-    }
-
-    /** Per-dim sweep DELETE against {@code chunks_1024} — see {@link #sweepChunks384}. */
-    private static int sweepChunks1024(DSLContext ctx, String tenant, String collection, List<String> dropped,
-                                        boolean stagingActive) {
-        return ctx.deleteFrom(CHUNKS_1024)
-            .where(CHUNKS_1024.TENANT_ID.eq(tenant))
-            .and(CHUNKS_1024.COLLECTION.eq(collection))
-            .and(C1024_CHASH_HEX.in(dropped))
-            .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
-                .join(CATALOG_DOCUMENTS)
-                  .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
-                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
-                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CHUNKS_1024.TENANT_ID))
-                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS_1024.CHASH))
-                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())))
-            .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENTS)
-                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
-                .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))
-                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
-                .and(CATALOG_DOCUMENTS.FILE_PATH.isNull().or(CATALOG_DOCUMENTS.FILE_PATH.eq("")))
-                .and(DOC_META_DOC_ID.eq(DSL.field("encode({0}, 'hex')", String.class, CHUNKS_1024.CHASH)))))
-            .and(stagingActive ? stagingGuardCondition(ctx, tenant, CHUNKS_1024.CHASH) : DSL.noCondition())
-            .execute();
     }
 
     /**
@@ -5244,18 +5229,17 @@ public final class CatalogRepository {
             .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                    .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.isNotNull())
-                   .and(DSL.notExists(ctx.selectOne().from(CHUNKS_384)
-                           .where(CHUNKS_384.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
-                                  .and(CHUNKS_384.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
-                                  .and(CHUNKS_384.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH)))))
-                   .and(DSL.notExists(ctx.selectOne().from(CHUNKS_768)
-                           .where(CHUNKS_768.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
-                                  .and(CHUNKS_768.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
-                                  .and(CHUNKS_768.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH)))))
-                   .and(DSL.notExists(ctx.selectOne().from(CHUNKS_1024)
-                           .where(CHUNKS_1024.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
-                                  .and(CHUNKS_1024.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
-                                  .and(CHUNKS_1024.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))))
+                   // RDR-191 (nexus-o8dil.48): collapsed from a 3-arm NOT EXISTS
+                   // (one per chunks_<dim> table) to one, now that chunks_384/
+                   // 768/1024 are the unified nexus.chunks. This is the FOURTH
+                   // NOT-EXISTS copy in the tree (D3's rekey/staging repoint,
+                   // T2 nexus/rdr-191-batch-D3-2026-08-13) and the one that is
+                   // NOT chash-only — keep BOTH the tenant AND collection scope
+                   // below; do not fold this into a shared chash-only helper.
+                   .and(DSL.notExists(ctx.selectOne().from(CHUNKS)
+                           .where(CHUNKS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                                  .and(CHUNKS.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
+                                  .and(CHUNKS.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH)))))
             .limit(limit)
             .fetch(CHK_CHASH_HEX);
     }
@@ -5772,10 +5756,25 @@ public final class CatalogRepository {
     /**
      * Resolve a chash within a specific collection to chunk_text + metadata.
      *
-     * <p>Queries {@code nexus.chunks_768}, {@code nexus.chunks_384}, and
-     * {@code nexus.chunks_1024} in sequence (first match wins). The chash
-     * must be the full-digest natural ID (chunk_text_hash, RDR-180) — the same
-     * convention used by the catalog_document_chunks manifest (RDR-108 D1).
+     * <p>RDR-191 (nexus-o8dil.48): PRE-unification this queried {@code
+     * nexus.chunks_768}, {@code nexus.chunks_384}, and {@code
+     * nexus.chunks_1024} in sequence (first match wins). That ordering is
+     * GONE — {@code chunks_384/768/1024} are now one physical {@code
+     * nexus.chunks}, so a single SELECT replaces the three-way probe.
+     *
+     * <p><b>The "first match wins" ordering never actually resolved a real
+     * ambiguity, and this collapse changes no observable behaviour.</b>
+     * RDR-103 collection naming ties one collection to exactly one embedding
+     * model/dim, so a given {@code (collection, chash)} pair could only ever
+     * match ONE of the three dim tables pre-unification — the sequential
+     * probe was picking among tables that could not simultaneously match,
+     * not breaking a tie. Post-unification the natural key {@code
+     * (tenant_id, collection, chash)} is the table's own primary key
+     * (vectors-004-unify-chunks.xml), so this method returns at most one row
+     * by construction, not by ordering.
+     *
+     * <p>The chash must be the full-digest natural ID (chunk_text_hash, RDR-180) —
+     * the same convention used by the catalog_document_chunks manifest (RDR-108 D1).
      *
      * <p>RLS auto-scopes to the caller's tenant via {@code TenantScope.withTenant}.
      *
@@ -5786,26 +5785,11 @@ public final class CatalogRepository {
      */
     public Map<String, Object> resolveSpan(String tenant, String collection, String chash) {
         return tenantScope.withTenant(tenant, ctx -> {
-            // Query the three dim tables in order; stop at first hit.
-            // Raw SQL UNION ALL would need casting across schemas; sequential jOOQ
-            // selects with early-return is cleaner and avoids cross-table JOIN complexity.
-            var r768 = ctx.select(CHUNKS_768.CHUNK_TEXT, CHUNKS_768.METADATA)
-                          .from(CHUNKS_768)
-                          .where(CHUNKS_768.COLLECTION.eq(collection).and(C768_CHASH_HEX.eq(chash)))
-                          .limit(1).fetchOne();
-            if (r768 != null) return chunkRow(chash, r768.value1(), r768.value2());
-
-            var r384 = ctx.select(CHUNKS_384.CHUNK_TEXT, CHUNKS_384.METADATA)
-                          .from(CHUNKS_384)
-                          .where(CHUNKS_384.COLLECTION.eq(collection).and(C384_CHASH_HEX.eq(chash)))
-                          .limit(1).fetchOne();
-            if (r384 != null) return chunkRow(chash, r384.value1(), r384.value2());
-
-            var r1024 = ctx.select(CHUNKS_1024.CHUNK_TEXT, CHUNKS_1024.METADATA)
-                           .from(CHUNKS_1024)
-                           .where(CHUNKS_1024.COLLECTION.eq(collection).and(C1024_CHASH_HEX.eq(chash)))
-                           .limit(1).fetchOne();
-            if (r1024 != null) return chunkRow(chash, r1024.value1(), r1024.value2());
+            var r = ctx.select(CHUNKS.CHUNK_TEXT, CHUNKS.METADATA)
+                       .from(CHUNKS)
+                       .where(CHUNKS.COLLECTION.eq(collection).and(CHUNKS_CHASH_HEX.eq(chash)))
+                       .limit(1).fetchOne();
+            if (r != null) return chunkRow(chash, r.value1(), r.value2());
             return null;
         });
     }
@@ -5813,9 +5797,19 @@ public final class CatalogRepository {
     /**
      * Resolve a chash globally (across all collections), with optional tie-break.
      *
-     * <p>Executes a {@code UNION ALL} across the three dim tables filtering on
-     * {@code chash = ?}, ordered so {@code prefer_collection} sorts first, then
-     * newest {@code created_at}. Takes the winning row, then looks up
+     * <p>RDR-191 (nexus-o8dil.48): PRE-unification this executed a {@code UNION
+     * ALL} across the three dim tables, wrapped as a derived table so the outer
+     * {@code ORDER BY} could reference expressions (PostgreSQL rejects
+     * expressions in a bare UNION's {@code ORDER BY}). Now that {@code
+     * chunks_384/768/1024} are one physical {@code nexus.chunks}
+     * (vectors-004-unify-chunks.xml), the UNION and its derived-table wrapper
+     * are both gone — a single SELECT with the same {@code ORDER BY} against
+     * the real table replaces them, since a plain (non-UNION) SELECT has no
+     * such restriction. The row set this returns is unchanged: a chash can
+     * still legitimately match multiple rows (one per collection that shares
+     * it, dim-homogeneous or not), so the same tie-break ordering (preferred
+     * collection first, then newest {@code created_at}, then collection name
+     * for determinism) still applies. Takes the winning row, then looks up
      * {@code doc_id} from {@code catalog_document_chunks}.
      *
      * <p>RLS auto-scopes to the caller's tenant via {@code TenantScope.withTenant}.
@@ -5828,33 +5822,16 @@ public final class CatalogRepository {
      */
     public Map<String, Object> resolveChash(String tenant, String chash, String preferCollection) {
         return tenantScope.withTenant(tenant, ctx -> {
-            // UNION ALL across the three dim tables, wrapped as a derived table so the
-            // outer ORDER BY can reference expressions (PostgreSQL rejects expressions
-            // in a bare UNION's ORDER BY; a derived-table FROM avoids that restriction).
             // prefer_collection is a bind parameter via the typed .eq(pref) predicate below.
             String pref = preferCollection != null ? preferCollection : "";
 
-            var sub = ctx.select(CHUNKS_768.COLLECTION, CHUNKS_768.CHUNK_TEXT, CHUNKS_768.METADATA, CHUNKS_768.CREATED_AT)
-                          .from(CHUNKS_768).where(C768_CHASH_HEX.eq(chash))
-                       .unionAll(
-                          ctx.select(CHUNKS_384.COLLECTION, CHUNKS_384.CHUNK_TEXT, CHUNKS_384.METADATA, CHUNKS_384.CREATED_AT)
-                             .from(CHUNKS_384).where(C384_CHASH_HEX.eq(chash)))
-                       .unionAll(
-                          ctx.select(CHUNKS_1024.COLLECTION, CHUNKS_1024.CHUNK_TEXT, CHUNKS_1024.METADATA, CHUNKS_1024.CREATED_AT)
-                             .from(CHUNKS_1024).where(C1024_CHASH_HEX.eq(chash)))
-                       .asTable("sub");
-
-            Field<String>         col       = sub.field("collection", String.class);
-            Field<String>         text      = sub.field("chunk_text", String.class);
-            Field<org.jooq.JSONB> meta      = sub.field("metadata", org.jooq.JSONB.class);
-            Field<java.time.OffsetDateTime> createdAt = sub.field("created_at", java.time.OffsetDateTime.class);
-
-            var row = ctx.select(col, text, meta, createdAt)
-                          .from(sub)
+            var row = ctx.select(CHUNKS.COLLECTION, CHUNKS.CHUNK_TEXT, CHUNKS.METADATA, CHUNKS.CREATED_AT)
+                          .from(CHUNKS)
+                          .where(CHUNKS_CHASH_HEX.eq(chash))
                           // Third key `collection ASC` matches the canonical _sort_key
                           // (preferred, newest created_at, deterministic name) so a chash in two
                           // collections with equal created_at resolves stably (njrcn.4 review).
-                          .orderBy(col.eq(pref).desc(), createdAt.desc(), col.asc())
+                          .orderBy(CHUNKS.COLLECTION.eq(pref).desc(), CHUNKS.CREATED_AT.desc(), CHUNKS.COLLECTION.asc())
                           .limit(1)
                           .fetchOne();
             if (row == null) return null;
@@ -5988,16 +5965,19 @@ public final class CatalogRepository {
      * the {@code catalog_collections} registry row LAST so the {@code ON DELETE
      * RESTRICT} child FKs (fk-002 / fk-003) act as a safety net rather than a blocker.
      *
-     * <p>Order (children → registry): chunks_* → chash_index → topic_assignments →
-     * topics → taxonomy_centroids_* → document_aspects → document_highlights →
+     * <p>Order (children → registry): chunks → chash_index → topic_assignments →
+     * topics → taxonomy_centroids → document_aspects → document_highlights →
      * aspect_extraction_queue → catalog_documents (fk-001 cascades any doc-rooted
-     * aspect/highlight/queue/manifest remainder) → catalog_collections.
+     * aspect/highlight/queue/manifest remainder) → catalog_collections. (RDR-191,
+     * nexus-o8dil.48: {@code chunks_384/768/1024} and {@code
+     * taxonomy_centroids_384/768/1024} are unified into single {@code nexus.chunks}
+     * / {@code nexus.taxonomy_centroids} tables — one DELETE each, not three.)
      *
      * <p>This is where RDR-164 closes <strong>nexus-tquoj</strong> (the client cascade
      * never purged {@code aspect_extraction_queue}; the explicit DELETE here catches it,
      * including doc-less {@code doc_id=''} rows the fk-001 document cascade cannot reach)
      * and the service-mode <strong>nexus-cugrk</strong> centroid leak ({@code
-     * taxonomy_centroids_*} have no FK to {@code topics}, CA-6 — purged by explicit
+     * taxonomy_centroids} has no FK to {@code topics}, CA-6 — purged by explicit
      * {@code DELETE WHERE collection=?} in the same txn).
      *
      * <p>RLS scopes every DELETE to the caller's tenant via the {@code nexus.tenant}
@@ -6021,10 +6001,12 @@ public final class CatalogRepository {
     private Map<String, Integer> deleteCollectionTxn(String tenant, String name) {
         return tenantScope.withTenant(tenant, ctx -> {
             Map<String, Integer> counts = new LinkedHashMap<>();
-            // 1. T3 chunk vectors (registry children, fk-002 RESTRICT).
-            counts.put("chunks_384",  ctx.deleteFrom(CHUNKS_384).where(CHUNKS_384.COLLECTION.eq(name)).execute());
-            counts.put("chunks_768",  ctx.deleteFrom(CHUNKS_768).where(CHUNKS_768.COLLECTION.eq(name)).execute());
-            counts.put("chunks_1024", ctx.deleteFrom(CHUNKS_1024).where(CHUNKS_1024.COLLECTION.eq(name)).execute());
+            // 1. T3 chunk vectors (registry children, fk-002 RESTRICT). RDR-191
+            //    (nexus-o8dil.48): one DELETE against the unified nexus.chunks,
+            //    not three against chunks_384/768/1024 -- the cascade-count key
+            //    collapses from three to one along with the table (was
+            //    "chunks_384"/"chunks_768"/"chunks_1024").
+            counts.put("chunks", ctx.deleteFrom(CHUNKS).where(CHUNKS.COLLECTION.eq(name)).execute());
             // 1b. nexus-o8dil.40 (RDR-191 F8d fix): the manifest cascade below
             //     (step 6) reaches catalog_document_chunks ONLY via fk-001's
             //     CASCADE off catalog_documents, scoped by the OWNING
@@ -6058,9 +6040,17 @@ public final class CatalogRepository {
             //     topic_links clears via topics(id) ON DELETE CASCADE in step 3, so it needs no row here.
             counts.put("taxonomy_meta", ctx.deleteFrom(TAXONOMY_META).where(TAXONOMY_META.COLLECTION.eq(name)).execute());
             // 4. centroids (CA-6: no FK to topics — explicit DELETE; the cugrk fix).
-            counts.put("taxonomy_centroids_384",  ctx.deleteFrom(TAXONOMY_CENTROIDS_384).where(TAXONOMY_CENTROIDS_384.COLLECTION.eq(name)).execute());
-            counts.put("taxonomy_centroids_768",  ctx.deleteFrom(TAXONOMY_CENTROIDS_768).where(TAXONOMY_CENTROIDS_768.COLLECTION.eq(name)).execute());
-            counts.put("taxonomy_centroids_1024", ctx.deleteFrom(TAXONOMY_CENTROIDS_1024).where(TAXONOMY_CENTROIDS_1024.COLLECTION.eq(name)).execute());
+            //    RDR-191 (nexus-o8dil.48): one DELETE against the unified
+            //    nexus.taxonomy_centroids, not three against
+            //    taxonomy_centroids_384/768/1024. CROSS-LANGUAGE CONTRACT
+            //    (T2 nexus/rdr-191-batch-E3-2026-08-13 [22462]): the Python
+            //    collection_rename.py / collection_purge.py cascade-count
+            //    readers now read this key as a LITERAL "taxonomy_centroids"
+            //    (falling back to summing the three legacy per-dim keys only
+            //    when this key is absent) -- the key below MUST stay exactly
+            //    "taxonomy_centroids", pinned by
+            //    CatalogDeleteCollectionCascadeTest.
+            counts.put("taxonomy_centroids", ctx.deleteFrom(TAXONOMY_CENTROIDS).where(TAXONOMY_CENTROIDS.COLLECTION.eq(name)).execute());
             // 5. aspect family (fk-003 RESTRICT). Explicit collection delete catches
             //    doc-less (doc_id='') rows fk-001's document cascade cannot reach — the tquoj fix.
             counts.put("document_aspects",        ctx.deleteFrom(DOCUMENT_ASPECTS).where(DOCUMENT_ASPECTS.COLLECTION.eq(name)).execute());
@@ -6287,18 +6277,22 @@ public final class CatalogRepository {
      * nexus-4nll0), and {@code migration_jobs} (JSONB collection SETS, which a scalar UPDATE
      * cannot rewrite — nexus-rvr1n). An exclusion that is not written down is
      * indistinguishable from an omission, so the gate fails on an undocumented one.
+     *
+     * <p>RDR-191 (nexus-o8dil.48): {@code chunks_384/768/1024} and {@code
+     * taxonomy_centroids_384/768/1024} collapse to ONE entry each ({@code chunks},
+     * {@code taxonomy_centroids}) now that they are single physical tables
+     * (vectors-004-unify-chunks.xml / taxonomy-007-unify-centroids.xml) — the
+     * schema-parity gate's {@code information_schema} query sees exactly one row
+     * per table post-drop, so a 1:1 registration is what "correct" now means for
+     * these two, not a stale 3-way split.
      */
     private static final List<CollectionScopedTable> COLLECTION_SCOPED_TABLES = List.of(
-        new CollectionScopedTable("chunks_384",              CHUNKS_384,              CHUNKS_384.COLLECTION),
-        new CollectionScopedTable("chunks_768",              CHUNKS_768,              CHUNKS_768.COLLECTION),
-        new CollectionScopedTable("chunks_1024",             CHUNKS_1024,             CHUNKS_1024.COLLECTION),
+        new CollectionScopedTable("chunks",                  CHUNKS,                  CHUNKS.COLLECTION),
         new CollectionScopedTable("catalog_document_chunks", CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
         new CollectionScopedTable("topic_assignments",       TOPIC_ASSIGNMENTS,       TOPIC_ASSIGNMENTS.SOURCE_COLLECTION),
         new CollectionScopedTable("topics",                  TOPICS,                  TOPICS.COLLECTION),
         new CollectionScopedTable("taxonomy_meta",           TAXONOMY_META,           TAXONOMY_META.COLLECTION),
-        new CollectionScopedTable("taxonomy_centroids_384",  TAXONOMY_CENTROIDS_384,  TAXONOMY_CENTROIDS_384.COLLECTION),
-        new CollectionScopedTable("taxonomy_centroids_768",  TAXONOMY_CENTROIDS_768,  TAXONOMY_CENTROIDS_768.COLLECTION),
-        new CollectionScopedTable("taxonomy_centroids_1024", TAXONOMY_CENTROIDS_1024, TAXONOMY_CENTROIDS_1024.COLLECTION),
+        new CollectionScopedTable("taxonomy_centroids",      TAXONOMY_CENTROIDS,      TAXONOMY_CENTROIDS.COLLECTION),
         new CollectionScopedTable("document_aspects",        DOCUMENT_ASPECTS,        DOCUMENT_ASPECTS.COLLECTION),
         new CollectionScopedTable("document_highlights",     DOCUMENT_HIGHLIGHTS,     DOCUMENT_HIGHLIGHTS.COLLECTION),
         new CollectionScopedTable("aspect_extraction_queue", ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.COLLECTION),

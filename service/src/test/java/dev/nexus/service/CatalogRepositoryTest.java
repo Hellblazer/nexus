@@ -108,16 +108,16 @@ class CatalogRepositoryTest {
             // Grant sequence for catalog_links BIGSERIAL
             su.createStatement().execute(
                 "GRANT USAGE ON SEQUENCE nexus.catalog_links_id_seq TO " + SVC_ROLE);
-            // RDR-159 P-1b: manifest functions (catalog-004) + chunks_384 read so the
+            // RDR-159 P-1b: manifest functions (catalog-004) + nexus.chunks read so the
             // svc role can invoke manifestBackfill/manifestOrphans (SECURITY INVOKER).
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.manifest_backfill() TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.manifest_orphans(int) TO " + SVC_ROLE);
-            for (String ct : new String[]{"chunks_384", "chunks_768", "chunks_1024"}) {
-                su.createStatement().execute(
-                    "GRANT SELECT ON nexus." + ct + " TO " + SVC_ROLE);
-            }
+            // RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into ONE
+            // nexus.chunks -- a single GRANT now covers what three did.
+            su.createStatement().execute(
+                "GRANT SELECT ON nexus.chunks TO " + SVC_ROLE);
             // RDR-164 P3: renameCollection re-homes every denorm-collection table in one txn;
             // grant write broadly so the coherent rename can move children off the old name.
             su.createStatement().execute(
@@ -3003,7 +3003,7 @@ class CatalogRepositoryTest {
     @Test @Order(200)
     void migration_manifestBackfill_stamps_null_collection_then_orphans_detected() {
         // A 384-model doc with ONE manifest row whose collection is NULL and
-        // NO chunk row in chunks_384. nexus-x6kdz: writeManifest now stamps
+        // NO chunk row (RDR-191: nexus.chunks, embedding_384). nexus-x6kdz: writeManifest now stamps
         // collection AT WRITE TIME, so the legacy NULL shape backfill exists
         // for must be seeded directly (the pre-fix writer's output).
         repo.upsertDocument(TENANT_MIG, Map.of(
@@ -3060,7 +3060,7 @@ class CatalogRepositoryTest {
             .isEqualTo(0L);
 
         // Orphan detection is independent of the NULL-collection axis: this
-        // row's chash was never written to chunks_384, so it is still a
+        // row's chash was never written to nexus.chunks (embedding_384), so it is still a
         // genuine 384 orphan even though its collection was real (write-time
         // stamped, RDR-191-compliant) the entire time — this coverage
         // survives the premise change untouched.
@@ -3123,7 +3123,8 @@ class CatalogRepositoryTest {
      * Seed: register the collection FK target, then insert a chunk row via raw
      * SQL (no vector column required when using zero-fill embedding).
      *
-     * <p>The chunks_768 table has a FK to catalog_collections (COLLECTION col);
+     * <p>RDR-191 (nexus-o8dil.48): {@code nexus.chunks} (unified; formerly
+     * {@code chunks_768}) has a FK to catalog_collections (COLLECTION col);
      * we must upsert the collection row BEFORE inserting the chunk.  The catalog_document_chunks
      * row links chash → doc_id for the resolveChash doc_id assertion.
      */
@@ -3147,9 +3148,11 @@ class CatalogRepositoryTest {
             );
             // Build a zero-vector literal: '[0,0,...,0]' with 768 zeros.
             String zeroVec = "[" + "0,".repeat(767) + "0]";
+            // RDR-191 (nexus-o8dil.48): chunks_768 unified into nexus.chunks --
+            // embedding_768 replaces the bare embedding column.
             var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks_768"
-                + " (tenant_id, collection, chash, chunk_text, embedding, metadata)"
+                "INSERT INTO nexus.chunks"
+                + " (tenant_id, collection, chash, chunk_text, embedding_768, metadata)"
                 + " VALUES (?, ?, ?, ?, ?::vector, ?::jsonb)"
                 + " ON CONFLICT (tenant_id, collection, chash) DO NOTHING"
             );

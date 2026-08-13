@@ -223,10 +223,15 @@ class CatalogPurgeTrashTest {
         }
     }
 
+    /** RDR-191 (nexus-o8dil.48): chunks_384 unified into nexus.chunks --
+     *  {@code embedding_384 IS NOT NULL} replaces table membership as the dim
+     *  filter (this fixture's tenant is otherwise 384-only, but the explicit
+     *  guard keeps this helper correct if that ever changes). */
     private long chunks384Count(String chashHex) throws Exception {
         try (Connection su = pg.createConnection("")) {
             var ps = su.prepareStatement(
-                "SELECT count(*) FROM nexus.chunks_384 WHERE tenant_id = ? AND chash = decode(?, 'hex')");
+                "SELECT count(*) FROM nexus.chunks WHERE tenant_id = ? AND chash = decode(?, 'hex') "
+                + "AND embedding_384 IS NOT NULL");
             ps.setString(1, TENANT);
             ps.setString(2, chashHex);
             var rs = ps.executeQuery();
@@ -235,13 +240,13 @@ class CatalogPurgeTrashTest {
         }
     }
 
-    /** nexus-erwvd parity pin support: total {@code chunks_384} rows for TENANT,
-     *  unfiltered by chash — the mechanical before/after diff a preview count is
-     *  checked against. */
+    /** nexus-erwvd parity pin support: total {@code nexus.chunks} rows (RDR-191
+     *  unified; formerly {@code chunks_384}) for TENANT, unfiltered by chash --
+     *  the mechanical before/after diff a preview count is checked against. */
     private long totalChunks384Rows() throws Exception {
         try (Connection su = pg.createConnection("")) {
             var ps = su.prepareStatement(
-                "SELECT count(*) FROM nexus.chunks_384 WHERE tenant_id = ?");
+                "SELECT count(*) FROM nexus.chunks WHERE tenant_id = ? AND embedding_384 IS NOT NULL");
             ps.setString(1, TENANT);
             var rs = ps.executeQuery();
             rs.next();
