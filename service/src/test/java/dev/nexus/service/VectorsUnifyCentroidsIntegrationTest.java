@@ -58,7 +58,7 @@ class VectorsUnifyCentroidsIntegrationTest {
     // Staged OUTSIDE db/changelog/ — see taxonomy-007-unify-centroids.xml's
     // own header and db.changelog-master.xml's comment for the full
     // changelog-parity drift-lint rationale (identical to the chunks side).
-    private static final String UNIFY_CHANGELOG = "db/changelog-staged/taxonomy-007-unify-centroids.xml";
+    private static final String UNIFY_CHANGELOG = "db/changelog/taxonomy-007-unify-centroids.xml";
 
     // ── Shared aged-box scaffold (mirrors VectorsUnifyChunksIntegrationTest) ──
 

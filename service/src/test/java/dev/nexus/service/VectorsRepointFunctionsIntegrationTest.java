@@ -82,9 +82,9 @@ class VectorsRepointFunctionsIntegrationTest {
 
     private static final String SVC_ROLE = "nexus_svc";
     private static final String SVC_PASS = "nexus_svc_pass";
-    private static final String VECTORS_004 = "db/changelog-staged/vectors-004-unify-chunks.xml";
-    private static final String TAXONOMY_007 = "db/changelog-staged/taxonomy-007-unify-centroids.xml";
-    private static final String VECTORS_005 = "db/changelog-staged/vectors-005-repoint-functions-views.xml";
+    private static final String VECTORS_004 = "db/changelog/vectors-004-unify-chunks.xml";
+    private static final String TAXONOMY_007 = "db/changelog/taxonomy-007-unify-centroids.xml";
+    private static final String VECTORS_005 = "db/changelog/vectors-005-repoint-functions-views.xml";
 
     private static final String TENANT = "t1";
 

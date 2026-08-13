@@ -192,6 +192,20 @@ GRANT SELECT ON public.databasechangeloglock TO nexus_svc;
     </changeSet>
 
     <changeSet id="grants-003-purge-vacuum-maintain" author="nexus-0ys55" runAlways="true">
+        <!-- RDR-191 Phase 4 (vectors-004-unify-chunks.xml): once the unify changeset
+             drops nexus.chunks_384/768/1024, this runAlways grant would raise
+             "relation does not exist" on every subsequent boot and crash-loop the
+             service. The existence guard below re-evaluates every boot (runAlways
+             means MARK_RAN here is per-run, not a permanent freeze): pre-unify boxes
+             keep executing it unchanged; post-unify boxes cleanly self-skip forever.
+             grants-005-chunks-unify-maintain below takes over the MAINTAIN
+             responsibility with the post-unify table set. Checksum-safe: Liquibase
+             hashes only the changes body, never preConditions (catalog-013-2
+             precedent). See vectors-004-unify-chunks.xml's header for the full
+             boot-brick analysis. -->
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT (to_regclass('nexus.chunks_384') IS NOT NULL)::int</sqlCheck>
+        </preConditions>
         <comment>
             nexus-0ys55: MAINTAIN on the five purge-trash VACUUM targets (nexus.chunks_384,
             nexus.chunks_768, nexus.chunks_1024, nexus.catalog_document_chunks,
@@ -328,6 +342,24 @@ $$;
         <rollback>
             <sql>REVOKE pg_monitor FROM nexus_svc;</sql>
         </rollback>
+    </changeSet>
+
+    <changeSet id="grants-005-chunks-unify-maintain" author="nexus-o8dil.12" runAlways="true">
+        <comment>MAINTAIN on nexus.chunks + catalog_document_chunks + catalog_documents, superseding grants-003's now-frozen chunks_384/768/1024 list. See vectors-004-unify-chunks.xml header for the full boot-brick analysis.</comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    IF current_setting('server_version_num')::int >= 170000 THEN
+        EXECUTE 'GRANT MAINTAIN ON nexus.chunks TO nexus_svc';
+        EXECUTE 'GRANT MAINTAIN ON nexus.catalog_document_chunks TO nexus_svc';
+        EXECUTE 'GRANT MAINTAIN ON nexus.catalog_documents TO nexus_svc';
+    ELSE
+        RAISE NOTICE 'grants-005-chunks-unify-maintain: server % predates MAINTAIN (PG17+)', current_setting('server_version');
+    END IF;
+END
+$$;
+        </sql>
+        <rollback><!-- Revoke is a DBA operation; not automated. --></rollback>
     </changeSet>
 
 </databaseChangeLog>

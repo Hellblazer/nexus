@@ -377,56 +377,15 @@
     <include file="db/changelog/taxonomy-006-assign-from-chashes.xml"/>
 
     <!-- RDR-191 Phase 4, centroid family (bead nexus-jv3ue, Hal ruling
-         o8dil.47 "unify the centroids too, one era"): the SIBLING of the
-         chunks unify changeset above lives at
-         db/changelog-staged/taxonomy-007-unify-centroids.xml — a SIBLING
-         directory of this one, not a subdirectory — fully written and
-         independently tested (VectorsUnifyCentroidsIntegrationTest), but is
-         DELIBERATELY NOT <include>d here yet, for the SAME two reasons as
-         vectors-004-unify-chunks.xml above: (a) registering it regenerates
-         jOOQ's Tables.java without Tables.TAXONOMY_CENTROIDS_384/768/1024,
-         breaking compilation of every existing call site
-         (TaxonomyCentroidRepository.java, DimTables.java's CENTROIDS map,
-         CatalogRepository.java's deleteCollectionTxn + COLLECTION_SCOPED_TABLES,
-         taxonomy-006's assign_from_chashes_<dim> Java callers — beads
-         nexus-o8dil.18/.19's scope, not this changeset's) until the Java
-         repoint lands alongside it; (b) living IN db/changelog/ while
-         unincluded trips the same changelog-parity drift lints (glob("*.xml")
-         vs the master include list) that vectors-004-unify-chunks.xml
-         already triggered — db/changelog-staged/ is invisible to those
-         non-recursive globs while remaining a normal classpath resource.
-
-         UNLIKE the chunks changeset, this one causes NO grants-nexus-svc.xml
-         boot-brick when registered — verified by direct grep: no changeset
-         anywhere GRANTs MAINTAIN on any taxonomy_centroids_<dim> table, and
-         neither CatalogRepository.PURGE_VACUUM_TABLES nor
-         TenantScope.VACUUM_ALLOWED_TABLES names one. Registration here is
-         therefore just mv + <include>, no grants-nexus-svc.xml edit
-         required (see taxonomy-007-unify-centroids.xml's own header for the
-         full grants-conclusion derivation and the CASCADE-fallout
-         enumeration against assign_from_chashes_<dim>).
-
-         THE PLAN: mv db/changelog-staged/taxonomy-007-unify-centroids.xml
-         back into this directory AND add the <include> in the SAME batch
-         that lands the centroid-side Java repoint (o8dil.18/.19), atomically
-         with (or immediately alongside) vectors-004-unify-chunks.xml's own
-         registration batch — Hal's o8dil.47 ruling is that both unify
-         changesets ship in the SAME engine release. Until then, this
-         changeset is validated in isolation: see
-         VectorsUnifyCentroidsIntegrationTest, which applies a standalone
-         changelog (every real file up through staging-002, plus this one,
-         loaded from its staged path) directly via the Liquibase API,
-         bypassing SchemaMigrator.MASTER_CHANGELOG's classpath resource so
-         this file's checked-in state is never touched by that test.
-         Mechanically enforced going forward by
-         tests/test_changelog_staged_batch_coupling_lint.py (RDR-191 repoint
-         batch Step A, nexus-o8dil.18: consolidates this file's former
-         per-file lint plus vectors-004's into ONE directory-driven batch
-         invariant covering all three staged repoint-batch changesets:
-         staged-and-unincluded passes, fully-registered
-         moved-back-plus-included-in-order passes, any other combination
-         (including a split batch where some files register ahead of
-         others) fails naming the mismatch). -->
+         o8dil.47 "unify the centroids too, one era"):
+         taxonomy-007-unify-centroids.xml is REGISTERED below in the Phase 4
+         repoint-batch slot (after catalog-028), in the lint-enforced order
+         vectors-004 -> taxonomy-007 -> vectors-005; see
+         tests/test_changelog_staged_batch_coupling_lint.py. No
+         grants-nexus-svc.xml edit was required for the centroid family:
+         verified by direct grep, no changeset GRANTs MAINTAIN on any
+         taxonomy_centroids_<dim> table and neither Java VACUUM allowlist
+         names one (recorded per jv3ue item 3). -->
 
     <!-- nexus-kl2z6 increment 2 / nexus-vc6dh: staging.document_chunks(chash)
          probe index for the sweep's third guard (design memo §4.2 REV 2
@@ -498,70 +457,25 @@
          below. -->
     <include file="db/changelog/catalog-028-quarantine-orphans-sweep-gate.xml"/>
 
-    <!-- RDR-191 Phase 4 core (beads nexus-o8dil.12 + .13 + .14): the ALWAYS-COPY
-         changeset that collapses nexus.chunks_384/768/1024 into ONE unified
-         nexus.chunks table lives at
-         db/changelog-staged/vectors-004-unify-chunks.xml — a SIBLING directory
-         of this one, not a subdirectory — fully written and independently
-         tested (VectorsUnifyChunksIntegrationTest), but is DELIBERATELY NOT
-         <include>d here yet.
-
-         WHY NOT (empirically discovered while building this changeset, not
-         assumed): jOOQ codegen (pom.xml generate-sources phase,
-         testcontainers-jooq-codegen-maven-plugin) boots a Testcontainers
-         Postgres, applies THIS ENTIRE changelog, and generates Tables.java
-         FROM THE RESULTING LIVE SCHEMA on every `mvn compile`. Registering
-         the unify changeset here regenerates Tables.java WITHOUT
-         Tables.CHUNKS_384/768/1024/COLLECTION_VECTOR_STATS (replaced by
-         Tables.CHUNKS) — which fails compilation of every one of the ~87
-         existing call sites across CatalogRepository.java,
-         PgVectorRepository.java, TaxonomyCentroidRepository.java,
-         RekeyOps.java, StagingPromoteOps.java, CombinedWriteService.java and
-         more (T2 nexus/rdr-191-p4-scoping-inventory-2026-08-13 [22416] Part
-         2A/2E). This is a COMPILE-time break across the whole service
-         module, not a runtime test failure — categorically worse than the
-         "some serving-path tests go red" case the originating brief
-         anticipated, and it would leave the checked-out tree unbuildable for
-         anyone until the full Java repoint (beads nexus-o8dil.16, .17, .18,
-         .19, .48) lands alongside it.
-
-         WHY db/changelog-staged/, NOT db/changelog/ (round 3, corrected):
-         living IN db/changelog/ without being <include>d ALSO breaks the
-         Python suite — the changelog-parity lints
-         (tests/test_rehearsal_seed_coverage_lint.py,
-         tests/test_changelog_rls_lint.py,
-         tests/test_changelog_validate_precondition_lint.py) assert the
-         master include list matches this directory's on-disk *.xml contents
-         EXACTLY, by design (RDR-191 Phase 4 was the first time anyone tried
-         to land a dormant changeset here — the repo is correctly, deliberately
-         hostile to that, and those lints must never be weakened with an
-         allowlist entry). db/changelog-staged/ is a sibling directory, so it
-         is invisible to every one of those glob-based checks while remaining
-         a normal classpath resource (everything under src/main/resources/ is
-         on the classpath) that Liquibase can load directly by path.
-         Mechanically enforced going forward by
-         tests/test_changelog_staged_batch_coupling_lint.py (RDR-191 repoint
-         batch Step A, nexus-o8dil.18: consolidates this file's former
-         per-file lint plus taxonomy-007's into ONE directory-driven batch
-         invariant covering all three staged repoint-batch changesets:
-         staged-and-unincluded passes, fully-registered (moved back here +
-         included, IN ORDER, + both grants-nexus-svc.xml pieces present)
-         passes, any OTHER combination (moved but not included, included but
-         still staged, included without the grants fix, or a SPLIT BATCH
-         where some of the three files register ahead of the others) fails
-         naming the mismatch. T2 [22433] checklist content unchanged.
-
-         THE PLAN: mv db/changelog-staged/vectors-004-unify-chunks.xml back
-         into this directory AND add the <include> in the SAME batch that
-         lands the Java repoint beads above — that batch's own commit is what
-         flips this on, atomically, so the tree is never left in a
-         compiles-but-serves-wrong or does-not-compile-at-all state. Until
-         then, vectors-004-unify-chunks.xml is validated in isolation: see
-         VectorsUnifyChunksIntegrationTest, which applies a standalone
-         changelog (every real file up through catalog-028, plus this one,
-         loaded from its staged path) directly via the Liquibase API,
-         bypassing SchemaMigrator.MASTER_CHANGELOG's classpath resource so
-         this file's checked-in state is never touched by that test. -->
+    <!-- RDR-191 Phase 4 repoint batch (Step B, plan T2 [22445]; beads
+         nexus-o8dil.12/.13/.14 core, jv3ue centroid sibling, o8dil.18
+         function/view repoint): the three-changeset unify batch, registered
+         ATOMICALLY with the full Java repoint (o8dil.16/.17/.48) and the
+         Python lockstep (o8dil.19/.15). Order is load-bearing and
+         lint-enforced (tests/test_changelog_staged_batch_coupling_lint.py):
+         vectors-004 collapses chunks_384/768/1024 into nexus.chunks;
+         taxonomy-007 collapses taxonomy_centroids_<dim> into
+         nexus.taxonomy_centroids; vectors-005 re-creates the 15
+         CASCADE-dropped objects (9 typed combined-query functions kept as
+         NINE typed entry points (DECISION 2, F13) plus
+         manifest_verify/_all per DECISION 1, gc_*, purge_trash,
+         chash_conformance_report, assign_from_chashes_*, remap_membership,
+         document_text, live_chunks, collection_vector_stats) against the
+         unified tables. grants-003 carries an existence guard and
+         grants-005 takes over MAINTAIN (see grants-nexus-svc.xml). -->
+    <include file="db/changelog/vectors-004-unify-chunks.xml"/>
+    <include file="db/changelog/taxonomy-007-unify-centroids.xml"/>
+    <include file="db/changelog/vectors-005-repoint-functions-views.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

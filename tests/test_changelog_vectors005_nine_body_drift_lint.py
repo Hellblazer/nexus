@@ -119,6 +119,13 @@ _DIM_TOKEN_RE = re.compile(r"(?<!\d)(384|768|1024)(?!\d)")
 
 
 def _vectors_005_path() -> Path:
+    # This lint pins BODY drift, not file location (location is
+    # test_changelog_staged_batch_coupling_lint.py's invariant). Resolve from
+    # whichever location the batch state has the file in, preferring the
+    # registered home so the lint keeps working across the Step B flip.
+    registered = CHANGELOG_DIR / VECTORS_005_BASENAME
+    if registered.exists():
+        return registered
     return CHANGELOG_DIR.parent / STAGED_DIR_NAME / VECTORS_005_BASENAME
 
 

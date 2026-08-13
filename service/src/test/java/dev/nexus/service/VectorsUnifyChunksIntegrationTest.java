@@ -90,7 +90,7 @@ class VectorsUnifyChunksIntegrationTest {
     // test_changelog_rls_lint.py, test_changelog_validate_precondition_lint.py)
     // assert the master include list matches CHANGELOG_DIR.glob("*.xml")
     // exactly -- a file present on disk but not <include>d is correctly
-    // treated as drift and fails the whole Python suite. db/changelog-staged/
+    // treated as drift and fails the whole Python suite. db/changelog/
     // is a SIBLING of db/changelog/, invisible to that non-recursive glob (and
     // to jOOQ codegen, which only ever applies what master.xml <include>s), so
     // this changeset stays fully classpath-loadable (everything under
@@ -98,7 +98,7 @@ class VectorsUnifyChunksIntegrationTest {
     // dormant, without tripping the drift lints. See db.changelog-master.xml's
     // own comment and T2 nexus/rdr-191-p4-unify-changeset-2026-08-13 [22433]
     // for the registration checklist that moves it back.
-    private static final String UNIFY_CHANGELOG = "db/changelog-staged/vectors-004-unify-chunks.xml";
+    private static final String UNIFY_CHANGELOG = "db/changelog/vectors-004-unify-chunks.xml";
 
     // ── Shared aged-box scaffold ─────────────────────────────────────────────
 
