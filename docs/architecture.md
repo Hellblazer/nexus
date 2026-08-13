@@ -252,6 +252,51 @@ converge route `POST /v1/catalog/owners/sweep_next_seq_drift`
 (`CatalogHandler.java`) floors every drifted owner's `next_seq` back to a
 safe value across all owners in one call.
 
+### Dangling manifest row: the definition of record
+
+"Dangling manifest row" has three distinct shapes, only one of which is a
+defect. A `catalog_document_chunks` row `c` is examined against its owning
+document `d` (`d.tenant_id = c.tenant_id AND d.tumbler = c.doc_id`) and
+against whether `(c.tenant_id, c.collection, c.chash)` resolves in the
+`chunks_<dim>` table its collection routes to:
+
+- **(a) Owner LIVE, no matching chunk row.** REAL dangling — the class every
+  producer fix and every gate targets. This is the definition
+  `nexus.manifest_verify(doc_id)` / `manifest_verify_all()`
+  (`catalog-020-index-run-fence.xml:167-176` / `:240-248`, both join
+  `d.deleted_at IS NULL`) and `nexus.manifest_orphans(dim)`
+  (`catalog-004-manifest-functions.xml:100/:116/:132`, same join) already
+  use, and the one `health._check_dangling_manifests()`
+  (`src/nexus/health.py:3837`) inherits by calling `manifest_verify_all()`
+  verbatim.
+- **(b) Owner TOMBSTONED.** Not dangling — the soft-tombstone contract
+  working as designed (`delete_document` deliberately leaves
+  `catalog_document_chunks` in place, `src/nexus/catalog/store_hook.py:738-741`).
+  These rows await `nx catalog purge-trash --no-dry-run --confirm`'s CASCADE
+  reap and are excluded from (a)'s instruments by construction, not by
+  omission.
+- **(c) Owner ABSENT.** Impossible: `catalog_document_chunks (tenant_id,
+  doc_id) -> catalog_documents (tenant_id, tumbler) ON DELETE CASCADE`
+  (`fk-001-catalog-cross-store.xml:69`) is a live Postgres FK already —
+  distinct from the manifest-row-to-chunk-row edge (`(tenant_id, collection,
+  chash)` against `chunks_<dim>`), which remains application-enforced only
+  until a future FK lands (planned `MATCH SIMPLE`, per RDR-191).
+
+A raw anti-join with no `d.deleted_at IS NULL` join (as run ad hoc, or as
+`catalog-025-collection-not-null.xml`'s one-time cleanup migration
+deliberately does) counts **(a) ∪ (b)** together. That is correct for a
+backward-looking sweep — it has no reason to leave tombstone residue sitting
+in a table it is already touching — but it is a different, larger population
+than (a) alone, and the two must never be compared as if they measured the
+same thing. `purge-trash`'s stranded-chunk preview is a different axis
+again: direction chunk→parent (existing `chunks_<dim>` rows with no LIVE
+manifest referrer), disjoint from all three shapes above by construction —
+a clean reading on one instrument says nothing about any other
+(`health.py:3880-3890`). Full reconciliation of specific measured
+discrepancies (e.g. 37 vs. 2,951 vs. 6,501 across different RDR-191 GATE-2
+census runs) plus the per-instrument definition table: T2
+`nexus/rdr-191-dangling-definition-of-record`.
+
 ### Chunk identity: the canonical chash ([RDR-180](rdr/rdr-180-content-address-chash-binary-32byte.md))
 
 A **chash IS the 32-byte SHA-256 digest of the chunk text** — the full digest,
