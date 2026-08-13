@@ -1,6 +1,7 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -23,6 +24,25 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * RDR-156 bead nexus-70r3c.1 — TDD-RED suite for P0.2 FK + hygiene changesets.
+ *
+ * <p><strong>RDR-191 Phase 4 (repoint-batch lane F1) STATUS NOTE:</strong>
+ * {@code nexus.chunks_384/768/1024} are unified into ONE {@code nexus.chunks}
+ * table (vectors-004-unify-chunks.xml); per that changeset's own "S3: NO
+ * COLLECTION FK ON nexus.chunks UNTIL PHASE 5" note, the three per-dim
+ * {@code chunks_<dim>_collection_fk} constraints this class was written
+ * against die with their tables and are NOT re-added on the unified table
+ * until Phase 5 (beads nexus-o8dil.29 local / .31 cloud) — a deliberate,
+ * documented, bounded risk window, not an oversight. Every test method below
+ * that asserts the chunks FK REJECTS an unregistered/cross-tenant insert, or
+ * that a chunks FK exists/validates, is {@code @Disabled} pending Phase 5
+ * with an inline pointer back to this note. CONTROL tests (registered insert
+ * accepted) and app-level tests (delete, rename, auto-register) that do not
+ * depend on the FK's presence are retargeted to the unified table and stay
+ * enabled. The {@code chunks_<dim>_chash_len_check} CHECK-rejection tests
+ * (GROUP 7) are ALSO disabled, for an unrelated, pre-existing reason: T2/D5
+ * lane record confirms those constraint names were already dropped by
+ * rdr180-2, true before and after RDR-191 (nexus.chunks has no
+ * length(text)=32 concept, only the octet family).
  *
  * <p><strong>TDD-RED state:</strong> All RED groups are written AGAINST the future schema
  * delivered by P0.2 (bead nexus-70r3c.2). P0.2 will add Liquibase changesets:
@@ -97,15 +117,21 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class CollectionRegistryFkTest {
 
     // ── Constraint names (fixed contract; P0.2 will use exactly these) ─────────
+    // RDR-191 Phase 4: the three chunks_<dim>_collection_fk constraints died with
+    // their tables (vectors-004-unify-chunks.xml) and are NOT re-added on the
+    // unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) — see class javadoc.
+    // Kept as constants (still referenced by the now-@Disabled tests below) but
+    // removed from the "currently live" FK name list.
     private static final String FK_CHUNKS_384  = "chunks_384_collection_fk";
     private static final String FK_CHUNKS_768  = "chunks_768_collection_fk";
     private static final String FK_CHUNKS_1024 = "chunks_1024_collection_fk";
     private static final String FK_TOPIC_ASSIGN= "topic_assignments_collection_fk";
 
-    // The surviving FK names (chash_index_collection_fk died with its table,
-    // RDR-187/nexus-piwya.9; the historical fk-002 changesets remain immutable)
+    // The surviving, CURRENTLY LIVE FK names (chash_index_collection_fk died with
+    // its table, RDR-187/nexus-piwya.9; the three chunks FKs are Phase-5-pending
+    // per the class javadoc — excluded here, not "all five" until Phase 5 lands).
     private static final List<String> ALL_FIVE_FK_NAMES = List.of(
-            FK_CHUNKS_384, FK_CHUNKS_768, FK_CHUNKS_1024, FK_TOPIC_ASSIGN);
+            FK_TOPIC_ASSIGN);
 
     // CHECK constraint names (RDR-180: TEXT length(chash)=32 checks were dropped and
     // replaced by bytea octet_length(chash)=32 checks — rdr180-001-bytea-chash.xml)
@@ -167,12 +193,15 @@ class CollectionRegistryFkTest {
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             for (String tbl : List.of(
                     "catalog_collections", "catalog_documents",
-                    "chunks_384", "chunks_768", "chunks_1024",
                     "topic_assignments", "topics",
                     "catalog_document_chunks")) {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
             }
+            // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
+            // a single GRANT now covers what three did.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
             // RDR-164 P3: renameCollection re-homes every denorm-collection table in one txn
             // (taxonomy_meta/centroids, aspects, highlights, queue, telemetry). Grant broadly.
             su.createStatement().execute(
@@ -208,25 +237,28 @@ class CollectionRegistryFkTest {
 
     @Test @Order(10)
     void chunks384_control_registeredCollection_accepted() throws Exception {
-        // CONTROL — must be GREEN before and after P0.2 lands.
+        // CONTROL — must be GREEN before and after P0.2 lands. RDR-191 Phase 4:
+        // retargeted to the unified nexus.chunks table, embedding_384 column.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCollection(su, TENANT_A, "ctrl-col-384");
             // Insert succeeds — registered collection
             su.createStatement().execute(
-                "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
                 "VALUES ('" + TENANT_A + "', 'ctrl-col-384', " +
                 "'" + validChash("384ctrl") + "', 'text', " +
                 vectorLiteral(384) + "::vector)");
             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.chunks_384 " +
+                "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
                 "WHERE tenant_id='" + TENANT_A + "' AND collection='ctrl-col-384'");
             rs.next();
-            assertThat(rs.getInt(1)).as("registered insert into chunks_384 must succeed").isEqualTo(1);
+            assertThat(rs.getInt(1)).as("registered insert into nexus.chunks (dim=384) must succeed").isEqualTo(1);
         }
     }
 
     @Test @Order(11)
+    @Disabled("RDR-191 Phase 4: chunks_384_collection_fk died with chunks_384 and is not "
+        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
     void chunks384_unregisteredCollection_rejected() throws Exception {
         // RED until P0.2 adds chunks_384_collection_fk.
         try (Connection su = pg.createConnection("")) {
@@ -246,24 +278,27 @@ class CollectionRegistryFkTest {
 
     @Test @Order(12)
     void chunks768_control_registeredCollection_accepted() throws Exception {
-        // CONTROL — must be GREEN before and after P0.2 lands.
+        // CONTROL — must be GREEN before and after P0.2 lands. RDR-191 Phase 4:
+        // retargeted to the unified nexus.chunks table, embedding_768 column.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCollection(su, TENANT_A, "ctrl-col-768");
             su.createStatement().execute(
-                "INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding) " +
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(768) + ") " +
                 "VALUES ('" + TENANT_A + "', 'ctrl-col-768', " +
                 "'" + validChash("768ctrl") + "', 'text', " +
                 vectorLiteral(768) + "::vector)");
             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.chunks_768 " +
+                "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
                 "WHERE tenant_id='" + TENANT_A + "' AND collection='ctrl-col-768'");
             rs.next();
-            assertThat(rs.getInt(1)).as("registered insert into chunks_768 must succeed").isEqualTo(1);
+            assertThat(rs.getInt(1)).as("registered insert into nexus.chunks (dim=768) must succeed").isEqualTo(1);
         }
     }
 
     @Test @Order(13)
+    @Disabled("RDR-191 Phase 4: chunks_768_collection_fk died with chunks_768 and is not "
+        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
     void chunks768_unregisteredCollection_rejected() throws Exception {
         // RED until P0.2 adds chunks_768_collection_fk.
         try (Connection su = pg.createConnection("")) {
@@ -283,24 +318,27 @@ class CollectionRegistryFkTest {
 
     @Test @Order(14)
     void chunks1024_control_registeredCollection_accepted() throws Exception {
-        // CONTROL — must be GREEN before and after P0.2 lands.
+        // CONTROL — must be GREEN before and after P0.2 lands. RDR-191 Phase 4:
+        // retargeted to the unified nexus.chunks table, embedding_1024 column.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCollection(su, TENANT_A, "ctrl-col-1024");
             su.createStatement().execute(
-                "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
                 "VALUES ('" + TENANT_A + "', 'ctrl-col-1024', " +
                 "'" + validChash("1024ctrl") + "', 'text', " +
                 vectorLiteral(1024) + "::vector)");
             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.chunks_1024 " +
+                "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
                 "WHERE tenant_id='" + TENANT_A + "' AND collection='ctrl-col-1024'");
             rs.next();
-            assertThat(rs.getInt(1)).as("registered insert into chunks_1024 must succeed").isEqualTo(1);
+            assertThat(rs.getInt(1)).as("registered insert into nexus.chunks (dim=1024) must succeed").isEqualTo(1);
         }
     }
 
     @Test @Order(15)
+    @Disabled("RDR-191 Phase 4: chunks_1024_collection_fk died with chunks_1024 and is not "
+        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
     void chunks1024_unregisteredCollection_rejected() throws Exception {
         // RED until P0.2 adds chunks_1024_collection_fk.
         try (Connection su = pg.createConnection("")) {
@@ -454,6 +492,9 @@ class CollectionRegistryFkTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(60)
+    @Disabled("RDR-191 Phase 4: chunks_384_collection_fk (and its ON DELETE RESTRICT) died "
+        + "with chunks_384 and is not re-added on the unified nexus.chunks until Phase 5 "
+        + "(nexus-o8dil.29/.31) -- see class javadoc.")
     void deleteCollection_withLiveChunk384_isRejected() throws Exception {
         // RED until P0.2 adds chunks_384_collection_fk ON DELETE RESTRICT.
         try (Connection su = pg.createConnection("")) {
@@ -480,22 +521,21 @@ class CollectionRegistryFkTest {
     @Test @Order(61)
     void deleteCollection_afterChunkDeleted_succeeds() throws Exception {
         // CONTROL for group 6 — after removing the chunk row, DELETE collection must succeed.
-        // This is GREEN now (RESTRICT absent → delete succeeds) AND after P0.2 (RESTRICT enforced
-        // → delete requires removing the chunk first).  The test is always GREEN but it
-        // verifies the "clear children then delete parent" pattern expected of callers.
+        // Always GREEN regardless of whether the FK/RESTRICT exists (no live referencer left).
+        // RDR-191 Phase 4: retargeted to the unified nexus.chunks table, embedding_384 column.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCollection(su, TENANT_A, "restrict-col-after");
             String ch = validChash("restrict-after");
             su.createStatement().execute(
-                "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
                 "VALUES ('" + TENANT_A + "', 'restrict-col-after', " +
                 "'" + ch + "', 'text', " +
                 vectorLiteral(384) + "::vector)");
 
             // Delete the chunk row first
             su.createStatement().execute(
-                "DELETE FROM nexus.chunks_384 " +
+                "DELETE FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
                 "WHERE tenant_id='" + TENANT_A + "' AND chash='" + ch + "'");
 
             // Now the collection delete must succeed
@@ -516,6 +556,9 @@ class CollectionRegistryFkTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(70)
+    @Disabled("Pre-existing, unrelated to RDR-191: chunks_384_chash_len_check was already "
+        + "dropped by rdr180-2 before RDR-191 -- nexus.chunks has no length(text)=32 concept, "
+        + "only the octet family (D5 lane record, T2 nexus/rdr-191-batch-D5-2026-08-13).")
     void chunks384_chashLenCheck_rejects31() throws Exception {
         // RED until P0.2 adds chunks_384_chash_len_check.
         try (Connection su = pg.createConnection("")) {
@@ -535,6 +578,8 @@ class CollectionRegistryFkTest {
     }
 
     @Test @Order(71)
+    @Disabled("Pre-existing, unrelated to RDR-191: chunks_384_chash_len_check was already "
+        + "dropped by rdr180-2 before RDR-191 -- see chunks384_chashLenCheck_rejects31.")
     void chunks384_chashLenCheck_rejects33() throws Exception {
         // RED until P0.2 adds chunks_384_chash_len_check.
         try (Connection su = pg.createConnection("")) {
@@ -555,23 +600,26 @@ class CollectionRegistryFkTest {
 
     @Test @Order(72)
     void chunks384_chashLenCheck_accepts32() throws Exception {
-        // CONTROL — must be GREEN before and after P0.2 lands.
+        // CONTROL — must be GREEN before and after P0.2 lands. RDR-191 Phase 4:
+        // retargeted to the unified nexus.chunks table, embedding_384 column.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCollection(su, TENANT_A, "chk-col-384-32");
             su.createStatement().execute(
-                "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
                 "VALUES ('" + TENANT_A + "', 'chk-col-384-32', " +
                 "'" + validChash("384-32ok") + "', 'text', " +
                 vectorLiteral(384) + "::vector)");
             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.chunks_384 WHERE chash='" + validChash("384-32ok") + "'");
+                "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE chash='" + validChash("384-32ok") + "'");
             rs.next();
-            assertThat(rs.getInt(1)).as("32-char chash must be accepted by chunks_384").isEqualTo(1);
+            assertThat(rs.getInt(1)).as("32-char chash must be accepted by nexus.chunks").isEqualTo(1);
         }
     }
 
     @Test @Order(73)
+    @Disabled("Pre-existing, unrelated to RDR-191: chunks_768_chash_len_check was already "
+        + "dropped by rdr180-2 before RDR-191 -- see chunks384_chashLenCheck_rejects31.")
     void chunks768_chashLenCheck_rejects31() throws Exception {
         // RED until P0.2 adds chunks_768_chash_len_check.
         try (Connection su = pg.createConnection("")) {
@@ -591,6 +639,8 @@ class CollectionRegistryFkTest {
     }
 
     @Test @Order(74)
+    @Disabled("Pre-existing, unrelated to RDR-191: chunks_768_chash_len_check was already "
+        + "dropped by rdr180-2 before RDR-191 -- see chunks384_chashLenCheck_rejects31.")
     void chunks768_chashLenCheck_rejects33() throws Exception {
         // RED until P0.2 adds chunks_768_chash_len_check.
         try (Connection su = pg.createConnection("")) {
@@ -610,6 +660,8 @@ class CollectionRegistryFkTest {
     }
 
     @Test @Order(75)
+    @Disabled("Pre-existing, unrelated to RDR-191: chunks_1024_chash_len_check was already "
+        + "dropped by rdr180-2 before RDR-191 -- see chunks384_chashLenCheck_rejects31.")
     void chunks1024_chashLenCheck_rejects31() throws Exception {
         // RED until P0.2 adds chunks_1024_chash_len_check.
         try (Connection su = pg.createConnection("")) {
@@ -629,6 +681,8 @@ class CollectionRegistryFkTest {
     }
 
     @Test @Order(76)
+    @Disabled("Pre-existing, unrelated to RDR-191: chunks_1024_chash_len_check was already "
+        + "dropped by rdr180-2 before RDR-191 -- see chunks384_chashLenCheck_rejects31.")
     void chunks1024_chashLenCheck_rejects33() throws Exception {
         // RED until P0.2 adds chunks_1024_chash_len_check.
         try (Connection su = pg.createConnection("")) {
@@ -861,6 +915,8 @@ class CollectionRegistryFkTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(100)
+    @Disabled("RDR-191 Phase 4: chunks_384_collection_fk died with chunks_384 and is not "
+        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
     void chunks384_crossTenantCollection_rejected() throws Exception {
         // RED until P0.2 adds chunks_384_collection_fk.
         // Collection registered ONLY under TENANT_B; INSERT as TENANT_A must be rejected
@@ -885,6 +941,8 @@ class CollectionRegistryFkTest {
     }
 
     @Test @Order(101)
+    @Disabled("RDR-191 Phase 4: chunks_384_collection_fk died with chunks_384 and is not "
+        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
     void chunks384_crossTenantCollection_viaRlsPosture_rejected() throws Exception {
         // RED until P0.2 adds chunks_384_collection_fk.
         // RLS-posture variant: svc role under FORCE RLS with GUC=TENANT_A tries to insert
@@ -926,7 +984,7 @@ class CollectionRegistryFkTest {
     @Test @Order(110)
     void upsertChunks_conformantCollection_autoRegistersWithParsedSegments() throws Exception {
         // Conformant name: <content_type>__<owner_id>__<embedding_model>__v<n>
-        // Uses minilm-l6-v2-384 → chunks_384 (matching the fake embedder dim below).
+        // Uses minilm-l6-v2-384 → nexus.chunks embedding_384 (matching the fake embedder dim below).
         String conformantCol = "knowledge__auto-reg-owner__minilm-l6-v2-384__v1";
         String tenant = "autoreg-tenant-a";
 
@@ -959,11 +1017,12 @@ class CollectionRegistryFkTest {
                 List.of(Map.of()));
         }
 
-        // Verify: (i) write succeeded — chunk row exists
+        // Verify: (i) write succeeded — chunk row exists. RDR-191 Phase 4: retargeted
+        // to the unified nexus.chunks table.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.chunks_384 " +
+                "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
                 "WHERE tenant_id='" + tenant + "' AND collection='" + conformantCol + "'");
             rs.next();
             assertThat(rs.getInt(1))
@@ -1043,7 +1102,9 @@ class CollectionRegistryFkTest {
     // (INSERT new registry Y → re-home children X→Y → DELETE old registry X),
     // which never touches catalog_collections.name. The chunks-present case
     // that used to fail now SUCCEEDS and re-homes the chunk row — this test
-    // now pins that coherent success.
+    // now pins that coherent success. RDR-191 Phase 4: chunks_384/768/1024
+    // unified into nexus.chunks; CatalogRepository.COLLECTION_SCOPED_TABLES'
+    // count key collapsed from three ("chunks_384" etc.) to one ("chunks").
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(120)
@@ -1061,7 +1122,7 @@ class CollectionRegistryFkTest {
             insertCollection(su, tenant, oldName);
             // Insert a chunk row referencing the collection
             su.createStatement().execute(
-                "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
                 "VALUES ('" + tenant + "', '" + oldName + "', " +
                 "'" + validChash("grp12chunk1") + "', 'rename-test chunk', " +
                 vectorLiteral(384) + "::vector)");
@@ -1080,7 +1141,7 @@ class CollectionRegistryFkTest {
 
             // The coherent re-home succeeds (no FK violation) and reports the moved chunk.
             var counts = repo.renameCollection(tenant, oldName, newName);
-            assertThat(counts.get("chunks_384"))
+            assertThat(counts.get("chunks"))
                 .as("the chunks-present case re-homes the chunk row").isEqualTo(1);
             assertThat(counts.get("catalog_collections_inserted")).as("registry Y inserted").isEqualTo(1);
             assertThat(counts.get("catalog_collections_superseded"))
@@ -1091,11 +1152,11 @@ class CollectionRegistryFkTest {
         // superseded tombstone with no chunks (nexus-cecqy — step 3 retires, not deletes).
         try (Connection su = pg.createConnection("")) {
             ResultSet rs;
-            rs = su.createStatement().executeQuery("SELECT COUNT(*) FROM nexus.chunks_384 WHERE tenant_id='"
+            rs = su.createStatement().executeQuery("SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id='"
                 + tenant + "' AND collection='" + oldName + "'");
             rs.next();
             assertThat(rs.getInt(1)).as("no chunk orphan under old name").isZero();
-            rs = su.createStatement().executeQuery("SELECT COUNT(*) FROM nexus.chunks_384 WHERE tenant_id='"
+            rs = su.createStatement().executeQuery("SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id='"
                 + tenant + "' AND collection='" + newName + "'");
             rs.next();
             assertThat(rs.getInt(1)).as("chunk re-homed under new name").isEqualTo(1);
@@ -1132,6 +1193,8 @@ class CollectionRegistryFkTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(130)
+    @Disabled("RDR-191 Phase 4: chunks_384_collection_fk died with chunks_384 and is not "
+        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
     void reconcileThenValidate_chunks384_gapWindowOrphan() throws Exception {
         final String T = "crfk-p03-c384";
         final String COL = "p03-orphan-c384";
@@ -1146,6 +1209,8 @@ class CollectionRegistryFkTest {
     }
 
     @Test @Order(131)
+    @Disabled("RDR-191 Phase 4: chunks_768_collection_fk died with chunks_768 and is not "
+        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
     void reconcileThenValidate_chunks768_gapWindowOrphan() throws Exception {
         final String T = "crfk-p03-c768";
         final String COL = "p03-orphan-c768";
@@ -1160,6 +1225,8 @@ class CollectionRegistryFkTest {
     }
 
     @Test @Order(132)
+    @Disabled("RDR-191 Phase 4: chunks_1024_collection_fk died with chunks_1024 and is not "
+        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
     void reconcileThenValidate_chunks1024_gapWindowOrphan() throws Exception {
         final String T = "crfk-p03-c1024";
         final String COL = "p03-orphan-c1024";

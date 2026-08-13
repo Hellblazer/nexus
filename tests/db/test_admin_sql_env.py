@@ -12,7 +12,12 @@ from subprocess import CompletedProcess
 
 import pytest
 
-from nexus.db.admin_sql import AdminCredentials, run_admin_sql
+from nexus.db.admin_sql import (
+    AdminCredentials,
+    AdminSqlResult,
+    run_admin_sql,
+    run_admin_sql_detailed,
+)
 
 
 class _RecordingRunner:
@@ -167,3 +172,133 @@ class TestExistenceGate:
                 ["ALTER TABLE nexus.chunks_384 VALIDATE CONSTRAINT chunks_384_chash_octet_check"],
                 psql_bin=psql, psql_runner=runner,
             )
+
+
+class TestRunAdminSqlDetailedNonVacuity:
+    """nexus-o8dil.19 (E1 non-vacuity, acceptance recorded on
+    nexus-o8dil.15): a VALIDATE run where EVERY statement's target relation
+    was absent must be DISTINGUISHABLE from a genuinely-clean run — against
+    today's plain ``run_admin_sql`` (bare ``bool | None``), the two
+    collapsed into the same ``True``. Table names below use the RDR-191
+    unified ``nexus.chunks`` relation, but the fix is dim-agnostic: it is
+    about the existence-gate's SIGNAL shape, not any particular table."""
+
+    def test_fully_skipped_is_distinguishable_from_genuinely_validated(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            "nexus.db.admin_sql.resolve_admin_credentials",
+            lambda creds_path=None: AdminCredentials(port=5599, user="nexus_admin", password="apw"),
+        )
+        psql = _bundle_psql(tmp_path)
+
+        def runner(argv, env):
+            stmt = argv[-1]
+            if "to_regclass" in stmt:
+                return CompletedProcess(argv, 0, stdout="", stderr="")  # every relation absent
+            raise AssertionError("a fully-absent statement must never reach VALIDATE")
+
+        result = run_admin_sql_detailed(
+            ["ALTER TABLE nexus.chunks VALIDATE CONSTRAINT chunks_chash_octet_check"],
+            psql_bin=psql, psql_runner=runner,
+        )
+        assert isinstance(result, AdminSqlResult)
+        assert result.ok is True  # legacy shape: the run "succeeded"
+        assert result.total == 1
+        assert result.skipped == 1
+        assert result.fully_skipped is True, (
+            "against today's plain `return True`, this distinction did not "
+            "exist — demonstrate the fix: fully_skipped must be True here"
+        )
+        # The legacy bool|None wrapper still collapses to True (backward
+        # compat) — this is the vacuity the wrapper's own docstring warns
+        # a non-vacuity-sensitive caller not to trust alone.
+        assert run_admin_sql(
+            ["ALTER TABLE nexus.chunks VALIDATE CONSTRAINT chunks_chash_octet_check"],
+            psql_bin=psql, psql_runner=runner,
+        ) is True
+
+    def test_genuinely_validated_run_is_not_fully_skipped(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "nexus.db.admin_sql.resolve_admin_credentials",
+            lambda creds_path=None: AdminCredentials(port=5599, user="nexus_admin", password="apw"),
+        )
+        psql = _bundle_psql(tmp_path)
+
+        def runner(argv, env):
+            stmt = argv[-1]
+            if "to_regclass" in stmt:
+                return CompletedProcess(argv, 0, stdout="t", stderr="")
+            return CompletedProcess(argv, 0, stdout="", stderr="")
+
+        result = run_admin_sql_detailed(
+            ["ALTER TABLE nexus.chunks VALIDATE CONSTRAINT chunks_chash_octet_check"],
+            psql_bin=psql, psql_runner=runner,
+        )
+        assert result.ok is True
+        assert result.total == 1
+        assert result.skipped == 0
+        assert result.fully_skipped is False
+
+    def test_partial_skip_is_not_fully_skipped(self, tmp_path, monkeypatch):
+        """A mix of present/absent relations must not read as fully-skipped
+        either — only a TOTAL absence is the non-vacuity signal."""
+        monkeypatch.setattr(
+            "nexus.db.admin_sql.resolve_admin_credentials",
+            lambda creds_path=None: AdminCredentials(port=5599, user="nexus_admin", password="apw"),
+        )
+        psql = _bundle_psql(tmp_path)
+        existing = {"nexus.chunks"}
+
+        def runner(argv, env):
+            stmt = argv[-1]
+            if "to_regclass" in stmt:
+                table = stmt.split("'")[1]
+                return CompletedProcess(argv, 0, stdout=("t" if table in existing else ""), stderr="")
+            return CompletedProcess(argv, 0, stdout="", stderr="")
+
+        result = run_admin_sql_detailed(
+            [
+                "ALTER TABLE nexus.chunks VALIDATE CONSTRAINT chunks_chash_octet_check",
+                "ALTER TABLE nexus.catalog_document_chunks VALIDATE CONSTRAINT catalog_document_chunks_chash_octet_check",
+            ],
+            psql_bin=psql, psql_runner=runner,
+        )
+        assert result.total == 2
+        assert result.skipped == 1
+        assert result.fully_skipped is False
+
+    def test_managed_mode_no_local_path_is_not_fully_skipped(self, monkeypatch):
+        """``ok is None`` (managed mode) must stay None, and must not
+        accidentally satisfy fully_skipped — no statement was even
+        attempted, a different case from every statement finding its
+        relation gone."""
+        monkeypatch.setattr(
+            "nexus.db.admin_sql.resolve_admin_credentials",
+            lambda creds_path=None: None,
+        )
+        result = run_admin_sql_detailed(
+            ["ALTER TABLE nexus.chunks VALIDATE CONSTRAINT chunks_chash_octet_check"],
+        )
+        assert result.ok is None
+        assert result.total == 1
+        assert result.fully_skipped is False
+
+    def test_empty_statement_list_is_not_fully_skipped(self, tmp_path, monkeypatch):
+        """Vacuously False on an empty input — nothing was ever attempted,
+        which must not be conflated with "everything attempted was
+        skipped"."""
+        monkeypatch.setattr(
+            "nexus.db.admin_sql.resolve_admin_credentials",
+            lambda creds_path=None: AdminCredentials(port=5599, user="nexus_admin", password="apw"),
+        )
+        psql = _bundle_psql(tmp_path)
+
+        def runner(argv, env):
+            raise AssertionError("no statement should run against an empty input")
+
+        result = run_admin_sql_detailed([], psql_bin=psql, psql_runner=runner)
+        assert result.ok is True
+        assert result.total == 0
+        assert result.skipped == 0
+        assert result.fully_skipped is False

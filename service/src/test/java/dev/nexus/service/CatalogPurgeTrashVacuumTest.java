@@ -57,15 +57,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>{@code nexus_svc} — the REAL production role name, provisioned entirely by
  *       the schema migration itself (this class's {@code @BeforeAll} only CREATEs the
  *       login role; every grant — base DML, {@code EXECUTE} on {@code purge_trash},
- *       and now {@code MAINTAIN} on the five purge-vacuum tables — comes from {@code
- *       grants-nexus-svc.xml}'s {@code grants-nexus-svc-1} and {@code
- *       grants-003-purge-vacuum-maintain} changesets, exactly as it would in a real
+ *       and now {@code MAINTAIN} on the three purge-vacuum tables (RDR-191,
+ *       nexus-o8dil.48: retargeted from five/three-dim to three unified tables) —
+ *       comes from {@code grants-nexus-svc.xml}'s {@code grants-nexus-svc-1} and
+ *       {@code grants-005-chunks-unify-maintain} changesets (supersedes the retired
+ *       {@code grants-003-purge-vacuum-maintain}), exactly as it would in a real
  *       deploy). Proves the DEFAULT provisioning path actually vacuums: after the
  *       async sweep completes, PostgreSQL shows a real vacuum (verified
  *       independently via {@code pg_stat_user_tables.last_vacuum}).</li>
  *   <li>{@code SVC_ROLE_NO_MAINTAIN} — same hand-granted base DML as {@code SVC_ROLE}
  *       but deliberately WITHOUT {@code MAINTAIN} — the negative control, standing in
- *       for a substrate that predates the {@code grants-003-purge-vacuum-maintain}
+ *       for a substrate that predates the {@code grants-005-chunks-unify-maintain}
  *       changeset (pre-PG17, or a deploy that has not yet re-run migrations). Proves
  *       {@link TenantScope#vacuumAnalyze} correctly detects PostgreSQL's
  *       warn-and-skip-without-error semantics for a non-owner lacking MAINTAIN: the
@@ -137,8 +139,9 @@ class CatalogPurgeTrashVacuumTest {
                 su.createStatement().execute("ALTER ROLE " + role + " SET search_path TO nexus, public");
             }
             // nexus_svc gets NO manual grants here — grants-nexus-svc-1 (base DML,
-            // EXECUTE on purge_trash) and grants-003-purge-vacuum-maintain (MAINTAIN on
-            // the five purge-vacuum tables) already ran as part of the migration above,
+            // EXECUTE on purge_trash) and grants-005-chunks-unify-maintain (MAINTAIN on
+            // the three unified purge-vacuum tables, RDR-191) already ran as part of the
+            // migration above,
             // exactly as they would against a real deploy. Only search_path, the one
             // thing every other test class's connecting role also sets and which no
             // changeset can set for a role it does not create.
@@ -186,10 +189,12 @@ class CatalogPurgeTrashVacuumTest {
 
     /**
      * Seeds {@code count} aged (60-day-old) tombstoned documents, each with one
-     * manifest row and one {@code chunks_384} row, under {@code tenant}/{@code
-     * collection}. Returns the resulting rows-affected total a purge-trash execute
-     * call would report (count docs purged + count chunks stranded — both dims other
-     * than 384 stay at zero for this fixture).
+     * manifest row and one {@code nexus.chunks} row with {@code embedding_384}
+     * populated, under {@code tenant}/{@code collection}. Returns the resulting
+     * rows-affected total a purge-trash execute call would report (count docs
+     * purged + count chunks stranded — both dims other than 384 stay at zero for
+     * this fixture; RDR-191's {@code strandedChunkCount} embedding-column guard,
+     * nexus-o8dil.48, is what makes that true post-unification).
      */
     private long seedAgedTombstones(CatalogRepository repo, PgVectorRepository vecRepo,
                                      String tenant, String collection, int count) throws Exception {
@@ -303,7 +308,7 @@ class CatalogPurgeTrashVacuumTest {
         long expectedRows = seedAgedTombstones(repoNexusSvc, vecRepoNexusSvc, tenant, collection, 6);
         assertThat(expectedRows).isEqualTo(12L);
 
-        resetVacuumStats("nexus.chunks_384");
+        resetVacuumStats("nexus.chunks");
 
         Map<String, Object> result = repoNexusSvc.purgeTrash(tenant, 30);
 
@@ -320,12 +325,14 @@ class CatalogPurgeTrashVacuumTest {
 
         // Independent verification via PostgreSQL's own stats, not just our own return
         // value: last_vacuum (VACUUM ANALYZE bumps both last_vacuum and last_analyze)
-        // must now be populated for chunks_384, the table this fixture actually wrote to.
+        // must now be populated for nexus.chunks (RDR-191 unified; formerly
+        // chunks_384), the table this fixture actually wrote to.
         // nexus_svc, provisioned ONLY by grants-nexus-svc.xml's own changesets
-        // (grants-003-purge-vacuum-maintain grants MAINTAIN on all five tables), so
-        // once the async sweep completes it must be a real vacuum, not a skip -- this
-        // is the DEFAULT production path, not a hand-crafted test-only role.
-        assertThat(lastVacuumIsRecent("nexus.chunks_384"))
+        // (grants-005-chunks-unify-maintain grants MAINTAIN on all three unified
+        // tables), so once the async sweep completes it must be a real vacuum, not
+        // a skip -- this is the DEFAULT production path, not a hand-crafted
+        // test-only role.
+        assertThat(lastVacuumIsRecent("nexus.chunks"))
             .as("pg_stat_user_tables.last_vacuum must reflect a REAL vacuum ran on the "
                 + "vacuum executor, not merely that submission returned without throwing")
             .isTrue();
@@ -340,7 +347,7 @@ class CatalogPurgeTrashVacuumTest {
         long expectedRows = seedAgedTombstones(repoNoMaintain, vecRepoNoMaintain, tenant, collection, 6);
         assertThat(expectedRows).isEqualTo(12L);
 
-        resetVacuumStats("nexus.chunks_384");
+        resetVacuumStats("nexus.chunks");
 
         Map<String, Object> result = repoNoMaintain.purgeTrash(tenant, 30);
 
@@ -353,16 +360,17 @@ class CatalogPurgeTrashVacuumTest {
 
         awaitVacuumIdle(repoNoMaintain);
 
-        // SVC_ROLE_NO_MAINTAIN owns none of the five tables and holds no MAINTAIN grant
-        // -- PostgreSQL warns-and-skips every VACUUM statement without throwing, so
-        // after the async sweep completes, last_vacuum must still be absent. The
-        // permission-skip detail itself (TenantScope.TableVacuumResult#detail(), the
-        // getWarnings() text) is NOT re-asserted here -- it is only ever visible in the
+        // SVC_ROLE_NO_MAINTAIN owns none of the three unified tables and holds no
+        // MAINTAIN grant -- PostgreSQL warns-and-skips every VACUUM statement
+        // without throwing, so after the async sweep completes, last_vacuum must
+        // still be absent. The permission-skip detail itself
+        // (TenantScope.TableVacuumResult#detail(), the getWarnings() text) is NOT
+        // re-asserted here -- it is only ever visible in the
         // event=purge_trash_vacuum_complete log line the executor writes, which
         // TenantScopeVacuumAllowlistTest / the vacuumAnalyze javadoc already cover at
         // the primitive level; this test's job is proving the ENVELOPE never lies about
         // a silent no-op, which the last_vacuum absence below does directly.
-        assertThat(lastVacuumIsRecent("nexus.chunks_384"))
+        assertThat(lastVacuumIsRecent("nexus.chunks"))
             .as("no MAINTAIN grant -> PostgreSQL's warn-and-skip must leave last_vacuum "
                 + "absent even though the envelope said 'scheduled' -- the envelope must "
                 + "never claim a vacuum happened that did not")

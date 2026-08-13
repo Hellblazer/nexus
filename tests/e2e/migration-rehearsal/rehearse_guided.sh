@@ -641,10 +641,18 @@ expect_sql "manifest dangling (chash with no content row in any dim)" \
 # FATALLY inside finalize (ChashCensus.scan + assertDiscoversKnownInventory —
 # the clean unlock above is its proof, incl. non-vacuity); these spot-checks
 # corroborate independently from the harness side.
-for T in chunks_384 chunks_768 chunks_1024; do
-  expect_sql "residual digest mismatch in $T" \
-    "SELECT count(*) FROM nexus.$T WHERE chunk_text <> '' AND chash IS DISTINCT FROM sha256(convert_to(chunk_text,'UTF8'))" "0"
-done
+#
+# RDR-191 Phase 4 (nexus-o8dil.52): this ran at the point in the flow where
+# the finalize census has already proven convergence -- i.e. the FINAL,
+# post-migration state -- so the three-table enumeration retargets to the
+# single unified nexus.chunks (one physical table now covers what used to
+# be three per-dim shards; no loop needed). Non-vacuity against an absent
+# relation is already structural here, not something this retarget adds:
+# `sql()` redirects psql stderr into stdout, so a query against a dropped
+# table returns the literal ERROR text, which expect_sql's exact-string
+# match against "0" fails loud (never silently reads as zero rows).
+expect_sql "residual digest mismatch in nexus.chunks (unified, RDR-191)" \
+  "SELECT count(*) FROM nexus.chunks WHERE chunk_text <> '' AND chash IS DISTINCT FROM sha256(convert_to(chunk_text,'UTF8'))" "0"
 
 # ── Phase 4 (items 1,6,7): direct staging-API scenario (768 + 1024) ──────────
 say "Phase 4 — direct /v1/staging scenario: dual-dim, live embed_fill, all three dispositions"

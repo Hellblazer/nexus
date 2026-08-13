@@ -1,0 +1,2890 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-191 Phase 4 repoint batch, Step A (bead nexus-o8dil.18) — re-creates
+    every SQL object that named nexus.chunks_384/768/1024 or
+    nexus.taxonomy_centroids_384/768/1024 directly, retargeted at the unified
+    nexus.chunks / nexus.taxonomy_centroids tables
+    (db/changelog-staged/vectors-004-unify-chunks.xml,
+    db/changelog-staged/taxonomy-007-unify-centroids.xml). STAGED, dormant,
+    same convention as its two siblings — see this file's own header for why
+    (db.changelog-master.xml's comment block after catalog-028 has the full
+    changelog-parity-drift-lint rationale, identical for all three files).
+
+    Plan of record: T2 nexus/rdr-191-repoint-batch-execution-plan-2026-08-13
+    [22445] Step A, incorporating the four nx_plan_audit revisions recorded on
+    bead nexus-o8dil.20's 2026-08-13 16:21 comment. Two named design
+    decisions ([22445] section 1, NOT re-litigated here):
+
+      DECISION 1 — manifest_verify / manifest_verify_all are RE-CREATED here,
+      not early-deleted (three live consumers: nx doctor's
+      _check_dangling_manifests, the RUNFENCE index-run-fence write path in
+      CatalogRepository, and Phase 5 gate nexus-o8dil.28). Phase 6 (.33)
+      still owns their eventual deletion, re-derived against .28 and the
+      RUNFENCE call site, not inherited from this file.
+
+      DECISION 2 — the nine combined-query functions keep NINE TYPED ENTRY
+      POINTS, byte-identical signatures (p_query vector(384|768|1024)), each
+      an independent LANGUAGE sql body naming its own embedding_<dim>
+      column. No dim-parameterised collapse: that would force an untyped
+      vector param + a runtime CASE over which embedding column to rank,
+      un-binding the HNSW index choice from the planner and reintroducing
+      F13's measured ~250x silent seq-scan (deployment-dependent: cloud 1024
+      / local 768). Mitigated MECHANICALLY (not by review) by the nine-body
+      drift lint, tests/test_changelog_vectors005_nine_body_drift_lint.py,
+      shipped in this same diff. That lint's cross-arm check normalizes
+      away WHICH dim token appeared WHERE, so a wrong-embedding-column
+      transposition (the F13 shape verbatim) inside a single arm can
+      normalize identically to a correct sibling and pass; a per-arm
+      SELF-consistency check (same file, same diff, 2026-08-13 round 2
+      per substantive-critic finding T2 [22454]) closes that gap by
+      asserting every dim token remaining in an arm's OWN body equals that
+      arm's OWN declared dim, independently of the cross-arm comparison.
+
+    CRITICAL-1 FIX — CROSS-DIM COLLISION GUARD ON THE GC WRITERS (added
+    2026-08-13 round 2, substantive-critic finding, T2
+    nexus/rdr-191-repoint-batch-step-a-critique-2026-08-13 [22454] and
+    nexus/rdr-191-batch-stepA-critique-fixes-2026-08-13): unification
+    removed a structural safety net vectors-004's own N7 guard exists to
+    name — pre-migration, each dim wrote to its OWN table
+    (chunks_384/768/1024), so a (tenant, collection, chash) PK collision
+    was STRUCTURALLY confined to same-dim rows; post-migration all three
+    dims share ONE table/PK space (nexus.chunks, CONSTRAINT
+    exactly_one_embedding). gc_quarantine_orphans's and
+    gc_restore_rereferenced's copy-INSERTs both carry an
+    `ON CONFLICT (tenant_id, collection, chash) DO UPDATE SET ...
+    embedding_384 = EXCLUDED.embedding_384, embedding_768 =
+    EXCLUDED.embedding_768, embedding_1024 = EXCLUDED.embedding_1024, ...`
+    that — pre-fix — blindly overwrote ALL THREE embedding columns on a
+    collision, silently destroying whichever row's embedding did not
+    happen to be EXCLUDED's.
+
+    DECISION (chosen from the semantics, not convenience): each function
+    now runs a targeted, N7-style pre-flight guard immediately before its
+    own copy-INSERT that detects any row whose chash already exists at the
+    move target under a DIFFERENT populated embedding_<dim> column than
+    the moving row's own, and RAISEs EXCEPTION naming the collision count,
+    target, tenant, and a capped sample of the colliding chashes, before
+    any row moves. Three options were on the table:
+
+      (a) RAISE loudly, mirroring N7 verbatim — CHOSEN, with the blast
+          radius explicitly bounded: N7 aborts a one-time migration; this
+          guard aborts only the ONE (tenant, collection) sweep call in
+          progress (gc_quarantine_orphans/gc_restore_rereferenced each
+          already operate on exactly one such pair per invocation, inside
+          their own transaction), so a genuine collision costs one GC
+          cycle's pass over one collection, retried next cycle — not the
+          whole sweep, not the whole batch. This matches the "no silent
+          fallbacks for correctness; FAIL LOUD" project directive and
+          gives an operator a diagnosable, sampled error instead of a
+          silently vanished chunk.
+      (b) A COALESCE-preserving ON CONFLICT (SET embedding_384 =
+          COALESCE(chunks.embedding_384, EXCLUDED.embedding_384), ...) —
+          REJECTED: for a genuine cross-dim collision this would populate
+          TWO embedding_<dim> columns on the same row, which VIOLATES
+          exactly_one_embedding outright — the failure would still be
+          loud (a CHECK violation) but undiagnosable (no sample, no named
+          collision count, an opaque constraint-violation error instead of
+          a purpose-written one) and arrives AFTER the INSERT has already
+          attempted the write, not before.
+      (c) DO NOTHING with the skip counted in the return row — REJECTED:
+          for gc_quarantine_orphans specifically, the DELETE that follows
+          the copy-INSERT re-derives its own row set independently (same
+          NOT EXISTS predicate, not "whatever the INSERT actually
+          affected"), so a DO-NOTHING'd copy would still have its SOURCE
+          row deleted by the unconditional DELETE immediately after —
+          copy skipped AND source deleted is a worse outcome than the
+          pre-fix blind overwrite, not a safer one.
+
+    Kill-controlled: VectorsRepointFunctionsIntegrationTest carries a
+    dedicated collision test per function that constructs a real cross-dim
+    (tenant, collection, chash) collision, asserts the RAISE fires (proven
+    to fail against the pre-fix body during this fix's own development),
+    and asserts BOTH the pre-existing target row AND the source row
+    survive untouched — proving the guard aborts before either side
+    moves, not merely before the write "looks" applied.
+
+    THE DIM-COLLAPSE DECISION PER OBJECT (recorded here, not assumed,
+    because "think it through per function" was this bead's own
+    instruction):
+
+      DIM MATTERS (kept as an IF/ELSIF, because it selects a DIFFERENT
+      subset of rows, not just a different storage location):
+        - manifest_orphans(dim): dim selects the split_part(collection,
+          '__', 3) model-token IN-list that decides which manifest rows are
+          "this dim's rows" to check for a matching chunk. The chash-
+          existence LEFT JOIN target itself collapses to nexus.chunks
+          (chash is dim-independent, unified PK) — only the WHERE routing
+          stays branched.
+        - chash_conformance_report(dim): dim selects which embedding_<dim>
+          IS NOT NULL subset of nexus.chunks the width-conformance count
+          applies to, AND the parallel split_part(...) IN-list for the
+          catalog_document_chunks row. Genuinely dim-scoped output; kept
+          branched. table_name labels ('nexus.chunks_384' etc.) are kept
+          VERBATIM as logical labels for report-consumer backward
+          compatibility, even though they no longer name real relations.
+        - assign_from_chashes_384/768/1024: DECISION 2's reasoning again —
+          three typed entry points, each filtering
+          c.embedding_<dim> IS NOT NULL / ct.embedding_<dim> IS NOT NULL so
+          the "<dim>" join and ORDER BY distance stay bound to ONE typed
+          column, never a runtime choice.
+
+      DIM DOES NOT MATTER (collapses to ONE dim-agnostic body; the `dim`
+      parameter is kept in the signature for Java call-surface compat and
+      the existing bad-dim validation contract, but no longer selects a
+      table or a column):
+        - gc_quarantine_orphans / gc_restore_rereferenced / gc_expire_quarantine:
+          all three operate on a (tenant_id, collection) pair whose ROWS are
+          already fully identified without knowing dim — a collection's
+          chunks all carry the same populated embedding_<dim> by
+          construction (the collection name encodes the model), and none of
+          the three functions' WHERE/JOIN predicates ever tested an
+          embedding value. "Quarantine moves rows regardless of dim" (task
+          brief, verbatim) — the row carries whichever embedding_<dim>
+          column is populated straight through the copy, untouched.
+        - purge_trash: same reasoning — its three near-identical per-dim
+          DELETE steps (1-3) become ONE DELETE against nexus.chunks; Step 4
+          (the document delete) was never dim-branched to begin with.
+
+    document_text / remap_membership: no dim branching in either the OLD or
+    NEW body (both already searched/joined across all three dims via
+    UNION ALL / three EXISTS clauses) — collapse to a single JOIN /
+    EXISTS against nexus.chunks, dim never appears in the signature.
+
+    manifest_verify / manifest_verify_all: same shape — the OLD body ORs
+    three EXISTS(chunks_<dim>) clauses; the NEW body is one
+    EXISTS(nexus.chunks) clause, per DECISION 1 above.
+
+    ROLLBACK STRATEGY (two categories, verified against vectors-004's own
+    CASCADE-fallout enumeration, not assumed):
+
+      (A) The 15 objects vectors-004's DROP TABLE ... CASCADE removed
+      IMMEDIATELY (LANGUAGE sql, pg_depend-tracked): live_chunks,
+      collection_vector_stats (2 views), the 9 combined-query functions,
+      document_text, remap_membership, manifest_verify, manifest_verify_all
+      (13 LANGUAGE sql functions). Immediately before THIS changeset runs
+      (within the batch), these are ABSENT — vectors-004 already dropped
+      them. This changeset's rollback for these 13+2 objects is therefore
+      `DROP ... IF EXISTS`, faithfully undoing only what THIS changeset did
+      (bring them from absent to present) — exactly the shape
+      vectors-004-unify-chunks.xml's own rollback comment describes
+      ("does NOT attempt to recreate the views/functions this changeset's
+      forward CASCADE removed ... restores those via their OWN owning
+      changesets' rollback + re-apply cycle once chunks_384/768/1024 exist
+      again"): resurrecting their PRE-vectors-004 bodies is catalog-006's /
+      catalog-007's / catalog-008's / catalog-004's / catalog-020's /
+      rdr180-002's own rollback+reapply job, not this changeset's.
+
+      (B) The 9 objects that SURVIVE vectors-004's DROP unchanged (plpgsql,
+      not pg_depend-tracked, merely LATENT-BROKEN until this changeset
+      fixes their bodies): manifest_orphans, chash_conformance_report,
+      gc_quarantine_orphans, gc_restore_rereferenced, gc_expire_quarantine,
+      purge_trash, assign_from_chashes_384/768/1024. These objects
+      genuinely EXIST, with their OLD (now latently broken) bodies,
+      immediately before this changeset runs. This changeset's rollback for
+      these 9 restores that immediately-prior body VERBATIM (the current
+      catalog-004 / rdr180-021 / catalog-028 / catalog-024 / catalog-027 /
+      catalog-026 / taxonomy-006 definitions), matching the
+      catalog-024/catalog-027/catalog-028 precedent of "restores the
+      original body verbatim, same discipline as layering CREATE OR
+      REPLACE on a shipped changeset."
+
+    NOT IN THIS CHANGESET (deviation from the [22445] Step A content list,
+    reported per this bead's own discipline, and verified against
+    nexus-o8dil.49's own bead comment thread before deciding): a "new-id
+    VALIDATE changeset for the unified collection FK". nexus-o8dil.49's
+    2026-08-13 15:07 comment (developer, same session as vectors-004's
+    authorship) confirms the FK-DROP half is moot (DROP TABLE ... CASCADE
+    already retires the three fk-002 chunks_<dim>_collection_fk constraints
+    — nothing left to explicitly drop) but the FK-ADD half — "add the
+    unified equivalent on nexus.chunks" — is explicitly SCOPED TO PHASE 5
+    (beads .29 local / .31 cloud), per T2 [22408] section 1 and
+    vectors-004-unify-chunks.xml's own header ("NO COLLECTION FK ON
+    nexus.chunks UNTIL PHASE 5 (S3, T2 [22436])"). A VALIDATE changeset
+    presupposes the constraint it validates already exists; adding one here,
+    ahead of the FK itself, would either be inert (validating nothing) or
+    require also adding the FK — which would silently reopen a decision
+    ([22436] S3) this changeset has no mandate to reopen. Filed as a bd
+    comment on nexus-o8dil.49 rather than silently dropped.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         Category (A) objects, part 1: the two views. live_chunks FIRST —
+         collection_vector_stats depends on it.
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <changeSet id="vectors-005-1" author="nexus-o8dil.18">
+        <comment>nexus.live_chunks: rebuilt against the unified nexus.chunks, ONE SELECT (no UNION ALL needed — each chunk is now one row, not one row per dim shard). DERIVED dim column via CASE keyed on WHICH embedding_&lt;dim&gt; column IS NOT NULL (never the vector's own width, which is unrecoverable at the SQL level anyway once cast to bare `vector`). embedding is COALESCE(embedding_384, embedding_768, embedding_1024)::vector — the three typed columns share one base pgvector type differing only by typmod, exactly mirroring how the OLD three-way UNION ALL already resolved to the untyped `vector` column type.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.live_chunks
+    WITH (security_invoker = true)
+AS
+SELECT c.tenant_id,
+       c.collection,
+       c.chash,
+       c.chunk_text,
+       COALESCE(c.embedding_384, c.embedding_768, c.embedding_1024)::vector AS embedding,
+       c.chunk_tsv,
+       c.metadata,
+       c.created_at,
+       CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+            WHEN c.embedding_768  IS NOT NULL THEN 768
+            WHEN c.embedding_1024 IS NOT NULL THEN 1024
+       END AS dim
+  FROM nexus.chunks c
+ WHERE (NOT EXISTS (
+     SELECT 1 FROM nexus.catalog_document_chunks m
+      WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+ ))
+ OR EXISTS (
+     SELECT 1
+       FROM nexus.catalog_document_chunks m
+       JOIN nexus.catalog_documents d
+         ON d.tenant_id = m.tenant_id
+        AND d.tumbler   = m.doc_id
+      WHERE m.tenant_id  = c.tenant_id
+        AND m.chash       = c.chash
+        AND d.deleted_at IS NULL
+ );
+        </sql>
+        <sql splitStatements="true" stripComments="false">
+GRANT SELECT ON nexus.live_chunks TO PUBLIC;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">DROP VIEW IF EXISTS nexus.live_chunks;</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-005-2" author="nexus-o8dil.18">
+        <comment>nexus.collection_vector_stats: UNCHANGED body (still SELECTs FROM nexus.live_chunks, grouped by dim) — re-created only because CASCADE dropped it alongside live_chunks. GRANT SELECT TO PUBLIC preserved.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.collection_vector_stats
+    WITH (security_invoker = true)
+AS
+SELECT lc.tenant_id,
+       lc.collection,
+       lc.dim,
+       count(*)           AS chunk_count,
+       max(lc.created_at) AS last_write
+  FROM nexus.live_chunks lc
+ GROUP BY lc.tenant_id, lc.collection, lc.dim;
+        </sql>
+        <sql splitStatements="true" stripComments="false">
+GRANT SELECT ON nexus.collection_vector_stats TO PUBLIC;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">DROP VIEW IF EXISTS nexus.collection_vector_stats;</sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         Category (A) objects, part 2: the nine typed combined-query
+         functions (DECISION 2). Bodies are the rdr180-002 live layer with
+         ONLY the FROM/column references changed: chunks_&lt;dim&gt; c ->
+         nexus.chunks c, c.embedding -> c.embedding_&lt;dim&gt;. Signatures
+         are byte-identical to today's.
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <changeSet id="vectors-005-3" author="nexus-o8dil.18">
+        <comment>search_metadata_scoped_384/768/1024: retargeted to nexus.chunks, embedding_&lt;dim&gt; column per typed entry point (DECISION 2)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_384(
+    p_query        vector(384),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @&gt; p_where)
+     ORDER BY c.embedding_384 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_768(
+    p_query        vector(768),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @&gt; p_where)
+     ORDER BY c.embedding_768 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_1024(
+    p_query        vector(1024),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @&gt; p_where)
+     ORDER BY c.embedding_1024 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_384(vector, text[], text, text, int, text, text, jsonb, int);
+DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_768(vector, text[], text, text, int, text, text, jsonb, int);
+DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_1024(vector, text[], text, text, int, text, text, jsonb, int);
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-005-4" author="nexus-o8dil.18">
+        <comment>search_graph_hop_384/768/1024: retargeted to nexus.chunks, embedding_&lt;dim&gt; column per typed entry point (DECISION 2). CARRIES FORWARD catalog-019-5/6/7's (nexus-t7m8e) tombstone-relay guard verbatim: the recursive `reach` CTE's traversal step JOINs BOTH endpoints (fd/td) against nexus.catalog_documents with deleted_at IS NULL, so a tombstoned document cannot act as a live relay forwarding reachability to documents beyond it. A first draft of this changeset silently dropped these two JOINs while doing the embedding_&lt;dim&gt; retarget (code-review-expert finding, T2 nexus/review-rdr191-stepA-critical-graphhop-tombstone-regression-2026-08-13 [22455]) -- fixed here before Step B; see GraphHopParityTest.tombstonedRelay_blocksReachabilityBeyondIt for the pinning test against the live layer and VectorsRepointFunctionsIntegrationTest.searchGraphHop_tombstonedRelay_blocksReachabilityBeyondIt (this diff) for the staged-layer equivalent.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_384(
+    p_query       vector(384),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+     ORDER BY c.embedding_384 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_768(
+    p_query       vector(768),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+     ORDER BY c.embedding_768 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_1024(
+    p_query       vector(1024),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+     ORDER BY c.embedding_1024 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.search_graph_hop_384(vector, text[], text[], text, int, text, jsonb, int);
+DROP FUNCTION IF EXISTS nexus.search_graph_hop_768(vector, text[], text[], text, int, text, jsonb, int);
+DROP FUNCTION IF EXISTS nexus.search_graph_hop_1024(vector, text[], text[], text, int, text, jsonb, int);
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-005-5" author="nexus-o8dil.18">
+        <comment>search_topic_scoped_384/768/1024: retargeted to nexus.chunks, embedding_&lt;dim&gt; column per typed entry point (DECISION 2)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_384(
+    p_query       vector(384),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 &lt;=&gt; p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex')
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_384 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_768(
+    p_query       vector(768),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 &lt;=&gt; p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex')
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_768 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_1024(
+    p_query       vector(1024),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 &lt;=&gt; p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex')
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_1024 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.search_topic_scoped_384(vector, text, text, int);
+DROP FUNCTION IF EXISTS nexus.search_topic_scoped_768(vector, text, text, int);
+DROP FUNCTION IF EXISTS nexus.search_topic_scoped_1024(vector, text, text, int);
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-005-6" author="nexus-o8dil.18">
+        <comment>Defensive GRANT EXECUTE on nexus_svc for the nine combined-query functions PLUS document_text/remap_membership/manifest_verify/manifest_verify_all: none of these thirteen carry a SURVIVING explicit GRANT after this changeset's own CASCADE-drop-then-CREATE-OR-REPLACE (a fresh CREATE re-establishes only the PostgreSQL function-level default of PUBLIC EXECUTE, not any grant a now-superseded earlier changeset issued against the pre-CASCADE object) — this changeset makes the nexus_svc grant explicit rather than relying on the PUBLIC default silently continuing to hold, matching catalog-004-4's explicit-grant precedent for document_text/manifest_orphans/manifest_backfill, catalog-020's own explicit grant for manifest_verify/manifest_verify_all, and remap-002's for remap_membership -- all four of which lapse the same way once vectors-004's CASCADE removes the object those changesets granted on (code-review-expert MEDIUM finding, T2 [22455]: apply the changeset's own stated policy consistently, not just to the nine facades).</comment>
+        <sql splitStatements="true" stripComments="false">
+GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_384(vector, text[], text, text, int, text, text, jsonb, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_768(vector, text[], text, text, int, text, text, jsonb, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_1024(vector, text[], text, text, int, text, text, jsonb, int) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_graph_hop_384(vector, text[], text[], text, int, text, jsonb, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_graph_hop_768(vector, text[], text[], text, int, text, jsonb, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_graph_hop_1024(vector, text[], text[], text, int, text, jsonb, int) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_384(vector, text, text, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_768(vector, text, text, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_1024(vector, text, text, int) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.document_text(text)          TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.remap_membership(text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.manifest_verify(text)        TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.manifest_verify_all()        TO nexus_svc;
+        </sql>
+        <rollback>
+            <!-- Revoke is a DBA operation; not automated (matches grants-nexus-svc.xml precedent). -->
+        </rollback>
+    </changeSet>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         Category (A) objects, part 3: document_text, remap_membership,
+         manifest_verify, manifest_verify_all — all four collapse their
+         former three-way chunks_&lt;dim&gt; fan-out to ONE reference against
+         nexus.chunks (dim never selected a subset for any of these four,
+         only a storage location).
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <changeSet id="vectors-005-7" author="nexus-o8dil.18">
+        <comment>document_text: the UNION ALL across chunks_384/768/1024 collapses to a single JOIN against nexus.chunks. Signature, tombstone/gap/missing-GUC contracts unchanged (catalog-004-3).</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.document_text(doc_id text)
+RETURNS TABLE(
+    "position"  int,
+    chunk_text  text
+)
+LANGUAGE sql
+SECURITY INVOKER
+AS $$
+    SELECT m.position::int, k.chunk_text::text
+      FROM nexus.catalog_document_chunks m
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id
+       AND d.tumbler   = m.doc_id
+       AND d.deleted_at IS NULL
+      JOIN nexus.chunks k
+        ON k.tenant_id  = m.tenant_id
+       AND k.collection = m.collection
+       AND k.chash      = m.chash
+     WHERE m.tenant_id = current_setting('nexus.tenant', true)
+       AND m.doc_id    = $1
+     ORDER BY m.position
+$$
+        </sql>
+        <rollback>
+            <!-- Category (A) object (this changeset's own header, "part 3" /
+                 line ~163): vectors-004's DROP TABLE ... CASCADE already
+                 removed document_text (LANGUAGE sql, pg_depend-tracked)
+                 immediately before this changeset ran, so this changeset's
+                 own forward direction brought it from ABSENT to PRESENT.
+                 Rollback must undo exactly that — DROP, restoring absence —
+                 not recreate the pre-vectors-004 body: at THIS point in the
+                 reverse rollback chain (vectors-005 rolls back before
+                 vectors-004), nexus.chunks_384/768/1024 do not exist yet
+                 (vectors-004's rollback, which recreates them, runs later),
+                 so a CREATE OR REPLACE FUNCTION ... LANGUAGE sql body
+                 referencing them fails at CREATE time (LANGUAGE sql bodies
+                 are validated against the catalog immediately, unlike
+                 plpgsql). Resurrecting the pre-vectors-004 body is
+                 catalog-004's own rollback+reapply job once those tables
+                 exist again (see this file's header, category (A) strategy)
+                 — this changeset's rollback restores only what THIS
+                 changeset changed. Matches the sibling DROP-only rollbacks
+                 already used for the two views (vectors-005-1/2), the nine
+                 combined-query functions (vectors-005-3/4/5), and
+                 manifest_verify/manifest_verify_all (vectors-005-9); this
+                 changeset and remap_membership's below were the two outliers
+                 that hadn't followed the category (A) pattern the header
+                 already documents (nexus-o8dil.18/.48, SchemaRollbackRoundTrip
+                 regression fix). -->
+            <sql splitStatements="true">DROP FUNCTION IF EXISTS nexus.document_text(text);</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-005-8" author="nexus-o8dil.18">
+        <comment>remap_membership: the three EXISTS(chunks_&lt;dim&gt;) clauses collapse to one EXISTS(nexus.chunks). Signature, chash_alias-chaining and hex-vs-bytea decode contract unchanged (rdr180-002's rdr180-19).</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.remap_membership(
+    p_source_collection text,
+    p_target_collection text
+) RETURNS TABLE(mapped_total bigint, present_count bigint)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $fn$
+    WITH fact AS (
+        SELECT CASE WHEN r.new_chash ~ '^[0-9a-f]+$' AND length(r.new_chash) % 2 = 0
+                    THEN decode(r.new_chash, 'hex')
+                    ELSE convert_to(r.new_chash, 'UTF8') END AS key_bytes
+        FROM nexus.chash_remap r
+        WHERE r.source_collection = p_source_collection
+          AND r.target_collection = p_target_collection
+    ),
+    resolved AS (
+        SELECT COALESCE(a.new_chash, f.key_bytes) AS chash
+        FROM fact f
+        LEFT JOIN nexus.chash_alias a
+          ON a.old_bytes = f.key_bytes
+    )
+    SELECT
+        count(*)::bigint AS mapped_total,
+        count(*) FILTER (WHERE
+            EXISTS (SELECT 1 FROM nexus.chunks c
+                     WHERE c.collection = p_target_collection
+                       AND c.chash = resolved.chash)
+        )::bigint AS present_count
+    FROM resolved
+$fn$;
+        </sql>
+        <rollback>
+            <!-- Category (A) object (this changeset's own header, "part 3" /
+                 line ~163) — same defect and same fix as document_text's
+                 rollback above (vectors-005-7): vectors-004's DROP TABLE ...
+                 CASCADE already removed remap_membership (LANGUAGE sql)
+                 immediately before this changeset ran. Rolling THIS
+                 changeset back must restore that absence via DROP, not
+                 recreate the pre-vectors-004 body — nexus.chunks_384/768/
+                 1024 do not exist yet at this point in the reverse rollback
+                 chain (vectors-004's rollback, which recreates them, runs
+                 later), so CREATE OR REPLACE FUNCTION ... LANGUAGE sql
+                 referencing them fails at CREATE time. This is the exact
+                 root cause of the SchemaRollbackRoundTripIntegrationTest
+                 failure ("relation nexus.chunks_384 does not exist" while
+                 rolling back this changeset) — fixed by matching the
+                 category (A) DROP-only pattern already used by the two
+                 views, the nine combined-query functions, and
+                 manifest_verify/manifest_verify_all (nexus-o8dil.18/.48). -->
+            <sql splitStatements="true">DROP FUNCTION IF EXISTS nexus.remap_membership(text, text);</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-005-9" author="nexus-o8dil.18">
+        <comment>manifest_verify / manifest_verify_all (DECISION 1: re-created, not early-deleted): the three-way OR across EXISTS(chunks_384/768/1024) collapses to one EXISTS(nexus.chunks). Signatures, tombstone/NULL-collection/reader-contract semantics unchanged (catalog-020-3/4).</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.manifest_verify(p_doc_id text)
+RETURNS TABLE(
+    referenced bigint,
+    present    bigint,
+    missing    bigint
+)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH manifest AS (
+        SELECT c.chash, c.collection
+          FROM nexus.catalog_document_chunks c
+          JOIN nexus.catalog_documents d
+            ON d.tenant_id = c.tenant_id
+           AND d.tumbler   = c.doc_id
+           AND d.deleted_at IS NULL
+         WHERE c.tenant_id  = current_setting('nexus.tenant', true)
+           AND c.doc_id     = p_doc_id
+           AND c.collection IS NOT NULL
+    ),
+    checked AS (
+        SELECT
+            EXISTS (
+                 SELECT 1 FROM nexus.chunks k
+                  WHERE k.tenant_id  = current_setting('nexus.tenant', true)
+                    AND k.collection = m.collection
+                    AND k.chash      = m.chash
+             ) AS is_present
+          FROM manifest m
+    )
+    SELECT
+        count(*)::bigint                                AS referenced,
+        count(*) FILTER (WHERE is_present)::bigint       AS present,
+        count(*) FILTER (WHERE NOT is_present)::bigint   AS missing
+      FROM checked
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.manifest_verify_all()
+RETURNS TABLE(
+    collection text,
+    referenced bigint,
+    present    bigint,
+    missing    bigint
+)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH manifest AS (
+        SELECT c.chash, c.collection
+          FROM nexus.catalog_document_chunks c
+          JOIN nexus.catalog_documents d
+            ON d.tenant_id = c.tenant_id
+           AND d.tumbler   = c.doc_id
+           AND d.deleted_at IS NULL
+         WHERE c.tenant_id  = current_setting('nexus.tenant', true)
+           AND c.collection IS NOT NULL
+    ),
+    checked AS (
+        SELECT
+            m.collection,
+            EXISTS (
+                 SELECT 1 FROM nexus.chunks k
+                  WHERE k.tenant_id  = current_setting('nexus.tenant', true)
+                    AND k.collection = m.collection
+                    AND k.chash      = m.chash
+             ) AS is_present
+          FROM manifest m
+    )
+    SELECT
+        collection,
+        count(*)::bigint                                AS referenced,
+        count(*) FILTER (WHERE is_present)::bigint       AS present,
+        count(*) FILTER (WHERE NOT is_present)::bigint   AS missing
+      FROM checked
+     GROUP BY collection
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.manifest_verify_all();
+DROP FUNCTION IF EXISTS nexus.manifest_verify(text);
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         Category (B) objects: LANGUAGE plpgsql, survive vectors-004's DROP
+         unchanged (not pg_depend-tracked), latent-broken until retargeted
+         here. Rollbacks restore the PRE-batch body verbatim.
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <changeSet id="vectors-005-10" author="nexus-o8dil.18">
+        <comment>manifest_orphans(dim): dim MATTERS (selects the split_part(...) model-token routing) so the IF/ELSIF stays; the LEFT JOIN target collapses from chunks_&lt;dim&gt; to nexus.chunks in all three arms (chash is dim-independent under the unified PK).</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.manifest_orphans(dim int)
+RETURNS TABLE(
+    tenant_id  text,
+    doc_id     text,
+    "position" int,
+    chash      text,
+    collection text
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'manifest_orphans: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    IF dim = 384 THEN
+        RETURN QUERY
+            SELECT c.tenant_id, c.doc_id, c.position, encode(c.chash, 'hex'), c.collection
+              FROM nexus.catalog_document_chunks c
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = c.tenant_id
+               AND d.tumbler   = c.doc_id
+               AND d.deleted_at IS NULL
+              LEFT JOIN nexus.chunks k
+                ON k.tenant_id  = c.tenant_id
+               AND k.collection = c.collection
+               AND k.chash      = c.chash
+             WHERE c.collection IS NOT NULL
+               AND split_part(c.collection, '__', 3) IN ('minilm-l6-v2-384')
+               AND k.chash IS NULL;
+
+    ELSIF dim = 768 THEN
+        RETURN QUERY
+            SELECT c.tenant_id, c.doc_id, c.position, encode(c.chash, 'hex'), c.collection
+              FROM nexus.catalog_document_chunks c
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = c.tenant_id
+               AND d.tumbler   = c.doc_id
+               AND d.deleted_at IS NULL
+              LEFT JOIN nexus.chunks k
+                ON k.tenant_id  = c.tenant_id
+               AND k.collection = c.collection
+               AND k.chash      = c.chash
+             WHERE c.collection IS NOT NULL
+               AND split_part(c.collection, '__', 3) IN ('bge-base-en-v15-768')
+               AND k.chash IS NULL;
+
+    ELSIF dim = 1024 THEN
+        RETURN QUERY
+            SELECT c.tenant_id, c.doc_id, c.position, encode(c.chash, 'hex'), c.collection
+              FROM nexus.catalog_document_chunks c
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = c.tenant_id
+               AND d.tumbler   = c.doc_id
+               AND d.deleted_at IS NULL
+              LEFT JOIN nexus.chunks k
+                ON k.tenant_id  = c.tenant_id
+               AND k.collection = c.collection
+               AND k.chash      = c.chash
+             WHERE c.collection IS NOT NULL
+               AND split_part(c.collection, '__', 3) IN ('voyage-code-3', 'voyage-context-3', 'voyage-3')
+               AND k.chash IS NULL;
+    END IF;
+END;
+$$
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.manifest_orphans(dim int)
+RETURNS TABLE(
+    tenant_id  text,
+    doc_id     text,
+    "position" int,
+    chash      text,
+    collection text
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'manifest_orphans: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    IF dim = 384 THEN
+        RETURN QUERY
+            SELECT c.tenant_id, c.doc_id, c.position, encode(c.chash, 'hex'), c.collection
+              FROM nexus.catalog_document_chunks c
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = c.tenant_id
+               AND d.tumbler   = c.doc_id
+               AND d.deleted_at IS NULL
+              LEFT JOIN nexus.chunks_384 k
+                ON k.tenant_id  = c.tenant_id
+               AND k.collection = c.collection
+               AND k.chash      = c.chash
+             WHERE c.collection IS NOT NULL
+               AND split_part(c.collection, '__', 3) IN ('minilm-l6-v2-384')
+               AND k.chash IS NULL;
+
+    ELSIF dim = 768 THEN
+        RETURN QUERY
+            SELECT c.tenant_id, c.doc_id, c.position, encode(c.chash, 'hex'), c.collection
+              FROM nexus.catalog_document_chunks c
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = c.tenant_id
+               AND d.tumbler   = c.doc_id
+               AND d.deleted_at IS NULL
+              LEFT JOIN nexus.chunks_768 k
+                ON k.tenant_id  = c.tenant_id
+               AND k.collection = c.collection
+               AND k.chash      = c.chash
+             WHERE c.collection IS NOT NULL
+               AND split_part(c.collection, '__', 3) IN ('bge-base-en-v15-768')
+               AND k.chash IS NULL;
+
+    ELSIF dim = 1024 THEN
+        RETURN QUERY
+            SELECT c.tenant_id, c.doc_id, c.position, encode(c.chash, 'hex'), c.collection
+              FROM nexus.catalog_document_chunks c
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = c.tenant_id
+               AND d.tumbler   = c.doc_id
+               AND d.deleted_at IS NULL
+              LEFT JOIN nexus.chunks_1024 k
+                ON k.tenant_id  = c.tenant_id
+               AND k.collection = c.collection
+               AND k.chash      = c.chash
+             WHERE c.collection IS NOT NULL
+               AND split_part(c.collection, '__', 3) IN ('voyage-code-3', 'voyage-context-3', 'voyage-3')
+               AND k.chash IS NULL;
+    END IF;
+END;
+$$
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-005-11" author="nexus-o8dil.18">
+        <comment>chash_conformance_report(dim): dim MATTERS (selects which embedding_&lt;dim&gt; IS NOT NULL subset of nexus.chunks the width count applies to). table_name labels kept VERBATIM ('nexus.chunks_384' etc.) for report-consumer backward compatibility even though they no longer name real relations.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.chash_conformance_report(dim int)
+RETURNS TABLE(
+    table_name     text,
+    total          bigint,
+    non_conformant bigint,
+    sample_chashes text[]
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'chash_conformance_report: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    IF dim = 384 THEN
+        RETURN QUERY
+            SELECT 'nexus.chunks_384'::text,
+                   (SELECT count(*) FROM nexus.chunks WHERE embedding_384 IS NOT NULL)::bigint,
+                   (SELECT count(*) FROM nexus.chunks
+                     WHERE embedding_384 IS NOT NULL AND octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.chunks
+                                 WHERE embedding_384 IS NOT NULL AND octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+        RETURN QUERY
+            SELECT 'nexus.catalog_document_chunks'::text,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('minilm-l6-v2-384'))::bigint,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('minilm-l6-v2-384')
+                       AND octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.catalog_document_chunks
+                                 WHERE collection IS NOT NULL
+                                   AND split_part(collection, '__', 3) IN ('minilm-l6-v2-384')
+                                   AND octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+
+    ELSIF dim = 768 THEN
+        RETURN QUERY
+            SELECT 'nexus.chunks_768'::text,
+                   (SELECT count(*) FROM nexus.chunks WHERE embedding_768 IS NOT NULL)::bigint,
+                   (SELECT count(*) FROM nexus.chunks
+                     WHERE embedding_768 IS NOT NULL AND octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.chunks
+                                 WHERE embedding_768 IS NOT NULL AND octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+        RETURN QUERY
+            SELECT 'nexus.catalog_document_chunks'::text,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('bge-base-en-v15-768'))::bigint,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('bge-base-en-v15-768')
+                       AND octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.catalog_document_chunks
+                                 WHERE collection IS NOT NULL
+                                   AND split_part(collection, '__', 3) IN ('bge-base-en-v15-768')
+                                   AND octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+
+    ELSIF dim = 1024 THEN
+        RETURN QUERY
+            SELECT 'nexus.chunks_1024'::text,
+                   (SELECT count(*) FROM nexus.chunks WHERE embedding_1024 IS NOT NULL)::bigint,
+                   (SELECT count(*) FROM nexus.chunks
+                     WHERE embedding_1024 IS NOT NULL AND octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.chunks
+                                 WHERE embedding_1024 IS NOT NULL AND octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+        RETURN QUERY
+            SELECT 'nexus.catalog_document_chunks'::text,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('voyage-code-3', 'voyage-context-3', 'voyage-3'))::bigint,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('voyage-code-3', 'voyage-context-3', 'voyage-3')
+                       AND octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.catalog_document_chunks
+                                 WHERE collection IS NOT NULL
+                                   AND split_part(collection, '__', 3) IN ('voyage-code-3', 'voyage-context-3', 'voyage-3')
+                                   AND octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+    END IF;
+END;
+$$
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.chash_conformance_report(dim int)
+RETURNS TABLE(
+    table_name     text,
+    total          bigint,
+    non_conformant bigint,
+    sample_chashes text[]
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'chash_conformance_report: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    IF dim = 384 THEN
+        RETURN QUERY
+            SELECT 'nexus.chunks_384'::text,
+                   (SELECT count(*) FROM nexus.chunks_384)::bigint,
+                   (SELECT count(*) FROM nexus.chunks_384
+                     WHERE octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.chunks_384
+                                 WHERE octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+        RETURN QUERY
+            SELECT 'nexus.catalog_document_chunks'::text,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('minilm-l6-v2-384'))::bigint,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('minilm-l6-v2-384')
+                       AND octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.catalog_document_chunks
+                                 WHERE collection IS NOT NULL
+                                   AND split_part(collection, '__', 3) IN ('minilm-l6-v2-384')
+                                   AND octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+
+    ELSIF dim = 768 THEN
+        RETURN QUERY
+            SELECT 'nexus.chunks_768'::text,
+                   (SELECT count(*) FROM nexus.chunks_768)::bigint,
+                   (SELECT count(*) FROM nexus.chunks_768
+                     WHERE octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.chunks_768
+                                 WHERE octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+        RETURN QUERY
+            SELECT 'nexus.catalog_document_chunks'::text,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('bge-base-en-v15-768'))::bigint,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('bge-base-en-v15-768')
+                       AND octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.catalog_document_chunks
+                                 WHERE collection IS NOT NULL
+                                   AND split_part(collection, '__', 3) IN ('bge-base-en-v15-768')
+                                   AND octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+
+    ELSIF dim = 1024 THEN
+        RETURN QUERY
+            SELECT 'nexus.chunks_1024'::text,
+                   (SELECT count(*) FROM nexus.chunks_1024)::bigint,
+                   (SELECT count(*) FROM nexus.chunks_1024
+                     WHERE octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.chunks_1024
+                                 WHERE octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+        RETURN QUERY
+            SELECT 'nexus.catalog_document_chunks'::text,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('voyage-code-3', 'voyage-context-3', 'voyage-3'))::bigint,
+                   (SELECT count(*) FROM nexus.catalog_document_chunks
+                     WHERE collection IS NOT NULL
+                       AND split_part(collection, '__', 3) IN ('voyage-code-3', 'voyage-context-3', 'voyage-3')
+                       AND octet_length(chash) &lt;&gt; 32)::bigint,
+                   COALESCE(
+                       (SELECT array_agg(encode(chash, 'hex') ORDER BY chash)
+                          FROM (SELECT chash FROM nexus.catalog_document_chunks
+                                 WHERE collection IS NOT NULL
+                                   AND split_part(collection, '__', 3) IN ('voyage-code-3', 'voyage-context-3', 'voyage-3')
+                                   AND octet_length(chash) &lt;&gt; 32
+                                 ORDER BY chash LIMIT 20) s),
+                       '{}'::text[]);
+    END IF;
+END;
+$$
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-005-12" author="nexus-o8dil.18">
+        <comment>gc_quarantine_orphans: dim DOES NOT MATTER (a (tenant, collection) pair's rows are already fully identified without knowing dim -- quarantine moves whatever embedding_&lt;dim&gt; column is populated straight through the copy). The three dim-branched bodies collapse to ONE dim-agnostic body against nexus.chunks; `dim` stays in the signature for Java call-surface compat and the existing bad-dim validation contract. Sweep-gate acquisition (nexus-sa731, catalog-028) and the pre-flight/inline-NOT-EXISTS guard shape are preserved verbatim. ADDS a cross-dim collision guard (Critical-1 fix, T2 nexus/rdr-191-repoint-batch-step-a-critique-2026-08-13 [22454] and nexus/rdr-191-batch-stepA-critique-fixes-2026-08-13) -- see this file's own header for the full derivation.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans(
+    dim                      int,
+    p_tenant_id              text,
+    p_collection             text,
+    p_quarantine_collection  text,
+    p_quarantined_at         text,
+    p_sample_limit           int
+)
+RETURNS TABLE(moved bigint, sample jsonb)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_moved            bigint;
+    v_sample           jsonb;
+    v_seg              text[];
+    v_collision_count  bigint;
+    v_collision_sample text[];
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    -- nexus-sa731: EXCLUSIVE half of the RDR-191 sweep gate (unchanged from
+    -- catalog-028-1 — see that changeset's comment for the full derivation).
+    PERFORM set_config('lock_timeout', '2000', true);
+    PERFORM set_config('statement_timeout', '5000', true);
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_collection));
+    EXCEPTION
+        WHEN lock_not_available THEN
+            RAISE EXCEPTION
+                'gc_quarantine_orphans: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer is holding it; retry',
+                p_tenant_id, p_collection
+                USING ERRCODE = 'lock_not_available';
+    END;
+
+    -- Pre-flight: is there anything to move at all? Not the source of truth
+    -- for WHICH chashes move (that is re-derived independently, inline, by
+    -- the INSERT and DELETE below) -- dim-agnostic, unlike the pre-batch
+    -- per-dim branches, since (tenant_id, collection) alone fully
+    -- identifies the row set now.
+    IF NOT EXISTS (
+        SELECT 1 FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND NOT EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = c.collection
+                    AND m.chash      = c.chash
+               )
+    ) THEN
+        RETURN QUERY SELECT 0::bigint, NULL::jsonb;
+        RETURN;
+    END IF;
+
+    -- N7-STYLE cross-dim collision guard (Critical-1 fix, T2 [22454]): the
+    -- unified PK (tenant_id, collection, chash) cannot hold two different-
+    -- dim rows. Detect, BEFORE any row moves, any orphan whose chash
+    -- already exists at p_quarantine_collection under a DIFFERENT
+    -- populated embedding_&lt;dim&gt; column than the orphan's own -- the blind
+    -- ON CONFLICT ... DO UPDATE ... EXCLUDED below would otherwise
+    -- silently overwrite (destroy) one of the two chunks' text/embedding.
+    -- RAISE aborts only THIS (tenant, collection) sweep call -- an ongoing
+    -- GC cycle, not vectors-004's one-time migration, so the bounded
+    -- blast radius is one collection's pass, retried next cycle, not the
+    -- whole batch.
+    WITH orphan AS (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim
+          FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND NOT EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = c.collection
+                    AND m.chash      = c.chash
+               )
+    ),
+    collision AS (
+        SELECT o.chash, o.src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM orphan o
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND e.collection = p_quarantine_collection
+           AND e.chash      = o.chash
+    )
+    SELECT count(*),
+           COALESCE(array_agg(encode(chash, 'hex') ORDER BY chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM collision
+     WHERE src_dim IS DISTINCT FROM existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans: % cross-dim (tenant_id, collection, chash) collision(s) at quarantine target % for tenant=%, origin collection=% -- the unified PK cannot hold two different-dim rows for the same chash (mirrors vectors-004''s N7 guard, T2 22454). Sample chashes: %. Refusing to overwrite; verify the quarantine-collection naming keeps distinct dims/collections separated before retrying.',
+            v_collision_count, p_quarantine_collection, p_tenant_id, p_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    -- Registration MUST precede the copy INSERT below (FK on collection).
+    v_seg := string_to_array(p_quarantine_collection, '__');
+    INSERT INTO nexus.catalog_collections
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version)
+    VALUES (
+        p_tenant_id, p_quarantine_collection,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE '' END,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE '' END,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE '' END,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END
+    )
+    ON CONFLICT (tenant_id, name) DO NOTHING;
+
+    INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                               embedding_384, embedding_768, embedding_1024, metadata)
+    SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text,
+           c.embedding_384, c.embedding_768, c.embedding_1024,
+           COALESCE(c.metadata, '{}'::jsonb)
+             || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                    'origin_collection', p_collection)
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+       AND NOT EXISTS (
+             SELECT 1 FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = c.tenant_id
+                AND m.collection = c.collection
+                AND m.chash      = c.chash
+           )
+    ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+      SET chunk_text     = EXCLUDED.chunk_text,
+          embedding_384  = EXCLUDED.embedding_384,
+          embedding_768  = EXCLUDED.embedding_768,
+          embedding_1024 = EXCLUDED.embedding_1024,
+          metadata       = EXCLUDED.metadata;
+
+    WITH del AS (
+        DELETE FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND NOT EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = c.collection
+                    AND m.chash      = c.chash
+               )
+        RETURNING c.chash, c.metadata->>'title' AS title
+    ),
+    counted AS (SELECT count(*) AS n FROM del),
+    sampled AS (
+        SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title)) AS s
+          FROM (SELECT chash, title FROM del LIMIT p_sample_limit) lim
+    )
+    SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+    RETURN QUERY SELECT v_moved, v_sample;
+END;
+$$
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans(
+    dim                      int,
+    p_tenant_id              text,
+    p_collection             text,
+    p_quarantine_collection  text,
+    p_quarantined_at         text,
+    p_sample_limit           int
+)
+RETURNS TABLE(moved bigint, sample jsonb)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_moved   bigint;
+    v_sample  jsonb;
+    v_seg     text[];
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    PERFORM set_config('lock_timeout', '2000', true);
+    PERFORM set_config('statement_timeout', '5000', true);
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_collection));
+    EXCEPTION
+        WHEN lock_not_available THEN
+            RAISE EXCEPTION
+                'gc_quarantine_orphans: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer is holding it; retry',
+                p_tenant_id, p_collection
+                USING ERRCODE = 'lock_not_available';
+    END;
+
+    IF dim = 384 THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM nexus.chunks_384 c
+             WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+               AND NOT EXISTS (
+                     SELECT 1 FROM nexus.catalog_document_chunks m
+                      WHERE m.tenant_id  = c.tenant_id
+                        AND m.collection = c.collection
+                        AND m.chash      = c.chash
+                   )
+        ) THEN
+            RETURN QUERY SELECT 0::bigint, NULL::jsonb;
+            RETURN;
+        END IF;
+
+        v_seg := string_to_array(p_quarantine_collection, '__');
+        INSERT INTO nexus.catalog_collections
+            (tenant_id, name, content_type, owner_id, embedding_model, model_version)
+        VALUES (
+            p_tenant_id, p_quarantine_collection,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END
+        )
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text, c.embedding,
+               COALESCE(c.metadata, '{}'::jsonb)
+                 || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                        'origin_collection', p_collection)
+          FROM nexus.chunks_384 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND NOT EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = c.collection
+                    AND m.chash      = c.chash
+               )
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        WITH del AS (
+            DELETE FROM nexus.chunks_384 c
+             WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+               AND NOT EXISTS (
+                     SELECT 1 FROM nexus.catalog_document_chunks m
+                      WHERE m.tenant_id  = c.tenant_id
+                        AND m.collection = c.collection
+                        AND m.chash      = c.chash
+                   )
+            RETURNING c.chash, c.metadata->>'title' AS title
+        ),
+        counted AS (SELECT count(*) AS n FROM del),
+        sampled AS (
+            SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title)) AS s
+              FROM (SELECT chash, title FROM del LIMIT p_sample_limit) lim
+        )
+        SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+        RETURN QUERY SELECT v_moved, v_sample;
+        RETURN;
+
+    ELSIF dim = 768 THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM nexus.chunks_768 c
+             WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+               AND NOT EXISTS (
+                     SELECT 1 FROM nexus.catalog_document_chunks m
+                      WHERE m.tenant_id  = c.tenant_id
+                        AND m.collection = c.collection
+                        AND m.chash      = c.chash
+                   )
+        ) THEN
+            RETURN QUERY SELECT 0::bigint, NULL::jsonb;
+            RETURN;
+        END IF;
+
+        v_seg := string_to_array(p_quarantine_collection, '__');
+        INSERT INTO nexus.catalog_collections
+            (tenant_id, name, content_type, owner_id, embedding_model, model_version)
+        VALUES (
+            p_tenant_id, p_quarantine_collection,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END
+        )
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text, c.embedding,
+               COALESCE(c.metadata, '{}'::jsonb)
+                 || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                        'origin_collection', p_collection)
+          FROM nexus.chunks_768 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND NOT EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = c.collection
+                    AND m.chash      = c.chash
+               )
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        WITH del AS (
+            DELETE FROM nexus.chunks_768 c
+             WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+               AND NOT EXISTS (
+                     SELECT 1 FROM nexus.catalog_document_chunks m
+                      WHERE m.tenant_id  = c.tenant_id
+                        AND m.collection = c.collection
+                        AND m.chash      = c.chash
+                   )
+            RETURNING c.chash, c.metadata->>'title' AS title
+        ),
+        counted AS (SELECT count(*) AS n FROM del),
+        sampled AS (
+            SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title)) AS s
+              FROM (SELECT chash, title FROM del LIMIT p_sample_limit) lim
+        )
+        SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+        RETURN QUERY SELECT v_moved, v_sample;
+        RETURN;
+
+    ELSIF dim = 1024 THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM nexus.chunks_1024 c
+             WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+               AND NOT EXISTS (
+                     SELECT 1 FROM nexus.catalog_document_chunks m
+                      WHERE m.tenant_id  = c.tenant_id
+                        AND m.collection = c.collection
+                        AND m.chash      = c.chash
+                   )
+        ) THEN
+            RETURN QUERY SELECT 0::bigint, NULL::jsonb;
+            RETURN;
+        END IF;
+
+        v_seg := string_to_array(p_quarantine_collection, '__');
+        INSERT INTO nexus.catalog_collections
+            (tenant_id, name, content_type, owner_id, embedding_model, model_version)
+        VALUES (
+            p_tenant_id, p_quarantine_collection,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END
+        )
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text, c.embedding,
+               COALESCE(c.metadata, '{}'::jsonb)
+                 || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                        'origin_collection', p_collection)
+          FROM nexus.chunks_1024 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND NOT EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = c.collection
+                    AND m.chash      = c.chash
+               )
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        WITH del AS (
+            DELETE FROM nexus.chunks_1024 c
+             WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+               AND NOT EXISTS (
+                     SELECT 1 FROM nexus.catalog_document_chunks m
+                      WHERE m.tenant_id  = c.tenant_id
+                        AND m.collection = c.collection
+                        AND m.chash      = c.chash
+                   )
+            RETURNING c.chash, c.metadata->>'title' AS title
+        ),
+        counted AS (SELECT count(*) AS n FROM del),
+        sampled AS (
+            SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title)) AS s
+              FROM (SELECT chash, title FROM del LIMIT p_sample_limit) lim
+        )
+        SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+        RETURN QUERY SELECT v_moved, v_sample;
+        RETURN;
+    END IF;
+END;
+$$
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-005-13" author="nexus-o8dil.18">
+        <comment>gc_restore_rereferenced: dim DOES NOT MATTER, same reasoning as gc_quarantine_orphans. Collapses to one dim-agnostic body against nexus.chunks; `dim` stays in the signature. ADDS the same cross-dim collision guard as gc_quarantine_orphans (Critical-1 fix, T2 [22454]) at its own copy-INSERT -- see this file's own header.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.gc_restore_rereferenced(
+    dim                      int,
+    p_tenant_id              text,
+    p_quarantine_collection  text,
+    p_origin_collection      text
+)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_chashes          bytea[];
+    v_restored         bigint := 0;
+    v_seg              text[];
+    v_collision_count  bigint;
+    v_collision_sample text[];
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    SELECT array_agg(c.chash) INTO v_chashes
+      FROM nexus.chunks c
+     WHERE c.tenant_id  = p_tenant_id
+       AND c.collection = p_quarantine_collection
+       AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+       AND EXISTS (
+             SELECT 1 FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = c.tenant_id
+                AND m.collection = p_origin_collection
+                AND m.chash      = c.chash
+           );
+
+    IF v_chashes IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    -- N7-STYLE cross-dim collision guard (Critical-1 fix, T2 [22454]):
+    -- same reasoning as gc_quarantine_orphans's guard -- detect, BEFORE
+    -- any row moves, any restore candidate whose chash already exists at
+    -- p_origin_collection under a DIFFERENT populated embedding_&lt;dim&gt;
+    -- column than the candidate's own.
+    WITH candidate AS (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim
+          FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes)
+    ),
+    collision AS (
+        SELECT cand.chash, cand.src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM candidate cand
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND e.collection = p_origin_collection
+           AND e.chash      = cand.chash
+    )
+    SELECT count(*),
+           COALESCE(array_agg(encode(chash, 'hex') ORDER BY chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM collision
+     WHERE src_dim IS DISTINCT FROM existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: % cross-dim (tenant_id, collection, chash) collision(s) at restore target % for tenant=%, quarantine collection=% -- the unified PK cannot hold two different-dim rows for the same chash (mirrors vectors-004''s N7 guard, T2 22454). Sample chashes: %. Refusing to overwrite; verify the origin-collection naming keeps distinct dims/collections separated before retrying.',
+            v_collision_count, p_origin_collection, p_tenant_id, p_quarantine_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    v_seg := string_to_array(p_origin_collection, '__');
+    INSERT INTO nexus.catalog_collections
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version)
+    VALUES (
+        p_tenant_id, p_origin_collection,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE '' END,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE '' END,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE '' END,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END
+    )
+    ON CONFLICT (tenant_id, name) DO NOTHING;
+
+    INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                               embedding_384, embedding_768, embedding_1024, metadata)
+    SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text,
+           c.embedding_384, c.embedding_768, c.embedding_1024,
+           (COALESCE(c.metadata, '{}'::jsonb) - 'quarantined_at' - 'origin_collection')
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+       AND c.chash = ANY(v_chashes)
+    ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+      SET chunk_text     = EXCLUDED.chunk_text,
+          embedding_384  = EXCLUDED.embedding_384,
+          embedding_768  = EXCLUDED.embedding_768,
+          embedding_1024 = EXCLUDED.embedding_1024,
+          metadata       = EXCLUDED.metadata;
+
+    DELETE FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+       AND c.chash = ANY(v_chashes);
+
+    v_restored := array_length(v_chashes, 1);
+    RETURN v_restored;
+END;
+$$
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.gc_restore_rereferenced(
+    dim                      int,
+    p_tenant_id              text,
+    p_quarantine_collection  text,
+    p_origin_collection      text
+)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_chashes  bytea[];
+    v_restored bigint := 0;
+    v_seg      text[];
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    IF dim = 384 THEN
+        SELECT array_agg(c.chash) INTO v_chashes
+          FROM nexus.chunks_384 c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_quarantine_collection
+           AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+           AND EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = p_origin_collection
+                    AND m.chash      = c.chash
+               );
+
+        IF v_chashes IS NULL THEN
+            RETURN 0;
+        END IF;
+
+        v_seg := string_to_array(p_origin_collection, '__');
+        INSERT INTO nexus.catalog_collections
+            (tenant_id, name, content_type, owner_id, embedding_model, model_version)
+        VALUES (
+            p_tenant_id, p_origin_collection,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END
+        )
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text, c.embedding,
+               (COALESCE(c.metadata, '{}'::jsonb) - 'quarantined_at' - 'origin_collection')
+          FROM nexus.chunks_384 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes)
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        DELETE FROM nexus.chunks_384 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes);
+
+        v_restored := array_length(v_chashes, 1);
+        RETURN v_restored;
+
+    ELSIF dim = 768 THEN
+        SELECT array_agg(c.chash) INTO v_chashes
+          FROM nexus.chunks_768 c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_quarantine_collection
+           AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+           AND EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = p_origin_collection
+                    AND m.chash      = c.chash
+               );
+
+        IF v_chashes IS NULL THEN
+            RETURN 0;
+        END IF;
+
+        v_seg := string_to_array(p_origin_collection, '__');
+        INSERT INTO nexus.catalog_collections
+            (tenant_id, name, content_type, owner_id, embedding_model, model_version)
+        VALUES (
+            p_tenant_id, p_origin_collection,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END
+        )
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text, c.embedding,
+               (COALESCE(c.metadata, '{}'::jsonb) - 'quarantined_at' - 'origin_collection')
+          FROM nexus.chunks_768 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes)
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        DELETE FROM nexus.chunks_768 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes);
+
+        v_restored := array_length(v_chashes, 1);
+        RETURN v_restored;
+
+    ELSIF dim = 1024 THEN
+        SELECT array_agg(c.chash) INTO v_chashes
+          FROM nexus.chunks_1024 c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_quarantine_collection
+           AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+           AND EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = p_origin_collection
+                    AND m.chash      = c.chash
+               );
+
+        IF v_chashes IS NULL THEN
+            RETURN 0;
+        END IF;
+
+        v_seg := string_to_array(p_origin_collection, '__');
+        INSERT INTO nexus.catalog_collections
+            (tenant_id, name, content_type, owner_id, embedding_model, model_version)
+        VALUES (
+            p_tenant_id, p_origin_collection,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE '' END,
+            CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END
+        )
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding, metadata)
+        SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text, c.embedding,
+               (COALESCE(c.metadata, '{}'::jsonb) - 'quarantined_at' - 'origin_collection')
+          FROM nexus.chunks_1024 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes)
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text = EXCLUDED.chunk_text,
+              embedding  = EXCLUDED.embedding,
+              metadata   = EXCLUDED.metadata;
+
+        DELETE FROM nexus.chunks_1024 c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes);
+
+        v_restored := array_length(v_chashes, 1);
+        RETURN v_restored;
+    END IF;
+END;
+$$
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-005-14" author="nexus-o8dil.18">
+        <comment>gc_expire_quarantine: dim DOES NOT MATTER, same reasoning. Collapses to one dim-agnostic body against nexus.chunks; `dim` stays in the signature. The manifest-reference refusal guard (nexus-wnpet, catalog-027) and the grace-window floor are preserved verbatim.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.gc_expire_quarantine(
+    dim                      int,
+    p_tenant_id              text,
+    p_quarantine_collection  text,
+    p_origin_collection      text,
+    p_cutoff                 text,
+    p_floor_fraction         float8,
+    p_floor_min_chunks       int,
+    p_force                  boolean
+)
+RETURNS TABLE(expired bigint, refused bigint)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_mine      bigint;
+    v_chashes   bytea[];
+    v_protected bytea[];
+    v_expired   bigint;
+    v_refused   bigint;
+    v_frac      float8;
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_expire_quarantine: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    SELECT count(*),
+           array_agg(c.chash) FILTER (
+               WHERE COALESCE(c.metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff
+                 AND NOT EXISTS (
+                       SELECT 1 FROM nexus.catalog_document_chunks m
+                        WHERE m.tenant_id  = c.tenant_id
+                          AND m.collection = p_origin_collection
+                          AND m.chash      = c.chash
+                     )),
+           array_agg(c.chash) FILTER (
+               WHERE COALESCE(c.metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff
+                 AND EXISTS (
+                       SELECT 1 FROM nexus.catalog_document_chunks m
+                        WHERE m.tenant_id  = c.tenant_id
+                          AND m.collection = p_origin_collection
+                          AND m.chash      = c.chash
+                     ))
+      INTO v_mine, v_chashes, v_protected
+      FROM nexus.chunks c
+     WHERE c.tenant_id  = p_tenant_id
+       AND c.collection = p_quarantine_collection
+       AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection;
+
+    v_expired := COALESCE(array_length(v_chashes, 1), 0);
+    v_refused := COALESCE(array_length(v_protected, 1), 0);
+
+    IF v_expired = 0 THEN
+        RETURN QUERY SELECT 0::bigint, v_refused;
+        RETURN;
+    END IF;
+
+    v_frac := v_expired::float8 / v_mine::float8;
+    IF v_expired >= p_floor_min_chunks AND v_frac > p_floor_fraction AND NOT p_force THEN
+        RETURN QUERY SELECT 0::bigint, v_expired + v_refused;
+        RETURN;
+    END IF;
+
+    DELETE FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+       AND c.chash = ANY(v_chashes);
+
+    RETURN QUERY SELECT v_expired, v_refused;
+END;
+$$
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.gc_expire_quarantine(
+    dim                      int,
+    p_tenant_id              text,
+    p_quarantine_collection  text,
+    p_origin_collection      text,
+    p_cutoff                 text,
+    p_floor_fraction         float8,
+    p_floor_min_chunks       int,
+    p_force                  boolean
+)
+RETURNS TABLE(expired bigint, refused bigint)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_mine      bigint;
+    v_chashes   bytea[];
+    v_protected bytea[];
+    v_expired   bigint;
+    v_refused   bigint;
+    v_frac      float8;
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_expire_quarantine: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    IF dim = 384 THEN
+        SELECT count(*),
+               array_agg(chash) FILTER (
+                   WHERE COALESCE(metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff
+                     AND NOT EXISTS (
+                           SELECT 1 FROM nexus.catalog_document_chunks m
+                            WHERE m.tenant_id  = chunks_384.tenant_id
+                              AND m.collection = p_origin_collection
+                              AND m.chash      = chunks_384.chash
+                         )),
+               array_agg(chash) FILTER (
+                   WHERE COALESCE(metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff
+                     AND EXISTS (
+                           SELECT 1 FROM nexus.catalog_document_chunks m
+                            WHERE m.tenant_id  = chunks_384.tenant_id
+                              AND m.collection = p_origin_collection
+                              AND m.chash      = chunks_384.chash
+                         ))
+          INTO v_mine, v_chashes, v_protected
+          FROM nexus.chunks_384
+         WHERE tenant_id  = p_tenant_id
+           AND collection = p_quarantine_collection
+           AND COALESCE(metadata->>'origin_collection', p_origin_collection) = p_origin_collection;
+
+        v_expired := COALESCE(array_length(v_chashes, 1), 0);
+        v_refused := COALESCE(array_length(v_protected, 1), 0);
+
+        IF v_expired = 0 THEN
+            RETURN QUERY SELECT 0::bigint, v_refused;
+            RETURN;
+        END IF;
+
+        v_frac := v_expired::float8 / v_mine::float8;
+        IF v_expired >= p_floor_min_chunks AND v_frac > p_floor_fraction AND NOT p_force THEN
+            RETURN QUERY SELECT 0::bigint, v_expired + v_refused;
+            RETURN;
+        END IF;
+
+        DELETE FROM nexus.chunks_384
+         WHERE tenant_id = p_tenant_id AND collection = p_quarantine_collection
+           AND chash = ANY(v_chashes);
+
+        RETURN QUERY SELECT v_expired, v_refused;
+        RETURN;
+
+    ELSIF dim = 768 THEN
+        SELECT count(*),
+               array_agg(chash) FILTER (
+                   WHERE COALESCE(metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff
+                     AND NOT EXISTS (
+                           SELECT 1 FROM nexus.catalog_document_chunks m
+                            WHERE m.tenant_id  = chunks_768.tenant_id
+                              AND m.collection = p_origin_collection
+                              AND m.chash      = chunks_768.chash
+                         )),
+               array_agg(chash) FILTER (
+                   WHERE COALESCE(metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff
+                     AND EXISTS (
+                           SELECT 1 FROM nexus.catalog_document_chunks m
+                            WHERE m.tenant_id  = chunks_768.tenant_id
+                              AND m.collection = p_origin_collection
+                              AND m.chash      = chunks_768.chash
+                         ))
+          INTO v_mine, v_chashes, v_protected
+          FROM nexus.chunks_768
+         WHERE tenant_id  = p_tenant_id
+           AND collection = p_quarantine_collection
+           AND COALESCE(metadata->>'origin_collection', p_origin_collection) = p_origin_collection;
+
+        v_expired := COALESCE(array_length(v_chashes, 1), 0);
+        v_refused := COALESCE(array_length(v_protected, 1), 0);
+
+        IF v_expired = 0 THEN
+            RETURN QUERY SELECT 0::bigint, v_refused;
+            RETURN;
+        END IF;
+
+        v_frac := v_expired::float8 / v_mine::float8;
+        IF v_expired >= p_floor_min_chunks AND v_frac > p_floor_fraction AND NOT p_force THEN
+            RETURN QUERY SELECT 0::bigint, v_expired + v_refused;
+            RETURN;
+        END IF;
+
+        DELETE FROM nexus.chunks_768
+         WHERE tenant_id = p_tenant_id AND collection = p_quarantine_collection
+           AND chash = ANY(v_chashes);
+
+        RETURN QUERY SELECT v_expired, v_refused;
+        RETURN;
+
+    ELSIF dim = 1024 THEN
+        SELECT count(*),
+               array_agg(chash) FILTER (
+                   WHERE COALESCE(metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff
+                     AND NOT EXISTS (
+                           SELECT 1 FROM nexus.catalog_document_chunks m
+                            WHERE m.tenant_id  = chunks_1024.tenant_id
+                              AND m.collection = p_origin_collection
+                              AND m.chash      = chunks_1024.chash
+                         )),
+               array_agg(chash) FILTER (
+                   WHERE COALESCE(metadata->>'quarantined_at', '9999-12-31T23:59:59Z') &lt;= p_cutoff
+                     AND EXISTS (
+                           SELECT 1 FROM nexus.catalog_document_chunks m
+                            WHERE m.tenant_id  = chunks_1024.tenant_id
+                              AND m.collection = p_origin_collection
+                              AND m.chash      = chunks_1024.chash
+                         ))
+          INTO v_mine, v_chashes, v_protected
+          FROM nexus.chunks_1024
+         WHERE tenant_id  = p_tenant_id
+           AND collection = p_quarantine_collection
+           AND COALESCE(metadata->>'origin_collection', p_origin_collection) = p_origin_collection;
+
+        v_expired := COALESCE(array_length(v_chashes, 1), 0);
+        v_refused := COALESCE(array_length(v_protected, 1), 0);
+
+        IF v_expired = 0 THEN
+            RETURN QUERY SELECT 0::bigint, v_refused;
+            RETURN;
+        END IF;
+
+        v_frac := v_expired::float8 / v_mine::float8;
+        IF v_expired >= p_floor_min_chunks AND v_frac > p_floor_fraction AND NOT p_force THEN
+            RETURN QUERY SELECT 0::bigint, v_expired + v_refused;
+            RETURN;
+        END IF;
+
+        DELETE FROM nexus.chunks_1024
+         WHERE tenant_id = p_tenant_id AND collection = p_quarantine_collection
+           AND chash = ANY(v_chashes);
+
+        RETURN QUERY SELECT v_expired, v_refused;
+        RETURN;
+    END IF;
+END;
+$$
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-005-15" author="nexus-o8dil.18">
+        <comment>purge_trash: dim DOES NOT MATTER (Steps 1-3 were never dim-branched to begin with, only table-branched) -- the three near-identical per-dim DELETE steps collapse to ONE DELETE against nexus.chunks. Step 4 (document delete) is byte-for-byte unchanged. Grace-window scoping (nexus-5da44, catalog-026) preserved verbatim.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.purge_trash(older_than interval)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_tenant TEXT;
+    v_count  BIGINT;
+BEGIN
+    -- GUC guard: must have a non-empty tenant scope
+    v_tenant := current_setting('nexus.tenant', true);
+    IF v_tenant IS NULL OR v_tenant = '' THEN
+        RAISE EXCEPTION
+            'purge_trash: nexus.tenant GUC must be set to a non-empty tenant scope. '
+            'Cross-tenant purge is not permitted. Set the nexus.tenant configuration '
+            'parameter before calling purge_trash.';
+    END IF;
+
+    -- Step 1-3 (collapsed): sweep orphaned chunk rows from the unified
+    -- nexus.chunks. Safety contract unchanged from catalog-026-1: a chunk
+    -- is sweepable ONLY IF it has at least one manifest row AND none of its
+    -- manifest rows PROTECT it -- a row protects when its owning document
+    -- is LIVE, or TOMBSTONED but still inside the older_than grace window.
+    -- Manifest-less chunks are never swept (RDR-145 deferred scope).
+    DELETE FROM nexus.chunks c
+    WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
+      AND NOT EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+            JOIN nexus.catalog_documents d
+              ON d.tenant_id = m.tenant_id
+             AND d.tumbler   = m.doc_id
+           WHERE m.tenant_id  = c.tenant_id
+             AND m.chash       = c.chash
+             AND (d.deleted_at IS NULL OR d.deleted_at &gt; NOW() - older_than)
+      );
+
+    -- Step 4: physically delete tombstoned documents older than the threshold.
+    -- fk-001 ON DELETE CASCADE removes catalog_document_chunks, document_aspects,
+    -- document_highlights, and aspect_extraction_queue rows for each deleted doc.
+    -- Unchanged from catalog-026-1.
+    DELETE FROM nexus.catalog_documents
+     WHERE tenant_id  = v_tenant
+       AND deleted_at IS NOT NULL
+       AND deleted_at &lt;= NOW() - older_than;
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.purge_trash(older_than interval)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_tenant TEXT;
+    v_count  BIGINT;
+BEGIN
+    v_tenant := current_setting('nexus.tenant', true);
+    IF v_tenant IS NULL OR v_tenant = '' THEN
+        RAISE EXCEPTION
+            'purge_trash: nexus.tenant GUC must be set to a non-empty tenant scope. '
+            'Cross-tenant purge is not permitted. Set the nexus.tenant configuration '
+            'parameter before calling purge_trash.';
+    END IF;
+
+    DELETE FROM nexus.chunks_384 c
+    WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
+      AND NOT EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+            JOIN nexus.catalog_documents d
+              ON d.tenant_id = m.tenant_id
+             AND d.tumbler   = m.doc_id
+           WHERE m.tenant_id  = c.tenant_id
+             AND m.chash       = c.chash
+             AND (d.deleted_at IS NULL OR d.deleted_at &gt; NOW() - older_than)
+      );
+
+    DELETE FROM nexus.chunks_768 c
+    WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
+      AND NOT EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+            JOIN nexus.catalog_documents d
+              ON d.tenant_id = m.tenant_id
+             AND d.tumbler   = m.doc_id
+           WHERE m.tenant_id  = c.tenant_id
+             AND m.chash       = c.chash
+             AND (d.deleted_at IS NULL OR d.deleted_at &gt; NOW() - older_than)
+      );
+
+    DELETE FROM nexus.chunks_1024 c
+    WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
+      AND NOT EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+            JOIN nexus.catalog_documents d
+              ON d.tenant_id = m.tenant_id
+             AND d.tumbler   = m.doc_id
+           WHERE m.tenant_id  = c.tenant_id
+             AND m.chash       = c.chash
+             AND (d.deleted_at IS NULL OR d.deleted_at &gt; NOW() - older_than)
+      );
+
+    DELETE FROM nexus.catalog_documents
+     WHERE tenant_id  = v_tenant
+       AND deleted_at IS NOT NULL
+       AND deleted_at &lt;= NOW() - older_than;
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         Category (B), part 2: assign_from_chashes_384/768/1024 (DECISION 2
+         reasoning applies again: three typed entry points, NOT collapsed).
+         Retargeted to BOTH unified tables per the .47 ruling ("unify the
+         centroids too, one era"). CRITICAL correctness addition versus the
+         pre-batch body: explicit c.embedding_&lt;dim&gt; IS NOT NULL AND
+         ct.embedding_&lt;dim&gt; IS NOT NULL filters on BOTH sides of the
+         join; without them, a cross-dim row pair (e.g. a 768-dim chunk
+         joined to a 384-dim centroid) would compute a NULL &lt;=&gt;
+         distance instead of being excluded outright, relying on NULLS LAST
+         ordering by accident rather than being structurally impossible.
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <changeSet id="vectors-005-16" author="nexus-o8dil.18">
+        <comment>nexus.assign_from_chashes_384: retargeted to nexus.chunks x nexus.taxonomy_centroids, both sides filtered to embedding_384 IS NOT NULL</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_384(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_384 &lt;=&gt; ct.embedding_384))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_384 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_384 &lt;=&gt; ct.embedding_384) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_384 &lt;=&gt; ct.embedding_384))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_384 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_384 &lt;=&gt; ct.embedding_384) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id, 'centroid'
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_384(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                     AS m_chash,
+                   ct.topic_id                                                AS m_topic_id,
+                   (1 - (c.embedding &lt;=&gt; ct.embedding))::double precision AS m_sim
+              FROM nexus.chunks_384 c
+              JOIN nexus.taxonomy_centroids_384 ct
+                ON ct.collection &lt;&gt; p_collection
+             WHERE c.collection = p_collection
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding &lt;=&gt; ct.embedding) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                     AS m_chash,
+                   ct.topic_id                                                AS m_topic_id,
+                   (1 - (c.embedding &lt;=&gt; ct.embedding))::double precision AS m_sim
+              FROM nexus.chunks_384 c
+              JOIN nexus.taxonomy_centroids_384 ct
+                ON ct.collection = p_collection
+             WHERE c.collection = p_collection
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding &lt;=&gt; ct.embedding) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id, 'centroid'
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-005-17" author="nexus-o8dil.18">
+        <comment>nexus.assign_from_chashes_768: retargeted, same shape as vectors-005-16</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_768(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_768 &lt;=&gt; ct.embedding_768))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_768 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_768 &lt;=&gt; ct.embedding_768) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_768 &lt;=&gt; ct.embedding_768))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_768 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_768 &lt;=&gt; ct.embedding_768) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id, 'centroid'
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_768(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                     AS m_chash,
+                   ct.topic_id                                                AS m_topic_id,
+                   (1 - (c.embedding &lt;=&gt; ct.embedding))::double precision AS m_sim
+              FROM nexus.chunks_768 c
+              JOIN nexus.taxonomy_centroids_768 ct
+                ON ct.collection &lt;&gt; p_collection
+             WHERE c.collection = p_collection
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding &lt;=&gt; ct.embedding) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                     AS m_chash,
+                   ct.topic_id                                                AS m_topic_id,
+                   (1 - (c.embedding &lt;=&gt; ct.embedding))::double precision AS m_sim
+              FROM nexus.chunks_768 c
+              JOIN nexus.taxonomy_centroids_768 ct
+                ON ct.collection = p_collection
+             WHERE c.collection = p_collection
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding &lt;=&gt; ct.embedding) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id, 'centroid'
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-005-18" author="nexus-o8dil.18">
+        <comment>nexus.assign_from_chashes_1024: retargeted, same shape as vectors-005-16</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_1024(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                            AS m_chash,
+                   ct.topic_id                                                       AS m_topic_id,
+                   (1 - (c.embedding_1024 &lt;=&gt; ct.embedding_1024))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_1024 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_1024 &lt;=&gt; ct.embedding_1024) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                            AS m_chash,
+                   ct.topic_id                                                       AS m_topic_id,
+                   (1 - (c.embedding_1024 &lt;=&gt; ct.embedding_1024))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_1024 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_1024 &lt;=&gt; ct.embedding_1024) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id, 'centroid'
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_1024(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                     AS m_chash,
+                   ct.topic_id                                                AS m_topic_id,
+                   (1 - (c.embedding &lt;=&gt; ct.embedding))::double precision AS m_sim
+              FROM nexus.chunks_1024 c
+              JOIN nexus.taxonomy_centroids_1024 ct
+                ON ct.collection &lt;&gt; p_collection
+             WHERE c.collection = p_collection
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding &lt;=&gt; ct.embedding) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                     AS m_chash,
+                   ct.topic_id                                                AS m_topic_id,
+                   (1 - (c.embedding &lt;=&gt; ct.embedding))::double precision AS m_sim
+              FROM nexus.chunks_1024 c
+              JOIN nexus.taxonomy_centroids_1024 ct
+                ON ct.collection = p_collection
+             WHERE c.collection = p_collection
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding &lt;=&gt; ct.embedding) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id, 'centroid'
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -815,6 +815,7 @@ def _provision_diag_conformance_view(bins: PgBinaries, port: int, os_user: str) 
     try:
         from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred, keeps provision import-light
             CHASH_BEARING_TABLES,
+            DIAG_CONFORMANCE_VIEW,
             diag_conformance_view_ddl,
         )
 
@@ -836,20 +837,47 @@ def _provision_diag_conformance_view(bins: PgBinaries, port: int, os_user: str) 
             "END IF; "
             "END $do$;",
         )
-        # nexus-hdumg: the DO block's IF is a NO-OP whenever the chash tables
-        # are not all present — which is the NORMAL state on a fresh provision
-        # (Liquibase creates them at first engine boot, after this runs). The
-        # old unconditional "pg_diag_conformance_view_provisioned" asserted a
-        # creation that had usually not happened, so the later, expected
-        # `diag_sql_failed` on the absent view read as an unexplained error.
-        # Say what was actually attempted.
-        _log.info(
-            "pg_diag_conformance_view_provision_attempted",
-            note="no-op unless all chash-bearing tables already exist "
-                 "(fresh provisions create them at first engine boot; the "
-                 "conformance probe falls back to legacy direct-table counts "
-                 "until a later re-provision creates the view)",
+        # nexus-o8dil.15 non-vacuity fix (RDR-191 repoint batch, risk R4):
+        # the DO block above is a fire-and-forget anonymous block — Postgres
+        # gives psql no signal whether its IF branch actually ran. The prior
+        # version logged the SAME "pg_diag_conformance_view_provision_
+        # attempted" line unconditionally, on both a genuine creation AND a
+        # total no-op (the NORMAL state on a fresh provision, before
+        # Liquibase has created the chash-bearing tables) — "attempted" is
+        # not "succeeded", and a caller/log-scan could not tell which had
+        # happened. That is the exact "reports success while converging
+        # nothing" shape RDR-182 forbids for the conformance diagnostics
+        # elsewhere in this module; a DO block that can no-op has no
+        # business sharing ONE log line with the case where it did the work.
+        # Query the view's ACTUAL post-DDL existence and log the two
+        # outcomes under DIFFERENT, greppable event names so this can never
+        # collapse back into a single silently-ambiguous line.
+        schema, relname = DIAG_CONFORMANCE_VIEW.split(".", 1)
+        exists = _psql_tuples(
+            bins, port, NEXUS_DB_NAME, os_user,
+            "SELECT 1 FROM pg_class c JOIN pg_namespace n "
+            "ON n.oid = c.relnamespace "
+            f"WHERE n.nspname = '{schema}' AND c.relname = '{relname}'",
         )
+        if exists == "1":
+            _log.info(
+                "pg_diag_conformance_view_provisioned",
+                view=DIAG_CONFORMANCE_VIEW,
+                note="the view exists after this call (freshly created here, "
+                     "or already present from an earlier provision)",
+            )
+        else:
+            _log.info(
+                "pg_diag_conformance_view_provision_skipped_tables_absent",
+                view=DIAG_CONFORMANCE_VIEW,
+                relations_required=len(CHASH_BEARING_TABLES),
+                note="not all chash-bearing tables exist yet — the DO "
+                     "block's IF branch did not fire. Normal on a fresh "
+                     "provision (Liquibase creates the tables at first "
+                     "engine boot); the conformance probe falls back to "
+                     "legacy direct-table counts until a later "
+                     "re-provision creates the view.",
+            )
     except Exception as exc:  # noqa: BLE001 — best-effort; absent view = probe falls back to legacy statements
         _log.warning("pg_diag_view_best_effort_failed", error=str(exc))
 

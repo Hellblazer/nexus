@@ -111,16 +111,16 @@ class CatalogRenameCollectionTest {
         assertThat(dev.nexus.service.db.CollectionRegistry.isKnown(TENANT_A, NEW))
             .as("registry cache marked for new name").isTrue();
         assertThat(c.get("catalog_collections_inserted")).as("registry Y inserted").isEqualTo(1);
-        assertThat(c.get("chunks_384")).as("chunks_384").isEqualTo(2);
-        assertThat(c.get("chunks_768")).as("chunks_768").isEqualTo(1);
-        assertThat(c.get("chunks_1024")).as("chunks_1024").isEqualTo(1);
+        // RDR-191 (nexus-o8dil.48): chunks_384/768/1024 and
+        // taxonomy_centroids_384/768/1024 unify into single nexus.chunks /
+        // nexus.taxonomy_centroids -- one cascade-count key each, summing what
+        // three keys used to report (2+1+1 chunks, 1+1+1 centroids).
+        assertThat(c.get("chunks")).as("chunks (unified, 2+1+1 across the three seeded dims)").isEqualTo(4);
         assertThat(c).as("RDR-187: no chash_index leg in the cascade").doesNotContainKey("chash_index");
         assertThat(c.get("topic_assignments")).as("topic_assignments (by source_collection)").isEqualTo(2);
         assertThat(c.get("topics")).as("topics").isEqualTo(1);
         assertThat(c.get("taxonomy_meta")).as("taxonomy_meta (RESTRICT child)").isEqualTo(1);
-        assertThat(c.get("taxonomy_centroids_384")).as("centroids_384").isEqualTo(1);
-        assertThat(c.get("taxonomy_centroids_768")).as("centroids_768").isEqualTo(1);
-        assertThat(c.get("taxonomy_centroids_1024")).as("centroids_1024").isEqualTo(1);
+        assertThat(c.get("taxonomy_centroids")).as("taxonomy_centroids (unified, 1+1+1)").isEqualTo(3);
         assertThat(c.get("document_aspects")).as("document_aspects (incl doc-less)").isEqualTo(2);
         assertThat(c.get("document_highlights")).as("document_highlights").isEqualTo(1);
         assertThat(c.get("aspect_extraction_queue")).as("aspect_extraction_queue (incl doc-less)").isEqualTo(2);
@@ -135,8 +135,11 @@ class CatalogRenameCollectionTest {
     @Test @Order(20)
     void renameCollection_noOrphanUnderOldName_allPresentUnderNew() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            for (String tbl : List.of("chunks_384", "chunks_768", "chunks_1024", "topics", "taxonomy_meta",
-                    "taxonomy_centroids_384", "taxonomy_centroids_768", "taxonomy_centroids_1024",
+            // RDR-191 (nexus-o8dil.48): chunks_384/768/1024 and
+            // taxonomy_centroids_384/768/1024 collapse to "chunks" and
+            // "taxonomy_centroids" -- one orphan-check each, not three.
+            for (String tbl : List.of("chunks", "topics", "taxonomy_meta",
+                    "taxonomy_centroids",
                     "document_aspects", "document_highlights", "aspect_extraction_queue",
                     "relevance_log", "search_telemetry")) {
                 assertThat(rows(su, "SELECT COUNT(*) FROM nexus." + tbl
@@ -159,8 +162,8 @@ class CatalogRenameCollectionTest {
             // Present under NEW.
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
                 + "' AND name='" + NEW + "'")).as("new registry row present").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks_384 WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + NEW + "'")).as("chunks under NEW").isEqualTo(2);
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks WHERE tenant_id='" + TENANT_A
+                + "' AND collection='" + NEW + "'")).as("chunks under NEW (unified, 2+1+1)").isEqualTo(4);
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.taxonomy_meta WHERE tenant_id='" + TENANT_A
                 + "' AND collection='" + NEW + "'")).as("taxonomy_meta under NEW").isEqualTo(1);
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.hook_failures WHERE tenant_id='" + TENANT_A
@@ -172,8 +175,8 @@ class CatalogRenameCollectionTest {
                 + "' AND collection='" + NEW + "'")).as("document_aspects under NEW").isEqualTo(2);
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.aspect_extraction_queue WHERE tenant_id='" + TENANT_A
                 + "' AND collection='" + NEW + "'")).as("aspect_extraction_queue under NEW").isEqualTo(2);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.taxonomy_centroids_384 WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + NEW + "'")).as("centroids_384 under NEW").isEqualTo(1);
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.taxonomy_centroids WHERE tenant_id='" + TENANT_A
+                + "' AND collection='" + NEW + "'")).as("centroids under NEW (unified, 1+1+1)").isEqualTo(3);
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.topic_assignments WHERE tenant_id='" + TENANT_A
                 + "' AND source_collection='" + NEW + "'")).as("topic_assignments under NEW").isEqualTo(2);
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.relevance_log WHERE tenant_id='" + TENANT_A
@@ -188,8 +191,8 @@ class CatalogRenameCollectionTest {
                 + "' AND name='" + OLD + "'")).as("tenant B old registry intact").isEqualTo(1);
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_B
                 + "' AND name='" + NEW + "'")).as("tenant B has no NEW row").isZero();
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks_384 WHERE tenant_id='" + TENANT_B
-                + "' AND collection='" + OLD + "'")).as("tenant B chunks intact under OLD").isEqualTo(2);
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks WHERE tenant_id='" + TENANT_B
+                + "' AND collection='" + OLD + "'")).as("tenant B chunks intact under OLD (unified)").isEqualTo(4);
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.taxonomy_meta WHERE tenant_id='" + TENANT_B
                 + "' AND collection='" + OLD + "'")).as("tenant B taxonomy_meta intact").isEqualTo(1);
         }
@@ -203,7 +206,7 @@ class CatalogRenameCollectionTest {
         // so step 1 upserts onto it — the count is still 1, but via DO UPDATE. The revive
         // is the whole point: renaming back onto a retired name brings it to life.
         assertThat(c.get("catalog_collections_inserted")).as("registry X revived").isEqualTo(1);
-        assertThat(c.get("chunks_384")).as("chunks_384 back").isEqualTo(2);
+        assertThat(c.get("chunks")).as("chunks back (unified, 2+1+1)").isEqualTo(4);
         assertThat(c.get("catalog_collections_superseded")).as("registry Y retired").isEqualTo(1);
         try (Connection su = pg.createConnection("")) {
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
@@ -215,15 +218,15 @@ class CatalogRenameCollectionTest {
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
                 + "' AND name='" + OLD + "' AND superseded_by='' AND superseded_at IS NULL"))
                 .as("OLD restored and revived").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks_384 WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + OLD + "'")).as("chunks restored under OLD").isEqualTo(2);
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks WHERE tenant_id='" + TENANT_A
+                + "' AND collection='" + OLD + "'")).as("chunks restored under OLD (unified)").isEqualTo(4);
             // Back-direction must restore the derived tables too (not just chunks/registry).
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.taxonomy_meta WHERE tenant_id='" + TENANT_A
                 + "' AND collection='" + OLD + "'")).as("taxonomy_meta restored").isEqualTo(1);
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.document_highlights WHERE tenant_id='" + TENANT_A
                 + "' AND collection='" + OLD + "'")).as("document_highlights restored").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.taxonomy_centroids_384 WHERE tenant_id='" + TENANT_A
-                + "' AND collection='" + OLD + "'")).as("centroids_384 restored").isEqualTo(1);
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.taxonomy_centroids WHERE tenant_id='" + TENANT_A
+                + "' AND collection='" + OLD + "'")).as("centroids restored (unified)").isEqualTo(3);
         }
     }
 
@@ -351,7 +354,7 @@ class CatalogRenameCollectionTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_C + "', '" + old + "')");
-            su.createStatement().execute(chunkInsert(TENANT_C, old, "chunks_384", 384, "rbchunk"));
+            su.createStatement().execute(chunkInsert(TENANT_C, old, 384, "rbchunk"));
             // OLD telemetry row that will try to move to (ts,'collide',NEW)...
             su.createStatement().execute("INSERT INTO nexus.search_telemetry (tenant_id, ts, query_hash, collection, raw_count, kept_count) "
                 + "VALUES ('" + TENANT_C + "', '" + ts + "', 'collide', '" + old + "', 1, 1)");
@@ -369,9 +372,9 @@ class CatalogRenameCollectionTest {
                 + "' AND name='" + old + "'")).as("OLD registry intact after rollback").isEqualTo(1);
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_C
                 + "' AND name='" + neu + "'")).as("NEW registry NOT created (rolled back)").isZero();
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks_384 WHERE tenant_id='" + TENANT_C
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks WHERE tenant_id='" + TENANT_C
                 + "' AND collection='" + old + "'")).as("chunk NOT re-homed (rolled back)").isEqualTo(1);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks_384 WHERE tenant_id='" + TENANT_C
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chunks WHERE tenant_id='" + TENANT_C
                 + "' AND collection='" + neu + "'")).as("no chunk under NEW").isZero();
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.search_telemetry WHERE tenant_id='" + TENANT_C
                 + "' AND collection='" + old + "'")).as("OLD telemetry intact").isEqualTo(1);
@@ -459,11 +462,11 @@ class CatalogRenameCollectionTest {
         // already registered under coll, so stamp the manifest row the same.
         st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
             + "VALUES ('" + tenant + "', 'rn-doc-1', 0, '" + chash("rnman1") + "', '" + coll + "')");
-        // chunks: 2/1/1
-        st.execute(chunkInsert(tenant, coll, "chunks_384", 384, "rn384a"));
-        st.execute(chunkInsert(tenant, coll, "chunks_384", 384, "rn384b"));
-        st.execute(chunkInsert(tenant, coll, "chunks_768", 768, "rn768a"));
-        st.execute(chunkInsert(tenant, coll, "chunks_1024", 1024, "rn1024a"));
+        // chunks: 2/1/1 across three dims, one unified nexus.chunks table (RDR-191).
+        st.execute(chunkInsert(tenant, coll, 384, "rn384a"));
+        st.execute(chunkInsert(tenant, coll, 384, "rn384b"));
+        st.execute(chunkInsert(tenant, coll, 768, "rn768a"));
+        st.execute(chunkInsert(tenant, coll, 1024, "rn1024a"));
         // (chash_index seeds removed — RDR-187/nexus-piwya.9: router dropped)
         // topics: 1 (explicit id)
         long topicId = Math.abs((long) (tenant + coll).hashCode());
@@ -476,13 +479,16 @@ class CatalogRenameCollectionTest {
             + "VALUES ('" + tenant + "', 'rn-doc-1', " + topicId + ", 'projection', '" + coll + "', NOW())");
         st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
             + "VALUES ('" + tenant + "', 'rn-doc-2', " + topicId + ", 'projection', '" + coll + "', NOW())");
-        // centroids: one per dim
-        st.execute("INSERT INTO nexus.taxonomy_centroids_384 (tenant_id, collection, topic_id, embedding) "
+        // centroids: one per dim, one unified nexus.taxonomy_centroids table (RDR-191).
+        // PK is (tenant_id, collection, topic_id) -- three DIFFERENT topic_ids, not
+        // the shared `topicId` above (would collide on the unified PK; pre-unification
+        // these lived in three separate physical tables and could share one topic_id).
+        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_384) "
             + "VALUES ('" + tenant + "', '" + coll + "', " + topicId + ", " + vec(384) + "::vector)");
-        st.execute("INSERT INTO nexus.taxonomy_centroids_768 (tenant_id, collection, topic_id, embedding) "
-            + "VALUES ('" + tenant + "', '" + coll + "', " + topicId + ", " + vec(768) + "::vector)");
-        st.execute("INSERT INTO nexus.taxonomy_centroids_1024 (tenant_id, collection, topic_id, embedding) "
-            + "VALUES ('" + tenant + "', '" + coll + "', " + topicId + ", " + vec(1024) + "::vector)");
+        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_768) "
+            + "VALUES ('" + tenant + "', '" + coll + "', " + (topicId + 1) + ", " + vec(768) + "::vector)");
+        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_1024) "
+            + "VALUES ('" + tenant + "', '" + coll + "', " + (topicId + 2) + ", " + vec(1024) + "::vector)");
         // document_aspects: 2 — one doc-rooted, one DOC-LESS
         st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id) "
             + "VALUES ('" + tenant + "', '" + coll + "', '/p/a1.md', NOW(), 'v1', 'docling', 'rn-doc-1')");
@@ -511,8 +517,10 @@ class CatalogRenameCollectionTest {
             + "VALUES ('" + tenant + "', 'q2', 'ch2', '" + coll + "', 'skip', 's1', NOW())");
     }
 
-    private static String chunkInsert(String tenant, String coll, String table, int dim, String seed) {
-        return "INSERT INTO nexus." + table + " (tenant_id, collection, chash, chunk_text, embedding) "
+    /** RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into nexus.chunks --
+     *  {@code dim} now selects the target embedding_&lt;dim&gt; column, not a table. */
+    private static String chunkInsert(String tenant, String coll, int dim, String seed) {
+        return "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_" + dim + ") "
             + "VALUES ('" + tenant + "', '" + coll + "', '" + chash(seed) + "', 'text', " + vec(dim) + "::vector)";
     }
 

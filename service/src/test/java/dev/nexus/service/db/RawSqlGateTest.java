@@ -182,10 +182,19 @@ class RawSqlGateTest {
                 ".fetch(sql, binds)", 1))),
         Map.entry("TaxonomyCentroidRepository.java", Map.of(
             // Same pgvector `<=>` category as PgVectorRepository.rawVectorFetch.
+            // RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-jv3ue item 5):
+            // retargeted from a bare "embedding" column + a hand-rolled
+            // "nexus.taxonomy_centroids_<dim>" table name (the latter a table
+            // dropped by the unify changeset -- would have been a SILENT
+            // RUNTIME failure, invisible to this compile-time gate) to
+            // DimTables.embeddingColumn(dim)/CENTROIDS_TABLE_NAME (via
+            // centroidTable(dim)) plus an explicit "embedding_<dim> IS NOT
+            // NULL" guard -- see the method's own javadoc for why the guard
+            // is load-bearing, not cosmetic.
             "annQuery", Map.of(
-                ".fetch( \"SELECT topic_id, (embedding <=> ?::vector) AS distance FROM \" "
-                + "+ centroidTable(dim) + \" WHERE collection \" + op + \" ?\" "
-                + "+ \" ORDER BY distance ASC, topic_id ASC LIMIT ?\", "
+                ".fetch( \"SELECT topic_id, (\" + embeddingCol + \" <=> ?::vector) AS distance FROM \" "
+                + "+ centroidTable(dim) + \" WHERE \" + embeddingCol + \" IS NOT NULL AND collection \" "
+                + "+ op + \" ?\" + \" ORDER BY distance ASC, topic_id ASC LIMIT ?\", "
                 + "vectorLiteral(embedding), collection, nResults)", 1))),
         Map.entry("CatalogRepository.java", Map.of(
             // SANCTIONED RAW (nexus-5xn3k.2): pg_advisory_xact_lock over a
@@ -799,65 +808,106 @@ class RawSqlGateTest {
     //    increment1-2026-08-08 [21850], nit 2) ──
 
     /**
-     * {@code ChashSqlIdioms.CHUNK_TABLES} silently hardcodes "three dims" in
-     * multiple independently hand-written call sites (RekeyOps' {@code DIMS},
-     * StagingPromoteOps' residual-count call site, {@code
-     * ChashSqlIdioms.danglingManifestCountDsl}'s three explicit NOT EXISTS
-     * clauses). A fourth dim table added without touching every one of
-     * those sites would drift silently. This canary fails LOUD instead:
-     * whoever adds a fourth dim must touch {@code CHUNK_TABLES}, see this
-     * test go red, and follow the checklist below.
+     * RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-o8dil.41 items 3+4)
+     * RETARGET of this canary: {@code nexus.chunks_384/768/1024} and {@code
+     * nexus.taxonomy_centroids_384/768/1024} collapsed into ONE unified
+     * table each ({@code nexus.chunks} / {@code nexus.taxonomy_centroids}),
+     * three nullable typed embedding columns apiece. Dim is now a COLUMN
+     * choice, not a TABLE identity — so "how many dim TABLES exist" (the
+     * old canary's question, {@code ChashSqlIdioms.CHUNK_TABLES.hasSize(3)})
+     * is no longer the drift signal a future dimension change needs. The
+     * live signal is {@code DimTables.CHUNKS}/{@code CENTROIDS} map size
+     * (pinned below); {@code CHUNK_TABLES} itself is now a single-element
+     * list (see its own javadoc) kept only as a checklist artifact, not a
+     * per-dim table-name enumeration.
      *
-     * <p>FOURTH-DIM CHECKLIST (update all of these when this assertion
-     * changes):
+     * <p>nexus-o8dil.41 comment 7 (2026-08-13, [22416] Part-9-derived
+     * finding): the OLD checklist covered ~16 sites against ~110 real
+     * Phase-4 decision sites — about 15%, and it grew reactively, one
+     * bullet per site that happened to bite someone. Rewritten here as a
+     * list of CHANNELS (a category of place a dim/table fact can live) so a
+     * future maintainer checks a CATEGORY, not a stale enumeration that
+     * will always be one channel short of the next drift class. Each
+     * channel names ONE representative live site as of this lane, not an
+     * exhaustive inventory — grep the category, don't trust the example.
+     *
      * <ul>
-     *   <li>{@code ChashSqlIdioms.CHUNK_TABLES} itself</li>
-     *   <li>{@code ChashSqlIdioms.danglingManifestCountDsl} (three explicit
-     *       {@code NOT EXISTS} clauses)</li>
-     *   <li>{@code RekeyOps.DIMS} (three explicit typed entries) and its
-     *       {@code orphanCond} (three explicit dim {@code NOT EXISTS}
-     *       clauses) and {@code unionAllContentRowsDsl} (three explicit
-     *       UNION ALL branches)</li>
-     *   <li>{@code StagingPromoteOps.finalizeTenant}'s residual-count call
-     *       site (three explicit {@code residualMismatchCountDsl} calls)</li>
-     *   <li>{@code StagingPromoteOps.chunkDim} (nexus-4okz4 increment 3:
-     *       three explicit switch branches resolving {@code promoteCollection}'s
-     *       per-dim content-table accessor)</li>
-     *   <li>{@code dev.nexus.service.vectors.DimTables.CHUNKS} /
-     *       {@code CENTROIDS} maps</li>
-     *   <li>{@code ChashSqlIdioms.existsInAnyDim} (nexus-4okz4 increment 4:
-     *       three explicit {@code EXISTS} disjuncts — the SINGLE-HOMED home
-     *       for this idiom since increment 5 converged {@code
-     *       StagingPromoteOps.canonExistsDsl}'s three call sites onto it and
-     *       deleted the private copy; {@code ChashCensus}' dangling-pointer
-     *       scan is a second caller)</li>
-     *   <li>nexus-sa731 round 2 (substantive-critic T2 critique-sa731-
-     *       catalog028-2026-08-13 [22404] Significant finding): this
-     *       checklist previously covered ONLY Java-side DSL constants — it
-     *       missed a parallel class of hardcoded three-way {@code
-     *       IF dim = 384 / ELSIF dim = 768 / ELSIF dim = 1024} branches
-     *       living in raw-SQL Liquibase functions, which RDR-191 Phase 4's
-     *       {@code chunks_384/768/1024 -> chunks} unification will need to
-     *       touch just as much as the Java sites above. Named here so a
-     *       fourth dim is not missed there either:
-     *       {@code nexus.gc_quarantine_orphans} (catalog-024, last replaced
-     *       by catalog-028 — 4 {@code NOT EXISTS} occurrences per dim branch,
-     *       pinned by {@code PgVectorRepositoryGcQuarantineTest
-     *       #gcQuarantineOrphans_definitionPin_hasSweepGateLock_
-     *       noStandaloneGuardSelect}), {@code nexus.gc_restore_rereferenced}
-     *       (catalog-024, unchanged by catalog-028), {@code
-     *       nexus.gc_expire_quarantine} (catalog-023, last replaced by
-     *       catalog-027), and {@code CatalogRepository}'s
-     *       {@code sweepChunks384}/{@code sweepChunks768}/
-     *       {@code sweepChunks1024} (Java methods, but each hand-written
-     *       per dim rather than driven off {@code CHUNK_TABLES}/{@code
-     *       DimTables.CHUNKS}). Also tracked on bead nexus-o8dil.41's Phase-4
-     *       retarget inventory via {@code bd comment}.</li>
+     *   <li><b>Typed jOOQ (single-table-instance-per-dim-key maps).</b>
+     *       {@code dev.nexus.service.vectors.DimTables.CHUNKS} / {@code
+     *       .CENTROIDS} — the SINGLE authority every typed call site reads
+     *       through. A dimension-count change starts and ends here for the
+     *       typed channel.</li>
+     *   <li><b>Raw-string table names.</b> Sites that build a
+     *       schema-qualified table name for string-concatenated SQL MUST
+     *       consult {@code DimTables.CHUNKS_TABLE_NAME} / {@code
+     *       .CENTROIDS_TABLE_NAME}, never re-derive {@code "nexus.chunks_"
+     *       + dim}. Representative: {@code
+     *       PgVectorRepository.chunksTable(int)}, {@code
+     *       TaxonomyCentroidRepository}'s ANN query, {@code
+     *       ChashRepository.PROBE_SQL}.</li>
+     *   <li><b>Raw-string column names.</b> Sites selecting/ordering by the
+     *       per-dim embedding column in raw SQL MUST consult {@code
+     *       DimTables.embeddingColumn(int)}, never hand-roll {@code
+     *       "embedding_" + dim} or bare {@code "embedding"}. Representative:
+     *       {@code PgVectorRepository.searchWithTokens}/{@code
+     *       hybridSearch}'s raw-SQL distance projections, {@code
+     *       TaxonomyCentroidRepository.annQuery}.</li>
+     *   <li><b>Stored-function bodies (Liquibase, {@code LANGUAGE sql} /
+     *       {@code plpgsql}).</b> Nine typed combined-query facades kept
+     *       per-dim DELIBERATELY (Decision 2, T2 [22445] — collapsing them
+     *       would reintroduce F13's silent-seq-scan regression), plus
+     *       {@code gc_quarantine_orphans}/{@code gc_restore_rereferenced}/
+     *       {@code gc_expire_quarantine}, {@code assign_from_chashes_<dim>}
+     *       (now retargeting BOTH unified tables per the o8dil.47 ruling),
+     *       {@code purge_trash}, {@code chash_conformance_report}. A
+     *       dimension-count change touches the changelog, not Java, for
+     *       this channel.</li>
+     *   <li><b>Views.</b> {@code nexus.live_chunks} (dim now DERIVED from
+     *       which embedding column is non-null, not a UNION leg), {@code
+     *       nexus.collection_vector_stats}.</li>
+     *   <li><b>Name-lists (Java constants enumerating dim-bearing table
+     *       names or dim ints).</b> {@code
+     *       dev.nexus.service.db.TenantScope.VACUUM_ALLOWED_TABLES} / {@code
+     *       CatalogRepository.PURGE_VACUUM_TABLES} (three-way lockstep with
+     *       the grants channel below, {@code
+     *       TenantScopeVacuumMaintainGrantParityTest}); {@code
+     *       ChashCensus.KNOWN_INVENTORY} / {@code TEXT_EXCLUSIONS}; {@code
+     *       CatalogRepository.MANIFEST_DIMS} / {@code
+     *       COLLECTION_SCOPED_TABLES}; every {@code DIMS}/{@code
+     *       VALID_DIMS} array (ChashRepository, TaxonomyCentroidRepository,
+     *       RekeyOps, StagingPromoteOps) — each of these is a loop-over-dim
+     *       site that, post-unification, MUST filter on {@code
+     *       embedding_<dim> IS NOT NULL} rather than relying on table
+     *       membership to scope a dim (the D1 hazard: looping the SAME
+     *       unified table N times without that filter silently
+     *       triples/N-tuples counts or duplicates rows).</li>
+     *   <li><b>Grants.</b> {@code grants-nexus-svc.xml}'s {@code
+     *       grants-005-chunks-unify-maintain} changeset (superseding {@code
+     *       grants-003}'s frozen chunks_384/768/1024 MAINTAIN list, guarded
+     *       by a checksum-neutral {@code preConditions}) — no centroid
+     *       analog exists (verified: zero grants ever named a centroid
+     *       table).</li>
+     *   <li><b>Python taxonomy.</b> {@code chash_tables.py}'s collapsed
+     *       inventory (RDR-191 E1, T2 [22463]) and its eight importers.</li>
+     *   <li><b>Shell rehearsals.</b> The upgrade-ladder / migration-
+     *       rehearsal loops that seed or assert per-dim table names
+     *       directly (E3).</li>
      * </ul>
      */
     @Test
-    void chunkTablesCanary_fourthDimNeedsAllSitesToldChecklistAbove() {
-        assertThat(ChashSqlIdioms.CHUNK_TABLES).hasSize(3);
+    void chunksSchemaCanary_dimensionCountChangeNeedsAllChannelsToldChecklistAbove() {
+        assertThat(dev.nexus.service.vectors.DimTables.CHUNKS)
+            .as("the typed-jOOQ channel's per-dim key set — the live authority for "
+                + "\"how many embedding dimensions are supported\" now that dim is a "
+                + "column choice, not a table identity")
+            .hasSize(3);
+        assertThat(dev.nexus.service.vectors.DimTables.CENTROIDS).hasSize(3);
+        assertThat(ChashSqlIdioms.CHUNK_TABLES)
+            .as("the unified chunks table is ONE physical table regardless of how "
+                + "many dims it carries — this list stays single-element; a change "
+                + "here means the unification itself was reverted, not that a dim "
+                + "was added")
+            .containsExactly(dev.nexus.service.vectors.DimTables.CHUNKS_TABLE_NAME);
     }
 
     // ── nexus-4okz4 increment 5, item (c): mechanical THE INLINE-VS-BIND
@@ -1099,130 +1149,144 @@ class RawSqlGateTest {
         "PgVectorRepository.java", Map.of(
             "searchWithTokens", java.util.Set.of(
                 "{ return searchWithTokens(tenant, queryText, collectionNames, nResults, where, false); }",
-                "{ if (collectionNames == null || collectionNames.isEmpty()) { return new Tokened<>(List.of(), 0L); }"
-                + " int dim = dimForCollection(collectionNames.get(0)); for (String col : collectionNames) { int colDim"
-                + " = dimForCollection(col); if (colDim != dim) { throw new IllegalArgumentException( \"mixed dimensions"
-                + " in one search call: '\" + collectionNames.get(0) + \"' is \" + dim + \"-dim but '\" + col + \"' is \" + co"
-                + "lDim + \"-dim - one query vector cannot serve both spaces\"); } } // Route by the first collection - t"
-                + "he same-dim check above guarantees the set is // homogeneous, and the Python client never mixes embe"
-                + "dder families in one call // (same convention as the Chroma path). EmbedResult embedResult = embedQu"
-                + "ery(collectionNames.get(0), queryText, dim); float[] queryVec = embedResult.embeddings().get(0); Str"
-                + "ingBuilder sql = new StringBuilder() // RDR-180: bytea storage — hex at the SQL seam (raw-SQL twin o"
-                + "f // the ChashHex converted type the jOOQ paths use). .append(\"SELECT encode(chash, 'hex') AS chash,"
-                + " chunk_text, collection, metadata::text AS metadata_json,\") .append(\" (embedding <=> ?::vector) AS d"
-                + "istance\") .append(\" FROM \").append(chunksTable(dim)).append(\" c\") .append(\" WHERE c.collection IN (\""
-                + ").append(placeholders(collectionNames.size())).append(\")\") // RDR-156 Decision 6 (nexus-3ck2g): live"
-                + "_chunks predicate, inlined so the // HNSW index scan on c stays engaged (see liveChunksPredicate's j"
-                + "avadoc). .append(\" AND \").append(liveChunksPredicate(\"c\")); List<Object> binds = new ArrayList<>(); "
-                + "binds.add(vectorLiteral(queryVec)); binds.addAll(collectionNames); if (where != null) { for (Map.Ent"
-                + "ry<String, Object> e : where.entrySet()) { appendWherePredicate(sql, binds, e.getKey(), e.getValue()"
-                + "); } } sql.append(\" ORDER BY distance ASC, chash ASC LIMIT ?\"); binds.add(nResults); Result<Record> "
-                + "result = tenantScope.withTenant(tenant, ctx -> { // Filtered-ANN recall: keep HNSW scanning past ef_"
-                + "search when the RLS + // collection + metadata predicates narrow the candidate set. SET LOCAL is // "
-                + "txn-scoped (same pool discipline as the TenantScope GUC stamp). PgSession.setLocal(ctx, \"hnsw.iterat"
-                + "ive_scan\", \"relaxed_order\"); return rawVectorFetch(ctx, sql.toString(), binds.toArray()); }); List<M"
-                + "ap<String, Object>> rows = new ArrayList<>(result.size()); for (Record rec : result) { Map<String, O"
-                + "bject> row = new LinkedHashMap<>(); row.put(\"id\", rec.get(\"chash\", String.class)); row.put(\"content\""
-                + ", rec.get(\"chunk_text\", String.class)); row.put(\"distance\", rec.get(\"distance\", Double.class)); row."
-                + "put(\"collection\", rec.get(\"collection\", String.class)); row.putAll(fromJson(rec.get(\"metadata_json\","
-                + " String.class))); rows.add(row); } // RDR-169 G5: surface address triple additively (chash + span al"
-                + "ways; source_uri opt-in) enrichSearchRows(tenant, rows, includeSourceUri); return new Tokened<>(rows"
-                + ", embedResult.tokens()); }"),
+                "{ if (collectionNames == null || collectionNames.isEmpty()) { return new Tokened<>(List.of"
+                + "(), 0L); } int dim = dimForCollection(collectionNames.get(0)); for (String col : collectio"
+                + "nNames) { int colDim = dimForCollection(col); if (colDim != dim) { throw new IllegalArgume"
+                + "ntException( \"mixed dimensions in one search call: '\" + collectionNames.get(0) + \"' is \" +"
+                + " dim + \"-dim but '\" + col + \"' is \" + colDim + \"-dim - one query vector cannot serve both "
+                + "spaces\"); } } // Route by the first collection - the same-dim check above guarantees the s"
+                + "et is // homogeneous, and the Python client never mixes embedder families in one call // ("
+                + "same convention as the Chroma path). EmbedResult embedResult = embedQuery(collectionNames."
+                + "get(0), queryText, dim); float[] queryVec = embedResult.embeddings().get(0); StringBuilder"
+                + " sql = new StringBuilder() // RDR-180: bytea storage — hex at the SQL seam (raw-SQL twin o"
+                + "f // the ChashHex converted type the jOOQ paths use). .append(\"SELECT encode(chash, 'hex')"
+                + " AS chash, chunk_text, collection, metadata::text AS metadata_json,\") .append(\" (\").append"
+                + "(DimTables.embeddingColumn(dim)).append(\" <=> ?::vector) AS distance\") .append(\" FROM \").a"
+                + "ppend(chunksTable(dim)).append(\" c\") .append(\" WHERE c.collection IN (\").append(placeholde"
+                + "rs(collectionNames.size())).append(\")\") // RDR-156 Decision 6 (nexus-3ck2g): live_chunks p"
+                + "redicate, inlined so the // HNSW index scan on c stays engaged (see liveChunksPredicate's "
+                + "javadoc). .append(\" AND \").append(liveChunksPredicate(\"c\")); List<Object> binds = new Arra"
+                + "yList<>(); binds.add(vectorLiteral(queryVec)); binds.addAll(collectionNames); if (where !="
+                + " null) { for (Map.Entry<String, Object> e : where.entrySet()) { appendWherePredicate(sql, "
+                + "binds, e.getKey(), e.getValue()); } } sql.append(\" ORDER BY distance ASC, chash ASC LIMIT "
+                + "?\"); binds.add(nResults); Result<Record> result = tenantScope.withTenant(tenant, ctx -> { "
+                + "// Filtered-ANN recall: keep HNSW scanning past ef_search when the RLS + // collection + m"
+                + "etadata predicates narrow the candidate set. SET LOCAL is // txn-scoped (same pool discipl"
+                + "ine as the TenantScope GUC stamp). PgSession.setLocal(ctx, \"hnsw.iterative_scan\", \"relaxed"
+                + "_order\"); return rawVectorFetch(ctx, sql.toString(), binds.toArray()); }); List<Map<String"
+                + ", Object>> rows = new ArrayList<>(result.size()); for (Record rec : result) { Map<String, "
+                + "Object> row = new LinkedHashMap<>(); row.put(\"id\", rec.get(\"chash\", String.class)); row.pu"
+                + "t(\"content\", rec.get(\"chunk_text\", String.class)); row.put(\"distance\", rec.get(\"distance\","
+                + " Double.class)); row.put(\"collection\", rec.get(\"collection\", String.class)); row.putAll(fr"
+                + "omJson(rec.get(\"metadata_json\", String.class))); rows.add(row); } // RDR-169 G5: surface a"
+                + "ddress triple additively (chash + span always; source_uri opt-in) enrichSearchRows(tenant,"
+                + " rows, includeSourceUri); return new Tokened<>(rows, embedResult.tokens()); }"),
             "hybridSearch", java.util.Set.of(
                 "{ return hybridSearchWithTokens(tenant, queryText, collectionNames, nResults, where, false).value();"
                 + " }",
                 "{ return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null); "
                 + "}",
-                "{ if (collectionNames == null || collectionNames.isEmpty()) { return List.of(); } // queryText is bo"
-                + "und twice below as a raw text parameter (plainto_tsquery + // trgm <%); a NUL-bearing query would hi"
-                + "t the same UTF8-0x00 rejection the // upsert path sanitizes (nexus-rvfwj sibling hole, dual-review H"
-                + "1). queryText = stripNul(queryText); if (nResults < 1) { // LIMIT -1 is \"no limit\" in Postgres - a n"
-                + "on-positive value would silently // unbound the query instead of capping it. throw new IllegalArgume"
-                + "ntException(\"nResults must be >= 1, got \" + nResults); } if (selectiveGateMax < 1) { // A non-positi"
-                + "ve threshold routes EVERY gate to the HNSW-first branch // (matchCount >= 0 is always > a non-positi"
-                + "ve cutoff), silently re-enabling // the lcogi selective-gate collapse. Reject rather than mis-dispat"
-                + "ch. throw new IllegalArgumentException( \"selectiveGateMax must be >= 1, got \" + selectiveGateMax); }"
-                + " int dim = dimForCollection(collectionNames.get(0)); for (String col : collectionNames) { int colDim"
-                + " = dimForCollection(col); if (colDim != dim) { throw new IllegalArgumentException( \"mixed dimensions"
-                + " in one hybrid-search call: '\" + collectionNames.get(0) + \"' is \" + dim + \"-dim but '\" + col + \"' is"
-                + " \" + colDim + \"-dim - one query vector cannot serve both spaces\"); } } EmbedResult hybridEmbed = emb"
-                + "edQuery(collectionNames.get(0), queryText, dim); if (tokensOut != null) tokensOut[0] = hybridEmbed.t"
-                + "okens(); float[] queryVec = hybridEmbed.embeddings().get(0); // Non-text scope (collection IN + meta"
-                + "data where). Shared by the selective // rank-by-chash query (nexus-x7z7l): that query re-applies the"
-                + "se cheap predicates // but NOT the text gate - the gate's matching chashes already satisfy it, so th"
-                + "e // expensive <% trigram heap-recheck runs ONCE (in the bounded fetch below), not // again at rank "
-                + "time. (The metadata->>? predicate is kept on the rank query, not // dropped: two same-text rows in d"
-                + "ifferent collections share a chash, so chash // alone would not re-impose a per-row metadata filter."
-                + ") StringBuilder scope = new StringBuilder() .append(\" WHERE collection IN (\").append(placeholders(co"
-                + "llectionNames.size())).append(\")\"); List<Object> scopeBinds = new ArrayList<>(collectionNames); // R"
-                + "DR-156 Decision 6 (nexus-3ck2g): live_chunks predicate folded into `scope` // BEFORE `gate` is deriv"
-                + "ed from it below, so every downstream query built off // either scope or gate — the bounded gate-sel"
-                + "ectivity probe, the selective // chash-ranked rank, and the HNSW-first fallback, all three read site"
-                + "s — inherits // it by construction; a single fix point instead of three. Inlined (never a JOIN // to"
-                + " nexus.live_chunks) so the HNSW/GIN scans on `c` (the alias assigned to // `table` below) stay engag"
-                + "ed — see liveChunksPredicate's javadoc. scope.append(\" AND \").append(liveChunksPredicate(\"c\")); // F"
-                + "ull gate = scope AND a text signal. FTS lexeme match OR word-trigram similarity: // the <% operator "
-                + "form (word_similarity >= pg_trgm.word_similarity_threshold) is // gin_trgm_ops-indexable (vectors-00"
-                + "2) where the function-call form is not; // word_similarity (vs plain similarity) does not dilute wit"
-                + "h chunk_text length. // The threshold GUC is pinned per-transaction below. StringBuilder gate = new "
-                + "StringBuilder(scope) .append(\" AND (chunk_tsv @@ plainto_tsquery('english', ?) OR ? <% chunk_text)\")"
-                + "; List<Object> gateBinds = new ArrayList<>(scopeBinds); gateBinds.add(queryText); gateBinds.add(quer"
-                + "yText); if (where != null) { for (Map.Entry<String, Object> e : where.entrySet()) { appendWherePredi"
-                + "cate(gate, gateBinds, e.getKey(), e.getValue()); appendWherePredicate(scope, scopeBinds, e.getKey(),"
-                + " e.getValue()); } } final String table = chunksTable(dim) + \" c\"; final String gateSql = gate.toStri"
-                + "ng(); final String scopeSql = scope.toString(); final String vecLit = vectorLiteral(queryVec); // SE"
-                + "LECTIVITY-AWARE DISPATCH (nexus-lcogi; single-gate-eval, nexus-x7z7l). ONE // bounded fetch of the g"
-                + "ate's chashes (LIMIT SELECTIVE_GATE_MAX+1) both picks the // plan AND, for the selective case, IS th"
-                + "e gate evaluation - the ranked query then // filters by chash (PK lookup), so the expensive <% trigr"
-                + "am heap-recheck runs once, // not twice. The prior design ran a standalone COUNT(*) probe AND re-ran"
-                + " the gate in // the ranked query: on a large code corpus that was two ~650ms <% heap-rechecks per //"
-                + " call (conexus-qsa EXPLAIN: count probe 700ms + materialized-CTE rank 654ms, both // dominated by th"
-                + "e lossy gin_trgm_ops recheck over ~1900 candidate rows). // // * SELECTIVE gate (matches <= SELECTIV"
-                + "E_GATE_MAX): the bounded fetch returns the // COMPLETE gate (all matches, since it did not hit the L"
-                + "IMIT). Rank those exact // chashes by cosine distance via a chash IN (...) filter + the cheap non-te"
-                + "xt // scope (collection/metadata). No HNSW, no re-gate: ranks the small gated set // exactly, with N"
-                + "O dependence on hnsw.max_scan_tuples (the lcogi collapse fix is // preserved - the prior HNSW-first "
-                + "single-query plan starved selective gates). // // * NON-SELECTIVE gate (matches > SELECTIVE_GATE_MAX"
-                + "): the bounded fetch hit the // LIMIT (returned SELECTIVE_GATE_MAX+1 chashes) and is discarded - kee"
-                + "p the // HNSW-first plan (gate as scan filter, iterative_scan). A dense gate is usually // found wit"
-                + "hin the scan budget; materializing a huge gated set (~4 KB/row // embeddings) would spill work_mem. "
-                + "The bounded fetch caps this probe's cost // (the prior unbounded COUNT scanned the full dense gate)."
-                + " Same SEMI-selective // caveat as before applies; P5.2's RRF fusion closes that window. // // matche"
-                + "s == 0 -> empty gate -> selective branch returns an empty result (no silent // vector fallback), han"
-                + "dled explicitly (chash IN () is not valid SQL). List<Object> probeBinds = new ArrayList<>(gateBinds)"
-                + "; probeBinds.add(selectiveGateMax + 1); Result<Record> result = tenantScope.withTenant(tenant, ctx -"
-                + "> { // Trigram gate calibration (contract anchor): word_similarity >= 0.6, pg_trgm's // default - ty"
-                + "po-probe candidates sit at ~0.9 and pass, no-signal rows at ~0.1 // do not. Pinned per-transaction s"
-                + "o the gate is independent of cluster config. PgSession.setLocal(ctx, \"pg_trgm.word_similarity_thresh"
-                + "old\", \"0.6\"); List<String> gateChashes = rawVectorFetch( ctx, \"SELECT encode(chash, 'hex') AS chash "
-                + "FROM \" + table + gateSql + \" LIMIT ?\", probeBinds.toArray()) .map(r -> r.get(\"chash\", String.class))"
-                + "; if (gateChashes.size() <= selectiveGateMax) { // Selective: the bounded fetch returned the COMPLET"
-                + "E gate (the LIMIT did NOT // fire - fewer than selectiveGateMax+1 matches exist, so it scanned the f"
-                + "ull // GIN candidate set, same work the old COUNT(*) did). The win is not a // cheaper probe: this s"
-                + "ingle gate scan REPLACES both the old COUNT(*) probe // AND the MATERIALIZED-CTE gate re-evaluation "
-                + "- the rank below filters by // chash with NO text gate, so the <% heap-recheck happens once, not twi"
-                + "ce. if (gateChashes.isEmpty()) { // Empty gate: typed-empty result (chash IN () is invalid SQL). ret"
-                + "urn rawVectorFetch(ctx, \"SELECT NULL::text AS chash, NULL::text AS chunk_text,\" + \" NULL::text AS co"
-                + "llection, NULL::text AS metadata_json,\" + \" NULL::float8 AS distance WHERE false\"); } // chash is NO"
-                + "T unique across collections (the table key is // (tenant_id, collection, chash)): a multi-collection"
-                + " gate can return the // same chash from N collections. Dedup the IN list - the collection scope in /"
-                + "/ scopeSql still yields one ranked row per (collection, chash). Dedup runs // AFTER the size-based d"
-                + "ispatch so the selective/non-selective boundary stays // identical to the old per-row COUNT(*). List"
-                + "<String> inChashes = gateChashes.stream().distinct().toList(); String sql = \"SELECT encode(chash, 'h"
-                + "ex') AS chash, chunk_text, collection, metadata::text AS metadata_json,\" + \" (embedding <=> ?::vecto"
-                + "r) AS distance FROM \" + table + scopeSql + \" AND chash IN (\" + decodePlaceholders(inChashes.size()) "
-                + "+ \")\" + \" ORDER BY distance ASC, chash ASC LIMIT ?\"; List<Object> b = new ArrayList<>(); b.add(vecLi"
-                + "t); b.addAll(scopeBinds); b.addAll(inChashes); b.add(nResults); return rawVectorFetch(ctx, sql, b.to"
-                + "Array()); } // HNSW-first for a dense gate: keep HNSW scanning past ef_search. PgSession.setLocal(ct"
-                + "x, \"hnsw.iterative_scan\", \"relaxed_order\"); String sql = \"SELECT encode(chash, 'hex') AS chash, chun"
-                + "k_text, collection, metadata::text AS metadata_json,\" + \" (embedding <=> ?::vector) AS distance FROM"
-                + " \" + table + gateSql + \" ORDER BY distance ASC, chash ASC LIMIT ?\"; List<Object> b = new ArrayList<>"
-                + "(); b.add(vecLit); b.addAll(gateBinds); b.add(nResults); return rawVectorFetch(ctx, sql, b.toArray()"
-                + "); }); List<Map<String, Object>> rows = new ArrayList<>(result.size()); for (Record rec : result) { "
-                + "Map<String, Object> row = new LinkedHashMap<>(); row.put(\"id\", rec.get(\"chash\", String.class)); row."
-                + "put(\"content\", rec.get(\"chunk_text\", String.class)); row.put(\"distance\", rec.get(\"distance\", Double."
-                + "class)); row.put(\"collection\", rec.get(\"collection\", String.class)); row.putAll(fromJson(rec.get(\"me"
-                + "tadata_json\", String.class))); rows.add(row); } return rows; }")));
+                "{ if (collectionNames == null || collectionNames.isEmpty()) { return List.of(); } // query"
+                + "Text is bound twice below as a raw text parameter (plainto_tsquery + // trgm <%); a NUL-be"
+                + "aring query would hit the same UTF8-0x00 rejection the // upsert path sanitizes (nexus-rvf"
+                + "wj sibling hole, dual-review H1). queryText = stripNul(queryText); if (nResults < 1) { // "
+                + "LIMIT -1 is \"no limit\" in Postgres - a non-positive value would silently // unbound the qu"
+                + "ery instead of capping it. throw new IllegalArgumentException(\"nResults must be >= 1, got "
+                + "\" + nResults); } if (selectiveGateMax < 1) { // A non-positive threshold routes EVERY gate"
+                + " to the HNSW-first branch // (matchCount >= 0 is always > a non-positive cutoff), silently"
+                + " re-enabling // the lcogi selective-gate collapse. Reject rather than mis-dispatch. throw "
+                + "new IllegalArgumentException( \"selectiveGateMax must be >= 1, got \" + selectiveGateMax); }"
+                + " int dim = dimForCollection(collectionNames.get(0)); for (String col : collectionNames) { "
+                + "int colDim = dimForCollection(col); if (colDim != dim) { throw new IllegalArgumentExceptio"
+                + "n( \"mixed dimensions in one hybrid-search call: '\" + collectionNames.get(0) + \"' is \" + di"
+                + "m + \"-dim but '\" + col + \"' is \" + colDim + \"-dim - one query vector cannot serve both spa"
+                + "ces\"); } } EmbedResult hybridEmbed = embedQuery(collectionNames.get(0), queryText, dim); i"
+                + "f (tokensOut != null) tokensOut[0] = hybridEmbed.tokens(); float[] queryVec = hybridEmbed."
+                + "embeddings().get(0); // Non-text scope (collection IN + metadata where). Shared by the sel"
+                + "ective // rank-by-chash query (nexus-x7z7l): that query re-applies these cheap predicates "
+                + "// but NOT the text gate - the gate's matching chashes already satisfy it, so the // expen"
+                + "sive <% trigram heap-recheck runs ONCE (in the bounded fetch below), not // again at rank "
+                + "time. (The metadata->>? predicate is kept on the rank query, not // dropped: two same-text"
+                + " rows in different collections share a chash, so chash // alone would not re-impose a per-"
+                + "row metadata filter.) StringBuilder scope = new StringBuilder() .append(\" WHERE collection"
+                + " IN (\").append(placeholders(collectionNames.size())).append(\")\"); List<Object> scopeBinds "
+                + "= new ArrayList<>(collectionNames); // RDR-156 Decision 6 (nexus-3ck2g): live_chunks predi"
+                + "cate folded into `scope` // BEFORE `gate` is derived from it below, so every downstream qu"
+                + "ery built off // either scope or gate — the bounded gate-selectivity probe, the selective "
+                + "// chash-ranked rank, and the HNSW-first fallback, all three read sites — inherits // it b"
+                + "y construction; a single fix point instead of three. Inlined (never a JOIN // to nexus.liv"
+                + "e_chunks) so the HNSW/GIN scans on `c` (the alias assigned to // `table` below) stay engag"
+                + "ed — see liveChunksPredicate's javadoc. scope.append(\" AND \").append(liveChunksPredicate(\""
+                + "c\")); // Full gate = scope AND a text signal. FTS lexeme match OR word-trigram similarity:"
+                + " // the <% operator form (word_similarity >= pg_trgm.word_similarity_threshold) is // gin_"
+                + "trgm_ops-indexable (vectors-002) where the function-call form is not; // word_similarity ("
+                + "vs plain similarity) does not dilute with chunk_text length. // The threshold GUC is pinne"
+                + "d per-transaction below. StringBuilder gate = new StringBuilder(scope) .append(\" AND (chun"
+                + "k_tsv @@ plainto_tsquery('english', ?) OR ? <% chunk_text)\"); List<Object> gateBinds = new"
+                + " ArrayList<>(scopeBinds); gateBinds.add(queryText); gateBinds.add(queryText); if (where !="
+                + " null) { for (Map.Entry<String, Object> e : where.entrySet()) { appendWherePredicate(gate,"
+                + " gateBinds, e.getKey(), e.getValue()); appendWherePredicate(scope, scopeBinds, e.getKey(),"
+                + " e.getValue()); } } final String table = chunksTable(dim) + \" c\"; final String gateSql = g"
+                + "ate.toString(); final String scopeSql = scope.toString(); final String vecLit = vectorLite"
+                + "ral(queryVec); // SELECTIVITY-AWARE DISPATCH (nexus-lcogi; single-gate-eval, nexus-x7z7l)."
+                + " ONE // bounded fetch of the gate's chashes (LIMIT SELECTIVE_GATE_MAX+1) both picks the //"
+                + " plan AND, for the selective case, IS the gate evaluation - the ranked query then // filte"
+                + "rs by chash (PK lookup), so the expensive <% trigram heap-recheck runs once, // not twice."
+                + " The prior design ran a standalone COUNT(*) probe AND re-ran the gate in // the ranked que"
+                + "ry: on a large code corpus that was two ~650ms <% heap-rechecks per // call (conexus-qsa E"
+                + "XPLAIN: count probe 700ms + materialized-CTE rank 654ms, both // dominated by the lossy gi"
+                + "n_trgm_ops recheck over ~1900 candidate rows). // // * SELECTIVE gate (matches <= SELECTIV"
+                + "E_GATE_MAX): the bounded fetch returns the // COMPLETE gate (all matches, since it did not"
+                + " hit the LIMIT). Rank those exact // chashes by cosine distance via a chash IN (...) filte"
+                + "r + the cheap non-text // scope (collection/metadata). No HNSW, no re-gate: ranks the smal"
+                + "l gated set // exactly, with NO dependence on hnsw.max_scan_tuples (the lcogi collapse fix"
+                + " is // preserved - the prior HNSW-first single-query plan starved selective gates). // // "
+                + "* NON-SELECTIVE gate (matches > SELECTIVE_GATE_MAX): the bounded fetch hit the // LIMIT (r"
+                + "eturned SELECTIVE_GATE_MAX+1 chashes) and is discarded - keep the // HNSW-first plan (gate"
+                + " as scan filter, iterative_scan). A dense gate is usually // found within the scan budget;"
+                + " materializing a huge gated set (~4 KB/row // embeddings) would spill work_mem. The bounde"
+                + "d fetch caps this probe's cost // (the prior unbounded COUNT scanned the full dense gate)."
+                + " Same SEMI-selective // caveat as before applies; P5.2's RRF fusion closes that window. //"
+                + " // matches == 0 -> empty gate -> selective branch returns an empty result (no silent // v"
+                + "ector fallback), handled explicitly (chash IN () is not valid SQL). List<Object> probeBind"
+                + "s = new ArrayList<>(gateBinds); probeBinds.add(selectiveGateMax + 1); Result<Record> resul"
+                + "t = tenantScope.withTenant(tenant, ctx -> { // Trigram gate calibration (contract anchor):"
+                + " word_similarity >= 0.6, pg_trgm's // default - typo-probe candidates sit at ~0.9 and pass"
+                + ", no-signal rows at ~0.1 // do not. Pinned per-transaction so the gate is independent of c"
+                + "luster config. PgSession.setLocal(ctx, \"pg_trgm.word_similarity_threshold\", \"0.6\"); List<S"
+                + "tring> gateChashes = rawVectorFetch( ctx, \"SELECT encode(chash, 'hex') AS chash FROM \" + t"
+                + "able + gateSql + \" LIMIT ?\", probeBinds.toArray()) .map(r -> r.get(\"chash\", String.class))"
+                + "; if (gateChashes.size() <= selectiveGateMax) { // Selective: the bounded fetch returned t"
+                + "he COMPLETE gate (the LIMIT did NOT // fire - fewer than selectiveGateMax+1 matches exist,"
+                + " so it scanned the full // GIN candidate set, same work the old COUNT(*) did). The win is "
+                + "not a // cheaper probe: this single gate scan REPLACES both the old COUNT(*) probe // AND "
+                + "the MATERIALIZED-CTE gate re-evaluation - the rank below filters by // chash with NO text "
+                + "gate, so the <% heap-recheck happens once, not twice. if (gateChashes.isEmpty()) { // Empt"
+                + "y gate: typed-empty result (chash IN () is invalid SQL). return rawVectorFetch(ctx, \"SELEC"
+                + "T NULL::text AS chash, NULL::text AS chunk_text,\" + \" NULL::text AS collection, NULL::text"
+                + " AS metadata_json,\" + \" NULL::float8 AS distance WHERE false\"); } // chash is NOT unique a"
+                + "cross collections (the table key is // (tenant_id, collection, chash)): a multi-collection"
+                + " gate can return the // same chash from N collections. Dedup the IN list - the collection "
+                + "scope in // scopeSql still yields one ranked row per (collection, chash). Dedup runs // AF"
+                + "TER the size-based dispatch so the selective/non-selective boundary stays // identical to "
+                + "the old per-row COUNT(*). List<String> inChashes = gateChashes.stream().distinct().toList("
+                + "); String sql = \"SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::t"
+                + "ext AS metadata_json,\" + \" (\" + DimTables.embeddingColumn(dim) + \" <=> ?::vector) AS dista"
+                + "nce FROM \" + table + scopeSql + \" AND chash IN (\" + decodePlaceholders(inChashes.size()) +"
+                + " \")\" + \" ORDER BY distance ASC, chash ASC LIMIT ?\"; List<Object> b = new ArrayList<>(); b."
+                + "add(vecLit); b.addAll(scopeBinds); b.addAll(inChashes); b.add(nResults); return rawVectorF"
+                + "etch(ctx, sql, b.toArray()); } // HNSW-first for a dense gate: keep HNSW scanning past ef_"
+                + "search. PgSession.setLocal(ctx, \"hnsw.iterative_scan\", \"relaxed_order\"); String sql = \"SEL"
+                + "ECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json"
+                + ",\" + \" (\" + DimTables.embeddingColumn(dim) + \" <=> ?::vector) AS distance FROM \" + table +"
+                + " gateSql + \" ORDER BY distance ASC, chash ASC LIMIT ?\"; List<Object> b = new ArrayList<>()"
+                + "; b.add(vecLit); b.addAll(gateBinds); b.add(nResults); return rawVectorFetch(ctx, sql, b.t"
+                + "oArray()); }); List<Map<String, Object>> rows = new ArrayList<>(result.size()); for (Recor"
+                + "d rec : result) { Map<String, Object> row = new LinkedHashMap<>(); row.put(\"id\", rec.get(\""
+                + "chash\", String.class)); row.put(\"content\", rec.get(\"chunk_text\", String.class)); row.put(\""
+                + "distance\", rec.get(\"distance\", Double.class)); row.put(\"collection\", rec.get(\"collection\","
+                + " String.class)); row.putAll(fromJson(rec.get(\"metadata_json\", String.class))); rows.add(ro"
+                + "w); } return rows; }")));
 
     /** Per-file scan for {@link #RAW_SQL_ASSEMBLY_SENTINELS} violations:
      * every registered method's CURRENT whole-body canonical text must

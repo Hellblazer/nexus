@@ -88,16 +88,23 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
         # Preserve the local fan-out's taxonomy dict shape ({topics, assignments,
         # links, meta}) so the CLI render (commands/collection.py) does not KeyError;
         # add centroids (purged here, absent from the local path).
+        # RDR-191 Phase 4 (nexus-o8dil.19/.47): unified nexus.taxonomy_centroids
+        # -- see the matching comment in collection_rename.py for why this
+        # reads the unified key with a legacy-per-dim-key fallback rather
+        # than requiring the Java repoint to have landed first.
+        _unified_centroids = deleted.get("taxonomy_centroids")
+        if _unified_centroids is None:
+            _unified_centroids = (
+                deleted.get("taxonomy_centroids_384", 0)
+                + deleted.get("taxonomy_centroids_768", 0)
+                + deleted.get("taxonomy_centroids_1024", 0)
+            )
         counts.taxonomy = {
             "topics": deleted.get("topics", 0),
             "assignments": deleted.get("topic_assignments", 0),
             "links": 0,
             "meta": deleted.get("taxonomy_meta", 0),
-            "centroids": (
-                deleted.get("taxonomy_centroids_384", 0)
-                + deleted.get("taxonomy_centroids_768", 0)
-                + deleted.get("taxonomy_centroids_1024", 0)
-            ),
+            "centroids": _unified_centroids,
         }
         counts.chash_deleted = deleted.get("chash_index", 0)
         counts.catalog_docs_deleted = deleted.get("catalog_documents", 0)

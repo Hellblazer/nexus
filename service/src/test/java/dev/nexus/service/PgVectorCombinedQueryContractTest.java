@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -89,11 +90,14 @@ class PgVectorCombinedQueryContractTest {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             for (String tbl : List.of("catalog_collections", "catalog_documents",
-                    "catalog_document_chunks", "topics", "topic_assignments",
-                    "chunks_384", "chunks_768", "chunks_1024")) {
+                    "catalog_document_chunks", "topics", "topic_assignments")) {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
             }
+            // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
+            // a single GRANT now covers what three did.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
             su.createStatement().execute("GRANT USAGE ON ALL SEQUENCES IN SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
@@ -322,7 +326,7 @@ class PgVectorCombinedQueryContractTest {
     private static void insertChunk(Connection su, String tenant, int dim, String collection,
                                     String chash, String text, double x, double y) throws Exception {
         su.createStatement().execute(
-            "INSERT INTO nexus.chunks_" + dim + " (tenant_id, collection, chash, chunk_text, embedding) "
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ") "
             + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + text + "', "
             + vec2(dim, x, y) + "::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }

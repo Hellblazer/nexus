@@ -43,7 +43,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>Testcontainers setup mirrors {@code PgVectorRepositoryContractTest} (pgvector/pgvector:pg17,
  * PER_CLASS lifecycle, plain-LOGIN NOSUPERUSER role) but is trimmed to only what these tests
- * touch: {@code chunks_1024} + {@code catalog_collections} (the auto-stub registration every
+ * touch: {@code nexus.chunks} (dim=1024) + {@code catalog_collections} (the auto-stub registration every
  * {@code upsertChunks} call performs).
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -94,7 +94,7 @@ class PgVectorEmbedSkipIntegrationTest {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chunks_1024 TO " + SVC_ROLE);
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
             // nexus-3ck2g: the get-family's typed liveChunksCondition (RDR-156 Decision 6)
@@ -615,7 +615,7 @@ class PgVectorEmbedSkipIntegrationTest {
     private long superuserCount(String collection) throws SQLException {
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
-                 "SELECT count(*) FROM nexus.chunks_1024 WHERE collection = ?")) {
+                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ? AND " + DimTables.embeddingColumn(1024) + " IS NOT NULL")) {
             ps.setString(1, collection);
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
@@ -627,7 +627,7 @@ class PgVectorEmbedSkipIntegrationTest {
     private String superuserEmbedding(String collection, String chash) throws SQLException {
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
-                 "SELECT embedding::text FROM nexus.chunks_1024 WHERE collection = ? AND chash = ?")) {
+                 "SELECT " + DimTables.embeddingColumn(1024) + "::text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ? AND chash = ?")) {
             ps.setString(1, collection);
             ps.setBytes(2, java.util.HexFormat.of().parseHex(chash));
             try (ResultSet rs = ps.executeQuery()) {
@@ -641,7 +641,7 @@ class PgVectorEmbedSkipIntegrationTest {
     private String rawMetadataV(String collection, String chash) throws SQLException {
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
-                 "SELECT metadata->>'v' FROM nexus.chunks_1024 WHERE collection = ? AND chash = ?")) {
+                 "SELECT metadata->>'v' FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ? AND chash = ?")) {
             ps.setString(1, collection);
             ps.setBytes(2, java.util.HexFormat.of().parseHex(chash));
             try (ResultSet rs = ps.executeQuery()) {

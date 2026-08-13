@@ -500,6 +500,22 @@ def analyze_changelog(
                         toggled_off.add(key)
                     continue
 
+                if stmt.upper().lstrip().startswith("DROP TABLE"):
+                    # A table DROPped in the SAME changeset is a terminal state:
+                    # there is no RLS left to restore and no isolation window
+                    # can leak through a nonexistent relation, so a preceding
+                    # NO FORCE toggle on it needs no FORCE restore (RDR-191
+                    # vectors-004-1 / taxonomy-007-1: NO FORCE for the
+                    # cross-shard copy reads, then DROP ... CASCADE of the
+                    # source shards in the same transaction). A toggle on a
+                    # table that is NOT in the drop list still requires its
+                    # restore — the discard below is keyed per dropped table.
+                    for g in _TABLE_MENTION_RE.findall(stmt):
+                        key = _table_key(g[0], g[1])
+                        toggled_off.discard(key)
+                        live_force.pop(key, None)
+                    continue
+
                 stmt_for_dml = _LEADING_DO_BEGIN_RE.sub("", stmt)
                 m = _DML_TARGET_RE.match(stmt_for_dml)
                 if m:
@@ -758,6 +774,44 @@ DELETE FROM nexus.widgets WHERE stale = true;
         if v.changeset_id == "cs-leak" and v.kind == NAKED_DML
     ]
     assert naked == [], naked
+
+
+def test_toggle_then_same_changeset_drop_needs_no_restore(tmp_path):
+    """A NO FORCE toggle followed by DROP TABLE of the SAME table in the SAME
+    changeset is terminal, not a leak: no relation survives to leak an
+    isolation window (the RDR-191 vectors-004-1 / taxonomy-007-1 shape --
+    NO FORCE for the cross-shard copy reads, then DROP ... CASCADE)."""
+    xml = """
+    <changeSet id="cs-unify" author="t">
+        <sql splitStatements="true">
+ALTER TABLE nexus.widgets NO FORCE ROW LEVEL SECURITY;
+INSERT INTO nexus.gizmos (id) SELECT id FROM nexus.widgets;
+DROP TABLE nexus.widgets CASCADE;
+        </sql>
+    </changeSet>
+    """
+    result = _analyze_synthetic(tmp_path, xml)
+    missing = [v for v in result.violations if v.kind == MISSING_RESTORE]
+    assert missing == [], missing
+
+
+def test_toggle_survives_a_drop_of_a_DIFFERENT_table(tmp_path):
+    """Kill-control for the drop-terminal rule: dropping some OTHER table must
+    not excuse the un-restored toggle on this one."""
+    xml = """
+    <changeSet id="cs-half" author="t">
+        <sql splitStatements="true">
+ALTER TABLE nexus.widgets NO FORCE ROW LEVEL SECURITY;
+DROP TABLE nexus.gadgets CASCADE;
+        </sql>
+    </changeSet>
+    """
+    result = _analyze_synthetic(tmp_path, xml)
+    missing = [
+        v for v in result.violations
+        if v.kind == MISSING_RESTORE and v.table == "nexus.widgets"
+    ]
+    assert missing, result.violations
 
 
 def test_later_changeset_backstop_does_not_count(tmp_path):

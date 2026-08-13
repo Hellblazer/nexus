@@ -8,6 +8,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.TokenHashing;
+import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -43,7 +44,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * The service here is wired with a PgVectorRepository ONLY — no Chroma repository,
  * no Chroma server, no chroma binary on the machine. Today every serving route
  * dereferences the absent Chroma repository (500); after P4a.2 each op serves from
- * the {@code nexus.chunks_<dim>} tables with the SAME response envelopes the
+ * the unified {@code nexus.chunks} table (RDR-191 Phase 4) with the SAME response envelopes the
  * Python {@code _ServiceCollectionStub} already speaks, so the client ports
  * unchanged:
  * <pre>
@@ -236,17 +237,17 @@ class PgVectorServingContractTest {
         assertThat(((Number) resp.get("upserted")).intValue())
             .as("upsert envelope {\"upserted\": N} preserved").isEqualTo(3);
 
-        // The rows must be IN PGVECTOR — count them in nexus.chunks_1024 as
-        // superuser. This is what makes the suite a cutover proof rather than a
-        // status-code check.
+        // The rows must be IN PGVECTOR — count them in the unified nexus.chunks table
+        // (RDR-191 Phase 4; formerly chunks_1024) as superuser. This is what makes the
+        // suite a cutover proof rather than a status-code check.
         try (Connection su = pg.createConnection("");
              var ps = su.prepareStatement(
-                 "SELECT count(*) FROM nexus.chunks_1024 WHERE collection = ?")) {
+                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ?")) {
             ps.setString(1, COL);
             try (var rs = ps.executeQuery()) {
                 rs.next();
                 assertThat(rs.getLong(1))
-                    .as("upserted chunks land in nexus.chunks_1024")
+                    .as("upserted chunks land in nexus.chunks (dim=1024)")
                     .isEqualTo(3L);
             }
         }
@@ -404,7 +405,7 @@ class PgVectorServingContractTest {
         // chunk_text untouched (no re-embed, no rewrite).
         try (Connection su = pg.createConnection("");
              var ps = su.prepareStatement(
-                 "SELECT chunk_text, metadata->>'frecency_score' FROM nexus.chunks_1024"
+                 "SELECT chunk_text, metadata->>'frecency_score' FROM " + DimTables.CHUNKS_TABLE_NAME
                  + " WHERE collection = ? AND chash = ?")) {
             ps.setString(1, COL);
             // chash is bytea(32) now (RDR-180) — bind the decoded digest, not hex text.
@@ -464,7 +465,7 @@ class PgVectorServingContractTest {
             .as("live chunk_count must be exactly 4 (3 upserted + 1 put, no tombstones)")
             .isEqualTo(4L);
         assertThat(((Number) col.get("dim")).intValue())
-            .as("voyage-context-3 collection routes to chunks_1024")
+            .as("voyage-context-3 collection routes to embedding_1024")
             .isEqualTo(1024);
         assertThat((String) col.get("last_write"))
             .as("last_write must be present for a written collection")
@@ -511,7 +512,7 @@ class PgVectorServingContractTest {
 
         try (Connection su = pg.createConnection("");
              var ps = su.prepareStatement(
-                 "SELECT count(*) FROM nexus.chunks_1024 WHERE collection = ?")) {
+                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ?")) {
             ps.setString(1, COL);
             try (var rs = ps.executeQuery()) {
                 rs.next();
@@ -538,7 +539,7 @@ class PgVectorServingContractTest {
 
         try (Connection su = pg.createConnection("");
              var ps = su.prepareStatement(
-                 "SELECT tenant_id, count(*) FROM nexus.chunks_1024"
+                 "SELECT tenant_id, count(*) FROM " + DimTables.CHUNKS_TABLE_NAME
                  + " WHERE collection = ? GROUP BY tenant_id ORDER BY tenant_id")) {
             ps.setString(1, COL);
             try (var rs = ps.executeQuery()) {
@@ -599,11 +600,13 @@ class PgVectorServingContractTest {
             // NOT VALID checks still enforce NEW writes: seeding a
             // legacy-shaped row requires drop → seed → re-add NOT VALID
             // (the RekeyOpsIntegrationTest choreography).
+            // RDR-191 Phase 4: chunks_1024_chash_octet_check collapsed into ONE
+            // chunks_chash_octet_check on the unified nexus.chunks table.
             su.createStatement().execute(
-                "ALTER TABLE nexus.chunks_1024 DROP CONSTRAINT chunks_1024_chash_octet_check");
+                "ALTER TABLE " + DimTables.CHUNKS_TABLE_NAME + " DROP CONSTRAINT chunks_chash_octet_check");
             try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks_1024 "
-                + "(tenant_id, collection, chash, chunk_text, embedding, metadata) "
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
+                + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ", metadata) "
                 + "VALUES (?, ?, decode(?, 'hex'), ?, ?::vector, ?::jsonb)")) {
                 ps.setString(1, TENANT_A);
                 ps.setString(2, colLegacy);
@@ -614,7 +617,7 @@ class PgVectorServingContractTest {
                 ps.executeUpdate();
             }
             su.createStatement().execute(
-                "ALTER TABLE nexus.chunks_1024 ADD CONSTRAINT chunks_1024_chash_octet_check "
+                "ALTER TABLE " + DimTables.CHUNKS_TABLE_NAME + " ADD CONSTRAINT chunks_chash_octet_check "
                 + "CHECK (octet_length(chash) = 32) NOT VALID");
         }
 

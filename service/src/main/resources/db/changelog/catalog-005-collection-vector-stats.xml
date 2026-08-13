@@ -68,8 +68,21 @@ SELECT lc.tenant_id,
 GRANT SELECT ON nexus.collection_vector_stats TO PUBLIC;
         </sql>
         <rollback>
-            <sql splitStatements="true">
-                REVOKE SELECT ON nexus.collection_vector_stats FROM PUBLIC;
+            <!-- RDR-191 repoint batch (nexus-o8dil.18): tolerant form. In the
+                 full reverse rollback chain the batch changesets' DROP-only
+                 rollbacks remove these objects BEFORE this rollback fires, and
+                 a bare REVOKE on a missing object errors. When the object is
+                 absent its grants died with it, so skipping is exact. Rollback
+                 edits on applied changesets are checksum-safe (catalog-013-2 /
+                 catalog-020-5 precedent). -->
+            <sql splitStatements="false">
+DO $$
+BEGIN
+    IF to_regclass('nexus.collection_vector_stats') IS NOT NULL THEN
+        REVOKE SELECT ON nexus.collection_vector_stats FROM PUBLIC;
+    END IF;
+END
+$$;
             </sql>
         </rollback>
     </changeSet>

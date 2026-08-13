@@ -1151,12 +1151,13 @@ class CatalogEngineDefects70Test {
     }
 
     /**
-     * Seed one row in {@code nexus.chunks_1024} so {@code resolveChash} has a
-     * chunk to find (it returns null before ever reaching the doc_id lookup
-     * otherwise). Mirrors the seeding shape used by ManifestCollectionStampTest.
+     * Seed one row in {@code nexus.chunks} (RDR-191 unified; formerly {@code
+     * chunks_1024}) so {@code resolveChash} has a chunk to find (it returns
+     * null before ever reaching the doc_id lookup otherwise). Mirrors the
+     * seeding shape used by ManifestCollectionStampTest.
      */
     private void seedChunkRow(String collection, String chash, String text) throws Exception {
-        // chunks_* carry an FK to catalog_collections on (tenant_id, collection).
+        // nexus.chunks carries an FK to catalog_collections on (tenant_id, collection).
         repo.upsertCollection(TENANT, Map.of(
             "name", collection, "content_type", "code",
             "embedding_model", "voyage-code-3", "model_version", "v1"));
@@ -1164,7 +1165,7 @@ class CatalogEngineDefects70Test {
             su.setAutoCommit(true);
             try (var st = su.createStatement()) {
                 st.execute(
-                    "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) "
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024) "
                     + "VALUES ('" + TENANT + "', '" + collection + "', decode('" + chash + "', 'hex'), '"
                     + text.replace("'", "''") + "', "
                     + "('[' || repeat('0.1,', 1023) || '0.1]')::vector) "

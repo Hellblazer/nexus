@@ -49,7 +49,8 @@ Chunk rows are seeded through the PUBLIC vector API
 (POST /v1/vectors/upsert-chunks) using the vector-PASSTHROUGH branch
 (embeddings supplied verbatim — no server-side embed, no model download,
 no API key). Collection names are RDR-103-conformant with the
-bge-base-en-v15-768 model segment so the service routes to chunks_768.
+bge-base-en-v15-768 model segment so the service embeds into the
+embedding_768 column of the unified nexus.chunks table.
 
 Tests run in DEFINITION ORDER (no randomization in this suite): the module
 service is shared, collections are test-unique, and the one store-wide

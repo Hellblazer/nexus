@@ -5,6 +5,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.RekeyOps;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -168,10 +169,12 @@ class WindowHybridSearchIntegrationTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_collections (tenant_id, name, content_type) "
                 + "VALUES ('" + TENANT + "', '" + COL + "', 'rdr') ON CONFLICT DO NOTHING");
+            // RDR-191 Phase 4: chunks_1024_chash_octet_check collapsed into ONE
+            // chunks_chash_octet_check on the unified nexus.chunks table.
             su.createStatement().execute(
-                "ALTER TABLE nexus.chunks_1024 DROP CONSTRAINT chunks_1024_chash_octet_check");
+                "ALTER TABLE " + DimTables.CHUNKS_TABLE_NAME + " DROP CONSTRAINT chunks_chash_octet_check");
             try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) "
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
                 + "VALUES (?, ?, ?, ?, ?::vector)")) {
                 for (Map.Entry<String, String> e : Map.of(
                         T_ALPHA, unitVec(1.0f, 0.0f),
@@ -197,7 +200,7 @@ class WindowHybridSearchIntegrationTest {
                 }
             } finally {
                 su.createStatement().execute(
-                    "ALTER TABLE nexus.chunks_1024 ADD CONSTRAINT chunks_1024_chash_octet_check "
+                    "ALTER TABLE " + DimTables.CHUNKS_TABLE_NAME + " ADD CONSTRAINT chunks_chash_octet_check "
                     + "CHECK (octet_length(chash) = 32) NOT VALID");
             }
         }

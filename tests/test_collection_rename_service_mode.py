@@ -51,7 +51,7 @@ _SERVER_COUNTS = {
     "topic_assignments": 2,
     "topics": 1,
     "taxonomy_meta": 1,
-    "taxonomy_centroids_384": 1,
+    "taxonomy_centroids": 1,  # RDR-191 Phase 4 unified key (nexus-o8dil.19/.47)
     "document_aspects": 2,
     "document_highlights": 1,
     "aspect_extraction_queue": 2,
@@ -87,11 +87,34 @@ def test_service_mode_uses_single_endpoint_and_maps_counts() -> None:
     assert counts["aspects"] == 2
     assert counts["aspect_queue"] == 2
     assert counts["highlights"] == 1
-    assert counts["tax_centroids"] == 1  # 384:1 + 768:0 + 1024:0
+    assert counts["tax_centroids"] == 1  # unified "taxonomy_centroids" key
     assert counts["relevance_log"] == 2
     assert counts["search_telemetry"] == 2
     assert counts["hook_failures"] == 1
     assert counts["catalog_docs"] == 1
+
+
+def test_service_mode_maps_legacy_per_dim_centroid_keys_as_fallback() -> None:
+    """nexus-o8dil.19/.47 transitional coverage: if the engine cascade
+    response still carries the three legacy per-dim keys (unified key
+    absent), the client sums them rather than reading 0. Non-vacuous:
+    fails if the fallback branch is removed or short-circuited."""
+    t3 = _fake_t3()
+    server_counts = dict(_SERVER_COUNTS)
+    del server_counts["taxonomy_centroids"]
+    server_counts.update({
+        "taxonomy_centroids_384": 2,
+        "taxonomy_centroids_768": 3,
+        "taxonomy_centroids_1024": 0,
+    })
+    client = MagicMock()
+    client.rename_collection_cascade = MagicMock(return_value=server_counts)
+
+    counts = rename_collection_data_plane(
+        "code__old", "code__new", t3_db=t3, catalog=client
+    )
+
+    assert counts["tax_centroids"] == 5  # 2 + 3 + 0
 
 
 def test_service_mode_failure_raises_clickexception_atomic() -> None:

@@ -24,18 +24,28 @@ import java.util.Set;
  * {@code project_against}) and the {@code discover_topics} centroid upsert so service-mode
  * taxonomy compute is chroma-free (RDR-155 retires ChromaDB).
  *
- * <p>Centroids are stored across three per-dim tables —
- * {@code nexus.taxonomy_centroids_384/768/1024} — mirroring the {@code chunks_<dim>}
- * convention. Unlike {@link PgVectorRepository}, routing is by EMBEDDING LENGTH, not by
- * parsing a collection-name model segment: taxonomy collection names are not four-segment
- * conformant (RDR-075 uses {@code <content_type>__<owner>} two-segment names), and the
- * centroid vector itself is the unambiguous dimension authority.
+ * <p>RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-jv3ue item 5): centroids are
+ * now stored in ONE unified table, {@code nexus.taxonomy_centroids}, with three nullable
+ * typed embedding columns (mirroring {@code nexus.chunks}'s own RDR-191 unification) —
+ * formerly three per-dim tables ({@code nexus.taxonomy_centroids_384/768/1024}). Routing
+ * is by EMBEDDING LENGTH, not by parsing a collection-name model segment: taxonomy
+ * collection names are not four-segment conformant (RDR-075 uses
+ * {@code <content_type>__<owner>} two-segment names), and the centroid vector itself is
+ * the unambiguous dimension authority — dim now selects the {@code embedding_<dim>}
+ * COLUMN via {@link DimTables#embeddingColumn(int)} / {@link DimTables#CENTROIDS}, not a
+ * target table.
  *
  * <p>Collection-keyed maintenance ops ({@link #count}, {@link #getByCollection},
- * {@link #deleteByIds}, {@link #purgeByCollection}) carry no vector, so they span all three
- * per-dim tables. A deployment is single-dim per RDR-075/077 (the chroma centroid collection
- * fixed its dimension on first write), so in practice only one table is non-empty; spanning
- * all three is correct regardless and needs no conformant name.
+ * {@link #deleteByIds}, {@link #purgeByCollection}) carry no vector. Since every dim key
+ * in {@link DimTables#CENTROIDS} now resolves to the SAME unified table instance, a
+ * per-dim loop over that map no longer scopes by table membership — each iteration MUST
+ * filter on {@code embedding_<dim> IS NOT NULL} (the RDR-191 D1 hazard: without that
+ * filter, a loop over the same physical table N times triples/N-tuples counts or
+ * duplicates rows, rather than genuinely visiting N disjoint physical stores as it did
+ * pre-unification). A deployment is single-dim per RDR-075/077 (the chroma centroid
+ * collection fixed its dimension on first write), so in practice only one dim's rows
+ * exist per tenant; the per-dim-column filter is correct regardless and needs no
+ * conformant name.
  *
  * <p>Tenant scoping is identical to {@link PgVectorRepository}: every operation runs inside
  * {@link TenantScope#withTenant} so the {@code nexus.tenant} GUC stamps the transaction and
@@ -46,7 +56,11 @@ public final class TaxonomyCentroidRepository {
 
     private static final Logger log = LoggerFactory.getLogger(TaxonomyCentroidRepository.class);
 
-    /** The per-dim centroid tables, mirroring chunks_384/768/1024. */
+    /**
+     * The supported centroid embedding dims — post-RDR-191 unification, each
+     * selects the {@code embedding_<dim>} column of the ONE {@code
+     * nexus.taxonomy_centroids} table, not a per-dim table.
+     */
     private static final int[] DIMS = {384, 768, 1024};
     private static final Set<Integer> VALID_DIMS = Set.of(384, 768, 1024);
 
@@ -125,10 +139,27 @@ public final class TaxonomyCentroidRepository {
             throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
         }
         String op = crossCollection ? "<>" : "=";
+        String embeddingCol = DimTables.embeddingColumn(dim);
         // SANCTIONED RAW (nexus-mzuj9): the pgvector `<=>` distance operator ordered directly
         // off a bind-parameter vector literal has no jOOQ DSL form (same category as
         // PgVectorRepository's search()/hybridSearch() — see that class's rawVectorFetch
         // javadoc). Registered in RawSqlGateTest's sanctioned method allowlist.
+        //
+        // RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-jv3ue item 5): table name
+        // consulted from DimTables.CENTROIDS_TABLE_NAME (was a hand-rolled
+        // "nexus.taxonomy_centroids_" + dim string that resolves to a table DROPped by
+        // the unify changeset — a silent RUNTIME failure, not a compile error, since this
+        // is plain string interpolation). Embedding column consulted from
+        // DimTables.embeddingColumn(dim) rather than the former bare "embedding" (every
+        // dim's rows now share the one physical table, so an unqualified "embedding"
+        // column no longer exists at all post-unification). The explicit
+        // "embedding_<dim> IS NOT NULL" guard is NEW and load-bearing: unlike
+        // PgVectorRepository's searchWithTokens (dim-homogeneous by collection, D2's
+        // hazard analysis), a centroid collection can legitimately hold rows at two
+        // dims mid-migration (this class's own dimensionProbe javadoc) — without the
+        // guard, ordering by "embedding_<dim> <=> ?::vector" would compute a NULL
+        // distance for foreign-dim rows and additionally defeats the embedding_<dim>
+        // partial-population correlation the HNSW index needs to be selective.
         Result<Record> result = tenantScope.withTenant(tenant, ctx -> {
             // Filtered-ANN recall: the collection predicate + RLS narrow the candidate set;
             // keep HNSW scanning past ef_search so a narrow collection returns its full set
@@ -136,8 +167,9 @@ public final class TaxonomyCentroidRepository {
             // txn-scoped, same pool discipline as the TenantScope GUC stamp.
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             return ctx.fetch(
-                "SELECT topic_id, (embedding <=> ?::vector) AS distance FROM " + centroidTable(dim)
-                + " WHERE collection " + op + " ?"
+                "SELECT topic_id, (" + embeddingCol + " <=> ?::vector) AS distance FROM "
+                + centroidTable(dim)
+                + " WHERE " + embeddingCol + " IS NOT NULL AND collection " + op + " ?"
                 + " ORDER BY distance ASC, topic_id ASC LIMIT ?",
                 vectorLiteral(embedding), collection, nResults);
         });
@@ -151,19 +183,22 @@ public final class TaxonomyCentroidRepository {
 
     /**
      * Count centroids for {@code collection} (or all, when {@code collection} is null)
-     * visible to {@code tenant}, summed across all per-dim tables.
+     * visible to {@code tenant}.
+     *
+     * <p>RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-jv3ue item 5): was a
+     * three-iteration loop over {@link DimTables#CENTROIDS}, SUMMING a count query — a
+     * genuine D1-hazard correctness bug post-unification (every dim key now resolves to
+     * the SAME physical table, so the loop TRIPLE-COUNTED every row rather than visiting
+     * three disjoint stores). Collapsed to one count against the unified table; any dim
+     * key works as the representative accessor since {@code .table()}/{@code
+     * .collection()} are identical across dims and a row's dim does not affect whether
+     * it should be counted here (this method counts centroids, not centroids-at-a-dim).
      */
     public int count(String tenant, String collection) {
-        long total = tenantScope.withTenant(tenant, ctx -> {
-            long sum = 0;
-            for (int dim : DIMS) {
-                DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
-                sum += collection != null
-                    ? ctx.fetchCount(ct.table(), ct.collection().eq(collection))
-                    : ctx.fetchCount(ct.table());
-            }
-            return sum;
-        });
+        DimTables.CentroidTable ct = DimTables.CENTROIDS.get(384);
+        long total = tenantScope.withTenant(tenant, ctx -> collection != null
+            ? ctx.fetchCount(ct.table(), ct.collection().eq(collection))
+            : ctx.fetchCount(ct.table()));
         if (total > Integer.MAX_VALUE) {
             throw new IllegalStateException("centroid count overflow: " + total);
         }
@@ -186,12 +221,24 @@ public final class TaxonomyCentroidRepository {
      * "at most one centroid dim per tenant" check is tracked as a follow-on, not built
      * here (the storage primitive is single-dim by contract; enforcing the migration
      * ordering belongs to the migration tool).
+     *
+     * <p>RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-jv3ue item 5): a bare
+     * {@code ctx.fetchExists(ct.table())} used to mean "does chunks_&lt;dim&gt; have any
+     * row for this tenant" — table membership WAS the dim signal. Post-unification every
+     * dim key resolves to the SAME table, so an unguarded existence check would ALWAYS
+     * report dim 384 (the first entry) for any tenant with ANY centroid, regardless of
+     * its actual dim — a genuine D1-hazard correctness bug, not merely wasted round
+     * trips. Fixed with an explicit {@code embedding_<dim> IS NOT NULL} predicate so each
+     * iteration checks its own dim's population.
      */
     public int dimensionProbe(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
             for (int dim : DIMS) {
                 DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
-                if (ctx.fetchExists(ct.table())) return dim;
+                if (ctx.fetchExists(ctx.selectOne().from(ct.table())
+                        .where(ct.embedding().isNotNull()))) {
+                    return dim;
+                }
             }
             return -1;
         });
@@ -224,7 +271,16 @@ public final class TaxonomyCentroidRepository {
         return fetchCentroids(tenant, ct -> ct.collection().ne(collection));
     }
 
-    /** Shared per-dim centroid fetch with a typed collection predicate. */
+    /**
+     * Shared per-dim centroid fetch with a typed collection predicate.
+     *
+     * <p>RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-jv3ue item 5): every dim key
+     * in {@link DimTables#CENTROIDS} now resolves to the SAME unified table, so a
+     * per-dim loop without an {@code embedding_<dim> IS NOT NULL} guard would fetch and
+     * return each matching row THREE TIMES (once per dim iteration) — a genuine D1-hazard
+     * correctness bug (silent row duplication), not merely wasted round trips. Added the
+     * guard so each iteration visits only the rows actually populated at that dim.
+     */
     private List<CentroidRecord> fetchCentroids(
             String tenant,
             java.util.function.Function<DimTables.CentroidTable, org.jooq.Condition> predicate) {
@@ -235,7 +291,7 @@ public final class TaxonomyCentroidRepository {
                 var rows = ctx.select(ct.collection(), ct.topicId(), ct.embedding(),
                                       ct.label(), ct.docCount())
                               .from(ct.table())
-                              .where(predicate.apply(ct))
+                              .where(predicate.apply(ct).and(ct.embedding().isNotNull()))
                               .orderBy(ct.collection().asc(), ct.topicId().asc())
                               .fetch();
                 for (var rec : rows) {
@@ -256,6 +312,17 @@ public final class TaxonomyCentroidRepository {
      * Delete centroids by topic_id within {@code collection}, across all per-dim tables.
      * Mirrors the rebuild path's {@code centroid_coll.delete}.
      *
+     * <p>RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-jv3ue item 5): unlike {@link
+     * #count}/{@link #dimensionProbe}/{@link #fetchCentroids}, a DELETE loop over the
+     * unified table's three dim keys is net-correct WITHOUT an {@code embedding_<dim> IS
+     * NOT NULL} guard — the first matching iteration deletes every row regardless of its
+     * dim, so later iterations always find zero rows left and contribute zero. Added the
+     * guard anyway for uniformity with the rest of this class and to stop the net
+     * correctness depending on iteration ORDER (a future re-order, e.g. to parallelize
+     * these three no-longer-independent deletes, would silently double-delete or race
+     * without it — each iteration is now independently correct rather than
+     * correct-by-accident).
+     *
      * @return number of rows actually deleted (RLS makes other tenants' rows invisible)
      */
     public int deleteByIds(String tenant, String collection, List<Long> topicIds) {
@@ -266,7 +333,8 @@ public final class TaxonomyCentroidRepository {
                 DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
                 deleted += ctx.deleteFrom(ct.table())
                               .where(ct.collection().eq(collection)
-                                  .and(ct.topicId().in(topicIds)))
+                                  .and(ct.topicId().in(topicIds))
+                                  .and(ct.embedding().isNotNull()))
                               .execute();
             }
             return deleted;
@@ -276,6 +344,11 @@ public final class TaxonomyCentroidRepository {
     /**
      * Remove every centroid for {@code collection}, across all per-dim tables.
      *
+     * <p>RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-jv3ue item 5): same
+     * per-iteration {@code embedding_<dim> IS NOT NULL} guard added as {@link
+     * #deleteByIds}, same reasoning (net-correct without it, but only by relying on
+     * execution order).
+     *
      * @return number of rows deleted
      */
     public int purgeByCollection(String tenant, String collection) {
@@ -284,7 +357,8 @@ public final class TaxonomyCentroidRepository {
             for (int dim : DIMS) {
                 DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
                 deleted += ctx.deleteFrom(ct.table())
-                              .where(ct.collection().eq(collection))
+                              .where(ct.collection().eq(collection)
+                                  .and(ct.embedding().isNotNull()))
                               .execute();
             }
             return deleted;
@@ -293,8 +367,19 @@ public final class TaxonomyCentroidRepository {
 
     // ── Internal helpers ────────────────────────────────────────────────────────
 
+    /**
+     * RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-jv3ue item 5): the
+     * raw-string table-name channel now consults {@link
+     * DimTables#CENTROIDS_TABLE_NAME} — {@code dim} stays a parameter for
+     * call-site symmetry with {@link DimTables#embeddingColumn(int)} (every
+     * caller already has {@code dim} in scope for the column choice right
+     * alongside the table name), even though the table name itself no
+     * longer varies by dim post-unification. Was {@code
+     * "nexus.taxonomy_centroids_" + dim}, a hand-rolled string resolving to
+     * a table the unify changeset DROPs.
+     */
     private static String centroidTable(int dim) {
-        return "nexus.taxonomy_centroids_" + dim;
+        return DimTables.CENTROIDS_TABLE_NAME;
     }
 
     /** pgvector cast-safe text literal: {@code [f1,f2,...]}. */

@@ -171,7 +171,12 @@ _ENTRY_RE = re.compile(
 #: refactor to a builder, a rename of the record) the parse returns a small set, every
 #: set-difference assertion below passes vacuously, and the gate reports GREEN while
 #: checking nothing. This turns that into a loud failure.
-_MIN_EXPECTED_ENTRIES = 15
+# Post-RDR-191 unify (Phase 4 batch): chunks_384/768/1024 collapsed to one
+# ("chunks", "collection") entry and taxonomy_centroids_<dim> to one
+# ("taxonomy_centroids", "collection") entry, so the registered list shrank
+# 18 -> 14. The floor is a parser-vacuity guard, not a completeness pin --
+# the two directional tests above are the real gate.
+_MIN_EXPECTED_ENTRIES = 14
 
 
 def _parse_java_list() -> set[tuple[str, str]]:

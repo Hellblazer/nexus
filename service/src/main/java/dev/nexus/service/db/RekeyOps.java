@@ -15,11 +15,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import dev.nexus.service.vectors.DimTables;
+
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
 import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
@@ -70,38 +70,55 @@ public final class RekeyOps {
     private static final Logger log = LoggerFactory.getLogger(RekeyOps.class);
 
     /**
-     * Typed per-dim table accessor for the three dim-partitioned content
-     * tables, in the SAME canonical order as {@link ChashSqlIdioms#CHUNK_TABLES}
-     * (nexus-4okz4 increment 2) — tied by construction/comment, not derived
-     * (same non-mechanical-link discipline {@code ChashSqlIdioms.
-     * danglingManifestCountDsl} already established for CHUNK_TABLES vs its
-     * three generated-Tables constants; see RawSqlGateTest's
-     * {@code chunkTablesCanary_fourthDimNeedsAllSitesToldChecklistAbove} for
-     * the full fourth-dim checklist).
+     * Typed table accessor for content rows (nexus-4okz4 increment 2,
+     * RDR-191 repoint nexus-o8dil.17).
      *
      * <p>byte[]-typed {@code chash} deliberately — NOT {@code
      * dev.nexus.service.vectors.DimTables.ChunkTable}'s hex-string accessor.
      * Every join in this class is against {@code chash_alias.old_bytes} /
      * {@code new_chash}, both byte[]-typed generated fields; a hex-string
      * comparison would silently never match (different wire representation
-     * of the same bytes, not comparable via {@code =}).
+     * of the same bytes, not comparable via {@code =}). {@link
+     * dev.nexus.service.jooq.nexus.Tables#CHUNKS}'s generated {@code CHASH}
+     * field is ALREADY byte[]-typed natively (unlike {@code ChunkTable},
+     * which wraps it through the {@code ChashHex} converted type), so no
+     * wrapper is needed at all post-unification — this record is built
+     * directly from the generated table.
      *
-     * <p>{@code name} mirrors {@link ChashSqlIdioms#CHUNK_TABLES}'s string
-     * entries exactly — used for the still-raw {@link
-     * ChashSqlIdioms#contentCollapseDelete(String)} call (no jOOQ DSL form,
-     * see step 4 below) and the synthetic-alias {@code source} column.
+     * <p>{@code name} is {@link DimTables#CHUNKS_TABLE_NAME} — used for the
+     * still-raw {@link ChashSqlIdioms#contentCollapseDelete(String)} call
+     * (no jOOQ DSL form, see step 4 below) and the synthetic-alias
+     * {@code source} column.
      */
     private record Dim(String name, Table<?> table, Field<byte[]> chash, Field<String> collection,
                         Field<String> chunkText, Field<JSONB> metadata) {
     }
 
+    /**
+     * RDR-191 unification (nexus-o8dil.17, nexus-xtmtf): {@code
+     * nexus.chunks_384/768/1024} collapsed into ONE table, {@code
+     * nexus.chunks}, keyed {@code (tenant_id, collection, chash)} —
+     * dim-independent identity (exactly one of {@code
+     * embedding_384/768/1024} is non-null per row, which this class never
+     * touches — {@link Dim} carries no embedding field, only chash/
+     * collection/chunkText/metadata; every operation below is an
+     * UPDATE/DELETE keyed on chash or an INSERT into {@code chash_alias},
+     * never a content INSERT into a chunk table).
+     *
+     * <p>{@code DIMS} therefore now names exactly ONE physical partition,
+     * not three — kept as a ONE-ELEMENT list (not inlined) rather than
+     * eliminating the {@code for (Dim d : DIMS)} loops entirely, so every
+     * loop body below stays behavior-identical and every loop still runs
+     * exactly once. This is not a cosmetic minimal-diff choice: looping 3x
+     * over the SAME table with identical predicates would now
+     * triple-process every row — the DimTables D1 hazard finding (table
+     * membership no longer implies dim; T2 nexus/rdr-191-batch-D1-2026-08-13
+     * [22460]) applies here directly, and a one-element list is the
+     * correctness fix, not merely a convenience.
+     */
     private static final List<Dim> DIMS = List.of(
-        new Dim("nexus.chunks_384", CHUNKS_384, CHUNKS_384.CHASH, CHUNKS_384.COLLECTION,
-            CHUNKS_384.CHUNK_TEXT, CHUNKS_384.METADATA),
-        new Dim("nexus.chunks_768", CHUNKS_768, CHUNKS_768.CHASH, CHUNKS_768.COLLECTION,
-            CHUNKS_768.CHUNK_TEXT, CHUNKS_768.METADATA),
-        new Dim("nexus.chunks_1024", CHUNKS_1024, CHUNKS_1024.CHASH, CHUNKS_1024.COLLECTION,
-            CHUNKS_1024.CHUNK_TEXT, CHUNKS_1024.METADATA));
+        new Dim(DimTables.CHUNKS_TABLE_NAME, CHUNKS, CHUNKS.CHASH, CHUNKS.COLLECTION,
+            CHUNKS.CHUNK_TEXT, CHUNKS.METADATA));
 
     private final TenantScope tenantScope;
 
@@ -325,14 +342,17 @@ public final class RekeyOps {
             // jOOQ DSL rendering (nexus-t76bp representation-only pass, Hal
             // directive 2026-08-08): identical to the prior raw SQL —
             // DISTINCT phys.collection, inner JOIN chash_alias to the
-            // three-dim UNION ALL on phys.chash = a.old_bytes. No bind
+            // physical content rows on phys.chash = a.old_bytes. No bind
             // values in this statement (no user input reaches it either
             // way); the rewrite is about typed columns and generated
             // tables, not injection risk.
-            var phys = ctx.select(CHUNKS_384.COLLECTION, CHUNKS_384.CHASH).from(CHUNKS_384)
-                .unionAll(ctx.select(CHUNKS_768.COLLECTION, CHUNKS_768.CHASH).from(CHUNKS_768))
-                .unionAll(ctx.select(CHUNKS_1024.COLLECTION, CHUNKS_1024.CHASH).from(CHUNKS_1024))
-                .asTable("phys");
+            // RDR-191 repoint (nexus-o8dil.17): the former three-dim UNION
+            // ALL (chunks_384/768/1024, each dim's own physical table)
+            // collapses to a single SELECT — nexus.chunks now IS the union
+            // of what those three tables held, dim-independent identity
+            // (tenant_id, collection, chash). No unionAll needed; "phys"
+            // still names the same (collection, chash) pair set as before.
+            var phys = ctx.select(CHUNKS.COLLECTION, CHUNKS.CHASH).from(CHUNKS).asTable("phys");
             var targetCollections = ctx.selectDistinct(phys.field("collection", String.class))
                 .from(CHASH_ALIAS)
                 .join(phys).on(phys.field("chash", byte[].class).eq(CHASH_ALIAS.OLD_BYTES))
@@ -357,13 +377,19 @@ public final class RekeyOps {
             int orphansDropped = 0;
             int orphansSynthesized = 0;
             // nexus-4okz4 increment 2 REWORK (C1 fix — see orphanCond's
-            // comment below for the full scoping explanation): aliased
-            // sibling copies of the three dim tables, built ONCE and reused
+            // comment below for the full scoping explanation): an aliased
+            // sibling copy of the content table, built ONCE and reused
             // across every dim iteration's orphanCond (pure expression-tree
-            // objects, no per-iteration state — safe to share).
-            var sib384 = CHUNKS_384.as("sib384");
-            var sib768 = CHUNKS_768.as("sib768");
-            var sib1024 = CHUNKS_1024.as("sib1024");
+            // object, no per-iteration state — safe to share).
+            //
+            // RDR-191 repoint (nexus-o8dil.17): collapsed from three
+            // per-dim aliases (sib384/768/1024, one per former physical
+            // table) to ONE — nexus.chunks is now the single table every
+            // dim's content lives in, so there is only one sibling copy to
+            // alias. See orphanCond's comment below for why aliasing this
+            // is now MANDATORY on every iteration (not just the historical
+            // "same-dim branch").
+            var sibContent = CHUNKS.as("sib_content");
             for (Dim d : DIMS) {
                 // self-join alias ("k") for the two-phase resolve/dedupe
                 // guard below — the SAME physical table referenced a second
@@ -412,28 +438,48 @@ public final class RekeyOps {
                 // nexus-4okz4 increment 2 REWORK (code-review-expert C1, T2
                 // review-4okz4-increment2 [21863], critique [21864] — pin
                 // fixture: RekeyOpsIntegrationTest's same-dim orphanCond
-                // correlation rows on TA/TB): the three dim-sibling NOT
-                // EXISTS subqueries below MUST use ALIASED copies
-                // (sib384/768/1024), never the bare generated-Tables
-                // constants. For the SAME-DIM branch (e.g. this clause
-                // against CHUNKS_384 when d.table() IS CHUNKS_384, unaliased,
-                // for the current statement's UPDATE/DELETE/INSERT target)
-                // an unaliased `.from(CHUNKS_384)` here would introduce a
-                // SECOND unaliased reference to the identical table name
-                // already in scope from the enclosing statement. PostgreSQL
-                // resolves the qualified column reference `chunks_384.chash`
-                // inside the subquery against the SUBQUERY'S OWN (innermost)
-                // range-table entry, not the outer row — d.chash() and the
-                // subquery's `CHUNKS_384.CHASH` become the SAME shadowed
-                // reference, so the predicate degenerates from "does a
-                // content row with THIS row's chash exist" to the
-                // self-comparison "chash = chash AND chunk_text <> ''",
-                // i.e. "does this dim have ANY content row for the tenant" —
-                // true or false for every orphan candidate uniformly,
-                // independent of which key is being checked. Applied
-                // uniformly to all three dim branches (not just the one that
-                // happens to be same-dim per iteration) so correctness does
-                // not depend on which dim d currently is.
+                // correlation rows on TA/TB): the sibling NOT EXISTS
+                // subquery below MUST use an ALIASED copy (sibContent),
+                // never a bare generated-Tables constant. An unaliased
+                // `.from(CHUNKS)` here would introduce a SECOND unaliased
+                // reference to the identical table already in scope from
+                // the enclosing statement's UPDATE/DELETE/INSERT target
+                // (d.table(), also CHUNKS, unaliased). PostgreSQL resolves
+                // the qualified column reference inside the subquery
+                // against the SUBQUERY'S OWN (innermost) range-table entry,
+                // not the outer row — d.chash() and the subquery's own
+                // CHASH column would become the SAME shadowed reference, so
+                // the predicate degenerates from "does a content row with
+                // THIS row's chash exist" to the self-comparison
+                // "chash = chash AND chunk_text <> ''", i.e. "does this
+                // table have ANY content row for the tenant" — true or
+                // false for every orphan candidate uniformly, independent
+                // of which key is being checked.
+                //
+                // RDR-191 repoint (nexus-o8dil.17): this is now the
+                // UNCONDITIONAL case, not merely a "same-dim branch". Before
+                // unification, d.table() cycled across three distinct
+                // physical tables, and only the branch where the sibling's
+                // table happened to equal d's OWN table needed aliasing.
+                // Now d.table() is ALWAYS CHUNKS (DIMS has exactly one
+                // entry — see its javadoc), so every iteration is the
+                // same-dim case by construction; aliasing sibContent is no
+                // longer a special case to get right per-branch, it is the
+                // only shape that exists.
+                //
+                // EQUIVALENCE (collapsed IN PLACE, not merged into a shared
+                // helper — RDR-191 repoint-batch execution plan D3, "collapse
+                // in place or prove equivalent"): the former three-conjunct
+                // form was "NOT EXISTS(content sibling in chunks_384) AND
+                // NOT EXISTS(chunks_768) AND NOT EXISTS(chunks_1024)" — i.e.
+                // no content-bearing row in ANY of the three tables (any
+                // collection — chash-only scope, no collection filter,
+                // deliberately unlike CatalogRepository.sampleMissingChashes'
+                // tenant-AND-collection-scoped fourth copy) shares this
+                // chash. nexus.chunks now physically IS the union of what
+                // those three tables held, so a single NOT EXISTS against
+                // it is the byte-for-byte same predicate over the same row
+                // set — not an approximation.
                 Condition orphanCond = d.chunkText().eq("")
                     .and(DSL.notExists(ctx.selectOne().from(CHASH_ALIAS)
                         .where(CHASH_ALIAS.OLD_BYTES.eq(d.chash()))))
@@ -442,15 +488,9 @@ public final class RekeyOps {
                     // their OLD keys until step 4) — never an orphan.
                     .and(DSL.notExists(ctx.selectOne().from(CHASH_ALIAS)
                         .where(CHASH_ALIAS.NEW_CHASH.eq(d.chash()))))
-                    .and(DSL.notExists(ctx.selectOne().from(sib384)
-                        .where(sib384.field(CHUNKS_384.CHASH).eq(d.chash()))
-                        .and(sib384.field(CHUNKS_384.CHUNK_TEXT).ne(""))))
-                    .and(DSL.notExists(ctx.selectOne().from(sib768)
-                        .where(sib768.field(CHUNKS_768.CHASH).eq(d.chash()))
-                        .and(sib768.field(CHUNKS_768.CHUNK_TEXT).ne(""))))
-                    .and(DSL.notExists(ctx.selectOne().from(sib1024)
-                        .where(sib1024.field(CHUNKS_1024.CHASH).eq(d.chash()))
-                        .and(sib1024.field(CHUNKS_1024.CHUNK_TEXT).ne(""))));
+                    .and(DSL.notExists(ctx.selectOne().from(sibContent)
+                        .where(sibContent.field(CHUNKS.CHASH).eq(d.chash()))
+                        .and(sibContent.field(CHUNKS.CHUNK_TEXT).ne(""))));
                 if (synthesizeOrphans) {
                     // Alias the surrogates FIRST so the step-5 cascade
                     // repoints their surviving pointers (RDR-180 Failure
@@ -744,45 +784,37 @@ public final class RekeyOps {
     }
 
     /**
-     * UNION ALL of mismatched content rows across dims with recovered
-     * old_ref (nexus-4okz4 increment 2 — typed rendering REPLACING the
-     * deleted string-returning {@code unionAllContentRows()}; RekeyOps-
-     * exclusive, private to this class both before and after this
-     * conversion). Columns: {@code old_ref} (the reversibility-lemma
-     * rendering), {@code old_bytes} (the row's CURRENT physical chash),
-     * {@code new_chash} (the digest), {@code source} (the originating dim
-     * table's name, matching {@link ChashSqlIdioms#CHUNK_TABLES}'s entries
-     * exactly). Written as three explicit branches rather than a loop over
-     * {@link #DIMS} — matches this file's own established explicit-three
-     * precedent (step 2b's {@code phys}/{@code targetCollections}) since a
-     * generic loop over heterogeneous per-branch {@code Record4} types has
-     * no simpler typed expression.
+     * Mismatched content rows with recovered old_ref (nexus-4okz4 increment
+     * 2 — typed rendering REPLACING the deleted string-returning {@code
+     * unionAllContentRows()}; RekeyOps-exclusive, private to this class
+     * both before and after this conversion). Columns: {@code old_ref}
+     * (the reversibility-lemma rendering), {@code old_bytes} (the row's
+     * CURRENT physical chash), {@code new_chash} (the digest), {@code
+     * source} (the originating table's name, {@link DimTables#CHUNKS_TABLE_NAME}).
+     *
+     * <p>RDR-191 repoint (nexus-o8dil.17): the former three-branch UNION
+     * ALL (one branch per dim's own physical table, unioned together)
+     * collapses to a SINGLE select — nexus.chunks now physically IS the
+     * union those three branches used to compute, so unioning it with
+     * itself would double/triple-count every mismatched row (the exact
+     * DimTables D1 hazard). {@code DIMS.get(0)} is the sole entry (see
+     * {@link #DIMS}'s javadoc); still routed through it rather than
+     * {@code CHUNKS} directly so {@code source} keeps tracking {@link
+     * DimTables#CHUNKS_TABLE_NAME} through one authority, not a second
+     * hand-rolled literal. Table alias kept as {@code "u"} — downstream
+     * callers ({@code conflictUnion}/{@code aliasUnion}) resolve columns by
+     * string name, unaffected by the union-to-single-select change.
      */
     private static Table<?> unionAllContentRowsDsl(DSLContext ctx) {
-        var u384 = ctx.select(
-                ChashSqlIdioms.oldRefField(CHUNKS_384.CHASH).as("old_ref"),
-                CHUNKS_384.CHASH.as("old_bytes"),
-                ChashSqlIdioms.digestField(CHUNKS_384.CHUNK_TEXT).as("new_chash"),
-                DSL.val(DIMS.get(0).name()).as("source"))
-            .from(CHUNKS_384)
-            .where(CHUNKS_384.CHUNK_TEXT.ne(""))
-            .and(CHUNKS_384.CHASH.isDistinctFrom(ChashSqlIdioms.digestField(CHUNKS_384.CHUNK_TEXT)));
-        var u768 = ctx.select(
-                ChashSqlIdioms.oldRefField(CHUNKS_768.CHASH).as("old_ref"),
-                CHUNKS_768.CHASH.as("old_bytes"),
-                ChashSqlIdioms.digestField(CHUNKS_768.CHUNK_TEXT).as("new_chash"),
-                DSL.val(DIMS.get(1).name()).as("source"))
-            .from(CHUNKS_768)
-            .where(CHUNKS_768.CHUNK_TEXT.ne(""))
-            .and(CHUNKS_768.CHASH.isDistinctFrom(ChashSqlIdioms.digestField(CHUNKS_768.CHUNK_TEXT)));
-        var u1024 = ctx.select(
-                ChashSqlIdioms.oldRefField(CHUNKS_1024.CHASH).as("old_ref"),
-                CHUNKS_1024.CHASH.as("old_bytes"),
-                ChashSqlIdioms.digestField(CHUNKS_1024.CHUNK_TEXT).as("new_chash"),
-                DSL.val(DIMS.get(2).name()).as("source"))
-            .from(CHUNKS_1024)
-            .where(CHUNKS_1024.CHUNK_TEXT.ne(""))
-            .and(CHUNKS_1024.CHASH.isDistinctFrom(ChashSqlIdioms.digestField(CHUNKS_1024.CHUNK_TEXT)));
-        return u384.unionAll(u768).unionAll(u1024).asTable("u");
+        Dim d = DIMS.get(0);
+        return ctx.select(
+                ChashSqlIdioms.oldRefField(d.chash()).as("old_ref"),
+                d.chash().as("old_bytes"),
+                ChashSqlIdioms.digestField(d.chunkText()).as("new_chash"),
+                DSL.val(d.name()).as("source"))
+            .from(d.table())
+            .where(d.chunkText().ne(""))
+            .and(d.chash().isDistinctFrom(ChashSqlIdioms.digestField(d.chunkText())))
+            .asTable("u");
     }
 }

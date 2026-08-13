@@ -192,6 +192,21 @@ GRANT SELECT ON public.databasechangeloglock TO nexus_svc;
     </changeSet>
 
     <changeSet id="grants-003-purge-vacuum-maintain" author="nexus-0ys55" runAlways="true">
+        <!-- RDR-191 Phase 4 (vectors-004-unify-chunks.xml): once the unify changeset
+             drops nexus.chunks_384/768/1024, this runAlways grant would raise
+             "relation does not exist" on every subsequent boot and crash-loop the
+             service. The guard is an EARLY-RETURN IN THE BODY below, deliberately
+             NOT a <preConditions onFail="MARK_RAN"> (nexus-ixsxa /
+             tests/test_changelog_markran_lint.py: runAlways + MARK_RAN INSERTs a
+             fresh DATABASECHANGELOG row on every boot the precondition is unmet,
+             unbounded, and corrupts rollbackCount depth arithmetic; a body guard
+             keeps the changeset RERAN — one row, updated in place). Editing this
+             runAlways body is checksum-safe: ValidatingVisitor skips the MD5SUM
+             comparison for shouldAlwaysRun(). Pre-unify boxes execute the grants
+             unchanged; post-unify boxes hit the RETURN and no-op forever.
+             grants-005-chunks-unify-maintain below takes over MAINTAIN with the
+             post-unify table set. See vectors-004-unify-chunks.xml's header for
+             the full boot-brick analysis. -->
         <comment>
             nexus-0ys55: MAINTAIN on the five purge-trash VACUUM targets (nexus.chunks_384,
             nexus.chunks_768, nexus.chunks_1024, nexus.catalog_document_chunks,
@@ -235,6 +250,12 @@ GRANT SELECT ON public.databasechangeloglock TO nexus_svc;
         <sql splitStatements="false" stripComments="false">
 DO $$
 BEGIN
+    -- RDR-191 era guard (see changeset comment): post-unify the per-dim
+    -- tables are gone and grants-005 owns MAINTAIN. Body guard, not
+    -- preConditions MARK_RAN (nexus-ixsxa).
+    IF to_regclass('nexus.chunks_384') IS NULL THEN
+        RETURN;
+    END IF;
     IF current_setting('server_version_num')::int >= 170000 THEN
         EXECUTE 'GRANT MAINTAIN ON nexus.chunks_384 TO nexus_svc';
         EXECUTE 'GRANT MAINTAIN ON nexus.chunks_768 TO nexus_svc';
@@ -328,6 +349,24 @@ $$;
         <rollback>
             <sql>REVOKE pg_monitor FROM nexus_svc;</sql>
         </rollback>
+    </changeSet>
+
+    <changeSet id="grants-005-chunks-unify-maintain" author="nexus-o8dil.12" runAlways="true">
+        <comment>MAINTAIN on nexus.chunks + catalog_document_chunks + catalog_documents, superseding grants-003's now-frozen chunks_384/768/1024 list. See vectors-004-unify-chunks.xml header for the full boot-brick analysis.</comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    IF current_setting('server_version_num')::int >= 170000 THEN
+        EXECUTE 'GRANT MAINTAIN ON nexus.chunks TO nexus_svc';
+        EXECUTE 'GRANT MAINTAIN ON nexus.catalog_document_chunks TO nexus_svc';
+        EXECUTE 'GRANT MAINTAIN ON nexus.catalog_documents TO nexus_svc';
+    ELSE
+        RAISE NOTICE 'grants-005-chunks-unify-maintain: server % predates MAINTAIN (PG17+)', current_setting('server_version');
+    END IF;
+END
+$$;
+        </sql>
+        <rollback><!-- Revoke is a DBA operation; not automated. --></rollback>
     </changeSet>
 
 </databaseChangeLog>

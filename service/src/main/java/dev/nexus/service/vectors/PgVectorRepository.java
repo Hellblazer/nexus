@@ -19,9 +19,15 @@ import org.jooq.impl.DSL;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
+// RDR-191 Phase 4 (nexus-o8dil.16/.18): chunks_384/768/1024 collapsed into the
+// single nexus.chunks table (three nullable embedding_<dim> columns) --
+// CHUNKS_384/CHUNKS_768/CHUNKS_1024 no longer exist as generated jOOQ Table
+// constants (only CHUNKS does; see DimTables' class javadoc for the single-
+// authority rationale). Every former per-table reference in this file now
+// resolves through CHUNKS (dim-agnostic table identity) plus, where an
+// embedding column specifically is needed, DimTables.embeddingColumn(dim) /
+// DimTables.CHUNKS.get(dim) for the typed accessor.
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_EXPIRE_QUARANTINE;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS;
@@ -959,6 +965,18 @@ public final class PgVectorRepository {
      * Token-aware sibling of {@link #search} (bead nexus-ehc4q).
      * Returns search results alongside the embedding token count.
      *
+     * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16, F13 hazard).</strong> The distance
+     * projection names {@code embedding_<dim>} explicitly via
+     * {@link DimTables#embeddingColumn(int)} rather than a bare {@code embedding}
+     * column - {@code nexus.chunks} carries three nullable embedding columns (one
+     * non-null per row, DB CHECK-enforced) since the chunks_384/768/1024 unification,
+     * so a bare {@code embedding} no longer resolves at all. Naming the WRONG dim's
+     * column would still parse (all three exist on the table) but silently seq-scan
+     * instead of using that dim's FULL HNSW index (F13: measured ~250x, deployment-
+     * dependent on which dim is adopted) - see {@code PgVectorRepositoryRawSqlPlanShapeTest}
+     * for the EXPLAIN-based proof that this shape, with no
+     * {@code embedding_<dim> IS NOT NULL} predicate, still binds to the full index.
+     *
      * @param includeSourceUri when true, resolves source_uri via catalog JOIN (opt-in, RDR-169 G5)
      */
     public Tokened<List<Map<String, Object>>> searchWithTokens(String tenant, String queryText,
@@ -990,7 +1008,7 @@ public final class PgVectorRepository {
             // RDR-180: bytea storage — hex at the SQL seam (raw-SQL twin of
             // the ChashHex converted type the jOOQ paths use).
             .append("SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,")
-            .append(" (embedding <=> ?::vector) AS distance")
+            .append(" (").append(DimTables.embeddingColumn(dim)).append(" <=> ?::vector) AS distance")
             .append(" FROM ").append(chunksTable(dim)).append(" c")
             .append(" WHERE c.collection IN (").append(placeholders(collectionNames.size())).append(")")
             // RDR-156 Decision 6 (nexus-3ck2g): live_chunks predicate, inlined so the
@@ -1181,6 +1199,15 @@ public final class PgVectorRepository {
         return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null);
     }
 
+    /**
+     * RDR-191 Phase 4 (nexus-o8dil.16, F13 hazard): both the selective-gate and
+     * dense-gate distance projections below name {@code embedding_<dim>} explicitly
+     * via {@link DimTables#embeddingColumn(int)} rather than a bare {@code embedding}
+     * column, for the same reason as {@link #searchWithTokens} — see that method's
+     * javadoc and {@code PgVectorRepositoryRawSqlPlanShapeTest} for the EXPLAIN-based
+     * proof that this shape (no {@code embedding_<dim> IS NOT NULL} predicate) still
+     * binds to the dispatched dim's FULL HNSW index.
+     */
     private List<Map<String, Object>> hybridSearch(String tenant, String queryText,
                                            List<String> collectionNames,
                                            int nResults,
@@ -1321,7 +1348,7 @@ public final class PgVectorRepository {
                 // identical to the old per-row COUNT(*).
                 List<String> inChashes = gateChashes.stream().distinct().toList();
                 String sql = "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
-                    + " (embedding <=> ?::vector) AS distance FROM " + table + scopeSql
+                    + " (" + DimTables.embeddingColumn(dim) + " <=> ?::vector) AS distance FROM " + table + scopeSql
                     + " AND chash IN (" + decodePlaceholders(inChashes.size()) + ")"
                     + " ORDER BY distance ASC, chash ASC LIMIT ?";
                 List<Object> b = new ArrayList<>();
@@ -1334,7 +1361,7 @@ public final class PgVectorRepository {
             // HNSW-first for a dense gate: keep HNSW scanning past ef_search.
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             String sql = "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
-                + " (embedding <=> ?::vector) AS distance FROM " + table + gateSql
+                + " (" + DimTables.embeddingColumn(dim) + " <=> ?::vector) AS distance FROM " + table + gateSql
                 + " ORDER BY distance ASC, chash ASC LIMIT ?";
             List<Object> b = new ArrayList<>();
             b.add(vecLit);
@@ -1679,18 +1706,27 @@ public final class PgVectorRepository {
      * List the collections visible to {@code tenant} (RDR-155 P4a.2,
      * bead nexus-1k8s1).
      *
-     * <p>Union across all three {@code chunks_<dim>} tables — collection is a
-     * column, not a table, so "a collection exists" means "at least one chunk row
-     * carries the name". RLS scopes the union to the tenant's rows, so a foreign
-     * tenant's collections are invisible (no existence leak).
+     * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16/.18, D1 semantic hazard):</strong> before
+     * the chunks_384/768/1024 unification this was a three-way {@code UNION} across three
+     * physically distinct tables — table membership alone was the (implicit) dim filter, so
+     * no row could be counted twice. Now every dim's chunk rows live in the SAME
+     * {@code nexus.chunks} table, so the old three-leg UNION would triple-count: each
+     * collection's rows would surface once per UNION leg regardless of which
+     * {@code embedding_<dim>} column is actually populated. Collapsed to a SINGLE
+     * {@code SELECT DISTINCT collection} scan instead of adding a per-leg
+     * {@code embedding_<dim> IS NOT NULL} guard — a collection name is already
+     * dim-homogeneous (every chunk row under one collection name carries the same
+     * populated embedding column; {@link #dimForCollection} is the single dispatch
+     * authority), so {@code collection} identity alone is sufficient to de-duplicate
+     * without ever needing to look at which embedding column is non-null. RLS scopes
+     * the scan to the tenant's rows, so a foreign tenant's collections are invisible
+     * (no existence leak) — same guarantee as before.
      *
      * @return Chroma-style envelope {@code [{"name": ...}, ...]}, name ascending
      */
     public List<Map<String, Object>> listCollections(String tenant) {
         var names = tenantScope.withTenant(tenant, ctx ->
-            ctx.selectDistinct(CHUNKS_384.COLLECTION).from(CHUNKS_384)
-               .union(ctx.selectDistinct(CHUNKS_768.COLLECTION).from(CHUNKS_768))
-               .union(ctx.selectDistinct(CHUNKS_1024.COLLECTION).from(CHUNKS_1024))
+            ctx.selectDistinct(CHUNKS.COLLECTION).from(CHUNKS)
                .orderBy(1)
                .fetch());
         List<Map<String, Object>> out = new ArrayList<>(names.size());
@@ -2063,6 +2099,19 @@ public final class PgVectorRepository {
      *         {@code [{"name": ..., "dim": 384, "count": N, "last_write": "..."}]},
      *         name ascending. {@code last_write} is ISO-8601 with offset, or absent
      *         if null. Collections with zero live chunks do not appear.
+     *
+     * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16/.18): coordinated, NO code change needed.</strong>
+     * {@code nexus.collection_vector_stats}'s body is UNCHANGED by the vectors-005 repoint
+     * changeset (re-created verbatim only because the CASCADE from dropping
+     * chunks_384/768/1024 also dropped it and its {@code nexus.live_chunks} base view) — it
+     * still {@code SELECT}s {@code tenant_id, collection, dim, count(*), max(created_at)}
+     * FROM {@code live_chunks} GROUP BY {@code tenant_id, collection, dim}, so the jOOQ-
+     * generated {@code CollectionVectorStats} table regenerates with identical field names/
+     * types and this method's {@code COLLECTION_VECTOR_STATS.COLLECTION/DIM/CHUNK_COUNT/
+     * LAST_WRITE} references keep compiling and mean the same thing. The view's own {@code dim}
+     * column is now DERIVED (a {@code CASE WHEN embedding_384 IS NOT NULL THEN 384 ...} in
+     * {@code live_chunks}, vectors-005-1) rather than implied by which physical table a row
+     * lived in — that derivation lives entirely in SQL and is invisible from this method.
      */
     public List<Map<String, Object>> collectionStats(String tenant) {
         var result = tenantScope.withTenant(tenant, ctx ->
@@ -2949,8 +2998,20 @@ public final class PgVectorRepository {
 
     // -- Internal helpers -------------------------------------------------------
 
+    /**
+     * RDR-191 Phase 4 (nexus-o8dil.16): thin wrapper over {@link DimTables#CHUNKS_TABLE_NAME}
+     * rather than hand-rolling {@code "nexus.chunks_" + dim} — the raw-SQL table-name
+     * channel {@link #searchWithTokens}/{@link #hybridSearch}/{@link #upsertChunks} read
+     * from must consult the same single name authority {@link DimTables} gives the typed
+     * jOOQ channel, or the two channels drift independently (DimTables' own class javadoc).
+     * {@code dim} is now vestigial for the table name itself (every dim resolves to the
+     * SAME {@code nexus.chunks} table) but is kept as a parameter: every call site already
+     * has a resolved {@code dim} in scope for the embedding-column choice
+     * ({@link DimTables#embeddingColumn(int)}) right alongside the table name, and dropping
+     * the parameter here would be a needless signature churn for zero benefit.
+     */
     private static String chunksTable(int dim) {
-        return "nexus.chunks_" + dim;
+        return DimTables.CHUNKS_TABLE_NAME;
     }
 
     /**
@@ -2976,6 +3037,16 @@ public final class PgVectorRepository {
      * hand-built SQL string the way it sees typed jOOQ statements — this predicate's
      * presence (by name, {@code liveChunksPredicate(}) in the method body is exactly
      * what that check requires.
+     *
+     * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16/.18): deliberately UNCHANGED.</strong>
+     * This predicate is alias-parameterised and its SQL text names only
+     * {@code catalog_document_chunks}/{@code catalog_documents} (via {@code alias.tenant_id}
+     * / {@code alias.chash} for the correlation, never a dim-sharded table name) — it
+     * carries no {@code chunks_<dim>} reference for the chunks_384/768/1024 unification to
+     * touch. Recorded here so a future repoint census does not re-flag this method: the
+     * "raw {@code chunks_<dim>} table" phrasing above and in the {@code nexus-msz9i} cost
+     * comment below describes the CALLER's table (now {@code nexus.chunks}, resolved via
+     * {@link #chunksTable(int)}), not anything this predicate itself references.
      */
     private static String liveChunksPredicate(String alias) {
         // nexus-msz9i (hybrid p50 744ms -> ~1000ms at the v0.1.63 deploy): the original
@@ -3045,6 +3116,14 @@ public final class PgVectorRepository {
      * .selectOne(}). This predicate is instead policed by the gate's dedicated {@code
      * scanTypedChunksSites} check (mirrors {@code scanRawChunksSites}), which requires
      * every named get-family method to call this helper by name.
+     *
+     * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16/.18): deliberately UNCHANGED</strong>, same
+     * reason as {@link #liveChunksPredicate} — the {@code ch} parameter's
+     * {@link DimTables.ChunkTable#tenantId()}/{@link DimTables.ChunkTable#chash()} accessors
+     * already resolve against whichever table {@code ch} was built from ({@code nexus.chunks}
+     * post-repoint), so this condition needed no edit for the unification; only the caller's
+     * {@code DimTables.CHUNKS.get(dim)} lookup (D1's scope) determines which table/columns
+     * {@code ch} carries.
      */
     private static org.jooq.Condition liveChunksCondition(DSLContext ctx, DimTables.ChunkTable ch) {
         // nexus-msz9i: the DEAD-SET form, the typed twin of the rewrite applied to

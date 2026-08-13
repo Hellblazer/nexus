@@ -3,6 +3,7 @@ package dev.nexus.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import dev.nexus.service.vectors.DimTables;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.util.ArrayList;
@@ -134,10 +135,14 @@ class GraphHopParityTest {
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             for (String tbl : List.of(
                     "catalog_collections", "catalog_documents", "catalog_document_chunks",
-                    "catalog_links", "chunks_384", "chunks_768", "chunks_1024")) {
+                    "catalog_links")) {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
             }
+            // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
+            // a single GRANT now covers what three did.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
             su.createStatement().execute("GRANT USAGE ON ALL SEQUENCES IN SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
@@ -194,7 +199,7 @@ class GraphHopParityTest {
             // ----- large star fixture for the EXPLAIN group (GROUP 10) -----
             seedExplainFixture(su);
 
-            for (String tbl : List.of("chunks_1024", "catalog_documents",
+            for (String tbl : List.of("chunks", "catalog_documents",
                     "catalog_document_chunks", "catalog_links")) {
                 su.createStatement().execute("ANALYZE nexus." + tbl);
             }
@@ -227,7 +232,7 @@ class GraphHopParityTest {
             "SELECT '" + TENANT_A + "', 'ex'||g, 0, decode(lpad(g::text, 64, '0'), 'hex'), '" + COLL_EXPLAIN + "' " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         su.createStatement().execute(
-            "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
             "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', decode(lpad(g::text, 64, '0'), 'hex'), 'ex'||g, " +
             "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::vector " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
@@ -389,7 +394,7 @@ class GraphHopParityTest {
             // Stamp metadata on g1's chunk only; g0's stays NULL. Late-order safe:
             // no earlier test passes p_where or reads chunk metadata.
             su.createStatement().execute(
-                "UPDATE nexus.chunks_1024 SET metadata = '{\"lang\": \"java\"}'::jsonb " +
+                "UPDATE " + DimTables.CHUNKS_TABLE_NAME + " SET metadata = '{\"lang\": \"java\"}'::jsonb " +
                 "WHERE collection = '" + COLL_G + "' AND chash = decode('" + validChash("g1") + "', 'hex')");
 
             // NULL where: unfiltered — the pre-catalog-012 behavior is preserved.
@@ -565,7 +570,7 @@ class GraphHopParityTest {
         // reachability, not representativeness.
         String inner =
             "SELECT d.tumbler " +
-            "  FROM nexus.chunks_1024 c " +
+            "  FROM " + DimTables.CHUNKS_TABLE_NAME + " c " +
             "  JOIN nexus.catalog_document_chunks m " +
             "    ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash " +
             "  JOIN nexus.catalog_documents d " +
@@ -574,17 +579,24 @@ class GraphHopParityTest {
             "         WHERE from_tumbler = 'exseed' AND link_type = 'cites') rd " +
             "    ON rd.tumbler = d.tumbler " +
             " WHERE c.collection = '" + COLL_EXPLAIN + "' AND d.deleted_at IS NULL " +
-            " ORDER BY c.embedding <=> " + queryVecLiteral(1024) + " LIMIT 10";
+            // RDR-191 repoint (nexus-o8dil.16/.48, Step G cluster-B triage): the unified
+            // nexus.chunks table carries three nullable embedding_384/768/1024 columns,
+            // not one bare `embedding` column - this test's own hand-rolled probe SQL
+            // (not production code; DimTables.CHUNKS_TABLE_NAME above already targets the
+            // unified table) was never updated post-repoint, so `c.embedding` no longer
+            // resolves (PSQLException: column c.embedding does not exist). The assertion
+            // below already targets idx_chunks_embedding_1024, so name that dim's column.
+            " ORDER BY c.embedding_1024 <=> " + queryVecLiteral(1024) + " LIMIT 10";
         String plan = explain(inner);
         assertThat(plan)
             .as("materialize-reached-then-rank must use the HNSW index "
-                + "idx_chunks_1024_embedding (rank OUTSIDE the recursive CTE keeps the "
+                + "idx_chunks_embedding_1024 (rank OUTSIDE the recursive CTE keeps the "
                 + "probe vector a plan-time literal). Plan was:%n%s", plan)
-            .contains("idx_chunks_1024_embedding");
+            .contains("idx_chunks_embedding_1024");
         assertThat(plan)
             .as("the reached-set join must NOT defeat the index into a Seq Scan on "
-                + "chunks_1024. Plan was:%n%s", plan)
-            .doesNotContain("Seq Scan on chunks_1024");
+                + "nexus.chunks. Plan was:%n%s", plan)
+            .doesNotContain("Seq Scan on chunks");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -676,14 +688,14 @@ class GraphHopParityTest {
             "      AND (" + sqlText(linkType) + " IS NULL OR l.link_type = " + sqlText(linkType) + ") " +
             "), reached AS (SELECT DISTINCT tumbler FROM reach) " +
             "SELECT d.tumbler AS id " +
-            "  FROM nexus.chunks_" + dim + " c " +
+            "  FROM " + DimTables.CHUNKS_TABLE_NAME + " c " +
             "  JOIN nexus.catalog_document_chunks m " +
             "    ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash " +
             "  JOIN nexus.catalog_documents d " +
             "    ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id " +
             "  JOIN reached rd ON rd.tumbler = d.tumbler " +
             " WHERE c.collection = '" + collection + "' AND d.deleted_at IS NULL " +
-            " ORDER BY c.embedding <=> " + queryVecLiteral(dim) + " ASC";
+            " ORDER BY c." + DimTables.embeddingColumn(dim) + " <=> " + queryVecLiteral(dim) + " ASC";
         return runIds(conn, sql);
     }
 
@@ -706,8 +718,8 @@ class GraphHopParityTest {
             "VALUES ('" + tenant + "', '" + tumbler + "', 0, decode('" + chash + "', 'hex'), '" + collection + "') " +
             "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
         su.createStatement().execute(
-            "INSERT INTO nexus.chunks_" + dim +
-            " (tenant_id, collection, chash, chunk_text, embedding) VALUES ('" +
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
+            " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ") VALUES ('" +
             tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + tumbler + "', " +
             vec2(dim, x, y) + "::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }

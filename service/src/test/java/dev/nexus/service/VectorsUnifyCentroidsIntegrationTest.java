@@ -29,17 +29,21 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * nexus.taxonomy_centroids} table ({@code taxonomy-007-unify-centroids.xml},
  * changeset {@code taxonomy-007-1}).
  *
- * <p><strong>Isolation strategy</strong> — identical shape to {@link
- * VectorsUnifyChunksIntegrationTest}: this changeset is NOT yet {@code
- * <include>}d in {@code db.changelog-master.xml} (see that file's own
- * comment). Every test runs the REAL, UNMODIFIED master changelog to head
- * first via {@link SchemaMigrator#migrate} (taxonomy_centroids_384/768/1024
- * exist exactly as they do in production today), then applies {@code
- * taxonomy-007-unify-centroids.xml} as its OWN standalone root changelog via
+ * <p><strong>Isolation strategy — UPDATED at Step G (RDR-191 repoint batch,
+ * bead nexus-o8dil.48)</strong> — identical shape to {@link
+ * VectorsUnifyChunksIntegrationTest}: this changeset IS NOW registered in
+ * {@code db.changelog-master.xml} (Step B, plan T2 [22445]). Tests that need
+ * the SOURCE (pre-unify) shape run the real master changelog only UP TO (not
+ * including) {@code taxonomy-007-1} via {@link #migrateUpTo}, seed their
+ * fixture against the per-dim tables, then apply {@code
+ * taxonomy-007-unify-centroids.xml} as its own standalone root changelog via
  * a second {@link Liquibase} instance pointed directly at that file's
  * classpath-relative path — byte-identical end state to a real {@code
  * <include>}, since Liquibase tracks {@code DATABASECHANGELOG} rows by
- * {@code (id, author, filename)}, not by which changelog reached them.
+ * {@code (id, author, filename)}, not by which changelog reached them. Tests
+ * that only assert against the FINAL unified state run {@link
+ * SchemaMigrator#migrate} to real head and treat a subsequent {@code
+ * applyUnifyChangeset} call as the idempotent no-op it now is.
  *
  * <p>UNLIKE the chunks test, this class has NO analog of {@code
  * unRekeyedLegacyChash_bootSurvives_octetCheckStaysNotValid} — centroid
@@ -58,7 +62,7 @@ class VectorsUnifyCentroidsIntegrationTest {
     // Staged OUTSIDE db/changelog/ — see taxonomy-007-unify-centroids.xml's
     // own header and db.changelog-master.xml's comment for the full
     // changelog-parity drift-lint rationale (identical to the chunks side).
-    private static final String UNIFY_CHANGELOG = "db/changelog-staged/taxonomy-007-unify-centroids.xml";
+    private static final String UNIFY_CHANGELOG = "db/changelog/taxonomy-007-unify-centroids.xml";
 
     // ── Shared aged-box scaffold (mirrors VectorsUnifyChunksIntegrationTest) ──
 
@@ -96,6 +100,36 @@ class VectorsUnifyCentroidsIntegrationTest {
         cfg.setMaximumPoolSize(2);
         cfg.setPoolName("nexus-admin-" + label);
         return new Rig(pg, new com.zaxxer.hikari.HikariDataSource(cfg));
+    }
+
+    /**
+     * Runs the master changelog up to (but NOT including) {@code changesetId},
+     * mirroring {@code SchemaMigratorIntegrationTest}'s aged-box idiom and
+     * {@link VectorsUnifyChunksIntegrationTest#migrateUpTo}'s identical
+     * sibling helper (Step G, RDR-191 repoint batch cluster A).
+     */
+    private static void migrateUpTo(com.zaxxer.hikari.HikariDataSource ds, String changesetId) throws Exception {
+        try (Connection conn = ds.getConnection()) {
+            Database database = DatabaseFactory.getInstance()
+                .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+            try (Liquibase liquibase = new Liquibase(
+                    "db/changelog/db.changelog-master.xml",
+                    new ClassLoaderResourceAccessor(),
+                    database)) {
+                var unrun = liquibase.listUnrunChangeSets(new Contexts(), new LabelExpression());
+                int idx = -1;
+                for (int i = 0; i < unrun.size(); i++) {
+                    if (changesetId.equals(unrun.get(i).getId())) {
+                        idx = i;
+                        break;
+                    }
+                }
+                assertThat(idx)
+                    .as("%s must be present in the master changelog", changesetId)
+                    .isGreaterThanOrEqualTo(0);
+                liquibase.update(idx, new Contexts(), new LabelExpression());
+            }
+        }
     }
 
     private static void applyUnifyChangeset(com.zaxxer.hikari.HikariDataSource ds) {
@@ -220,7 +254,9 @@ class VectorsUnifyCentroidsIntegrationTest {
     void straddlingDistribution_rowsLandInCorrectTypedColumn() throws Exception {
         Rig rig = newRig("straddle");
         try {
-            SchemaMigrator.migrate(rig.adminDs());
+            // Stop BEFORE taxonomy-007-1 (now real head, Step B registration)
+            // so taxonomy_centroids_384/768/1024 still exist to seed pre-unify.
+            migrateUpTo(rig.adminDs(), "taxonomy-007-1");
 
             seedCentroid(rig.pg(), 384, "t1", "code__demo__minilm__v1", 1L, "alpha");
             seedCentroid(rig.pg(), 768, "t1", "docs__demo__bge__v1", 2L, "beta");
@@ -270,7 +306,9 @@ class VectorsUnifyCentroidsIntegrationTest {
     void degenerateSingleRow_migratesCleanly() throws Exception {
         Rig rig = newRig("degenerate");
         try {
-            SchemaMigrator.migrate(rig.adminDs());
+            // Stop BEFORE taxonomy-007-1 -- taxonomy_centroids_384/768/1024
+            // must still exist to seed pre-unify (Step G).
+            migrateUpTo(rig.adminDs(), "taxonomy-007-1");
             seedCentroid(rig.pg(), 384, "t1", "code__demo__minilm__v1", 7L, "solo");
             // taxonomy_centroids_768 and _1024 stay EMPTY.
 
@@ -306,7 +344,9 @@ class VectorsUnifyCentroidsIntegrationTest {
     void crossShardPkCollision_haltsMigrationLoudly() throws Exception {
         Rig rig = newRig("collision");
         try {
-            SchemaMigrator.migrate(rig.adminDs());
+            // Stop BEFORE taxonomy-007-1 -- taxonomy_centroids_384/768/1024
+            // must still exist to seed pre-unify (Step G).
+            migrateUpTo(rig.adminDs(), "taxonomy-007-1");
             seedCentroid(rig.pg(), 384, "t1", "same__collection__v1", 9L, "one");
             seedCentroid(rig.pg(), 768, "t1", "same__collection__v1", 9L, "two");
 
@@ -435,7 +475,9 @@ class VectorsUnifyCentroidsIntegrationTest {
     void rollback_restoresSourcesFaithfully() throws Exception {
         Rig rig = newRig("rollback");
         try {
-            SchemaMigrator.migrate(rig.adminDs());
+            // Stop BEFORE taxonomy-007-1 -- taxonomy_centroids_384/768/1024
+            // must still exist to seed pre-unify (Step G).
+            migrateUpTo(rig.adminDs(), "taxonomy-007-1");
             seedCentroid(rig.pg(), 384, "t1", "code__demo__minilm__v1", 50L, "r1");
             seedCentroid(rig.pg(), 768, "t1", "docs__demo__bge__v1", 52L, "r3");
             seedCentroid(rig.pg(), 1024, "t1", "knowledge__demo__voyage__v1", 51L, "r2");

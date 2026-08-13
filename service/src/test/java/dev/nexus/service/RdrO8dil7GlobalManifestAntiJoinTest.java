@@ -8,6 +8,7 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.StagingPromoteOps;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Contexts;
@@ -86,8 +87,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * ruling): a {@code catalog_document_chunks} row is DANGLING (definition
  * class (a), the only class this criterion is about) when its owning
  * document is LIVE ({@code deleted_at IS NULL}) and its {@code
- * (tenant_id, collection, chash)} triple resolves in NO {@code chunks_384
- * /768/1024} row. A row whose owner is TOMBSTONED (class b, soft-tombstone
+ * (tenant_id, collection, chash)} triple resolves in NO {@code nexus.chunks}
+ * row (RDR-191 Phase 4 unified; formerly {@code chunks_384/768/1024}). A row
+ * whose owner is TOMBSTONED (class b, soft-tombstone
  * residue) is NOT dangling by design — it is protected by Tier 1 above and
  * reaped later, together with its owner, by {@code purge_trash}'s
  * grace-window sweep (Tier 2). {@link #globalDanglingCount} below encodes
@@ -242,11 +244,9 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
                 + "JOIN nexus.catalog_documents d "
                 + "  ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id "
                 + "WHERE d.deleted_at IS NULL "
-                + "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c "
-                + "  WHERE c.tenant_id = m.tenant_id AND c.collection = m.collection AND c.chash = m.chash) "
-                + "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c "
-                + "  WHERE c.tenant_id = m.tenant_id AND c.collection = m.collection AND c.chash = m.chash) "
-                + "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c "
+                // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
+                // one NOT EXISTS now covers what three ANDed ones did.
+                + "AND NOT EXISTS (SELECT 1 FROM " + DimTables.CHUNKS_TABLE_NAME + " c "
                 + "  WHERE c.tenant_id = m.tenant_id AND c.collection = m.collection AND c.chash = m.chash)");
             rs.next();
             return rs.getInt(1);
@@ -274,11 +274,9 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
                 "SELECT COUNT(*) FROM nexus.catalog_document_chunks m "
                 + "JOIN nexus.catalog_documents d "
                 + "  ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id "
-                + "WHERE NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c "
-                + "  WHERE c.tenant_id = m.tenant_id AND c.collection = m.collection AND c.chash = m.chash) "
-                + "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c "
-                + "  WHERE c.tenant_id = m.tenant_id AND c.collection = m.collection AND c.chash = m.chash) "
-                + "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c "
+                // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
+                // one NOT EXISTS now covers what three ANDed ones did.
+                + "WHERE NOT EXISTS (SELECT 1 FROM " + DimTables.CHUNKS_TABLE_NAME + " c "
                 + "  WHERE c.tenant_id = m.tenant_id AND c.collection = m.collection AND c.chash = m.chash)");
             rs.next();
             return rs.getInt(1);
@@ -321,9 +319,11 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         return rs.getInt(1);
     }
 
-    private static String chunkText(Connection su, String table, String collection, String chashHex) throws Exception {
+    /** RDR-191 Phase 4: chunks_<dim> unified into nexus.chunks -- (collection, chash)
+     *  is the full PK, so no dim/embedding-column filter is needed here. */
+    private static String chunkText(Connection su, String collection, String chashHex) throws Exception {
         var rs = su.createStatement().executeQuery(
-            "SELECT chunk_text FROM nexus." + table + " WHERE collection = '" + collection
+            "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
             + "' AND chash = decode('" + chashHex + "', 'hex')");
         return rs.next() ? rs.getString(1) : null;
     }
@@ -429,8 +429,8 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             su.createStatement().execute("INSERT INTO nexus.catalog_documents "
                 + "(tenant_id, tumbler, title, physical_collection) "
                 + "VALUES ('" + TENANT + "', 'gate2-del-doc', 'gate2 del doc', '" + collHome + "')");
-            su.createStatement().execute("INSERT INTO nexus.chunks_1024 "
-                + "(tenant_id, collection, chash, chunk_text, embedding) "
+            su.createStatement().execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
+                + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
                 + "VALUES ('" + TENANT + "', '" + collDel + "', '" + chash + "', 'text', "
                 + vec(1024) + "::vector)");
             su.createStatement().execute("INSERT INTO nexus.catalog_document_chunks "
@@ -492,7 +492,7 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         vectorRepo.delete(TENANT, coll, List.of(shared));
 
         try (Connection su = pg.createConnection("")) {
-            assertThat(chunkText(su, "chunks_1024", coll, shared))
+            assertThat(chunkText(su, coll, shared))
                 .as("F10c: a chunk another LIVE document's manifest still references must "
                     + "physically survive delete")
                 .isEqualTo(sharedText);
@@ -566,7 +566,7 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         vectorRepo.delete(TENANT, coll, List.of(shared));
 
         try (Connection su = pg.createConnection("")) {
-            assertThat(chunkText(su, "chunks_1024", coll, shared))
+            assertThat(chunkText(su, coll, shared))
                 .as("nexus-mmkqe Tier 1: a chunk a TOMBSTONED document's manifest row still "
                     + "names must physically survive delete, unconditionally — the "
                     + "soft-tombstone contract deliberately leaves that reference in place, "
@@ -634,10 +634,10 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         // ordinary orphan shape.
 
         try (Connection su = pg.createConnection("")) {
-            assertThat(chunkText(su, "chunks_1024", coll, protectedChash))
+            assertThat(chunkText(su, coll, protectedChash))
                 .as("precondition: the protected chunk physically exists before GC runs")
                 .isEqualTo(protectedContent);
-            assertThat(chunkText(su, "chunks_1024", coll, orphanChash))
+            assertThat(chunkText(su, coll, orphanChash))
                 .as("precondition: the orphan chunk physically exists before GC runs")
                 .isEqualTo(orphanContent);
         }
@@ -653,15 +653,15 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             // In-run control: the manifest-referenced chunk MUST still be in
             // the ORIGIN collection — proves the survival check below can
             // observe a genuine PASS, not merely be wired to always succeed.
-            assertThat(chunkText(su, "chunks_1024", coll, protectedChash))
+            assertThat(chunkText(su, coll, protectedChash))
                 .as("control: a manifest-referenced chunk must survive quarantineOrphans in "
                     + "the SAME call that quarantines a genuine orphan — proves the survival "
                     + "check can discriminate")
                 .isEqualTo(protectedContent);
-            assertThat(chunkText(su, "chunks_1024", coll, orphanChash))
+            assertThat(chunkText(su, coll, orphanChash))
                 .as("the genuine orphan must actually be moved out of the origin collection")
                 .isNull();
-            assertThat(chunkText(su, "chunks_1024", quarantineColl, orphanChash))
+            assertThat(chunkText(su, quarantineColl, orphanChash))
                 .as("the genuine orphan must land in the quarantine collection")
                 .isEqualTo(orphanContent);
             assertThat(globalDanglingCount(su))
@@ -714,8 +714,8 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
                 + "VALUES ('" + TENANT + "', '" + quarantineColl + "')");
             for (var pair : List.of(Map.entry(refChash, refContent), Map.entry(unrefChash, unrefContent))) {
-                su.createStatement().execute("INSERT INTO nexus.chunks_1024 "
-                    + "(tenant_id, collection, chash, chunk_text, embedding, metadata) VALUES ('"
+                su.createStatement().execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
+                    + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ", metadata) VALUES ('"
                     + TENANT + "', '" + quarantineColl + "', decode('" + pair.getKey() + "', 'hex'), '"
                     + pair.getValue() + "', " + vec(1024) + "::vector, jsonb_build_object("
                     + "'origin_collection', '" + coll + "', 'quarantined_at', '" + pastCutoff + "'))");
@@ -730,10 +730,10 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
 
         int danglingBefore;
         try (Connection su = pg.createConnection("")) {
-            assertThat(chunkText(su, "chunks_1024", quarantineColl, refChash))
+            assertThat(chunkText(su, quarantineColl, refChash))
                 .as("precondition: the referenced chunk sits in quarantine, past its cutoff")
                 .isEqualTo(refContent);
-            assertThat(chunkText(su, "chunks_1024", quarantineColl, unrefChash))
+            assertThat(chunkText(su, quarantineColl, unrefChash))
                 .as("precondition: the unreferenced chunk sits in quarantine, past its cutoff")
                 .isEqualTo(unrefContent);
             // The fixture's own manifest row (collection = coll, the ORIGIN
@@ -761,11 +761,11 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             // In-run control: the genuinely unreferenced chash must
             // actually expire — proves the "expired" outcome is
             // observable, not just a permanent "refused" report.
-            assertThat(chunkText(su, "chunks_1024", quarantineColl, unrefChash))
+            assertThat(chunkText(su, quarantineColl, unrefChash))
                 .as("control: a genuinely unreferenced past-cutoff chunk must actually expire "
                     + "in the SAME call — proves the outcome can discriminate")
                 .isNull();
-            assertThat(chunkText(su, "chunks_1024", quarantineColl, refChash))
+            assertThat(chunkText(su, quarantineColl, refChash))
                 .as("nexus-wnpet: a past-cutoff chunk a manifest row still references must "
                     + "NOT be hard-deleted, even with force=true")
                 .isEqualTo(refContent);
@@ -907,17 +907,18 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             su.setAutoCommit(true);
             su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
                 + "VALUES ('" + TENANT + "', '" + coll + "')");
-            // Correlation pin: one unrelated LIVE chunk per dim, in the SAME
-            // collection, so the anti-join cannot pass by "the chunk tables
-            // happen to be empty".
-            su.createStatement().execute("INSERT INTO nexus.chunks_384 "
-                + "(tenant_id, collection, chash, chunk_text, embedding) VALUES "
+            // Correlation pin: one unrelated LIVE chunk per dim (three distinct rows,
+            // one per embedding_<dim> column, RDR-191 unified table), in the SAME
+            // collection, so the anti-join cannot pass by "nexus.chunks happens to
+            // be empty".
+            su.createStatement().execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
+                + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") VALUES "
                 + "('" + TENANT + "', '" + coll + "', '" + pin384 + "', 'pin', " + vec(384) + "::vector)");
-            su.createStatement().execute("INSERT INTO nexus.chunks_768 "
-                + "(tenant_id, collection, chash, chunk_text, embedding) VALUES "
+            su.createStatement().execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
+                + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(768) + ") VALUES "
                 + "('" + TENANT + "', '" + coll + "', '" + pin768 + "', 'pin', " + vec(768) + "::vector)");
-            su.createStatement().execute("INSERT INTO nexus.chunks_1024 "
-                + "(tenant_id, collection, chash, chunk_text, embedding) VALUES "
+            su.createStatement().execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
+                + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") VALUES "
                 + "('" + TENANT + "', '" + coll + "', '" + pin1024 + "', 'pin', " + vec(1024) + "::vector)");
             su.createStatement().execute("INSERT INTO nexus.catalog_documents "
                 + "(tenant_id, tumbler, title, physical_collection) VALUES "

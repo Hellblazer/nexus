@@ -3,6 +3,7 @@ package dev.nexus.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.TenantConstants;
+import dev.nexus.service.vectors.DimTables;
 import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -77,11 +78,17 @@ class TaxonomyCentroidHandlerTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            for (int dim : new int[] {384, 768, 1024}) {
-                su.createStatement().execute(
-                    "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.taxonomy_centroids_" + dim
-                    + " TO " + SVC_ROLE);
-            }
+            // Step G (RDR-191 repoint batch cluster A): this is a HANDLER
+            // test of CURRENT production behavior, not a historical replay
+            // -- startAll() migrates to real head (now including Step B's
+            // taxonomy-007-1 registration), so the per-dim
+            // taxonomy_centroids_384/768/1024 tables no longer exist; only
+            // the unified nexus.taxonomy_centroids does, with typed
+            // embedding_<dim> columns (DimTables is the single naming
+            // authority for the raw-SQL channel per its own javadoc).
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CENTROIDS_TABLE_NAME
+                + " TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT ON nexus.service_tokens, nexus.session_tokens TO " + SVC_ROLE);
             su.createStatement().execute(

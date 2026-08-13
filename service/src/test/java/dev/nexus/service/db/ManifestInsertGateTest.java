@@ -137,7 +137,8 @@ class ManifestInsertGateTest {
      *       T2 nexus/critique-t76bp-rekey-gate-2026-08-08 [21807]): the
      *       resolution now runs BEFORE step 3 (not immediately before step
      *       5), joining the alias map's {@code old_bytes} values against
-     *       {@code chunks_384/768/1024} — gating steps 3-4's content
+     *       {@code nexus.chunks} (RDR-191 Phase 4 unified; formerly {@code
+     *       chunks_384/768/1024}) — gating steps 3-4's content
      *       mutations too, not just step 5's manifest UPDATE. See {@code
      *       RekeyOps.rekey}'s own step-(2b) comment for the full
      *       coextensiveness argument and the named orphan-synthesize

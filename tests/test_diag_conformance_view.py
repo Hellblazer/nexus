@@ -35,9 +35,10 @@ _REPO = Path(__file__).resolve().parents[1]
 def test_the_authoritative_set_is_column_aware_and_complete():
     """nexus-z5j0t: the RDR-185 .13 audit gaps are IN the set, with their
     real column names (the chunk_id-naming blind spot), and the poison
-    subset is exactly the four survivors (the gate must not grow;
+    subset is exactly the two survivors post-RDR-191 unify (the gate must
+    not grow; chunks_384/768/1024 collapsed into ONE nexus.chunks relation,
     nexus.chash_index retired by RDR-187 / nexus-piwya.5 ahead of the
-    table DROP)."""
+    table DROP, independently of the unify)."""
     by_table = {t.table: t for t in CHASH_BEARING_TABLES}
     assert by_table["nexus.topic_assignments"].column == "doc_id"
     assert by_table["nexus.frecency"].column == "chunk_id"
@@ -46,13 +47,15 @@ def test_the_authoritative_set_is_column_aware_and_complete():
     assert not by_table["nexus.frecency"].poison
     assert not by_table["nexus.relevance_log"].poison
     assert tuple(t.table for t in POISON_CHASH_TABLES) == (
-        "nexus.chunks_384",
-        "nexus.chunks_768",
-        "nexus.chunks_1024",
+        "nexus.chunks",
         "nexus.catalog_document_chunks",
     )
     # RDR-187 pin: the retired router must not reappear in the registry.
     assert "nexus.chash_index" not in {t.table for t in CHASH_BEARING_TABLES}
+    # RDR-191 pin: the per-dim shards must not reappear either.
+    assert "nexus.chunks_384" not in {t.table for t in CHASH_BEARING_TABLES}
+    assert "nexus.chunks_768" not in {t.table for t in CHASH_BEARING_TABLES}
+    assert "nexus.chunks_1024" not in {t.table for t in CHASH_BEARING_TABLES}
     assert all(t.column == "chash" for t in POISON_CHASH_TABLES)
     assert set(CHASH_BEARING_TABLES) == set(POISON_CHASH_TABLES) | set(DEBT_CHASH_TABLES)
 
@@ -64,11 +67,13 @@ def test_view_ddl_covers_exactly_the_chash_tables():
         assert f"FROM {t.table} WHERE octet_length({t.column}) <> 32" in ddl
     # Debt legs are SEMANTIC anti-joins (RDR-180 .6 amendment 1): hex-shaped
     # references that miss every chunk-table join; titles/non-hex identities
-    # are excluded by the hex guard (not chash debt).
+    # are excluded by the hex guard (not chash debt). RDR-191: the anti-join
+    # used to be a 3-way AND (one per dim shard) and is now ONE NOT EXISTS
+    # against the unified nexus.chunks relation.
     for t in DEBT_CHASH_TABLES:
         assert f"'{t.table}' AS table_name" in ddl
         assert f"t.{t.column} ~ '^[0-9a-f]+$'" in ddl
-    assert ddl.count("NOT EXISTS") == 3 * len(DEBT_CHASH_TABLES)
+    assert ddl.count("NOT EXISTS") == len(DEBT_CHASH_TABLES)
     # One UNION arm per table, no extras.
     assert ddl.count("UNION ALL") == len(CHASH_BEARING_TABLES) - 1
 

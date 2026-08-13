@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.vectors.DimTables;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -148,13 +149,14 @@ class CollectionVectorStatsTest {
             for (String tbl : List.of(
                     "catalog_collections",
                     "catalog_documents",
-                    "catalog_document_chunks",
-                    "chunks_384",
-                    "chunks_768",
-                    "chunks_1024")) {
+                    "catalog_document_chunks")) {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
             }
+            // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
+            // a single GRANT now covers what three did.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
@@ -211,9 +213,9 @@ class CollectionVectorStatsTest {
         // CONTROL: raw tables hold exactly what we inserted
         try (Connection su = pg.createConnection("")) {
             assertThat(rawChunkCount(su, 384, TENANT_A, COLL_A_384))
-                .as("CONTROL: 3 chunks_384 rows must exist").isEqualTo(3);
+                .as("CONTROL: 3 nexus.chunks rows (dim=384) must exist").isEqualTo(3);
             assertThat(rawChunkCount(su, 1024, TENANT_A, COLL_A_1024))
-                .as("CONTROL: 2 chunks_1024 rows must exist").isEqualTo(2);
+                .as("CONTROL: 2 nexus.chunks rows (dim=1024) must exist").isEqualTo(2);
         }
 
         try (Connection su = pg.createConnection("")) {
@@ -528,12 +530,17 @@ class CollectionVectorStatsTest {
         }
     }
 
-    /** Raw count(*) over chunks_<dim> — the SQL GET /v1/vectors/count uses today. */
+    /**
+     * Raw count(*) over the unified nexus.chunks table — the SQL GET /v1/vectors/count
+     * uses today. RDR-191 Phase 4: table collapsed from chunks_<dim>; the
+     * embedding_<dim> IS NOT NULL guard scopes the count to this dim (D1 hazard).
+     */
     private static long rawChunkCount(Connection conn, int dim, String tenantId,
                                       String collection) throws Exception {
         ResultSet rs = conn.createStatement().executeQuery(
-            "SELECT count(*) FROM nexus.chunks_" + dim +
-            " WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'");
+            "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME +
+            " WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'" +
+            " AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL");
         rs.next();
         return rs.getLong(1);
     }
@@ -580,16 +587,17 @@ class CollectionVectorStatsTest {
     }
 
     /**
-     * Insert a chunks_<dim> row with an EXPLICIT created_at (deterministic fixtures —
-     * last_write assertions are exact, never now()-relative). Collection must be
-     * pre-registered (fk-002). Superuser insert bypasses FORCE RLS.
+     * Insert a nexus.chunks row (RDR-191 Phase 4: unified; formerly chunks_<dim>) with
+     * an EXPLICIT created_at (deterministic fixtures — last_write assertions are exact,
+     * never now()-relative). Collection must be pre-registered (fk-002). Superuser
+     * insert bypasses FORCE RLS.
      */
     private static void insertChunk(Connection su, int dim, String tenantId, String collection,
                                     String chash, String chunkText, String createdAt)
             throws Exception {
         su.createStatement().execute(
-            "INSERT INTO nexus.chunks_" + dim +
-            " (tenant_id, collection, chash, chunk_text, embedding, created_at) " +
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
+            " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ", created_at) " +
             "VALUES ('" + tenantId + "', '" + collection + "', '" + chash + "', " +
             "'" + chunkText.replace("'", "''") + "', " + vectorLiteral(dim) + "::vector, " +
             "'" + createdAt + "'::timestamptz) " +

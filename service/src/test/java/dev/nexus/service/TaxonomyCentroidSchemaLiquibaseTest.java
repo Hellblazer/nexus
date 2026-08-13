@@ -19,22 +19,28 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * RDR-156 bead nexus-t1hnc.1 — pgvector taxonomy-centroid Liquibase schema test.
  *
- * <p>Verifies that taxonomy-002-centroids.xml applies cleanly and produces the
- * three per-dim centroid tables (mirroring the chunks_384/768/1024 convention)
- * with the exact column set, primary key, cosine HNSW index, and RLS policy.
+ * <p>RDR-191 Phase 4 (bead nexus-jv3ue, taxonomy-007-unify-centroids.xml): the
+ * three per-dim centroid tables this test originally verified
+ * ({@code nexus.taxonomy_centroids_384/768/1024}) are unified into ONE
+ * {@code nexus.taxonomy_centroids} table with three nullable typed
+ * {@code embedding_<dim>} columns, mirroring {@code nexus.chunks}'s shape. This
+ * test now verifies the UNIFIED table: one PK, one RLS policy, three per-dim
+ * HNSW indexes on the three embedding columns.
  *
- * <p>Exact assertions, not existence-only: the HNSW index must use access method
+ * <p>Exact assertions, not existence-only: each HNSW index must use access method
  * {@code hnsw}, opclass {@code vector_cosine_ops}, and carry the
  * {@code m=16, ef_construction=64} reloptions — the centroid-ANN read path
  * (assign_single / compute_assignments parity) depends on cosine distance.
  */
 class TaxonomyCentroidSchemaLiquibaseTest {
 
-    /** dim -> embedding vector dimension; mirrors chunks_&lt;dim&gt;. */
+    private static final String TABLE = "taxonomy_centroids";
+
+    /** dim -> embedding vector dimension; selects embedding_&lt;dim&gt;. */
     private static final List<Integer> DIMS = List.of(384, 768, 1024);
 
     @Test
-    void centroidChangeset_appliesAndCreatesPerDimTables() throws Exception {
+    void centroidChangeset_appliesAndCreatesUnifiedTable() throws Exception {
         try (PostgreSQLContainer<?> pg = PgContainerHelper.start()) {
 
             try (Connection su = pg.createConnection("")) {
@@ -54,30 +60,37 @@ class TaxonomyCentroidSchemaLiquibaseTest {
             }
 
             try (Connection c = pg.createConnection("")) {
+                // Table exists in nexus schema
+                ResultSet rs = c.createStatement().executeQuery(
+                    "SELECT 1 FROM information_schema.tables " +
+                    "WHERE table_schema='nexus' AND table_name='" + TABLE + "'");
+                assertThat(rs.next()).as("table nexus." + TABLE + " must exist").isTrue();
+
+                // Exact column set: three nullable embedding_<dim> columns, no chash
+                // (taxonomy-007's own DIVERGENCE 1 note: centroids have no content-hash
+                // concept at all).
+                List<String> cols = columnNames(c, "nexus", TABLE);
+                assertThat(cols).as("columns of nexus." + TABLE).containsExactlyInAnyOrder(
+                    "tenant_id", "collection", "topic_id",
+                    "embedding_384", "embedding_768", "embedding_1024",
+                    "label", "doc_count", "created_at");
+
+                // Primary key is (tenant_id, collection, topic_id) in order
+                assertThat(primaryKeyColumns(c, "nexus", TABLE))
+                    .as("PK of nexus." + TABLE)
+                    .containsExactly("tenant_id", "collection", "topic_id");
+
+                // exactly-one-embedding CHECK constraint present
+                assertThat(constraintExists(c, "taxonomy_centroids_exactly_one_embedding"))
+                    .as("taxonomy_centroids_exactly_one_embedding CHECK must exist").isTrue();
+
                 for (int dim : DIMS) {
-                    String table = "taxonomy_centroids_" + dim;
-                    String index = "idx_taxonomy_centroids_" + dim + "_embedding";
+                    String column = "embedding_" + dim;
+                    String index = "idx_taxonomy_centroids_embedding_" + dim;
 
-                    // Table exists in nexus schema
-                    ResultSet rs = c.createStatement().executeQuery(
-                        "SELECT 1 FROM information_schema.tables " +
-                        "WHERE table_schema='nexus' AND table_name='" + table + "'");
-                    assertThat(rs.next()).as("table nexus." + table + " must exist").isTrue();
-
-                    // Exact column set
-                    List<String> cols = columnNames(c, "nexus", table);
-                    assertThat(cols).as("columns of nexus." + table).containsExactlyInAnyOrder(
-                        "tenant_id", "collection", "topic_id", "embedding",
-                        "label", "doc_count", "created_at");
-
-                    // embedding column is vector(dim)
-                    assertThat(vectorDimension(c, "nexus", table, "embedding"))
-                        .as("embedding dimension of nexus." + table).isEqualTo(dim);
-
-                    // Primary key is (tenant_id, collection, topic_id) in order
-                    assertThat(primaryKeyColumns(c, "nexus", table))
-                        .as("PK of nexus." + table)
-                        .containsExactly("tenant_id", "collection", "topic_id");
+                    // embedding_<dim> column is vector(dim)
+                    assertThat(vectorDimension(c, "nexus", TABLE, column))
+                        .as("dimension of nexus." + TABLE + "." + column).isEqualTo(dim);
 
                     // HNSW cosine index: access method, opclass, reloptions
                     assertThat(indexAccessMethod(c, index))
@@ -87,26 +100,26 @@ class TaxonomyCentroidSchemaLiquibaseTest {
                     List<String> reloptions = indexReloptions(c, index);
                     assertThat(reloptions).as("reloptions of " + index)
                         .contains("m=16", "ef_construction=64");
-
-                    // RLS enabled + FORCED
-                    ResultSet rlsRs = c.createStatement().executeQuery(
-                        "SELECT relrowsecurity, relforcerowsecurity FROM pg_class " +
-                        "WHERE relname='" + table + "' AND relnamespace=" +
-                        "(SELECT oid FROM pg_namespace WHERE nspname='nexus')");
-                    assertThat(rlsRs.next()).as("pg_class entry for " + table).isTrue();
-                    assertThat(rlsRs.getBoolean("relrowsecurity"))
-                        .as("RLS enabled on nexus." + table).isTrue();
-                    assertThat(rlsRs.getBoolean("relforcerowsecurity"))
-                        .as("RLS forced on nexus." + table).isTrue();
-
-                    // tenant_isolation policy present
-                    ResultSet polRs = c.createStatement().executeQuery(
-                        "SELECT 1 FROM pg_policies " +
-                        "WHERE schemaname='nexus' AND tablename='" + table + "' " +
-                        "AND policyname='tenant_isolation'");
-                    assertThat(polRs.next())
-                        .as("tenant_isolation policy on nexus." + table).isTrue();
                 }
+
+                // RLS enabled + FORCED (once, on the unified table)
+                ResultSet rlsRs = c.createStatement().executeQuery(
+                    "SELECT relrowsecurity, relforcerowsecurity FROM pg_class " +
+                    "WHERE relname='" + TABLE + "' AND relnamespace=" +
+                    "(SELECT oid FROM pg_namespace WHERE nspname='nexus')");
+                assertThat(rlsRs.next()).as("pg_class entry for " + TABLE).isTrue();
+                assertThat(rlsRs.getBoolean("relrowsecurity"))
+                    .as("RLS enabled on nexus." + TABLE).isTrue();
+                assertThat(rlsRs.getBoolean("relforcerowsecurity"))
+                    .as("RLS forced on nexus." + TABLE).isTrue();
+
+                // tenant_isolation policy present (once, on the unified table)
+                ResultSet polRs = c.createStatement().executeQuery(
+                    "SELECT 1 FROM pg_policies " +
+                    "WHERE schemaname='nexus' AND tablename='" + TABLE + "' " +
+                    "AND policyname='tenant_isolation'");
+                assertThat(polRs.next())
+                    .as("tenant_isolation policy on nexus." + TABLE).isTrue();
             }
         }
     }
@@ -145,6 +158,12 @@ class TaxonomyCentroidSchemaLiquibaseTest {
         List<String> cols = new ArrayList<>();
         while (rs.next()) cols.add(rs.getString("attname"));
         return cols;
+    }
+
+    private static boolean constraintExists(Connection c, String conname) throws Exception {
+        ResultSet rs = c.createStatement().executeQuery(
+            "SELECT 1 FROM pg_constraint WHERE conname='" + conname + "'");
+        return rs.next();
     }
 
     private static String indexAccessMethod(Connection c, String index) throws Exception {

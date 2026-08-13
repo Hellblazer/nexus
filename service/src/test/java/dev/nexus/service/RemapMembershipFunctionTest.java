@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -85,7 +86,7 @@ class RemapMembershipFunctionTest {
             su.createStatement().execute(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chash_remap TO " + SVC_ROLE);
             su.createStatement().execute(
-                "GRANT SELECT ON nexus.chunks_384, nexus.chunks_768, nexus.chunks_1024 TO " + SVC_ROLE);
+                "GRANT SELECT ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);  // RDR-191 Phase 4: unified
             // RDR-180: remap_membership() now chains through chash_alias to resolve
             // legacy-era facts against a rekeyed store (rdr180-002 comment).
             su.createStatement().execute(
@@ -146,7 +147,7 @@ class RemapMembershipFunctionTest {
         long targetCount;
         try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) AS cnt FROM nexus.chunks_1024 " +
+                "SELECT COUNT(*) AS cnt FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
                 "WHERE tenant_id = '" + TENANT + "' AND collection = '" + tgt + "'");
             rs.next();
             targetCount = rs.getLong("cnt");
@@ -179,7 +180,7 @@ class RemapMembershipFunctionTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
-                "DELETE FROM nexus.chunks_1024 WHERE tenant_id = '" + TENANT + "' " +
+                "DELETE FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id = '" + TENANT + "' " +
                 "AND collection = '" + tgt + "' AND chash = decode('" + chash("t2map3") + "', 'hex')");
         }
 
@@ -225,7 +226,7 @@ class RemapMembershipFunctionTest {
         assertThat(after[1]).isEqualTo(0);
     }
 
-    // ── Test 4: dim-agnostic — claims found in chunks_384 too ────────────────
+    // ── Test 4: dim-agnostic — claims found via embedding_384 too ────────────
 
     @Test
     void dimAgnostic_claimInChunks384_counted() throws Exception {
@@ -236,7 +237,7 @@ class RemapMembershipFunctionTest {
             insertCollection(su, TENANT, tgt);
             insertMapRow(su, TENANT, src, "legacy-id-1", chash("t4map1"), tgt);
             su.createStatement().execute(
-                "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
                 "VALUES ('" + TENANT + "', '" + tgt + "', decode('" + chash("t4map1") + "', 'hex'), 'text', " +
                 "('[1" + ",0".repeat(383) + "]')::vector)");
         }
@@ -355,7 +356,7 @@ class RemapMembershipFunctionTest {
     private void insertChunk1024(Connection su, String tenant, String collection,
                                  String chash) throws Exception {
         su.createStatement().execute(
-            "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
             "VALUES ('" + tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), 'text', " +
             "('[1" + ",0".repeat(1023) + "]')::vector) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");

@@ -90,7 +90,17 @@ $fn$;
 GRANT EXECUTE ON FUNCTION nexus.remap_membership(text, text) TO nexus_svc;
         </sql>
         <rollback>
-            REVOKE EXECUTE ON FUNCTION nexus.remap_membership(text, text) FROM nexus_svc;
+            <!-- RDR-191 repoint batch (nexus-o8dil.18): tolerant form; see
+                 catalog-020-5's rollback comment for the full rationale. -->
+            <sql splitStatements="false">
+DO $$
+BEGIN
+    IF to_regprocedure('nexus.remap_membership(text, text)') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.remap_membership(text, text) FROM nexus_svc;
+    END IF;
+END
+$$;
+            </sql>
         </rollback>
     </changeSet>
 

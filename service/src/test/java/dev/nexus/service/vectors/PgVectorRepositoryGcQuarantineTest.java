@@ -186,7 +186,7 @@ class PgVectorRepositoryGcQuarantineTest {
     private long chunkCount(String collection) throws SQLException {
         try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
             var rs = st.executeQuery(
-                "SELECT count(*) FROM nexus.chunks_1024 WHERE collection = '" + collection + "'");
+                "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection + "' AND " + DimTables.embeddingColumn(1024) + " IS NOT NULL");
             rs.next();
             return rs.getLong(1);
         }
@@ -195,7 +195,7 @@ class PgVectorRepositoryGcQuarantineTest {
     private String chunkText(String collection, String chash) throws SQLException {
         try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
             var rs = st.executeQuery(
-                "SELECT chunk_text FROM nexus.chunks_1024 WHERE collection = '" + collection
+                "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
                 + "' AND chash = decode('" + chash + "', 'hex')");
             return rs.next() ? rs.getString(1) : null;
         }
@@ -204,7 +204,7 @@ class PgVectorRepositoryGcQuarantineTest {
     private String metadataField(String collection, String chash, String key) throws SQLException {
         try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
             var rs = st.executeQuery(
-                "SELECT metadata->>'" + key + "' FROM nexus.chunks_1024 WHERE collection = '" + collection
+                "SELECT metadata->>'" + key + "' FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
                 + "' AND chash = decode('" + chash + "', 'hex')");
             return rs.next() ? rs.getString(1) : null;
         }
@@ -299,7 +299,7 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThatThrownBy(() -> {
             try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
                 st.execute(
-                    "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) "
+                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
                     + "VALUES ('" + TENANT_A + "', '" + originCol + "', NULL, 'x', "
                     + "('[' || repeat('0,', 1023) || '0]')::vector)");
             }
@@ -675,31 +675,51 @@ class PgVectorRepositoryGcQuarantineTest {
             .doesNotContain("v_chashes")
             .doesNotContain("= ANY(v_chashes)");
 
+        // RDR-191 repoint batch (vectors-005-repoint-functions-views.xml,
+        // nexus-o8dil.18) re-created this function dim-agnostic (the row's
+        // populated embedding_<dim> column carries straight through a move
+        // regardless of dim -- see that changeset's header, "DIM DOES NOT
+        // MATTER" bucket) AND added an N7-style cross-dim collision guard
+        // (Critical-1 fix, T2 22454) that legitimately introduces its OWN
+        // array_agg, unrelated to the old registration guard's precomputed
+        // membership array: it builds v_collision_sample, a capped sample of
+        // colliding chashes for the RAISE EXCEPTION message, not a `chash =
+        // ANY(...)` guard feeding a move statement. A blanket "no array_agg
+        // anywhere" ban is therefore no longer the correct pin -- re-derived
+        // below to still assert the OLD guard shape is gone (containsOnlyOnce
+        // + tied to the collision-sample INTO target) without going vacuous.
         assertThat(functionDef)
-            .as("the registration guard is now driven by a cheap pre-flight EXISTS "
-                + "check (used only to decide whether to bother, and to sequence "
-                + "catalog_collections registration before the FK-dependent copy "
-                + "INSERT), not a precomputed array's nullness")
-            .doesNotContain("array_agg");
+            .as("array_agg's ONLY legitimate use in this function is building the "
+                + "N7-style cross-dim collision sample (v_collision_sample) for the "
+                + "Critical-1 guard (T2 22454) -- the OLD registration guard's "
+                + "precomputed membership array is already pinned absent above "
+                + "(v_chashes / = ANY(v_chashes)); this pins that array_agg has not "
+                + "crept back in as a SECOND, unrelated precomputed-array guard")
+            .containsOnlyOnce("array_agg")
+            .contains("INTO v_collision_count, v_collision_sample");
 
-        // "NOT EXISTS" occurrences: FOUR per dim branch (384/768/1024) = 12. The
-        // pre-flight is itself an `IF NOT EXISTS (SELECT 1 FROM chunks_<dim> ...
-        // AND NOT EXISTS (guard))` -- its own outer existence check PLUS one guard
-        // evaluation (2), then the copy-to-quarantine INSERT's own inline guard (1)
-        // and the remove-from-origin DELETE's own inline guard (1) -- each an
-        // INDEPENDENT re-evaluation of the manifest-reference predicate, none of
-        // them handing a precomputed chash array to another. catalog-024's shape
-        // had exactly 3 total (one array-building `SELECT array_agg(...) ... WHERE
-        // NOT EXISTS(...)` guard per dim branch, feeding BOTH move statements via
-        // `chash = ANY(v_chashes)`) -- this count is the load-bearing signal that
-        // the guard collapsed INTO each statement rather than merely surviving
-        // alongside them.
+        // "NOT EXISTS" occurrences: the RDR-191 repoint made this function
+        // dim-agnostic (no more x3 per-dim branching), so the count collapsed
+        // from the old dim-branched shape's 12 down to FIVE, each an
+        // INDEPENDENT re-evaluation of the manifest-reference predicate (or,
+        // for the pre-flight's outer check, of "is there anything to move at
+        // all") -- none of them handing a precomputed chash array to another:
+        // (1) the pre-flight's own outer `IF NOT EXISTS (...)`, (2) the
+        // pre-flight's inner manifest-reference guard, (3) the orphan CTE that
+        // feeds the collision-detection query, (4) the copy-to-quarantine
+        // INSERT's own inline guard, (5) the remove-from-origin DELETE's own
+        // inline guard. This count is still the load-bearing signal that the
+        // guard lives inline in each statement rather than via a standalone
+        // array-building guard SELECT (sa731 semantics preserved across the
+        // dim-collapse).
         int notExistsCount = functionDef.split("NOT EXISTS", -1).length - 1;
         assertThat(notExistsCount)
-            .as("inline/pre-flight NOT EXISTS occurrences must be 4x per dim branch "
-                + "(pre-flight's outer + inner, INSERT, DELETE) x 3 dim branches = "
-                + "12, not 3x total via a standalone array-building guard SELECT")
-            .isEqualTo(12);
+            .as("inline/pre-flight NOT EXISTS occurrences must be FIVE -- pre-flight's "
+                + "outer + inner, the collision-detection orphan CTE, the copy INSERT, "
+                + "and the DELETE -- now that the RDR-191 repoint made this function "
+                + "dim-agnostic (no more x3 per-dim multiplication), not 3x total via a "
+                + "standalone array-building guard SELECT")
+            .isEqualTo(5);
     }
 
     // ── nexus-sa731 ROUND 2: definition pin — bounded-wait timeout mirror ───

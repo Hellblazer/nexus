@@ -6,6 +6,7 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.CombinedWriteService;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.EmbedResult;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.EmbedderRouter;
@@ -133,7 +134,7 @@ class CombinedWriteRepositoryTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var ps = su.prepareStatement(
-                "SELECT 1 FROM nexus.chunks_384 WHERE tenant_id = ? AND collection = ? AND chash = ?");
+                "SELECT 1 FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id = ? AND collection = ? AND chash = ? AND " + DimTables.embeddingColumn(384) + " IS NOT NULL");
             ps.setString(1, tenant);
             ps.setString(2, collection);
             ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
@@ -145,7 +146,7 @@ class CombinedWriteRepositoryTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var ps = su.prepareStatement(
-                "SELECT chunk_text FROM nexus.chunks_384 WHERE tenant_id = ? AND collection = ? AND chash = ?");
+                "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id = ? AND collection = ? AND chash = ? AND " + DimTables.embeddingColumn(384) + " IS NOT NULL");
             ps.setString(1, tenant);
             ps.setString(2, collection);
             ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
@@ -154,12 +155,12 @@ class CombinedWriteRepositoryTest {
         }
     }
 
-    /** Raw stored {@code metadata} JSONB, as text, for a chunks_384 row. */
+    /** Raw stored {@code metadata} JSONB, as text, for a nexus.chunks (dim=384) row. */
     private String chunk384MetadataJson(String tenant, String collection, String hexChash) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var ps = su.prepareStatement(
-                "SELECT metadata::text FROM nexus.chunks_384 WHERE tenant_id = ? AND collection = ? AND chash = ?");
+                "SELECT metadata::text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id = ? AND collection = ? AND chash = ? AND " + DimTables.embeddingColumn(384) + " IS NOT NULL");
             ps.setString(1, tenant);
             ps.setString(2, collection);
             ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
@@ -177,7 +178,7 @@ class CombinedWriteRepositoryTest {
             su.createStatement().execute("SET nexus.tenant = '" + tenant + "'");
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding)"
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ")"
                 + " VALUES (?, ?, ?, ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             ps.setString(1, tenant);
             ps.setString(2, collection);

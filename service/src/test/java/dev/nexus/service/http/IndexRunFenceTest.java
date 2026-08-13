@@ -10,6 +10,7 @@ import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -227,7 +228,7 @@ class IndexRunFenceTest {
     void complete_refuses409_whenMissingGreaterThanZero_leavesIndexingUntouched() throws Exception {
         String docId = "irf-complete-missing-doc-1";
         registerDoc(docId);
-        // Manifest row with NO matching chunks_1024 row -> missing = 1.
+        // Manifest row with NO matching nexus.chunks row -> missing = 1.
         repo.writeManifest(TENANT, docId, COLLECTION, List.of(
             Map.<String, Object>of("position", 0, "chash", chash("irf-missing-chunk"), "chunk_index", 0)));
 
@@ -261,7 +262,7 @@ class IndexRunFenceTest {
         String docId = "irf-complete-missing-logged-doc-1";
         registerDoc(docId);
         String missingChash = chash("irf-missing-logged-chunk");
-        // Manifest row with NO matching chunks_1024 row -> missing = 1.
+        // Manifest row with NO matching nexus.chunks row -> missing = 1.
         repo.writeManifest(TENANT, docId, COLLECTION, List.of(
             Map.<String, Object>of("position", 0, "chash", missingChash, "chunk_index", 0)));
 
@@ -569,7 +570,7 @@ class IndexRunFenceTest {
         String docId = "irf-wmm-refused-doc-1";
         registerDoc(docId);
         String chash = chash("irf-wmm-refused-chash");
-        // NO matching chunks_1024 row inserted -> missing = 1.
+        // NO matching nexus.chunks row inserted -> missing = 1.
 
         Map<String, Object> doc = Map.of(
             "doc_id", docId,
@@ -621,7 +622,7 @@ class IndexRunFenceTest {
         String docId = "irf-wmm-http-refused-doc-1";
         registerDoc(docId);
         String chash = chash("irf-wmm-http-refused-chash");
-        // Deliberately NO matching chunks_1024 row -> missing = 1 -> refused.
+        // Deliberately NO matching nexus.chunks row -> missing = 1 -> refused.
 
         var ex = postCatalog("/v1/catalog/manifest/write_many",
             "{\"collection\":\"" + COLLECTION + "\",\"docs\":[{\"doc_id\":\"" + docId + "\",\"rows\":[{\"position\":0,\"chash\":\""
@@ -789,7 +790,7 @@ class IndexRunFenceTest {
             "physical_collection", COLLECTION));
     }
 
-    /** Writes a single manifest row for docId AND a matching chunks_1024 row (present, not missing). */
+    /** Writes a single manifest row for docId AND a matching nexus.chunks row (present, not missing). */
     private String writeOneRowManifestWithMatchingChunk(String docId, String chashSeed) {
         String chash = chash(chashSeed);
         repo.writeManifest(TENANT, docId, COLLECTION, List.of(
@@ -802,7 +803,7 @@ class IndexRunFenceTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
-                "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
                 "VALUES ('" + TENANT + "', '" + COLLECTION + "', decode('" + chashHex + "', 'hex'), " +
                 "'chunk text', ('[1" + ",0".repeat(1023) + "]')::vector) " +
                 "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");

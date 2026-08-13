@@ -34,8 +34,7 @@ def test_service_mode_uses_single_endpoint_and_maps_counts(
                 "chunks_384": 5, "chunks_768": 0, "chunks_1024": 0,
                 "chash_index": 5,
                 "topic_assignments": 3, "topics": 2, "taxonomy_meta": 1,
-                "taxonomy_centroids_384": 2, "taxonomy_centroids_768": 0,
-                "taxonomy_centroids_1024": 0,
+                "taxonomy_centroids": 2,  # RDR-191 unified key (nexus-o8dil.19/.47)
                 "document_aspects": 4, "document_highlights": 1,
                 "aspect_extraction_queue": 7,
                 "catalog_documents": 6, "catalog_collections": 1,
@@ -65,6 +64,41 @@ def test_service_mode_uses_single_endpoint_and_maps_counts(
         "topics": 2, "assignments": 3, "links": 0, "meta": 1, "centroids": 2,
     }
     assert counts.failures == []
+
+
+def test_service_mode_maps_legacy_per_dim_centroid_keys_as_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-o8dil.19/.47 transitional coverage: the unified "taxonomy_centroids"
+    key is absent (legacy per-dim response shape) -> the client sums the
+    three per-dim keys rather than reading 0."""
+
+    class _FakeClient:
+        def delete_collection(self, name: str) -> dict[str, int]:
+            return {
+                "chunks_384": 0, "chunks_768": 0, "chunks_1024": 0,
+                "chash_index": 0,
+                "topic_assignments": 0, "topics": 0, "taxonomy_meta": 0,
+                "taxonomy_centroids_384": 1, "taxonomy_centroids_768": 4,
+                "taxonomy_centroids_1024": 0,
+                "document_aspects": 0, "document_highlights": 0,
+                "aspect_extraction_queue": 0,
+                "catalog_documents": 0, "catalog_collections": 0,
+            }
+
+    monkeypatch.setattr(
+        "nexus.catalog.factory.make_catalog_reader", lambda: _FakeClient()
+    )
+    from tests.pipeline_fake_engine import make_fake_engine_db
+
+    pipeline_db, _engine = make_fake_engine_db()
+    monkeypatch.setattr(
+        "nexus.db.http_pipeline_client.HttpPipelineDB", lambda: pipeline_db
+    )
+
+    counts = purge_collection_cascade(object(), "knowledge__svc3__minilm-l6-v2-384__v1")
+
+    assert counts.taxonomy["centroids"] == 5  # 1 + 4 + 0
 
 
 def test_service_mode_endpoint_failure_recorded(

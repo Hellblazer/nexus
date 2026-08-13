@@ -819,13 +819,16 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:339",
         "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:387",
         "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:403",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:490",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:493",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:502",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:511",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:516",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:532",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:537",
+        # nexus-o8dil.52 (RDR-191 Phase 4): line numbers below shifted +10
+        # after the chunks_384/768/1024 loop at the old :409-416 was
+        # retargeted to the unified nexus.chunks (net +9 lines added).
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:500",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:503",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:512",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:521",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:526",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:542",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:547",
         "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:82",
         "tests/e2e/migration-rehearsal/rehearse_cold.sh:113",
         "tests/e2e/migration-rehearsal/rehearse_cold.sh:77",
@@ -863,7 +866,10 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_guided.sh:448",
         "tests/e2e/migration-rehearsal/rehearse_guided.sh:451",
         "tests/e2e/migration-rehearsal/rehearse_guided.sh:454",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:760",
+        # nexus-o8dil.52 (RDR-191 Phase 4): shifted +8 after the
+        # chunks_384/768/1024 loop at the old :644-651 was retargeted to
+        # the unified nexus.chunks.
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:768",
         "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh:101",
         "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh:175",
         "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:139",

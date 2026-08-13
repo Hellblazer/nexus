@@ -109,7 +109,7 @@ class GrantsSvcForeignOwnedRelationTest {
 
             // 4. Post-conditions: nexus_svc got DML on an admin-owned table,
             //    but NOT on the foreign-owned diag view — it does not need it.
-            assertThat(hasTablePriv(su, SVC_ROLE, "nexus.chunks_384", "INSERT"))
+            assertThat(hasTablePriv(su, SVC_ROLE, "nexus.chunks", "INSERT"))
                 .as("admin-owned table must still be granted")
                 .isTrue();
             assertThat(hasTablePriv(su, SVC_ROLE, "nexus.diag_chash_conformance", "SELECT"))
