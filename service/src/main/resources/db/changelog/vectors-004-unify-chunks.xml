@@ -334,6 +334,20 @@ CREATE INDEX idx_chunks_tenant_chash
     ON nexus.chunks (tenant_id, chash);
         </sql>
 
+        <!-- Step 5b: ANALYZE the freshly bulk-copied table in the SAME changelog
+             pass (nexus-97gii). The rdr180-001 BUG-0148 invariant: a migration
+             that rewrites a table ANALYZEs it in the same pass — a bulk-copied
+             table with absent stats flips the planner off HNSW while every
+             health probe stays green (the original incident's remediation was a
+             manual ANALYZE). ANALYZE is transaction-safe, RLS-exempt
+             (maintenance runs as the migration role), and cheap relative to the
+             copy it follows. Pinned by SchemaMigratorIntegrationTest's
+             rdr180Rewrite_leavesPlannerStatsFresh (re-derived for nexus.chunks
+             in the Phase 4 batch, F2 lane). -->
+        <sql splitStatements="true" stripComments="false">
+ANALYZE nexus.chunks;
+        </sql>
+
         <!-- Step 6: drop the three sources in the SAME transaction (amendment
              viii). CASCADE fallout is documented in full in the file header. -->
         <sql splitStatements="true" stripComments="false">
