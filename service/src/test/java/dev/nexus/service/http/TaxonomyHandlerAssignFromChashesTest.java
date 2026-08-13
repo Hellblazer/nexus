@@ -82,9 +82,14 @@ class TaxonomyHandlerAssignFromChashesTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
+            // RDR-191 unify (vectors-004/taxonomy-007): chunks_<dim> and
+            // taxonomy_centroids_<dim> collapse into ONE unified table each --
+            // one grant apiece, not a dim loop. assign_from_chashes_<dim> stays
+            // THREE separate typed functions (DECISION 2, T2 [22445]), so its
+            // EXECUTE grant keeps the loop.
+            su.createStatement().execute("GRANT SELECT ON nexus.chunks TO " + SVC_ROLE);
+            su.createStatement().execute("GRANT SELECT ON nexus.taxonomy_centroids TO " + SVC_ROLE);
             for (int dim : new int[] {384, 768, 1024}) {
-                su.createStatement().execute("GRANT SELECT ON nexus.chunks_" + dim + " TO " + SVC_ROLE);
-                su.createStatement().execute("GRANT SELECT ON nexus.taxonomy_centroids_" + dim + " TO " + SVC_ROLE);
                 su.createStatement().execute(
                     "GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_" + dim
                     + "(text, text[], boolean) TO " + SVC_ROLE);
@@ -225,8 +230,8 @@ class TaxonomyHandlerAssignFromChashesTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks_" + DIM
-                    + " (tenant_id, collection, chash, chunk_text, embedding)"
+                    "INSERT INTO nexus.chunks"
+                    + " (tenant_id, collection, chash, chunk_text, embedding_" + DIM + ")"
                     + " VALUES (?, ?, decode(?, 'hex'), ?, ?::vector)")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, COL);
@@ -238,8 +243,10 @@ class TaxonomyHandlerAssignFromChashesTest {
         }
     }
 
-    /** chunks_&lt;dim&gt; carries an FK to catalog_collections(tenant_id, name) — pre-register
-     * the fixture collection before seeding chunk rows (idempotent). */
+    /** Pre-register the fixture collection before seeding chunk rows (idempotent).
+     * The unified nexus.chunks ships with ZERO collection-FK enforcement until
+     * RDR-191 Phase 5 (vectors-004-unify-chunks.xml header) — belt-and-suspenders,
+     * not FK-required, kept for parity with the SVC_ROLE catalog_collections grant. */
     private void registerCollection(String collection) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -263,8 +270,8 @@ class TaxonomyHandlerAssignFromChashesTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.taxonomy_centroids_" + DIM
-                    + " (tenant_id, collection, topic_id, embedding) VALUES (?, ?, ?, ?::vector)")) {
+                    "INSERT INTO nexus.taxonomy_centroids"
+                    + " (tenant_id, collection, topic_id, embedding_" + DIM + ") VALUES (?, ?, ?, ?::vector)")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, collection);
                 ps.setLong(3, topicId);
