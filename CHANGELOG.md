@@ -6,6 +6,85 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.7.0] - 2026-08-14
+
+Paired release with **engine-service-v0.1.75** (cut, shakeout-gated,
+acquire-gated on the published bytes, cloud-deployed and cloud-gated
+2026-08-14; `REQUIRED_ENGINE_VERSION` bumps to it here, so fresh local
+installs and package upgrades converge to the same engine identity). That
+engine carries the RDR-191 Phase 4 storage unification; several of this
+release's fixes are the client halves of contracts that engine already
+enforces, which is why the two ship together.
+
+### Fixed
+- **Restores catalog registration for notes and indexed documents against
+  the current engine.** The deployed engine (v0.1.73+) requires every
+  manifest write to name its collection explicitly; the released 7.6.1
+  client structurally could not send it, so every `store put` / MCP
+  knowledge write and most indexing paths stored their content but LOST
+  the catalog registration — the document existed in vector search yet
+  was invisible to `query()` and catalog-scoped search, and the CLI
+  reported an error after the content had already landed (910 live
+  documents accumulated in this state on the managed deployment). The
+  client now sends the collection on every manifest write, append, and
+  batched write page, and refuses locally (with a named error) rather
+  than sending a blank. Recovery of the already-damaged documents ships
+  separately once the repair tooling's own defects are fixed (its current
+  form could destroy healthy manifests; see internal notes).
+- **Same-call document delete works again against the current engine**
+  (the delete-protection contract's client half, previously published
+  behavior had degraded until the next cut).
+- **Upgrading an existing local install no longer strands the engine.**
+  Three distinct defects on the upgrade journey, each found by the
+  release's own upgrade rehearsal: (1) the pre-convergence store
+  verification only understood the NEW storage schema, so on the
+  still-old store it reported "unverifiable" and correctly-but-forever
+  deferred the engine convergence; (2) once convergence did fire, the new
+  engine failed its first boot because a grant the new schema requires
+  (`pg_monitor` ADMIN OPTION, introduced after 7.6.1) was never
+  backfilled on the upgrade path — the service start now runs the
+  provisioning fast path against the bundled PostgreSQL before every
+  spawn, so any such grant self-heals (managed/bring-your-own PostgreSQL
+  is never touched); (3) `nx daemon service stop` could falsely report
+  that pids "survived SIGKILL" — the liveness check counted zombie
+  processes as alive — flipping a fully successful engine cycle into a
+  spurious NEEDS-HUMAN failure, and the same zombie-blindness could let
+  a dead supervisor's stale lease short-circuit a fresh start. Process
+  liveness is now zombie-aware throughout the shared daemon lifecycle
+  primitive.
+- **`nx doctor`'s store verification now measures through the
+  mid-migration window** (new schema present, diagnostic view not yet
+  re-provisioned) instead of degrading to a generic "could not probe"
+  warning, and the upgrade ladder's own healing probe understands both
+  storage eras.
+
+### Changed
+- **T3 vector storage is unified** (engine-side, RDR-191 Phase 4): the
+  per-dimension chunk and centroid tables are collapsed into single
+  tables with typed embedding columns. On the managed deployment the
+  migration ran 2026-08-14 with an exact row-count invariant and
+  reclaimed ~627 MB; local installs perform the same migration on their
+  first boot of the new engine (the always-copy window is
+  disk-pre-flighted). Search behavior is unchanged; freshly rebuilt
+  full-text/trigram indexes measurably improved several keyword-query
+  recall scores on the deploy gate.
+
+### Internal
+- The scenario-journey test flake pair is root-caused and fixed (a
+  process-wide T3 client memo could outlive a test's factory patch and
+  serve a mock to later tests in the same worker); the singleton now
+  snapshot/restores per test with graded leak reporting. Daemon tests no
+  longer patch the stdlib `subprocess.Popen` (a narrow spawn seam
+  replaces 16 patch sites), ending a cross-test collision with the new
+  `ps`-based liveness probe.
+- Seven shipped changesets' rollback blocks are now tolerant of objects
+  legitimately dropped earlier in the reverse rollback chain; the full
+  263-changeset rollback-to-zero round trip is exercised green.
+- New follow-up gates queued from this release's incident review: a
+  published-client write leg for the engine deploy gate and a
+  both-halves wire-contract tripwire (the two mechanisms that would have
+  caught the 7.6.1 registration outage before deploy).
+
 ## [7.6.1] - 2026-08-11
 
 ### Fixed
