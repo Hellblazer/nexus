@@ -889,6 +889,36 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   fails the ALTER if any NULL remains. The census sizes the remediation; PG
   enforces it.
 
+  **AMENDMENT (xii), 2026-08-14 — Phase 7 FOLDS INTO the Phase 5 engine
+  cut, by the same disposition-(a) mechanism as amendment (xi). Ruled by
+  Hal, direct: "fold Phase 7 in."** The census-then-manual-remediate-then-
+  promote sequence above is replaced by a Liquibase changeset in the SAME
+  cut as `catalog-029`, ordered AFTER it (so the manifest FK is live and PG
+  checks every backfill UPDATE at write time), doing three logged steps:
+  (1) BACKFILL each NULL-collection row from its parent document's
+  `physical_collection` ONLY where the resulting
+  `(tenant_id, collection, chash)` exists in `nexus.chunks` — a backfill
+  that would violate the just-added FK is not a fix, it is relabeled
+  debris; (2) DELETE the remainder: F12e's three backfill-proof classes
+  (ghost/sourceless parents, rows under tombstoned parents, rows with no
+  parent row at all) plus backfill-unsatisfiable rows from (1) — all are
+  manifest rows referencing nothing resolvable, the same debris class
+  amendment (xi) already deletes, with counts logged per class;
+  (3) `ALTER COLUMN collection SET NOT NULL`. PostgreSQL is the hard gate
+  exactly as this phase always said: any NULL surviving (1)+(2) fails the
+  ALTER and the boot, loudly. The C2 census (F12d) is thereby DEMOTED from
+  sequencing instrument to record — the changeset's own logged counts at
+  boot are the production number F12d wanted, produced at the moment it
+  matters on every deployment, and the pre-deploy census in the Phase 5
+  runbook remains the operator-side measurement. GATE-2 (zero live
+  producers, bead nexus-o8dil.7, P0) closed before this fold, so F12b/F12c
+  producer fixes are already in. The FK stays `MATCH SIMPLE` (Decision
+  item 6 unchanged); after promotion the NULL arm is simply empty. Bead
+  mapping: nexus-o8dil.37 is the implementation (rides the Phase 5 tag);
+  .35/.36 close as demoted/folded; .38's review folds into .32's single
+  Phase 5+7 batch review. Decision of record: T2
+  `nexus/rdr-191-phase7-fold-decision`.
+
 ## Research Findings
 
 - **F18 (DECIDED, 2026-08-11): the migration shape is ALWAYS-COPY, not
