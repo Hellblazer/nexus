@@ -233,7 +233,20 @@ _step "6/12 nx doctor stanza-drift report (captured for cross-check)"
 # was list_repos_dual discarding the REGISTRY leg when the service-mode
 # catalog proxy raises, fixed in src/nexus/repos.py. The step-1 seeding is
 # sufficient; nothing extra is needed here.)
-DOCTOR_OUT="$(HOME="$SANDBOX" nx doctor 2>&1 || true)"
+# gap-8 (T2 [22511]): a bare `|| true` here swallowed BOTH "doctor
+# reported actionable warnings" (rc!=0, benign) AND "doctor crashed with a
+# traceback" (rc!=0, NOT benign) into the same "continue" outcome. The
+# negative-substring tests downstream (stanza-drift absence here; the
+# demoted-verb absence right after) would then pass vacuously on a crash
+# that printed no output at all. Capture the rc explicitly and assert
+# doctor actually RAN (non-empty output, no traceback) before trusting any
+# absence-based check against its content.
+DOCTOR_RC=0
+DOCTOR_OUT="$(HOME="$SANDBOX" nx doctor 2>&1)" || DOCTOR_RC=$?
+[[ -n "$DOCTOR_OUT" ]] || _die "nx doctor (step 6) produced no output at all (rc=$DOCTOR_RC) — cannot assert on stanza-drift content"
+[[ "$DOCTOR_OUT" != *'Traceback (most recent call last)'* ]] \
+    || _die "nx doctor (step 6) crashed with a traceback (rc=$DOCTOR_RC). Output:\n$DOCTOR_OUT"
+_pass "nx doctor ran (rc=$DOCTOR_RC, non-empty output, no traceback)"
 if [[ "${DOCTOR_OUT,,}" == *'stanza drift'* ]]; then
     DRIFT_REPORTED=1
     [[ "$DOCTOR_OUT" == *'nx hooks update'* ]] \
@@ -294,11 +307,19 @@ _pass "nx hooks update is idempotent"
 
 # ── 8. nx doctor: drift resolved ─────────────────────────────────────────────
 _step "8/12 nx doctor should NOT report drift after update"
-DOCTOR_OUT="$(HOME="$SANDBOX" nx doctor 2>&1 || true)"
+# gap-8 (T2 [22511]): same positive-assertion-first fix as step 6 above —
+# a doctor crash here previously produced empty/garbage output that could
+# not contain "stanza drift" either, so the negative check below would
+# have reported "drift resolved" even though doctor never actually ran.
+DOCTOR_RC=0
+DOCTOR_OUT="$(HOME="$SANDBOX" nx doctor 2>&1)" || DOCTOR_RC=$?
+[[ -n "$DOCTOR_OUT" ]] || _die "nx doctor (step 8) produced no output at all (rc=$DOCTOR_RC) — cannot assert drift is resolved"
+[[ "$DOCTOR_OUT" != *'Traceback (most recent call last)'* ]] \
+    || _die "nx doctor (step 8) crashed with a traceback (rc=$DOCTOR_RC). Output:\n$DOCTOR_OUT"
 if [[ "${DOCTOR_OUT,,}" == *'stanza drift'* ]]; then
     _die "drift warning persists after nx hooks update. Output:\n$DOCTOR_OUT"
 fi
-_pass "drift resolved"
+_pass "nx doctor ran clean (rc=$DOCTOR_RC) and drift resolved"
 
 # ── 9. Plugin rename + tag-pin surface (marketplace.json) ────────────────────
 _step "9/12 plugin marketplace.json reflects rename + tag pinning"
@@ -368,7 +389,15 @@ if [ -f "$REPO_ROOT/mcpb/manifest.json" ]; then
     fi
     _pass "mcpb pack produces a $BUNDLE_SIZE-byte bundle (well under 100 KB)"
 else
-    _pass "skipped (mcpb/ not present on this branch)"
+    # gap-8 non-vacuity note (T2 [22511], house convention: a skip-passing
+    # gate must say why skipping here is safe): mcpb/manifest.json is
+    # present on every normal develop/release branch — it ships the .mcpb
+    # bundle this repo publishes. This else-clause's ONLY legitimate
+    # trigger is running this script against a branch that predates
+    # mcpb/ entirely. It is not a routine no-op: on every ordinary
+    # invocation of this script the `if` arm above runs for real and can
+    # fail (a broken `mcpb pack` or an oversized bundle reds this step).
+    _pass "skipped (mcpb/ not present on this branch — see note above; not the common path)"
 fi
 
 # ── 12. Summary ──────────────────────────────────────────────────────────────

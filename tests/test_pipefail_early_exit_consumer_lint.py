@@ -852,24 +852,27 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:90",
         "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:91",
         "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:94",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:245",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:248",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:256",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:265",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:266",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:296",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:299",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:305",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:316",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:323",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:324",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:448",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:451",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:454",
-        # nexus-o8dil.52 (RDR-191 Phase 4): shifted +8 after the
-        # chunks_384/768/1024 loop at the old :644-651 was retargeted to
-        # the unified nexus.chunks.
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:768",
+        # gap-8/gap-15 (T2 [22511]): retargeted after the `-e` addition +
+        # RC-capture rewires (GA_OUT/GB_OUT/GU_OUT/DIRECT_OUT,
+        # `expect_sql`'s internal `sql()` capture, and several
+        # cleanup-command `|| true` additions) shifted every line below.
+        # Same 15 sites, same shapes -- none of this pass's edits touched
+        # these grep-q pipelines themselves.
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:269",
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:272",
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:280",
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:292",
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:293",
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:325",
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:328",
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:334",
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:348",
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:355",
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:356",
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:484",
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:487",
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:490",
+        "tests/e2e/migration-rehearsal/rehearse_guided.sh:811",
         "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh:101",
         "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh:175",
         "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:139",
@@ -883,31 +886,28 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:51",
         "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:75",
         "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:97",
-        # nexus-xm0cp (2026-08-10): line numbers shifted by the fix for
-        # that bead (deleted the T2-database-not-found dead branch, the
-        # two dual_write_failed sites, and the 5xx-log-scan block; added
-        # the Phase D client-rc census). One violation was eliminated
-        # outright (the old :157 "T2 database not found" pipe no longer
-        # exists — the branch itself was deleted, not retargeted), so
-        # this file's count drops from 14 to 13; see the ceiling below.
-        # Retargeted again (+17 each) for the Phase E collections-drift
-        # gate (nexus-syfes class): a 17-line header-docstring insertion
-        # before line 28 shifted every one of these; the new Phase E body
-        # itself lands after all of them (past line 297) and introduces
-        # no new early-exit-consumer pipe.
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:135",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:138",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:148",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:154",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:157",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:163",
+        # gap-8/gap-15 (T2 [22511]): retargeted after the `-e` addition +
+        # per-command dispositions (run_check's internal capture, several
+        # `VAR=$(cmd) || true` additions). The former :111 site (the
+        # health-poll `nx daemon service status | grep -qiE ... && {
+        # healthy=1; break; }`) is GONE from this list -- it was itself
+        # fixed in this pass by appending `|| true` (the poll's expected
+        # not-yet-healthy iteration was a bare `&&` with no `||`, which
+        # would have died on iteration 1 under the new `-e`), so it moved
+        # to the `_PIPEFAIL_OR_TRUE_SITES` guarded ratchet below instead.
+        # 13 entries -> 12; see the ceiling adjustment below.
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:75",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:159",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:162",
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:172",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:178",
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:183",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:191",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:195",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:240",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:61",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:111",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:189",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:198",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:209",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:217",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:221",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:266",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:142",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:193",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:238",
@@ -1009,7 +1009,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/local-index-memory-gate.sh:849",
     }
 )
-_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 157
+_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 156
 
 
 def test_pipefail_early_exit_exempt_ratchet() -> None:
@@ -1097,28 +1097,42 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         # few lines below from each shard's own `$rc` exit code, never
         # from this.
         "tests/containers/fanout.sh:158",
-        # tests/e2e/migration-rehearsal/rehearse_shakeout.sh (1 entry):
-        # prints staleness/skip diagnostic lines for human eyeballing in
-        # a "run-2 log tail for diagnosis" block -- the actual
-        # indexed-content-searchable assertion runs on the next
-        # (unrelated) line via a fresh, unguarded
-        # `nx search ... | grep -qi`. Retargeted +17 for the Phase E
-        # collections-drift gate's header-docstring insertion (nexus-syfes
-        # class; see the EARLY_EXIT_EXEMPT block above for the same shift).
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:238",
+        # tests/e2e/migration-rehearsal/rehearse_shakeout.sh (2 entries):
+        #
+        #   :264 -- prints staleness/skip diagnostic lines for human
+        #   eyeballing in a "run-2 log tail for diagnosis" block -- the
+        #   actual indexed-content-searchable assertion runs on the next
+        #   (unrelated) line via a fresh, unguarded `nx search | grep -qi`.
+        #   Retargeted (gap-8/gap-15, T2 [22511]) after the `-e` addition
+        #   shifted the file; same site, same rationale as before.
+        #
+        #   :128 -- gap-15 NEW entry: the Phase A health-poll loop,
+        #   `nx daemon service status | grep -qiE "health.*ok|status.*live"
+        #   && { healthy=1; break; } || true`. This is a poll-and-retry
+        #   loop body, not an `if`/`elif` condition (so
+        #   `_if_condition_or_true_bug_hits` does not apply) -- the
+        #   EXPECTED "not yet healthy" iteration is a bare `&&` failure
+        #   with no trailing `||`, which the new `set -e` would abort on
+        #   at iteration 1 without this guard. The real pass/fail
+        #   assertion is the SEPARATE post-loop line,
+        #   `[ "$healthy" = 1 ] && ok ... || { bad ...; exit 1; }` --
+        #   this guarded site itself gates nothing.
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:264",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:128",
         # tests/e2e/release-sandbox.sh (3 entries): the already-commented
         # `|| true: head is an early-exit consumer...` idiom this file's
         # own docstring cites as the sanctioned shape -- readback for
         # human eyeballing only; the actual FAIL/bad decision for each
         # surrounding block is made from a separately-captured variable
         # or a dedicated gate elsewhere, never from these truncated
-        # echoes.
-        "tests/e2e/release-sandbox.sh:647",
-        "tests/e2e/release-sandbox.sh:651",
-        "tests/e2e/release-sandbox.sh:682",
+        # echoes. Retargeted (gap-8/gap-15, T2 [22511]) after this pass's
+        # edits shifted the file; same 3 sites, same rationale.
+        "tests/e2e/release-sandbox.sh:754",
+        "tests/e2e/release-sandbox.sh:758",
+        "tests/e2e/release-sandbox.sh:806",
     }
 )
-_PIPEFAIL_OR_TRUE_SITES_CEILING = 8
+_PIPEFAIL_OR_TRUE_SITES_CEILING = 9
 
 
 def test_pipefail_or_true_sites_ratchet() -> None:

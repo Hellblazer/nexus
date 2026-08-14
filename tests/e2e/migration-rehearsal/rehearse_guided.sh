@@ -48,7 +48,21 @@
 # (release_version >= the guided-upgrade floor, done by run.sh --guided) so
 # the version-pin PASSES; an unstamped binary reports release_version=null
 # and guided-upgrade correctly fail-closes.
-set -uo pipefail
+#
+# gap-15 (T2 [22511]): `-e` added (was `set -uo pipefail`, no -e). NOT a
+# blanket revert — the ok/bad collect-and-continue design, and especially
+# Phase 0A/0B's "this command is EXPECTED to exit non-zero" tests, must
+# survive. Every bare command substitution this addition would otherwise
+# make fatal (and that was not already protected by an if/&&/|| construct
+# -e exempts) got an explicit per-command disposition: `expect_sql`'s
+# internal `sql()` capture, the four `nx guided-upgrade`/`svc_py` captures
+# whose own rc IS the assertion (GA_OUT/GB_OUT/GU_OUT/DIRECT_OUT — rewired
+# to `RC=0; OUT="$(cmd)" || RC=$?` so a failing command populates RC
+# instead of aborting before the existing `$?`-based checks run), and a
+# handful of housekeeping `sql`/cleanup calls whose content, not rc, is
+# what downstream code already checks. See the gap-8/15 fix commit for the
+# specific sites.
+set -euo pipefail
 # ── RETIRED at RDR-155 P4b (2026-07-24) ──────────────────────────────────────
 # This rehearsal drives `nx guided-upgrade` / `nx migrate-to-service` — the
 # Chroma→PG guided-migration verbs DELETED in RDR-155 P4b P2. The journey is
@@ -107,7 +121,12 @@ sql() (
 )
 expect_sql() {  # label, sql, want — EXACT equality (the exact-number teeth)
   local got
-  got="$(sql "$2")"
+  # gap-15: `sql()`'s own exit status is psql's -- a query error (or any
+  # transient connectivity blip) must not abort the WHOLE script here.
+  # expect_sql is called ~20+ times bare (not if/&&/||-wrapped) throughout
+  # this file; without `|| true` a single failing call under -e would
+  # silently skip every remaining phase instead of reporting one FAIL.
+  got="$(sql "$2")" || true
   if [ "$got" = "$3" ]; then ok "$1 = $got"; else bad "$1: got '$got', want $3"; fi
 }
 
@@ -236,8 +255,13 @@ if BLOCK_A="$(python /home/nexus/seed_legacy.py "$CHROMA_LOCAL" --blocking=colli
 else
   bad "collision-pair seed failed"; say "ABORT (Phase-0 precondition)"; exit 1
 fi
-GA_OUT="$(nx guided-upgrade --timeout 180 --yes 2>&1)"
-GA_RC=$?
+# gap-15: THIS command is EXPECTED to exit non-zero (that is the whole
+# point of Phase 0A) -- a bare `VAR="$(cmd)"; RC=$?` dies at the
+# assignment under -e exactly when the test is working as intended,
+# before RC=$? ever runs. Capture via the `||` branch instead so a
+# failing command populates GA_RC rather than aborting.
+GA_RC=0
+GA_OUT="$(nx guided-upgrade --timeout 180 --yes 2>&1)" || GA_RC=$?
 printf '%s\n' "$GA_OUT" | sed 's/^/       /'
 [ "$GA_RC" -ne 0 ] \
   && ok "sub-run A exited non-zero ($GA_RC)" \
@@ -261,7 +285,10 @@ printf '%s' "$GA_OUT" | grep -q "Using bundled PostgreSQL (downloaded + verified
 test ! -f "$HOME/.config/nexus/migration.state" \
   && ok "no migration sentinel after the collision block (pre-write)" \
   || bad "collision block left a migration sentinel (expected none — pre-write)"
-REMOVE_A="$(python /home/nexus/seed_legacy.py "$CHROMA_LOCAL" --remove-blocking=collision | tail -1)"
+# gap-15: the existing if/else below already gives a clear "ABORT" +
+# exit 1 diagnostic on failure -- `|| true` lets the script reach that
+# diagnostic instead of dying at the assignment with a bare bash error.
+REMOVE_A="$(python /home/nexus/seed_legacy.py "$CHROMA_LOCAL" --remove-blocking=collision | tail -1)" || true
 if printf '%s' "$REMOVE_A" | grep -q "rehearsal-pair__bge-base-en-v15-768" \
    && printf '%s' "$REMOVE_A" | grep -q "rehearsal-pair__voyage-context-3"; then
   ok "collision pair removed: $REMOVE_A"
@@ -287,8 +314,10 @@ if BLOCK_B="$(python /home/nexus/seed_legacy.py "$CHROMA_LOCAL" --blocking=prega
 else
   bad "pregate seed failed"; say "ABORT (Phase-0 precondition)"; exit 1
 fi
-GB_OUT="$(nx guided-upgrade --timeout 180 --yes 2>&1)"
-GB_RC=$?
+# gap-15: same rationale as Phase 0A's GA_OUT capture above -- this
+# command is EXPECTED to exit non-zero.
+GB_RC=0
+GB_OUT="$(nx guided-upgrade --timeout 180 --yes 2>&1)" || GB_RC=$?
 printf '%s\n' "$GB_OUT" | sed 's/^/       /'
 [ "$GB_RC" -ne 0 ] \
   && ok "sub-run B exited non-zero ($GB_RC)" \
@@ -312,14 +341,17 @@ test -f "$HOME/.config/nexus/migration.state" \
   || bad "no migration sentinel after the pregate block (expected migrated-failed)"
 # MANDATORY remediation: a lingering migrated-failed sentinel poisons every
 # later assertion. Plain clear-state suffices for migrated-failed.
-CLEAR_OUT="$(nx migration --clear-state 2>&1)"
+# gap-15: same reasoning as REMOVE_A/REMOVE_B -- reach the existing
+# "ABORT (a poisoned sentinel...)" diagnostic below instead of a bare
+# bash abort at the assignment.
+CLEAR_OUT="$(nx migration --clear-state 2>&1)" || true
 if printf '%s' "$CLEAR_OUT" | grep -q "Cleared migration sentinel"; then
   ok "migration sentinel cleared: $CLEAR_OUT"
 else
   bad "clear-state did not confirm ('Cleared migration sentinel' missing): $CLEAR_OUT"
   say "ABORT (a poisoned sentinel makes every later assertion misleading)"; exit 1
 fi
-REMOVE_B="$(python /home/nexus/seed_legacy.py "$CHROMA_LOCAL" --remove-blocking=pregate | tail -1)"
+REMOVE_B="$(python /home/nexus/seed_legacy.py "$CHROMA_LOCAL" --remove-blocking=pregate | tail -1)" || true  # gap-15: see REMOVE_A note above
 if printf '%s' "$REMOVE_B" | grep -q "legacybare" \
    && printf '%s' "$REMOVE_B" | grep -q "rehearsal-notext"; then
   ok "pregate shapes removed: $REMOVE_B"
@@ -428,8 +460,12 @@ PY
 # ── The ONE command: nx guided-upgrade ───────────────────────────────────────
 say "nx guided-upgrade — detect → provision → health-gate → version-pin → land-then-transform"
 note "release_version pin: the binary was built with a stamped release.properties"
-GU_OUT="$(nx guided-upgrade --timeout 180 --yes 2>&1)"   # BARE: default-path resolution under test (nexus-id750)
-GU_RC=$?
+# gap-15: rc IS the assertion below (GU_RC != 0 => bad) -- a bare
+# `VAR="$(cmd)"; RC=$?` would die at the assignment under -e on a genuine
+# regression (guided-upgrade failing), losing the diagnostic branch below
+# that dumps the service logs. Capture via the `||` branch instead.
+GU_RC=0
+GU_OUT="$(nx guided-upgrade --timeout 180 --yes 2>&1)" || GU_RC=$?   # BARE: default-path resolution under test (nexus-id750)
 printf '%s\n' "$GU_OUT" | sed 's/^/       /'
 
 if [ "$GU_RC" != 0 ]; then
@@ -524,13 +560,16 @@ PY
 # ── Phase 3 (items 3,4,8): exact-number teeth over the live store ────────────
 say "Phase 3 — exact-number teeth (alias map, collapse, cascade, census)"
 # tail -1: discover_pg_binaries logs a structlog line before the path prints.
-PSQL_BIN="$(python -c 'from nexus.db.pg_provision import discover_pg_binaries; print(discover_pg_binaries().psql)' 2>/dev/null | tail -1)"
+# gap-15: `|| true` on both -- the existing if/else right below already
+# gives a clear "ABORT (no SQL teeth)" diagnostic; reach it instead of a
+# bare bash abort at the assignment.
+PSQL_BIN="$(python -c 'from nexus.db.pg_provision import discover_pg_binaries; print(discover_pg_binaries().psql)' 2>/dev/null | tail -1)" || true
 if [ -x "$PSQL_BIN" ]; then
   ok "bundled psql resolved ($PSQL_BIN)"
 else
   bad "cannot resolve the bundled psql (got: '$PSQL_BIN')"; say "ABORT (no SQL teeth)"; exit 1
 fi
-PG_SUPERUSER="$(python -c 'from nexus.db.pg_provision import bootstrap_superuser; print(bootstrap_superuser())' 2>/dev/null | tail -1)"
+PG_SUPERUSER="$(python -c 'from nexus.db.pg_provision import bootstrap_superuser; print(bootstrap_superuser())' 2>/dev/null | tail -1)" || true
 if SQL_PROBE="$(sql 'SELECT 1')" && [ "$SQL_PROBE" = "1" ]; then
   ok "superuser SQL path live (role $PG_SUPERUSER, trust auth)"
 else
@@ -662,6 +701,11 @@ say "Phase 4 — direct /v1/staging scenario: dual-dim, live embed_fill, all thr
 # two never-driven Item8 policies — a second finalize with
 # orphan_policy=synthesize on the SAME staged orphan proves finalize is
 # idempotent AND re-runnable with a different policy (item 7).
+# gap-15: the heredoc's python `assert`s ARE the test -- an assertion
+# failure making svc_py exit non-zero must not abort this bash script
+# under -e before DIRECT_RC=$? runs (that line is the actual pass/fail
+# check below). Capture via the `||` branch instead.
+DIRECT_RC=0
 DIRECT_OUT="$(svc_py - <<'PY'
 import hashlib, json, sys
 from nexus.migration.staging_land import HttpStagingStore
@@ -736,8 +780,7 @@ counts = store.counts()
 assert all(v == 0 for v in counts.values()), f"staging not cleared: {counts}"
 print("       staging cleared after the scenario")
 PY
-)"
-DIRECT_RC=$?
+)" || DIRECT_RC=$?
 printf '%s\n' "$DIRECT_OUT"
 if [ "$DIRECT_RC" = 0 ]; then
   ok "direct scenario: dual-dim promote + live embed_fill + all finalize fields + both orphan policies"
@@ -779,7 +822,7 @@ then
 else
   ok "finalize ABORTED with residue present — the finalize-fatal census is load-bearing"
 fi
-sql "DELETE FROM nexus.frecency WHERE chunk_id = '$RESIDUE_REF'" >/dev/null
+sql "DELETE FROM nexus.frecency WHERE chunk_id = '$RESIDUE_REF'" >/dev/null || true  # gap-15: housekeeping cleanup, not the assertion (the finalize check right below is)
 if svc_py - <<'PY' >/dev/null 2>&1
 from nexus.migration.staging_land import HttpStagingStore
 HttpStagingStore().finalize()
@@ -798,8 +841,10 @@ say "Phase 5 — mutation falsification: alias-build disabled ⇒ the asserts MU
 # without a second native build. The citation and alias-count asserts above
 # must then FAIL — if either still passes, it was vacuous all along. This
 # runs LAST: it deliberately corrupts the throwaway container store.
-DELETED="$(sql "DELETE FROM nexus.chash_alias WHERE source LIKE 'staging:%'")"
-ALIAS_LEFT="$(sql "SELECT count(*) FROM nexus.chash_alias WHERE source LIKE 'staging:%'")"
+# gap-15: content checked below (ALIAS_LEFT == "0"), not rc-gated -- a
+# `sql()` hiccup here must not abort before that check runs.
+DELETED="$(sql "DELETE FROM nexus.chash_alias WHERE source LIKE 'staging:%'")" || true
+ALIAS_LEFT="$(sql "SELECT count(*) FROM nexus.chash_alias WHERE source LIKE 'staging:%'")" || true
 if [ "$ALIAS_LEFT" = "0" ]; then
   ok "alias-build effect removed ($DELETED; the no-alias world is real, not a silent no-op)"
 else
@@ -810,7 +855,7 @@ if citation16 resolve >/dev/null 2>&1; then
 else
   ok "16-char citation assert FAILED without aliases — the item-3 assert is load-bearing"
 fi
-ALIAS_NOW="$(sql "SELECT count(*) FROM nexus.chash_alias WHERE source LIKE 'staging:%'")"
+ALIAS_NOW="$(sql "SELECT count(*) FROM nexus.chash_alias WHERE source LIKE 'staging:%'")" || true  # gap-15: content-checked below, not rc-gated
 if [ "$ALIAS_NOW" = "$ALIAS_TOTAL" ]; then
   bad "FALSIFICATION FAILED: alias-count assert would still pass ($ALIAS_NOW) — vacuous"
 else

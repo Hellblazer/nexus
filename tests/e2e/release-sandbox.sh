@@ -67,6 +67,38 @@ _svc_field() {  # $1 = json key
         2>/dev/null || true
 }
 
+# gap-15 (T2 [22511]): non-vacuity floor for the shakedown's indexing steps.
+# Prints "<doc_count> <chunk_count>" from `nx catalog stats --json` totals.
+# The four indexing steps previously asserted exit code only -- a zero-chunk
+# index (early return, wrong cwd, silently-empty walk) passed. Deltas across
+# this helper give each step a real "did indexing actually put rows in the
+# store" assertion, not just "did the process exit 0". Falls back to "0 0"
+# on any parse failure so a caller's arithmetic never sees a bare newline.
+_catalog_counts() {
+    nx catalog stats --json 2>/dev/null \
+        | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('documents',0), d.get('chunks',0))" \
+        2>/dev/null || echo "0 0"
+}
+
+# gap-15: assert the doc/chunk deltas across an indexing step meet a
+# per-fixture floor. Only called when the step's own exit code was clean
+# (an exit-code failure is already recorded by the caller) — this is the
+# SECOND, independent assertion: a step can exit 0 while indexing nothing
+# (early return, wrong cwd, silently-empty walk), and that is exactly the
+# vacuous-pass class this closes.
+_index_floor_check() {
+    local label="$1" doc_floor="$2" chunk_floor="$3" doc_before="$4" chunk_before="$5"
+    local doc_after chunk_after doc_delta chunk_delta
+    read -r doc_after chunk_after < <(_catalog_counts)
+    doc_delta=$((doc_after - doc_before))
+    chunk_delta=$((chunk_after - chunk_before))
+    echo "  non-vacuity: docs +$doc_delta (floor $doc_floor), chunks +$chunk_delta (floor $chunk_floor)"
+    if (( doc_delta < doc_floor || chunk_delta < chunk_floor )); then
+        echo "  [FAIL] non-vacuity floor not met for $label" >&2
+        SHAKEDOWN_FAILED+=("$label (non-vacuity floor: docs +$doc_delta/$doc_floor chunks +$chunk_delta/$chunk_floor)")
+    fi
+}
+
 _svc_teardown() {
     echo "  ── teardown (nx daemon service stop --with-pg) ──"
     nx daemon service stop --with-pg 2>&1 | tail -3 | sed 's/^/    /' || true
@@ -340,7 +372,14 @@ if (( SKIP_INSTALL == 0 )); then
     echo "[2/3] Reinstalling nx CLI from $REPO_ROOT (isolated: HOME=$SANDBOX) ..."
     (cd "$REPO_ROOT" && uv sync >/dev/null 2>&1)
     "$REPO_ROOT/scripts/reinstall-tool.sh" >/dev/null
-    echo "      $(nx --version 2>/dev/null || echo 'nx --version failed')"
+    # gap-8 (T2 [22511]): this used to be `nx --version 2>/dev/null ||
+    # echo 'nx --version failed'` -- a broken reinstall printed a friendly
+    # string and the script CONTINUED into smoke/shakedown against a dead
+    # nx. reinstall-tool.sh exiting 0 only proves the wheel build/install
+    # step ran; it does not prove the resulting `nx` is actually callable.
+    NX_VER_OUT="$(nx --version 2>&1)" \
+        || _die "reinstall-tool.sh exited 0 but 'nx --version' failed afterward (broken install): $NX_VER_OUT"
+    echo "      $NX_VER_OUT"
 else
     echo "[2/3] Skipping reinstall (--skip-install). nx version: $(nx --version 2>/dev/null || echo 'unknown')"
 fi
@@ -361,11 +400,24 @@ case "$MODE" in
         _provision_local_service
         echo "  nx --version: $(nx --version)"
         echo
+        # gap-8 (T2 [22511]): `nx upgrade` / `nx plan reseed` used to run
+        # under `|| true` -- the release sandbox ran the user-facing
+        # convergence command and ignored whether it worked. Collect-and-
+        # continue (nexus-6xkdu precedent, same pattern as the doctor loop
+        # below) so a failure here turns the final verdict red without
+        # forfeiting the diagnostic value of the remaining checks.
+        SMOKE_FAILED=()
         echo "  nx upgrade --dry-run:"
-        nx upgrade --dry-run 2>&1 | sed 's/^/    /' || true
+        if ! nx upgrade --dry-run 2>&1 | sed 's/^/    /'; then
+            echo "    [FAIL] -- exit non-zero" >&2
+            SMOKE_FAILED+=("nx upgrade --dry-run")
+        fi
         echo
         echo "  nx upgrade (apply):"
-        nx upgrade 2>&1 | sed 's/^/    /' || true
+        if ! nx upgrade 2>&1 | sed 's/^/    /'; then
+            echo "    [FAIL] -- exit non-zero" >&2
+            SMOKE_FAILED+=("nx upgrade (apply)")
+        fi
         echo
         # nx plan reseed seeds the builtin plan templates that
         # --check-plan-library verifies. Without this step the doctor
@@ -381,7 +433,10 @@ case "$MODE" in
         # off its N/A stub. `nx plan reseed` is the live equivalent —
         # idempotent, routes through HttpPlanLibrary in every mode.
         echo "  nx plan reseed (seeds plan library):"
-        nx plan reseed 2>&1 | tail -5 | sed 's/^/    /' || true
+        if ! nx plan reseed 2>&1 | tail -5 | sed 's/^/    /'; then
+            echo "    [FAIL] -- exit non-zero" >&2
+            SMOKE_FAILED+=("nx plan reseed")
+        fi
         echo
         # A gate that PRINTS a failure and exits 0 is not a gate. This loop
         # detected failures correctly (set -euo pipefail at the top makes the
@@ -389,25 +444,24 @@ case "$MODE" in
         # them on the floor: the caller saw exit 0 with "[FAIL]" in the log.
         # Found by the 7.0.0 release dry run, where --check-taxonomy failed and
         # the gate reported success.
-        SMOKE_FAILED=()
         for check in --check-schema --check-plan-library --check-taxonomy; do
             echo "  nx doctor $check:"
             if nx doctor "$check" 2>&1 | sed 's/^/    /'; then
                 echo "    [pass]"
             else
                 echo "    [FAIL] -- exit non-zero" >&2
-                SMOKE_FAILED+=("$check")
+                SMOKE_FAILED+=("nx doctor $check")
             fi
             echo
         done
         echo "[done] Sandbox state at $SANDBOX. Run '$0 reset' to tear down."
         if (( ${#SMOKE_FAILED[@]} )); then
             echo >&2
-            echo "SMOKE FAILED: ${#SMOKE_FAILED[@]} doctor check(s) exited non-zero:" >&2
-            printf '  nx doctor %s\n' "${SMOKE_FAILED[@]}" >&2
+            echo "SMOKE FAILED: ${#SMOKE_FAILED[@]} step(s) exited non-zero:" >&2
+            printf '  %s\n' "${SMOKE_FAILED[@]}" >&2
             exit 1
         fi
-        echo "SMOKE PASSED: all doctor checks green."
+        echo "SMOKE PASSED: all steps green."
         ;;
 
     shakedown)
@@ -432,6 +486,12 @@ case "$MODE" in
         # readback), but it DOES turn the final verdict FAILED. Mirrors the
         # SMOKE_FAILED pattern in the smoke arm above.
         SHAKEDOWN_FAILED=()
+        # gap-8 (T2 [22511]): steps that are deliberately NOT part of the
+        # pass/fail verdict (a pre-step whose real gate runs right after it,
+        # a T1-turd-risk sniff) still need to be VISIBLE, never silently
+        # dropped. Collected here and printed unconditionally in the final
+        # summary, regardless of overall pass/fail.
+        SHAKEDOWN_SOFT=()
 
         echo
         echo "── T1 sniff: BEFORE ──"
@@ -443,13 +503,23 @@ case "$MODE" in
         echo
         echo "── nx --version + upgrade ──"
         nx --version | sed 's/^/  /'
-        nx upgrade 2>&1 | sed 's/^/  /' || true
+        # gap-8 (T2 [22511]): was `|| true` -- ran the user-facing
+        # convergence command and discarded whether it worked.
+        if ! nx upgrade 2>&1 | sed 's/^/  /'; then
+            echo "  [FAIL] nx upgrade exited non-zero" >&2
+            SHAKEDOWN_FAILED+=("0/11 nx upgrade")
+        fi
 
         echo
         echo "── 1/11 nx plan reseed (seeds plan library) ──"
         # nexus-vl8lk: was `nx catalog setup` (retired, raised, swallowed by
         # `|| true`) — see the smoke arm's comment above for the full story.
-        nx plan reseed 2>&1 | tail -5 | sed 's/^/  /' || true
+        # gap-8 (T2 [22511]): the `|| true` on the live `nx plan reseed`
+        # call was purged the same way.
+        if ! nx plan reseed 2>&1 | tail -5 | sed 's/^/  /'; then
+            echo "  [FAIL] nx plan reseed exited non-zero" >&2
+            SHAKEDOWN_FAILED+=("1/11 nx plan reseed")
+        fi
 
         echo
         echo "── 2/11 nx index repo (bounded fixture corpus) ──"
@@ -525,17 +595,34 @@ case "$MODE" in
             && git -c user.email=shakedown@nexus.local -c user.name=shakedown \
                    commit -q -m "shakedown fixture snapshot")
         echo "  fixture: ${#FIXTURE_FILES[@]} files under $FIXTURE_DIR"
+        # gap-15 (T2 [22511]): non-vacuity floor -- 60% of the fixture file
+        # count, both for docs and chunks (each indexed file should produce
+        # at least one catalog document with at least one chunk; 60% leaves
+        # slack for any file type this fixture set later grows to include
+        # that legitimately produces zero chunks, without being so loose it
+        # misses a real zero-chunk regression).
+        REPO_FLOOR=$(( ${#FIXTURE_FILES[@]} * 60 / 100 ))
+        read -r RDOCS_BEFORE RCHUNKS_BEFORE < <(_catalog_counts)
         if ! nx index repo "$FIXTURE_DIR" 2>&1 | tail -5 | sed 's/^/  /'; then
             echo "  [FAIL] nx index repo exited non-zero" >&2
             SHAKEDOWN_FAILED+=("2/11 nx index repo")
+        else
+            _index_floor_check "2/11 nx index repo" "$REPO_FLOOR" "$REPO_FLOOR" "$RDOCS_BEFORE" "$RCHUNKS_BEFORE"
         fi
 
         echo
         echo "── 3a/11 nx index pdf (tc-sql.pdf — Docling path, no formulas) ──"
+        read -r PDOCS_BEFORE PCHUNKS_BEFORE < <(_catalog_counts)
         if ! nx index pdf "$REPO_ROOT/tests/fixtures/tc-sql.pdf" \
                 --collection knowledge__shakedown 2>&1 | tail -5 | sed 's/^/  /'; then
             echo "  [FAIL] nx index pdf (tc-sql.pdf, Docling path) exited non-zero" >&2
             SHAKEDOWN_FAILED+=("3a/11 nx index pdf (Docling path)")
+        else
+            # gap-15: one PDF -> floor 1 doc; a real multi-page PDF should
+            # chunk into several pieces, floor 3 catches a zero/near-zero
+            # chunk regression without being brittle to chunking-boundary
+            # drift across tokenizer/model changes.
+            _index_floor_check "3a/11 nx index pdf (Docling path)" 1 3 "$PDOCS_BEFORE" "$PCHUNKS_BEFORE"
         fi
 
         echo
@@ -557,17 +644,29 @@ case "$MODE" in
         # fail even when MinerU itself was broken. Now propagated: a
         # non-zero exit here is collected into SHAKEDOWN_FAILED and turns
         # the final verdict red.
+        read -r MDOCS_BEFORE MCHUNKS_BEFORE < <(_catalog_counts)
         if ! nx index pdf "$REPO_ROOT/tests/fixtures/bft-to-smr.pdf" \
                 --collection knowledge__shakedown 2>&1 | tail -5 | sed 's/^/  /'; then
             echo "  [FAIL] nx index pdf (bft-to-smr.pdf, MinerU path) exited non-zero" >&2
             SHAKEDOWN_FAILED+=("3b/11 nx index pdf (MinerU path)")
+        else
+            # gap-15: same reasoning as 3a — one PDF -> floor 1 doc, floor 3
+            # chunks (bft-to-smr.pdf is a real multi-page formula fixture).
+            _index_floor_check "3b/11 nx index pdf (MinerU path)" 1 3 "$MDOCS_BEFORE" "$MCHUNKS_BEFORE"
         fi
 
         echo
         echo "── 4/11 nx index rdr ──"
+        # gap-15: docs/rdr carries ~190 RDR files at the time this floor was
+        # set; 10 is a deliberately conservative floor (survives future
+        # trims/consolidation of the RDR corpus) that still catches a
+        # complete-failure regression (zero indexed).
+        read -r ODOCS_BEFORE OCHUNKS_BEFORE < <(_catalog_counts)
         if ! nx index rdr "$REPO_ROOT" 2>&1 | tail -5 | sed 's/^/  /'; then
             echo "  [FAIL] nx index rdr exited non-zero" >&2
             SHAKEDOWN_FAILED+=("4/11 nx index rdr")
+        else
+            _index_floor_check "4/11 nx index rdr" 10 10 "$ODOCS_BEFORE" "$OCHUNKS_BEFORE"
         fi
 
         echo
@@ -598,8 +697,16 @@ case "$MODE" in
                 2>&1) | tail -5 | sed 's/^/  /'; then
             echo "  [pass] greenfield index produced 0 chunks with deprecated keys"
         else
-            echo "  [FAIL] greenfield index leaked deprecated keys"
-            echo "         nexus-e5uw regression: indexer is writing pruned keys."
+            # gap-8 D3 (T2 [22511]): report the OBSERVATION (the pytest
+            # regression test exited non-zero / assertion failed), and name
+            # the nexus-e5uw class as a HYPOTHESIS the test's own name and
+            # assertions point at — not an asserted-but-unobserved cause.
+            # The actual failure detail is in the pytest output printed
+            # above this block.
+            echo "  [FAIL] test_greenfield_index_writes_no_deprecated_keys failed" >&2
+            echo "         Hypothesis (unconfirmed beyond the test's own name/assertion):"
+            echo "         nexus-e5uw class — indexer may be writing pruned/deprecated keys."
+            echo "         See the pytest output above for the actual failure."
             echo "         Investigate before merge."
             exit 1
         fi
@@ -662,15 +769,32 @@ case "$MODE" in
         # the in-process ``NX_T1_ISOLATED=1`` escape hatch retired
         # outright, it now hard-fails). The bare-CLI path
         # (``get_t1_database()``'s CLI-dedicated mint, nexus-rn3wo.1)
-        # mints its own persisted session against the live storage
-        # service instead — no opt-in flag needed.
+        # mints its own PERSISTED session against the live storage service
+        # and REUSES it across every subsequent bare-CLI invocation in this
+        # sandbox HOME (the id is cached to
+        # ``$HOME/.config/nexus/t1_cli_dedicated_session`` on first mint) —
+        # so cross-invocation readback genuinely works here. gap-8 (T2
+        # [22511]): this step's title always claimed "write + readback" but
+        # only ever performed the write; the "readback only works inside a
+        # Claude Code session" note below was stale, predating the
+        # persisted CLI-dedicated session design (nexus-rn3wo.1). Now
+        # performs the readback for real and joins SHAKEDOWN_FAILED on
+        # failure, same as every other fail-capable step in this arm.
         SCRATCH_OUT=$(nx scratch put "shakedown probe $SHAKE_TS" --tags=shakedown 2>&1 | tail -1)
         if [[ "$SCRATCH_OUT" == *"Stored:"* ]]; then
             echo "  put: ok ($SCRATCH_OUT)"
         else
-            echo "  put: [WARN] unexpected output — $SCRATCH_OUT"
+            echo "  put: [FAIL] unexpected output — $SCRATCH_OUT" >&2
+            SHAKEDOWN_FAILED+=("8/11 nx scratch put")
         fi
-        echo "  note: cross-invocation readback only works inside a Claude Code session"
+        SCRATCH_LIST_OUT=$(nx scratch list 2>&1)
+        if [[ "$SCRATCH_LIST_OUT" == *"$SHAKE_TS"* ]]; then
+            echo "  readback: ok (marker found via nx scratch list)"
+        else
+            echo "  readback: [FAIL] marker not found in nx scratch list output" >&2
+            echo "$SCRATCH_LIST_OUT" | tail -5 | sed 's/^/    /'
+            SHAKEDOWN_FAILED+=("8/11 nx scratch readback")
+        fi
 
         echo
         echo "── 9/11 catalog stats (registry + link graph readback) ──"
@@ -729,11 +853,28 @@ case "$MODE" in
         # The verb defaults to --dry-run; the gate needs the actual
         # registration so the doctor's drift check sees the populated
         # projection on the next call.
-        nx catalog backfill-collections --no-dry-run 2>&1 | tail -5 | sed 's/^/    /' || true
+        #
+        # gap-8 (T2 [22511]): this stays a SOFT step (backfill is not
+        # required to succeed for THIS gate to be meaningful — the
+        # collections-drift check right below is the actual assertion, and
+        # it runs WITHOUT `|| true`) but the soft-ness is now
+        # VERDICT-COUNTED, not invisible: a silent backfill failure used to
+        # vanish into the `|| true`. It is recorded as an explicit
+        # soft/advisory finding so a reviewer can see it happened, without
+        # failing the run on a step whose job is prep, not verification.
+        if ! nx catalog backfill-collections --no-dry-run 2>&1 | tail -5 | sed 's/^/    /'; then
+            echo "  [soft-fail, non-blocking] nx catalog backfill-collections exited non-zero" >&2
+            SHAKEDOWN_SOFT+=("11/11 nx catalog backfill-collections pre-step (non-blocking; see collections-drift check below for the real gate)")
+        fi
         echo "  [check] nx catalog doctor --collections-drift:"
         if ! nx catalog doctor --collections-drift 2>&1 | sed 's/^/    /'; then
-            echo "  [fail] collections-drift survived backfill: release blocked"
-            echo "         The projection cannot reach a steady state vs T3."
+            # gap-8 D3 (T2 [22511]): report the observation (the doctor
+            # check exited non-zero: release blocked) and let the doctor's
+            # OWN printed output above (piped through unfiltered) carry the
+            # specific diagnosis, rather than asserting a named cause this
+            # script never independently confirmed.
+            echo "  [FAIL] nx catalog doctor --collections-drift exited non-zero: release blocked" >&2
+            echo "         See the doctor output above for the specific drift found."
             echo "         Investigate before tagging."
             exit 1
         fi
@@ -747,15 +888,26 @@ case "$MODE" in
         DELTA_S=$((AFTER_SESSIONS - BEFORE_SESSIONS))
         DELTA_T=$((AFTER_TMPDIRS - BEFORE_TMPDIRS))
         echo "  delta:         sessions+$DELTA_S  tmpdirs+$DELTA_T"
+        # gap-8 (T2 [22511]): explicitly ADVISORY (never gates the
+        # pass/fail verdict — T1 turd accumulation is a slow-leak signal,
+        # not a single-run correctness failure) AND now a verdict INPUT via
+        # SHAKEDOWN_SOFT, so a trip is visible in the final summary instead
+        # of a WARN line that could scroll by unnoticed.
         if (( DELTA_S > 2 || DELTA_T > 2 )); then
-            echo "  [WARN] T1 turd risk: net delta exceeds expected steady-state"
+            echo "  [ADVISORY, non-blocking] T1 turd risk: net delta exceeds expected steady-state"
             echo "         Investigate $HOME/.config/nexus/sessions/ and $T1_DIR_PARENT/nx_t1_*"
+            SHAKEDOWN_SOFT+=("T1 sniff: turd risk (sessions+$DELTA_S tmpdirs+$DELTA_T exceeds expected steady-state)")
         else
             echo "  [ok] T1 lifecycle within expected bounds"
         fi
 
         echo
         echo "[done] Sandbox state at $SANDBOX. Run '$0 reset' to tear down."
+        if (( ${#SHAKEDOWN_SOFT[@]} )); then
+            echo
+            echo "SHAKEDOWN SOFT/ADVISORY (non-blocking, not counted in the pass/fail verdict):"
+            printf '  %s\n' "${SHAKEDOWN_SOFT[@]}"
+        fi
         if (( ${#SHAKEDOWN_FAILED[@]} )); then
             echo >&2
             echo "SHAKEDOWN FAILED: ${#SHAKEDOWN_FAILED[@]} release-gate step(s) exited non-zero:" >&2
