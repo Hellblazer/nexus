@@ -1612,6 +1612,198 @@ class TestChashProbeViewFallback:
         )
 
 
+def _content_diag_runner(
+    *,
+    unified_chunks: str = "0",
+    catalog_document_chunks: str = "0",
+    legacy_chunks_384: str = "0",
+    legacy_chunks_768: str = "0",
+    legacy_chunks_1024: str = "0",
+    debt: str = "0",
+    era_answer: str = "1",
+    fail_relations: tuple[str, ...] = (),
+):
+    """A run_diagnostic_sql psql_runner keyed by SQL CONTENT rather than
+    call order — robust against exactly how many round-trips a given code
+    path issues (whether the debt-leg probe or the era discriminator
+    fires is a code-path detail, not something these tests should have to
+    predict by counting). Each keyword arg is the response for one
+    distinguishable table/leg; ``fail_relations`` names relations whose
+    query should fail outright (returncode 1, 'relation ... does not
+    exist') to simulate a genuinely absent table — the diag view itself
+    is matched via the literal ``"nexus.diag_chash_conformance"``."""
+    calls: list[str] = []
+
+    def _ok(val: str) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess([], 0, stdout=f"{val}\n", stderr="")
+
+    def _fail(rel: str) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            [], 1, stdout="", stderr=f'relation "{rel}" does not exist',
+        )
+
+    def runner(argv, env):
+        stmt = argv[-1]
+        calls.append(stmt)
+        # to_regclass FIRST: fail_relations entries like the exact
+        # "FROM nexus.chunks " marker below would otherwise false-match
+        # the era probe's "to_regclass('nexus.chunks')" substring.
+        if "to_regclass" in stmt:
+            return _ok(era_answer)
+        for rel in fail_relations:
+            if rel in stmt:
+                return _fail(rel)
+        # View-path legs are quoted ('nexus.chunks_384'); direct-fallback
+        # legs are unquoted (FROM nexus.chunks_384 ). Order matters: the
+        # per-dim checks must run before the bare "nexus.chunks" checks
+        # since "nexus.chunks_384" contains "nexus.chunks" as a prefix.
+        if "chunks_384" in stmt:
+            return _ok(legacy_chunks_384)
+        if "chunks_768" in stmt:
+            return _ok(legacy_chunks_768)
+        if "chunks_1024" in stmt:
+            return _ok(legacy_chunks_1024)
+        if "catalog_document_chunks" in stmt:
+            return _ok(catalog_document_chunks)
+        if "topic_assignments" in stmt or "frecency" in stmt or "relevance_log" in stmt:
+            return _ok(debt)
+        if "nexus.chunks" in stmt:
+            return _ok(unified_chunks)
+        return _ok("0")
+
+    runner.calls = calls  # type: ignore[attr-defined]
+    return runner
+
+
+class TestChashProbeEraStraddle:
+    """RDR-191 F14a mirror-direction straddle in the poison gate
+    (nexus-o8dil, 2026-08-14, package-upgrade MVV failure): the pre-
+    convergence probe's client-side statements already carry the
+    POST-unify table names (``nexus.chunks``), but the store's engine may
+    not have migrated to that relation yet. The deployed
+    ``nexus.diag_chash_conformance`` view then reflects whichever
+    chash_tables.py era provisioned it — possibly OLDER than this
+    client's working-tree code — so the unified WHERE filter can execute
+    successfully yet return a NULL aggregate (blank psql line) for
+    ``nexus.chunks`` specifically. Pre-fix this reached
+    ``sum(int(c) for c in counts)`` and raised a bare
+    ``ValueError: invalid literal for int() with base 10: ''`` that named
+    no table, permanently deferring engine convergence (the exact shape
+    hit by ``tests/e2e/migration-rehearsal/run.sh --package-upgrade``)."""
+
+    def test_legacy_view_row_blank_retries_legacy_era_and_unblocks(self, tmp_path):
+        """The confirmed production shape: the unified view-path query
+        succeeds (no exception) but returns a blank aggregate for
+        ``nexus.chunks`` (deployed view still per-dim-shaped) and a real
+        value for ``nexus.catalog_document_chunks`` (name unchanged across
+        the unify) — exactly the ``['', '0']`` observed in the failing
+        MVV run. The era discriminator reports "nexus.chunks absent", so
+        the probe retries against the legacy per-dim view rows and
+        measures a real (non-vacuous) poison count instead of deferring
+        forever."""
+        runner = _content_diag_runner(
+            unified_chunks="", catalog_document_chunks="0",
+            era_answer="0",  # nexus.chunks does not exist yet
+            legacy_chunks_384="2", legacy_chunks_768="0", legacy_chunks_1024="0",
+        )
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        chash = [r for r in results if r.label == "Chunk chash conformance"]
+        assert chash, "the store must be VERIFIED (poisoned), not deferred as unverifiable"
+        assert chash[0].warn is True and chash[0].fatal is False
+        assert "2 chunk row(s)" in chash[0].detail
+        assert "could not probe" not in chash[0].detail
+
+    def test_legacy_view_all_clean_unblocks_convergence_cleanly(self, tmp_path):
+        """Same straddle shape as above, but every legacy-era leg is
+        clean (0) — convergence must proceed with NO poison result at
+        all, not a lingering unverifiable WARN."""
+        runner = _content_diag_runner(
+            unified_chunks="", catalog_document_chunks="0", era_answer="0",
+        )
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        assert [r.label for r in results] == ["Schema migrations"]
+
+    def test_neither_era_resolves_still_defers_with_named_table(self, tmp_path):
+        """NON-VACUITY (requirement 1's fail-safe): if the legacy-era
+        retry ALSO comes back blank — genuinely no candidate table
+        answers — the store stays UNVERIFIABLE (the existing defer path),
+        never a false clean. The surfaced detail now NAMES the specific
+        table that could not be parsed, instead of a bare int('')."""
+        runner = _content_diag_runner(
+            unified_chunks="", catalog_document_chunks="0", era_answer="0",
+            legacy_chunks_384="", legacy_chunks_768="", legacy_chunks_1024="",
+            # catalog_document_chunks stays "0" in BOTH the unified and
+            # legacy legs (name unchanged) — only nexus.chunks itself is
+            # unmeasurable in every era tried, which must still defer.
+        )
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        chash = next(r for r in results if r.label == "Chunk chash conformance")
+        assert chash.warn is True and chash.fatal is False
+        assert "did not run" in chash.detail
+        assert "nexus.chunks" in chash.detail  # names the offending table
+
+    def test_unified_schema_present_never_reinterprets_as_legacy(self, tmp_path):
+        """Safety rail: a genuinely poisoned CURRENT-era store (unified
+        view returns real, non-blank values) must NEVER retry against
+        legacy names or otherwise change interpretation — the era
+        discriminator is only consulted when a blank is observed."""
+        runner = _content_diag_runner(unified_chunks="3", catalog_document_chunks="0")
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        assert not any("to_regclass" in c for c in runner.calls), (
+            "a clean/poisoned unified result must never trigger the era probe"
+        )
+        chash = next(r for r in results if r.label == "Chunk chash conformance")
+        assert "3 chunk row(s)" in chash.detail
+
+    def test_view_absent_and_unified_direct_fallback_absent_retries_legacy_direct(self, tmp_path):
+        """The OLDER straddle shape: the diag view itself was never
+        provisioned on this box (RuntimeError, 'relation ... does not
+        exist'), and the existing direct-table fallback — which still
+        assumes the unified table names — ALSO fails because
+        nexus.chunks does not exist yet. The probe must retry once more
+        against the legacy per-dim direct-table statements before
+        deferring."""
+        runner = _content_diag_runner(
+            # Precise markers, not the bare "nexus.chunks" substring —
+            # that would also false-match chunks_384/768/1024 (which
+            # must SUCCEED here) and the era probe's own to_regclass call.
+            fail_relations=("nexus.diag_chash_conformance", "FROM nexus.chunks "),
+            era_answer="0",  # nexus.chunks absent -> retry legacy
+        )
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        assert [r.label for r in results] == ["Schema migrations"]
+
+
 # ── nexus-5xn3k AC5: dangling manifest chashes ───────────────────────────────
 
 

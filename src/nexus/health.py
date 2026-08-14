@@ -2940,10 +2940,15 @@ def _check_migration_state(
     # WARN, never a false "clean".
     from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred to avoid circular import
         CHASH_CONFORMANCE_LABEL,
+        LEGACY_POISON_CHASH_TABLES,
+        POISON_CHASH_TABLES,
         POISON_DETAIL_TOKEN,
         chash_conformance_statements,
+        chash_era_probe_statement,
         debt_chash_conformance_statements,
         legacy_chash_conformance_statements,
+        legacy_era_chash_conformance_statements,
+        parse_conformance_sum,
     )
     from nexus.db.diag_connection import (  # noqa: PLC0415 — deferred to avoid circular import
         resolve_diag_credentials,
@@ -2969,7 +2974,33 @@ def _check_migration_state(
         ))
         nonconforming = -1
     else:
+        def _run_diag(stmts: tuple[str, ...]) -> list[str]:
+            return run_diagnostic_sql(
+                stmts, diag_creds, psql_bin=psql_bin, psql_runner=diag_runner,
+            )
+
+        def _probe_unified_schema_exists() -> bool:
+            """Existence-gate before reinterpreting a probe result as
+            legacy-era (mirrors ``nexus.db.admin_sql``'s F14a pattern): a
+            failure of the discriminator itself defaults to "assume
+            unified" — the SAFEST default, since it refuses to reinterpret
+            a genuinely poisoned current-era store as legacy-era just
+            because the discriminator itself could not answer."""
+            try:
+                era_out = _run_diag((chash_era_probe_statement(),))
+                return bool(era_out) and era_out[0].strip() == "1"
+            except (RuntimeError, DiagnosticSqlViolation, ValueError) as era_exc:
+                _log.warning(
+                    "chash_probe_era_discriminator_failed",
+                    error=str(era_exc)[:200],
+                    note="could not determine unified-vs-legacy chash "
+                         "schema — assuming unified (never reinterpret a "
+                         "possibly-genuine poison result as legacy-era)",
+                )
+                return True
+
         try:
+            poison_tables = POISON_CHASH_TABLES
             # Amendment A6 (nexus-9bufb): view-era statements first — counts
             # by construction via nexus.diag_chash_conformance. An engine one
             # generation behind (no view yet) fails the first set; the legacy
@@ -2977,10 +3008,7 @@ def _check_migration_state(
             # grants era carries full-table SELECT — fall back LOUDLY (log),
             # never silently.
             try:
-                counts = run_diagnostic_sql(
-                    chash_conformance_statements(), diag_creds,
-                    psql_bin=psql_bin, psql_runner=diag_runner,
-                )
+                counts = _run_diag(chash_conformance_statements())
                 view_era = True
             except DiagnosticSqlViolation:
                 # A LINT failure is a product defect, never an engine-
@@ -3002,11 +3030,75 @@ def _check_migration_state(
                          "direct-table statements (view absent on pre-A6 "
                          "engines, or view/owner grant gap — see error)",
                 )
-                counts = run_diagnostic_sql(
-                    legacy_chash_conformance_statements(), diag_creds,
-                    psql_bin=psql_bin, psql_runner=diag_runner,
-                )
-            nonconforming = sum(int(c) for c in counts)
+                try:
+                    counts = _run_diag(legacy_chash_conformance_statements())
+                except DiagnosticSqlViolation:
+                    raise
+                except (RuntimeError, ValueError) as direct_exc:
+                    # nexus-o8dil (2026-08-14): RDR-191 F14a mirror-direction
+                    # straddle in the poison gate. The view is absent AND the
+                    # unified-name direct fallback also failed — on a
+                    # straddle-era box (past A6, before the RDR-191 unify)
+                    # the unified nexus.chunks relation genuinely does not
+                    # exist yet, so this direct COUNT fails the same way the
+                    # view-path did. Existence-gate before retrying against
+                    # the pre-unify per-dim direct statements; a genuinely
+                    # broken current-era store re-raises the ORIGINAL error
+                    # rather than being silently reinterpreted.
+                    if _probe_unified_schema_exists():
+                        raise
+                    _log.warning(
+                        "chash_probe_direct_fallback_retrying_legacy_era",
+                        error=str(direct_exc)[:200],
+                        note="unified-name direct fallback failed and "
+                             "nexus.chunks does not exist yet — retrying "
+                             "against the pre-RDR-191 per-dim table names",
+                    )
+                    counts = _run_diag(
+                        legacy_chash_conformance_statements(LEGACY_POISON_CHASH_TABLES),
+                    )
+                    poison_tables = LEGACY_POISON_CHASH_TABLES
+
+            # nexus-o8dil (2026-08-14): RDR-191 F14a mirror-direction
+            # straddle in the poison gate (the confirmed shape, GH #1414
+            # class recurrence). The unified view-path query above can
+            # execute successfully yet return a NULL aggregate (blank psql
+            # line) for a table whose relation was created by RDR-191 —
+            # the deployed view was built by an OLDER engine's own
+            # provisioning and still carries rows keyed by the pre-unify
+            # per-dim names, so the unified WHERE filter matches no row.
+            # Existence-gate before reinterpreting: only retry under
+            # legacy names when nexus.chunks provably does not exist yet —
+            # never on a blank leg alone, which a genuinely poisoned
+            # current-era store could also (in principle) produce.
+            if view_era and any(not c.strip() for c in counts) \
+                    and not _probe_unified_schema_exists():
+                try:
+                    legacy_view_counts = _run_diag(
+                        legacy_era_chash_conformance_statements(),
+                    )
+                except DiagnosticSqlViolation:
+                    raise
+                except (RuntimeError, ValueError) as legacy_view_exc:
+                    _log.warning(
+                        "chash_probe_legacy_era_view_fallback_failed",
+                        error=str(legacy_view_exc)[:200],
+                    )
+                    legacy_view_counts = None
+                if legacy_view_counts is not None and not any(
+                    not c.strip() for c in legacy_view_counts
+                ):
+                    _log.info(
+                        "chash_probe_legacy_era_view_match",
+                        note="the unified-name view query returned a NULL "
+                             "aggregate; the store verified via the "
+                             "pre-RDR-191 per-dim table names instead "
+                             "(RDR-191 straddle window)",
+                    )
+                    counts = legacy_view_counts
+                    poison_tables = LEGACY_POISON_CHASH_TABLES
+
+            nonconforming = parse_conformance_sum(poison_tables, counts)
         except (RuntimeError, DiagnosticSqlViolation, ValueError) as exc:
             # Probe failure (schema variant missing a table), lint refusal,
             # or non-numeric output — a WARN, never a false poison-clean.

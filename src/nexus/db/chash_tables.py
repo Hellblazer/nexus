@@ -43,7 +43,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import NamedTuple
+from typing import NamedTuple, Sequence
 
 
 class ProbeState(str, Enum):
@@ -154,6 +154,39 @@ DEBT_CHASH_TABLES: tuple[ChashBearingTable, ...] = tuple(
 )
 
 
+#: RDR-191 F14a mirror-direction straddle in the POISON GATE (nexus-o8dil,
+#: 2026-08-14): the pre-convergence chash-poison probe (``nexus.health.
+#: _check_migration_state``, reused by the install-binary gate and by
+#: ``nx daemon restart-stale``'s convergence check) runs CLIENT-SIDE Python
+#: that already carries the POST-unify :data:`CHASH_BEARING_TABLES` (naming
+#: :data:`CHUNKS_TABLE` = ``"nexus.chunks"``) against a store whose engine
+#: has NOT yet run the migration that creates that relation — the exact
+#: "retargeting early validates against a table that does not exist yet"
+#: class RDR-191 named for ``chash_rekey`` (``nexus.upgrade_ladder.rungs.
+#: chash_rekey``'s ``OCTET_CHECKS`` partition / ``admin_sql.py``'s F14a
+#: existence gate), recurring here for the poison probe instead of a
+#: VALIDATE. This is the PRE-unify per-dim shape the probe must be able to
+#: verify against on an old box: ``chunks_384``/``chunks_768``/
+#: ``chunks_1024`` + ``catalog_document_chunks`` (the last is unchanged
+#: across the unify — included here so this inventory is self-contained,
+#: not because its name differs). Existence-gated at the call site
+#: (``nexus.health._check_migration_state``'s era discriminator), never
+#: assumed — a box that has neither this set nor the unified set is
+#: genuinely unverifiable and defers, per the existing fail-safe.
+LEGACY_CHASH_BEARING_TABLES: tuple[ChashBearingTable, ...] = (
+    ChashBearingTable("nexus.chunks_384", "chash", poison=True),
+    ChashBearingTable("nexus.chunks_768", "chash", poison=True),
+    ChashBearingTable("nexus.chunks_1024", "chash", poison=True),
+    ChashBearingTable("nexus.catalog_document_chunks", "chash", poison=True),
+)
+
+#: The (all-poison) gating subset of the legacy inventory — mirrors
+#: :data:`POISON_CHASH_TABLES` for the pre-unify era.
+LEGACY_POISON_CHASH_TABLES: tuple[ChashBearingTable, ...] = tuple(
+    t for t in LEGACY_CHASH_BEARING_TABLES if t.poison
+)
+
+
 #: The poison-detail matcher token (nexus-jxizy.5): the health probe's
 #: poison HealthResult embeds this exact phrase in its ``detail``, and the
 #: install-binary gate (``commands/daemon.py``) plus the convergence gate
@@ -257,13 +290,50 @@ def chash_conformance_statements() -> tuple[str, ...]:
     aggregate-only shape the ``nexus_diag`` lint accepts. Poison-only BY
     DESIGN (nexus-z5j0t): these feed the install-binary gate, and every
     deployed view generation (5-, 7- or 8-leg) carries these rows, so the
-    gate's behavior is invariant across view generations. The view emits
-    exactly one row per covered table unconditionally, so ``sum`` never
-    returns NULL here."""
+    gate's behavior is invariant across view generations.
+
+    CAVEAT (nexus-o8dil, 2026-08-14, RDR-191 F14a mirror-direction straddle
+    in the poison gate — GH #1414 class recurrence): "every deployed view
+    generation carries these rows" is true only when the deployed view was
+    (re)created under the SAME table-name era this function filters by. A
+    store whose engine has not yet migrated to the unified ``nexus.chunks``
+    relation can still have a LIVE, queryable view — just one built by an
+    OLDER engine's provisioning, keyed by the PRE-unify per-dim names. This
+    function's ``WHERE table_name = 'nexus.chunks'`` leg then matches no
+    row, and ``sum`` legitimately returns NULL (psql renders an empty
+    line) — callers MUST treat that as unmeasured, never assume it cannot
+    happen. :func:`legacy_era_chash_conformance_statements` is the
+    era-matched counterpart for that straddle window; see
+    ``nexus.health._check_migration_state``'s era discriminator."""
     return tuple(
         f"SELECT sum(non_conformant) FROM {DIAG_CONFORMANCE_VIEW} "
         f"WHERE table_name = '{t.table}'"
         for t in POISON_CHASH_TABLES
+    )
+
+
+def legacy_era_chash_conformance_statements() -> tuple[str, ...]:
+    """The view-path statements, but filtered by the PRE-RDR-191 per-dim
+    table names (:data:`LEGACY_POISON_CHASH_TABLES`) instead of the unified
+    set.
+
+    RDR-191 F14a mirror-direction straddle in the poison gate (nexus-o8dil,
+    2026-08-14): on a store whose engine has not yet run the migration
+    that creates ``nexus.chunks``, the deployed ``nexus.diag_chash_
+    conformance`` view — built by that OLDER engine's own provisioning —
+    still carries rows keyed by ``chunks_384``/``chunks_768``/
+    ``chunks_1024``/``catalog_document_chunks``, not ``nexus.chunks``.
+    :func:`chash_conformance_statements`'s unified filter matches no row
+    there (NULL aggregate, empty psql line); these statements are the
+    era-matched query against the SAME view for that window. Callers
+    choose between the two sets via an existence probe on ``nexus.chunks``
+    (``nexus.health._check_migration_state``), never by guessing from a
+    blank result — a genuinely poisoned unified store must not be
+    misread as "must be legacy-era" just because a leg came back empty."""
+    return tuple(
+        f"SELECT sum(non_conformant) FROM {DIAG_CONFORMANCE_VIEW} "
+        f"WHERE table_name = '{t.table}'"
+        for t in LEGACY_POISON_CHASH_TABLES
     )
 
 
@@ -281,16 +351,80 @@ def debt_chash_conformance_statements() -> tuple[str, ...]:
     )
 
 
-def legacy_chash_conformance_statements() -> tuple[str, ...]:
+def legacy_chash_conformance_statements(
+    tables: tuple[ChashBearingTable, ...] = POISON_CHASH_TABLES,
+) -> tuple[str, ...]:
     """The pre-A6 direct-table counts. The health probe FALLS BACK to these
-    when the view is absent (an engine older than the A6 changeset) — the
-    old grants era still carries full-table SELECT, so the fallback works
-    exactly as before; without it the install-binary gate would fail loud on
-    every store one engine-generation behind. Poison-only: pre-A6 engines
-    predate the telemetry-001 debt tables, so direct debt counts there would
-    fail on missing relations. Same era-safe ``octet_length`` predicate as
-    the view (see :func:`diag_conformance_view_ddl`)."""
+    when the view is absent (an engine older than the A6 changeset, or —
+    nexus-o8dil, 2026-08-14 — a straddle-era box where the view has never
+    been provisioned at all) — the old grants era still carries full-table
+    SELECT (the A6 ``grants-nexus-diag-2`` REVOKE only fires once the view
+    EXISTS, so "view absent" and "direct SELECT still granted" go
+    together), so the fallback works exactly as before; without it the
+    install-binary gate would fail loud on every store one engine-
+    generation behind. Poison-only: pre-A6 engines predate the
+    telemetry-001 debt tables, so direct debt counts there would fail on
+    missing relations. Same era-safe ``octet_length`` predicate as the view
+    (see :func:`diag_conformance_view_ddl`).
+
+    *tables* defaults to :data:`POISON_CHASH_TABLES` (the unified set,
+    unchanged prior behavior). Pass :data:`LEGACY_POISON_CHASH_TABLES` for
+    the RDR-191 straddle window's pre-unify per-dim shape — SAME direct-
+    count mechanism, different table names, so the two eras cannot drift
+    apart on the predicate itself."""
     return tuple(
         f"SELECT count(*) FROM {t.table} WHERE octet_length({t.column}) <> 32"
-        for t in POISON_CHASH_TABLES
+        for t in tables
     )
+
+
+def chash_era_probe_statement(table: str = CHUNKS_TABLE) -> str:
+    """A lint-legal, grant-free existence probe for *table* (nexus-o8dil,
+    2026-08-14): ``to_regclass`` is a metadata function callable by ANY
+    role regardless of the A6 ``grants-nexus-diag-2`` direct-table-SELECT
+    revoke, and the statement has no ``FROM`` clause, so
+    :mod:`nexus.remediation.sql_lint`'s aggregate-only content guard never
+    applies to it (nothing to fail-closed on). Used by the pre-convergence
+    poison probe as the era discriminator: ``nexus.chunks`` existing means
+    the unified (post-RDR-191) statement set applies; its absence means
+    either the pre-unify per-dim shape or a genuinely-unprovisioned store —
+    the caller falls through to :data:`LEGACY_POISON_CHASH_TABLES` and,
+    failing that too, the existing unverifiable/defer path."""
+    return f"SELECT (to_regclass('{table}') IS NOT NULL)::int"
+
+
+def parse_conformance_sum(
+    tables: tuple[ChashBearingTable, ...], outputs: Sequence[str],
+) -> int:
+    """Defensively sum per-table diagnostic COUNT outputs against *tables*
+    (nexus-o8dil, 2026-08-14 — RDR-191 F14a mirror-direction straddle in
+    the poison gate, GH #1414-class recurrence). A bare
+    ``sum(int(c) for c in outputs)`` turns ANY blank/NULL aggregate
+    (era-mismatched view row, a partial result) into an opaque
+    ``ValueError: invalid literal for int() with base 10: ''`` that names
+    no table and gives the operator nothing to act on. This raises the
+    SAME exception type (callers' existing ``except ... ValueError``
+    degrade-cleanly handling is unchanged) but always NAMES the probed
+    table, so "which table couldn't be verified" survives into the
+    surfaced detail instead of being lost at the ``int()`` boundary."""
+    if len(tables) != len(outputs):
+        raise ValueError(
+            f"conformance probe returned {len(outputs)} result(s) for "
+            f"{len(tables)} statement(s) — a partial scan is not a clean store"
+        )
+    total = 0
+    for t, raw in zip(tables, outputs):
+        stripped = raw.strip()
+        if not stripped:
+            raise ValueError(
+                f"empty/NULL conformance count for {t.table!r} — the "
+                "counted view carries no row for that table (stale or "
+                "era-mismatched view generation)"
+            )
+        try:
+            total += int(stripped)
+        except ValueError as exc:
+            raise ValueError(
+                f"non-numeric conformance count for {t.table!r}: {stripped!r}"
+            ) from exc
+    return total
