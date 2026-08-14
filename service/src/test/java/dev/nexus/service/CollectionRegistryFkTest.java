@@ -31,11 +31,16 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * COLLECTION FK ON nexus.chunks UNTIL PHASE 5" note, the three per-dim
  * {@code chunks_<dim>_collection_fk} constraints this class was written
  * against die with their tables and are NOT re-added on the unified table
- * until Phase 5 (beads nexus-o8dil.29 local / .31 cloud) — a deliberate,
- * documented, bounded risk window, not an oversight. Every test method below
- * that asserts the chunks FK REJECTS an unregistered/cross-tenant insert, or
- * that a chunks FK exists/validates, is {@code @Disabled} pending Phase 5
- * with an inline pointer back to this note. CONTROL tests (registered insert
+ * until Phase 5 — the collection-FK family's bead home is nexus-o8dil.49
+ * (its own title/description carry a flagged ownership ambiguity as of the
+ * nexus-a66gd critique, T2 [22546]: nexus-o8dil.29/.31 scope the MANIFEST FK
+ * only, not this collection FK; resolve at the o8dil.23 Phase-5 planning
+ * pass) — a deliberate, documented, bounded risk window, not an oversight.
+ * Every test method below that asserts the chunks FK REJECTS an
+ * unregistered/cross-tenant insert, or that a chunks FK exists/validates, is
+ * {@code @Disabled} pending Phase 5, re-enabling when the unified collection
+ * FK lands — whichever bead the Phase-5 planning pass ultimately assigns it
+ * to — with an inline pointer back to this note. CONTROL tests (registered insert
  * accepted) and app-level tests (delete, rename, auto-register) that do not
  * depend on the FK's presence are retargeted to the unified table and stay
  * enabled. The {@code chunks_<dim>_chash_len_check} CHECK-rejection tests
@@ -119,7 +124,8 @@ class CollectionRegistryFkTest {
     // ── Constraint names (fixed contract; P0.2 will use exactly these) ─────────
     // RDR-191 Phase 4: the three chunks_<dim>_collection_fk constraints died with
     // their tables (vectors-004-unify-chunks.xml) and are NOT re-added on the
-    // unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) — see class javadoc.
+    // unified nexus.chunks until Phase 5 (collection-FK family home: nexus-o8dil.49,
+    // ownership flagged ambiguous — see class javadoc).
     // Kept as constants (still referenced by the now-@Disabled tests below) but
     // removed from the "currently live" FK name list.
     private static final String FK_CHUNKS_384  = "chunks_384_collection_fk";
@@ -258,7 +264,7 @@ class CollectionRegistryFkTest {
 
     @Test @Order(11)
     @Disabled("RDR-191 Phase 4: chunks_384_collection_fk died with chunks_384 and is not "
-        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
+        + "re-added on the unified nexus.chunks until Phase 5 (collection-FK family home: nexus-o8dil.49, ownership flagged ambiguous -- see class javadoc).")
     void chunks384_unregisteredCollection_rejected() throws Exception {
         // RED until P0.2 adds chunks_384_collection_fk.
         try (Connection su = pg.createConnection("")) {
@@ -298,7 +304,7 @@ class CollectionRegistryFkTest {
 
     @Test @Order(13)
     @Disabled("RDR-191 Phase 4: chunks_768_collection_fk died with chunks_768 and is not "
-        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
+        + "re-added on the unified nexus.chunks until Phase 5 (collection-FK family home: nexus-o8dil.49, ownership flagged ambiguous -- see class javadoc).")
     void chunks768_unregisteredCollection_rejected() throws Exception {
         // RED until P0.2 adds chunks_768_collection_fk.
         try (Connection su = pg.createConnection("")) {
@@ -338,7 +344,7 @@ class CollectionRegistryFkTest {
 
     @Test @Order(15)
     @Disabled("RDR-191 Phase 4: chunks_1024_collection_fk died with chunks_1024 and is not "
-        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
+        + "re-added on the unified nexus.chunks until Phase 5 (collection-FK family home: nexus-o8dil.49, ownership flagged ambiguous -- see class javadoc).")
     void chunks1024_unregisteredCollection_rejected() throws Exception {
         // RED until P0.2 adds chunks_1024_collection_fk.
         try (Connection su = pg.createConnection("")) {
@@ -494,7 +500,8 @@ class CollectionRegistryFkTest {
     @Test @Order(60)
     @Disabled("RDR-191 Phase 4: chunks_384_collection_fk (and its ON DELETE RESTRICT) died "
         + "with chunks_384 and is not re-added on the unified nexus.chunks until Phase 5 "
-        + "(nexus-o8dil.29/.31) -- see class javadoc.")
+        + "(collection-FK family home: nexus-o8dil.49, ownership flagged ambiguous -- see "
+        + "class javadoc).")
     void deleteCollection_withLiveChunk384_isRejected() throws Exception {
         // RED until P0.2 adds chunks_384_collection_fk ON DELETE RESTRICT.
         try (Connection su = pg.createConnection("")) {
@@ -916,7 +923,7 @@ class CollectionRegistryFkTest {
 
     @Test @Order(100)
     @Disabled("RDR-191 Phase 4: chunks_384_collection_fk died with chunks_384 and is not "
-        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
+        + "re-added on the unified nexus.chunks until Phase 5 (collection-FK family home: nexus-o8dil.49, ownership flagged ambiguous -- see class javadoc).")
     void chunks384_crossTenantCollection_rejected() throws Exception {
         // RED until P0.2 adds chunks_384_collection_fk.
         // Collection registered ONLY under TENANT_B; INSERT as TENANT_A must be rejected
@@ -942,7 +949,7 @@ class CollectionRegistryFkTest {
 
     @Test @Order(101)
     @Disabled("RDR-191 Phase 4: chunks_384_collection_fk died with chunks_384 and is not "
-        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
+        + "re-added on the unified nexus.chunks until Phase 5 (collection-FK family home: nexus-o8dil.49, ownership flagged ambiguous -- see class javadoc).")
     void chunks384_crossTenantCollection_viaRlsPosture_rejected() throws Exception {
         // RED until P0.2 adds chunks_384_collection_fk.
         // RLS-posture variant: svc role under FORCE RLS with GUC=TENANT_A tries to insert
@@ -1194,7 +1201,7 @@ class CollectionRegistryFkTest {
 
     @Test @Order(130)
     @Disabled("RDR-191 Phase 4: chunks_384_collection_fk died with chunks_384 and is not "
-        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
+        + "re-added on the unified nexus.chunks until Phase 5 (collection-FK family home: nexus-o8dil.49, ownership flagged ambiguous -- see class javadoc).")
     void reconcileThenValidate_chunks384_gapWindowOrphan() throws Exception {
         final String T = "crfk-p03-c384";
         final String COL = "p03-orphan-c384";
@@ -1210,7 +1217,7 @@ class CollectionRegistryFkTest {
 
     @Test @Order(131)
     @Disabled("RDR-191 Phase 4: chunks_768_collection_fk died with chunks_768 and is not "
-        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
+        + "re-added on the unified nexus.chunks until Phase 5 (collection-FK family home: nexus-o8dil.49, ownership flagged ambiguous -- see class javadoc).")
     void reconcileThenValidate_chunks768_gapWindowOrphan() throws Exception {
         final String T = "crfk-p03-c768";
         final String COL = "p03-orphan-c768";
@@ -1226,7 +1233,7 @@ class CollectionRegistryFkTest {
 
     @Test @Order(132)
     @Disabled("RDR-191 Phase 4: chunks_1024_collection_fk died with chunks_1024 and is not "
-        + "re-added on the unified nexus.chunks until Phase 5 (nexus-o8dil.29/.31) -- see class javadoc.")
+        + "re-added on the unified nexus.chunks until Phase 5 (collection-FK family home: nexus-o8dil.49, ownership flagged ambiguous -- see class javadoc).")
     void reconcileThenValidate_chunks1024_gapWindowOrphan() throws Exception {
         final String T = "crfk-p03-c1024";
         final String COL = "p03-orphan-c1024";

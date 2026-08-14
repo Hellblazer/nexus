@@ -22,11 +22,44 @@ WHAT IS BANNED: ``chunks_384`` / ``chunks_768`` / ``chunks_1024`` /
   * ``tests/**/*.py``, ``tests/**/*.sh``, ``tests/**/*.java`` (the last glob
     resolves to zero files today — ``tests/`` is Python+shell only — kept
     wired per the bead's literal scope in case a Java test ever lands there)
+  * ``service/src/test/java/**/*.java`` (nexus-a66gd, 2026-08-14: the
+    carve-out nexus-evqoc left for this tree. All 45 files the nexus-evqoc
+    audit found here were individually classified, not merely grep-swept —
+    every one is LEGITIMATE (RDR-191-unification historical narration,
+    migration-mechanic tests exercising vectors-004/taxonomy-007 themselves,
+    the chash-conformance wire-compat label, one negative-assertion
+    completeness proof, and one synthetic unrelated fixture); zero were
+    genuinely stale, so this pass added allowlist entries only, no code
+    fixes. See ``_COUNT_PINNED_FILE_ALLOWLIST`` for the per-file reasons.
+    A substantive-critic pass on this batch (T2 [22546]) flagged and this
+    module fixed two follow-ups: CollectionRegistryFkTest's re-enable
+    pointer named the wrong bead (nexus-o8dil.29/.31 scope only the
+    MANIFEST FK; the collection-FK family's actual home is nexus-o8dil.49,
+    itself now flagged with an ownership ambiguity for the Phase-5
+    planning pass to resolve), and CatalogPurgeTrashTest's reason
+    mis-bucketed 2 of its 8 hits as pure historical prose when they are
+    live wire-compat field-name references inside AssertJ ``.as(...)``
+    description strings, not comments.)
 
-``service/src/test/java/**`` is deliberately OUT of scope (tracked as its own
-follow-up, nexus-a66gd): the bead's scope names ``service/src/main/java/**``
-only, not the test tree, and that tree carries 45+ files of its own
-legacy-era fixture debt that is a separate, unscoped cleanup.
+    WHY NO COMMENT-VS-CODE AUTO-CLASSIFIER (substantive-critic, T2
+    [22546]): the CatalogPurgeTrashTest follow-up above raises the obvious
+    next question — why not have the lint itself distinguish a Java
+    comment / Python comment / shell comment from a live code token, so
+    "historical prose" claims in allowlist reasons are machine-verified
+    instead of hand-asserted? Deliberately not built: parsing three
+    languages' comment grammars (Java ``//``/``/* */``/javadoc, Python
+    ``#``/docstrings, shell ``#``) correctly enough to trust a lint
+    decision on is real per-language tokenizer machinery, and the actual
+    incidents this lint exists to catch (nexus-rmver's 26 E-class sites,
+    the azx14 P1) were never comment-vs-code misclassifications — they
+    were genuinely-live SQL/queries against dropped tables, which the
+    banned-token regex already catches regardless of whether the
+    surrounding line is a comment. Count pins plus a human-written,
+    per-file reason already carry the comment-vs-code judgment call (and
+    get it wrong occasionally, as CatalogPurgeTrashTest's fix above
+    shows) at a fraction of the authoring and maintenance cost of a
+    real multi-language comment parser; that tradeoff is revisited only
+    if a real incident turns on this distinction, not preemptively.
 
 ALLOWLIST DESIGN — COUNT PINS, NOT FILE-LEVEL EXEMPTIONS (nexus-bxcgh,
 substantive-critic round 1, 2026-08-14): the first version of this lint used
@@ -134,8 +167,10 @@ _JAVA_GLOBS = (
 )
 _SCRIPTS_GLOBS = ("scripts/**/*.sh", "scripts/**/*.py")
 _TEST_GLOBS = ("tests/**/*.py", "tests/**/*.sh", "tests/**/*.java")
+#: nexus-a66gd: the service/src/test/java carve-out nexus-evqoc left open.
+_JAVA_TEST_GLOBS = ("service/src/test/java/**/*.java",)
 
-_ALL_GLOBS = _SRC_GLOBS + _JAVA_GLOBS + _SCRIPTS_GLOBS + _TEST_GLOBS
+_ALL_GLOBS = _SRC_GLOBS + _JAVA_GLOBS + _SCRIPTS_GLOBS + _TEST_GLOBS + _JAVA_TEST_GLOBS
 
 # ── Allowlists (every entry requires a reason) ──────────────────────────────
 
@@ -302,18 +337,15 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "does not move this pin.)"
     ),
     "service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java": (
-        11,
-        "OUT OF SCOPE for this diff: concurrently owned by a sibling agent "
-        "doing dim-predicate work on this exact file — its count moved 8 -> "
-        "11 between this lint's first draft and this remediation pass, "
-        "confirming the file is genuinely in flux. Pin is the count AS OF "
-        "THIS COMMIT ONLY, explicitly NOT verified line-by-line the way "
-        "every other pinned file was — do not treat a future re-pin here as "
-        "evidence of review the way it would be elsewhere. Re-audit "
-        "line-by-line once the sibling's work lands (nexus-evqoc follow-up "
-        "if any genuinely-stale line surfaces); until then this pin exists "
-        "only so this lint does not block on a file it must not touch, and "
-        "it WILL re-trip (correctly) the moment that count changes again."
+        12,
+        "Line-by-line audited at the nexus-74zvm/3rprg commit (the dim-"
+        "predicate work that had this file in flux during the lint's own "
+        "drafting): all 12 hits are historical/decision prose — the D1-"
+        "hazard and anchor DECISION comments (incl. the 'chunks_384/768/"
+        "1024 unification' narrative phrase that moved the count 11 -> 12) "
+        "and pre-existing RDR-191 history javadoc. Zero executable "
+        "per-dim SQL. The nexus-gjwhu residual-disclosure paragraph was "
+        "deliberately phrased without a bare banned token."
     ),
     "service/src/main/java/dev/nexus/service/db/ChashSqlIdioms.java": (
         3,
@@ -495,6 +527,311 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "exactly across an unrelated RDR-109 rename) — explanatory, not a "
         "stale reference."
     ),
+    # ── service/src/test/java: nexus-a66gd (2026-08-14) — the carve-out
+    #    nexus-evqoc left open. All 45 files below were individually
+    #    classified against the real diff, not grep-swept: every one is
+    #    LEGITIMATE. Grouped by the same shape the src/java pins above use.
+    # ── migration-mechanic tests: exercise the vectors-004/taxonomy-007
+    #    unification changesets THEMSELVES, so per-dim table names are the
+    #    subject under test, not debris. Canonical LEGITIMATE per the bead's
+    #    own caution. ──────────────────────────────────────────────────────
+    "service/src/test/java/dev/nexus/service/VectorsUnifyChunksIntegrationTest.java": (
+        30,
+        "RDR-191 Phase 4 core: the ALWAYS-COPY migration test collapsing "
+        "nexus.chunks_384/768/1024 into ONE nexus.chunks (vectors-004-unify-"
+        "chunks.xml). The per-dim names are this changeset's own subject "
+        "under test, not stale debris."
+    ),
+    "service/src/test/java/dev/nexus/service/VectorsUnifyCentroidsIntegrationTest.java": (
+        19,
+        "The centroid-family sibling of VectorsUnifyChunksIntegrationTest: "
+        "tests taxonomy-007-unify-centroids.xml collapsing "
+        "taxonomy_centroids_384/768/1024 into ONE taxonomy_centroids. Same "
+        "reason as that file."
+    ),
+    "service/src/test/java/dev/nexus/service/SchemaMigratorIntegrationTest.java": (
+        26,
+        "SchemaMigrator end-to-end integration test: runs the FULL "
+        "changelog including the vectors-004/taxonomy-007 unification "
+        "changesets and their rollback blocks, so it necessarily names the "
+        "per-dim tables the migration creates-then-collapses and the "
+        "rollback round-trips back to. Canonical LEGITIMATE per the bead's "
+        "own caution about SchemaMigratorIntegrationTest."
+    ),
+    "service/src/test/java/dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java": (
+        35,
+        "nexus-4m6i0.6 upgrade-rehearsal suite: injects a pre-unify schema "
+        "divergence and upgrades it to HEAD across the vectors-004/"
+        "taxonomy-007 changesets, then asserts the per-dim tables are GONE "
+        "at HEAD (a completeness proof, not a live reference) plus straddle-"
+        "window content-preservation checks that must name the source "
+        "per-dim tables by construction."
+    ),
+    # ── straddle-era FK test with forward-looking @Disabled bodies pending
+    #    Phase 5 (nexus-o8dil.49 — collection-FK family home; see file's own
+    #    class javadoc for the ownership-ambiguity flag) ────────────────────
+    "service/src/test/java/dev/nexus/service/CollectionRegistryFkTest.java": (
+        38,
+        "RDR-156 nexus-70r3c.1 FK+hygiene suite. Per the class's own "
+        "top-of-file STATUS NOTE, the three chunks_<dim>_collection_fk "
+        "constraints die with their tables and are not re-added on the "
+        "unified nexus.chunks until Phase 5; every test method asserting "
+        "that FK's presence/behavior is @Disabled with an inline pointer "
+        "back to the note, and its dead-but-intentional SQL bodies "
+        "(INSERT INTO nexus.chunks_384/768/1024) are preserved verbatim so "
+        "they can be re-enabled unchanged at Phase 5. Deliberate, "
+        "documented, bounded — not an oversight. RETARGETED (nexus-a66gd "
+        "substantive-critic remediation, 2026-08-14): the re-enable pointer "
+        "originally named nexus-o8dil.29/.31, but those beads' description "
+        "scopes only the MANIFEST FK (catalog_document_chunks -> "
+        "nexus.chunks), not this COLLECTION FK (chunks -> "
+        "catalog_collections). The collection-FK family's actual bead home "
+        "is nexus-o8dil.49 — whose own title/description carry a flagged "
+        "ownership ambiguity, to be resolved at the o8dil.23 Phase-5 "
+        "planning pass. Pointer updated in both the .java file and here; "
+        "pin count unchanged (comment-only edit, no banned-token count "
+        "delta)."
+    ),
+    # ── deliberate wire-compat label: chash_conformance_report(dim)'s
+    #    table_name column, same pattern as the Python conformance-report
+    #    test and the changelog directory allowlist. ─────────────────────
+    "service/src/test/java/dev/nexus/service/ChashConformanceReportIntegrationTest.java": (
+        3,
+        "tableRow(report, \"nexus.chunks_768\") reads chash_conformance_"
+        "report(dim)'s DELIBERATE wire-compat table_name label — the same "
+        "label test_du2dw_chash_conformance_report_engine.py and the "
+        "changelog directory's allowlist reason both name as intentional, "
+        "not stale."
+    ),
+    # ── negative-assertion completeness proof (mirrors "
+    #    test_diag_conformance_view.py's pin) ────────────────────────────
+    "service/src/test/java/dev/nexus/service/vectors/ReferenceOnlySqlShapeTest.java": (
+        1,
+        "doesNotContain(\"chunks_1024\") — a positive proof the SQL shape "
+        "under test does NOT reference the retired per-dim table, not a "
+        "live reference to one. Mirrors test_diag_conformance_view.py's "
+        "allowlist reason."
+    ),
+    # ── synthetic fixture: an arbitrary example key, unrelated to real
+    #    table/column content (mirrors the tests/ synthetic-fixture group) ──
+    "service/src/test/java/dev/nexus/service/http/RekeyJobsTest.java": (
+        1,
+        "ENVELOPE = Map.of(\"disposition\", \"rekeyed\", \"chunks_1024\", 12) "
+        "is a made-up async-job-result fixture exercising RekeyJobs' poll/"
+        "terminal-state mechanics; \"chunks_1024\" here is an arbitrary "
+        "example key, not a query against or reference to the real table."
+    ),
+    # ── pure historical prose (javadoc/comment narrating the RDR-191
+    #    unification, mirrors the service/src/main/java historical-prose
+    #    group above; no live per-dim SQL target remains in any of these) ──
+    "service/src/test/java/dev/nexus/service/CatalogDeleteCollectionCascadeTest.java": (
+        7,
+        "Comments narrating the RDR-191 unification of chunks_384/768/1024 "
+        "and taxonomy_centroids_384/768/1024 into nexus.chunks / "
+        "nexus.taxonomy_centroids; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/CatalogEngineDefects70Test.java": (
+        1,
+        "Javadoc narrating a seeded nexus.chunks row as 'RDR-191 unified; "
+        "formerly chunks_1024'; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/CatalogManifestSweepRepositoryTest.java": (
+        5,
+        "Comments narrating the RDR-191 unification of chunks_384/768/1024 "
+        "into nexus.chunks; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/CatalogPurgeTrashTest.java": (
+        8,
+        "6 of the 8 hits are comments/javadoc narrating chunks_384 as the "
+        "pre-unify fixture table (historical, mirrors "
+        "CatalogDeleteCollectionCascadeTest). The other 2 (lines 380, 540) "
+        "are inside .as(...) AssertJ description strings in LIVE test code, "
+        "not comments — corrected from an earlier 'historical prose' "
+        "mis-bucketing (nexus-a66gd substantive-critic remediation, "
+        "2026-08-14): they name chunks_384_stranded, a REAL wire-compat "
+        "field name CatalogRepository.java's purge-preview map actually "
+        "returns (a live label, not dead prose) — same wire-compat-label "
+        "class as ChashConformanceReportIntegrationTest's pin above, just "
+        "in an assertion description rather than a map-key lookup."
+    ),
+    "service/src/test/java/dev/nexus/service/CatalogPurgeTrashVacuumTest.java": (
+        1,
+        "Comment narrating nexus.chunks as 'RDR-191 unified; formerly "
+        "chunks_384', the table this VACUUM-observability fixture actually "
+        "wrote to; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/CatalogRenameCollectionTest.java": (
+        5,
+        "Comments narrating the RDR-191 unification; historical only, "
+        "mirrors CatalogDeleteCollectionCascadeTest's allowlist reason."
+    ),
+    "service/src/test/java/dev/nexus/service/CatalogRepositoryTest.java": (
+        3,
+        "Comments narrating the RDR-191 unification (chunks_384/768/1024 -> "
+        "nexus.chunks, chunks_768 as a pre-unify FK-target example); "
+        "historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/ChashProbePlanShapeTest.java": (
+        1,
+        "Javadoc narrating the RDR-191 Phase 4 retarget from three per-dim "
+        "tables to the unified nexus.chunks with a single index; historical "
+        "only."
+    ),
+    "service/src/test/java/dev/nexus/service/ChashRepositoryTest.java": (
+        2,
+        "Javadoc/comment narrating the RDR-191 Phase 4 lane D5 collapse of "
+        "chunks_384/768/1024; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/ChunksRlsBehavioralTest.java": (
+        2,
+        "Javadoc narrating the RDR-191 Phase 4 unification of "
+        "nexus.chunks_384/768/1024 into nexus.chunks; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/CollectionRegistryFkExtraTest.java": (
+        1,
+        "Javadoc narrating chunks_384/768/1024 as unified into nexus.chunks "
+        "under RDR-191 Phase 4; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/CollectionVectorStatsTest.java": (
+        4,
+        "Javadoc/comments narrating collection_vector_stats as aggregating "
+        "across the (now-unified) chunks_384/768/1024; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/CombinedQueryParityTest.java": (
+        1,
+        "Comment narrating the RDR-191 Phase 4 unification of "
+        "chunks_384/768/1024 into nexus.chunks; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/db/ManifestInsertGateTest.java": (
+        1,
+        "Javadoc narrating the alias-map resolution as joining against "
+        "nexus.chunks ('RDR-191 Phase 4 unified; formerly "
+        "chunks_384/768/1024'); historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/db/RawSqlGateTest.java": (
+        3,
+        "Javadoc narrating the RAW-SQL canary's RETARGET from "
+        "chunks_384/768/1024 and taxonomy_centroids_384/768/1024 onto the "
+        "unified tables, plus a reference to grants-003's frozen pre-unify "
+        "MAINTAIN list; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/db/TenantScopeVacuumAllowlistTest.java": (
+        2,
+        "Comments narrating the pre-unification five-table allowlist and "
+        "its RDR-191 collapse into nexus.chunks; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/db/TenantScopeVacuumMaintainGrantParityTest.java": (
+        1,
+        "Javadoc narrating chunks_384/768/1024 under the pre-unify "
+        "grants-003-purge-vacuum-maintain changeset; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/EmbeddingModeFailLoudTest.java": (
+        1,
+        "Comment narrating the live nexus-pebfx.8 failure class as a "
+        "prefix-routing 400 against 'the chunks_384 table'; historical "
+        "only, describes a fixed bug."
+    ),
+    "service/src/test/java/dev/nexus/service/GraphHopParityTest.java": (
+        1,
+        "Comment narrating the RDR-191 Phase 4 unification of "
+        "chunks_384/768/1024 into nexus.chunks; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/ManifestCollectionStampTest.java": (
+        1,
+        "Javadoc narrating a planted nexus.chunks row as 'RDR-191 unified; "
+        "formerly chunks_1024'; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/ManifestFunctionsTest.java": (
+        2,
+        "Comment/javadoc narrating the RDR-191 unification of "
+        "chunks_384/768/1024 into nexus.chunks; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/ManifestVerifyTest.java": (
+        2,
+        "Comment/javadoc narrating the OR-across-chunks_384/768/1024 shape "
+        "the unified table's no-OR query replaced; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/nativeimage/JooqRecordReflectionFeatureTest.java": (
+        2,
+        "Comment narrating the RDR-191 changeset pair collapsing six "
+        "per-dim tables into two unified tables; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/PgVectorCombinedQueryContractTest.java": (
+        1,
+        "Comment narrating the RDR-191 Phase 4 unification of "
+        "chunks_384/768/1024 into nexus.chunks; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/PgVectorHybridSearchContractTest.java": (
+        1,
+        "Comment narrating the RDR-191 Phase 4 unification of "
+        "chunks_384/768/1024 into nexus.chunks; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/PgVectorRepositoryContractTest.java": (
+        2,
+        "Comment/javadoc narrating the RDR-191 Phase 4 unification and the "
+        "pre-unify 'nothing in chunks_768' assertion shape it replaced; "
+        "historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/PgVectorRepositoryRawSqlPlanShapeTest.java": (
+        1,
+        "Javadoc narrating the chunks_384/768/1024 -> nexus.chunks "
+        "unification; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/PgVectorServingContractTest.java": (
+        1,
+        "Comment narrating a superuser fixture table as 'RDR-191 Phase 4; "
+        "formerly chunks_1024'; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/Rdr71gw2CollectionNotNullTest.java": (
+        3,
+        "Comments/javadoc narrating that the pre-fk-002 gap ran against "
+        "nexus.chunks_384/768/1024 directly, and nexus.chunks as 'RDR-191 "
+        "unified; formerly chunks_384/768/1024'; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/RdrO8dil7GlobalManifestAntiJoinTest.java": (
+        3,
+        "Javadoc/comments narrating a manifest row as 'RDR-191 Phase 4 "
+        "unified; formerly chunks_384/768/1024'; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/RekeyOpsIntegrationTest.java": (
+        5,
+        "Comments narrating the RDR-191 repoint's pre-unification content "
+        "layout (content living in chunks_384 vs chunks_768 across "
+        "collections) that the rekey fixtures' setup narrates for context; "
+        "historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/SoftDeleteTest.java": (
+        3,
+        "Javadoc/comments narrating the pre-unify 384/768/1024 fixture "
+        "shape and nexus.chunks as 'RDR-191 Phase 4 unified; formerly a "
+        "chunks_384 row'; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/StagingPromoteOpsIntegrationTest.java": (
+        3,
+        "Comments narrating a branch that used to be hardcoded to "
+        "chunks_768 only, and the RDR-191 repoint collapsing "
+        "chunks_384/768/1024; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/TaxonomyCentroidHandlerTest.java": (
+        1,
+        "Comment narrating that the taxonomy_centroids_384/768/1024 tables "
+        "no longer exist; a completeness note, not a live reference."
+    ),
+    "service/src/test/java/dev/nexus/service/TaxonomyCentroidRepositoryTest.java": (
+        1,
+        "Comment narrating the RDR-191 Phase 4 lane D5 unification of "
+        "nexus.taxonomy_centroids_384/768/1024; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/TaxonomyCentroidSchemaLiquibaseTest.java": (
+        1,
+        "Javadoc narrating nexus.taxonomy_centroids_384/768/1024 as unified "
+        "into ONE table; historical only."
+    ),
+    "service/src/test/java/dev/nexus/service/vectors/PgVectorRepositoryDimGuardTest.java": (
+        3,
+        "Javadoc narrating the pre-unify per-dim chunks_384/768/1024 tables "
+        "the dim guard used to key off of; historical only."
+    ),
 }
 
 
@@ -552,6 +889,9 @@ def test_globs_resolve_to_files() -> None:
         "service/src/main/java/**/*.java glob looks broken"
     )
     assert len(list(REPO_ROOT.glob("tests/**/*.py"))) >= 100, "tests/**/*.py glob looks broken"
+    assert len(list(REPO_ROOT.glob("service/src/test/java/**/*.java"))) >= 40, (
+        "service/src/test/java/**/*.java glob looks broken"
+    )
 
 
 def test_detector_fires_on_a_synthetic_banned_reference(tmp_path) -> None:
