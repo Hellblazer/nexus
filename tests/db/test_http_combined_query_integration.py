@@ -672,10 +672,28 @@ def test_append_and_import_seams_stamp_collection(cat_client, vec_client) -> Non
     stamp ``document_chunks.collection`` (substantive-critic finding 2,
     2026-07-09): ``appendManifestChunks`` (via
     ``HttpCatalogClient.append_manifest_chunks``) and ``importChunksBatch``
-    (via ``POST /v1/catalog/import/chunk`` — the exact envelope the
-    migration orchestrator sends, see
-    ``src/nexus/migration/orchestrator.py`` fill_missing_document_chunks
-    import_fn).
+    (via ``POST /v1/catalog/import/chunk``).
+
+    The import leg is posted RAW (``cat_client._post``) on purpose: the route
+    has NO client method — its only caller was the since-deleted
+    ``src/nexus/db/t2/catalog_etl.py`` (nexus-i711w Stage 2 sub-stage A), and
+    it is carried as a deliberate exclusion in
+    ``tests/catalog/test_fake_catalog_handler_route_census.py``. (The pre-
+    RDR-191 wording here pointed at ``src/nexus/migration/orchestrator.py``
+    fill_missing_document_chunks as the envelope's production twin; that
+    module no longer exists — RDR-155 P4b deleted the guided-migration
+    surface — so the raw body below is the whole of this route's Python-side
+    coverage.) That makes this hand-built body the ONLY place a wire-contract
+    change to the route can be caught on the Python side, and it is exactly
+    what happened at RDR-191 GATE-2 (498c92953): the commit added the
+    required top-level ``collection`` to every manifest-family route
+    including ``/import/chunk`` (``CatalogHandler.handleImportChunk`` ->
+    ``requireCollection``) and reconciled this file's client-METHOD call
+    sites, but a hand-built envelope has no signature to update, so this one
+    went unreconciled and the seam 400'd (``'collection' required``). The
+    bodies below now carry the top-level key the engine requires — a
+    per-ROW ``collection`` does NOT satisfy it, since ``requireCollection``
+    never inspects ``rows``.
 
     Both are ``ON CONFLICT DO UPDATE`` writers, unlike ``write_manifest``'s
     DELETE+re-INSERT: dropping ``COLLECTION`` from their INSERT column list
@@ -757,8 +775,13 @@ def test_append_and_import_seams_stamp_collection(cat_client, vec_client) -> Non
     import_rows = [
         {"position": 0, "chash": chash_imp, "line_start": 1, "line_end": 10}
     ]
-    # Same wire envelope the migration orchestrator's verify-fill leg sends.
-    cat_client._post("/import/chunk", {"doc_id": str(doc_imp), "rows": import_rows})
+    # RDR-191 GATE-2: top-level `collection` is REQUIRED on this route, and
+    # is the value the engine stamps verbatim on every row (never inferred
+    # from the owning document's physical_collection any more).
+    cat_client._post(
+        "/import/chunk",
+        {"doc_id": str(doc_imp), "collection": _COLLECTION, "rows": import_rows},
+    )
 
     query_imp = "cqtripwire test4 import seam migration chunk batch writer"
     rows = vec_client.search_metadata_scoped(query_imp, [_COLLECTION])
@@ -775,10 +798,43 @@ def test_append_and_import_seams_stamp_collection(cat_client, vec_client) -> Non
     )
 
     # Re-import the same rows = ON CONFLICT DO UPDATE branch.
-    cat_client._post("/import/chunk", {"doc_id": str(doc_imp), "rows": import_rows})
+    cat_client._post(
+        "/import/chunk",
+        {"doc_id": str(doc_imp), "collection": _COLLECTION, "rows": import_rows},
+    )
     rows2 = vec_client.search_metadata_scoped(query_imp, [_COLLECTION])
     assert any(r["id"] == str(doc_imp) for r in rows2), (
         f"doc {doc_imp!s} vanished from combined-query results after a "
         "REPEAT /import/chunk call — the import seam's ON CONFLICT DO "
         f"UPDATE branch broke the collection stamp. Rows: {rows2!r}"
     )
+
+    # ── Coverage lock (RDR-191 GATE-2, nexus-sh9v2) ───────────────────────
+    # The two positive legs above pass only because they SEND the top-level
+    # key; on their own they cannot distinguish "the engine requires it" from
+    # "the engine tolerates its absence and we happen to send it". Pin the
+    # requirement directly on both collection-carrying seams, so a future
+    # relaxation of `requireCollection` (or a silent fallback back to the
+    # owning document's physical_collection — the exact inference GATE-2
+    # removed) fails HERE rather than shipping. Per-ROW collection is
+    # deliberately included in the import probe and must NOT satisfy the
+    # check: `requireCollection` reads the top-level body only.
+    import httpx  # noqa: PLC0415 — deferred: only this control needs the typed error
+
+    with pytest.raises(httpx.HTTPStatusError) as exc_import:
+        cat_client._post(
+            "/import/chunk",
+            {
+                "doc_id": str(doc_imp),
+                "rows": [dict(r, collection=_COLLECTION) for r in import_rows],
+            },
+        )
+    assert exc_import.value.response.status_code == 400, exc_import.value
+    assert "collection" in str(exc_import.value), exc_import.value
+
+    with pytest.raises(httpx.HTTPStatusError) as exc_append:
+        cat_client._post(
+            "/manifest/append", {"doc_id": str(doc_app), "rows": append_rows},
+        )
+    assert exc_append.value.response.status_code == 400, exc_append.value
+    assert "collection" in str(exc_append.value), exc_append.value
