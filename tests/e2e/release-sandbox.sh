@@ -800,7 +800,7 @@ case "$MODE" in
         else
             echo "  readback: [FAIL] marker not found in nx scratch list output" >&2
             echo "$SCRATCH_LIST_OUT" | tail -5 | sed 's/^/    /'
-            SHAKEDOWN_FAILED+=("8/11 nx scratch readback")
+            SHAKEDOWN_FAILED+=("8/11 nx scratch list readback")
         fi
 
         echo
