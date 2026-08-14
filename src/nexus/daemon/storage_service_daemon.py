@@ -1106,37 +1106,110 @@ class StorageServiceSupervisor:
         will pass — a long replay can still burn one respawn attempt. A
         ``pg_isready``-grade probe is the follow-on if that residual is
         ever observed in practice.
+
+        Both exits (PG was already up, or was just started here) fall
+        through to :meth:`_backfill_provision_grants` before returning —
+        see its docstring for why this is the load-bearing preflight for
+        the nexus-hzhgl round-3 upgrade fix.
         """
         if _port_accepting(_SERVICE_HOST, self._pg_port):
             _log.debug("storage_service_pg_already_running", port=self._pg_port)
-            return
-
-        _log.info("storage_service_starting_pg", port=self._pg_port)
-        try:
-            from nexus.db.pg_provision import discover_pg_binaries, _start_cluster  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
-            pg_data_str = self._creds.get("PG_DATA", "")
-            if not pg_data_str:
+        else:
+            _log.info("storage_service_starting_pg", port=self._pg_port)
+            try:
+                from nexus.db.pg_provision import discover_pg_binaries, _start_cluster  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+                pg_data_str = self._creds.get("PG_DATA", "")
+                if not pg_data_str:
+                    raise StorageServiceStartError(
+                        "PG_DATA not found in pg_credentials. "
+                        "Re-run 'nx init --service' to reprovision."
+                    )
+                pgdata = Path(pg_data_str)
+                bins = discover_pg_binaries()
+                _start_cluster(bins, pgdata, self._pg_port)
+            except StorageServiceStartError:
+                raise
+            except Exception as exc:
                 raise StorageServiceStartError(
-                    "PG_DATA not found in pg_credentials. "
-                    "Re-run 'nx init --service' to reprovision."
-                )
-            pgdata = Path(pg_data_str)
-            bins = discover_pg_binaries()
-            _start_cluster(bins, pgdata, self._pg_port)
-        except StorageServiceStartError:
-            raise
-        except Exception as exc:
-            raise StorageServiceStartError(
-                f"Failed to start Postgres on port {self._pg_port}: {exc}. "
-                "Check the Postgres data directory and pg_credentials."
-            ) from exc
+                    f"Failed to start Postgres on port {self._pg_port}: {exc}. "
+                    "Check the Postgres data directory and pg_credentials."
+                ) from exc
 
-        if not _port_accepting(_SERVICE_HOST, self._pg_port):
-            raise StorageServiceStartError(
-                f"Postgres on port {self._pg_port} did not accept connections "
-                "after pg_ctl start. Check pg_data/pg.log."
+            if not _port_accepting(_SERVICE_HOST, self._pg_port):
+                raise StorageServiceStartError(
+                    f"Postgres on port {self._pg_port} did not accept connections "
+                    "after pg_ctl start. Check pg_data/pg.log."
+                )
+            _log.info("storage_service_pg_ready", port=self._pg_port)
+
+        self._backfill_provision_grants()
+
+    def _backfill_provision_grants(self) -> None:
+        """Re-run ``pg_provision.provision()``'s idempotent fast path against
+        the bundled PG, best-effort, BEFORE the service binary is spawned
+        (Step 2 of :meth:`_start_locked`) — i.e. before Liquibase would ever
+        consume the grants it depends on.
+
+        THE GAP THIS CLOSES (nexus-hzhgl round 3, package-upgrade MVV P1,
+        2026-08-14): round 2 wired ``_backfill_pg_monitor_admin_option``
+        into ``provision()``'s own fast idempotency path (the steady state
+        for every already-provisioned install), but NOTHING on the
+        engine-convergence / service-restart path ever calls ``provision()``
+        again — ``_ensure_pg_running`` only ever called
+        ``pg_provision._start_cluster`` directly. A box provisioned before
+        the round-2 fix shipped (``nexus_admin`` created without ADMIN
+        OPTION on ``pg_monitor``) converges its ON-DISK engine cleanly via
+        ``nx daemon restart-stale`` (the binary swap is a plain file copy),
+        but the NEW engine then crash-loops PERMANENTLY at Liquibase's
+        ``grants-004-monitor-wal-visibility`` changeset on every subsequent
+        boot, because nothing between the upgrade and the new engine's
+        first boot ever re-provisioned the grant. Exactly reproduced by:
+        ``nx daemon service stop`` (leaves PG running, by design) then
+        ``nx daemon service start`` — the PG-already-running branch above
+        used to return with no backfill at all.
+
+        PLACEMENT DECISION: every service start (not convergence-only).
+        This is the simplest option and, unlike a convergence-only hook,
+        also self-heals a box whose provision drifted for ANY future grant
+        the fast path grows — the same posture ``nx init --service``
+        already has on every re-run. The cost is a handful of idempotent
+        psql round-trips per service start / PG-recovery cycle, which is
+        the same order of cost ``provision()``'s fast path already pays at
+        every ``nx init --service`` invocation.
+
+        GUARDED to the LOCALLY-BUNDLED cluster only: ``pg_provision``
+        assumes OS-level superuser access to the cluster it provisioned
+        (``bootstrap_superuser()``), which is true ONLY for the bundled
+        cluster this supervisor started via ``PG_DATA``/``pg_ctl``. A
+        "cloud habitat with a managed Postgres" install (``nx daemon
+        service install-binary --no-pg-bundle``) has no ``PG_DATA`` in its
+        ``pg_credentials`` and no local superuser to grant with —
+        ``PG_DATA`` presence is the same signal the branch above already
+        uses to distinguish "ours to start" from "someone else's". Those
+        deployments self-heal via the manual DBA step named in
+        docs/configuration.md prerequisite 2 (the same remedy text the
+        Liquibase changeset itself raises) — pg_provision must never run
+        against a remote/customer-managed Postgres.
+
+        Best-effort by design, matching every other backfill in
+        ``pg_provision.py``: a failure here degrades to the pre-existing,
+        self-explanatory Liquibase error at engine boot — never worse than
+        before the fix, and never blocks a service start over a
+        diagnostic-role or extension backfill unrelated to the actual
+        failure.
+        """
+        if not self._creds.get("PG_DATA", "").strip():
+            _log.debug(
+                "storage_service_provision_backfill_skipped",
+                reason="no PG_DATA in pg_credentials — managed/BYO Postgres, "
+                       "not the bundled cluster this supervisor owns",
             )
-        _log.info("storage_service_pg_ready", port=self._pg_port)
+            return
+        try:
+            from nexus.db.pg_provision import provision  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+            provision(config_dir=self._config_dir)
+        except Exception as exc:  # noqa: BLE001 — best-effort preflight; see docstring
+            _log.warning("storage_service_provision_backfill_failed", error=str(exc))
 
     def heartbeat_once(self) -> tuple[bool, bool]:
         """Re-stamp the lease iff service is alive AND healthy AND PG reachable.
