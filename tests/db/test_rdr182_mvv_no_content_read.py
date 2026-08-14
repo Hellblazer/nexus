@@ -26,6 +26,12 @@ import subprocess
 
 import pytest
 
+from nexus.db.chash_tables import (
+    CHUNKS_TABLE,
+    DIAG_CONFORMANCE_VIEW,
+    diag_conformance_view_ddl,
+    legacy_chash_conformance_statements,
+)
 from nexus.remediation import StoreState, emit_forensics_playbook
 
 # The content-safe objects the chash-poison forensics topic is allowed to
@@ -46,6 +52,11 @@ _ALLOWED_READ_OBJECTS = {
     # the view, and even a direct count over them would be aggregate-only
     # metadata (chash-reference lengths, never content).
     "nexus.topic_assignments", "nexus.frecency", "nexus.relevance_log",
+    # nexus-rpw6u (RDR-191 straddle handling): the legacy-era statement set
+    # filters the SAME counts view by the pre-unify per-dim table names —
+    # same string-literal caveat as the debt legs above, plus the
+    # to_regclass('nexus.chunks') era-probe statement's own literal.
+    "nexus.chunks_384", "nexus.chunks_768", "nexus.chunks_1024",
 }
 #: Column tokens that would indicate CONTENT projection (must never appear
 #: as a bare projected column in a diagnostic statement).
@@ -75,7 +86,13 @@ class TestNoContentReadProperty:
             select_part = re.search(
                 r"\bSELECT\b(.*?)\bFROM\b", stmt, re.IGNORECASE | re.DOTALL
             )
-            assert select_part, stmt
+            if select_part is None:
+                # nexus-rpw6u: the RDR-191 era-probe statement
+                # (to_regclass('nexus.chunks')) has no FROM target at all —
+                # a metadata function call with nothing to project content
+                # from, so there is nothing for this check to examine.
+                assert "FROM" not in stmt.upper(), stmt
+                continue
             projected = select_part.group(1).lower()
             for col in _CONTENT_COLUMNS:
                 # `length(chash)` is a metadata function over a hash, not a
@@ -182,24 +199,57 @@ class TestEndToEndPoisonedStore:
             assert proc.returncode == 0, proc.stderr
             return proc.stdout.strip()
 
-        # Minimal FORCE-RLS chunks_768 with ONE poisoned (non-32-char) row
-        # under tenant 'default', plus the diag grants.
+        # Minimal FORCE-RLS nexus.chunks (RDR-191 unified relation — the
+        # table the SHIPPED forensics diagnostic actually targets, nexus-
+        # rpw6u retarget) with ONE poisoned (non-32-byte) row under tenant
+        # 'default', PLUS the four other tables diag_conformance_view_ddl()
+        # references (catalog_document_chunks + the three debt legs) so the
+        # REAL Amendment-A6 counts view can be created — critic round 1
+        # CRITICAL-1: the old fixture used a hand-rolled direct count
+        # (`legacy_chash_conformance_statements()`, the pre-A6/view-absent
+        # FALLBACK shape), never the VIEW-based statement
+        # (`chash_conformance_statements()`) `_chash_poison_forensics`
+        # actually SHIPS — so the view path had zero end-to-end coverage.
+        # chash is BYTEA here (not TEXT) because the debt legs' anti-join
+        # decodes against it (see diag_conformance_view_ddl's docstring);
+        # convert_to(...) produces an arbitrary-length bytea without going
+        # through a hex parse.
         su("CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION nexus_admin")
         su(
-            "SET ROLE nexus_admin; "
-            "CREATE TABLE IF NOT EXISTS nexus.chunks_768 ("
-            "  chash TEXT NOT NULL, tenant_id TEXT NOT NULL); "
-            "ALTER TABLE nexus.chunks_768 ENABLE ROW LEVEL SECURITY; "
-            "ALTER TABLE nexus.chunks_768 FORCE ROW LEVEL SECURITY; "
-            "DROP POLICY IF EXISTS ti ON nexus.chunks_768; "
-            "CREATE POLICY ti ON nexus.chunks_768 "
+            f"SET ROLE nexus_admin; "
+            f"CREATE TABLE IF NOT EXISTS {CHUNKS_TABLE} ("
+            "  chash BYTEA NOT NULL, tenant_id TEXT NOT NULL); "
+            f"ALTER TABLE {CHUNKS_TABLE} ENABLE ROW LEVEL SECURITY; "
+            f"ALTER TABLE {CHUNKS_TABLE} FORCE ROW LEVEL SECURITY; "
+            f"DROP POLICY IF EXISTS ti ON {CHUNKS_TABLE}; "
+            f"CREATE POLICY ti ON {CHUNKS_TABLE} "
             "  USING (tenant_id = current_setting('nexus.tenant', true)) "
             "  WITH CHECK (tenant_id = current_setting('nexus.tenant', true)); "
             "SELECT set_config('nexus.tenant','default',false); "
-            "INSERT INTO nexus.chunks_768 (chash, tenant_id) "
-            "  VALUES ('short-poison-id', 'default'); "
+            f"INSERT INTO {CHUNKS_TABLE} (chash, tenant_id) "
+            "  VALUES (convert_to('short-poison-id', 'UTF8'), 'default'); "
+            "CREATE TABLE IF NOT EXISTS nexus.catalog_document_chunks "
+            "  (chash TEXT NOT NULL); "
+            "CREATE TABLE IF NOT EXISTS nexus.topic_assignments "
+            "  (doc_id TEXT NOT NULL); "
+            "CREATE TABLE IF NOT EXISTS nexus.frecency "
+            "  (chunk_id TEXT NOT NULL); "
+            "CREATE TABLE IF NOT EXISTS nexus.relevance_log "
+            "  (chunk_id TEXT NOT NULL);"
+        )
+        # The view is created by the CLUSTER SUPERUSER (os_user, a fresh
+        # connection — SET ROLE from the call above does not carry over),
+        # matching production's superuser provisioning path. RLS bypass for
+        # nexus_diag comes from its own BYPASSRLS role attribute
+        # (_create_roles), not from view ownership — so this is about
+        # matching the real grant topology, not RLS semantics: post-A6,
+        # nexus_diag gets SELECT on the VIEW only, never direct table
+        # SELECT (the "grants-nexus-diag-2" changeset revokes it once the
+        # view exists).
+        su(diag_conformance_view_ddl())
+        su(
             "GRANT USAGE ON SCHEMA nexus TO nexus_diag; "
-            "GRANT SELECT ON ALL TABLES IN SCHEMA nexus TO nexus_diag;"
+            f"GRANT SELECT ON {DIAG_CONFORMANCE_VIEW} TO nexus_diag;"
         )
         yield {"port": port, "psql": bins.pg_ctl and str(bins.psql)}
         subprocess.run(
@@ -210,17 +260,23 @@ class TestEndToEndPoisonedStore:
     def test_forensics_probe_detects_poison_cross_tenant_read_only(self, poisoned_cluster):
         from pathlib import Path
 
+        from nexus.db.chash_tables import chash_conformance_statements
         from nexus.db.diag_connection import DiagCredentials, run_diagnostic_sql
         from tests.db._service_fixture import pg_bin_dir
 
         creds = DiagCredentials(
             port=poisoned_cluster["port"], user="nexus_diag", password="diag-pw",
         )
-        # The single chunks_768 leg of the shipped forensics diagnostic —
-        # run via the sanctioned choke point (lint + read-only session, NO
-        # tenant GUC set: BYPASSRLS sees the poisoned row a policy-subject
+        # The nexus.chunks (unified) leg of the ACTUAL shipped forensics
+        # statement — the Amendment-A6 VIEW-based sum
+        # (`chash_conformance_statements()`, what `_chash_poison_forensics`
+        # really emits — critic round 1 CRITICAL-1 retarget, not the
+        # direct-count fallback shape) — run via the sanctioned choke point
+        # (lint + read-only session, NO tenant GUC set: nexus_diag's
+        # BYPASSRLS role attribute sees the poisoned row a policy-subject
         # role would count as 0, the nexus-vounk property).
-        stmt = "SELECT count(*) FROM nexus.chunks_768 WHERE length(chash) <> 32"
+        stmt = chash_conformance_statements()[0]
+        assert f"'{CHUNKS_TABLE}'" in stmt
         out = run_diagnostic_sql([stmt], creds, psql_bin=Path(pg_bin_dir()) / "psql")
         assert out == ["1"], "forensics probe did not detect the poisoned row"
 
@@ -236,7 +292,7 @@ class TestEndToEndPoisonedStore:
         )
         with pytest.raises(DiagnosticSqlViolation):
             run_diagnostic_sql(
-                ["SELECT chash FROM nexus.chunks_768"],
+                [f"SELECT chash FROM {CHUNKS_TABLE}"],
                 creds, psql_bin=Path(pg_bin_dir()) / "psql",
             )
 
@@ -250,18 +306,22 @@ class TestEndToEndPoisonedStore:
         import subprocess
         from pathlib import Path
 
+        from nexus.db.chash_tables import chash_conformance_statements
         from nexus.db.diag_connection import DiagCredentials, run_diagnostic_sql
         from tests.db._service_fixture import pg_bin_dir
 
-        stmt = "SELECT count(*) FROM nexus.chunks_768 WHERE length(chash) <> 32"
         # (a) nexus_admin (NOSUPERUSER, the health probe's old identity), no
         # GUC -> FORCE RLS filters everything -> 0 (the vacuous count). Must
         # NOT be a superuser here — superusers bypass RLS and would see the
-        # row, hiding the very bug this asserts.
+        # row, hiding the very bug this asserts. Direct table query — this
+        # half proves RLS applies to nexus_admin at all, independent of the
+        # diagnostic surface half (b) below, so it uses the direct-count
+        # shape (nexus_admin has no view grant, only its own table).
+        admin_stmt = legacy_chash_conformance_statements()[0]
         admin = subprocess.run(
             [str(Path(pg_bin_dir()) / "psql"), "-h", "127.0.0.1",
              "-p", str(poisoned_cluster["port"]), "-U", "nexus_admin",
-             "-d", "nexus", "-tAc", stmt],
+             "-d", "nexus", "-tAc", admin_stmt],
             capture_output=True, text=True, timeout=30,
             env=dict(os.environ, PGPASSWORD="a-pw"),
         )
@@ -270,11 +330,15 @@ class TestEndToEndPoisonedStore:
             "nexus_admin (no GUC) should count 0 under FORCE RLS — the vacuous "
             "path the vounk fix retires"
         )
-        # (b) nexus_diag via the choke point -> sees the poison
+        # (b) nexus_diag via the choke point, through the SAME view-based
+        # statement the shipped forensics diagnostic runs (nexus-rpw6u
+        # retarget) -> nexus_diag's BYPASSRLS role attribute sees the
+        # poison the admin path missed.
         creds = DiagCredentials(
             port=poisoned_cluster["port"], user="nexus_diag", password="diag-pw",
         )
-        diag = run_diagnostic_sql([stmt], creds, psql_bin=Path(pg_bin_dir()) / "psql")
+        diag_stmt = chash_conformance_statements()[0]
+        diag = run_diagnostic_sql([diag_stmt], creds, psql_bin=Path(pg_bin_dir()) / "psql")
         assert diag == ["1"], "diag path must see the poisoned row the admin path missed"
 
 

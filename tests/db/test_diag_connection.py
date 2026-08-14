@@ -198,6 +198,113 @@ class TestLiveStoreDetailLocalOnly:
         assert "live diagnostic results" in text
         assert "SELECT 1; = 42" in text
 
+    def test_blank_aggregate_renders_as_unmeasured_marker_not_bare_null(self):
+        """nexus-rpw6u (GH #1414 class on the forensics rendering path): a
+        NULL aggregate — the RDR-191 straddle window where a statement's
+        table_name filter matches no row in the deployed conformance view,
+        so psql renders an empty stdout line — must NEVER render as a bare
+        'stmt = ' with nothing after the equals sign. That is indistinguish-
+        able from a genuine empty-string result and reads as silently clean
+        to anyone (human or agent) scanning the rendered text."""
+        from unittest.mock import patch
+
+        from nexus.db.diag_connection import live_store_detail
+
+        stmt = (
+            "SELECT sum(non_conformant) FROM nexus.diag_chash_conformance "
+            "WHERE table_name = 'nexus.chunks'"
+        )
+        with patch("nexus.config.is_local_mode", return_value=True):
+            text = live_store_detail(
+                [stmt], resolve=lambda: _CREDS, run=lambda s, c: [""],
+            )
+        assert f"{stmt} = " not in text.replace(f"{stmt} = UNMEASURED", "")
+        assert "UNMEASURED" in text
+        assert f"{stmt} = UNMEASURED" in text
+        # A genuine result renders unchanged — no false marker.
+        with patch("nexus.config.is_local_mode", return_value=True):
+            text2 = live_store_detail(
+                [stmt], resolve=lambda: _CREDS, run=lambda s, c: ["0"],
+            )
+        assert f"{stmt} = 0" in text2
+        assert "UNMEASURED" not in text2
+
+    def test_whitespace_only_aggregate_also_renders_as_unmeasured(self):
+        """A whitespace-only psql line (rather than a truly empty one) must
+        not slip past the blank check — both are the same NULL-aggregate
+        signal."""
+        from unittest.mock import patch
+
+        from nexus.db.diag_connection import live_store_detail
+
+        with patch("nexus.config.is_local_mode", return_value=True):
+            text = live_store_detail(
+                ["SELECT 1;"], resolve=lambda: _CREDS, run=lambda s, c: ["   "],
+            )
+        assert "SELECT 1; = UNMEASURED" in text
+
+    def test_view_absent_still_yields_era_probe_value_and_per_statement_failed(self):
+        """nexus-rpw6u CRITICAL-2 (critic round 1): before this fix every
+        statement rode ONE atomic ``run_diagnostic_sql`` call — a single
+        failing statement (the counts view absent: the pre-A6 install case,
+        or the DROP-then-reprovision window ``chash_rekey.py`` itself calls
+        EXPECTED mid-upgrade) raised and blanked EVERY statement's result,
+        including the grant-free era-probe statement that would have
+        succeeded alone. Per-statement isolation must let the era probe (and
+        anything else not touching the missing view) report its real value
+        while the view-based statements render a FAILED marker each,
+        individually — never the whole-batch UNKNOWN degrade."""
+        from unittest.mock import patch
+
+        from nexus.db.chash_tables import (
+            chash_conformance_statements,
+            chash_era_probe_statement,
+        )
+        from nexus.db.diag_connection import live_store_detail
+
+        era_probe = chash_era_probe_statement()
+        view_stmt = chash_conformance_statements()[0]
+
+        def _run(statements, creds):
+            (stmt,) = statements
+            if "diag_chash_conformance" in stmt:
+                raise RuntimeError(
+                    'relation "nexus.diag_chash_conformance" does not exist'
+                )
+            return ["1"]  # connectivity preflight + the era probe both measure fine
+
+        with patch("nexus.config.is_local_mode", return_value=True):
+            text = live_store_detail(
+                [era_probe, view_stmt], resolve=lambda: _CREDS, run=_run,
+            )
+        assert "live diagnostic results" in text  # per-statement shape, not the aggregate one
+        assert f"{era_probe} = 1" in text
+        assert f"{view_stmt} = FAILED" in text
+        assert "does not exist" in text
+        assert "treat store state as UNKNOWN" not in text
+
+    def test_connection_failure_still_yields_the_aggregate_unknown_message(self):
+        """(b) A true connection-level failure (bad credentials, PG
+        unreachable, a broken psql/libpq loader path) fails identically for
+        every statement — including the connectivity preflight — so it must
+        still produce ONE aggregate 'FAILED ... UNKNOWN' message, not N
+        copies of the same error rendered as per-statement FAILED lines."""
+        from unittest.mock import patch
+
+        from nexus.db.diag_connection import live_store_detail
+
+        def _boom(statements, creds):
+            raise RuntimeError("could not connect to server: Connection refused")
+
+        with patch("nexus.config.is_local_mode", return_value=True):
+            text = live_store_detail(
+                ["SELECT 1", "SELECT 2"], resolve=lambda: _CREDS, run=_boom,
+            )
+        assert text.startswith("live diagnostics FAILED")
+        assert "could not connect to server" in text
+        assert "treat store state as UNKNOWN, not clean." in text
+        assert "live diagnostic results" not in text  # never the per-statement shape
+
 
 class TestBundleLibLoaderGuard:
     """GH #1414 era-hop, review round 3 (2026-07-21): run_diagnostic_sql is

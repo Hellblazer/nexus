@@ -27,7 +27,11 @@ from dataclasses import dataclass, field
 
 from nexus.db.chash_tables import CHASH_BEARING_TABLES as _CHASH_TABLES
 from nexus.db.chash_tables import chash_conformance_statements as _chash_statements
+from nexus.db.chash_tables import chash_era_probe_statement as _era_probe_statement
 from nexus.db.chash_tables import debt_chash_conformance_statements as _debt_statements
+from nexus.db.chash_tables import (
+    legacy_era_chash_conformance_statements as _legacy_era_statements,
+)
 
 #: Full clickable https URL, pinned to ``main`` (releases promote develop ->
 #: main, so an operator on a released build finds the sections on main).
@@ -38,6 +42,23 @@ MIGRATION_RUNBOOK_URL = (
 )
 
 _PASTE_RULE = "  " + "-" * 64
+
+
+def _dedupe_preserve_order(items: tuple[str, ...]) -> tuple[str, ...]:
+    """Drop later duplicates, keep first-seen order (nexus-rpw6u critic
+    round 1, SIGNIFICANT-1): ``nexus.catalog_document_chunks``'s view-
+    filtered statement is byte-identical whether it comes from the unified
+    or the legacy-era statement set (that table's name is unaffected by the
+    RDR-191 unify), and running the same aggregate twice costs a psql
+    round-trip and reads as a possible copy-paste bug to anyone scanning
+    the rendered diagnostic."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return tuple(out)
 
 
 @dataclass(frozen=True)
@@ -292,7 +313,51 @@ def _chash_poison_forensics(store_state: StoreState) -> Playbook:
     """The FORENSICS (read-only investigation) playbook for the GH #1390
     class — the first diagnostic-shaped topic (nexus-ykzbj.10): carries
     lint-verified aggregate SQL, mutates nothing, and exists to decide
-    whether ``remediate:chash-poison`` is needed at all."""
+    whether ``remediate:chash-poison`` is needed at all.
+
+    nexus-rpw6u (RDR-191 straddle handling, shape (a) — a DECISION, not a
+    forced constraint; critic round 1, SIGNIFICANT-2): the two sibling
+    consumers (``nexus.health._check_migration_state`` and
+    ``nexus.upgrade_ladder.rungs.chash_rekey``'s conformance probe) both
+    probe the era live, choose ONE matching statement set, and only run
+    that (shape (b)) — they can, because they execute inside Python
+    functions with direct DB access. ``playbook.py`` ITSELF is dependency-
+    light by design (stdlib-only, no DB I/O — see the module docstring) so
+    IT cannot do that; but the actual forensics entry point that calls it,
+    ``nexus.mcp.core.forensics``, already resolves credentials and runs SQL
+    via ``_diag_run`` — shape (b) (probe the era there, build one matched
+    statement set, hand THAT to this builder) was and is possible. Shape
+    (a) — the era probe statement plus BOTH the unified (post-RDR-191) and
+    legacy-era (pre-unify per-dim table names) view-filtered statement sets,
+    unconditionally — was chosen instead so the agent sees the FULL picture
+    in one artifact (no second round-trip through the builder once the era
+    is known), and is safe to run unconditionally because
+    ``diag_connection.live_store_detail`` executes each statement in its
+    OWN isolated call (nexus-rpw6u CRITICAL-2 remediation): a leg that does
+    not apply to this store's era renders UNMEASURED or FAILED for its own
+    lines only and can never blank the era probe or the other leg. Worth
+    revisiting toward shape (b) if a future topic's statement count makes
+    the round-trip cost matter more than the single-artifact convenience.
+
+    Whichever leg matches the store's actual schema era measures; the other
+    legitimately renders NULL (an UNMEASURED marker per
+    ``diag_connection._render_diagnostic_output``, never a bare blank) or,
+    absent the counts view entirely, FAILED — the ``steps`` text below tells
+    the agent how to read both. Both legs stay view-based
+    (``chash_conformance_statements`` / ``legacy_era_chash_conformance_
+    statements``, never the direct-table fallback) — the A6 count-by-
+    construction discipline applies equally to both eras, so the forensics
+    and health/rekey surfaces cannot drift on which table shapes they
+    trust.
+
+    DEDUPE (critic round 1, SIGNIFICANT-1): ``nexus.catalog_document_chunks``
+    is unaffected by the RDR-191 unify (it never had a per-dim shape), so
+    its view-filtered statement is byte-identical between the unified set
+    (``chash_conformance_statements()[1]``) and the legacy-era set
+    (``legacy_era_chash_conformance_statements()[3]``). Assembly below
+    dedupes ORDER-PRESERVING (keeps the first occurrence) so the agent never
+    pays an extra psql round-trip for, or misreads as a copy-paste bug, a
+    statement that would render the identical value twice."""
     return Playbook(
         topic="chash-poison",
         context=(
@@ -324,6 +389,27 @@ def _chash_poison_forensics(store_state: StoreState) -> Playbook:
             "closed GH #1390 shape). (The chash_index statement was "
             "retired by RDR-187 — the router table is dropped as of "
             "engine v0.1.51.)",
+            "interpret the era probe (the to_regclass('nexus.chunks') "
+            "statement): 1 means this store's engine has already run the "
+            "RDR-191 chunk-table unify, so the first two statements are the "
+            "ones that can measure poison; 0 (or an UNMEASURED marker on "
+            "the first two) means the store is in the pre-unify STRADDLE "
+            "window (chunks_384/chunks_768/chunks_1024 still per-dim) — read "
+            "the legacy-era statements that follow instead. A NULL/"
+            "UNMEASURED result on one leg while the era probe says the "
+            "OTHER leg applies is expected and must never be read as "
+            "'clean' — it means that leg simply does not apply to this "
+            "store's era",
+            "interpret the legacy-era statements the same way as the first "
+            "two (poison, gating) but against the pre-RDR-191 per-dim table "
+            "names — only relevant when the era probe reads 0",
+            "each statement below runs in its OWN isolated call, so a "
+            "FAILED line never means the others are unreliable — but if the "
+            "era probe says a leg SHOULD be the one measuring (e.g. it "
+            "reads 1 and the unified leg is UNMEASURED/FAILED, or it reads "
+            "0 and the legacy-era leg is UNMEASURED/FAILED) treat that as "
+            "the missing-counts-view case in the escape clause below, never "
+            "as evidence the store is clean",
             "interpret: the next three statements (topic_assignments, "
             "frecency, relevance_log) are LEGACY DEBT — non-gating "
             "(no CHECK constraint exists there), but non-zero counts mean "
@@ -361,8 +447,16 @@ def _chash_poison_forensics(store_state: StoreState) -> Playbook:
         # counts — the diagnostic role's table SELECT is revoked in the view
         # era, and the view emits counts by construction. Same emitter the
         # health probe uses (nexus.db.chash_tables), so the two surfaces
-        # cannot drift.
-        diagnostic_sql=_chash_statements() + _debt_statements() + (
+        # cannot drift. Dedupe (SIGNIFICANT-1 above) applies ONLY to the
+        # era-straddle block (unified + probe + legacy-era) — the debt and
+        # constraint-state legs never overlap it.
+        diagnostic_sql=_dedupe_preserve_order(
+            _chash_statements()
+            + (_era_probe_statement(),)
+            + _legacy_era_statements()
+        )
+        + _debt_statements()
+        + (
             "SELECT conname, convalidated FROM pg_constraint "
             # critic-180-foundation finding 3: the historical LIKE 'chk_%'
             # matched ZERO constraints (real names end in _check) — a dead
