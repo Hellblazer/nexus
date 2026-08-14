@@ -8,6 +8,7 @@
 #   tests/e2e/migration-rehearsal/run.sh --era-hop    # RDR-185 era-spanning hop: ancient install -> current via `nx upgrade` ALONE (nexus-n7u38.30)
 #   tests/e2e/migration-rehearsal/run.sh --chash-window # RDR-180 pre-cutover window: cohort engine boots (bytea conversion) BEFORE the chash-rekey rung runs (nexus-p78a0)
 #   tests/e2e/migration-rehearsal/run.sh --stranded    # nexus-8nlj4 two-hop stranded-redirect: ancient Chroma artifacts + package-upgrade straight to current must trip the LAST_MIGRATION_CAPABLE detector; downgrading to the pin must be able to migrate them for real
+#   NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade  # nexus-86mx2 PUBLISHED-TARGET mode: upgrade to the REAL published PyPI wheel X.Y.Z (sha256-verified against PyPI's own JSON API) instead of the worktree build; unset = worktree behavior unchanged
 #   tests/e2e/migration-rehearsal/run.sh --comprehensive # Phase D: daily-driver surface (T2/T1/T3/catalog/doctor), deterministic bge-768 LOCAL only
 #   tests/e2e/migration-rehearsal/run.sh --stress      # Phase E: concurrency + queue-drain stress, same bge-768-local dependency as Phase D
 #
@@ -148,6 +149,19 @@ COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.75}"
 # catch this case either; only a human/agent check does.
 PREV_RELEASE="${NEXUS_PREV_RELEASE:-7.6.1}"
 PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.71}"
+# nexus-86mx2 (2026-08-14) PUBLISHED-TARGET mode for --package-upgrade: when
+# set, the UPGRADE TARGET is the real PUBLISHED PyPI wheel for that version
+# instead of the working-tree build — the published-BYTES upgrade journey,
+# closing the loop the pre-tag worktree run cannot prove ("identical tree" is
+# an argument, not a run; see the release skill's post-publish step). Unset
+# (default) leaves the worktree-wheel behavior below completely unchanged.
+# This is a companion axis to tests/e2e/published-client-write-gate.sh, not a
+# duplicate of it: that gate owns the FRESH-WRITE axis (a client that has
+# never upgraded, writing against a NEWER engine); this mode owns the UPGRADE
+# axis (an existing install's PACKAGE moving forward). Wheel is downloaded +
+# sha256-verified against PyPI's own JSON API digest — fail loud on mismatch,
+# never a silently-wrong artifact staged into the box.
+NEXUS_TARGET_RELEASE="${NEXUS_TARGET_RELEASE:-}"
 # RDR-185 P4.3 (nexus-n7u38.30): the ERA-HOP's starting point. Deliberately NOT
 # "one release back" like PREV_RELEASE — this leg's whole claim is that an
 # ANCIENT install converges, so the default is the OLDEST install the product
@@ -570,15 +584,59 @@ elif [ "$CHASH_WINDOW" = 1 ]; then
   cp "$HERE/Dockerfile.chash-window" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_chash_window.sh" "$STAGE/"
 elif [ "$PACKAGE_UPGRADE" = 1 ]; then
-  # nexus-cfgo9: the WORKING-TREE wheel travels in under its OWN subdirectory
-  # (its real PEP 427 filename preserved — pip/uv parse the filename strictly
-  # and a prefix-mangled name fails with "invalid version") so it never
-  # collides with the driver script's `pip install conexus==$PREV_RELEASE`
-  # from real PyPI into the SAME venv. No engine artifact is staged at all
-  # (both $PREV_ENGINE_TAG and $NEW_ENGINE_TAG are acquired at runtime by the
-  # product's own code — the harness never supplies an engine binary).
+  # nexus-cfgo9: the UPGRADE-TARGET wheel travels in under its OWN
+  # subdirectory (real PEP 427 filename preserved — pip/uv parse the wheel
+  # filename strictly and a prefix-mangled name fails with "invalid
+  # version") so it never collides with the driver script's
+  # `pip install conexus==$PREV_RELEASE` from real PyPI into the SAME venv.
+  # No engine artifact is staged at all (both $PREV_ENGINE_TAG and
+  # $NEW_ENGINE_TAG are acquired at runtime by the product's own code — the
+  # harness never supplies an engine binary).
   mkdir -p "$STAGE/worktree-wheel"
-  cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
+  if [ -n "$NEXUS_TARGET_RELEASE" ]; then
+    # nexus-86mx2: PUBLISHED-TARGET mode — download the REAL published wheel
+    # from PyPI instead of building the working tree. Resolved + verified
+    # via PyPI's own JSON API (never `pip download`: this box's dev venv has
+    # no `pip` module, and a direct JSON-API fetch resolves the exact wheel
+    # URL + expected digest in one round trip with no dependency-resolution
+    # surface to trust).
+    echo "[run.sh] NEXUS_TARGET_RELEASE=$NEXUS_TARGET_RELEASE — downloading the PUBLISHED wheel from PyPI (not the worktree build)"
+    PYPI_META="$(mktemp)"
+    curl -fsSL "https://pypi.org/pypi/conexus/$NEXUS_TARGET_RELEASE/json" -o "$PYPI_META" \
+      || { rm -f "$PYPI_META"; echo "FATAL: could not fetch PyPI metadata for conexus==$NEXUS_TARGET_RELEASE — is it published?" >&2; exit 1; }
+    TARGET_INFO="$(python3 -c "
+import json
+with open('$PYPI_META') as f:
+    d = json.load(f)
+for u in d['urls']:
+    if u['packagetype'] == 'bdist_wheel':
+        print(u['url'])
+        print(u['digests']['sha256'])
+        print(u['filename'])
+        break
+else:
+    raise SystemExit(1)
+" 2>/dev/null)" || { rm -f "$PYPI_META"; echo "FATAL: no bdist_wheel asset for conexus==$NEXUS_TARGET_RELEASE on PyPI" >&2; exit 1; }
+    rm -f "$PYPI_META"
+    TARGET_WHEEL_URL="$(sed -n '1p' <<<"$TARGET_INFO")"
+    TARGET_WHEEL_SHA256="$(sed -n '2p' <<<"$TARGET_INFO")"
+    TARGET_WHEEL_NAME="$(sed -n '3p' <<<"$TARGET_INFO")"
+    curl -fsSL -o "$STAGE/worktree-wheel/$TARGET_WHEEL_NAME" "$TARGET_WHEEL_URL" \
+      || { echo "FATAL: download of $TARGET_WHEEL_URL failed" >&2; exit 1; }
+    GOT_SHA256="$(python3 -c "
+import hashlib
+h = hashlib.sha256()
+with open('$STAGE/worktree-wheel/$TARGET_WHEEL_NAME', 'rb') as f:
+    for chunk in iter(lambda: f.read(1 << 20), b''):
+        h.update(chunk)
+print(h.hexdigest())
+")"
+    [ "$GOT_SHA256" = "$TARGET_WHEEL_SHA256" ] \
+      || { echo "FATAL: downloaded wheel sha256 mismatch for conexus==$NEXUS_TARGET_RELEASE: got $GOT_SHA256, PyPI JSON API says $TARGET_WHEEL_SHA256" >&2; exit 1; }
+    echo "[run.sh] verified $TARGET_WHEEL_NAME sha256=$TARGET_WHEEL_SHA256 (matches PyPI JSON API digest)"
+  else
+    cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
+  fi
   cp "$HERE/Dockerfile.package-upgrade" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_package_upgrade.sh" "$STAGE/"
 elif [ "$STRANDED" = 1 ]; then
@@ -681,6 +739,10 @@ elif [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
 fi
 if [ "$PACKAGE_UPGRADE" = 1 ]; then
   run_env+=(-e "PREV_RELEASE=$PREV_RELEASE" -e "PREV_ENGINE_TAG=$PREV_ENGINE_TAG" -e "NEW_ENGINE_TAG=$NEW_ENGINE_TAG")
+  # nexus-86mx2: forward which upgrade target staged above (published wheel
+  # vs worktree build) so rehearse_package_upgrade.sh's own logging + verdict
+  # line can NAME it — a log reader must never have to guess which axis ran.
+  [ -n "$NEXUS_TARGET_RELEASE" ] && run_env+=(-e "TARGET_RELEASE=$NEXUS_TARGET_RELEASE")
 fi
 if [ "$ERA_HOP" = 1 ]; then
   run_env+=(-e "ERA_RELEASE=$ERA_RELEASE" -e "ERA_ENGINE_TAG=$ERA_ENGINE_TAG" -e "NEW_ENGINE_TAG=$NEW_ENGINE_TAG")

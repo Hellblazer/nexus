@@ -115,6 +115,49 @@ the same release, and the deploy fires at client-tag push, in parallel with
 the PyPI publish — satisfied the instant the client tag exists, live before
 any user can install the client that requires it.
 
+### 3c. PRE-TAG gate: published-client write leg (`published-client-write-gate.sh`, nexus-86mx2)
+
+```bash
+tests/e2e/published-client-write-gate.sh
+```
+
+Must end `PUBLISHED-CLIENT WRITE GATE PASSED`. Runs the CURRENTLY-PUBLISHED
+conexus client (real PyPI, scrubbed-HOME sandbox — same isolation idiom as
+`fresh-install-mvv.sh --published`) against THIS candidate engine (working-
+tree dev jar by default via `scripts/build-gate-jar.sh`;
+`NEXUS_SERVICE_TAG=engine-service-vX.Y.Z` points it at a specific published
+tag instead) and asserts REAL catalog registration — manifest ROW COUNT via
+`GET /v1/catalog/manifest/verify`, exact expected count, never a 200 alone —
+for a `store put` and an `index md` write.
+
+**Why the other legs do not cover this.** Every other gate in this checklist
+tests a CONSISTENT client/engine pair: the host JVM suite and `--shakeout`
+are develop×develop; `--acquire` is the WORKING-TREE client against a
+published engine; `--package-upgrade` proves an EXISTING install's engine
+converges, never a fresh client's WRITE path against a stricter successor.
+None of them is "the client every user currently has, writing against the
+engine about to ship." That gap is exactly how `engine-service-v0.1.73`'s
+RDR-191 GATE-2 constraint (manifest writes must name their collection)
+400'd every released-7.6.1 manifest write in PRODUCTION while every gate
+above stayed green (T2 22488/22489, nexus-sh9v2 — 910 live documents
+accumulated invisible to catalog-aware retrieval before anyone noticed).
+This leg would have caught it here, before deploy, instead of in production.
+
+A published client KNOWN to be incompatible with the current engine (the
+exact window before a client release ships the fix) is not a tag-cut
+blocker — acknowledge it explicitly and by name:
+
+```bash
+NX_EXPECTED_CLIENT_LAG=nexus-sh9v2 tests/e2e/published-client-write-gate.sh
+```
+
+Exits 2 (`PUBLISHED-CLIENT WRITE GATE EXPECTED-INCOMPATIBLE`) — a named,
+counted state, never a silent pass. The script refuses the acknowledgment
+(hard-fails instead, exit 1) once the published client it actually resolves
+is >= the version its own header names as the fix — an ack held past its
+expiry is exactly the drift this gate exists to catch. See the script's own
+header for the full contract; do not re-derive it here.
+
 ### 4. Push the tag (human, or AI when explicitly authorized)
 
 Releaser is **human** by default (AI preps + validates); the human pushes the

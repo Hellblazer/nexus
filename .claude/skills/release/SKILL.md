@@ -352,6 +352,44 @@ tag-push is the moment the merge is conflict-free by construction; skipping
 it re-opens the divergence that Step 7 then has to re-resolve under
 pressure. Do it every release, zero-change releases included.
 
+### 11c. Post-publish: published-bytes UPGRADE journey (nexus-86mx2, 2026-08-14)
+
+Both commands below drive the just-published PyPI bytes, not the working
+tree — "identical tree" is an argument that the pre-tag battery already ran
+this; it is not a run of the actual published artifact. Run them once Step
+11 confirms PyPI shows the new version.
+
+```bash
+tests/e2e/fresh-install-mvv.sh --published X.Y.Z    # FRESH-install axis, published bytes
+NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade   # UPGRADE axis, published bytes
+```
+
+The first (nexus-796zn) is the post-publish shakedown for a box that has
+never run conexus before — see its description near Step 1 above; it
+belongs here, not in the pre-tag battery, because nothing is on PyPI yet at
+that point in the checklist.
+
+The second (nexus-86mx2) closes the loop the pre-tag `--package-upgrade` run
+(Step 1) cannot: that run always upgrades to the WORKING-TREE wheel, which
+proves the code but not the actual bytes PyPI now serves — a difference in
+wheel packaging, MANIFEST.in, or dependency resolution at the real
+`uv tool install`/`pip install` layer (the exact nexus-l2ku5 shape) is
+invisible to a worktree-wheel run by construction. Setting
+`NEXUS_TARGET_RELEASE=X.Y.Z` makes `run.sh` download the real published
+wheel from PyPI (sha256-verified against PyPI's own JSON API) and upgrade
+to THAT instead — same GH #1402 convergence assertions, now against bytes
+a real user would actually install. Must end
+`PACKAGE-UPGRADE CONVERGENCE MVV PASSED — ... -> published conexus X.Y.Z ->
+...` — the verdict line always names which target ran; a plain
+`-> working tree` here on a post-publish run means `NEXUS_TARGET_RELEASE`
+was not set and the loop was NOT actually closed.
+
+Coordinate with (do not duplicate) `tests/e2e/published-client-write-gate.sh`
+(nexus-86mx2, wired into the `engine-release` skill's pre-tag battery): that
+gate owns the FRESH-WRITE axis against a CANDIDATE engine, pre-deploy; this
+step owns the UPGRADE axis against the REAL published engine identity,
+post-publish. See either script's header for the full ownership split.
+
 ### 12. Reinstall local tool and verify
 
 ```bash
