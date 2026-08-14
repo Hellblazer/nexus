@@ -252,6 +252,56 @@ converge route `POST /v1/catalog/owners/sweep_next_seq_drift`
 (`CatalogHandler.java`) floors every drifted owner's `next_seq` back to a
 safe value across all owners in one call.
 
+### Dangling manifest row: the definition of record
+
+"Dangling manifest row" has three distinct shapes, only one of which is a
+defect. A `catalog_document_chunks` row `c` is examined against its owning
+document `d` (`d.tenant_id = c.tenant_id AND d.tumbler = c.doc_id`) and
+against whether `(c.tenant_id, c.collection, c.chash)` resolves in
+`nexus.chunks`, filtered to the `embedding_<dim>` column its collection
+routes to (RDR-191 Phase 4: the three per-dim `chunks_384/768/1024` tables
+were unified into one `nexus.chunks` table with three nullable typed
+`embedding_384`/`embedding_768`/`embedding_1024` columns under an
+exactly-one-populated CHECK, plus three unconditional full HNSW indexes,
+one per column):
+
+- **(a) Owner LIVE, no matching chunk row.** REAL dangling — the class every
+  producer fix and every gate targets. This is the definition
+  `nexus.manifest_verify(doc_id)` / `manifest_verify_all()`
+  (`catalog-020-index-run-fence.xml:167-176` / `:240-248`, both join
+  `d.deleted_at IS NULL`) and `nexus.manifest_orphans(dim)`
+  (`catalog-004-manifest-functions.xml:100/:116/:132`, same join) already
+  use, and the one `health._check_dangling_manifests()`
+  (`src/nexus/health.py:3837`) inherits by calling `manifest_verify_all()`
+  verbatim.
+- **(b) Owner TOMBSTONED.** Not dangling — the soft-tombstone contract
+  working as designed (`delete_document` deliberately leaves
+  `catalog_document_chunks` in place, `src/nexus/catalog/store_hook.py:738-741`).
+  These rows await `nx catalog purge-trash --no-dry-run --confirm`'s CASCADE
+  reap and are excluded from (a)'s instruments by construction, not by
+  omission.
+- **(c) Owner ABSENT.** Impossible: `catalog_document_chunks (tenant_id,
+  doc_id) -> catalog_documents (tenant_id, tumbler) ON DELETE CASCADE`
+  (`fk-001-catalog-cross-store.xml:69`) is a live Postgres FK already —
+  distinct from the manifest-row-to-chunk-row edge (`(tenant_id, collection,
+  chash)` against `nexus.chunks`), which remains application-enforced only
+  until a future FK lands (planned `MATCH SIMPLE`, per RDR-191).
+
+A raw anti-join with no `d.deleted_at IS NULL` join (as run ad hoc, or as
+`catalog-025-collection-not-null.xml`'s one-time cleanup migration
+deliberately does) counts **(a) ∪ (b)** together. That is correct for a
+backward-looking sweep — it has no reason to leave tombstone residue sitting
+in a table it is already touching — but it is a different, larger population
+than (a) alone, and the two must never be compared as if they measured the
+same thing. `purge-trash`'s stranded-chunk preview is a different axis
+again: direction chunk→parent (existing `nexus.chunks` rows with no LIVE
+manifest referrer), disjoint from all three shapes above by construction —
+a clean reading on one instrument says nothing about any other
+(`health.py:3880-3890`). Full reconciliation of specific measured
+discrepancies (e.g. 37 vs. 2,951 vs. 6,501 across different RDR-191 GATE-2
+census runs) plus the per-instrument definition table: T2
+`nexus/rdr-191-dangling-definition-of-record`.
+
 ### Chunk identity: the canonical chash ([RDR-180](rdr/rdr-180-content-address-chash-binary-32byte.md))
 
 A **chash IS the 32-byte SHA-256 digest of the chunk text** — the full digest,
@@ -504,7 +554,7 @@ search_cross_corpus()              # search_engine.py
 | `taxonomy_meta` | Per-collection discover stats (last_discover_at, last_discover_doc_count) |
 | `topic_links` | Aggregated inter-topic link counts derived from catalog link graph |
 
-**Centroid storage** (`taxonomy_centroids_{384,768,1024}`, one per embedding dim): served through pgvector via `nexus-service` (`HttpCentroidStore`) since [RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4a.2. One row per topic holds the centroid vector, collection, topic_id, and label; `assign_single()` does the ANN lookup. (The discover/rebuild centroid-WRITE helpers retain raw-Chroma access only for injected-client / legacy-ETL paths, slated for removal in [RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4b.)
+**Centroid storage** (`nexus.taxonomy_centroids`, one unified table with three nullable typed `embedding_384`/`embedding_768`/`embedding_1024` columns under an exactly-one-populated CHECK — [RDR-191](rdr/rdr-191-unify-chunk-tables-enable-manifest-fk.md) Phase 4 unified the three prior per-dim `taxonomy_centroids_{384,768,1024}` tables the same way it unified T3 chunks): served through pgvector via `nexus-service` (`HttpCentroidStore`) since [RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4a.2. One row per topic holds the centroid vector, collection, topic_id, and label; `assign_single()` does the ANN lookup. Chroma is not a live substrate in any mode (RDR-155 P4b, shipped 2026-07-25) — the discover/rebuild centroid-write helpers go through `HttpCentroidStore` like every other centroid path.
 
 ### Centroid Lifecycle
 
@@ -806,7 +856,7 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 | **Console** | `console/` (`app.py`, `watchers.py`, `config.py`, `routes/`), `commands/console.py` | Embedded web UI for monitoring agentic Nexus activity (`nx console`). FastAPI/uvicorn server with live-updating routes for activity, campaigns, health, and partials. `commands/console.py` handles start/stop lifecycle and PID file management |
 | **Search** | `search_engine.py`, `search_clusterer.py`, `scoring.py`, `frecency.py`, `ripgrep_cache.py`, `filters.py` | Query, rank, rerank. `scoring.py` applies topic boost (`apply_topic_boost`: same-topic -0.1, linked-topic -0.05). `search_engine.py` does topic grouping (T2 assignments when >50% coverage) with fallback to Ward hierarchical clustering. `filters.py` also contains `sanitize_query()` ([RDR-071](rdr/rdr-071-query-sanitizer-permanence-mode.md)) which strips LLM prompt contamination from search queries before embedding |
 | **Context** | `context.py`, `commands/context_cmd.py` | L1 project context cache ([RDR-072](rdr/rdr-072-progressive-context-loading.md)). `generate_context_l1()` builds a ~200 token topic map from taxonomy, cached as flat file at `~/.config/nexus/context/<repo>-<hash>.txt`. Injected by SessionStart hook for agent cold-start acceleration. Auto-refreshed after `taxonomy discover` and `index repo` |
-| **Taxonomy** | `db/t2/catalog_taxonomy.py`, `commands/taxonomy_cmd.py`, `taxonomy.py` (shim) | HDBSCAN topic discovery from T3 embeddings ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)). T2 tables: `topics`, `topic_assignments`, `taxonomy_meta`, `topic_links`. Centroids on pgvector (`taxonomy_centroids_{384,768,1024}`) via nexus-service (`HttpCentroidStore`) for centroid ANN, since [RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4a.2. `discover_for_collection()` is the shared entry point for CLI and `nx index repo`. `taxonomy_assign_hook` in `mcp_infra.py` fires on every `store_put` for incremental assignment. `taxonomy.py` is a backward-compatibility shim that forwards old call sites to `db.taxonomy` |
+| **Taxonomy** | `db/t2/catalog_taxonomy.py`, `commands/taxonomy_cmd.py`, `taxonomy.py` (shim) | HDBSCAN topic discovery from T3 embeddings ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)). T2 tables: `topics`, `topic_assignments`, `taxonomy_meta`, `topic_links`. Centroids on pgvector (`nexus.taxonomy_centroids`, unified single table since RDR-191 Phase 4) via nexus-service (`HttpCentroidStore`) for centroid ANN, since [RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4a.2. `discover_for_collection()` is the shared entry point for CLI and `nx index repo`. `taxonomy_assign_hook` in `mcp_infra.py` fires on every `store_put` for incremental assignment. `taxonomy.py` is a backward-compatibility shim that forwards old call sites to `db.taxonomy` |
 | **Hooks** | `commands/hooks.py`, `commands/hook.py` | `hooks.py`: Git hook install/uninstall/status, sentinel-bounded stanza management. `hook.py`: Claude Code SessionStart/SessionEnd lifecycle runners |
 | **Verification** | `config.py` (verification section), `conexus/hooks/scripts/stop_verification_hook.sh`, `conexus/hooks/scripts/pre_close_verification_hook.sh`, `conexus/hooks/scripts/read_verification_config.py` | Opt-in mechanical enforcement: Stop hook (session-end checks), PreToolUse hook (bd-close gate), standalone config reader. See [Verification config](configuration.md#verification) |
 | **MCP Servers** | `mcp/core.py`, `mcp/catalog.py`, `mcp_infra.py`, `mcp_server.py` (shim) | Multi-server FastMCP architecture ([RDR-062](rdr/rdr-062-mcp-interface-tiering.md), [RDR-139](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md)). `nexus` core server (38 tools: storage, retrieval, operators, orchestration) + `nexus-catalog` (10 tools: catalog and link graph). (The RDR-139 Layer A' `nx-mcp-devonthink` proxy was retired 2026-07-07, nexus-goypg — clients connect to DEVONthink's own MCP server directly; its `dt_incorporate` composite lives on as `nx dt incorporate`.) Short-name convention: catalog tools drop the redundant `catalog_` prefix since the server namespace already provides context. Six destructive / maintenance operations are intentionally kept CLI-only. Backward-compat shim at `mcp_server.py` re-exports every function. `query()` has catalog-aware routing (author, content_type, subtree, follow_links, depth); singletons and test injection live in `mcp_infra.py`. **For the full tool catalog see [MCP Servers](mcp-servers.md).** |

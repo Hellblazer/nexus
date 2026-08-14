@@ -376,6 +376,17 @@
          already included above; before the runAlways grants below. -->
     <include file="db/changelog/taxonomy-006-assign-from-chashes.xml"/>
 
+    <!-- RDR-191 Phase 4, centroid family (bead nexus-jv3ue, Hal ruling
+         o8dil.47 "unify the centroids too, one era"):
+         taxonomy-007-unify-centroids.xml is REGISTERED below in the Phase 4
+         repoint-batch slot (after catalog-028), in the lint-enforced order
+         vectors-004 -> taxonomy-007 -> vectors-005; see
+         tests/test_changelog_staged_batch_coupling_lint.py. No
+         grants-nexus-svc.xml edit was required for the centroid family:
+         verified by direct grep, no changeset GRANTs MAINTAIN on any
+         taxonomy_centroids_<dim> table and neither Java VACUUM allowlist
+         names one (recorded per jv3ue item 3). -->
+
     <!-- nexus-kl2z6 increment 2 / nexus-vc6dh: staging.document_chunks(chash)
          probe index for the sweep's third guard (design memo §4.2 REV 2
          corrected shape). Needs staging.document_chunks (staging-001);
@@ -401,6 +412,70 @@
          place. Same catalog_document_chunks/chunks_384/768/1024
          prerequisites as catalog-023; before the runAlways grants below. -->
     <include file="db/changelog/catalog-024-quarantine-collection-registration.xml"/>
+
+    <!-- RDR-191 nexus-71gw2 (Phase C): catalog_document_chunks.collection
+         NOT NULL: resolve where knowable (chash membership plus sibling
+         tiebreak), delete what cannot be resolved, no sentinel, no DEFAULT
+         (Hal ruling 2026-08-12). Needs chunks_384/768/1024 (vectors-001) for
+         the C-membership lookup and catalog_documents for the chunk_count
+         resync; after catalog-023/024 for file-order clarity, before the
+         runAlways grants below. -->
+    <include file="db/changelog/catalog-025-collection-not-null.xml"/>
+
+    <!-- nexus-5da44 (RDR-191 GATE-2 delete-path quartet): CREATE OR REPLACE of
+         nexus.purge_trash — the chunk-orphan sweep (Steps 1-3) now applies the
+         SAME older_than grace-window scoping Step 4's document delete already
+         applies, so an in-grace-window tombstone keeps chunks, document, and
+         manifest rows together until cutoff. Layered on top of
+         catalog-003-soft-delete.xml via CREATE OR REPLACE — that file already
+         shipped and is never edited in place. After catalog-025 for file-order
+         clarity, before the runAlways grants below. -->
+    <include file="db/changelog/catalog-026-purge-trash-chunk-age.xml"/>
+
+    <!-- nexus-wnpet (RDR-191 GATE-2 delete-path quartet): CREATE OR REPLACE of
+         nexus.gc_expire_quarantine — the hard-delete of past-cutoff quarantined
+         chunks now refuses (counts as `refused`, not `expired`) any chash still
+         named by a live-or-tombstoned catalog_document_chunks manifest row,
+         mirroring gc_restore_rereferenced's rescue predicate. Layered on top of
+         catalog-023-quarantine-functions.xml via CREATE OR REPLACE — that file
+         already shipped and is never edited in place. After catalog-026 for
+         file-order clarity, before the runAlways grants below. -->
+    <include file="db/changelog/catalog-027-gc-expire-quarantine-manifest-guard.xml"/>
+
+    <!-- nexus-sa731 (RDR-191 GATE-2 census cell 5a, concurrent axis): CREATE OR
+         REPLACE of nexus.gc_quarantine_orphans — takes the EXCLUSIVE half of the
+         same per-(tenant, collection) advisory sweep gate
+         CatalogRepository#runSweepTransaction uses, closing the write-skew
+         window between the manifest-reference guard SELECT and the chunk
+         move/delete (two separate READ COMMITTED statements, previously
+         unlocked). Also collapses the guard into the move statements' own
+         WHERE (inline NOT EXISTS) instead of a precomputed chash array,
+         deleting the now-redundant standalone guard SELECT. Layered on top of
+         catalog-024-quarantine-collection-registration.xml via CREATE OR
+         REPLACE — that file already shipped and is never edited in place.
+         After catalog-027 for file-order clarity, before the runAlways grants
+         below. -->
+    <include file="db/changelog/catalog-028-quarantine-orphans-sweep-gate.xml"/>
+
+    <!-- RDR-191 Phase 4 repoint batch (Step B, plan T2 [22445]; beads
+         nexus-o8dil.12/.13/.14 core, jv3ue centroid sibling, o8dil.18
+         function/view repoint): the three-changeset unify batch, registered
+         ATOMICALLY with the full Java repoint (o8dil.16/.17/.48) and the
+         Python lockstep (o8dil.19/.15). Order is load-bearing and
+         lint-enforced (tests/test_changelog_staged_batch_coupling_lint.py):
+         vectors-004 collapses chunks_384/768/1024 into nexus.chunks;
+         taxonomy-007 collapses taxonomy_centroids_<dim> into
+         nexus.taxonomy_centroids; vectors-005 re-creates the 15
+         CASCADE-dropped objects (9 typed combined-query functions kept as
+         NINE typed entry points (DECISION 2, F13) plus
+         manifest_verify/_all per DECISION 1, gc_*, purge_trash,
+         chash_conformance_report, assign_from_chashes_*, remap_membership,
+         document_text, live_chunks, collection_vector_stats) against the
+         unified tables. grants-003 carries an existence guard and
+         grants-005 takes over MAINTAIN (see grants-nexus-svc.xml). -->
+    <include file="db/changelog/vectors-004-unify-chunks.xml"/>
+    <include file="db/changelog/taxonomy-007-unify-centroids.xml"/>
+    <include file="db/changelog/vectors-005-repoint-functions-views.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

@@ -81,7 +81,9 @@ def _seed_live_doc(local_t3: T3Database, *, collection: str, title: str, content
     tumbler, _created = catalog_store_hook_tracked(
         title=title, doc_id=chash, collection_name=collection,
     )
-    cat.append_manifest_chunks(tumbler, [{"chash": chash, "position": 0}])
+    cat.append_manifest_chunks(
+        tumbler, [{"chash": chash, "position": 0}], collection=collection,
+    )
     cat.resync_chunk_count_cache(tumbler)
     return chash
 

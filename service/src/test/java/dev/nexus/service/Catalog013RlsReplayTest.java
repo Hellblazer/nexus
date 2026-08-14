@@ -101,6 +101,11 @@ class Catalog013RlsReplayTest {
                 + "END $$");
             exec(su, "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '"
                 + ADMIN_PASS + "' NOSUPERUSER NOBYPASSRLS");
+            // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
+            // visibility: granting pg_monitor onward to nexus_svc needs the grantor to
+            // hold pg_monitor WITH ADMIN OPTION (or be superuser). Same DBA-bootstrap
+            // mirror as GrantsSvcForeignOwnedRelationTest and the other replay fixtures.
+            exec(su, "GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
 
             // 1. Full changelog as superuser — post-RDR-180 schema (bytea).
             liquibaseUpdate(pg.getJdbcUrl(),

@@ -134,7 +134,7 @@ class TestServiceChildLogging:
             captured.update(kwargs)
             return _FakeProc()
 
-        monkeypatch.setattr(ssd.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd, "_popen", _fake_popen)
         # Skip the credential-chain lookup for the voyage key.
         monkeypatch.setenv("NX_VOYAGE_API_KEY", "test-key")
 
@@ -350,7 +350,7 @@ class TestDetachedSpawnCapture:
             return _FakeProc()
 
         monkeypatch.setattr(sr, "ServiceRegistry", _FakeRegistry)
-        monkeypatch.setattr(dm.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(dm, "_popen", _fake_popen)
 
         result = CliRunner().invoke(
             main, ["daemon", "service", "start", "--config-dir", str(config_dir)],

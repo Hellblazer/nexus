@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.vectors.DimTables;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -107,9 +108,10 @@ class ManifestFunctionsTest {
     // ── Test collections (must be registered in catalog_collections per fk-002) ─
     // Collection names follow the conformant shape: <type>__<owner>__<model>__<version>
     // The model segment (split_part(name, '__', 3)) must match the _MODEL_DIMS tokens
-    // used by manifest_orphans to route to the correct chunks_<dim> table.
-    // 384: model token = 'minilm-l6-v2-384' (maps chunks_384)
-    // 1024: model token = 'voyage-context-3' (maps chunks_1024)
+    // used by manifest_orphans to route to the correct embedding_<dim> column of the
+    // unified nexus.chunks table (RDR-191 Phase 4; formerly a chunks_<dim> table).
+    // 384: model token = 'minilm-l6-v2-384' (maps embedding_384)
+    // 1024: model token = 'voyage-context-3' (maps embedding_1024)
     private static final String COLLECTION_384  = "knowledge__mf-owner-a__minilm-l6-v2-384__v1";
     private static final String COLLECTION_1024 = "knowledge__mf-owner-a__voyage-context-3__v1";
 
@@ -162,13 +164,14 @@ class ManifestFunctionsTest {
                     "catalog_document_chunks",
                     "document_aspects",
                     "document_highlights",
-                    "aspect_extraction_queue",
-                    "chunks_384",
-                    "chunks_768",
-                    "chunks_1024")) {
+                    "aspect_extraction_queue")) {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
             }
+            // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
+            // a single GRANT now covers what three did.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT USAGE ON SEQUENCE nexus.document_aspects_id_seq TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -201,8 +204,8 @@ class ManifestFunctionsTest {
     // EXPECTED RED: nexus.manifest_orphans function absent until catalog-004.
     //
     // Fixture: 1 live doc, 2 manifest rows:
-    //   - chash_present: has a chunks_384 row    → NOT an orphan
-    //   - chash_missing:  NO chunks_384 row      → IS an orphan
+    //   - chash_present: has a nexus.chunks row (embedding_384)    → NOT an orphan
+    //   - chash_missing:  NO nexus.chunks row                       → IS an orphan
     //
     // Assert: manifest_orphans(384) returns exactly 1 row (chash_missing).
     // ══════════════════════════════════════════════════════════════════════════
@@ -377,48 +380,42 @@ class ManifestFunctionsTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(40)
-    void manifestBackfill_stampsCollectionFromDoc() throws Exception {
-        // RED until catalog-004 adds nexus.manifest_backfill().
+    void manifestBackfill_insertingNullCollectionThrows_backfillIsAPermanentNoOp() throws Exception {
+        // RDR-191 (nexus-71gw2) rebase: catalog_document_chunks.collection is
+        // NOT NULL as of catalog-025-collection-not-null.xml, with NO sentinel
+        // and NO DEFAULT (Hal's ruling killed the sentinel design). The
+        // pre-71gw2 fixture here inserted a manifest row with `collection`
+        // OMITTED (landing NULL) to exercise manifest_backfill()'s stamp --
+        // that state is now UNREPRESENTABLE. Assert the unrepresentability
+        // directly (the INSERT throws), not merely a row count of 0.
         String docId = "mf-backfill-doc-1";
         String chash = validChash("mf-backfill-chsh01");
 
-        // Fixture: doc with physical_collection; manifest row with collection = NULL
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, docId, COLLECTION_384);
-            // Insert manifest row with collection = NULL (pre-backfill state)
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks " +
-                "  (tenant_id, doc_id, position, chash) " +
-                "VALUES ('" + TENANT_A + "', '" + docId + "', 0, '" + chash + "') " +
-                "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+
+            PSQLException ex = assertThrows(PSQLException.class, () ->
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_document_chunks " +
+                    "  (tenant_id, doc_id, position, chash) " +
+                    "VALUES ('" + TENANT_A + "', '" + docId + "', 0, '" + chash + "') " +
+                    "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING"));
+            assertThat(ex.getSQLState())
+                .as("omitting collection must fail the NOT NULL constraint, not silently land NULL")
+                .isEqualTo("23502");
         }
 
-        // CONTROL: confirm collection IS NULL before backfill
+        // manifest_backfill() is now VESTIGIAL (RDR-191 plan §7.2 item 3): no
+        // row can ever carry collection IS NULL, so its own
+        // WHERE collection IS NULL predicate matches nothing. Still callable
+        // (not deleted -- Phase 6 retires it), permanently a 0-row no-op.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT collection FROM nexus.catalog_document_chunks " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND doc_id = '" + docId + "' AND position = 0");
-            assertThat(rs.next()).as("CONTROL: manifest row must exist").isTrue();
-            assertThat(rs.getString("collection"))
-                .as("CONTROL: collection must be NULL before backfill")
-                .isNull();
-        }
-
-        // Call manifest_backfill() — RED trigger: function absent
-        try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute("SELECT " + FN_BACKFILL + "()");
-        }
-
-        // Post-backfill: manifest row's collection must be stamped
-        try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT collection FROM nexus.catalog_document_chunks " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND doc_id = '" + docId + "' AND position = 0");
-            assertThat(rs.next()).as("manifest row must still exist after backfill").isTrue();
-            assertThat(rs.getString("collection"))
-                .as("manifest_backfill() must stamp collection = doc's physical_collection")
-                .isEqualTo(COLLECTION_384);
+            ResultSet rs = su.createStatement().executeQuery("SELECT " + FN_BACKFILL + "()");
+            rs.next();
+            assertThat(rs.getLong(1))
+                .as("manifest_backfill() is a permanent 0-row no-op once NULL collection is unrepresentable")
+                .isEqualTo(0L);
         }
     }
 
@@ -433,46 +430,18 @@ class ManifestFunctionsTest {
 
     @Test @Order(50)
     void manifestBackfill_idempotent_secondCallReturnsZero() throws Exception {
-        // RED until catalog-004 adds nexus.manifest_backfill() with idempotency.
-        //
-        // Fresh fixture: this test runs after @Order(40) which already called backfill —
-        // so at entry there are ZERO NULL-collection rows. We seed exactly ONE fresh row,
-        // making the first-call count exactly == 1 (not >=1), preventing vacuous inequality
-        // from masking a missed stamp.
-        String docId = "mf-idem-doc-1";
-        String chash = validChash("mf-idem-chsh0001");
-
-        // Fixture: doc with physical_collection; manifest row with collection = NULL.
-        // @Order(40) stamped all prior rows, so this is the only NULL row at call time.
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, docId, COLLECTION_384);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks " +
-                "  (tenant_id, doc_id, position, chash) " +
-                "VALUES ('" + TENANT_A + "', '" + docId + "', 0, '" + chash + "') " +
-                "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
-        }
-
-        // First call — stamps the one fresh NULL row; count must be exactly 1
+        // RDR-191 (nexus-71gw2) rebase: no fresh NULL row can be seeded any
+        // more (see Order(40)), so idempotency is now UNCONDITIONAL rather
+        // than "0 the second time" -- both calls return 0.
         try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery("SELECT " + FN_BACKFILL + "()");
             rs.next();
-            long firstCount = rs.getLong(1);
-            assertThat(firstCount)
-                .as("manifest_backfill() first call must stamp exactly 1 row " +
-                    "(the fresh NULL row seeded above; prior tests leave no NULL rows at @Order(50))")
-                .isEqualTo(1L);
+            assertThat(rs.getLong(1)).as("first call: nothing to stamp").isEqualTo(0L);
         }
-
-        // Second call — must return 0 (idempotent: nothing left to stamp)
         try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery("SELECT " + FN_BACKFILL + "()");
             rs.next();
-            long secondCount = rs.getLong(1);
-            assertThat(secondCount)
-                .as("manifest_backfill() second call must return 0 (idempotent: no NULL collections remain)")
-                .isEqualTo(0L);
+            assertThat(rs.getLong(1)).as("second call: still nothing to stamp").isEqualTo(0L);
         }
     }
 
@@ -487,42 +456,31 @@ class ManifestFunctionsTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(60)
-    void manifestBackfill_skipsTombstonedDocRows() throws Exception {
-        // RED until catalog-004 adds nexus.manifest_backfill() tombstone-aware.
+    void manifestBackfill_insertingNullCollectionForTombstonedDocAlsoThrows() throws Exception {
+        // RDR-191 (nexus-71gw2) rebase: the NOT NULL constraint is
+        // unconditional -- a tombstoned parent document does not exempt a
+        // manifest row from it. This subsumes the original tombstone-SKIP
+        // scenario: there is no longer a NULL row for manifest_backfill() to
+        // (correctly) skip in the first place.
         String docTombed = "mf-bf-tomb-doc-1";
         String chash     = validChash("mf-bf-tomb-chsh01");
 
-        // Fixture: tombstoned doc; manifest row with collection = NULL
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, docTombed, COLLECTION_384);
-            // Tombstone it
             su.createStatement().execute(
                 "UPDATE nexus.catalog_documents SET deleted_at = NOW() " +
                 "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docTombed + "'");
-            // Insert manifest row with collection = NULL
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks " +
-                "  (tenant_id, doc_id, position, chash) " +
-                "VALUES ('" + TENANT_A + "', '" + docTombed + "', 0, '" + chash + "') " +
-                "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
-        }
 
-        // Call manifest_backfill()
-        try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute("SELECT " + FN_BACKFILL + "()");
-        }
-
-        // Tombstoned doc's manifest row must NOT be stamped (collection stays NULL)
-        try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT collection FROM nexus.catalog_document_chunks " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND doc_id = '" + docTombed + "' AND position = 0");
-            assertThat(rs.next()).as("manifest row for tombstoned doc must still exist").isTrue();
-            assertThat(rs.getString("collection"))
-                .as("manifest_backfill() must NOT stamp collection for tombstoned docs " +
-                    "(tombstone-aware: joins deleted_at IS NULL on parent doc)")
-                .isNull();
+            PSQLException ex = assertThrows(PSQLException.class, () ->
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_document_chunks " +
+                    "  (tenant_id, doc_id, position, chash) " +
+                    "VALUES ('" + TENANT_A + "', '" + docTombed + "', 0, '" + chash + "') " +
+                    "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING"));
+            assertThat(ex.getSQLState())
+                .as("NOT NULL is unconditional -- a tombstoned parent must not exempt the row")
+                .isEqualTo("23502");
         }
     }
 
@@ -538,25 +496,31 @@ class ManifestFunctionsTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(61)
-    void manifestBackfill_restoreCycle_alreadyStampedRowUnchanged() throws Exception {
-        // RED until catalog-004 adds nexus.manifest_backfill().
+    void manifestBackfill_restoreCycle_backfillRemainsANoOpThroughout() throws Exception {
+        // RDR-191 (nexus-71gw2) rebase: the row can no longer start NULL, so
+        // seed it with its REAL collection directly and prove the
+        // tombstone/restore cycle neither perturbs the stamped value nor
+        // gives manifest_backfill() anything to do -- it stays the
+        // permanent no-op Order(40)/(50) establish.
         String docId = "mf-restore-doc-1";
         String chash = validChash("mf-restore-chsh01");
 
-        // Step 1: live doc with manifest row (collection = NULL initially)
+        // Step 1: live doc with manifest row, stamped with its real collection.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, docId, COLLECTION_384);
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks " +
-                "  (tenant_id, doc_id, position, chash) " +
-                "VALUES ('" + TENANT_A + "', '" + docId + "', 0, '" + chash + "') " +
+                "  (tenant_id, doc_id, position, chash, collection) " +
+                "VALUES ('" + TENANT_A + "', '" + docId + "', 0, '" + chash + "', '" + COLLECTION_384 + "') " +
                 "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
         }
 
-        // Step 2: backfill — stamps collection
+        // Step 2: backfill — nothing to stamp, must be a no-op.
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute("SELECT " + FN_BACKFILL + "()");
+            ResultSet rs = su.createStatement().executeQuery("SELECT " + FN_BACKFILL + "()");
+            rs.next();
+            assertThat(rs.getLong(1)).as("nothing to stamp before the restore cycle either").isEqualTo(0L);
         }
 
         // Verify stamped
@@ -973,14 +937,15 @@ class ManifestFunctionsTest {
     }
 
     /**
-     * Insert a chunks_384 row. Collection must be pre-registered (fk-002 NOT VALID FK).
+     * Insert a nexus.chunks row (RDR-191 unified; formerly chunks_384) with embedding_384
+     * populated. Collection must be pre-registered (fk-002 NOT VALID FK).
      * chash MUST be exactly 32 hex characters. PK: (tenant_id, collection, chash).
      * Superuser insert bypasses FORCE RLS so direct fixture setup is possible.
      */
     private static void insertChunk384(Connection su, String tenantId, String collection,
                                         String chash, String chunkText) throws Exception {
         su.createStatement().execute(
-            "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
             "VALUES ('" + tenantId + "', '" + collection + "', '" + chash + "', " +
             "'" + chunkText.replace("'", "''") + "', " + vectorLiteral(384) + "::vector) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
@@ -999,13 +964,14 @@ class ManifestFunctionsTest {
     }
 
     /**
-     * Count chunks_384 rows for (tenantId, collection).
+     * Count nexus.chunks rows with embedding_384 populated for (tenantId, collection).
      */
     private static int countChunks384(Connection conn, String tenantId, String collection)
             throws Exception {
         ResultSet rs = conn.createStatement().executeQuery(
-            "SELECT COUNT(*) FROM nexus.chunks_384 " +
-            "WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'");
+            "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
+            "WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'" +
+            " AND " + DimTables.embeddingColumn(384) + " IS NOT NULL");
         rs.next();
         return rs.getInt(1);
     }

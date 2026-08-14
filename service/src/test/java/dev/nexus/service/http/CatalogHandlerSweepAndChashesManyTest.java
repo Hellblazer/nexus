@@ -10,6 +10,7 @@ import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -122,7 +123,7 @@ class CatalogHandlerSweepAndChashesManyTest {
             su.createStatement().execute("SET nexus.tenant = '" + TENANT + "'");
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding)"
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ")"
                 + " VALUES (?, ?, ?, ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             ps.setString(1, TENANT);
             ps.setString(2, collection);
@@ -140,7 +141,7 @@ class CatalogHandlerSweepAndChashesManyTest {
         String col = "code__httpcm1__minilm-l6-v2-384__v1";
         registerDoc("hcm.1", col);
         CapturingExchange w = post("/v1/catalog/manifest/write",
-            "{\"doc_id\":\"hcm.1\",\"rows\":[{\"position\":0,\"chash\":\"" + ch("hcm1a") + "\"}]}");
+            "{\"doc_id\":\"hcm.1\",\"collection\":\"" + col + "\",\"rows\":[{\"position\":0,\"chash\":\"" + ch("hcm1a") + "\"}]}");
         handleWithTenant(w);
         assertThat(w.status).isEqualTo(200);
 
@@ -194,13 +195,13 @@ class CatalogHandlerSweepAndChashesManyTest {
         seedChunk384(col, x);
         registerDoc("hwm.1", col);
         CapturingExchange seed = post("/v1/catalog/manifest/write_many",
-            "{\"docs\":[{\"doc_id\":\"hwm.1\",\"rows\":[{\"position\":0,\"chash\":\"" + x + "\"}]}]}");
+            "{\"collection\":\"" + col + "\",\"docs\":[{\"doc_id\":\"hwm.1\",\"rows\":[{\"position\":0,\"chash\":\"" + x + "\"}]}]}");
         handleWithTenant(seed);
         assertThat(seed.status).isEqualTo(200);
 
         // No "sweep" key at all — must behave exactly as before this feature.
         CapturingExchange ex = post("/v1/catalog/manifest/write_many",
-            "{\"docs\":[{\"doc_id\":\"hwm.1\",\"rows\":[{\"position\":0,\"chash\":\"" + ch("hwm1-y") + "\"}]}]}");
+            "{\"collection\":\"" + col + "\",\"docs\":[{\"doc_id\":\"hwm.1\",\"rows\":[{\"position\":0,\"chash\":\"" + ch("hwm1-y") + "\"}]}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(200);
         assertThat(ex.bodyString())
@@ -216,12 +217,12 @@ class CatalogHandlerSweepAndChashesManyTest {
         seedChunk384(col, x);
         registerDoc("hwm.2", col);
         CapturingExchange seed = post("/v1/catalog/manifest/write_many",
-            "{\"docs\":[{\"doc_id\":\"hwm.2\",\"rows\":[{\"position\":0,\"chash\":\"" + x + "\"}]}]}");
+            "{\"collection\":\"" + col + "\",\"docs\":[{\"doc_id\":\"hwm.2\",\"rows\":[{\"position\":0,\"chash\":\"" + x + "\"}]}]}");
         handleWithTenant(seed);
         assertThat(seed.status).isEqualTo(200);
 
         CapturingExchange ex = post("/v1/catalog/manifest/write_many",
-            "{\"sweep\":true,\"docs\":[{\"doc_id\":\"hwm.2\",\"rows\":[{\"position\":0,"
+            "{\"sweep\":true,\"collection\":\"" + col + "\",\"docs\":[{\"doc_id\":\"hwm.2\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + ch("hwm2-y") + "\"}]}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(200);
@@ -238,7 +239,7 @@ class CatalogHandlerSweepAndChashesManyTest {
         // "sweep":"true" (a STRING, not a JSON boolean) must NOT be truthy —
         // same "explicit true only" idiom as handleAssignMany's cross_collection.
         CapturingExchange ex = post("/v1/catalog/manifest/write_many",
-            "{\"sweep\":\"true\",\"docs\":[{\"doc_id\":\"hwm.3\",\"rows\":[{\"position\":0,"
+            "{\"sweep\":\"true\",\"collection\":\"" + col + "\",\"docs\":[{\"doc_id\":\"hwm.3\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + ch("hwm3-a") + "\"}]}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(200);

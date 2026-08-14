@@ -1,0 +1,205 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-191 nexus-71gw2 (Phase C) — catalog_document_chunks.collection
+    NOT NULL, no sentinel, no DEFAULT.
+
+    Hal's ruling, verbatim (2026-08-12): "An unresolvable manifest row is
+    invalid. Delete it. NOT NULL with no sentinel, no DEFAULT." The rev-1
+    sentinel design (`__orphan__`) and the rev-2 per-row C-membership +
+    sibling-tiebreak resolution CTE are BOTH REJECTED — see T2
+    nexus/rdr-191-p0-burndown-state-2026-08-12 and bead nexus-71gw2's own
+    notes for why: neither ever fixed nexus-c30ew (a stamped-but-unverified
+    collection makes `m.collection = c.collection` FALSE and `NOT EXISTS`
+    TRUE, quarantining a still-referenced chunk), and a NULL or wrong-guess
+    row collides with RDR-191's own future FK (a NULL row is FK-exempt under
+    MATCH SIMPLE; a non-NULL row with no matching chunk is exactly what
+    VALIDATE rejects). The final ruling closes the whole class differently,
+    upstream of this changeset: writers now SEND the collection on every
+    manifest write (CatalogRepository.writeManifestRows/appendManifestChunks/
+    importChunksBatch/doImportChunk, all caller-supplied — no ghost-collection
+    resolution of any kind remains in the engine). This changeset's job is
+    strictly BACKWARD-LOOKING: clean up whatever the OLD, collection-optional
+    write paths already left behind, then close the schema so a NULL can
+    never land again.
+
+    WHAT THIS CHANGESET DOES (plan §7.1, corrected form — no per-row
+    resolution, ever):
+      1. DELETE every row with collection IS NULL outright. Unresolvable by
+         definition — there is nothing left to try to resolve it FROM; a
+         re-index regenerates a real row.
+      2. DELETE every DANGLING row too: a NON-NULL collection stamped by an
+         old write path that turns out not to actually contain the row's
+         chash in chunks_384/768/1024 for that (tenant_id, collection) pair.
+         This is exactly nexus-c30ew's failure shape, and exactly what the
+         RDR-191 Phase 5 FK will reject once it lands — deleting it here
+         means Phase 5 finds nothing left to violate it.
+      3. Resync documents.chunk_count for every touched doc.
+      4. SET NOT NULL; convert the (now-vacuous) partial index to plain.
+    Every surviving row is thus a VERIFIED (tenant_id, collection, chash)
+    match — FK-VALIDATE-able by construction, before the FK exists.
+    Deleting is safe: the manifest is DERIVED data (composition, not
+    truth); a chunk left with no manifest reference at all is exactly what
+    the GC exists to collect.
+
+    FOURTH BOOT-BRICK CLASS (distinct from the three RDR-191 has already
+    caught: F14b, .23's VALIDATE, and the plain-DEFAULT sequencing risk).
+    "One changeset is exhaustive by construction" holds only under a single
+    writer — Liquibase's changelog lock serializes concurrent BOOTS, but
+    does NOT stop an ALREADY-RUNNING old binary mid-rolling-deploy from
+    inserting a NULL-collection row after our DELETE step and committing
+    before our ALTER acquires its AccessExclusiveLock. Opening with an
+    explicit LOCK TABLE ... ACCESS EXCLUSIVE MODE closes the window: no
+    writer can slip a row in after we start.
+
+    RLS DISCIPLINE, FIVE TABLES: this changeset both WRITES
+    nexus.catalog_document_chunks and nexus.catalog_documents (the
+    chunk_count resync join) and READS nexus.chunks_384/768/1024 for the
+    dangling-row check (step 2) — the read is a plain existence check now
+    (no per-row C-membership computation, no sibling tiebreak), but it is
+    still a genuine read of those three tables' data, and they carry their
+    OWN FORCE ROW LEVEL SECURITY (vectors-001-baseline.xml :181/:188/:195).
+    Liquibase runs as nexus_admin, the table owner but NOT BYPASSRLS
+    (role-001-nexus-svc.xml) — under FORCE RLS with no `nexus.tenant` GUC
+    set at migration time, an untoggled read of chunks_384/768/1024 returns
+    ZERO rows for every tenant, which would make the dangling-row anti-join
+    misclassify EVERY row (including live, correctly-referenced ones) as
+    dangling and delete the entire manifest. All five tables are toggled
+    off, then restored, symmetrically — this is NOT the catalog-014
+    two-table pattern (that migration never reads the chunk content
+    tables at all); it is a genuine widening this changeset's own dangling
+    check requires, independent of whatever the now-deleted per-row
+    resolution logic once needed the same three tables for.
+
+    Resync (RDR-191 plan §7.6 / nexus-mqd6t): `documents.chunk_count` is a
+    same-transaction mirror of the manifest (CatalogRepository.java
+    writeManifestRows); deleting manifest rows without resyncing leaves it
+    claiming rows that no longer exist and `completeIndexRun` starts
+    refusing 409 on `referenced() != chunkCount`. The resync below is
+    deliberately tombstone-scoped on BOTH halves, reproducing
+    `resyncChunkCount`'s (CatalogRepository.java) two predicates verbatim
+    (it cannot call the Java method from SQL): the COUNT is scoped to a
+    live parent doc, and the UPDATE carries `deleted_at IS NULL` so a
+    resync can never write through to a soft-deleted document.
+
+    Partial index (plan §7.5): `idx_catalog_chunks_collection`
+    (vectors-001-baseline.xml :226-229) is `WHERE collection IS NOT NULL`.
+    Under NOT NULL the predicate is vacuous but PostgreSQL proves
+    partial-index usability from the QUERY's own restriction clauses, not
+    the column constraint, so once callers stop supplying
+    `collection IS NOT NULL` explicitly the index can silently degrade to a
+    seq scan. Converted to a plain index here, in the same changeset that
+    makes the predicate vacuous, to close that gap at the moment it opens.
+
+    NO FK is added by this changeset (RDR-191 Phase 5's concern, not this
+    one) — when it lands it is application-documented as MATCH SIMPLE
+    (RDR-191 decision record), and every row this changeset leaves behind
+    already satisfies the predicate that FK will enforce.
+
+    manifest_backfill() (catalog-004) is left untouched and becomes
+    VESTIGIAL (plan §7.2 item 3): no row can ever carry collection IS NULL
+    after this changeset runs, so its own `WHERE collection IS NULL`
+    predicate matches nothing, forever. Not deleted here — RDR-191 Decision
+    item 4 retires it in Phase 6.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-025-0" author="nexus-71gw2">
+        <comment>catalog_document_chunks.collection: delete unresolvable (NULL) and dangling (stamped-but-unverified) rows, resync chunk_count, then SET NOT NULL. No resolution, no sentinel, no DEFAULT (Hal ruling 2026-08-12).</comment>
+        <sql splitStatements="true" stripComments="false">
+-- Fourth boot-brick closure: block a concurrent old-binary writer for the
+-- WHOLE remainder of this transaction before touching anything else.
+LOCK TABLE nexus.catalog_document_chunks IN ACCESS EXCLUSIVE MODE;
+
+-- RLS toggle, all five tables this changeset's SELECT/UPDATE/DELETE touch.
+ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_documents       NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks_384              NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks_768              NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks_1024             NO FORCE ROW LEVEL SECURITY;
+
+-- Step 1: rows with no collection at all are unresolvable by definition --
+-- delete outright, no resolution attempt. RETURNING captured into a temp
+-- table so the resync below (step 3) knows exactly which docs were touched.
+CREATE TEMP TABLE t_71gw2_deleted_null ON COMMIT DROP AS
+WITH del AS (
+    DELETE FROM nexus.catalog_document_chunks
+    WHERE collection IS NULL
+    RETURNING tenant_id, doc_id
+)
+SELECT DISTINCT tenant_id, doc_id FROM del;
+
+-- Step 2: dangling rows -- a NON-NULL collection that does not actually
+-- contain the row's chash in any of chunks_384/768/1024. This is exactly
+-- nexus-c30ew's failure shape (a stamped collection that turns out wrong)
+-- and exactly what the Phase 5 FK will reject; a re-index regenerates a
+-- real row. `collection IS NOT NULL` keeps this DISJOINT from step 1's
+-- already-deleted rows (two data-modifying statements targeting the same
+-- row inside one transaction is unspecified in PostgreSQL; disjoint sets
+-- avoids the question entirely).
+CREATE TEMP TABLE t_71gw2_deleted_dangling ON COMMIT DROP AS
+WITH del AS (
+    DELETE FROM nexus.catalog_document_chunks c
+    WHERE c.collection IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM nexus.chunks_384  v WHERE v.tenant_id = c.tenant_id AND v.collection = c.collection AND v.chash = c.chash)
+      AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768  v WHERE v.tenant_id = c.tenant_id AND v.collection = c.collection AND v.chash = c.chash)
+      AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 v WHERE v.tenant_id = c.tenant_id AND v.collection = c.collection AND v.chash = c.chash)
+    RETURNING tenant_id, doc_id
+)
+SELECT DISTINCT tenant_id, doc_id FROM del;
+
+-- Step 3: documents.chunk_count resync (nexus-mqd6t's two predicates,
+-- verbatim, for every touched doc only): COUNT scoped to a live parent,
+-- UPDATE guarded by deleted_at IS NULL so a resync can never write through
+-- to a tombstone.
+CREATE TEMP TABLE t_71gw2_touched_docs ON COMMIT DROP AS
+SELECT tenant_id, doc_id FROM t_71gw2_deleted_null
+UNION
+SELECT tenant_id, doc_id FROM t_71gw2_deleted_dangling;
+
+UPDATE nexus.catalog_documents d
+SET chunk_count = (
+    SELECT count(*) FROM nexus.catalog_document_chunks cc
+    WHERE cc.tenant_id = d.tenant_id AND cc.doc_id = d.tumbler
+      AND EXISTS (
+          SELECT 1 FROM nexus.catalog_documents dp
+          WHERE dp.tenant_id = cc.tenant_id AND dp.tumbler = cc.doc_id AND dp.deleted_at IS NULL
+      )
+)
+FROM t_71gw2_touched_docs td
+WHERE d.tenant_id = td.tenant_id AND d.tumbler = td.doc_id AND d.deleted_at IS NULL;
+
+-- Step 4: the partial index's predicate becomes vacuous the instant
+-- collection is NOT NULL (every row satisfies it); converted to plain so a
+-- caller that stops spelling out `collection IS NOT NULL` cannot silently
+-- lose the index to a seq scan (PostgreSQL proves partial-index usability
+-- from the query's own clauses, not the column constraint).
+DROP INDEX IF EXISTS nexus.idx_catalog_chunks_collection;
+CREATE INDEX idx_catalog_chunks_collection
+    ON nexus.catalog_document_chunks (tenant_id, collection);
+
+-- Unfailable by construction: every remaining collection-IS-NULL row was
+-- just deleted above, so this ALTER cannot reject a residual row -- no
+-- manual per-deployment remediation, no operator sequencing.
+ALTER TABLE nexus.catalog_document_chunks
+    ALTER COLUMN collection SET NOT NULL;
+
+ALTER TABLE nexus.chunks_1024             FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks_768              FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks_384              FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_documents       FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_document_chunks FORCE ROW LEVEL SECURITY;
+        </sql>
+        <rollback>
+DROP INDEX IF EXISTS nexus.idx_catalog_chunks_collection;
+CREATE INDEX idx_catalog_chunks_collection
+    ON nexus.catalog_document_chunks (tenant_id, collection)
+    WHERE collection IS NOT NULL;
+ALTER TABLE nexus.catalog_document_chunks ALTER COLUMN collection DROP NOT NULL;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

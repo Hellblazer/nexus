@@ -489,9 +489,17 @@ def rollback_minted_catalog_entry(tumbler: str, *, original_error: str = "") -> 
                 pass
 
 
-def store_put_manifest_direct(catalog_doc_id: str, metadatas: list[dict]) -> None:
+def store_put_manifest_direct(
+    catalog_doc_id: str, metadatas: list[dict], *, collection: str,
+) -> None:
     """Direct, fail-loud manifest write for the store_put path
     (nexus-b6enc C3 / F2).
+
+    RDR-191 (Hal ruling 2026-08-12): *collection* is REQUIRED — the T3
+    collection this store_put call targets, already in scope at every
+    caller (``col_name`` / ``collection``), threaded through to
+    ``atomic_manifest_replace`` so the engine stamps it verbatim instead of
+    inferring it from chunk membership.
 
     The generic ``fire_batch`` chain swallows every hook exception by
     contract (best-effort, correct for indexer batches). For store_put
@@ -532,7 +540,7 @@ def store_put_manifest_direct(catalog_doc_id: str, metadatas: list[dict]) -> Non
 
     writer = make_catalog_writer(priority="interactive")
     try:
-        writer.atomic_manifest_replace(catalog_doc_id, chunks)
+        writer.atomic_manifest_replace(catalog_doc_id, chunks, collection=collection)
         writer.resync_chunk_count_cache(catalog_doc_id)
     finally:
         try:
@@ -562,6 +570,56 @@ def store_put_manifest_direct(catalog_doc_id: str, metadatas: list[dict]) -> Non
             f"{len(missing)} of {len(expected)} chunk hashes missing "
             f"after write (e.g. {sorted(missing)[0][:16]}…)"
         )
+
+
+def _retract_manifest_rows_for_chash(reader, writer, entry, chash: str) -> None:
+    """Explicitly retract *chash*'s own manifest row(s) from *entry*'s
+    document BEFORE the caller tombstones it and deletes the T3 chunk
+    (nexus-mmkqe / nexus-rnqbw, RDR-191 GATE-2).
+
+    TWO-TIER PROTECTION (T2 nexus/rdr-191-dangling-definition-of-record
+    [22364], amended 2026-08-12): ``PgVectorRepository#delete``'s anti-join
+    now protects a chunk referenced by a TOMBSTONED owner's manifest row
+    unconditionally (definition class b) -- correct for an INDEPENDENT
+    deleter (GC, quarantine, a different session), none of which may
+    destroy content another document's manifest still names, tombstoned or
+    not. That is exactly what breaks the SAME-CALL tombstone-then-delete
+    pattern this helper's three callers use (``nx store delete --id``, MCP
+    ``store_delete``, ``HttpVectorClient.expire()`` -- all funnel through
+    either this function or :func:`reap_catalog_manifest_for_chashes`,
+    which also calls it): tombstoning *entry* no longer implicitly
+    unblocks deleting ITS OWN chunk, because the freshly-tombstoned
+    manifest row is now class-b-protected too.
+
+    The fix is NOT to weaken the anti-join back toward tombstone-blindness
+    -- that would reopen the independent-deleter hole nexus-mmkqe closed --
+    it is to make the OWNER's own reap explicit: retract the specific
+    manifest row(s) naming *chash* here, via a full-manifest
+    read-filter-rewrite (``write_manifest`` replace, not a partial delete
+    primitive -- none exists on the caller-facing write surface), so by the
+    time the T3 delete runs there is no manifest row left for the
+    anti-join to protect. Every OTHER document's manifest row referencing
+    the same chash (RDR-108 collapse-by-design) is untouched and keeps
+    protecting it exactly as designed -- this only ever touches *entry*'s
+    own manifest.
+
+    Raises on failure (a manifest read/write error, a closed handle, ...)
+    rather than swallowing -- propagates to the caller's own try/except,
+    matching whichever fail-loud or best-effort contract that caller
+    already has. This helper carries no contract of its own to preserve.
+    """
+    tumbler_str = str(entry.tumbler)
+    current_rows = reader.get_manifest(tumbler_str)
+    remaining = [
+        {
+            "position": r.position, "chash": r.chash, "chunk_index": r.chunk_index,
+            "line_start": r.line_start, "line_end": r.line_end,
+            "char_start": r.char_start, "char_end": r.char_end,
+        }
+        for r in current_rows if r.chash != chash
+    ]
+    if len(remaining) != len(current_rows):
+        writer.write_manifest(tumbler_str, remaining, collection=entry.physical_collection)
 
 
 def store_delete_catalog_cleanup(
@@ -672,11 +730,20 @@ def store_delete_catalog_cleanup(
 
     tumbler = str(entry.tumbler)
     writer = None
+    retract_reader = None
     try:
-        from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred, avoids import cycle
 
         writer = make_catalog_writer(priority="interactive")
+        # nexus-mmkqe/rnqbw (RDR-191 GATE-2): retract chash_doc_id's own
+        # manifest row(s) BEFORE tombstoning -- the anti-join now protects
+        # a tombstoned owner's manifest row too (definition class b), so
+        # tombstoning alone no longer unblocks THIS caller's own T3 delete
+        # the way it used to. See _retract_manifest_rows_for_chash.
+        retract_reader = make_catalog_reader()
+        if retract_reader is not None:
+            _retract_manifest_rows_for_chash(retract_reader, writer, entry, chash_doc_id)
         writer.delete_document(Tumbler.parse(tumbler))
         _log.info(
             "store_delete_catalog_row_removed",
@@ -690,6 +757,11 @@ def store_delete_catalog_cleanup(
         )
         return tumbler, str(exc)
     finally:
+        if retract_reader is not None:
+            try:
+                retract_reader._db.close()
+            except Exception:  # noqa: BLE001 — best-effort handle cleanup in finally
+                pass
         if writer is not None:
             try:
                 writer.close()
@@ -733,21 +805,33 @@ def reap_catalog_manifest_for_chashes(
     header docstring for :func:`single_chunk_manifest_metadata`.
 
     ORDERING IS LOAD-BEARING (nexus-o8dil.5 round 2 finding). Callers
-    MUST invoke this BEFORE deleting the T3 chunk(s), not after.
-    ``PgVectorRepository#delete``'s anti-join (RDR-191 F10c) refuses to
-    delete a chash while ANY live (non-tombstoned-owner) manifest row
-    still references it — including the very document whose own note is
-    being deleted, since ``delete_document`` is a soft tombstone that
-    deliberately leaves ``catalog_document_chunks`` in place. Reaping
+    MUST invoke this BEFORE deleting the T3 chunk(s), not after. Reaping
     AFTER the chunk delete (the pre-nexus-o8dil.5 order in both this
     module's callers) means the manifest row is still live at delete
     time, every deletion is silently refused, and reaping afterward
     tombstones a document whose chunk never actually left T3 — exactly
-    the TTL-sweep leak this fix closes. Reaping first lets the chunk
-    delete succeed for the common single-owner case, while still
-    correctly leaving a GENUINELY shared chash's chunk protected (this
-    function no-ops when :func:`resolve_knowledge_doc_for_chash` finds
-    no unambiguous store_put-origin owner — see that function's own
+    the TTL-sweep leak this fix closes.
+
+    RETRACTION, NOT JUST TOMBSTONE (nexus-mmkqe/rnqbw amendment, RDR-191
+    GATE-2, 2026-08-12 — supersedes this section's original mechanism,
+    kept below for provenance). Originally, reaping first was enough on
+    its own: ``PgVectorRepository#delete``'s anti-join treated a
+    tombstoned owner's manifest row as no longer "live", so
+    ``delete_document``'s soft tombstone alone unblocked the chunk delete.
+    nexus-mmkqe made that anti-join protect a TOMBSTONED owner's manifest
+    row too (definition-of-record class b — correct for an INDEPENDENT
+    deleter, e.g. GC or a different session, which must not destroy
+    content another document's manifest still names). That reopened this
+    exact leak for THIS function's own same-call pattern: tombstoning no
+    longer implicitly unblocks the tombstoner's own delete. Each per-chash
+    iteration below now calls :func:`_retract_manifest_rows_for_chash`
+    BEFORE ``delete_document`` — an explicit manifest-row retraction, not
+    reliance on a blind filter — so the anti-join has nothing left to
+    protect for *this* chash by the time the T3 delete runs, while a
+    GENUINELY shared chash (another live OR tombstoned-but-in-grace-window
+    document's manifest row) stays fully protected (this function still
+    no-ops when :func:`resolve_knowledge_doc_for_chash` finds no
+    unambiguous store_put-origin owner — see that function's own
     ambiguity-handling docstring).
 
     *chashes* are T3 chunk natural ids, not tumblers (nexus-5axey:
@@ -789,6 +873,35 @@ def reap_catalog_manifest_for_chashes(
                     actual_collection=entry.physical_collection, tumbler=str(entry.tumbler),
                 )
                 continue
+            # nexus-mmkqe/rnqbw: retract THIS chash's own manifest row(s)
+            # BEFORE tombstoning — see _retract_manifest_rows_for_chash and
+            # this function's own "RETRACTION, NOT JUST TOMBSTONE" docstring
+            # section.
+            #
+            # nexus-review-kmo9h-regression: retraction gets its OWN narrow
+            # try/except, separate from delete_document below. Letting a
+            # retraction failure propagate to the OUTER try/except (as an
+            # earlier revision of this loop did) aborted the ENTIRE batch —
+            # not just this chash's tombstone, every remaining chash in
+            # *chashes* too — which is strictly worse than this function's
+            # own documented best-effort contract ("a failed reap for one
+            # chash simply means the anti-join will (correctly) refuse to
+            # delete that chash's chunk"). WARNING, not DEBUG: a failed
+            # retraction is now consequential (the chunk stays anti-join-
+            # protected until a later reap or purge_trash, not merely a
+            # missed catalog tombstone), so it should be visible without
+            # DEBUG-level logging enabled. delete_document still runs
+            # UNCONDITIONALLY after — the document gets tombstoned either
+            # way; if retraction failed, the manifest row survives and the
+            # anti-join loudly (not silently) blocks the caller's own T3
+            # delete, which is the SAFE direction (data protected, not lost).
+            try:
+                _retract_manifest_rows_for_chash(reader, writer, entry, chash)
+            except Exception:  # noqa: BLE001 — retraction is best-effort; see comment above
+                _log.warning(
+                    "catalog_reap_retraction_failed",
+                    chash=chash, tumbler=str(entry.tumbler), exc_info=True,
+                )
             writer.delete_document(entry.tumbler)
     except Exception:  # noqa: BLE001 — best-effort catalog reap; failure logged at debug, cleanup in finally
         _log.debug("catalog_reap_failed", exc_info=True, doc_ids=chashes)

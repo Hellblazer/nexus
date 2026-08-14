@@ -1783,8 +1783,8 @@ class TestOrchestrators:
         vector space. split_topic used to re-embed the topic's documents with
         MiniLM-384 whenever the handle was not service-backed. For a bge-768 or
         voyage-1024 collection that produced 384-dim child centroids, which land
-        in taxonomy_centroids_384 while the collection's chunks live in the
-        768/1024 space — so the ANN assign that follows hits the dimension
+        in the embedding_384 column of the unified nexus.taxonomy_centroids
+        table while the collection's chunks live in the 768/1024 space — so the ANN assign that follows hits the dimension
         -mismatch guard and returns [], and the split's children are silently
         unassignable. The split reports success; the topics it created are dead.
 

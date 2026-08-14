@@ -20,8 +20,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * RDR-164 P1a bead nexus-dcqml — collection-registry FK spine, second wave.
  *
  * <p>RDR-156 P0.2 (fk-002) added NOT VALID {@code ON DELETE RESTRICT} FKs from
- * {@code chunks_384/768/1024}, {@code chash_index}, and {@code topic_assignments}
- * to {@code catalog_collections(tenant_id, name)}. This suite covers the FIVE
+ * {@code chunks_384/768/1024} (RDR-191 Phase 4: unified into {@code nexus.chunks};
+ * the collection FK itself is Phase 5, {@link CollectionRegistryFkTest}'s territory,
+ * not yet landed as of this comment), {@code chash_index}, and
+ * {@code topic_assignments} to {@code catalog_collections(tenant_id, name)}. This
+ * suite covers the FIVE
  * remaining FK-eligible collection-level lifecycle tables that RDR-164 P1a wires
  * with the same NOT VALID + RESTRICT shape (changelog {@code fk-003-collection-registry-extra.xml}):
  *

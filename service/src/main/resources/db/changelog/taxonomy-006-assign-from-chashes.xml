@@ -333,10 +333,22 @@ GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_768(text, text[], boolean)  
 GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_1024(text, text[], boolean) TO nexus_svc;
         </sql>
         <rollback>
-            <sql splitStatements="true">
-                REVOKE EXECUTE ON FUNCTION nexus.assign_from_chashes_1024(text, text[], boolean) FROM nexus_svc;
-                REVOKE EXECUTE ON FUNCTION nexus.assign_from_chashes_768(text, text[], boolean)  FROM nexus_svc;
-                REVOKE EXECUTE ON FUNCTION nexus.assign_from_chashes_384(text, text[], boolean)  FROM nexus_svc;
+            <!-- RDR-191 repoint batch (nexus-o8dil.18): tolerant form; see
+                 catalog-020-5's rollback comment for the full rationale. -->
+            <sql splitStatements="false">
+DO $$
+BEGIN
+    IF to_regprocedure('nexus.assign_from_chashes_1024(text, text[], boolean)') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.assign_from_chashes_1024(text, text[], boolean) FROM nexus_svc;
+    END IF;
+    IF to_regprocedure('nexus.assign_from_chashes_768(text, text[], boolean)') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.assign_from_chashes_768(text, text[], boolean) FROM nexus_svc;
+    END IF;
+    IF to_regprocedure('nexus.assign_from_chashes_384(text, text[], boolean)') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.assign_from_chashes_384(text, text[], boolean) FROM nexus_svc;
+    END IF;
+END
+$$;
             </sql>
         </rollback>
     </changeSet>

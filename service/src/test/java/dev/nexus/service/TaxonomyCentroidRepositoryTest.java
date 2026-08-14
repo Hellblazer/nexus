@@ -39,21 +39,25 @@ import static org.assertj.core.api.Assertions.within;
  *
  * <p>Contract pinned here:
  * <ul>
- *   <li><strong>Embedding-length routing.</strong> upsert/annQuery dispatch to
- *       {@code taxonomy_centroids_384/768/1024} by the vector's length (the vector is
- *       ground truth); taxonomy collection names are NOT four-segment conformant
- *       (RDR-075 uses {@code <content_type>__<owner>} two-segment names), so
- *       {@code dimForCollection} cannot be the router.
- *   <li><strong>Cosine similarity.</strong> annQuery returns {@code 1 - (embedding <=> q)}.
+ *   <li><strong>Embedding-length routing.</strong> upsert/annQuery dispatch by the
+ *       vector's length to the {@code embedding_384/768/1024} column of the unified
+ *       {@code nexus.taxonomy_centroids} table (RDR-191 Phase 4, repoint-batch lane D5 —
+ *       formerly three per-dim tables) — the vector is ground truth; taxonomy collection
+ *       names are NOT four-segment conformant (RDR-075 uses
+ *       {@code <content_type>__<owner>} two-segment names), so {@code dimForCollection}
+ *       cannot be the router.
+ *   <li><strong>Cosine similarity.</strong> annQuery returns
+ *       {@code 1 - (embedding_<dim> <=> q)}.
  *   <li><strong>cross_collection filter.</strong> {@code WHERE collection = ?} (false) vs
  *       {@code WHERE collection <> ?} (true) — parity with assign_single's where-filter.
  *   <li><strong>Narrow-collection exact recall (RDR-156).</strong> A collection with N
  *       centroids returns exactly {@code min(N, nResults)} hits — never silently fewer
  *       (the {@code hnsw.iterative_scan='relaxed_order'} guard).
  *   <li><strong>Tenant RLS.</strong> every op takes a tenant; a foreign tenant sees/affects 0.
- *   <li><strong>Collection-keyed ops span all three tables.</strong> count/getByCollection/
- *       delete/purge operate without a vector, so they union/delete across all per-dim
- *       tables (a deployment is single-dim per RDR-075/077; only one has rows).
+ *   <li><strong>Collection-keyed ops span all three embedding columns.</strong>
+ *       count/getByCollection/delete/purge operate without a vector, so they scope by
+ *       {@code embedding_<dim> IS NOT NULL} across all three dims of the ONE unified
+ *       table (a deployment is single-dim per RDR-075/077; only one dim has rows).</li>
  * </ul>
  *
  * <p>Plain-LOGIN NOSUPERUSER NOBYPASSRLS service role (nexus-5j7pb class) so the RLS
@@ -108,11 +112,10 @@ class TaxonomyCentroidRepositoryTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            for (int dim : new int[] {384, 768, 1024}) {
-                su.createStatement().execute(
-                    "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.taxonomy_centroids_" + dim
-                    + " TO " + SVC_ROLE);
-            }
+            // RDR-191 Phase 4 (repoint-batch lane D5): nexus.taxonomy_centroids_384/768/1024
+            // collapsed into ONE unified nexus.taxonomy_centroids table.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.taxonomy_centroids TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
@@ -154,10 +157,10 @@ class TaxonomyCentroidRepositoryTest {
             new CentroidRecord(col, 20L, unit(384, 0.6f, 0.8f), "beta",  3),
             new CentroidRecord(col, 30L, unit(384, 0.0f, 1.0f), "gamma", 7)));
 
-        // 384-length vectors land ONLY in taxonomy_centroids_384.
-        assertThat(superuserCount(384, col)).as("all three in centroids_384").isEqualTo(3L);
-        assertThat(superuserCount(768, col)).as("none in centroids_768").isEqualTo(0L);
-        assertThat(superuserCount(1024, col)).as("none in centroids_1024").isEqualTo(0L);
+        // 384-length vectors land ONLY in the embedding_384 column.
+        assertThat(superuserCount(384, col)).as("all three at embedding_384").isEqualTo(3L);
+        assertThat(superuserCount(768, col)).as("none at embedding_768").isEqualTo(0L);
+        assertThat(superuserCount(1024, col)).as("none at embedding_1024").isEqualTo(0L);
 
         assertThat(repo.count(TENANT_A, col)).as("tenant-A sees 3").isEqualTo(3);
         assertThat(repo.count(TENANT_B, col)).as("tenant-B sees 0 under RLS").isEqualTo(0);
@@ -322,11 +325,19 @@ class TaxonomyCentroidRepositoryTest {
 
     // ── Helpers ─────────────────────────────────────────────────────────────────
 
-    /** Superuser row count for one collection in a centroid table (bypasses RLS). */
+    /**
+     * Superuser row count for one collection AT one dim (bypasses RLS).
+     *
+     * <p>RDR-191 Phase 4 (repoint-batch lane D5): {@code nexus.taxonomy_centroids_<dim>}
+     * collapsed into the unified {@code nexus.taxonomy_centroids} table — dim is now an
+     * {@code embedding_<dim> IS NOT NULL} predicate against that one table, not a
+     * separate table name.
+     */
     private long superuserCount(int dim, String collection) throws SQLException {
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
-                 "SELECT count(*) FROM nexus.taxonomy_centroids_" + dim + " WHERE collection = ?")) {
+                 "SELECT count(*) FROM nexus.taxonomy_centroids "
+                 + "WHERE collection = ? AND embedding_" + dim + " IS NOT NULL")) {
             ps.setString(1, collection);
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();

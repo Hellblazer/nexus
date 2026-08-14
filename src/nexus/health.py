@@ -2200,6 +2200,14 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     # check is the consumer that matters. The completeness guard carries a
     # matching dropped-tables exemption.)
     "nexus.chash_remap",
+    # nexus.chunks: RDR-191 Phase 4 unify (nexus-o8dil.51). Added in the SAME
+    # engine release as vectors-004-unify-chunks.xml, which creates the
+    # unified table WITH RLS in the same changeset that drops chunks_384/
+    # chunks_768/chunks_1024 (never listed here — see the absent-table
+    # handling in _check_rls_present, which is what makes this addition
+    # safe rather than a future permanent false FATAL like the chash_index
+    # episode above).
+    "nexus.chunks",
     "nexus.claude_assisted_remediation_consents",
     "nexus.document_aspects",
     "nexus.document_highlights",
@@ -2217,6 +2225,12 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.relevance_log",
     "nexus.retention_markers",
     "nexus.search_telemetry",
+    # nexus.taxonomy_centroids: RDR-191 Phase 4 unify (nexus-o8dil.51/.47 "one
+    # era" ruling). Same rationale as nexus.chunks above: added alongside
+    # taxonomy-007-unify-centroids.xml, which drops taxonomy_centroids_384/
+    # _768/_1024 (never listed here) in the same changeset it grants RLS on
+    # the unified table.
+    "nexus.taxonomy_centroids",
     "nexus.taxonomy_meta",
     "nexus.tier_writes",
     "nexus.topic_assignments",
@@ -2926,10 +2940,15 @@ def _check_migration_state(
     # WARN, never a false "clean".
     from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred to avoid circular import
         CHASH_CONFORMANCE_LABEL,
+        LEGACY_POISON_CHASH_TABLES,
+        POISON_CHASH_TABLES,
         POISON_DETAIL_TOKEN,
         chash_conformance_statements,
+        chash_era_probe_statement,
         debt_chash_conformance_statements,
         legacy_chash_conformance_statements,
+        legacy_era_chash_conformance_statements,
+        parse_conformance_sum,
     )
     from nexus.db.diag_connection import (  # noqa: PLC0415 — deferred to avoid circular import
         resolve_diag_credentials,
@@ -2955,7 +2974,33 @@ def _check_migration_state(
         ))
         nonconforming = -1
     else:
+        def _run_diag(stmts: tuple[str, ...]) -> list[str]:
+            return run_diagnostic_sql(
+                stmts, diag_creds, psql_bin=psql_bin, psql_runner=diag_runner,
+            )
+
+        def _probe_unified_schema_exists() -> bool:
+            """Existence-gate before reinterpreting a probe result as
+            legacy-era (mirrors ``nexus.db.admin_sql``'s F14a pattern): a
+            failure of the discriminator itself defaults to "assume
+            unified" — the SAFEST default, since it refuses to reinterpret
+            a genuinely poisoned current-era store as legacy-era just
+            because the discriminator itself could not answer."""
+            try:
+                era_out = _run_diag((chash_era_probe_statement(),))
+                return bool(era_out) and era_out[0].strip() == "1"
+            except (RuntimeError, DiagnosticSqlViolation, ValueError) as era_exc:
+                _log.warning(
+                    "chash_probe_era_discriminator_failed",
+                    error=str(era_exc)[:200],
+                    note="could not determine unified-vs-legacy chash "
+                         "schema — assuming unified (never reinterpret a "
+                         "possibly-genuine poison result as legacy-era)",
+                )
+                return True
+
         try:
+            poison_tables = POISON_CHASH_TABLES
             # Amendment A6 (nexus-9bufb): view-era statements first — counts
             # by construction via nexus.diag_chash_conformance. An engine one
             # generation behind (no view yet) fails the first set; the legacy
@@ -2963,10 +3008,7 @@ def _check_migration_state(
             # grants era carries full-table SELECT — fall back LOUDLY (log),
             # never silently.
             try:
-                counts = run_diagnostic_sql(
-                    chash_conformance_statements(), diag_creds,
-                    psql_bin=psql_bin, psql_runner=diag_runner,
-                )
+                counts = _run_diag(chash_conformance_statements())
                 view_era = True
             except DiagnosticSqlViolation:
                 # A LINT failure is a product defect, never an engine-
@@ -2988,11 +3030,108 @@ def _check_migration_state(
                          "direct-table statements (view absent on pre-A6 "
                          "engines, or view/owner grant gap — see error)",
                 )
-                counts = run_diagnostic_sql(
-                    legacy_chash_conformance_statements(), diag_creds,
-                    psql_bin=psql_bin, psql_runner=diag_runner,
-                )
-            nonconforming = sum(int(c) for c in counts)
+                try:
+                    counts = _run_diag(legacy_chash_conformance_statements())
+                except DiagnosticSqlViolation:
+                    raise
+                except (RuntimeError, ValueError) as direct_exc:
+                    # nexus-o8dil (2026-08-14): RDR-191 F14a mirror-direction
+                    # straddle in the poison gate. The view is absent AND the
+                    # unified-name direct fallback also failed — on a
+                    # straddle-era box (past A6, before the RDR-191 unify)
+                    # the unified nexus.chunks relation genuinely does not
+                    # exist yet, so this direct COUNT fails the same way the
+                    # view-path did. Existence-gate before retrying against
+                    # the pre-unify per-dim direct statements; a genuinely
+                    # broken current-era store re-raises the ORIGINAL error
+                    # rather than being silently reinterpreted.
+                    if _probe_unified_schema_exists():
+                        raise
+                    _log.warning(
+                        "chash_probe_direct_fallback_retrying_legacy_era",
+                        error=str(direct_exc)[:200],
+                        note="unified-name direct fallback failed and "
+                             "nexus.chunks does not exist yet — retrying "
+                             "against the pre-RDR-191 per-dim table names",
+                    )
+                    counts = _run_diag(
+                        legacy_chash_conformance_statements(LEGACY_POISON_CHASH_TABLES),
+                    )
+                    poison_tables = LEGACY_POISON_CHASH_TABLES
+
+            # nexus-o8dil (2026-08-14): RDR-191 F14a mirror-direction
+            # straddle in the poison gate (the confirmed shape, GH #1414
+            # class recurrence). The unified view-path query above can
+            # execute successfully yet return a NULL aggregate (blank psql
+            # line) for a table whose relation was created by RDR-191 —
+            # the deployed view was built by an OLDER engine's own
+            # provisioning and still carries rows keyed by the pre-unify
+            # per-dim names, so the unified WHERE filter matches no row.
+            # Existence-gate before reinterpreting: consulted UNCONDITIONALLY
+            # on a blank leg (never skipped), because the answer decides
+            # which of TWO distinct straddle windows this is.
+            if view_era and any(not c.strip() for c in counts):
+                if _probe_unified_schema_exists():
+                    # nexus-o8dil (2026-08-14, review round 2 SIGNIFICANT 1):
+                    # nexus.chunks EXISTS — the engine has already migrated —
+                    # yet the leg came back blank, so the deployed VIEW is
+                    # stale (still per-dim shaped): view re-provisioning only
+                    # happens via the chash-rekey rung's re-provision step or
+                    # `nx init --service`, never automatically after a bare
+                    # engine binary swap. This store IS measurable, just not
+                    # through the stale view — fall through to the SAME
+                    # direct unified-table statements used when the
+                    # view-path raises outright, instead of surfacing a
+                    # generic "could not probe" WARN for a store that is
+                    # provably current-era.
+                    try:
+                        direct_counts = _run_diag(legacy_chash_conformance_statements())
+                    except DiagnosticSqlViolation:
+                        raise
+                    except (RuntimeError, ValueError) as direct_exc:
+                        _log.warning(
+                            "chash_probe_direct_fallback_for_stale_view_failed",
+                            error=str(direct_exc)[:200],
+                            note="nexus.chunks exists but the view-path leg "
+                                 "was blank (stale per-dim view) and the "
+                                 "direct unified-table fallback also failed",
+                        )
+                    else:
+                        _log.info(
+                            "chash_probe_direct_fallback_for_stale_view",
+                            note="the diag view is stale (still per-dim "
+                                 "shaped) though the schema has already "
+                                 "migrated; measured via direct "
+                                 "unified-table counts instead",
+                        )
+                        counts = direct_counts
+                else:
+                    try:
+                        legacy_view_counts = _run_diag(
+                            legacy_era_chash_conformance_statements(),
+                        )
+                    except DiagnosticSqlViolation:
+                        raise
+                    except (RuntimeError, ValueError) as legacy_view_exc:
+                        _log.warning(
+                            "chash_probe_legacy_era_view_fallback_failed",
+                            error=str(legacy_view_exc)[:200],
+                        )
+                        legacy_view_counts = None
+                    if legacy_view_counts is not None and not any(
+                        not c.strip() for c in legacy_view_counts
+                    ):
+                        _log.info(
+                            "chash_probe_legacy_era_view_match",
+                            note="the unified-name view query returned a "
+                                 "NULL aggregate; the store verified via "
+                                 "the pre-RDR-191 per-dim table names "
+                                 "instead (RDR-191 straddle window)",
+                        )
+                        counts = legacy_view_counts
+                        poison_tables = LEGACY_POISON_CHASH_TABLES
+
+            nonconforming = parse_conformance_sum(poison_tables, counts)
         except (RuntimeError, DiagnosticSqlViolation, ValueError) as exc:
             # Probe failure (schema variant missing a table), lint refusal,
             # or non-numeric output — a WARN, never a false poison-clean.
@@ -3268,12 +3407,33 @@ ORDER BY tbl.schema_name, tbl.table_name;
             policy_count = 0
         rls_by_table[key] = (rls_on, rls_force, policy_count)
 
+    # nexus-o8dil.51: a listed table can legitimately be ABSENT from pg_class
+    # (not yet migrated, or -- post RDR-191 Phase 4 -- a dropped per-dim
+    # shard that was never listed in the first place but whose sibling
+    # unified table might not have landed yet on an older box). The VALUES
+    # driving table + LEFT JOIN means an absent table's relrowsecurity /
+    # relforcerowsecurity come back NULL, which -t -A prints as an empty
+    # string -- distinct from the 't'/'f' pg_class always assigns to a row
+    # that actually exists (relrowsecurity is NOT NULL in every real pg_class
+    # row). That is the ONLY signal absence has here; do not confuse it with
+    # "RLS explicitly disabled" (rls_on == 'f'), which is a real table with
+    # bad RLS and must stay FATAL.
     failed: list[str] = []
+    absent: list[str] = []
     for table in _RLS_TENANT_TABLES:
         if table not in rls_by_table:
             failed.append(f"{table} (not in query output)")
             continue
         rls_on, rls_force, policy_count = rls_by_table[table]
+
+        if rls_on == "" and rls_force == "":
+            # LEFT JOIN produced no pg_class match: table does not exist.
+            # Not fatal (chash_index precedent: a listed-but-dropped table
+            # must never be a permanent false FATAL), but must not be
+            # silently folded into the "all present and correct" ok result
+            # either -- it is its own reported outcome, below.
+            absent.append(table)
+            continue
 
         if rls_on != "t" or rls_force != "t" or policy_count == 0:
             reasons = []
@@ -3285,13 +3445,20 @@ ORDER BY tbl.schema_name, tbl.table_name;
                 reasons.append("no policies")
             failed.append(f"{table} ({', '.join(reasons)})")
 
+    present_count = len(_RLS_TENANT_TABLES) - len(absent)
+
     if failed:
+        absent_note = (
+            f" ({len(absent)} listed table(s) not yet present, reported "
+            f"separately: {', '.join(sorted(absent))})"
+            if absent else ""
+        )
         return [HealthResult(
             label="RLS policies",
             ok=False,
             detail=(
-                f"RLS missing on {len(failed)}/{len(_RLS_TENANT_TABLES)} "
-                f"tenant table(s): {', '.join(failed)}"
+                f"RLS missing on {len(failed)}/{present_count} "
+                f"present tenant table(s): {', '.join(failed)}{absent_note}"
             ),
             fix_suggestions=[
                 "Re-run migrations: nx init --service",
@@ -3299,6 +3466,26 @@ ORDER BY tbl.schema_name, tbl.table_name;
                 "check service/src/main/resources/db/changelog/",
             ],
             fatal=True,
+        )]
+
+    if absent:
+        # Its own reported outcome (nexus-o8dil.51 acceptance): not FATAL
+        # (the table may simply predate a migration that hasn't run yet, or
+        # -- transiently, mid-upgrade -- postdate one), and not a silent
+        # pass either (ok=False, warn=True) since a doctor run that reports
+        # "RLS policies: OK" while N listed tables are actually missing
+        # from the database would hide a real convergence gap.
+        return [HealthResult(
+            label="RLS policies",
+            ok=False,
+            warn=True,
+            detail=(
+                f"RLS policies: present and correct on {present_count}/"
+                f"{present_count} migrated tenant table(s); "
+                f"{len(absent)} listed table(s) not yet present in the "
+                f"database (pre-migration or upgrade in progress): "
+                f"{', '.join(sorted(absent))}"
+            ),
         )]
 
     return [HealthResult(
@@ -4498,15 +4685,75 @@ def _check_chash_conformance_report() -> list[HealthResult]:
 #: this comment instead.
 _STALE_INDEXING_THRESHOLD_HOURS = 6.0
 
-#: v7.1.0 tag time (UTC) — the first PUBLIC release carrying the CLIENT-side
-#: index-run fence (nexus-5xn3k.3, commit 4b0c5fb5). nexus-vw594 F3 / root
-#: cause of nexus-biq4x: used ONLY to distinguish a quiescent-but-fence-aware
-#: corpus (nothing indexed since the fence shipped — expected, still
-#: ok=True) from the nexus-vw594 coverage-gap signature (a document indexed
-#: AFTER this date carries no fence stamp, because its producer never calls
-#: begin/complete at all — see the investigation memo, T2
-#: nx memory get -p nexus -t "vw594-investigation-2026-08-04").
-_FENCE_RELEASE_DT = datetime(2026, 8, 2, 22, 26, 0, tzinfo=UTC)
+#: v7.3.0 tag time (UTC) — the first PUBLIC release in which EVERY producer
+#: stamps the index-run fence (nexus-vw594 F1, commit f55435eb). Used ONLY to
+#: separate a document whose producer was legitimately unfenced when it was
+#: written (permanent no-backfill debt — expected, needs no action) from a
+#: genuine producer regression (a document indexed AFTER full coverage
+#: shipped that still carries no stamp).
+#:
+#: DERIVATION — re-verify with git, never from memory or a bead's prose
+#: (nexus-apig6 got this wrong TWICE from prose, in opposite directions):
+#:     git tag --contains f55435eb --sort=creatordate | grep '^v' | head -1
+#:     git log -1 --format=%cI v7.3.0        # -> 2026-08-07T09:00:35-07:00
+#: and confirm the release BEFORE it does not contain the commit:
+#:     git merge-base --is-ancestor f55435eb v7.2.0   # -> non-zero
+#:
+#: DO NOT move this back to v7.1.0's 2026-08-02T22:26Z. That is
+#: the tag time of the FIRST client fence (nexus-5xn3k.3, commit 4b0c5fb5),
+#: which called begin/complete at exactly 4 PDF/md/dt ingest sites covering
+#: ~105 of 10,544 documents. The producers of the other 96% — the repo
+#: indexer's ``_batch_flush``, ``store_put``, the code/prose indexers, memory,
+#: MCP — were only fenced by f55435eb (2026-08-04), public at v7.3.0. Keyed on
+#: v7.1.0 this check reported every document indexed in the intervening five
+#: days as an unfenced-producer regression and prescribed a whole-corpus
+#: re-embed to fix it; that false positive reached a downstream install, which
+#: filed it as an open upstream bug (460 of 462 documents flagged). See the
+#: investigation memo, T2
+#: nx memory get -p nexus -t "vw594-investigation-2026-08-04".
+#:
+#: Nor forward to v7.5.0's 2026-08-09T22:45:30Z — apig6's first fix attempt
+#: used that date on the unverified claim that coverage shipped there. It
+#: does not: f55435eb is an ancestor of v7.3.0, two releases earlier
+#: (code-review-expert, 2026-08-11). That anchor silently absorbed any real
+#: regression in the 08-07..08-09 window into the "legacy, no action" bucket —
+#: the same defect class this constant exists to close, merely narrower.
+#:
+#: vw594 ruled NO LEGACY BACKFILL as a design decision, so a corpus indexed
+#: before this date reporting index_state=NULL on every row is the EXPECTED
+#: permanent steady state, not drift.
+_PRODUCER_FENCE_RELEASE_DT = datetime(2026, 8, 7, 16, 0, 35, tzinfo=UTC)
+
+#: NOT the anchor on its own — a LOWER BOUND on it (nexus-oiu1t). No client
+#: can have had full producer coverage before the release that carried it, so
+#: no evidence-derived anchor may ever fall below this. See
+#: ``_check_stale_indexing_runs`` for the install-local anchor this floors.
+
+#: How many post-anchor unstamped identifiers are NAMED in the WARN detail.
+_MAX_NAMED_UNSTAMPED = 10
+#: Bound on the run-id ledger built during the walk (nexus-2sa6w).
+#:
+#: WHAT IT ACTUALLY COSTS (substantive-critic, 2026-08-11 — an earlier version
+#: of this comment claimed the cap "only bites on a corpus stamped entirely
+#: one-document-at-a-time", which understates it): the ledger fills in WALK
+#: order, so ANY 5000 distinct run ids seen before a genuine multi-document
+#: batch — including solo ids from interactive `nx store put` / `nx memory
+#: put`, each minting its own uuid4 — cause that batch's proof to be dropped.
+#: A heavily dogfooded install is a plausible way to hit this, not a
+#: hypothetical one.
+#:
+#: It fails SAFE: losing the proof falls back to the weak anchor and its
+#: hedged wording, never to a false accusation. It is no longer silent —
+#: `ledger_note` below says so when the cap filled and nothing was proven.
+_MAX_TRACKED_RUN_IDS = 5000
+
+#: How many candidates are RETAINED during the corpus walk. The walk cannot
+#: know the anchor until it finishes (the anchor is derived from the stamped
+#: population), so candidates are gathered against the floor and filtered
+#: after. Bounded so a fully-unstamped 10k-document corpus cannot grow a list
+#: proportional to the corpus inside a diagnostic-only check; truncation is
+#: reported explicitly, never silently.
+_MAX_TRACKED_UNSTAMPED = 1000
 
 
 def _check_stale_indexing_runs() -> list[HealthResult]:
@@ -4558,7 +4805,45 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
     # CatalogEntry.index_state_reported's docstring.
     reported_null = 0
     not_reported = 0
-    newest_reported_null_dt: datetime | None = None
+    # nexus-apig6/oiu1t: candidate regressions — reported-but-NULL documents
+    # indexed after the coverage FLOOR. Gathered against the floor because the
+    # real anchor is not known until the walk ends; filtered against it after.
+    candidates: list[tuple[str, datetime]] = []
+    candidates_truncated = 0
+    # nexus-oiu1t: the install's OWN evidence that it has run a fenced
+    # producer — the earliest document carrying a real index_state. A fact
+    # about THIS install, unlike a release-tag date, which assumes the user
+    # upgraded the day the release shipped.
+    #
+    # A BARE stamp proves SOME producer was fenced, NOT that all were
+    # (code-review-expert + substantive-critic, 2026-08-11; verified against
+    # git). v7.1.0's fence (4b0c5fb5) covered 4 PDF/md/DEVONthink ingest
+    # sites; the rest arrived at v7.3.0 (f55435eb), and no column records
+    # which producer or client version stamped a row. So a client still on
+    # v7.1.0/v7.2.x that runs one PDF ingest establishes a WEAK anchor while
+    # its repo-index and store_put writes stay legitimately unfenced.
+    #
+    # nexus-2sa6w — the STRONG discriminator, read off the data rather than
+    # inferred from a naming convention: `_fence_begin` mints uuid4() PER
+    # DOCUMENT, while `_fence_begin_many` mints ONE run id shared across an
+    # entire flush. A run id appearing on 2+ documents therefore proves the
+    # writing client had the begin-many route, which exists ONLY from
+    # f55435eb — i.e. FULL producer coverage. Evidence-positive only: a
+    # single-document flush shares nothing either, so ABSENCE proves nothing
+    # and falls back to the weak anchor and its hedged wording. Chosen over
+    # mapping content_type to a producer family because THIS degrades safely —
+    # if begin-many ever changes shape the evidence stops appearing and the
+    # check gets more cautious, where a stale content_type map would keep
+    # mis-attributing silently.
+    earliest_stamped_dt: datetime | None = None
+    # nexus-2sa6w: run id -> [count, earliest indexed_at seen for that run].
+    run_ids: dict[str, list] = {}
+    run_ids_dropped = 0
+    # Reported-but-NULL with NO usable indexed_at. Cannot be attributed to
+    # either side of the boundary — counted separately so the ok=True summary
+    # never claims they predate coverage when nothing establishes that
+    # (code-review-expert, 2026-08-11).
+    undated_reported_null = 0
     try:
         # nexus-ft7eg: share this walk with _check_next_seq_drift
         # (_highest_child_seqs' identical `all_documents(limit=0)` scan) —
@@ -4574,21 +4859,76 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
             if state is None:
                 # Fence-aware engine, but this document has never been
                 # stamped (unfenced producer, or simply not re-indexed
-                # since the fence shipped — §_FENCE_RELEASE_DT below tells
-                # these two apart).
+                # since full producer coverage shipped —
+                # §_PRODUCER_FENCE_RELEASE_DT below tells these two apart).
                 reported_null += 1
                 indexed_at = str(getattr(entry, "indexed_at", "") or "")
+                ia_dt = None
                 if indexed_at:
                     try:
                         ia_dt = datetime.fromisoformat(indexed_at.replace("Z", "+00:00"))
                     except ValueError:
                         ia_dt = None
-                    if ia_dt is not None and (
-                        newest_reported_null_dt is None or ia_dt > newest_reported_null_dt
-                    ):
-                        newest_reported_null_dt = ia_dt
+                if ia_dt is None:
+                    undated_reported_null += 1
+                elif ia_dt > _PRODUCER_FENCE_RELEASE_DT:
+                    if len(candidates) < _MAX_TRACKED_UNSTAMPED:
+                        ident = (
+                            str(getattr(entry, "source_uri", "") or "")
+                            or str(getattr(entry, "tumbler", "") or "")
+                            or "?"
+                        )
+                        candidates.append((ident, ia_dt))
+                    else:
+                        candidates_truncated += 1
                 continue
             checked += 1
+            # nexus-oiu1t: a real index_state is proof that a fence ran on
+            # this document.
+            #
+            # ONLY 'complete' rows may date that proof (code-review-expert,
+            # 2026-08-11; verified in service/.../db/CatalogRepository.java).
+            # beginIndexRun writes INDEX_STATE/INDEX_RUN_ID/INDEX_STARTED_AT
+            # and completeIndexRun writes INDEX_STATE/INDEX_CONTENT_HASH/
+            # CHUNK_COUNT — NEITHER writes INDEXED_AT, which only the
+            # manifest-write/register path sets. So on a row stuck at
+            # 'indexing' or 'failed' (a crashed or in-flight run), indexed_at
+            # is a leftover from that document's PRIOR, unrelated successful
+            # index. Dating either anchor from it puts the anchor earlier than
+            # any evidence supports — and for the ledger it would let a
+            # CRASHED begin-many batch assert a regression, unhedged, against
+            # documents written before coverage was ever proven. Reopening the
+            # over-claiming class through a new door.
+            #
+            # NOTE the guard is an `if`, NOT an early `continue`: the
+            # stale-'indexing' detection below is this function's ORIGINAL
+            # purpose and must still see every non-complete row. A `continue`
+            # here silently disabled it (caught by
+            # TestCheckStaleIndexingRuns::test_stale_indexing_document_is_reported).
+            if state == "complete":
+                stamped_at = str(getattr(entry, "indexed_at", "") or "")
+                if stamped_at:
+                    try:
+                        st_dt = datetime.fromisoformat(stamped_at.replace("Z", "+00:00"))
+                    except ValueError:
+                        st_dt = None
+                    if st_dt is not None:
+                        if (earliest_stamped_dt is None
+                                or st_dt < earliest_stamped_dt):
+                            earliest_stamped_dt = st_dt
+                        # nexus-2sa6w: ledger the run id so a SHARED one can
+                        # prove begin-many, hence a full-coverage client.
+                        rid = str(getattr(entry, "index_run_id", "") or "")
+                        if rid:
+                            slot = run_ids.get(rid)
+                            if slot is not None:
+                                slot[0] += 1
+                                if st_dt < slot[1]:
+                                    slot[1] = st_dt
+                            elif len(run_ids) < _MAX_TRACKED_RUN_IDS:
+                                run_ids[rid] = [1, st_dt]
+                            else:
+                                run_ids_dropped += 1
             if state != "indexing":
                 continue
             started = getattr(entry, "index_started_at", "") or ""
@@ -4627,28 +4967,163 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
     # NONE fired.
     results: list[HealthResult] = []
 
-    if (
-        reported_null > 0
-        and newest_reported_null_dt is not None
-        and newest_reported_null_dt > _FENCE_RELEASE_DT
-    ):
-        # The vw594 signature: a document landed AFTER the fence existed
-        # with no stamp at all — an unfenced producer wrote it. Never
-        # ok=True for this (nexus-biq4x's misdiagnosis was exactly
-        # rendering this case as a green pre-fence skip).
+    # nexus-oiu1t: derive the anchor from THIS INSTALL's evidence, floored by
+    # the release that first carried full coverage. A release-tag date alone
+    # assumes the user upgraded the day it shipped; an install that upgraded
+    # late wrote legitimately-unfenced documents well after the tag, and
+    # anchoring on the tag reports every one of them as a producer regression
+    # — the identical false positive nexus-apig6 was filed for, merely on a
+    # later population. The floor still applies because no client can have had
+    # full coverage before the release existed, so a stamp claiming to predate
+    # it is clock skew, not evidence.
+    # No floor is applied HERE: candidates were already gathered against
+    # _PRODUCER_FENCE_RELEASE_DT during the walk, so every candidate is above
+    # the floor by construction and an anchor below it cannot change any
+    # outcome. (A max() here was written first and proven dead by its own kill
+    # control — the walk-level floor subsumes it. The floor is pinned by
+    # test_pre_coverage_document_is_never_a_candidate.)
+    # nexus-2sa6w: prefer the PROVEN anchor — the earliest run that stamped 2+
+    # documents, which only begin-many (v7.3.0+) can produce. It is always at
+    # or after the weak anchor, so preferring it is strictly more conservative:
+    # fewer documents are flagged, and the ones that are cannot be explained by
+    # a partial-coverage client.
+    proven_anchor: datetime | None = None
+    for _count, _first_dt in run_ids.values():
+        if _count >= 2 and (proven_anchor is None or _first_dt < proven_anchor):
+            proven_anchor = _first_dt
+    anchor = proven_anchor if proven_anchor is not None else earliest_stamped_dt
+    post_anchor = [c for c in candidates if anchor is not None and c[1] > anchor]
+
+    if post_anchor:
+        # A document landed AFTER this install demonstrably had a fully-fenced
+        # client and still carries no stamp — a NEW producer regression. Never
+        # ok=True for this (nexus-biq4x's misdiagnosis was exactly rendering
+        # this case as a green pre-fence skip).
+        #
+        # nexus-apig6: scoped to the post-anchor population and NAMED. The old
+        # shape reported the whole ``reported_null`` count and prescribed an
+        # unqualified `nx index <path> --force`, which on a corpus indexed
+        # before v7.3.0 reads as "re-embed all 462 of your documents" —
+        # contradicting vw594's own no-backfill decision.
+        post_anchor_count = len(post_anchor)
+        names = "; ".join(
+            f"{ident} ({at.isoformat()})"
+            for ident, at in post_anchor[:_MAX_NAMED_UNSTAMPED]
+        )
+        if post_anchor_count > _MAX_NAMED_UNSTAMPED:
+            names += f"; +{post_anchor_count - _MAX_NAMED_UNSTAMPED} more"
+        truncation_note = (
+            f" (plus {candidates_truncated} candidate(s) beyond the "
+            f"{_MAX_TRACKED_UNSTAMPED}-document tracking cap, not individually "
+            "attributed)"
+            if candidates_truncated else ""
+        )
+        # Truncated candidates were never anchor-filtered, so they are
+        # UNATTRIBUTED — excluded from `legacy` rather than folded into
+        # "predate the anchor, need no action", which would contradict the
+        # truncation note in the same message (code-review-expert, 2026-08-11).
+        legacy = (
+            reported_null - post_anchor_count - undated_reported_null
+            - candidates_truncated
+        )
+        legacy_note = (
+            f" The other {legacy} reported-but-NULL document(s) predate "
+            f"{anchor.isoformat()} and need no action (no legacy backfill by "
+            "design)."
+            if legacy > 0 else ""
+        )
+        undated_note = (
+            f" {undated_reported_null} further reported-but-NULL document(s) "
+            "carry no usable indexed_at and could fall on either side of that "
+            "boundary — this check cannot attribute them."
+            if undated_reported_null > 0 else ""
+        )
         results.append(HealthResult(
             label=label, ok=False, warn=True,
             detail=(
-                f"{reported_null} document(s) report index_state but it "
-                "is NULL on every one of them, and at least one was "
-                f"indexed {newest_reported_null_dt.isoformat()} — after "
-                f"the fence's {_FENCE_RELEASE_DT.isoformat()} release. "
-                "The fence engine is live; a producer wrote this document "
-                "without ever calling index-run begin/complete "
-                "(nexus-vw594 coverage gap), not a pre-fence engine."
+                f"{post_anchor_count} document(s) report index_state but "
+                "carry no stamp, despite being indexed after this install's "
+                f"fence baseline ({anchor.isoformat()}, "
+                + (
+                    "a batched index run, which only a client with FULL "
+                    "producer coverage can produce"
+                    if proven_anchor is not None else
+                    "its earliest stamped document"
+                )
+                + f"): {names}{truncation_note}. "
+                + (
+                    "A producer wrote these without calling index-run "
+                    "begin/complete — a coverage regression worth finding. "
+                    "(The one alternative left: a SECOND, older client also "
+                    "writing to this corpus.)"
+                    if proven_anchor is not None else
+                    "Two explanations fit, and a bare stamp cannot "
+                    "distinguish them: a producer is unfenced (a regression "
+                    "worth finding), OR this install was running a client "
+                    "whose fence covered only PDF/md/DEVONthink ingest "
+                    "(v7.1.0-v7.2.x), leaving its repo-index and store_put "
+                    "writes legitimately unstamped. Check the client version "
+                    "first — it is the cheaper of the two."
+                )
+                + (
+                    f" (Note: {run_ids_dropped} index-run id(s) exceeded this "
+                    f"check's {_MAX_TRACKED_RUN_IDS}-run ledger and were not "
+                    "examined, so proof of full coverage may have been missed "
+                    "— this reading is the cautious one.)"
+                    if run_ids_dropped and proven_anchor is None else ""
+                )
+                + f"{legacy_note}{undated_note}"
+            ),
+            fix_suggestions=(
+                [
+                    "nx index <path> --force   (re-index ONLY the named "
+                    "document(s) above — this clears the symptom, not the "
+                    "unfenced producer)",
+                ] if proven_anchor is not None else [
+                    "nx --version   (a client below 7.3.0 explains this with "
+                    "no regression at all)",
+                    "nx index <path> --force   (on a 7.3.0+ client, re-index "
+                    "ONLY the named document(s) above — this clears the "
+                    "symptom, not the unfenced producer)",
+                ]
+            ),
+        ))
+    elif anchor is None and (candidates or candidates_truncated):
+        # nexus-oiu1t: post-floor unstamped documents exist, but NO document in
+        # this corpus has ever been stamped — nothing establishes whether this
+        # install has run a fully-fenced client at all. A late upgrader and a
+        # genuinely unfenced producer are indistinguishable from here.
+        #
+        # This still WARNS. Declining to warn would hide a real producer
+        # regression on an install that has never once stamped — the exact
+        # shape the vw594 incident had. What nexus-apig6 was filed for was not
+        # that a warning existed, but that it ASSERTED a producer bug it could
+        # not prove and prescribed re-embedding the whole corpus; so this arm
+        # states the ambiguity and prescribes ONE document.
+        ambiguous_total = len(candidates) + candidates_truncated
+        results.append(HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"cannot attribute: {ambiguous_total} document(s) indexed "
+                "after full producer coverage shipped "
+                f"{_PRODUCER_FENCE_RELEASE_DT.date().isoformat()} carry no "
+                "index-run stamp, and "
+                + (
+                    "no document in this corpus has ever been stamped"
+                    if checked == 0 else
+                    f"none of the {checked} stamped document(s) has a "
+                    "COMPLETED run carrying a usable indexed_at (an "
+                    "'indexing'/'failed' row's indexed_at belongs to its "
+                    "previous index, not this run)"
+                )
+                + " — so no fence baseline can be established for this "
+                "install. Either a producer is unfenced, or this install "
+                "upgraded late and these are its own pre-coverage writes. "
+                "Re-indexing ONE document tells them apart."
             ),
             fix_suggestions=[
-                "nx index <path> --force   (re-index through a fenced producer)",
+                "nx index <path> --force   (re-index any ONE document to "
+                "establish this install's fence baseline, then re-run doctor)",
             ],
         ))
 
@@ -4678,9 +5153,28 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
 
     # Nothing WARN-worthy found — build the single honest ok=True summary.
     if checked > 0:
+        # nexus-oiu1t (code-review-expert, 2026-08-11): do NOT collapse to a
+        # bare "none (N checked)" here. On a real corpus this is the COMMON
+        # branch — a few stamped documents alongside a large pre-coverage
+        # population — and dropping the reported_null/undated counts hides
+        # exactly the state a downstream install misread as an upstream bug.
+        extra = ""
+        if reported_null:
+            attributed = reported_null - undated_reported_null
+            extra = (
+                f"; {attributed} unstamped document(s) predate this install's "
+                "fence baseline and need no action (no legacy backfill by "
+                "design)"
+                if attributed else ""
+            )
+            if undated_reported_null:
+                extra += (
+                    f"; {undated_reported_null} unstamped document(s) carry no "
+                    "usable indexed_at and cannot be attributed"
+                )
         return [HealthResult(
             label=label, ok=True,
-            detail=f"none ({checked} fenced document(s) checked)",
+            detail=f"none ({checked} fenced document(s) checked){extra}",
         )]
     if reported_null > 0:
         # Quiescent: the fence is live but nothing has run through it yet
@@ -4688,8 +5182,20 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
         # shipped — catalog-020 does not retro-populate by design).
         return [HealthResult(
             label=label, ok=True,
-            detail=f"fence live, 0 stale runs ({reported_null} document(s) "
-                   "report index_state but none has run through the fence yet)",
+            detail=(
+                f"fence live, 0 stale runs ({reported_null} document(s) "
+                "report index_state but none has run through the fence yet — "
+                f"{reported_null - undated_reported_null} indexed before full "
+                "producer coverage shipped "
+                f"{_PRODUCER_FENCE_RELEASE_DT.date().isoformat()}, not "
+                "backfilled by design, no action needed"
+                + (
+                    f"; {undated_reported_null} carry no usable indexed_at "
+                    "and cannot be attributed to either side of that date"
+                    if undated_reported_null else ""
+                )
+                + ")"
+            ),
         )]
     # NON-VACUITY: a genuinely pre-fence engine omits index_state entirely
     # on every row (not_reported > 0 and nothing else), or the corpus

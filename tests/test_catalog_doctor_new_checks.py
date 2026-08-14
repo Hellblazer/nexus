@@ -464,7 +464,7 @@ class TestStorePutIntegrity:
                 "chash": chash, "position": 0, "chunk_index": 0,
                 "line_start": None, "line_end": None,
                 "char_start": None, "char_end": None,
-            }])
+            }], collection="knowledge__seeded")
         return str(t)
 
     class _FakeT3:

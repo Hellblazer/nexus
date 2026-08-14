@@ -127,8 +127,11 @@ class CatalogManifestSweepRepositoryTest {
             su.setAutoCommit(true);
             su.createStatement().execute("SET nexus.tenant = '" + tenant + "'");
             String zeroVec = "[" + "0,".repeat(383) + "0]";
+            // RDR-191 (nexus-o8dil.48): chunks_384 unified into nexus.chunks
+            // (vectors-004-unify-chunks.xml) -- embedding_384 replaces the bare
+            // embedding column.
             var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding)"
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384)"
                 + " VALUES (?, ?, ?, ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             ps.setString(1, tenant);
             ps.setString(2, collection);
@@ -143,7 +146,8 @@ class CatalogManifestSweepRepositoryTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var ps = su.prepareStatement(
-                "SELECT 1 FROM nexus.chunks_384 WHERE tenant_id = ? AND collection = ? AND chash = ?");
+                "SELECT 1 FROM nexus.chunks WHERE tenant_id = ? AND collection = ? AND chash = ? "
+                + "AND embedding_384 IS NOT NULL");
             ps.setString(1, tenant);
             ps.setString(2, collection);
             ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
@@ -163,7 +167,7 @@ class CatalogManifestSweepRepositoryTest {
                 Map.<String, Object>of("position", 1, "chash", ch("gccm1b"), "chunk_index", 1),
                 Map.<String, Object>of("position", 0, "chash", ch("gccm1a"), "chunk_index", 0))),
             Map.<String, Object>of("doc_id", "gccm.2", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", ch("gccm2a"), "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", ch("gccm2a"), "chunk_index", 0)))), col);
 
         var result = repo.getChunkChashesMany(TENANT_A,
             List.of("gccm.1", "gccm.2", "gccm.never-registered"));
@@ -181,7 +185,7 @@ class CatalogManifestSweepRepositoryTest {
         registerDoc(TENANT_A, "gccm.tomb", col);
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "gccm.tomb", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", ch("gccmtomb"), "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", ch("gccmtomb"), "chunk_index", 0)))), col);
         assertThat(repo.getChunkChashesMany(TENANT_A, List.of("gccm.tomb"))).containsKey("gccm.tomb");
 
         repo.deleteDocument(TENANT_A, "gccm.tomb");
@@ -208,13 +212,13 @@ class CatalogManifestSweepRepositoryTest {
         // Seed A's manifest referencing x (no sweep needed on the seed write).
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.1", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))), col);
         assertThat(chunk384Exists(TENANT_A, col, x)).isTrue();
 
         // Replace with a manifest that drops x — nothing else references it — sweep=true.
         var result = repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.1", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", ch("swp1-y"), "chunk_index", 0)))),
+                Map.<String, Object>of("position", 0, "chash", ch("swp1-y"), "chunk_index", 0)))), col,
             null, true);
 
         assertThat(result.get("docs")).isEqualTo(1);
@@ -229,7 +233,7 @@ class CatalogManifestSweepRepositoryTest {
             assertThat(d.get("kept")).isEqualTo(0);
         });
         assertThat(chunk384Exists(TENANT_A, col, x))
-            .as("orphaned chunk actually removed from chunks_384").isFalse();
+            .as("orphaned chunk actually removed from nexus.chunks").isFalse();
     }
 
     @Test @Order(11)
@@ -243,12 +247,12 @@ class CatalogManifestSweepRepositoryTest {
             Map.<String, Object>of("doc_id", "swp.2a", "rows", List.<Map<String, Object>>of(
                 Map.<String, Object>of("position", 0, "chash", shared, "chunk_index", 0))),
             Map.<String, Object>of("doc_id", "swp.2b", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", shared, "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", shared, "chunk_index", 0)))), col);
 
         // A drops `shared`; B STILL references it — the union guard must keep it.
         var result = repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.2a", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", ch("swp2-new"), "chunk_index", 0)))),
+                Map.<String, Object>of("position", 0, "chash", ch("swp2-new"), "chunk_index", 0)))), col,
             null, true);
 
         assertThat(result.get("swept")).as("shared chash must survive the union guard").isEqualTo(0);
@@ -301,10 +305,10 @@ class CatalogManifestSweepRepositoryTest {
         registerDoc(TENANT_A, "swp.3doc", col);
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.3doc", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", noteChash, "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", noteChash, "chunk_index", 0)))), col);
         var result = repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.3doc", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", ch("swp3-doc-new"), "chunk_index", 0)))),
+                Map.<String, Object>of("position", 0, "chash", ch("swp3-doc-new"), "chunk_index", 0)))), col,
             null, true);
 
         assertThat(result.get("swept"))
@@ -323,14 +327,14 @@ class CatalogManifestSweepRepositoryTest {
         registerDoc(TENANT_A, "swp.4", col);
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.4", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))), col);
 
         // sweep OMITTED (3-arg and 2-arg overloads) — must be byte-for-byte
         // identical to the pre-eslkl behaviour: x survives even though it is
         // dropped, and the envelope's sweep fields are all zero/empty.
         var result = repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.4", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", ch("swp4-y"), "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", ch("swp4-y"), "chunk_index", 0)))), col);
 
         assertThat(result.get("swept")).isEqualTo(0);
         assertThat(result.get("sweep_skipped")).isEqualTo(0);
@@ -345,12 +349,12 @@ class CatalogManifestSweepRepositoryTest {
         registerDoc(TENANT_A, "swp.5", col);
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.5", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", ch("swp5-a"), "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", ch("swp5-a"), "chunk_index", 0)))), col);
 
         // Replace keeps the SAME chash at the same position — nothing dropped.
         var result = repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.5", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", ch("swp5-a"), "chunk_index", 0)))),
+                Map.<String, Object>of("position", 0, "chash", ch("swp5-a"), "chunk_index", 0)))), col,
             null, true);
 
         assertThat(result.get("swept")).isEqualTo(0);
@@ -367,7 +371,7 @@ class CatalogManifestSweepRepositoryTest {
         registerDoc(TENANT_A, "swp.6", col);
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.6", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))), col);
 
         // Force a REAL SQL error at the sweep's DELETE statement (permission
         // denied), without touching the connection's health, so the txn-wide
@@ -375,14 +379,14 @@ class CatalogManifestSweepRepositoryTest {
         // under test — not a fabricated Java exception.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("REVOKE DELETE ON nexus.chunks_384 FROM " + SVC_ROLE);
-            su.createStatement().execute("REVOKE DELETE ON nexus.chunks_768 FROM " + SVC_ROLE);
-            su.createStatement().execute("REVOKE DELETE ON nexus.chunks_1024 FROM " + SVC_ROLE);
+            // RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into ONE
+            // nexus.chunks -- a single REVOKE now covers what three did.
+            su.createStatement().execute("REVOKE DELETE ON nexus.chunks FROM " + SVC_ROLE);
         }
         try {
             var result = repo.writeManifestMany(TENANT_A, List.of(
                 Map.<String, Object>of("doc_id", "swp.6", "rows", List.<Map<String, Object>>of(
-                    Map.<String, Object>of("position", 0, "chash", ch("swp6-y"), "chunk_index", 0)))),
+                    Map.<String, Object>of("position", 0, "chash", ch("swp6-y"), "chunk_index", 0)))), col,
                 null, true);
 
             assertThat(result.get("docs"))
@@ -410,9 +414,7 @@ class CatalogManifestSweepRepositoryTest {
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute("GRANT DELETE ON nexus.chunks_384 TO " + SVC_ROLE);
-                su.createStatement().execute("GRANT DELETE ON nexus.chunks_768 TO " + SVC_ROLE);
-                su.createStatement().execute("GRANT DELETE ON nexus.chunks_1024 TO " + SVC_ROLE);
+                su.createStatement().execute("GRANT DELETE ON nexus.chunks TO " + SVC_ROLE);
             }
         }
     }
@@ -449,9 +451,9 @@ class CatalogManifestSweepRepositoryTest {
         registerDoc(TENANT_A, "swp.8a-b", col1);
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.8a-a", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", shared1, "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", shared1, "chunk_index", 0)))), col1);
         repo.writeManifestMany(TENANT_A, List.of(
-            Map.<String, Object>of("doc_id", "swp.8a-a", "rows", List.<Map<String, Object>>of())));
+            Map.<String, Object>of("doc_id", "swp.8a-a", "rows", List.<Map<String, Object>>of())), col1);
         assertThat(chunk384Exists(TENANT_A, col1, shared1))
             .as("precondition: shared still physically present, nothing manifests it yet").isTrue();
 
@@ -509,9 +511,9 @@ class CatalogManifestSweepRepositoryTest {
         registerDoc(TENANT_A, "swp.8b-b", col2);
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.8b-a", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", shared2, "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", shared2, "chunk_index", 0)))), col2);
         repo.writeManifestMany(TENANT_A, List.of(
-            Map.<String, Object>of("doc_id", "swp.8b-a", "rows", List.<Map<String, Object>>of())));
+            Map.<String, Object>of("doc_id", "swp.8b-a", "rows", List.<Map<String, Object>>of())), col2);
 
         try (Connection connA = dsConnection(); Connection connB = dsConnection()) {
             connA.setAutoCommit(false);
@@ -557,11 +559,12 @@ class CatalogManifestSweepRepositoryTest {
             .as("nexus-11gh6 CLOSED: the guard correctly retained the chunk").isTrue();
     }
 
-    /** The EXACT guard shape {@code sweepChunks384} uses (both {@code NOT
+    /** The EXACT guard shape {@code sweepChunks} uses (both {@code NOT
      *  EXISTS} clauses) — driven manually so hand-written tests can control
-     *  commit order around it. */
+     *  commit order around it. RDR-191 (nexus-o8dil.48): targets the unified
+     *  {@code nexus.chunks}, not the retired {@code chunks_384}. */
     private static final String SWEEP_GUARD_DELETE_SQL =
-        "DELETE FROM nexus.chunks_384 c "
+        "DELETE FROM nexus.chunks c "
         + "WHERE c.tenant_id = ? AND c.collection = ? AND c.chash = decode(?, 'hex') "
         + "AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m "
         + "  JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id "
@@ -610,7 +613,7 @@ class CatalogManifestSweepRepositoryTest {
         registerDoc(TENANT_A, "swp.9", col);
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.9", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", ch("swp9-x"), "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", ch("swp9-x"), "chunk_index", 0)))), col);
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -629,7 +632,7 @@ class CatalogManifestSweepRepositoryTest {
         try {
             result = repo.writeManifestMany(TENANT_A, List.of(
                 Map.<String, Object>of("doc_id", "swp.9", "rows", List.<Map<String, Object>>of(
-                    Map.<String, Object>of("position", 0, "chash", ch("swp9-y"), "chunk_index", 0)))),
+                    Map.<String, Object>of("position", 0, "chash", ch("swp9-y"), "chunk_index", 0)))), col,
                 null, true);
         } finally {
             try (Connection su = pg.createConnection("")) {
@@ -675,7 +678,7 @@ class CatalogManifestSweepRepositoryTest {
         registerDoc(TENANT_A, "swp.10", col);
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.10", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))), col);
 
         try (Connection external = dsConnection()) {
             external.setAutoCommit(false);
@@ -691,7 +694,7 @@ class CatalogManifestSweepRepositoryTest {
             // the manifest write itself must be entirely unaffected.
             var result = repo.writeManifestMany(TENANT_A, List.of(
                 Map.<String, Object>of("doc_id", "swp.10", "rows", List.<Map<String, Object>>of(
-                    Map.<String, Object>of("position", 0, "chash", ch("swp10-y"), "chunk_index", 0)))),
+                    Map.<String, Object>of("position", 0, "chash", ch("swp10-y"), "chunk_index", 0)))), col,
                 null, true);
 
             assertThat(result.get("docs"))
@@ -725,9 +728,9 @@ class CatalogManifestSweepRepositoryTest {
         seedChunk384(TENANT_A, col, z);
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.10", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", z, "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", z, "chunk_index", 0)))), col);
         var result2 = repo.writeManifestMany(TENANT_A, List.of(
-            Map.<String, Object>of("doc_id", "swp.10", "rows", List.<Map<String, Object>>of())),
+            Map.<String, Object>of("doc_id", "swp.10", "rows", List.<Map<String, Object>>of())), col,
             null, true);
         assertThat(result2.get("sweep_skipped"))
             .as("gate is free now -- no skip this time").isEqualTo(0);
@@ -779,7 +782,7 @@ class CatalogManifestSweepRepositoryTest {
         String col = "code__swp11a__minilm-l6-v2-384__v1";
         registerDoc(TENANT_A, "swp.11a", col);
         assertWriterBlocksOnExternalExclusiveGate(col, () ->
-            repo.writeManifest(TENANT_A, "swp.11a", List.of(
+            repo.writeManifest(TENANT_A, "swp.11a", col, List.of(
                 Map.<String, Object>of("position", 0, "chash", ch("swp11a-x"), "chunk_index", 0))));
         assertThat(repo.getManifest(TENANT_A, "swp.11a")).hasSize(1);
     }
@@ -791,7 +794,7 @@ class CatalogManifestSweepRepositoryTest {
         assertWriterBlocksOnExternalExclusiveGate(col, () ->
             repo.writeManifestMany(TENANT_A, List.of(
                 Map.<String, Object>of("doc_id", "swp.11b", "rows", List.<Map<String, Object>>of(
-                    Map.<String, Object>of("position", 0, "chash", ch("swp11b-x"), "chunk_index", 0))))));
+                    Map.<String, Object>of("position", 0, "chash", ch("swp11b-x"), "chunk_index", 0)))), col));
         assertThat(repo.getManifest(TENANT_A, "swp.11b")).hasSize(1);
     }
 
@@ -800,7 +803,7 @@ class CatalogManifestSweepRepositoryTest {
         String col = "code__swp11c__minilm-l6-v2-384__v1";
         registerDoc(TENANT_A, "swp.11c", col);
         assertWriterBlocksOnExternalExclusiveGate(col, () ->
-            repo.appendManifestChunks(TENANT_A, "swp.11c", List.of(
+            repo.appendManifestChunks(TENANT_A, "swp.11c", col, List.of(
                 Map.<String, Object>of("position", 0, "chash", ch("swp11c-x"), "chunk_index", 0))));
         assertThat(repo.getManifest(TENANT_A, "swp.11c")).hasSize(1);
     }
@@ -810,7 +813,7 @@ class CatalogManifestSweepRepositoryTest {
         String col = "code__swp11d__minilm-l6-v2-384__v1";
         registerDoc(TENANT_A, "swp.11d", col);
         assertWriterBlocksOnExternalExclusiveGate(col, () ->
-            repo.importChunk(TENANT_A, "swp.11d",
+            repo.importChunk(TENANT_A, "swp.11d", col,
                 Map.<String, Object>of("position", 0, "chash", ch("swp11d-x"), "chunk_index", 0)));
         assertThat(repo.getManifest(TENANT_A, "swp.11d")).hasSize(1);
     }
@@ -820,7 +823,7 @@ class CatalogManifestSweepRepositoryTest {
         String col = "code__swp11e__minilm-l6-v2-384__v1";
         registerDoc(TENANT_A, "swp.11e", col);
         assertWriterBlocksOnExternalExclusiveGate(col, () ->
-            repo.importChunksBatch(TENANT_A, "swp.11e", List.of(
+            repo.importChunksBatch(TENANT_A, "swp.11e", col, List.of(
                 Map.<String, Object>of("position", 0, "chash", ch("swp11e-x"), "chunk_index", 0))));
         assertThat(repo.getManifest(TENANT_A, "swp.11e")).hasSize(1);
     }
@@ -899,7 +902,7 @@ class CatalogManifestSweepRepositoryTest {
         registerDoc(TENANT_A, "swp.30", col);
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.30", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))), col);
 
         // A staged (not-yet-promoted) manifest row for a DIFFERENT doc_id references x
         // by its canonical 64-hex text directly -- the "declaration of intent" that
@@ -910,7 +913,7 @@ class CatalogManifestSweepRepositoryTest {
             // but the staged reference must still protect it.
             var result = repo.writeManifestMany(TENANT_A, List.of(
                 Map.<String, Object>of("doc_id", "swp.30", "rows", List.<Map<String, Object>>of(
-                    Map.<String, Object>of("position", 0, "chash", ch("swp30-y"), "chunk_index", 0)))),
+                    Map.<String, Object>of("position", 0, "chash", ch("swp30-y"), "chunk_index", 0)))), col,
                 null, true);
 
             assertThat(result.get("swept"))
@@ -934,9 +937,9 @@ class CatalogManifestSweepRepositoryTest {
         // fresh sweep decision on the SAME chash with the guard now silent.
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.30", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))), col);
         var result2 = repo.writeManifestMany(TENANT_A, List.of(
-            Map.<String, Object>of("doc_id", "swp.30", "rows", List.<Map<String, Object>>of())),
+            Map.<String, Object>of("doc_id", "swp.30", "rows", List.<Map<String, Object>>of())), col,
             null, true);
 
         assertThat(result2.get("swept"))
@@ -962,14 +965,14 @@ class CatalogManifestSweepRepositoryTest {
         registerDoc(TENANT_A, "swp.31", col);
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.31", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", y, "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", y, "chunk_index", 0)))), col);
 
         seedChashAlias(TENANT_A, legacy, y);
         seedStagingDocumentChunk(TENANT_A, "swp.31-staged", 0, legacy);
         try {
             var result = repo.writeManifestMany(TENANT_A, List.of(
                 Map.<String, Object>of("doc_id", "swp.31", "rows", List.<Map<String, Object>>of(
-                    Map.<String, Object>of("position", 0, "chash", ch("swp31-z"), "chunk_index", 0)))),
+                    Map.<String, Object>of("position", 0, "chash", ch("swp31-z"), "chunk_index", 0)))), col,
                 null, true);
 
             assertThat(result.get("swept"))
@@ -993,9 +996,9 @@ class CatalogManifestSweepRepositoryTest {
 
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.31", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", y, "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", y, "chunk_index", 0)))), col);
         var result2 = repo.writeManifestMany(TENANT_A, List.of(
-            Map.<String, Object>of("doc_id", "swp.31", "rows", List.<Map<String, Object>>of())),
+            Map.<String, Object>of("doc_id", "swp.31", "rows", List.<Map<String, Object>>of())), col,
             null, true);
 
         assertThat(result2.get("swept"))
@@ -1008,7 +1011,7 @@ class CatalogManifestSweepRepositoryTest {
         // nexus-kl2z6 increment 2: sweep_detail.reason == "statement_timeout" (57014) --
         // the DELETE itself, once the EXCLUSIVE gate is already granted, exceeds
         // SWEEP_STATEMENT_TIMEOUT_MS (5000ms). Forced DETERMINISTICALLY via a BEFORE
-        // DELETE trigger on nexus.chunks_384 that sleeps past the timeout -- no
+        // DELETE trigger on nexus.chunks that sleeps past the timeout -- no
         // threads, no timing luck: PostgreSQL's own statement_timeout cancels the
         // statement mid-execution on every run, the same "real SQL error, not a
         // fabricated Java exception" discipline Order(15)'s REVOKE technique uses.
@@ -1018,7 +1021,7 @@ class CatalogManifestSweepRepositoryTest {
         registerDoc(TENANT_A, "swp.32", col);
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.32", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))), col);
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -1026,13 +1029,13 @@ class CatalogManifestSweepRepositoryTest {
                 "CREATE OR REPLACE FUNCTION test_slow_sweep_delete() RETURNS trigger AS $$ "
                 + "BEGIN PERFORM pg_sleep(6); RETURN OLD; END; $$ LANGUAGE plpgsql");
             su.createStatement().execute(
-                "CREATE TRIGGER test_slow_sweep_delete_trigger BEFORE DELETE ON nexus.chunks_384 "
+                "CREATE TRIGGER test_slow_sweep_delete_trigger BEFORE DELETE ON nexus.chunks "
                 + "FOR EACH ROW EXECUTE FUNCTION test_slow_sweep_delete()");
         }
         try {
             var result = repo.writeManifestMany(TENANT_A, List.of(
                 Map.<String, Object>of("doc_id", "swp.32", "rows", List.<Map<String, Object>>of(
-                    Map.<String, Object>of("position", 0, "chash", ch("swp32-y"), "chunk_index", 0)))),
+                    Map.<String, Object>of("position", 0, "chash", ch("swp32-y"), "chunk_index", 0)))), col,
                 null, true);
 
             assertThat(result.get("docs"))
@@ -1050,7 +1053,7 @@ class CatalogManifestSweepRepositoryTest {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 su.createStatement().execute(
-                    "DROP TRIGGER IF EXISTS test_slow_sweep_delete_trigger ON nexus.chunks_384");
+                    "DROP TRIGGER IF EXISTS test_slow_sweep_delete_trigger ON nexus.chunks");
                 su.createStatement().execute("DROP FUNCTION IF EXISTS test_slow_sweep_delete()");
             }
         }
@@ -1064,9 +1067,11 @@ class CatalogManifestSweepRepositoryTest {
         // connection with a single (n=1) outer candidate. Three fidelity gaps
         // closed here:
         //   1. Drift risk: the SQL is now the REAL jOOQ-rendered statement, captured
-        //      via CatalogRepository.renderSweepChunks384DeleteSql -- extracted from
-        //      the production sweepChunks384 method itself (sweepChunks384Query), not
+        //      via CatalogRepository.renderSweepChunksDeleteSql -- extracted from
+        //      the production sweepChunks method itself (sweepChunksQuery), not
         //      a hand-kept mirror that can silently fall out of sync with it.
+        //      (RDR-191, nexus-o8dil.48: renamed from renderSweepChunks384DeleteSql/
+        //      sweepChunks384 now that chunks_384/768/1024 are one nexus.chunks.)
         //   2. RLS fidelity: EXPLAIN now runs through tenantScope.withTenant -- the
         //      SAME SVC_ROLE / FORCE-RLS-scoped connection repo.writeManifestMany
         //      uses in production, not a superuser connection (which bypasses RLS
@@ -1076,7 +1081,7 @@ class CatalogManifestSweepRepositoryTest {
         //      seeding under a different tenant would make those rows invisible to
         //      this EXPLAIN and silently collapse the "realistic scale" claim to
         //      n=0 visible rows while still LOOKING like a 50k-row test.
-        //   3. Outer/bounded-side cardinality: CANDIDATE_COUNT chunks_384 rows, not
+        //   3. Outer/bounded-side cardinality: CANDIDATE_COUNT nexus.chunks rows, not
         //      the single candidate the prior version of this test carried.
         //      CANDIDATE_COUNT is per_collection_chunk_cap's REAL, pinned value for
         //      code__ collections (src/nexus/db/http_vector_client.py
@@ -1089,7 +1094,7 @@ class CatalogManifestSweepRepositoryTest {
         // NOT the Nested Loop / Index Scan the ORIGINAL version of this test asserted
         // must be the ONLY acceptable shape -- and this is NOT primarily a function of
         // CANDIDATE_COUNT. Isolated by bisection: reproducing the OLD test's own n=1
-        // cardinality, with and without the ANALYZE nexus.chunks_384 call the old test
+        // cardinality, with and without the ANALYZE nexus.chunks call the old test
         // never had, STILL plans as Hash Anti Join once run through tenantScope
         // .withTenant (SVC_ROLE, FORCE RLS) instead of the superuser connection the
         // old test used. The rendered SQL for the guard clause itself is structurally
@@ -1139,12 +1144,13 @@ class CatalogManifestSweepRepositoryTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
 
-            // Bulk-seed CANDIDATE_COUNT chunks_384 rows -- the outer/bounded side of
+            // Bulk-seed CANDIDATE_COUNT nexus.chunks rows -- the outer/bounded side of
             // the guard's correlated NOT EXISTS, at the real per-flush cap for a
-            // code__ collection (per_collection_chunk_cap).
+            // code__ collection (per_collection_chunk_cap). RDR-191: embedding_384
+            // replaces the bare embedding column now that chunks_384 is unified.
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             try (var ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding)"
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384)"
                     + " VALUES (?, ?, ?, ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
                 for (String hex : dropped) {
                     ps.setString(1, TENANT_A);
@@ -1167,25 +1173,26 @@ class CatalogManifestSweepRepositoryTest {
                 + "encode(sha256(('explain-seed-' || i)::bytea), 'hex') "
                 + "FROM generate_series(1, " + stagingRows + ") AS i");
             su.createStatement().execute("ANALYZE staging.document_chunks");
-            su.createStatement().execute("ANALYZE nexus.chunks_384");
+            su.createStatement().execute("ANALYZE nexus.chunks");
         }
 
         try {
             String realSql = tenantScope.withTenant(TENANT_A, ctx ->
-                CatalogRepository.renderSweepChunks384DeleteSql(ctx, TENANT_A, col, dropped, true));
+                CatalogRepository.renderSweepChunksDeleteSql(ctx, TENANT_A, col, dropped, true));
 
             // The REV-1-vs-REV-2 distinguishing property, proven directly on the
             // rendered SQL text rather than a specific EXPLAIN plan shape: the
             // staging alias's OWN chash column is never wrapped in encode()/decode()
             // -- only the bounded candidate side is. This is what keeps the staging
             // index usable/available under any join strategy, and it cannot drift
-            // out of sync with production because realSql IS what sweepChunks384
+            // out of sync with production because realSql IS what sweepChunks
             // executes (see the drift-risk fix above).
             assertThat(realSql)
                 .as("REV-1's rejected shape wrapped the STAGING side's join key in a "
                     + "function, making its index unusable under any join strategy -- the "
                     + "staging alias's chash column must stay bare (no encode()/decode()) "
-                    + "for this guard's real, jOOQ-rendered SQL:\n" + realSql)
+                    + "for this guard's real, jOOQ-rendered SQL (sweepChunksQuery, RDR-191 "
+                    + "unified):\n" + realSql)
                 .doesNotContainPattern("(?i)(encode|decode)\\(\\s*\"s2?\"\\.\"chash\"");
 
             String planText = tenantScope.withTenant(TENANT_A, ctx -> {
@@ -1207,7 +1214,7 @@ class CatalogManifestSweepRepositoryTest {
                     "DELETE FROM staging.document_chunks WHERE tenant_id = '" + TENANT_A
                     + "' AND doc_id LIKE 'explain-plan.%'");
                 su.createStatement().execute(
-                    "DELETE FROM nexus.chunks_384 WHERE tenant_id = '" + TENANT_A
+                    "DELETE FROM nexus.chunks WHERE tenant_id = '" + TENANT_A
                     + "' AND collection = '" + col + "'");
             }
         }

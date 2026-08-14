@@ -406,14 +406,24 @@ printf '%s' "$UP_OUT" | grep -q "rung 'chash-rekey' converged" \
 
 # ── Assert: every content row keys by its digest; checks VALIDATEd ───────────
 say "Assert — full-digest keys everywhere, five octet CHECKs convalidated"
-for T in chunks_384 chunks_768 chunks_1024; do
-  MISMATCH="$(diag_sql "SELECT count(*) FROM nexus.$T WHERE chunk_text <> '' AND chash IS DISTINCT FROM sha256(convert_to(chunk_text,'UTF8'))")"
-  [ "$MISMATCH" = "0" ] && ok "$T: zero digest-mismatched content rows" \
-    || bad "$T: $MISMATCH content row(s) NOT keyed by sha256(chunk_text)"
-  WIDTH_BAD="$(diag_sql "SELECT count(*) FROM nexus.$T WHERE octet_length(chash) <> 32")"
-  [ "$WIDTH_BAD" = "0" ] && ok "$T: every key is exactly 32 bytes" \
-    || bad "$T: $WIDTH_BAD row(s) not 32 bytes wide"
-done
+# RDR-191 Phase 4 (nexus-o8dil.52): this runs AFTER "nx upgrade" has closed
+# the chash-rekey window -- the post-upgrade side of THIS rehearsal's own
+# axis -- so it retargets to the unified nexus.chunks the same as the
+# rehearse_guided.sh loop (one physical table now covers what used to be
+# three per-dim shards; no loop needed). Non-vacuity against an absent
+# relation is already structural: diag_sql redirects psql stderr into
+# stdout, so a query against a dropped table returns the literal ERROR
+# text, which the "$MISMATCH/$WIDTH_BAD" = "0" comparisons fail loud on
+# (never silently reads as zero rows). The single-dim POST_COUNT check
+# below this block stays chunks_768-scoped on purpose: it is out of this
+# bead's scope (nexus-o8dil.52 names only the two three-table enumeration
+# loops, not every single-dim assertion in these scripts).
+MISMATCH="$(diag_sql "SELECT count(*) FROM nexus.chunks WHERE chunk_text <> '' AND chash IS DISTINCT FROM sha256(convert_to(chunk_text,'UTF8'))")"
+[ "$MISMATCH" = "0" ] && ok "nexus.chunks (unified, RDR-191): zero digest-mismatched content rows" \
+  || bad "nexus.chunks: $MISMATCH content row(s) NOT keyed by sha256(chunk_text)"
+WIDTH_BAD="$(diag_sql "SELECT count(*) FROM nexus.chunks WHERE octet_length(chash) <> 32")"
+[ "$WIDTH_BAD" = "0" ] && ok "nexus.chunks: every key is exactly 32 bytes" \
+  || bad "nexus.chunks: $WIDTH_BAD row(s) not 32 bytes wide"
 # Expected = the seeded legacy rows + the ONE strict window write (which
 # succeeds since the store-put full-digest fix — it is a 32-byte row the
 # rekey leaves untouched). Distinct texts, so no collapse.

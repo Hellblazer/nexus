@@ -40,6 +40,7 @@ from nexus.daemon.service_registry import (
     _procfs_enumerate,
     all_process_rows,
     process_command,
+    process_state,
     storage_service_stack_matcher,
     terminate_pids,
 )
@@ -819,6 +820,21 @@ def _sweep_surviving_stack(
     for pid, cmd in before:
         if not _pid_alive(pid):
             continue
+        # A ZOMBIE is not a survivor (nexus-o8dil.21). ``_pid_alive`` is
+        # ``os.kill(pid, 0)``, which succeeds for a terminated-but-unreaped
+        # process: the stop DID kill it, and its parent simply has not
+        # collected the exit status yet. Orphans of a PID 1 that is not a
+        # real init (the MVV container's PID 1 is a shell script; CI
+        # runners are the same shape) stay in that state indefinitely, so
+        # this sweep re-signalled corpses and then reported the successful
+        # stop as having "left pid(s) running". The zombie check is kept
+        # SEPARATE from ``_pid_alive`` deliberately: that call keeps its
+        # alive-on-ambiguous-errno semantics (see the import comment), and
+        # only a POSITIVE ``Z`` reading — never an unknown one — excludes
+        # a pid here.
+        if process_state(pid) == "Z":
+            _log.info("restart_stop_sweep_pid_already_dead", pid=pid, state="Z")
+            continue
         current = process_command(pid)
         # An unreadable argv (permissions, a zombie mid-reap) is not evidence
         # of a recycle; fall back to the recorded command rather than skipping
@@ -838,16 +854,26 @@ def _sweep_surviving_stack(
     stubborn = terminate_pids(supervisors)
     stubborn += terminate_pids(engines)
     listed = ", ".join(str(p) for p, _ in survivors)
+    # Report what was OBSERVED, never a cause that was not (nexus-o8dil.21).
+    # Both strings used to assert "(its lease-based check saw no live
+    # lease)" unconditionally — a hardcoded diagnosis this function never
+    # makes: it compares a pre-stop process snapshot against the process
+    # table and has no visibility into the stop's lease outcome at all. In
+    # the 2026-08-14 package-upgrade MVV that invented cause sent the
+    # investigation after a cross-version lease-discovery gap that did not
+    # exist (the stop's own output, "Storage service stopped (pid(s)=...)",
+    # is emitted ONLY when the lease WAS discovered).
     if stubborn:
         return (
-            f"[stop-sweep] `nx daemon service stop` left pid(s) {listed} "
-            f"running (its lease-based check saw no live lease); "
-            f"pid(s) {', '.join(str(p) for p in stubborn)} survived SIGKILL"
+            f"[stop-sweep] pid(s) {listed} were still running after "
+            f"`nx daemon service stop` returned; pid(s) "
+            f"{', '.join(str(p) for p in stubborn)} were STILL running after "
+            "a direct SIGKILL escalation (not merely awaiting reap)"
         )
     return (
-        f"[stop-sweep] `nx daemon service stop` left pid(s) {listed} running "
-        "(its lease-based check saw no live lease) — terminated them directly "
-        "so the restart cycles the engine instead of short-circuiting"
+        f"[stop-sweep] pid(s) {listed} were still running after "
+        "`nx daemon service stop` returned — terminated them directly so the "
+        "restart cycles the engine instead of short-circuiting"
     )
 
 

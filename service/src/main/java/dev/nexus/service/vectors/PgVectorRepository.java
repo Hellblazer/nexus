@@ -19,9 +19,15 @@ import org.jooq.impl.DSL;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
+// RDR-191 Phase 4 (nexus-o8dil.16/.18): chunks_384/768/1024 collapsed into the
+// single nexus.chunks table (three nullable embedding_<dim> columns) --
+// CHUNKS_384/CHUNKS_768/CHUNKS_1024 no longer exist as generated jOOQ Table
+// constants (only CHUNKS does; see DimTables' class javadoc for the single-
+// authority rationale). Every former per-table reference in this file now
+// resolves through CHUNKS (dim-agnostic table identity) plus, where an
+// embedding column specifically is needed, DimTables.embeddingColumn(dim) /
+// DimTables.CHUNKS.get(dim) for the typed accessor.
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_EXPIRE_QUARANTINE;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS;
@@ -959,6 +965,18 @@ public final class PgVectorRepository {
      * Token-aware sibling of {@link #search} (bead nexus-ehc4q).
      * Returns search results alongside the embedding token count.
      *
+     * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16, F13 hazard).</strong> The distance
+     * projection names {@code embedding_<dim>} explicitly via
+     * {@link DimTables#embeddingColumn(int)} rather than a bare {@code embedding}
+     * column - {@code nexus.chunks} carries three nullable embedding columns (one
+     * non-null per row, DB CHECK-enforced) since the chunks_384/768/1024 unification,
+     * so a bare {@code embedding} no longer resolves at all. Naming the WRONG dim's
+     * column would still parse (all three exist on the table) but silently seq-scan
+     * instead of using that dim's FULL HNSW index (F13: measured ~250x, deployment-
+     * dependent on which dim is adopted) - see {@code PgVectorRepositoryRawSqlPlanShapeTest}
+     * for the EXPLAIN-based proof that this shape, with no
+     * {@code embedding_<dim> IS NOT NULL} predicate, still binds to the full index.
+     *
      * @param includeSourceUri when true, resolves source_uri via catalog JOIN (opt-in, RDR-169 G5)
      */
     public Tokened<List<Map<String, Object>>> searchWithTokens(String tenant, String queryText,
@@ -990,7 +1008,7 @@ public final class PgVectorRepository {
             // RDR-180: bytea storage — hex at the SQL seam (raw-SQL twin of
             // the ChashHex converted type the jOOQ paths use).
             .append("SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,")
-            .append(" (embedding <=> ?::vector) AS distance")
+            .append(" (").append(DimTables.embeddingColumn(dim)).append(" <=> ?::vector) AS distance")
             .append(" FROM ").append(chunksTable(dim)).append(" c")
             .append(" WHERE c.collection IN (").append(placeholders(collectionNames.size())).append(")")
             // RDR-156 Decision 6 (nexus-3ck2g): live_chunks predicate, inlined so the
@@ -1181,6 +1199,15 @@ public final class PgVectorRepository {
         return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null);
     }
 
+    /**
+     * RDR-191 Phase 4 (nexus-o8dil.16, F13 hazard): both the selective-gate and
+     * dense-gate distance projections below name {@code embedding_<dim>} explicitly
+     * via {@link DimTables#embeddingColumn(int)} rather than a bare {@code embedding}
+     * column, for the same reason as {@link #searchWithTokens} — see that method's
+     * javadoc and {@code PgVectorRepositoryRawSqlPlanShapeTest} for the EXPLAIN-based
+     * proof that this shape (no {@code embedding_<dim> IS NOT NULL} predicate) still
+     * binds to the dispatched dim's FULL HNSW index.
+     */
     private List<Map<String, Object>> hybridSearch(String tenant, String queryText,
                                            List<String> collectionNames,
                                            int nResults,
@@ -1321,7 +1348,7 @@ public final class PgVectorRepository {
                 // identical to the old per-row COUNT(*).
                 List<String> inChashes = gateChashes.stream().distinct().toList();
                 String sql = "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
-                    + " (embedding <=> ?::vector) AS distance FROM " + table + scopeSql
+                    + " (" + DimTables.embeddingColumn(dim) + " <=> ?::vector) AS distance FROM " + table + scopeSql
                     + " AND chash IN (" + decodePlaceholders(inChashes.size()) + ")"
                     + " ORDER BY distance ASC, chash ASC LIMIT ?";
                 List<Object> b = new ArrayList<>();
@@ -1334,7 +1361,7 @@ public final class PgVectorRepository {
             // HNSW-first for a dense gate: keep HNSW scanning past ef_search.
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             String sql = "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
-                + " (embedding <=> ?::vector) AS distance FROM " + table + gateSql
+                + " (" + DimTables.embeddingColumn(dim) + " <=> ?::vector) AS distance FROM " + table + gateSql
                 + " ORDER BY distance ASC, chash ASC LIMIT ?";
             List<Object> b = new ArrayList<>();
             b.add(vecLit);
@@ -1679,18 +1706,27 @@ public final class PgVectorRepository {
      * List the collections visible to {@code tenant} (RDR-155 P4a.2,
      * bead nexus-1k8s1).
      *
-     * <p>Union across all three {@code chunks_<dim>} tables — collection is a
-     * column, not a table, so "a collection exists" means "at least one chunk row
-     * carries the name". RLS scopes the union to the tenant's rows, so a foreign
-     * tenant's collections are invisible (no existence leak).
+     * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16/.18, D1 semantic hazard):</strong> before
+     * the chunks_384/768/1024 unification this was a three-way {@code UNION} across three
+     * physically distinct tables — table membership alone was the (implicit) dim filter, so
+     * no row could be counted twice. Now every dim's chunk rows live in the SAME
+     * {@code nexus.chunks} table, so the old three-leg UNION would triple-count: each
+     * collection's rows would surface once per UNION leg regardless of which
+     * {@code embedding_<dim>} column is actually populated. Collapsed to a SINGLE
+     * {@code SELECT DISTINCT collection} scan instead of adding a per-leg
+     * {@code embedding_<dim> IS NOT NULL} guard — a collection name is already
+     * dim-homogeneous (every chunk row under one collection name carries the same
+     * populated embedding column; {@link #dimForCollection} is the single dispatch
+     * authority), so {@code collection} identity alone is sufficient to de-duplicate
+     * without ever needing to look at which embedding column is non-null. RLS scopes
+     * the scan to the tenant's rows, so a foreign tenant's collections are invisible
+     * (no existence leak) — same guarantee as before.
      *
      * @return Chroma-style envelope {@code [{"name": ...}, ...]}, name ascending
      */
     public List<Map<String, Object>> listCollections(String tenant) {
         var names = tenantScope.withTenant(tenant, ctx ->
-            ctx.selectDistinct(CHUNKS_384.COLLECTION).from(CHUNKS_384)
-               .union(ctx.selectDistinct(CHUNKS_768.COLLECTION).from(CHUNKS_768))
-               .union(ctx.selectDistinct(CHUNKS_1024.COLLECTION).from(CHUNKS_1024))
+            ctx.selectDistinct(CHUNKS.COLLECTION).from(CHUNKS)
                .orderBy(1)
                .fetch());
         List<Map<String, Object>> out = new ArrayList<>(names.size());
@@ -2063,6 +2099,19 @@ public final class PgVectorRepository {
      *         {@code [{"name": ..., "dim": 384, "count": N, "last_write": "..."}]},
      *         name ascending. {@code last_write} is ISO-8601 with offset, or absent
      *         if null. Collections with zero live chunks do not appear.
+     *
+     * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16/.18): coordinated, NO code change needed.</strong>
+     * {@code nexus.collection_vector_stats}'s body is UNCHANGED by the vectors-005 repoint
+     * changeset (re-created verbatim only because the CASCADE from dropping
+     * chunks_384/768/1024 also dropped it and its {@code nexus.live_chunks} base view) — it
+     * still {@code SELECT}s {@code tenant_id, collection, dim, count(*), max(created_at)}
+     * FROM {@code live_chunks} GROUP BY {@code tenant_id, collection, dim}, so the jOOQ-
+     * generated {@code CollectionVectorStats} table regenerates with identical field names/
+     * types and this method's {@code COLLECTION_VECTOR_STATS.COLLECTION/DIM/CHUNK_COUNT/
+     * LAST_WRITE} references keep compiling and mean the same thing. The view's own {@code dim}
+     * column is now DERIVED (a {@code CASE WHEN embedding_384 IS NOT NULL THEN 384 ...} in
+     * {@code live_chunks}, vectors-005-1) rather than implied by which physical table a row
+     * lived in — that derivation lives entirely in SQL and is invisible from this method.
      */
     public List<Map<String, Object>> collectionStats(String tenant) {
         var result = tenantScope.withTenant(tenant, ctx ->
@@ -2148,37 +2197,116 @@ public final class PgVectorRepository {
      * REFUSES to delete a chunk whose manifest row has not yet been rewritten
      * to the new collection, rather than silently orphaning it.
      *
-     * <p><strong>"Live" excludes tombstoned owners (review finding, bead
-     * nexus-o8dil.5 round 2).</strong> A manifest row whose OWNING document
-     * ({@code catalog_documents} via {@code doc_id = tumbler}) is soft-deleted
-     * ({@code deleted_at IS NOT NULL}) does not count as "still referenced" —
-     * this mirrors this same file's {@code liveChunksCondition}/{@code
-     * liveChunksPredicate} idiom (~line 2903) and {@code
-     * CatalogRepository#strandedChunkCount}, both of which already treat a
-     * tombstoned-only manifest reference as dead, not live. Without this join,
-     * {@code deleteDocument}'s deliberate choice to leave {@code
-     * catalog_document_chunks} rows in place until {@code purge_trash}'s
-     * cascade (so a manual restore stays possible) would make THIS method
-     * refuse to delete a chunk belonging ONLY to documents already tombstoned
-     * — including, degenerately, blocking a caller from deleting a document's
-     * OWN chunks the instant after tombstoning that same document, which is
-     * exactly the retract-manifest-then-delete-chunk ordering the Python
-     * callers use. Bounded by {@code purge_trash}'s grace window either way —
-     * this is a consistency/predictability call, not a data-loss one — but an
-     * undocumented divergence from the file's own established liveness idiom
-     * is not acceptable, so it is closed here rather than left implicit.
+     * <p><strong>"Live" INCLUDES tombstoned owners (RDR-191 GATE-2, nexus-mmkqe
+     * — this REVERSES the nexus-o8dil.5 round-2 decision recorded below, kept
+     * for provenance).</strong> A manifest row whose OWNING document ({@code
+     * catalog_documents} via {@code doc_id = tumbler}) is soft-deleted ({@code
+     * deleted_at IS NOT NULL}) STILL counts as "still referenced" and protects
+     * its chunk. This is the definition-of-record three-way partition (T2
+     * nexus/rdr-191-dangling-definition-of-record [22364], synthesizing Hal's
+     * 2026-08-12 ruling): class (a) owner LIVE with no backing chunk is real
+     * dangling; class (b) owner TOMBSTONED is the soft-tombstone contract
+     * WORKING AS DESIGNED — {@code delete_document}/{@code deleteDocument}
+     * deliberately leaves {@code catalog_document_chunks} rows in place so a
+     * manual restore stays possible ({@code src/nexus/catalog/store_hook.py}
+     * :738-741), and those rows must go on protecting their chunk until {@code
+     * purge_trash}'s cascade reaps BOTH together (bounded by the grace
+     * window — see {@code nexus.purge_trash}, catalog-003-soft-delete.xml,
+     * fixed by nexus-5da44 to apply that same grace-window scoping to its own
+     * chunk sweep). Dropping the tombstoned-owner join here is what makes this
+     * method agree with that contract instead of racing it: without it, a
+     * chunk this method leaves behind mid-grace-window could be swept by a
+     * SEPARATE caller (a stale-manifest GC pass, a superseded-vectors sweep)
+     * while the tombstoned document's manifest row still names it — producing
+     * exactly the class-b-row-then-orphaned-early defect nexus-mmkqe reported
+     * as live on this, the single most-travelled chunk-delete site.
      *
-     * <p><strong>What that trade actually costs — do not soften this.</strong>
-     * The retained chunk is NOT reclaimed by routine GC. {@code nx t3 gc}
-     * treats ANY manifest reference as "keep", dangling or not, so a chunk held
-     * back by this anti-join because of an already-dangling manifest row (the
-     * RDR measured a live pre-existing population of 37 such rows across 4
-     * documents) stays until RDR-191 Phase 5 reconciles the manifest — work
-     * that has not started. For the F8c prune case, recovery depends on a
-     * re-index that may never fire. The over-retention is therefore UNBOUNDED
-     * IN TIME, not "until the next GC pass". It is still the right trade — the
-     * data loss it replaces was silent and irreversible, this is visible and
-     * repairable — but it is a deferral, not a self-healing one.
+     * <p>THE PRIOR RULING'S OWN CONCERN WAS REAL, NOT HYPOTHETICAL — CORRECTED
+     * 2026-08-12 (nexus-rnqbw, critic finding on this very fix, verified
+     * empirically via {@code tests/test_o8dil5_expire_manifest_reap.py} going
+     * red under the working tree). An earlier revision of this paragraph
+     * claimed no production caller performs the retract-manifest-then-
+     * delete-chunk ordering in one call — false. THREE Python callers do
+     * exactly that, all funneling through {@code nexus.catalog.store_hook}'s
+     * {@code reap_catalog_manifest_for_chashes} / {@code
+     * store_delete_catalog_cleanup}: {@code nx store delete --id}, MCP
+     * {@code store_delete}, and {@code HttpVectorClient.expire()}. Each
+     * tombstones the owning document via {@code delete_document} and then
+     * deletes the T3 chunk in the SAME call — the exact ordering the
+     * round-2 decision below was built around, and the exact ordering this
+     * fix's tombstone-inclusive join reopened as a leak (a false
+     * anti-join-protected refusal on an ordinary single-owner delete). THE
+     * FIX IS NOT a weaker anti-join here — that would reopen the
+     * independent-deleter hole this method's join exists to close — it is
+     * an EXPLICIT manifest-row retraction one layer up, in Python:
+     * {@code store_hook.py}'s {@code _retract_manifest_rows_for_chash}
+     * removes the reaped chash's own manifest row(s) BEFORE tombstoning, so
+     * by the time this method's join runs there is nothing left for it to
+     * (correctly) protect for that one chash, while every OTHER document's
+     * manifest row referencing the same chash (RDR-108 collapse-by-design)
+     * stays fully protected. See that function's own "RETRACTION, NOT JUST
+     * TOMBSTONE" docstring section for the full mechanism. This method's
+     * join is UNCONDITIONAL class-b protection (tier 1, below); the Python
+     * retraction step is what lets an OWNER's own same-call delete coexist
+     * with it, by construction rather than by narrowing this join.
+     *
+     * <p>PRIOR RULING (nexus-o8dil.5 round 2, SUPERSEDED above — kept so the
+     * history of this decision is legible, not silently erased): "Live"
+     * excludes tombstoned owners; this mirrors this same file's {@code
+     * liveChunksCondition}/{@code liveChunksPredicate} idiom (~line 2903) and
+     * {@code CatalogRepository#strandedChunkCount}, both of which STILL treat
+     * a tombstoned-only manifest reference as dead for THEIR OWN purposes
+     * (live_chunks visibility / stranded-count reporting — read-only views,
+     * not a delete-path protection decision, so they are NOT reversed by this
+     * fix and remain deliberately divergent from this method's join).
+     *
+     * <p><strong>TWO-TIER PROTECTION ACROSS THE RDR-191 DELETE-PATH QUARTET
+     * — name both, do not "reconcile" them toward each other.</strong> This
+     * fix, {@code gc_expire_quarantine}'s manifest guard (nexus-wnpet), and
+     * {@code purge_trash}'s chunk sweep (nexus-5da44) sit in TWO DELIBERATELY
+     * DIFFERENT tiers, both correct for their own surface:
+     * <ul>
+     *   <li><b>Tier 1 — UNCONDITIONAL class-b protection</b> (this method;
+     *       {@code nexus.gc_expire_quarantine}'s manifest-reference refusal,
+     *       not overridable by {@code force}). Surfaces where the actor is a
+     *       GENERIC anti-join or a GC-lifecycle boundary with no notion of
+     *       "this document's own grace window" in scope — a tombstoned
+     *       owner's manifest row protects its chunk with no time limit
+     *       attached to the protection itself. Bounded only indirectly, by
+     *       {@code purge_trash} eventually reaping the tombstone.</li>
+     *   <li><b>Tier 2 — GRACE-WINDOW-SCOPED protection</b> ({@code
+     *       purge_trash}'s chunk sweep; {@code CatalogRepository#
+     *       strandedChunkCount}'s reporting pair, nexus-erwvd). Surfaces
+     *       where the actor IS the grace-window mechanism itself — a
+     *       tombstoned owner protects its chunk ONLY while still inside
+     *       {@code older_than}; past it, chunk/document/manifest are reaped
+     *       together in one call. This is time-bounded protection BY
+     *       DESIGN, because bounding it is the entire point of the surface.</li>
+     * </ul>
+     * A tombstoned-but-past-window owner is therefore Tier-1-protected
+     * (this method still won't delete its chunk out from under a
+     * still-live manifest row on some OTHER document) but NOT Tier-2-
+     * protected (its OWN purge_trash sweep proceeds). That is not a
+     * contradiction to fix by narrowing Tier 1 to match Tier 2's window,
+     * or widening Tier 2 to match Tier 1's unconditional stance — each
+     * tier answers a different question ("does ANY other reference exist"
+     * vs. "has THIS document's own grace period elapsed") and collapsing
+     * them would either reopen a Tier-1 hole (an independent deleter
+     * racing a fresh tombstone) or break Tier 2's whole purpose (a grace
+     * window that never actually reaps anything).
+     *
+     * <p><strong>What this trade still costs — do not soften this.</strong>
+     * A chunk protected here by an already-dangling class-b/(a) manifest row
+     * is NOT reclaimed by routine GC. {@code nx t3 gc} treats ANY manifest
+     * reference as "keep", dangling or not, so retention stays until either
+     * {@code purge_trash} ages the tombstone past its grace window (class b)
+     * or RDR-191 Phase 5 reconciles a genuinely class-(a) dangling row — work
+     * that has not started. The over-retention for an unreconciled class-(a)
+     * row is therefore UNBOUNDED IN TIME, not "until the next GC pass"; a
+     * class-(b) row is bounded by the grace window by construction. It is
+     * still the right trade — the data loss the anti-join replaces was silent
+     * and irreversible, this is visible and repairable — but it is a
+     * deferral, not a self-healing one.
      *
      * <p>No caller in the census intends to delete a chunk a live manifest row
      * still names, so there is no wholesale-purge caller this scoping defeats.
@@ -2201,6 +2329,11 @@ public final class PgVectorRepository {
         if (ids == null || ids.isEmpty()) return 0;
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         return tenantScope.withTenant(tenant, ctx -> {
+            // RDR-191 GATE-2 (nexus-mmkqe): NO deleted_at predicate on the join —
+            // a manifest row protects its chunk whether its owning document is
+            // live (class a) or tombstoned (class b, soft-tombstone contract
+            // still in force). See the method javadoc "Live INCLUDES tombstoned
+            // owners" for the full definition-of-record citation.
             var stillReferenced = DSL.exists(
                 ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
                    .join(CATALOG_DOCUMENTS)
@@ -2208,8 +2341,7 @@ public final class PgVectorRepository {
                            .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
                           .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection()))
-                          .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))
-                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
+                          .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))));
             return ctx.deleteFrom(ch.table())
                .where(ch.collection().eq(collection).and(ch.chash().in(ids)).andNot(stillReferenced))
                .execute();
@@ -2866,8 +2998,20 @@ public final class PgVectorRepository {
 
     // -- Internal helpers -------------------------------------------------------
 
+    /**
+     * RDR-191 Phase 4 (nexus-o8dil.16): thin wrapper over {@link DimTables#CHUNKS_TABLE_NAME}
+     * rather than hand-rolling {@code "nexus.chunks_" + dim} — the raw-SQL table-name
+     * channel {@link #searchWithTokens}/{@link #hybridSearch}/{@link #upsertChunks} read
+     * from must consult the same single name authority {@link DimTables} gives the typed
+     * jOOQ channel, or the two channels drift independently (DimTables' own class javadoc).
+     * {@code dim} is now vestigial for the table name itself (every dim resolves to the
+     * SAME {@code nexus.chunks} table) but is kept as a parameter: every call site already
+     * has a resolved {@code dim} in scope for the embedding-column choice
+     * ({@link DimTables#embeddingColumn(int)}) right alongside the table name, and dropping
+     * the parameter here would be a needless signature churn for zero benefit.
+     */
     private static String chunksTable(int dim) {
-        return "nexus.chunks_" + dim;
+        return DimTables.CHUNKS_TABLE_NAME;
     }
 
     /**
@@ -2893,6 +3037,16 @@ public final class PgVectorRepository {
      * hand-built SQL string the way it sees typed jOOQ statements — this predicate's
      * presence (by name, {@code liveChunksPredicate(}) in the method body is exactly
      * what that check requires.
+     *
+     * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16/.18): deliberately UNCHANGED.</strong>
+     * This predicate is alias-parameterised and its SQL text names only
+     * {@code catalog_document_chunks}/{@code catalog_documents} (via {@code alias.tenant_id}
+     * / {@code alias.chash} for the correlation, never a dim-sharded table name) — it
+     * carries no {@code chunks_<dim>} reference for the chunks_384/768/1024 unification to
+     * touch. Recorded here so a future repoint census does not re-flag this method: the
+     * "raw {@code chunks_<dim>} table" phrasing above and in the {@code nexus-msz9i} cost
+     * comment below describes the CALLER's table (now {@code nexus.chunks}, resolved via
+     * {@link #chunksTable(int)}), not anything this predicate itself references.
      */
     private static String liveChunksPredicate(String alias) {
         // nexus-msz9i (hybrid p50 744ms -> ~1000ms at the v0.1.63 deploy): the original
@@ -2962,6 +3116,14 @@ public final class PgVectorRepository {
      * .selectOne(}). This predicate is instead policed by the gate's dedicated {@code
      * scanTypedChunksSites} check (mirrors {@code scanRawChunksSites}), which requires
      * every named get-family method to call this helper by name.
+     *
+     * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16/.18): deliberately UNCHANGED</strong>, same
+     * reason as {@link #liveChunksPredicate} — the {@code ch} parameter's
+     * {@link DimTables.ChunkTable#tenantId()}/{@link DimTables.ChunkTable#chash()} accessors
+     * already resolve against whichever table {@code ch} was built from ({@code nexus.chunks}
+     * post-repoint), so this condition needed no edit for the unification; only the caller's
+     * {@code DimTables.CHUNKS.get(dim)} lookup (D1's scope) determines which table/columns
+     * {@code ch} carries.
      */
     private static org.jooq.Condition liveChunksCondition(DSLContext ctx, DimTables.ChunkTable ch) {
         // nexus-msz9i: the DEAD-SET form, the typed twin of the rewrite applied to

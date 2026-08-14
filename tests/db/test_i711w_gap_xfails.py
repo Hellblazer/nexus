@@ -134,7 +134,7 @@ class TestT3GcTombstoneSafety:
             source_uri="file:///i711w/gc1/doc.md",
         )
         h = _ch("i711w-gc1-chunk")
-        cat.write_manifest(str(t), [{"chash": h, "position": 0}])
+        cat.write_manifest(str(t), [{"chash": h, "position": 0}], collection=coll)
 
         # NON-VACUITY guard: the chunk is visible while the doc is live.
         assert h in cat.chashes_for_collection(coll), (
@@ -159,7 +159,7 @@ class TestT3GcTombstoneSafety:
             source_uri="file:///i711w/gc2/doc.md",
         )
         h = _ch("i711w-gc2-chunk")
-        cat.write_manifest(str(t), [{"chash": h, "position": 0}])
+        cat.write_manifest(str(t), [{"chash": h, "position": 0}], collection=coll)
 
         # NON-VACUITY guard: while live, the chash attributes to the doc.
         before = cat.docs_for_chashes([h])
@@ -239,7 +239,7 @@ class TestT3GcTombstoneSafety:
             source_uri="file:///i711w/gc3/live.md",
         )
         h_live = _ch("i711w-gc3-live-chunk")
-        cat.write_manifest(str(t_live), [{"chash": h_live, "position": 0}])
+        cat.write_manifest(str(t_live), [{"chash": h_live, "position": 0}], collection=coll)
 
         # Doomed doc: tombstoned below; its chunk is the GC subject.
         t_dead = cat.register(
@@ -250,7 +250,7 @@ class TestT3GcTombstoneSafety:
             source_uri="file:///i711w/gc3/dead.md",
         )
         h_dead = _ch("i711w-gc3-dead-chunk")
-        cat.write_manifest(str(t_dead), [{"chash": h_dead, "position": 0}])
+        cat.write_manifest(str(t_dead), [{"chash": h_dead, "position": 0}], collection=coll)
 
         # Real T3Database over the canonical vector substitute. Both chunks
         # are 60 days old so they clear the default 30d orphan window.

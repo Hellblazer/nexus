@@ -268,7 +268,7 @@ class TestItem12CatalogReadsAfterRename:
     list_by_collection / lookup_doc_id_by_collection_and_path /
     get_collection / chashes_for_collection). NO real search()-after-rename
     test exists ANYWHERE in the repo: the engine-side vector re-home
-    (chunks_384/768/1024, CatalogRepository.java:2411-2413) is asserted by
+    (nexus.chunks embedding_384/768/1024 columns, CatalogRepository.java:2411-2413) is asserted by
     nothing end-to-end, and tests/test_collection_rename_service_mode.py is
     MagicMock-only (it pins the client's request shape, not that a real
     semantic search over the renamed collection returns the doc's chunks).
@@ -301,7 +301,7 @@ class TestItem12CatalogReadsAfterRename:
         )
         cat.write_manifest(str(t), [
             {"position": 0, "chash": self._CHASH, "line_start": 1, "line_end": 10},
-        ])
+        ], collection=self._OLD)
         # Sanity: seeded reads resolve under OLD before the rename.
         assert cat.lookup_doc_id_by_collection_and_path(self._OLD, self._PATH) == str(t)
         assert self._CHASH in cat.chashes_for_collection(self._OLD)

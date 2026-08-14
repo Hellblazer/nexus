@@ -127,12 +127,20 @@ class TestVictimScenarioEndToEnd:
             "tags": "", "timestamp": "2026-07-18T00:00:00+00:00", "ttl": 30,
         }
         db = _fake_t3()
-        with patch("nexus.commands.memory.t2_handle", return_value=fake_t2), \
-             patch("nexus.db.make_t3", return_value=db), \
-             patch("nexus.corpus.t3_collection_name", return_value="knowledge__p__x__v1"):
-            result = runner.invoke(
-                main, ["memory", "promote", "1", "--collection", "knowledge__p"],
-            )
+        try:
+            with patch("nexus.commands.memory.t2_handle", return_value=fake_t2), \
+                 patch("nexus.db.make_t3", return_value=db), \
+                 patch("nexus.corpus.t3_collection_name", return_value="knowledge__p__x__v1"):
+                result = runner.invoke(
+                    main, ["memory", "promote", "1", "--collection", "knowledge__p"],
+                )
+        finally:
+            # nexus-jovc9: promote's store chains call get_t3(), which memoises
+            # the patched make_t3's mock into the process-wide _t3_instance.
+            # patch() restores the factory, not the memo — see the identical
+            # note on tests/test_memory.py::_promote.
+            from nexus.mcp_infra import inject_t3
+            inject_t3(None)
         assert "chroma_api_key" not in result.output.lower()
         assert "voyage_api_key not set" not in result.output.lower()
 

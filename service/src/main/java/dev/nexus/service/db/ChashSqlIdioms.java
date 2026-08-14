@@ -12,9 +12,7 @@ import java.util.List;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
 
 /**
@@ -100,9 +98,31 @@ public final class ChashSqlIdioms {
     private ChashSqlIdioms() {
     }
 
-    /** The three dim-partitioned content tables, in canonical order. */
+    /**
+     * The content table(s) backing chunk storage, in canonical order.
+     *
+     * <p>RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-o8dil.41 item 4):
+     * {@code nexus.chunks_384/768/1024} collapsed into ONE unified {@code
+     * nexus.chunks} table with three nullable typed embedding columns —
+     * dim is now a COLUMN choice ({@link dev.nexus.service.vectors.DimTables
+     * #embeddingColumn(int)}), not a TABLE identity, so a "list of dim
+     * tables" is a single-element list going forward. Left as a {@code
+     * List<String>} (not collapsed to a bare constant) because it remains
+     * the schema-drift sentinel {@code RawSqlGateTest}'s canary pins — see
+     * that test's rewritten checklist for what actually needs touching on a
+     * FUTURE dimension-count change (a column add on the unified table, not
+     * a table add). Verified (nexus-4okz4 increment 1 finding, reaffirmed
+     * this lane): grep-confirmed ZERO executable main-source consumers of
+     * this constant — {@code contentCollapseDelete}'s call sites are fed
+     * from {@code RekeyOps.DIMS}' {@code d.name()}, never from here — so
+     * this is a checklist artifact, not a live drift surface itself; keep
+     * it in lockstep with {@link
+     * dev.nexus.service.vectors.DimTables#CHUNKS_TABLE_NAME} by construction
+     * (both derive from the same "one unified table" fact) rather than by a
+     * runtime cross-check.
+     */
     public static final List<String> CHUNK_TABLES =
-        List.of("nexus.chunks_384", "nexus.chunks_768", "nexus.chunks_1024");
+        List.of(dev.nexus.service.vectors.DimTables.CHUNKS_TABLE_NAME);
 
     /** The one digest formula: full sha256 over the row's chunk_text.
      *  Typed jOOQ-DSL twin: {@link #digestField(Field)} (nexus-4okz4
@@ -377,67 +397,66 @@ public final class ChashSqlIdioms {
 
     /**
      * In-txn verify: {@code count(*)} of manifest rows pointing at no
-     * content row in any dim. SINGLE-HOMED (nexus-4okz4 increment 1,
-     * collapsing the twin renderings the nexus-t76bp jOOQ-DSL pass left
-     * split across {@code RekeyOps} (a private DSL copy) and this class's
-     * former raw-SQL {@code danglingManifestCount()} string — both callers
-     * ({@code RekeyOps.rekey} step 6, {@code StagingPromoteOps.
-     * finalizeTenant} step 7, {@code ChashCensus.danglingPointers}) now
-     * call this ONE implementation, closing the drift hazard both prior
-     * copies independently hardcoding the three dim tables carried (T2
-     * critique-t76bp-rekey-gate-2026-08-08 [21807] ROUND 3, condition (3):
-     * "neither copy derives from CHUNK_TABLES ... a fourth dim table is
-     * the realistic drift trigger"). {@link #CHUNK_TABLES} is a
-     * String-typed table-name list built for raw-SQL composition
-     * elsewhere in this class (contentCollapseDelete iterates it as a
-     * loop variable at call sites); the three generated-Tables constants
-     * below are typed jOOQ handles for the SAME three tables and cannot be
-     * driven off that String list without a name-to-generated-class lookup
-     * that would be its own drift surface — kept as the explicit three,
-     * tied to CHUNK_TABLES only by this comment. See RawSqlGateTest's
-     * {@code chunkTablesCanary_fourthDimNeedsAllSitesToldChecklistAbove}
-     * for the full fourth-dim checklist (nexus-4okz4 increment 2).
+     * content row. SINGLE-HOMED (nexus-4okz4 increment 1, collapsing the
+     * twin renderings the nexus-t76bp jOOQ-DSL pass left split across
+     * {@code RekeyOps} (a private DSL copy) and this class's former raw-SQL
+     * {@code danglingManifestCount()} string — both callers ({@code
+     * RekeyOps.rekey} step 6, {@code StagingPromoteOps.finalizeTenant} step
+     * 7, {@code ChashCensus.danglingPointers}) call this ONE
+     * implementation.
+     *
+     * <p>RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-o8dil.41 item
+     * 4): {@code nexus.chunks_384/768/1024} collapsed into ONE unified
+     * {@code nexus.chunks} table — the predicate this method renders was
+     * always "no content row for this chash IN ANY DIM," and with dim no
+     * longer a table identity that collapses from a three-way ANDed {@code
+     * NOT EXISTS} (one per former dim table) to a SINGLE {@code NOT EXISTS}
+     * against the one unified table; a chash is content-backed or it is
+     * not, full stop — {@link #CHUNK_TABLES} / {@link
+     * dev.nexus.service.vectors.DimTables#CHUNKS_TABLE_NAME} is the single
+     * authority for that one table name. Callers ({@link #existsInAnyDim}
+     * is the sibling boolean form) are D3-committed against this unified
+     * shape already (RekeyOps.orphanCond, StagingPromoteOps' converged
+     * {@code canonExistsDsl} call sites) — this method's body is what makes
+     * that commitment correct. See RawSqlGateTest's rewritten channel
+     * checklist for what a FUTURE dimension-count change (a column add,
+     * not a table add) needs to touch instead.
      */
     // No SANCTIONED RAW comment: pure DSL, no raw-SQL string executed here.
     public static Integer danglingManifestCountDsl(org.jooq.DSLContext ctx) {
         return ctx.selectCount()
             .from(CATALOG_DOCUMENT_CHUNKS)
-            .where(DSL.notExists(ctx.selectOne().from(CHUNKS_384)
-                    .where(CHUNKS_384.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
-            .and(DSL.notExists(ctx.selectOne().from(CHUNKS_768)
-                    .where(CHUNKS_768.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
-            .and(DSL.notExists(ctx.selectOne().from(CHUNKS_1024)
-                    .where(CHUNKS_1024.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
+            .where(DSL.notExists(ctx.selectOne().from(CHUNKS)
+                    .where(CHUNKS.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
             .fetchOne(0, Integer.class);
     }
 
     /**
-     * The three-way {@code EXISTS} disjunction proving a chash is CANONICAL
-     * (a content row for it exists in any of the three dim tables) —
-     * nexus-4okz4 increment 4 shared home for the idiom, with
-     * {@code ChashCensus}' dangling-pointer scan as its first caller.
-     * {@code ChashSqlIdioms.danglingManifestCountDsl} inlines the same
-     * predicate as three explicit {@code NOT EXISTS} conjuncts above
-     * (structurally different shape — a count query, not a boolean
-     * condition — so it stays its own rendering rather than composing this
-     * one). {@code StagingPromoteOps} privately carried a byte-for-byte
+     * The {@code EXISTS} predicate proving a chash is CANONICAL (a content
+     * row for it exists) — nexus-4okz4 increment 4 shared home for the
+     * idiom, with {@code ChashCensus}' dangling-pointer scan as its first
+     * caller. {@code StagingPromoteOps} privately carried a byte-for-byte
      * identical copy ({@code canonExistsDsl}, increment 3) until increment
      * 5 converged its three call sites onto this method and deleted the
      * private copy outright — SINGLE-HOMED, same discipline as
      * {@link #danglingManifestCountDsl}'s twin collapse in increment 1: no
-     * forked variant left behind for any caller. (The increment-4
-     * "single-homed-for-NEW-callers-only" carve-out that briefly justified
-     * leaving StagingPromoteOps unconverged had no prior precedent anywhere
-     * in this project and directly contradicted this very discipline one
-     * section away — see nexus-4okz4 bead history.) Every caller, old or
-     * new, reaches for THIS one rather than re-deriving the disjunction
-     * locally. Same three-explicit-branches discipline as the fourth-dim
-     * checklist ({@code RawSqlGateTest.chunkTablesCanary_...}) — a fourth
-     * dim needs this method added to that checklist too.
+     * forked variant left behind for any caller. Every caller, old or new,
+     * reaches for THIS one rather than re-deriving the predicate locally.
+     *
+     * <p>RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-o8dil.41 item
+     * 4): was a three-way {@code OR} disjunction across
+     * {@code chunks_384/768/1024} — with those collapsed into the ONE
+     * unified {@code nexus.chunks} table, "exists in any dim" is now a
+     * SINGLE {@code EXISTS} against that one table (dim is a column
+     * choice, not a table identity a chash could independently exist
+     * under). {@code danglingManifestCountDsl} above renders the same
+     * fact as a {@code NOT EXISTS} count-query conjunct rather than
+     * composing this boolean form — structurally different shape, kept as
+     * its own rendering, same as before. See RawSqlGateTest's rewritten
+     * channel checklist for what a FUTURE dimension-count change (a
+     * column add, not a table add) needs to touch instead of this method.
      */
     public static Condition existsInAnyDim(DSLContext ctx, Field<byte[]> chash) {
-        return DSL.exists(ctx.selectOne().from(CHUNKS_384).where(CHUNKS_384.CHASH.eq(chash)))
-            .or(DSL.exists(ctx.selectOne().from(CHUNKS_768).where(CHUNKS_768.CHASH.eq(chash))))
-            .or(DSL.exists(ctx.selectOne().from(CHUNKS_1024).where(CHUNKS_1024.CHASH.eq(chash))));
+        return DSL.exists(ctx.selectOne().from(CHUNKS).where(CHUNKS.CHASH.eq(chash)));
     }
 }

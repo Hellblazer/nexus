@@ -138,16 +138,21 @@ class ChashConformanceReportIntegrationTest {
     //    CHECK even NOT VALID, so this maneuver is the ONLY way to get a
     //    non-conformant row into a real Postgres instance) ─────────────────
 
+    // RDR-191 Phase 4 (repoint-batch lane F1): nexus.chunks_768 unified into
+    // nexus.chunks -- the octet-width CHECK is now ONE constraint shared
+    // across all three embedding_<dim> columns (chunks_chash_octet_check),
+    // not a per-dim constraint. Dropping it opens the poisoning window for
+    // whichever dim column this test's insert populates.
     private void withChecksDropped(Connection su, Runnable seed) throws Exception {
         su.createStatement().execute(
-            "ALTER TABLE nexus.chunks_768 DROP CONSTRAINT chunks_768_chash_octet_check");
+            "ALTER TABLE nexus.chunks DROP CONSTRAINT chunks_chash_octet_check");
         su.createStatement().execute(
             "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT catalog_document_chunks_chash_octet_check");
         try {
             seed.run();
         } finally {
             su.createStatement().execute(
-                "ALTER TABLE nexus.chunks_768 ADD CONSTRAINT chunks_768_chash_octet_check "
+                "ALTER TABLE nexus.chunks ADD CONSTRAINT chunks_chash_octet_check "
                 + "CHECK (octet_length(chash) = 32) NOT VALID");
             su.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks ADD CONSTRAINT catalog_document_chunks_chash_octet_check "
@@ -157,7 +162,7 @@ class ChashConformanceReportIntegrationTest {
 
     private static void insertChunk768(Connection su, String tenant, byte[] chash, String text) {
         try (PreparedStatement ps = su.prepareStatement(
-            "INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding) "
+            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768) "
             + "VALUES (?, ?, ?, ?, ?::vector)")) {
             ps.setString(1, tenant);
             ps.setString(2, COLLECTION);

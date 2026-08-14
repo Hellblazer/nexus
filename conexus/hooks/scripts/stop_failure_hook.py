@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""StopFailure hook — log API failure context to beads memory for observability.
+"""StopFailure hook — swallow API failure events without side effects.
 
-Output and exit codes are ignored by Claude Code. This script exists purely
-for one side effect: bd remember (all failures), a crash/abnormal-termination
-log for observability. It does NOT file issues — transient API failures are
-infra events, not actionable bugs, and filing them pollutes the ready queue.
+Output and exit codes are ignored by Claude Code. Transient API failures are
+infra events, not actionable bugs: it does NOT file issues (pollutes the
+ready queue) and does NOT `bd remember` them (per-event keys accumulated
+unboundedly and bd prime injected them into every session — nexus-0dj7e).
+Debug tracing via NX_HOOK_DEBUG=1 only.
 """
 from __future__ import annotations
 
@@ -19,8 +20,6 @@ if sys.version_info < (3, 12):
 
 import json
 import os
-import shutil
-import subprocess
 from datetime import datetime, timezone
 
 DEBUG = os.environ.get("NX_HOOK_DEBUG", "0") == "1"
@@ -39,20 +38,6 @@ KNOWN_TYPES = frozenset({
 def _debug(msg: str) -> None:
     if DEBUG:
         print(f"[stop-failure-hook] {msg}", file=sys.stderr)
-
-
-def _run(args: list[str], timeout: int = 5) -> bool:
-    """Run a command, return True on success."""
-    try:
-        result = subprocess.run(
-            args, capture_output=True, text=True, timeout=timeout,
-        )
-        if DEBUG and result.stderr:
-            _debug(f"stderr from {args[0]}: {result.stderr[:300]}")
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        _debug(f"{args[0]} failed: {exc}")
-        return False
 
 
 def main() -> None:
@@ -82,19 +67,12 @@ def main() -> None:
         _debug("not in Claude Code session (CLAUDECODE not set), skipping side effects")
         return
 
-    if not shutil.which("bd"):
-        _debug("bd not on PATH, skipping")
-        return
-
-    # Log failure to beads memory for observability. This is the only side
-    # effect: a crash/abnormal-termination record. We intentionally do NOT
-    # create an issue (`bd create`) here — transient API failures (rate limit,
-    # server error, auth) are infra events, not actionable bugs, and filing
-    # them as P1 issues pollutes `bd ready` with non-work that masquerades as
-    # the next thing to do. The remember-log is sufficient for tracking.
+    # No side effects. Transient API failures (rate limit, server error,
+    # auth) are infra events: `bd create` would pollute `bd ready`, and
+    # `bd remember` minted a permanent per-event key that bd prime injected
+    # into every session's context (nexus-0dj7e). Debug trace only.
     summary = f"stop-failure-{error_type}: {error_details[:200]} at {timestamp}"
-    _run(["bd", "remember", summary])
-    _debug(f"logged: {summary}")
+    _debug(f"observed: {summary}")
 
 
 if __name__ == "__main__":

@@ -62,6 +62,13 @@ class GrantsSvcForeignOwnedRelationTest {
                 + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
             exec(su, "GRANT CREATE ON DATABASE postgres TO " + ADMIN_ROLE);
             exec(su, "GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
+            // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
+            // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
+            // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc,
+            // and PostgreSQL refuses that GRANT unless the migration role already holds
+            // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
+            // the falsification proof of this exact prerequisite.
+            exec(su, "GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
             exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
             exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
 
@@ -102,7 +109,7 @@ class GrantsSvcForeignOwnedRelationTest {
 
             // 4. Post-conditions: nexus_svc got DML on an admin-owned table,
             //    but NOT on the foreign-owned diag view — it does not need it.
-            assertThat(hasTablePriv(su, SVC_ROLE, "nexus.chunks_384", "INSERT"))
+            assertThat(hasTablePriv(su, SVC_ROLE, "nexus.chunks", "INSERT"))
                 .as("admin-owned table must still be granted")
                 .isTrue();
             assertThat(hasTablePriv(su, SVC_ROLE, "nexus.diag_chash_conformance", "SELECT"))

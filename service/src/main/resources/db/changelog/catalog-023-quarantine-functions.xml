@@ -580,10 +580,27 @@ GRANT EXECUTE ON FUNCTION nexus.gc_restore_rereferenced(int, text, text, text) T
 GRANT EXECUTE ON FUNCTION nexus.gc_expire_quarantine(int, text, text, text, text, float8, int, boolean) TO nexus_svc;
         </sql>
         <rollback>
-            <sql splitStatements="true">
-                REVOKE EXECUTE ON FUNCTION nexus.gc_expire_quarantine(int, text, text, text, text, float8, int, boolean) FROM nexus_svc;
-                REVOKE EXECUTE ON FUNCTION nexus.gc_restore_rereferenced(int, text, text, text) FROM nexus_svc;
-                REVOKE EXECUTE ON FUNCTION nexus.gc_quarantine_orphans(int, text, text, text, text, int) FROM nexus_svc;
+            <!-- RDR-191 repoint batch (nexus-o8dil.18): tolerant form. In the
+                 full reverse rollback chain the batch changesets' DROP-only
+                 rollbacks remove these objects BEFORE this rollback fires, and
+                 a bare REVOKE on a missing object errors. When the object is
+                 absent its grants died with it, so skipping is exact. Rollback
+                 edits on applied changesets are checksum-safe (catalog-013-2 /
+                 catalog-020-5 precedent). -->
+            <sql splitStatements="false">
+DO $$
+BEGIN
+    IF to_regprocedure('nexus.gc_expire_quarantine(int, text, text, text, text, float8, int, boolean)') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.gc_expire_quarantine(int, text, text, text, text, float8, int, boolean) FROM nexus_svc;
+    END IF;
+    IF to_regprocedure('nexus.gc_restore_rereferenced(int, text, text, text)') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.gc_restore_rereferenced(int, text, text, text) FROM nexus_svc;
+    END IF;
+    IF to_regprocedure('nexus.gc_quarantine_orphans(int, text, text, text, text, int)') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.gc_quarantine_orphans(int, text, text, text, text, int) FROM nexus_svc;
+    END IF;
+END
+$$;
             </sql>
         </rollback>
     </changeSet>

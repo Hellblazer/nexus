@@ -297,7 +297,46 @@ class TestRequiredEngineVersion:
         # regressions). POST-DEPLOY VERIFY DONE, not owed:
         # check_engine_release_floor.py WITHOUT --paired-deploy exits 0,
         # cloud release_version=0.1.71 == floor.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 71)
+        #
+        # BUMPED to (0,1,73) 2026-08-12: v0.1.72 was cut+deployed same day
+        # (cloud went 0.1.71 -> 0.1.72) but the RDR-191 manifest bundle
+        # (caller-supplied collection, catalog-025 NOT NULL, commit
+        # 498c9295) landed AFTER its cut, so v0.1.73 was cut from
+        # bd716286a to carry it — v0.1.72 is now a floor-skipped version
+        # for LOCAL installs (deployed to cloud, never pinned). Gated:
+        # full engine suite BUILD SUCCESS on bd716286a, --shakeout
+        # CANDIDATE SHAKEOUT PASSED pre-tag on the same tip. DEPLOY of
+        # 0.1.73 is the pending relay at this bump; until it lands the
+        # managed handshake legitimately reads cloud 0.1.72 < floor —
+        # check_engine_release_floor.py documents that state, and the
+        # --acquire post-publish gate covers the published bytes.
+        #
+        # BUMPED to (0,1,74) 2026-08-12, same day: v0.1.74 cut from
+        # d784d8c6e carries the RDR-191 wave-2 delete-path family
+        # (catalog-026 purge-trash grace-window chunk sweep, catalog-027
+        # quarantine manifest guard, the tombstone-aware delete anti-join
+        # + explicit reap retraction, and the manifest-read wire field
+        # kzso5 — the client half of which is version-tolerant and only
+        # fully activates against this engine). v0.1.73 was deployed and
+        # recorded the same day, so this is a one-step floor move, not a
+        # skip. Gated: full engine suite 2010/0/0 on d784d8c6e,
+        # --shakeout CANDIDATE SHAKEOUT PASSED pre-tag on the same tip;
+        # deploy relay is the pending step at this bump.
+        #
+        # BUMPED to (0,1,75) 2026-08-13: the RDR-191 Phase 4 GATE-4
+        # co-release (nexus-o8dil.21) — v0.1.75 cut from 40ef3696e (the
+        # repoint-batch merge) carries the unify DDL (vectors-004 /
+        # taxonomy-007 / vectors-005) AND the rung retarget (.15), the
+        # pairing F14a forbids splitting. Fully gated BEFORE this bump:
+        # full engine suite 2075/0/0 on the tagged tree, --shakeout
+        # CANDIDATE SHAKEOUT PASSED, post-publish --acquire PASSED
+        # (263 migrations, 0 failed), DEPLOYED and cloud-gated 2026-08-14
+        # (conexus [22485]: STEP-6 green, client-path gate green, row
+        # invariant exact). This floor bump rides conexus 7.7.0 per the
+        # paired-release choreography — the same release that ships the
+        # three unshipped client wire-halves (498c92953 / b361a8106 /
+        # 8c75a61a3; nexus-sh9v2).
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 75)
 
 
 class TestParseEngineVersion:

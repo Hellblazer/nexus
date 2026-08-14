@@ -629,9 +629,12 @@ class ForeignKeyConstraintTest {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "chunk-doc-1");
             su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES " +
+                "('" + TENANT_A + "', 'fk-chunk-coll') ON CONFLICT DO NOTHING");
+            su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks " +
-                "(tenant_id, doc_id, position, chash) VALUES " +
-                "('" + TENANT_A + "', 'chunk-doc-1', 0, 'abc123abc123abc123abc123abc12300')");
+                "(tenant_id, doc_id, position, chash, collection) VALUES " +
+                "('" + TENANT_A + "', 'chunk-doc-1', 0, 'abc123abc123abc123abc123abc12300', 'fk-chunk-coll')");
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
                 "WHERE tenant_id='" + TENANT_A + "' AND doc_id='chunk-doc-1'");
@@ -644,11 +647,14 @@ class ForeignKeyConstraintTest {
     void chunkManifest_orphanDocId_rejectsWithFKViolation() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES " +
+                "('" + TENANT_A + "', 'fk-chunk-coll') ON CONFLICT DO NOTHING");
             Exception ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
                     "INSERT INTO nexus.catalog_document_chunks " +
-                    "(tenant_id, doc_id, position, chash) VALUES " +
-                    "('" + TENANT_A + "', 'nonexistent-chunk-doc', 0, 'deadbeefdeadbeefdeadbeefdeadbeef')")
+                    "(tenant_id, doc_id, position, chash, collection) VALUES " +
+                    "('" + TENANT_A + "', 'nonexistent-chunk-doc', 0, 'deadbeefdeadbeefdeadbeefdeadbeef', 'fk-chunk-coll')")
             );
             assertThat(ex.getMessage())
                 .as("FK must reject chunk row with no matching catalog_documents entry")
@@ -662,10 +668,13 @@ class ForeignKeyConstraintTest {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "chunk-cascade-doc");
             su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES " +
+                "('" + TENANT_A + "', 'fk-chunk-coll') ON CONFLICT DO NOTHING");
+            su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks " +
-                "(tenant_id, doc_id, position, chash) VALUES " +
-                "('" + TENANT_A + "', 'chunk-cascade-doc', 0, 'hash0000000000000000000000000000'), " +
-                "('" + TENANT_A + "', 'chunk-cascade-doc', 1, 'hash1111111111111111111111111111')");
+                "(tenant_id, doc_id, position, chash, collection) VALUES " +
+                "('" + TENANT_A + "', 'chunk-cascade-doc', 0, 'hash0000000000000000000000000000', 'fk-chunk-coll'), " +
+                "('" + TENANT_A + "', 'chunk-cascade-doc', 1, 'hash1111111111111111111111111111', 'fk-chunk-coll')");
 
             ResultSet before = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
@@ -693,13 +702,16 @@ class ForeignKeyConstraintTest {
             su.setAutoCommit(true);
             // Seed catalog_documents for TENANT_A only
             insertCatalogDocument(su, TENANT_A, TUMBLER_A);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES " +
+                "('" + TENANT_B + "', 'fk-chunk-coll') ON CONFLICT DO NOTHING");
             // Insert chunk row for TENANT_B referencing TENANT_A's tumbler — must be rejected
             // (FK checks as table owner; without composite key this would silently succeed)
             Exception ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
                     "INSERT INTO nexus.catalog_document_chunks " +
-                    "(tenant_id, doc_id, position, chash) VALUES " +
-                    "('" + TENANT_B + "', '" + TUMBLER_A + "', 0, 'crosshashcrosshashcrosshash00000')")
+                    "(tenant_id, doc_id, position, chash, collection) VALUES " +
+                    "('" + TENANT_B + "', '" + TUMBLER_A + "', 0, 'crosshashcrosshashcrosshash00000', 'fk-chunk-coll')")
             );
             assertThat(ex.getMessage())
                 .as("Composite FK must reject cross-tenant chunk manifest reference")

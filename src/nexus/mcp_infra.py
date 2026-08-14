@@ -1653,8 +1653,20 @@ def _stamp_index_run_complete(cat, doc_id: str, content_hash: str,
         )
 
 
-def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
+def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
                          manifest_complete: dict[str, str] | None = None) -> None:
+    # RDR-191 (Hal ruling 2026-08-12, "stop guessing the collection"):
+    # 'collection' is now a REQUIRED str, not an optional guess the engine
+    # would otherwise infer from chunk membership. The sole caller
+    # (manifest_write_batch_hook, ~:1235) already has it in scope from its
+    # own required `collection: str` parameter — fail loud here rather than
+    # let a blank value silently reach any of the manifest-write calls
+    # below, which now all require it too.
+    if not collection:
+        raise ValueError(
+            "_manifest_write_loop: 'collection' is required and must be "
+            "non-blank (RDR-191) — every manifest write below requires it"
+        )
     # nexus-u2kwq: multi-doc batches (the flush-grain aggregate path) go
     # through ONE write_many POST when the writer supports it; a 404
     # (engine < v0.1.24) or missing capability falls back to the per-doc
@@ -1767,11 +1779,11 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
             try:
                 if _complete_map:
                     res = _manifest_write_with_retry(
-                        cat.write_manifest_many, full_docs, complete=_complete_map)
+                        cat.write_manifest_many, full_docs, complete=_complete_map,
+                        collection=collection)
                 else:
-                    # Positional-only legacy call shape: keeps patched/older
-                    # writer doubles working when no stamp is requested.
-                    res = _manifest_write_with_retry(cat.write_manifest_many, full_docs)
+                    res = _manifest_write_with_retry(
+                        cat.write_manifest_many, full_docs, collection=collection)
                 wrote_many = True
                 # Dual return shape: dict (current client — carries the
                 # complete_refused contract) or bare failed-ids list (legacy
@@ -1943,7 +1955,8 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
                         doc_id=doc_id, collection=collection, error=str(_exc))
                     _before = set()
                     _record_superseded_sweep_skip(doc_id, collection, "before_read_failed")
-                _manifest_write_with_retry(cat.atomic_manifest_replace, doc_id, chunks)
+                _manifest_write_with_retry(
+                    cat.atomic_manifest_replace, doc_id, chunks, collection=collection)
                 _sweep_superseded_vectors(cat, doc_id, _before, chunks, collection,
                                           reader=reader, notes_provider=_notes_provider)
                 # chunk_count parity (critique Critical): the HTTP
@@ -1969,7 +1982,8 @@ def _manifest_write_loop(cat, by_doc, collection: str | None = None, *, reader,
                     _stamp_index_run_complete(
                         cat, doc_id, _claimed_hash, len(chunks))
             else:
-                _manifest_write_with_retry(cat.append_manifest_chunks, doc_id, chunks)
+                _manifest_write_with_retry(
+                    cat.append_manifest_chunks, doc_id, chunks, collection=collection)
                 # Same contract violation the write_many branch flags: a doc
                 # claimed COMPLETE whose batch lacks position 0 cannot be the
                 # whole file. Never stamp it; say so loudly (once — the

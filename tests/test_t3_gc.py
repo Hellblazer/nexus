@@ -217,7 +217,7 @@ def _register_doc_active(
     if chashes:
         catalog.write_manifest(str(tumbler), [
             {"chash": c, "position": i} for i, c in enumerate(chashes)
-        ])
+        ], collection=collection)
     return str(tumbler)
 
 

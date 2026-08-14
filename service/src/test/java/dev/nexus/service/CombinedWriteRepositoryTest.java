@@ -6,6 +6,7 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.CombinedWriteService;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.EmbedResult;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.EmbedderRouter;
@@ -133,7 +134,7 @@ class CombinedWriteRepositoryTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var ps = su.prepareStatement(
-                "SELECT 1 FROM nexus.chunks_384 WHERE tenant_id = ? AND collection = ? AND chash = ?");
+                "SELECT 1 FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id = ? AND collection = ? AND chash = ? AND " + DimTables.embeddingColumn(384) + " IS NOT NULL");
             ps.setString(1, tenant);
             ps.setString(2, collection);
             ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
@@ -145,7 +146,7 @@ class CombinedWriteRepositoryTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var ps = su.prepareStatement(
-                "SELECT chunk_text FROM nexus.chunks_384 WHERE tenant_id = ? AND collection = ? AND chash = ?");
+                "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id = ? AND collection = ? AND chash = ? AND " + DimTables.embeddingColumn(384) + " IS NOT NULL");
             ps.setString(1, tenant);
             ps.setString(2, collection);
             ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
@@ -154,12 +155,12 @@ class CombinedWriteRepositoryTest {
         }
     }
 
-    /** Raw stored {@code metadata} JSONB, as text, for a chunks_384 row. */
+    /** Raw stored {@code metadata} JSONB, as text, for a nexus.chunks (dim=384) row. */
     private String chunk384MetadataJson(String tenant, String collection, String hexChash) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var ps = su.prepareStatement(
-                "SELECT metadata::text FROM nexus.chunks_384 WHERE tenant_id = ? AND collection = ? AND chash = ?");
+                "SELECT metadata::text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id = ? AND collection = ? AND chash = ? AND " + DimTables.embeddingColumn(384) + " IS NOT NULL");
             ps.setString(1, tenant);
             ps.setString(2, collection);
             ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
@@ -177,7 +178,7 @@ class CombinedWriteRepositoryTest {
             su.createStatement().execute("SET nexus.tenant = '" + tenant + "'");
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding)"
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ")"
                 + " VALUES (?, ?, ?, ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             ps.setString(1, tenant);
             ps.setString(2, collection);
@@ -291,7 +292,7 @@ class CombinedWriteRepositoryTest {
 
         // A drops `shared` (plain writeManifestMany, sweep=true); B still references it.
         var result = repo.writeManifestMany(TENANT_A, List.of(
-            doc("cw.2a", List.of(row(0, ch("cw2-new"))))), null, true);
+            doc("cw.2a", List.of(row(0, ch("cw2-new"))))), col, null, true);
 
         assertThat(result.get("swept"))
             .as("B's live reference (landed via the combined write) must survive the union guard")
@@ -393,7 +394,7 @@ class CombinedWriteRepositoryTest {
         String col = "code__cw6__minilm-l6-v2-384__v1";
         registerDoc(TENANT_A, "cw.6", col);
         var result = repo.writeManifestMany(TENANT_A, List.of(
-            doc("cw.6", List.of(row(0, ch("cw6-x"))))), null, true);
+            doc("cw.6", List.of(row(0, ch("cw6-x"))))), col, null, true);
         assertThat(result).as("no `chunks` field -- `chunks_written` must be ABSENT, not zero")
             .doesNotContainKey("chunks_written");
     }
@@ -514,10 +515,13 @@ class CombinedWriteRepositoryTest {
     void combinedWrite_unregisteredGhostDoc_stillGatesOnTheCollectionBeingWritten() throws Exception {
         String col = "code__cw10__minilm-l6-v2-384__v1";
         String x = ch("cw10-x");
-        // No physical_collection at all -- physicalCollectionOf(docId) returns
-        // null for this doc, so the PRE-n7umy-fix code acquired NO gate at
-        // all on the writeManifestRows path (the `if (coll != null)` guard
-        // skips it entirely).
+        // No physical_collection at all for this doc -- the PRE-n7umy-fix
+        // code derived its sweep-gate collection FROM the document's own
+        // physical_collection (RDR-191 removed that inference entirely;
+        // writeManifestRows now takes an explicit, caller-supplied
+        // collection instead), so a null physical_collection meant NO gate
+        // was acquired at all on the writeManifestRows path (the `if (coll
+        // != null)` guard skipped it entirely).
         repo.upsertDocument(TENANT_A, Map.of(
             "tumbler", "cw.10", "title", "combined-write-ghost-cw.10",
             "content_type", "code", "corpus", "code", "chunk_count", 0));

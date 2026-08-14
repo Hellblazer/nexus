@@ -286,6 +286,14 @@ class ManifestRow:
     line_end: int | None = None
     char_start: int | None = None
     char_end: int | None = None
+    # nexus-kzso5 (RDR-191 follow-up): the row's OWN stamped collection —
+    # caller-supplied, NOT NULL truth on the engine side, independent of
+    # the owning document's ``physical_collection``. ``None`` ONLY when
+    # talking to a pre-field engine that doesn't send the wire key at all
+    # (tolerate absence, never fabricate a value) — never a stand-in for
+    # "genuinely no collection", which the engine contract no longer
+    # permits.
+    collection: str | None = None
 
 
 def _default_registry_path() -> Path:

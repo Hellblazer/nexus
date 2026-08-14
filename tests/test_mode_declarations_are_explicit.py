@@ -458,6 +458,140 @@ def test_mode_lint_exclude_files_all_resolve() -> None:
     )
 
 
+# ── hoisted-token marker registry (nexus-f1f2x) ────────────────────────────
+#
+# `_scan_offenders` above is, by design (see the module docstring), a scan
+# of `inspect.getsource(item.function)` -- the collected test function's OWN
+# source only. A voyage-token literal hoisted OUT of the function body -- to
+# a class attribute (`self._COLLECTION`) or a module-level helper
+# (`_ghost_write_collection()`) -- is therefore structurally invisible to
+# it: not flagged, not excluded, just never seen. Two such sites were found
+# during the 2026-08-12 RDR-191 test tail (substantive-critic round-3, T2
+# [22342]); both verified benign, but their invisibility was the bug --
+# future hoists would be accidental, not self-aware.
+#
+# A blind AST-reachability scan (every class attribute + every module-level
+# helper actually referenced from a test body, corpus-wide) was evaluated
+# while fixing this and rejected: it surfaces ~99 additional pre-existing
+# hoisted-token sites across 15+ files that have never been individually
+# vetted for whether the token is genuinely benign (see the nexus-f1f2x
+# follow-up bead filed for that audit). Wiring that scan into this file's
+# live census would turn "close two known holes" into "break ~90 unrelated
+# tests in one PR" -- an uncontrolled blast radius the two-site bead this
+# file's docstring is scoped to does not license.
+#
+# Instead: a REGISTRY, the same shape as `_MODE_LINT_EXCLUDE_NODEIDS` above
+# -- a site is only checked once someone deliberately lists it here, and
+# once listed, its own source must carry the `nexus-mode-lint` marker
+# (a literal substring match, deliberately not tied to comment placement
+# relative to any one statement -- both real sites put it in a docstring,
+# not glued to the assignment). No ratchet-style ceiling on this set the
+# way `_MODE_LINT_EXCLUDE_NODEIDS_CEILING` guards the exclude lists:
+# growing `_HOISTED_TOKEN_SITES` is a commitment to marking a site, not a
+# grant of silence, so there is nothing here for a ratchet to protect
+# against.
+_HOISTED_TOKEN_MARKER = "nexus-mode-lint"
+
+_HOISTED_TOKEN_SITES: frozenset[str] = frozenset({
+    # nexus-p5qk8 class fixture: class-level `_COLLECTION` used by every
+    # method via `self._COLLECTION`. Marker present since authoring.
+    "tests/test_catalog_manifest_read_api.py::TestManifestWritesRefreshIndexedAt",
+    # nexus-71gw2 / nexus-j862l ghost-doc rebase: module-level helper
+    # `_ghost_write_collection()` called directly by four test bodies.
+    "tests/db/test_c2_manifest_null_collection_engine.py::_ghost_write_collection",
+})
+
+
+def _hoisted_source_missing_marker(path: pathlib.Path, symbol: str) -> str | None:
+    """``None`` if the top-level class/function *symbol* in *path* carries
+    the RDR-109 hoisted-token marker somewhere in its own source; else a
+    short reason string.
+
+    AST-scoped rather than a raw file grep so the marker must live INSIDE
+    the hoisting definition's own source (not merely somewhere else in a
+    large file) -- proven by the kill control below.
+    """
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+    node = next(
+        (
+            n
+            for n in tree.body
+            if isinstance(n, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
+            and n.name == symbol
+        ),
+        None,
+    )
+    if node is None:
+        return f"no top-level class/function named {symbol!r} in {path}"
+    segment = ast.get_source_segment(source, node) or ""
+    if _HOISTED_TOKEN_MARKER in segment:
+        return None
+    return (
+        f"{path}::{symbol} has no `{_HOISTED_TOKEN_MARKER}` marker in its "
+        "own source"
+    )
+
+
+def _hoisted_offenders_missing_marker(sites: frozenset[str]) -> list[str]:
+    """Registry-driven check: every registered site must carry the marker."""
+    missing: list[str] = []
+    for site in sorted(sites):
+        file_part, _, symbol = site.partition("::")
+        reason = _hoisted_source_missing_marker(_REPO_ROOT / file_part, symbol)
+        if reason is not None:
+            missing.append(f"{site} -> {reason}")
+    return missing
+
+
+def test_registered_hoisted_token_sites_carry_explicit_marker() -> None:
+    """The two known hoisted-token sites (nexus-f1f2x) must conform: each
+    must carry the `nexus-mode-lint` marker somewhere in its own source. A
+    site listed in `_HOISTED_TOKEN_SITES` with no marker is exactly the
+    "accidental, not self-aware" hoist this bead exists to prevent.
+    """
+    missing = _hoisted_offenders_missing_marker(_HOISTED_TOKEN_SITES)
+    assert not missing, (
+        "RDR-109 nexus-f1f2x: the following registered hoisted-token sites "
+        "are missing their explicit marker:\n  "
+        + "\n  ".join(missing)
+        + "\n\nFix: add a comment or docstring line containing "
+        f"`{_HOISTED_TOKEN_MARKER}` explaining why the voyage-token literal "
+        "at this site is safe despite being invisible to "
+        "`_scan_offenders`'s per-function source scan."
+    )
+
+
+def test_hoisted_source_missing_marker_is_non_vacuous(
+    tmp_path: pathlib.Path,
+) -> None:
+    """KILL CONTROL (nexus-f1f2x): prove `_hoisted_source_missing_marker`
+    actually distinguishes a marked hoist from an unmarked one -- without
+    this, `test_registered_hoisted_token_sites_carry_explicit_marker`
+    passing would be exactly as vacuous as `_scan_offenders` was on a
+    shrunk item list (see `test_scan_offenders_is_vacuous_on_a_shrunk_item_
+    list` below for that sibling kill control).
+    """
+    unmarked = tmp_path / "unmarked_case.py"
+    unmarked.write_text(
+        "class Foo:\n"
+        '    _TOKEN = "voyage-context-3"  # a hoisted token, no marker\n'
+    )
+    marked = tmp_path / "marked_case.py"
+    marked.write_text(
+        "class Foo:\n"
+        f"    # {_HOISTED_TOKEN_MARKER}: string-literal-as-name, no "
+        "embedder runs\n"
+        '    _TOKEN = "voyage-context-3"\n'
+    )
+    unrelated = tmp_path / "no_such_symbol.py"
+    unrelated.write_text("class Bar:\n    pass\n")
+
+    assert _hoisted_source_missing_marker(unmarked, "Foo") is not None
+    assert _hoisted_source_missing_marker(marked, "Foo") is None
+    assert _hoisted_source_missing_marker(unrelated, "Foo") is not None
+
+
 # ── partial-view guard tests (nexus-vdti6) ─────────────────────────────────
 #
 # Fast unit coverage for tests.conftest.partial_session_view_reason,

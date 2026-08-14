@@ -3406,7 +3406,8 @@ def store_put(
         manifest_error = ""
         if catalog_doc_id:
             try:
-                store_put_manifest_direct(catalog_doc_id, manifest_metadatas)
+                store_put_manifest_direct(
+                    catalog_doc_id, manifest_metadatas, collection=col_name)
             except Exception as manifest_exc:  # noqa: BLE001 — captured for the explicit non-"Stored:" result below
                 manifest_error = str(manifest_exc)
                 # nexus-vw594 F2 fix-round IMPORTANT: the vector put

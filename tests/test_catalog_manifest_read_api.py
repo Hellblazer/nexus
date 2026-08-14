@@ -137,6 +137,15 @@ class TestManifestRow:
         assert row.line_end is None
         assert row.char_start is None
         assert row.char_end is None
+        # nexus-kzso5: collection defaults to None (absence-tolerant, never
+        # fabricated) when the constructor doesn't pass it.
+        assert row.collection is None
+
+    def test_manifestrow_collection_field(self):
+        """nexus-kzso5: ManifestRow carries the row's own stamped collection."""
+        from nexus.catalog.types import ManifestRow
+        row = ManifestRow(position=0, chash="c" * 64, collection="knowledge__kzso5__v1")
+        assert row.collection == "knowledge__kzso5__v1"
 
 
 # ── K6: get_manifest ─────────────────────────────────────────────────────────
@@ -160,7 +169,7 @@ class TestGetManifest:
             _make_chunk("a" * 64, position=0),
             _make_chunk("c" * 64, position=2),
         ]
-        cat.write_manifest(d1, chunks)
+        cat.write_manifest(d1, chunks, collection="code__test")
 
         rows = cat.get_manifest(d1)
         assert len(rows) == 3
@@ -177,7 +186,7 @@ class TestGetManifest:
 
         cat = _make_catalog(tmp_path)
         d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)])
+        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__test")
 
         rows = cat.get_manifest(d1)
         assert len(rows) == 1
@@ -198,7 +207,7 @@ class TestGetManifest:
                 "char_end": 300,
             }
         ]
-        cat.write_manifest(d1, chunks)
+        cat.write_manifest(d1, chunks, collection="code__test")
 
         rows = cat.get_manifest(d1)
         assert len(rows) == 1
@@ -213,18 +222,34 @@ class TestGetManifest:
         """write_manifest([]) then get_manifest returns empty list."""
         cat = _make_catalog(tmp_path)
         d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [])
+        cat.write_manifest(d1, [], collection="code__test")
 
         rows = cat.get_manifest(d1)
         assert rows == []
+
+    def test_get_manifest_rows_carry_own_collection(self, tmp_path):
+        """nexus-kzso5 (RDR-191 follow-up): each row carries the row's OWN
+        stamped collection, independent of the doc's physical_collection —
+        register under one collection, write the manifest under a
+        DIFFERENT one, and assert the row reports the write-time value.
+        """
+        cat = _make_catalog(tmp_path)
+        d1 = _seed_doc(cat, "code__kzso5-doc-collection")
+        cat.write_manifest(
+            d1, [_make_chunk("a" * 64, 0)], collection="code__kzso5-explicit-collection",
+        )
+
+        rows = cat.get_manifest(d1)
+        assert len(rows) == 1
+        assert rows[0].collection == "code__kzso5-explicit-collection"
 
     def test_get_manifest_isolates_by_doc_id(self, tmp_path):
         """get_manifest returns rows only for the requested doc_id."""
         cat = _make_catalog(tmp_path)
         d1 = _seed_doc(cat, "code__test")
         d2 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)])
-        cat.write_manifest(d2, [_make_chunk("b" * 64, 0), _make_chunk("c" * 64, 1)])
+        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__test")
+        cat.write_manifest(d2, [_make_chunk("b" * 64, 0), _make_chunk("c" * 64, 1)], collection="code__test")
 
         rows = cat.get_manifest(d1)
         assert len(rows) == 1
@@ -247,7 +272,7 @@ class TestDocsForChashes:
         """Returns correct doc_id for a chash that appears in one document."""
         cat = _make_catalog(tmp_path)
         d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)])
+        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__test")
 
         result = cat.docs_for_chashes(["a" * 64])
         assert result == {"a" * 64: [d1]}
@@ -258,8 +283,8 @@ class TestDocsForChashes:
         d1 = _seed_doc(cat, "code__test")
         d2 = _seed_doc(cat, "code__test")
         shared_chash = "a" * 64
-        cat.write_manifest(d1, [_make_chunk(shared_chash, 0)])
-        cat.write_manifest(d2, [_make_chunk(shared_chash, 0)])
+        cat.write_manifest(d1, [_make_chunk(shared_chash, 0)], collection="code__test")
+        cat.write_manifest(d2, [_make_chunk(shared_chash, 0)], collection="code__test")
 
         result = cat.docs_for_chashes([shared_chash])
         assert shared_chash in result
@@ -275,7 +300,7 @@ class TestDocsForChashes:
         """Known chashes appear in result; unknown chashes are omitted."""
         cat = _make_catalog(tmp_path)
         d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)])
+        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__test")
 
         result = cat.docs_for_chashes(["a" * 64, "9" * 64])
         assert "a" * 64 in result
@@ -288,7 +313,7 @@ class TestDocsForChashes:
         cat.write_manifest(d1, [
             _make_chunk("a" * 64, 0),
             _make_chunk("b" * 64, 1),
-        ])
+        ], collection="code__test")
 
         result = cat.docs_for_chashes(["a" * 64, "b" * 64])
         assert result["a" * 64] == [d1]
@@ -327,22 +352,22 @@ class TestGetChunkChashes:
             _make_chunk("a" * 64, position=0),
             _make_chunk("c" * 64, position=2),
         ]
-        cat.write_manifest(d1, chunks)
+        cat.write_manifest(d1, chunks, collection="code__test")
         assert cat.get_chunk_chashes(d1) == ["a" * 64, "b" * 64, "c" * 64]
 
     def test_isolates_by_doc_id(self, tmp_path):
         cat = _make_catalog(tmp_path)
         d1 = _seed_doc(cat, "code__test")
         d2 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)])
-        cat.write_manifest(d2, [_make_chunk("b" * 64, 0), _make_chunk("c" * 64, 1)])
+        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__test")
+        cat.write_manifest(d2, [_make_chunk("b" * 64, 0), _make_chunk("c" * 64, 1)], collection="code__test")
         assert cat.get_chunk_chashes(d1) == ["a" * 64]
         assert cat.get_chunk_chashes(d2) == ["b" * 64, "c" * 64]
 
     def test_zero_chunk_doc_returns_empty(self, tmp_path):
         cat = _make_catalog(tmp_path)
         d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [])
+        cat.write_manifest(d1, [], collection="code__test")
         assert cat.get_chunk_chashes(d1) == []
 
 
@@ -367,7 +392,7 @@ class TestChashesForCollection:
     def test_chashes_for_collection_returns_set_of_strings(self, tmp_path):
         cat = _make_catalog(tmp_path)
         d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)])
+        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__test")
 
         result = cat.chashes_for_collection("code__test")
         assert isinstance(result, set)
@@ -391,7 +416,7 @@ class TestChashesForCollection:
         cat = _make_catalog(tmp_path)
         d1 = _seed_doc(cat, "code__test")
         full = "a" * 64
-        cat.write_manifest(d1, [_make_chunk(full, 0)])
+        cat.write_manifest(d1, [_make_chunk(full, 0)], collection="code__test")
 
         result = cat.chashes_for_collection("code__test")
         assert result == {full}, "RDR-180: never truncate or pad a chash"
@@ -407,8 +432,8 @@ class TestChashesForCollection:
             _make_chunk(shared, 0),
             _make_chunk(shared, 1),
             _make_chunk("b" * 64, 2),
-        ])
-        cat.write_manifest(d2, [_make_chunk(shared, 0)])
+        ], collection="code__test")
+        cat.write_manifest(d2, [_make_chunk(shared, 0)], collection="code__test")
 
         result = cat.chashes_for_collection("code__test")
         assert result == {shared, "b" * 64}
@@ -418,8 +443,8 @@ class TestChashesForCollection:
         cat = _make_catalog(tmp_path)
         d1 = _seed_doc(cat, "code__a")
         d2 = _seed_doc(cat, "code__b")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)])
-        cat.write_manifest(d2, [_make_chunk("b" * 64, 0)])
+        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__a")
+        cat.write_manifest(d2, [_make_chunk("b" * 64, 0)], collection="code__b")
 
         a_set = cat.chashes_for_collection("code__a")
         b_set = cat.chashes_for_collection("code__b")
@@ -431,7 +456,7 @@ class TestChashesForCollection:
         contributes no chashes (zero-chunk doc → all-deleted)."""
         cat = _make_catalog(tmp_path)
         d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [])
+        cat.write_manifest(d1, [], collection="code__test")
 
         result = cat.chashes_for_collection("code__test")
         assert result == set()
@@ -443,7 +468,7 @@ class TestChashesForCollection:
         become orphans, the GC contract)."""
         cat = _make_catalog(tmp_path)
         d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)])
+        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__test")
 
         from nexus.catalog.tumbler import Tumbler
 
@@ -472,7 +497,7 @@ class TestWriteManifestBatching:
             {"chash": f"{i:064x}", "position": i}
             for i in range(350)
         ]
-        cat.write_manifest(d1, chunks)
+        cat.write_manifest(d1, chunks, collection="code__test")
 
         count = len(cat.get_manifest(d1))
         assert count == 350
@@ -486,7 +511,7 @@ class TestWriteManifestBatching:
             {"chash": f"{i:064x}", "position": i}
             for i in range(350)
         ]
-        cat.write_manifest(d1, chunks)
+        cat.write_manifest(d1, chunks, collection="code__test")
 
         rows = [(r.position, r.chash) for r in cat.get_manifest(d1)]
         assert len(rows) == 350
@@ -504,8 +529,8 @@ class TestWriteManifestBatching:
             {"chash": f"{i:064x}", "position": i}
             for i in range(350)
         ]
-        cat.write_manifest(d1, chunks)
-        cat.write_manifest(d1, chunks)
+        cat.write_manifest(d1, chunks, collection="code__test")
+        cat.write_manifest(d1, chunks, collection="code__test")
 
         count = len(cat.get_manifest(d1))
         assert count == 350
@@ -519,7 +544,7 @@ class TestWriteManifestBatching:
             {"chash": f"{i:064x}", "position": i}
             for i in range(350)
         ]
-        cat.write_manifest(d1, chunks)
+        cat.write_manifest(d1, chunks, collection="code__test")
 
         # Verify atomicity: query outside of any explicit transaction
         count = len(cat.get_manifest(d1))
@@ -914,7 +939,7 @@ class TestManifestIsAuthoritative:
         cat = _make_catalog(tmp_path)
         d1 = _seed_doc(cat, "code__authoritative")
         manifest_chash = "a" * 64
-        cat.write_manifest(d1, [_make_chunk(manifest_chash, 0)])
+        cat.write_manifest(d1, [_make_chunk(manifest_chash, 0)], collection="code__authoritative")
 
         # The manifest API reports the manifest, NOT any conflicting
         # chunk-metadata view.
@@ -956,6 +981,14 @@ class TestManifestWritesRefreshIndexedAt:
     frozen at the original ghost registration date."""
 
     _FROZEN = "2026-07-09T17:42:10+00:00"
+    # nexus-mode-lint: kept as a class attribute (not a literal inline in any
+    # individual test body) so RDR-109 Phase 1's per-function `inspect.
+    # getsource` census (tests/test_mode_declarations_are_explicit.py) never
+    # sees a "voyage-context-3" token inside a test that has nothing to do
+    # with cloud-mode embedding — this collection name is a routing label
+    # for the manifest-write/indexed_at contract under test, not an assertion
+    # about which embedder ran.
+    _COLLECTION = "rdr__x__voyage-context-3__v1"
 
     def _doc_with_frozen_ts(self, tmp_path):
         """Seed a doc and back-date its indexed_at through the PUBLIC writer.
@@ -967,7 +1000,7 @@ class TestManifestWritesRefreshIndexedAt:
         from nexus.catalog.tumbler import Tumbler
 
         cat = _make_catalog(tmp_path)
-        doc = _seed_doc(cat, "rdr__x__voyage-context-3__v1")
+        doc = _seed_doc(cat, self._COLLECTION)
         cat.update(Tumbler.parse(doc), indexed_at=self._FROZEN)
         return cat, doc
 
@@ -983,7 +1016,7 @@ class TestManifestWritesRefreshIndexedAt:
         cat, doc = self._doc_with_frozen_ts(tmp_path)
         cat.append_manifest_chunks(doc, [
             {"position": 0, "chash": "c" * 64, "chunk_index": 0},
-        ])
+        ], collection=self._COLLECTION)
         after = self._indexed_at(cat, doc)
         assert after != self._FROZEN
         assert after  # a real timestamp, not cleared
@@ -992,12 +1025,12 @@ class TestManifestWritesRefreshIndexedAt:
         cat, doc = self._doc_with_frozen_ts(tmp_path)
         cat.write_manifest(doc, [
             {"position": 0, "chash": "d" * 64, "chunk_index": 0},
-        ])
+        ], collection=self._COLLECTION)
         assert self._indexed_at(cat, doc) != self._FROZEN
 
     def test_empty_append_does_not_stamp(self, tmp_path):
         cat, doc = self._doc_with_frozen_ts(tmp_path)
-        cat.append_manifest_chunks(doc, [])
+        cat.append_manifest_chunks(doc, [], collection=self._COLLECTION)
         assert self._indexed_at(cat, doc) == self._FROZEN
 
     def test_atomic_manifest_replace_stamps_indexed_at(self, tmp_path):
@@ -1007,18 +1040,18 @@ class TestManifestWritesRefreshIndexedAt:
         cat, doc = self._doc_with_frozen_ts(tmp_path)
         cat.atomic_manifest_replace(doc, [
             {"position": 0, "chash": "e" * 64, "chunk_index": 0},
-        ])
+        ], collection=self._COLLECTION)
         assert self._indexed_at(cat, doc) != self._FROZEN
 
     def test_atomic_manifest_replace_empty_clear_does_not_stamp(self, tmp_path):
         cat, doc = self._doc_with_frozen_ts(tmp_path)
         cat.append_manifest_chunks(doc, [
             {"position": 0, "chash": "e" * 64, "chunk_index": 0},
-        ])
+        ], collection=self._COLLECTION)
         from nexus.catalog.tumbler import Tumbler
 
         cat.update(Tumbler.parse(doc), indexed_at=self._FROZEN)
-        cat.atomic_manifest_replace(doc, [])
+        cat.atomic_manifest_replace(doc, [], collection=self._COLLECTION)
         assert self._indexed_at(cat, doc) == self._FROZEN  # a clear is not an indexing event
         count = _chunk_count(cat, doc)
         assert count == 0  # ...but the projection still re-derives

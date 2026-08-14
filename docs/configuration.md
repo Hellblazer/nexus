@@ -199,6 +199,14 @@ run:
    design** (nexus-y3wuu): it reaches only a local Postgres via the local
    `pg_credentials` file, so on a remote/managed store the role serves
    server-side diagnostics run with your own credentials, not `nx forensics`.
+   Also run `GRANT pg_monitor TO nexus_admin WITH ADMIN OPTION;` (nexus-hzhgl,
+   RDR-191 Phase 3/4 pre-flight) — PostgreSQL only lets a role grant
+   membership in another role it already holds WITH ADMIN OPTION (or as
+   superuser), and `nexus_admin` is neither by default, so without this
+   one-time superuser step the changelog's `grants-004-monitor-wal-visibility`
+   changeset (which grants `pg_monitor` onward to `nexus_svc` for WAL-
+   retention visibility — `pg_ls_waldir()` / `pg_stat_*`, **not** filesystem
+   free space) fails loud on every migration run.
 3. **Diagnostic counts view (RDR-182 Amendment A6).** After the first
    migration run has created the chunk tables, create the superuser-owned
    counts view and grant it to `nexus_diag` — under FORCE row-level security a
@@ -208,19 +216,15 @@ run:
 
    ```sql
    CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS
-   SELECT 'nexus.chunks_384' AS table_name, count(*) AS non_conformant FROM nexus.chunks_384 WHERE octet_length(chash) <> 32
-   UNION ALL
-   SELECT 'nexus.chunks_768' AS table_name, count(*) AS non_conformant FROM nexus.chunks_768 WHERE octet_length(chash) <> 32
-   UNION ALL
-   SELECT 'nexus.chunks_1024' AS table_name, count(*) AS non_conformant FROM nexus.chunks_1024 WHERE octet_length(chash) <> 32
+   SELECT 'nexus.chunks' AS table_name, count(*) AS non_conformant FROM nexus.chunks WHERE octet_length(chash) <> 32
    UNION ALL
    SELECT 'nexus.catalog_document_chunks' AS table_name, count(*) AS non_conformant FROM nexus.catalog_document_chunks WHERE octet_length(chash) <> 32
    UNION ALL
-   SELECT 'nexus.topic_assignments' AS table_name, count(*) AS non_conformant FROM nexus.topic_assignments t WHERE t.doc_id ~ '^[0-9a-f]+$' AND length(t.doc_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = decode(t.doc_id, 'hex')) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = decode(t.doc_id, 'hex')) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = decode(t.doc_id, 'hex'))
+   SELECT 'nexus.topic_assignments' AS table_name, count(*) AS non_conformant FROM nexus.topic_assignments t WHERE t.doc_id ~ '^[0-9a-f]+$' AND length(t.doc_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = decode(t.doc_id, 'hex'))
    UNION ALL
-   SELECT 'nexus.frecency' AS table_name, count(*) AS non_conformant FROM nexus.frecency t WHERE t.chunk_id ~ '^[0-9a-f]+$' AND length(t.chunk_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = decode(t.chunk_id, 'hex')) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = decode(t.chunk_id, 'hex')) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = decode(t.chunk_id, 'hex'))
+   SELECT 'nexus.frecency' AS table_name, count(*) AS non_conformant FROM nexus.frecency t WHERE t.chunk_id ~ '^[0-9a-f]+$' AND length(t.chunk_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = decode(t.chunk_id, 'hex'))
    UNION ALL
-   SELECT 'nexus.relevance_log' AS table_name, count(*) AS non_conformant FROM nexus.relevance_log t WHERE t.chunk_id ~ '^[0-9a-f]+$' AND length(t.chunk_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = decode(t.chunk_id, 'hex')) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = decode(t.chunk_id, 'hex')) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = decode(t.chunk_id, 'hex'));
+   SELECT 'nexus.relevance_log' AS table_name, count(*) AS non_conformant FROM nexus.relevance_log t WHERE t.chunk_id ~ '^[0-9a-f]+$' AND length(t.chunk_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = decode(t.chunk_id, 'hex'));
    GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag;
    ```
 

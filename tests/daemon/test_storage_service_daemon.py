@@ -17,9 +17,14 @@ and Java JAR; they are excluded from the default unit suite.
 """
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -30,6 +35,7 @@ from nexus.daemon.service_registry import (
     ServiceRegistry,
     ServiceSupervisor,
     StaleOwnerError,
+    process_state,
 )
 from nexus.daemon.storage_service_daemon import (
     StopOutcome,
@@ -1491,7 +1497,7 @@ class TestSpawnServiceVoyageKeyPlumbing:
             return MagicMock(pid=43210)
 
         monkeypatch.setattr(
-            "nexus.daemon.storage_service_daemon.subprocess.Popen", _fake_popen,
+            "nexus.daemon.storage_service_daemon._popen", _fake_popen,
         )
         sup._spawn_service()
         return captured
@@ -1573,6 +1579,166 @@ class TestSpawnServiceVoyageKeyPlumbing:
             env = self._spawn_env(config_dir, clock, monkeypatch)
         get_cred.assert_called_once_with("voyage_api_key")
         assert env["NX_VOYAGE_API_KEY"] == "chain-key"
+
+
+class TestCredsReloadAfterBackfill:
+    """nexus-hzhgl round 3 review Significant-1: ``_backfill_provision_grants()``
+    (called from ``_ensure_pg_running``) can rewrite ``pg_credentials`` on
+    disk via ``provision()``'s fast path, but ``self._creds`` was frozen at
+    ``__init__`` time. ``_spawn_service()`` — the very next step in
+    ``_start_locked`` — builds the JVM's entire env from ``self._creds``.
+    Without a reload in between, a future backfill that rotates an
+    env-relevant credential would land on disk but never reach the freshly
+    spawned process.
+    """
+
+    def test_ensure_pg_running_reloads_creds_after_backfill(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Direct proof on ``_ensure_pg_running`` alone: a backfill that
+        mutates the on-disk file is reflected in ``self._creds`` immediately
+        afterward, with no real PG or subprocess involved."""
+        creds_file = config_dir / "pg_credentials"
+        creds_file.write_text(
+            "PG_PORT=15432\n"
+            "PG_DATA=/tmp/testpgdata\n"
+            "NX_DB_URL=jdbc:postgresql://127.0.0.1:15432/nexus\n"
+            "NX_DB_USER=nexus_svc\n"
+            "NX_DB_PASS=original-pass\n"
+            "NX_DB_ADMIN_URL=jdbc:postgresql://127.0.0.1:15432/nexus\n"
+            "NX_DB_ADMIN_USER=nexus_admin\n"
+            "NX_DB_ADMIN_PASS=testadminpass\n"
+        )
+        creds_file.chmod(0o600)
+
+        sup = _make_supervisor(
+            config_dir, clock,
+            creds={
+                "NX_DB_URL": "jdbc:...", "NX_DB_USER": "nexus_svc",
+                "NX_DB_PASS": "original-pass",
+                "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "nexus_admin",
+                "NX_DB_ADMIN_PASS": "testadminpass", "PG_PORT": "15432",
+                "PG_DATA": "/tmp/testpgdata",
+                "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
+            },
+        )
+
+        def _fake_backfill_mutates_disk() -> None:
+            # Simulate a future provision() fast-path backfill rotating a
+            # DB credential on disk -- the exact class Significant-1 warns
+            # about (today's backfills don't touch these keys; a future one
+            # might).
+            text = creds_file.read_text().replace(
+                "NX_DB_PASS=original-pass", "NX_DB_PASS=fresh-post-backfill-pass",
+            )
+            creds_file.write_text(text)
+
+        monkeypatch.setattr(
+            "nexus.daemon.storage_service_daemon._port_accepting",
+            lambda *a, **k: True,  # PG already running -> short-circuit branch
+        )
+        monkeypatch.setattr(sup, "_backfill_provision_grants", _fake_backfill_mutates_disk)
+
+        assert sup._creds["NX_DB_PASS"] == "original-pass"  # precondition
+
+        sup._ensure_pg_running()
+
+        assert sup._creds["NX_DB_PASS"] == "fresh-post-backfill-pass", (
+            "self._creds was not reloaded after _backfill_provision_grants() "
+            "ran -- _spawn_service() would build the JVM env from stale creds"
+        )
+
+    def test_spawned_env_carries_post_backfill_value(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End-to-end proof through the real call sequence the reviewer
+        asked for: a backfill mutates a cred value, then the SPAWNED env
+        (captured via a mocked Popen -- no real JVM needed) carries the
+        fresh value, not the construction-time snapshot."""
+        creds_file = config_dir / "pg_credentials"
+        creds_file.write_text(
+            "PG_PORT=15432\n"
+            "PG_DATA=/tmp/testpgdata\n"
+            "NX_DB_URL=jdbc:postgresql://127.0.0.1:15432/nexus\n"
+            "NX_DB_USER=nexus_svc\n"
+            "NX_DB_PASS=original-pass\n"
+            "NX_DB_ADMIN_URL=jdbc:postgresql://127.0.0.1:15432/nexus\n"
+            "NX_DB_ADMIN_USER=nexus_admin\n"
+            "NX_DB_ADMIN_PASS=testadminpass\n"
+        )
+        creds_file.chmod(0o600)
+
+        sup = _make_supervisor(
+            config_dir, clock,
+            creds={
+                "NX_DB_URL": "jdbc:...", "NX_DB_USER": "nexus_svc",
+                "NX_DB_PASS": "original-pass",
+                "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "nexus_admin",
+                "NX_DB_ADMIN_PASS": "testadminpass", "PG_PORT": "15432",
+                "PG_DATA": "/tmp/testpgdata",
+                "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
+            },
+        )
+
+        def _fake_backfill_mutates_disk() -> None:
+            text = creds_file.read_text().replace(
+                "NX_DB_PASS=original-pass", "NX_DB_PASS=fresh-post-backfill-pass",
+            )
+            creds_file.write_text(text)
+
+        monkeypatch.setattr(
+            "nexus.daemon.storage_service_daemon._port_accepting",
+            lambda *a, **k: True,
+        )
+        monkeypatch.setattr(sup, "_backfill_provision_grants", _fake_backfill_mutates_disk)
+
+        sup._ensure_pg_running()  # Step 1 -- runs the (fake) backfill + reload
+
+        captured: dict[str, str] = {}
+
+        def _fake_popen(cmd, env=None, **kwargs):
+            captured.update(env or {})
+            return MagicMock(pid=44100)
+
+        monkeypatch.setattr(
+            "nexus.daemon.storage_service_daemon._popen", _fake_popen,
+        )
+        sup._spawn_service()  # Step 2 -- builds the JVM env from self._creds
+
+        assert captured["NX_DB_PASS"] == "fresh-post-backfill-pass", (
+            "_spawn_service() built the JVM env from a stale credentials "
+            "snapshot -- a real post-upgrade credential rotation would "
+            "silently spawn the new engine with the OLD value"
+        )
+
+
+class TestEnsurePgRunningCalledOnFreshStart:
+    """nexus-hzhgl round 3 review Significant-2, positive case: with NO live
+    lease, ``start()`` must reach ``_ensure_pg_running()`` (and so the
+    backfill). The negative case (live lease -> NOT called) is already
+    pinned by ``TestRdr175MvvSingleSupervisor::
+    test_second_start_short_circuits_to_single_lease``; this test closes the
+    other side so the lease short-circuit is proven to be the ONLY skip
+    path, not merely one that happens to skip it in the cases already
+    covered.
+    """
+
+    def test_no_live_lease_reaches_ensure_pg_running(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        from nexus.daemon.service_registry import ServiceRegistry
+
+        scope = str(os.getuid())
+        assert ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock).discover(scope) is None
+
+        sup = _make_supervisor(config_dir, clock)
+        proc = _FakeProc(pid=51300)
+        with patch.object(sup, "_ensure_pg_running") as ensure_pg, \
+             patch.object(sup, "_spawn_service", return_value=(proc, 19800)), \
+             patch.object(sup, "_wait_for_service_ready"):
+            sup.start()
+
+        ensure_pg.assert_called_once()
 
 
 class TestNativeStartHasNoSchemaSkewGate:
@@ -1767,7 +1933,12 @@ class TestEnsureStorageSupervisor:
         from nexus.commands import daemon as daemon_mod
 
         self._publish_fresh_lease(config_dir)
-        with patch.object(daemon_mod.subprocess, "Popen") as popen:
+        # process_state stubbed alive-shaped: on a /proc-less box it shells out
+        # to `ps` via the same stdlib subprocess symbol this test mocks
+        # (nexus-o8dil.21). The lease's supervisor_pid IS this live test
+        # process, so "S" is the faithful answer.
+        with patch("nexus.daemon.service_registry.process_state", return_value="S"), \
+             patch.object(daemon_mod, "_popen") as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
         assert rec is not None
         popen.assert_not_called()  # idempotent: a live lease is never re-spawned
@@ -1793,7 +1964,8 @@ class TestEnsureStorageSupervisor:
         monkeypatch.setenv("NEXUS_SERVICE_BIN", str(other_binary))
         monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
 
-        with patch.object(daemon_mod.subprocess, "Popen") as popen:
+        with patch("nexus.daemon.service_registry.process_state", return_value="S"), \
+             patch.object(daemon_mod, "_popen") as popen:
             with pytest.raises(StorageServiceStartError, match="DIFFERENT artifact"):
                 daemon_mod.ensure_storage_supervisor(config_dir)
         popen.assert_not_called()
@@ -1828,7 +2000,8 @@ class TestEnsureStorageSupervisor:
         monkeypatch.setenv("NEXUS_SERVICE_BIN", str(other_binary))
         monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
 
-        with patch.object(daemon_mod.subprocess, "Popen") as popen:
+        with patch("nexus.daemon.service_registry.process_state", return_value="S"), \
+             patch.object(daemon_mod, "_popen") as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
         popen.assert_not_called()
         assert rec is not None and rec.endpoint.get("port") == 18099
@@ -1847,7 +2020,7 @@ class TestEnsureStorageSupervisor:
             return MagicMock()
 
         with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
-             patch.object(daemon_mod.subprocess, "Popen", side_effect=_popen_publishes) as popen:
+             patch.object(daemon_mod, "_popen", side_effect=_popen_publishes) as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
         popen.assert_called_once()
         assert rec is not None and rec.endpoint.get("port") == 18092
@@ -1863,7 +2036,7 @@ class TestEnsureStorageSupervisor:
         monkeypatch.setattr(daemon_mod.time, "monotonic", lambda: next(ticks))
         monkeypatch.setattr(daemon_mod.time, "sleep", lambda _s: None)
         with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
-             patch.object(daemon_mod.subprocess, "Popen", return_value=MagicMock()):
+             patch.object(daemon_mod, "_popen", return_value=MagicMock()):
             with pytest.raises(StorageServiceStartError):
                 daemon_mod.ensure_storage_supervisor(config_dir)
 
@@ -1880,7 +2053,9 @@ class TestEnsureStorageSupervisor:
         from nexus.daemon.service_registry import ServiceRegistry
 
         # A fresh, supervised lease (payload carries supervisor_pid). Patch
-        # _pid_is_alive False so the guard treats that supervisor as dead.
+        # the guard's probe False so it treats that supervisor as dead.
+        # The probe is ``_pid_is_running``, not ``_pid_is_alive``, since
+        # nexus-o8dil.21 — see the zombie sibling test below for why.
         self._publish_fresh_lease(config_dir, port=18093)
         scope = str(os.getuid())
         assert ServiceRegistry(dir=config_dir, tier="storage_service").discover(scope) is not None
@@ -1889,20 +2064,90 @@ class TestEnsureStorageSupervisor:
             self._publish_fresh_lease(config_dir, port=18094)
             return MagicMock()
 
-        with patch.object(ssd_mod, "_pid_is_alive", return_value=False), \
+        with patch.object(ssd_mod, "_pid_is_running", return_value=False), \
              patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
-             patch.object(daemon_mod.subprocess, "Popen", side_effect=_popen_publishes) as popen:
+             patch.object(daemon_mod, "_popen", side_effect=_popen_publishes) as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
 
         popen.assert_called_once()  # dead lease must trigger a re-spawn
         assert rec is not None and rec.endpoint.get("port") == 18094
+
+    def test_zombie_supervisor_pid_relinquishes_and_respawns(
+        self, config_dir: Path
+    ) -> None:
+        """nexus-o8dil.21. Same heal, but with a REAL zombie and NO patched
+        probe — which is the only way to prove the fix, since the whole
+        defect is that the old probe could not tell a corpse from a
+        supervisor.
+
+        ``_pid_is_alive`` is ``os.kill(pid, 0)`` and succeeds indefinitely
+        on a killed-but-unreaped process. When PID 1 is not a real init (a
+        container whose PID 1 is a shell script; a CI runner), a
+        hard-crashed supervisor stays exactly that — so this heal, which
+        exists for the hard-crash case, never fired there: the fresh lease
+        stayed, ``start`` short-circuited onto it, and the box served a
+        dead supervisor's endpoint until the TTL ran out.
+
+        RED-FIRST: against the pre-fix call site (``_pid_is_alive``) the
+        guard sees "alive", no re-spawn happens, and ``popen`` is never
+        called.
+        """
+        from nexus.commands import daemon as daemon_mod
+        from nexus.daemon.service_registry import (
+            ServiceRegistry,
+            ServiceSupervisor,
+        )
+
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [sys.executable, "-c", "import time; time.sleep(120)"],
+        )
+        try:
+            os.kill(proc.pid, signal.SIGKILL)
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline and process_state(proc.pid) != "Z":
+                time.sleep(0.02)
+            assert process_state(proc.pid) == "Z", "fixture must be a zombie"
+
+            registry = ServiceRegistry(
+                dir=config_dir, tier="storage_service", clock=time.time,
+            )
+            ServiceSupervisor(
+                registry, str(os.getuid()), version="0.0.0",
+                endpoint_provider=lambda: {
+                    "host": "127.0.0.1", "port": 18096, "pid": proc.pid,
+                    "token": "tok",
+                },
+                payload={"supervisor_pid": proc.pid},
+            ).publish_once()
+
+            def _popen_publishes(*_a, **_k):
+                self._publish_fresh_lease(config_dir, port=18097)
+                return MagicMock()
+
+            # Shadow daemon_mod's OWN `subprocess` reference rather than
+            # patching the stdlib module's Popen attribute: process_state
+            # legitimately shells out to `ps` on a /proc-less box, and a
+            # global Popen mock would break that real probe — which is the
+            # thing under test here (nexus-o8dil.21).
+            popen = MagicMock(side_effect=_popen_publishes)
+            with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
+                 patch.object(daemon_mod, "_popen", popen):
+                rec = daemon_mod.ensure_storage_supervisor(config_dir)
+        finally:
+            with contextlib.suppress(ChildProcessError, OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=5)
+
+        # A zombie supervisor is a CRASHED supervisor: its fresh lease must be
+        # reclaimed and the stack re-spawned.
+        popen.assert_called_once()
+        assert rec is not None and rec.endpoint.get("port") == 18097
 
     def test_absent_supervisor_pid_trusts_ttl_freshness(
         self, config_dir: Path
     ) -> None:
         """A lease WITHOUT a supervisor_pid (legacy/non-supervised) must fall
         through to the existing TTL-freshness short-circuit — no spurious
-        re-spawn — even when _pid_is_alive would report dead."""
+        re-spawn — even when the liveness probe would report dead."""
         import time as _time
 
         import nexus.daemon.storage_service_daemon as ssd_mod
@@ -1914,8 +2159,8 @@ class TestEnsureStorageSupervisor:
         sup._service_port = 18095
         sup._publish(18095)
 
-        with patch.object(ssd_mod, "_pid_is_alive", return_value=False), \
-             patch.object(daemon_mod.subprocess, "Popen") as popen:
+        with patch.object(ssd_mod, "_pid_is_running", return_value=False), \
+             patch.object(daemon_mod, "_popen") as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
 
         popen.assert_not_called()  # absent supervisor_pid → trust TTL, no re-spawn
@@ -2005,7 +2250,7 @@ class TestLeaseTtlAndHeapBound:
             captured["argv"] = argv
             return _FakeProc(pid=49100)
 
-        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_popen", _fake_popen)
         monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18078)
         sup._spawn_service()
         # -Xmx must immediately follow the binary path (native-image consumes
@@ -2024,7 +2269,7 @@ class TestLeaseTtlAndHeapBound:
         monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18088)
         # A malformed heap value fails loud BEFORE spawning (no /health-timeout
         # misdiagnosis); Popen is never reached.
-        monkeypatch.setattr(ssd_mod.subprocess, "Popen",
+        monkeypatch.setattr(ssd_mod, "_popen",
                             lambda *a, **k: (_ for _ in ()).throw(AssertionError("Popen reached")))
         with pytest.raises(StorageServiceStartError, match="NX_SERVICE_MAX_HEAP"):
             sup._spawn_service()
@@ -2042,7 +2287,7 @@ class TestLeaseTtlAndHeapBound:
             captured["argv"] = argv
             return _FakeProc(pid=49101)
 
-        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_popen", _fake_popen)
         monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
         sup._spawn_service()
         # Production default: no -Xmx — the binary keeps native-image's default heap.
@@ -2069,7 +2314,7 @@ class TestPdeathsigOrphanPrevention:
             captured.update(kw)
             return _FakeProc(pid=49201)
 
-        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_popen", _fake_popen)
         monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
         sup._spawn_service()
         assert captured.get("preexec_fn") is ssd_mod._set_pdeathsig_preexec, (
@@ -2089,7 +2334,7 @@ class TestPdeathsigOrphanPrevention:
             captured.update(kw)
             return _FakeProc(pid=49202)
 
-        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_popen", _fake_popen)
         monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
         sup._spawn_service()
         assert captured.get("preexec_fn") is None, (
@@ -2111,7 +2356,7 @@ class TestPdeathsigOrphanPrevention:
             captured.update(kw)
             return _FakeProc(pid=49203)
 
-        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_popen", _fake_popen)
         monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
         sup._spawn_service()
         assert captured["env"].get("NX_SERVICE_PARENT_DEATH_EXIT") == "1"
@@ -2447,3 +2692,51 @@ class TestRdr175MvvSingleSupervisor:
         assert ensure_pg_calls == [1], "PG restarted in place exactly once"
         assert sup._proc is fake_proc, "Java process must NOT be bounced for a PG-only restart"
         assert sup._proc.pid == pid_before
+
+
+class TestStopDoesNotWaitOnAnAlreadyDeadSupervisor:
+    """nexus-o8dil.21, the double-killer leg.
+
+    ``stop_storage_service``'s lease branch SIGTERMs the supervisor and
+    then waits up to ``_GRACEFUL_STOP_TIMEOUT`` for it to go away. The
+    wait probe used to be ``os.kill(pid, 0)``, which succeeds forever on a
+    ZOMBIE — a supervisor already killed by a previous stop, an upgrade
+    sweep, or any concurrent killer, whose parent has not reaped it. So a
+    second stop burned the whole grace window and then sent a pointless
+    SIGKILL to a corpse.
+
+    Uses a REAL zombie rather than a patched probe: the whole defect is
+    that the probe cannot tell the difference, so a faked probe would
+    assert nothing.
+    """
+
+    def test_zombie_supervisor_is_not_waited_on(self, config_dir: Path) -> None:
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [sys.executable, "-c", "import time; time.sleep(120)"],
+        )
+        try:
+            os.kill(proc.pid, signal.SIGKILL)
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline and process_state(proc.pid) != "Z":
+                time.sleep(0.02)
+            assert process_state(proc.pid) == "Z", (
+                "fixture must produce a real unreaped zombie"
+            )
+            _write_stale_or_fresh_lease(
+                config_dir, supervisor_pid=proc.pid, engine_pid=None,
+                age_s=1.0, ttl=15.0,
+            )
+            t0 = time.monotonic()
+            outcome = stop_storage_service(config_dir=config_dir)
+            elapsed = time.monotonic() - t0
+        finally:
+            with contextlib.suppress(ChildProcessError, OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=5)
+
+        assert elapsed < 2.0, (
+            "an already-dead (zombie) supervisor must not hold the graceful "
+            f"stop window open; took {elapsed:.2f}s of a 5s budget"
+        )
+        assert outcome.stubborn == (), (
+            f"a corpse is not a stubborn survivor: {outcome}"
+        )

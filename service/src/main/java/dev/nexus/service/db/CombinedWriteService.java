@@ -21,7 +21,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 /**
  * nexus-kl2z6 increment 1 — the orchestration seam T2 {@code
  * design-kl2z6-combined-write} §1.3 names: sits in front of {@link
- * CatalogRepository#writeManifestMany(String, List, Map, boolean, String,
+ * CatalogRepository#writeManifestMany(String, List, String, Map, boolean,
  * Map)}, owns the ONE dependency that repository does not have
  * (embedding), and hands it fully-resolved {@code (chash, text, vector,
  * metadata)} tuples so every per-doc transaction only ever WRITES —
@@ -46,7 +46,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  *       per-doc manifest transaction has opened yet).</li>
  *   <li><b>Dispatch</b> the resolved {@code chash -> ResolvedChunk} map,
  *       unchanged, to {@code CatalogRepository.writeManifestMany}'s 6-arg
- *       overload — which is where every per-doc transaction, and thus
+ *       (collection-first) overload — which is where every per-doc
+ *       transaction, and thus
  *       every actual WRITE, happens.</li>
  * </ol>
  *
@@ -109,7 +110,7 @@ public final class CombinedWriteService {
             List<Map<String, Object>> chunks, List<Map<String, Object>> docs,
             Map<String, String> complete, boolean sweep, boolean forceReEmbed) {
         if (collection == null || collection.isBlank()) {
-            throw new IllegalArgumentException("'collection' required when 'chunks' is present");
+            throw new IllegalArgumentException("'collection' is required and must be non-blank");
         }
         int dim = PgVectorRepository.dimForCollection(collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
@@ -225,7 +226,7 @@ public final class CombinedWriteService {
         // Phase 3: dispatch — every actual WRITE happens inside this call,
         // one per-doc transaction at a time.
         Map<String, Object> response =
-            catalogRepo.writeManifestMany(tenant, docs, complete, sweep, collection, resolved);
+            catalogRepo.writeManifestMany(tenant, docs, collection, complete, sweep, resolved);
         // nexus-acvi7: merge the embed-partition counts into the SAME
         // response envelope `chunks_written` already rides — this is the
         // right seam (CatalogRepository.writeManifestMany's map, built at

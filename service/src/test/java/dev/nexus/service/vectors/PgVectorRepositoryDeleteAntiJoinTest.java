@@ -150,7 +150,7 @@ class PgVectorRepositoryDeleteAntiJoinTest {
         for (int i = 0; i < chashesInOrder.size(); i++) {
             rows.add(Map.<String, Object>of("position", i, "chash", chashesInOrder.get(i), "chunk_index", i));
         }
-        catalogRepo.writeManifest(tenant, docId, rows);
+        catalogRepo.writeManifest(tenant, docId, collection, rows);
     }
 
     private void seedChunk(String tenant, String collection, String chash, String text, String title) {
@@ -161,14 +161,14 @@ class PgVectorRepositoryDeleteAntiJoinTest {
     private String chunkText(String collection, String chash) throws SQLException {
         try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
             var rs = st.executeQuery(
-                "SELECT chunk_text FROM nexus.chunks_1024 WHERE collection = '" + collection
+                "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
                 + "' AND chash = decode('" + chash + "', 'hex')");
             return rs.next() ? rs.getString(1) : null;
         }
     }
 
     /**
-     * Tenant-scoped variant of {@link #chunkText} — chunks_1024's PK is
+     * Tenant-scoped variant of {@link #chunkText} — nexus.chunks's PK is
      * {@code (tenant_id, collection, chash)}, so two different tenants can
      * legitimately hold a row with the identical (collection, chash) pair.
      * The unscoped query (a raw superuser connection, RLS bypassed) cannot
@@ -178,7 +178,7 @@ class PgVectorRepositoryDeleteAntiJoinTest {
     private String chunkTextForTenant(String tenant, String collection, String chash) throws SQLException {
         try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
             var rs = st.executeQuery(
-                "SELECT chunk_text FROM nexus.chunks_1024 WHERE tenant_id = '" + tenant
+                "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE tenant_id = '" + tenant
                 + "' AND collection = '" + collection
                 + "' AND chash = decode('" + chash + "', 'hex')");
             return rs.next() ? rs.getString(1) : null;
@@ -206,7 +206,7 @@ class PgVectorRepositoryDeleteAntiJoinTest {
         // dealt with — cleared/rewritten — before the physical chunk delete call.
         // atomic_manifest_replace with an empty row list is exactly what a document
         // deletion / re-index-to-zero-chunks does.
-        catalogRepo.writeManifest(TENANT_A, "delaj.doc.a", List.of());
+        catalogRepo.writeManifest(TENANT_A, "delaj.doc.a", collection, List.of());
 
         // Caller deletes "document A's chunks" — its former manifest chash set,
         // including the chash it happens to share with document B. The caller
@@ -275,7 +275,7 @@ class PgVectorRepositoryDeleteAntiJoinTest {
     @Test
     void delete_sameChashDifferentCollection_manifestInOtherCollectionDoesNotBlock() throws Exception {
         // Same chash value, seeded as two physically distinct chunk rows in
-        // two different collections (chunks_1024's PK is (tenant, collection,
+        // two different collections (nexus.chunks's PK is (tenant, collection,
         // chash)). A manifest row scoped to collection X must not block a
         // delete of the SAME chash in collection Y — proves the .collection()
         // filter on both the anti-join subquery and the DELETE's own WHERE
@@ -300,16 +300,18 @@ class PgVectorRepositoryDeleteAntiJoinTest {
     }
 
     @Test
-    void delete_tombstonedOwner_doesNotBlockDeletion() throws Exception {
-        // deleteDocument is a deliberate SOFT tombstone (CatalogRepository
-        // javadoc): it sets catalog_documents.deleted_at but leaves the
-        // catalog_document_chunks manifest row in place until purge_trash's
-        // cascade. A manifest row belonging ONLY to a tombstoned document
-        // must not count as "still referenced" -- otherwise the
-        // retract-manifest-then-delete-chunk ordering every Python caller
-        // uses (tombstone the document, then delete its chunks) would be
-        // permanently self-blocking. See PgVectorRepository#delete javadoc,
-        // "Live excludes tombstoned owners".
+    void delete_tombstonedOwner_stillProtectsChunk_untilPurgeTrashReapsBoth() throws Exception {
+        // RDR-191 GATE-2 (nexus-mmkqe) REVERSES the prior "tombstoned owner
+        // does not block deletion" behavior. deleteDocument is a deliberate
+        // SOFT tombstone (CatalogRepository javadoc): it sets
+        // catalog_documents.deleted_at but leaves the catalog_document_chunks
+        // manifest row in place until purge_trash's cascade. Per the
+        // definition-of-record (T2 nexus/rdr-191-dangling-definition-of-record
+        // [22364]), a manifest row belonging to a TOMBSTONED document is class
+        // (b) -- the soft-tombstone contract working as designed, not
+        // dangling -- and must go on protecting its chunk until purge_trash
+        // reaps manifest row and chunk together. See PgVectorRepository#delete
+        // javadoc, "Live INCLUDES tombstoned owners".
         String collection = col("case5");
         String chash = ch("delaj-tombstoned-owner");
 
@@ -322,16 +324,18 @@ class PgVectorRepositoryDeleteAntiJoinTest {
         int deleted = vectorRepo.delete(TENANT_A, collection, List.of(chash));
 
         assertThat(deleted)
-            .as("a manifest row whose only owner is tombstoned must not block deletion")
-            .isEqualTo(1);
-        assertThat(chunkText(collection, chash)).isNull();
+            .as("a manifest row whose only owner is tombstoned must still protect its chunk")
+            .isEqualTo(0);
+        assertThat(chunkText(collection, chash))
+            .as("the chunk must survive -- purge_trash, not this delete path, reaps it")
+            .isEqualTo("tombstoned-owner text");
     }
 
     @Test
     void delete_crossTenant_otherTenantsManifestDoesNotBlockOwnChunk() throws Exception {
         // TENANT_B has a live document manifest referencing `chash` in this
         // collection name; TENANT_A independently owns a physically distinct
-        // chunk row for the SAME chash + collection (chunks_1024's PK
+        // chunk row for the SAME chash + collection (nexus.chunks's PK
         // includes tenant_id, so this is a legitimate distinct row, not a
         // collision). TENANT_A's delete must not be blocked by TENANT_B's
         // manifest -- the anti-join subquery correlates on tenant_id, and

@@ -86,6 +86,11 @@ public final class ChashCensus {
      * The justified exclusions. KEEP SHORT; additions need the same scrutiny
      * a new sqlite3.connect gets.
      */
+    // RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-o8dil.41 item 5, comment
+    // 3): nexus.chunks_384/768/1024 collapsed into ONE unified nexus.chunks
+    // table — the three per-dim chunk_text exclusions (identical rationale,
+    // differing only by table name) collapse to the one physical column that
+    // now exists.
     public static final List<Exclusion> TEXT_EXCLUSIONS = List.of(
         new Exclusion("chash_alias", "old_ref",
             "THE legacy-reference registry — holding old ids is its purpose"),
@@ -93,10 +98,8 @@ public final class ChashCensus {
             "remap facts: old_id is free-form by design (RDR-180 Item6a)"),
         new Exclusion("chash_remap", "new_chash",
             "widened era facts: 32-hex pre-flip rows stay readable (rdr180-13)"),
-        new Exclusion("chunks_384", "chunk_text",
+        new Exclusion("chunks", "chunk_text",
             "free content — a note BODY may legitimately be a bare hash string"),
-        new Exclusion("chunks_768", "chunk_text", "free content (see chunks_384)"),
-        new Exclusion("chunks_1024", "chunk_text", "free content (see chunks_384)"),
         new Exclusion("relevance_log", "query", "free content (user query text)"),
         new Exclusion("aspect_extraction_queue", "content", "free content"),
         new Exclusion("aspect_extraction_queue", "content_hash",
@@ -110,10 +113,13 @@ public final class ChashCensus {
     /** The known chash-bearing inventory the enumeration MUST rediscover. */
     // chash_index.chash left the inventory WITH the table (RDR-187 DROP,
     // nexus-piwya.9) — the schema-derived enumeration no longer discovers it.
+    // RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-o8dil.41 item 5):
+    // chunks_384/768/1024.chash (three BYTEA-discovered entries) collapsed to
+    // the single chunks.chash entry the unified table now carries.
     static final Set<String> KNOWN_INVENTORY = Set.of(
         "catalog_document_chunks.chash",
         "topic_assignments.doc_id", "frecency.chunk_id", "relevance_log.chunk_id",
-        "chunks_384.chash", "chunks_768.chash", "chunks_1024.chash");
+        "chunks.chash");
 
     private static final String LEGACY_SHAPE = "^([0-9a-f]{16}|[0-9a-f]{32})$";
 

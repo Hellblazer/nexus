@@ -28,6 +28,24 @@ hit — ``writer.update(existing.tumbler, physical_collection=...)`` plus a
 WARNING naming the move — mirroring what ``_catalog_pdf_hook`` already does
 at the tail, just moved ahead of the manifest write.
 
+SUPERSEDED MECHANISM (RDR-191 GATE-2, 498c92953 — read this before editing
+anything below). The paragraph above describes the engine as it WAS: manifest
+rows took their ``collection`` from ``catalog_documents.physical_collection``
+at write time, which is what made a stale document stamp poison the manifest.
+GATE-2 removed that inference entirely — ``physicalCollectionOf`` is deleted,
+the manifest writers take a REQUIRED caller-supplied ``collection`` and stamp
+it verbatim on every row, and the indexer supplies the run's own collection
+(``manifest_write_batch_hook``'s ``collection`` argument is the T3 batch's).
+The nexus-2t63u reconcile still matters — ``physical_collection`` is the
+document's own home-collection truth, read by catalog-scoped routing and by
+``manifest_backfill``'s derivation — but it is no longer what keeps the
+manifest honest. Consequence for the tests here: the two scenarios that used
+to end in ``IndexRunVerifyRefused`` (the kill control, and the reconcile-
+write-failure fence proof) now run CLEAN, and both were re-derived to pin the
+new contract rather than deleted or weakened. Their ``IndexRunVerifyRefused``
+coverage is preserved by an explicit constructed-missing-chunk control inside
+the kill control; if you touch that control, keep a real refusal exercised.
+
 Drives the PRODUCTION entry point ``nexus.doc_indexer.index_pdf`` (never
 ``_register_or_lookup_doc_id`` directly for the reconciliation proof) against
 the SHARED engine substrate every unit test already uses (``tests/conftest.py``'s
@@ -53,8 +71,12 @@ in service of fixing nexus-2t63u. ``TestReconcileWriteFailureIsolated``
 below proves the fix: the reconcile write is now isolated in its OWN narrow
 try/except, so a failure there is advisory (logged, swallowed) and the
 already-resolved tumbler is never discarded — the run stays fenced (begins
-and completes, refusing honestly if the stale stamp makes the manifest
-disagree) rather than silently falling out of RUNFENCE altogether.
+and completes) rather than silently falling out of RUNFENCE altogether.
+(As originally written that clause ended "...refusing honestly if the stale
+stamp makes the manifest disagree" — see SUPERSEDED MECHANISM above: post-
+GATE-2 a stale document stamp can no longer make the manifest disagree, so
+the test now pins the fence-ran claim directly instead of inferring it from
+a refusal.)
 """
 from __future__ import annotations
 
@@ -253,20 +275,47 @@ class TestReconcileOnCollectionRetarget:
             f"reconciled BEFORE the manifest write — got {verify}"
         )
 
-    def test_kill_control_without_reconcile_reproduces_the_wedge(
+    def test_kill_control_without_reconcile_no_longer_wedges_after_gate2(
         self, tmp_path,
     ) -> None:
-        """KILL CONTROL (mandatory). Reverts ``_register_or_lookup_doc_id``'s
-        by_file_path hit to its EXACT pre-nexus-2t63u shape (no
-        reconciliation) and proves the damage REAPPEARS under the IDENTICAL
-        re-index-into-a-different-collection scenario as the base test
-        above: chunks land correctly in the NEW collection, but the
-        manifest stays stamped to the STALE collection, so the completion
-        verify refuses and manifest_verify reports missing chunks that are
-        actually present — just under the wrong collection. Without this
-        control, the base test's green could be incidental.
+        """KILL CONTROL, RE-DERIVED (RDR-191 GATE-2, nexus-sh9v2).
+
+        This test used to assert the OPPOSITE: revert
+        ``_register_or_lookup_doc_id``'s by_file_path hit to its EXACT
+        pre-nexus-2t63u shape and the wedge REAPPEARS — completion refused,
+        ``manifest_verify`` reporting live chunks as missing. That is no
+        longer reachable, and NOT because the fence weakened. RDR-191 GATE-2
+        (498c92953) eradicated the disease at its source: the engine's
+        manifest writers take a **caller-supplied** ``collection`` and stamp
+        it verbatim on every row (``CatalogRepository`` "writers SEND the
+        collection; the engine STAMPS it verbatim, NEVER [infers it]";
+        ``physicalCollectionOf`` was deleted outright). The wedge's entire
+        premise was that the engine DERIVED each manifest row's collection
+        from ``catalog_documents.physical_collection`` at write time, so a
+        stale document stamp poisoned the manifest and
+        ``nexus.manifest_verify``'s ``k.collection = m.collection`` join
+        looked in the wrong collection. Post-GATE-2 the rows carry the
+        RUN's own collection (``manifest_write_batch_hook``'s ``collection``
+        argument is the T3 batch's collection), so a stale
+        ``physical_collection`` cannot reach the manifest at all.
+
+        A kill control whose disease has been eradicated is REWRITTEN to pin
+        the eradication, never deleted and never weakened to pass vacuously.
+        So this now asserts the NEW contract — the pre-2t63u shape runs
+        CLEAN because the manifest is stamped with the write's own
+        collection — and then, because a green built on "no refusal" is
+        worthless if the refusal path is dead, ends with an explicit
+        non-vacuity control proving the fence STILL refuses on a genuinely
+        missing chunk.
+
+        Probe evidence (2026-08-14, engine v0.1.75 substrate): with the
+        pre-2t63u shape patched in, run 2's manifest rows came back stamped
+        ``collection_b`` (not the stale ``collection_a``),
+        ``manifest_verify`` returned referenced=present=4/missing=0, and
+        appending one manifest row for a chash absent from T3 made
+        ``complete_index_run`` raise ``IndexRunVerifyRefused(missing=1)``.
         """
-        from nexus.catalog.factory import make_catalog_reader
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
         from nexus.db.http_vector_client import HttpVectorClient
         from nexus.doc_indexer import _register_or_lookup_doc_id, index_pdf
 
@@ -300,38 +349,87 @@ class TestReconcileOnCollectionRetarget:
              ):
             ME2.return_value.extract.side_effect = _extract_side_effect(1, result)
             MC2.return_value.chunk.return_value = _fake_chunks(4, prefix="run2")
-            with pytest.raises(IndexRunVerifyRefused) as excinfo:
-                index_pdf(
-                    pdf_path, corpus, t3=HttpVectorClient(),
-                    collection_name=collection_b, force=True, streaming="never",
-                )
-
-        assert excinfo.value.missing > 0, (
-            "kill control failed to reproduce the wedge — expected the "
-            f"stale collection stamp to make the completion verify refuse "
-            f"with missing > 0, got {excinfo.value.missing}"
-        )
+            # NO pytest.raises: post-GATE-2 the un-reconciled shape is no
+            # longer damaging. A refusal HERE would mean the manifest is
+            # being stamped from something other than the write's own
+            # collection — i.e. GATE-2 regressed — so an unexpected
+            # IndexRunVerifyRefused propagates and fails the test loudly.
+            n2 = index_pdf(
+                pdf_path, corpus, t3=HttpVectorClient(),
+                collection_name=collection_b, force=True, streaming="never",
+            )
+        assert n2 == 4
 
         reader = make_catalog_reader()
-        entry = reader.resolve(doc_id)
-        assert entry is not None
-        assert entry.physical_collection == collection_a, (
-            "the kill control must reproduce the STALE stamp — "
-            f"physical_collection must remain {collection_a!r}, got "
-            f"{entry.physical_collection!r}"
-        )
-        assert entry.index_state == "indexing", (
-            "the completion stamp must be REFUSED (never 'complete') — "
-            f"got {entry.index_state!r}"
+
+        # ── The eradication itself: every manifest row carries the RUN's
+        # collection, NOT the document's (still-stale) physical_collection.
+        # This is the assertion the old wedge could not have satisfied.
+        rows = reader.get_manifest(doc_id)
+        assert rows, "run 2 wrote no manifest rows at all"
+        stamped = {r.collection for r in rows}
+        assert stamped == {collection_b}, (
+            "RDR-191 GATE-2 contract broken: manifest rows must carry the "
+            f"collection the WRITE supplied ({collection_b!r}) even when the "
+            "document's physical_collection was never reconciled. Got "
+            f"{sorted(stamped)!r} — a row stamped {collection_a!r} means the "
+            "engine is inferring the collection from the owning document "
+            "again (physicalCollectionOf resurrection), which is exactly the "
+            "nexus-2t63u wedge's root cause."
         )
 
         verify = reader.manifest_verify(doc_id)
-        assert verify["missing"] > 0, (
-            f"kill control failed to reproduce the wedge — expected "
-            f"manifest_verify to report missing chunks against the stale "
-            f"collection stamp, got {verify}"
+        assert verify["referenced"] == verify["present"] == 4, verify
+        assert verify["missing"] == 0, (
+            "manifest_verify must be clean without any reconciliation — the "
+            "rows and the chunks are both in the run's own collection, so "
+            f"the k.collection = m.collection join matches. Got {verify}"
         )
-        assert verify["present"] < verify["referenced"], verify
+
+        entry = reader.resolve(doc_id)
+        assert entry is not None
+        assert entry.index_state == "complete", (
+            "the completion stamp must land: nothing is missing, so the "
+            f"fence has nothing to refuse. Got {entry.index_state!r}"
+        )
+        # The document's own stamp still converges — but at the TAIL, via
+        # _catalog_pdf_hook, which only runs because the completion was NOT
+        # refused. (The sibling test above gets the SAME end state from the
+        # EARLY nexus-2t63u reconcile instead. Pre-GATE-2 the refusal fired
+        # first and the tail hook was never reached, which is what made the
+        # wedge self-perpetuating.) Asserted so the old assertion's slot is
+        # not left as a silent hole.
+        assert entry.physical_collection == collection_b, (
+            "without the early reconcile, physical_collection must still "
+            f"converge at the tail hook — expected {collection_b!r}, got "
+            f"{entry.physical_collection!r}"
+        )
+
+        # ── Non-vacuity control (mandatory; feedback_falsify_by_deleting_
+        # the_code). Everything above is a green built on the ABSENCE of a
+        # refusal, which is worthless if the refusal path is dead. Construct
+        # a genuinely missing chunk — a manifest row naming a chash that was
+        # never upserted into T3 — and prove the fence still bites. This
+        # keeps IndexRunVerifyRefused coverage alive on the production
+        # writer after the wedge scenario stopped producing it.
+        writer = make_catalog_writer()
+        try:
+            absent_chash = "de" * 32  # 64 hex, never upserted to T3
+            writer.append_manifest_chunks(
+                doc_id, [{"position": 99, "chash": absent_chash}],
+                collection=collection_b,
+            )
+            verify_dirty = reader.manifest_verify(doc_id)
+            assert verify_dirty["missing"] == 1, (
+                "the control chunk is not registering as missing, so the "
+                f"refusal below would prove nothing. Got {verify_dirty}"
+            )
+            with pytest.raises(IndexRunVerifyRefused) as excinfo:
+                writer.complete_index_run(doc_id, "killctl-control-hash", 5)
+            assert excinfo.value.missing == 1, excinfo.value
+            assert excinfo.value.doc_id == doc_id, excinfo.value
+        finally:
+            writer.close()
 
 
 class TestReconcileWriteFailureIsolated:
@@ -405,11 +503,37 @@ class TestReconcileWriteFailureIsolated:
     def test_write_failure_leaves_the_run_fenced_not_skipped(self, tmp_path) -> None:
         """The stronger, end-to-end proof: drives the PRODUCTION entry
         point with the reconcile write failing, and shows the run stays
-        inside RUNFENCE (fences begin/complete and refuses HONESTLY on the
-        now-stale manifest) rather than silently succeeding with an
-        untouched, stale index_state — which is what doc_id="" would look
-        like (no exception, no fence activity at all).
+        inside RUNFENCE (both fence legs fire) rather than silently falling
+        out of it — which is what ``doc_id=""`` would look like (no fence
+        activity at all, run 1's completion record left untouched).
+
+        RE-DERIVED for RDR-191 GATE-2 (nexus-sh9v2). The original form
+        asserted the fence stayed fenced by watching it REFUSE
+        (``IndexRunVerifyRefused``), since the failed reconcile left
+        ``physical_collection`` stale and — under the pre-GATE-2 engine —
+        that staleness propagated into the manifest rows. It no longer
+        does: manifest rows are stamped with the caller-supplied collection
+        (the run's own, ``collection_b``), so the verify is clean and the
+        completion LANDS. This test's own prior comment already ruled that
+        outcome acceptable — "both outcomes (a completion that succeeds
+        against the old collection, or an honest refusal) are acceptable;
+        SILENTLY SKIPPING the fence is not" — so the assertion moves to
+        what the test was always about: did the fence RUN.
+
+        Keeping the old ``pytest.raises`` would have been the weakening
+        move (it would only pass again if GATE-2 regressed). Instead the
+        fence-ran claim is pinned two independent ways, neither of which a
+        discarded tumbler could satisfy: (1) ``_fence_begin`` /
+        ``_fence_complete`` are wrapped spies — production behaviour intact
+        — and must BOTH be called with the resolved tumbler; (2) the
+        engine-side ``index_run_id`` must ROTATE away from run 1's value
+        (``_fence_begin`` mints it), with ``index_state`` back at
+        ``complete``. The live refusal path stays covered by
+        ``test_kill_control_without_reconcile_no_longer_wedges_after_gate2``'s
+        non-vacuity control.
         """
+        import nexus.doc_indexer as doc_indexer_module
+
         from nexus.catalog.factory import make_catalog_reader
         from nexus.catalog.http_catalog_client import HttpCatalogClient
         from nexus.db.http_vector_client import HttpVectorClient
@@ -436,41 +560,85 @@ class TestReconcileWriteFailureIsolated:
         )
         assert doc_id
 
+        reader = make_catalog_reader()
+        run1_entry = reader.resolve(doc_id)
+        assert run1_entry is not None
+        run1_run_id = run1_entry.index_run_id
+        assert run1_run_id, "run 1 must have left a fenced completion to contrast against"
+
         with patch("nexus.doc_indexer.PDFExtractor") as ME2, \
              patch("nexus.doc_indexer.PDFChunker") as MC2, \
-             patch.object(HttpCatalogClient, "update", side_effect=RuntimeError("simulated transient reconcile-write failure")):
+             patch.object(HttpCatalogClient, "update", side_effect=RuntimeError("simulated transient reconcile-write failure")), \
+             patch("nexus.doc_indexer._fence_begin",
+                   wraps=doc_indexer_module._fence_begin) as spy_begin, \
+             patch("nexus.doc_indexer._fence_complete",
+                   wraps=doc_indexer_module._fence_complete) as spy_complete:
             ME2.return_value.extract.side_effect = _extract_side_effect(1, result)
             MC2.return_value.chunk.return_value = _fake_chunks(4, prefix="run2")
-            with pytest.raises(IndexRunVerifyRefused) as excinfo:
-                index_pdf(
-                    pdf_path, corpus, t3=HttpVectorClient(),
-                    collection_name=collection_b, force=True, streaming="never",
-                )
+            # No pytest.raises: post-GATE-2 the manifest carries the run's
+            # own collection, so there is nothing for the fence to refuse.
+            # An IndexRunVerifyRefused here would propagate and fail loudly.
+            n2 = index_pdf(
+                pdf_path, corpus, t3=HttpVectorClient(),
+                collection_name=collection_b, force=True, streaming="never",
+            )
+        assert n2 == 4
 
-        # The run stayed FENCED: it reached the completion verify (which is
-        # what raises IndexRunVerifyRefused) rather than silently returning
-        # a chunk count with doc_id="" and no fence activity at all — the
-        # damage this bead fixes. The refusal itself is EXPECTED and
-        # correct here (the reconcile write failed, so the manifest is
-        # still stamped to the stale collection_a) — both outcomes (a
-        # completion that succeeds against the old collection, or an
-        # honest refusal) are acceptable; SILENTLY SKIPPING the fence is
-        # not.
-        assert excinfo.value.doc_id == doc_id
-        assert excinfo.value.missing > 0
+        # ── Proof 1: both fence legs ran, each with the RESOLVED tumbler.
+        # The nexus-ir68m damage (reconcile failure discarding the tumbler,
+        # returning "") leaves both of these at zero calls, because
+        # index_pdf gates them on `if _catalog_doc_id_for_batch:`.
+        assert spy_begin.call_count == 1, (
+            "_fence_begin never fired — the run fell OUT of RUNFENCE, which "
+            "is the nexus-ir68m damage: a failed reconcile write discarded "
+            f"an already-resolved tumbler. Calls: {spy_begin.call_args_list!r}"
+        )
+        assert spy_begin.call_args_list[0].args[0] == doc_id, spy_begin.call_args_list
+        assert spy_complete.call_count == 1, (
+            "_fence_complete never fired — the run began but never closed "
+            f"the fence. Calls: {spy_complete.call_args_list!r}"
+        )
+        assert spy_complete.call_args_list[0].args[0] == doc_id, spy_complete.call_args_list
 
-        entry = make_catalog_reader().resolve(doc_id)
+        entry = reader.resolve(doc_id)
         assert entry is not None
+
+        # ── Proof 2 (independent of the spies, engine-observable): the fence
+        # minted a NEW index_run_id. A skipped fence leaves run 1's value in
+        # place, so this discriminates fenced-completion from no-fence-at-all
+        # even though both end at index_state == "complete".
+        assert entry.index_run_id and entry.index_run_id != run1_run_id, (
+            "index_run_id did not rotate — _fence_begin never minted a run "
+            f"for this pass (run 1: {run1_run_id!r}, now: "
+            f"{entry.index_run_id!r}), i.e. the run was never fenced"
+        )
+        assert entry.index_state == "complete", (
+            "the fence must have BEGUN and then COMPLETED: post-RDR-191 "
+            "GATE-2 the manifest rows carry the run's own collection, so the "
+            "completion verify has nothing to refuse even though the "
+            f"reconcile write failed. Got {entry.index_state!r}"
+        )
+
+        # The reconcile write genuinely failed — physical_collection must NOT
+        # have silently changed. (The tail _catalog_pdf_hook would normally
+        # converge it; here its writer.update is the same patched failure,
+        # logged as catalog_pdf_hook_failed and swallowed.)
         assert entry.physical_collection == collection_a, (
             "the reconcile write failed — physical_collection must remain "
             f"stale at {collection_a!r}, got {entry.physical_collection!r}"
         )
-        assert entry.index_state == "indexing", (
-            "the fence must have BEGUN (index_state transitions away from "
-            "run 1's 'complete' the moment _fence_begin fires) and then "
-            "been correctly refused at completion — 'indexing' proves the "
-            f"fence ran; got {entry.index_state!r}"
+
+        # ── Proof 3: the stale document stamp did NOT reach the manifest.
+        # This is why there was nothing to refuse, stated as a contract
+        # rather than left as an inference from the absent exception.
+        stamped = {r.collection for r in reader.get_manifest(doc_id)}
+        assert stamped == {collection_b}, (
+            "manifest rows must carry the WRITE's collection "
+            f"({collection_b!r}) even with the document still stamped "
+            f"{collection_a!r}. Got {sorted(stamped)!r}"
         )
+        verify = reader.manifest_verify(doc_id)
+        assert verify["missing"] == 0, verify
 
 
 class TestSourceUriBranchUnchanged:

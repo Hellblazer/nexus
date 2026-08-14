@@ -8,7 +8,8 @@ of them embeds". ``discover_for_collection`` was the fourth: when T3 returned
 documents without embeddings it re-encoded every chunk with
 ``LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")``, so a bge-768 or
 voyage-1024 collection got topic centroids computed in a DIFFERENT vector
-space, persisted into ``taxonomy_centroids_384``. Every later ANN assign then
+space, persisted into the embedding_384 column of the unified
+``nexus.taxonomy_centroids`` table. Every later ANN assign then
 hit the dimension-mismatch guard, returned ``[]``, and the collection ended up
 with topics nothing could be assigned to.
 

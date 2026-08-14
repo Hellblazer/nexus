@@ -16,14 +16,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import dev.nexus.service.vectors.DimTables;
+
 import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
 import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
@@ -185,28 +185,38 @@ public final class StagingPromoteOps {
     }
 
     /**
-     * Per-dim content-table accessor for {@link #promoteCollection}'s
-     * content INSERT (nexus-4okz4 increment 3) — same explicit-three-
-     * branches discipline as {@code RekeyOps.DIMS} /
-     * {@code ChashSqlIdioms.danglingManifestCountDsl} (no common typed
-     * interface across the three generated chunk-table classes to derive
-     * this from {@link ChashSqlIdioms#CHUNK_TABLES} mechanically). See
-     * RawSqlGateTest's {@code chunkTablesCanary_fourthDimNeedsAllSitesToldChecklistAbove}
-     * fourth-dim checklist, extended to name this method.
+     * Content-table accessor for {@link #promoteCollection}'s content
+     * INSERT (nexus-4okz4 increment 3, RDR-191 repoint nexus-o8dil.17).
+     *
+     * <p>Unlike {@code RekeyOps.Dim} (which carries no embedding field —
+     * RekeyOps never INSERTs content rows), this record genuinely needs a
+     * per-dim {@code embedding} accessor: {@link #promoteCollection} writes
+     * a NEW content row whose embedding lands in the dim-specific column.
+     * Post-unification all three dims share the SAME {@code table}
+     * ({@link dev.nexus.service.jooq.nexus.Tables#CHUNKS}) and the SAME
+     * tenantId/collection/chash/chunkText/metadata fields — only {@code
+     * embedding} differs, selected via {@link DimTables#embeddingColumn(int)}
+     * (the single name authority the raw-SQL/typed-DSL split shares, per
+     * DimTables' own class javadoc) rather than hand-rolling
+     * {@code "embedding_" + dim} here. byte[]-typed {@code chash} kept
+     * (built directly off the generated table, not {@code
+     * DimTables.ChunkTable}'s hex-string accessor) for the same reason as
+     * {@code RekeyOps.Dim}: {@link ChashSqlIdioms#digestField} and the
+     * {@code chash_alias} joins below are byte[]-typed, and {@code
+     * Tables.CHUNKS.CHASH} is already byte[]-typed natively.
      */
     private record ChunkDim(Table<?> table, Field<String> tenantId, Field<String> collection,
                              Field<byte[]> chash, Field<String> chunkText, Field<Vector> embedding,
                              Field<JSONB> metadata) {
     }
 
+    @SuppressWarnings("unchecked")
     private static ChunkDim chunkDim(int impliedDim) {
         return switch (impliedDim) {
-            case 384 -> new ChunkDim(CHUNKS_384, CHUNKS_384.TENANT_ID, CHUNKS_384.COLLECTION,
-                CHUNKS_384.CHASH, CHUNKS_384.CHUNK_TEXT, CHUNKS_384.EMBEDDING, CHUNKS_384.METADATA);
-            case 768 -> new ChunkDim(CHUNKS_768, CHUNKS_768.TENANT_ID, CHUNKS_768.COLLECTION,
-                CHUNKS_768.CHASH, CHUNKS_768.CHUNK_TEXT, CHUNKS_768.EMBEDDING, CHUNKS_768.METADATA);
-            case 1024 -> new ChunkDim(CHUNKS_1024, CHUNKS_1024.TENANT_ID, CHUNKS_1024.COLLECTION,
-                CHUNKS_1024.CHASH, CHUNKS_1024.CHUNK_TEXT, CHUNKS_1024.EMBEDDING, CHUNKS_1024.METADATA);
+            case 384, 768, 1024 -> new ChunkDim(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION,
+                CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                (Field<Vector>) CHUNKS.field(DimTables.embeddingColumn(impliedDim)),
+                CHUNKS.METADATA);
             // unreachable in practice: promoteCollection's own
             // PromotePreconditionException guard validates impliedDim is one
             // of 384/768/1024 before this method is ever invoked.
@@ -473,8 +483,9 @@ public final class StagingPromoteOps {
             // Object-typed for the isNotNull() predicate below only; the
             // orphan-synthesize INSERT's select list needs a SEPARATE
             // Vector-typed accessor (scEmbeddingTyped, built where it's used)
-            // matching CHUNKS_768.EMBEDDING's exact Java type so
-            // insertInto(...).select(...) type-checks.
+            // matching the target ChunkDim's embedding Field's exact Java
+            // type (dim-selected via DimTables.embeddingColumn — see
+            // chunkDim(int)) so insertInto(...).select(...) type-checks.
             Field<Object> scEmbeddingRaw = DSL.field(DSL.name("s", "embedding"), Object.class);
             Field<JSONB> scChunkMeta = DSL.field(DSL.name("s", "chunk_meta"), JSONB.class);
 
@@ -542,30 +553,68 @@ public final class StagingPromoteOps {
                     .execute();
                 // chunk_text_hash mirrors the SURROGATE chash (RDR-086
                 // metadata parity, same rationale as the content INSERT).
-                // Hardcoded to chunks_768/dim=768 — preserved VERBATIM from
-                // the deleted raw SQL (a pre-existing behavior of this
-                // branch, not something this representation-only pass
-                // changes; the raw form never synthesized 384/1024 orphans
-                // either).
+                //
+                // FIXED (nexus-o8dil.50, RDR-191 P4): this branch used to be
+                // hardcoded to chunks_768/dim=768 only, "preserved verbatim"
+                // from the deleted raw SQL. That was not a merely-incomplete
+                // convenience: the CHASH_ALIAS insert directly above is
+                // dim-agnostic (aliases EVERY row matching orphanCond,
+                // regardless of scDim), so a 384/1024 orphan got a committed
+                // alias with NO backing content row in any dim table. If a
+                // staged manifest pointer (staging.document_chunks) later
+                // resolved through that alias — precisely the case Item8
+                // exists to handle — this method's own dangling_manifest
+                // fatal check (below, (7) in-txn verify) would find a
+                // catalog_document_chunks row whose chash has no content
+                // anywhere and throw IllegalStateException, ABORTING THE
+                // WHOLE finalizeTenant TRANSACTION for the tenant. Because
+                // finalize is documented idempotent/re-runnable, every retry
+                // hits the identical alias again — a repeatable, tenant-wide
+                // finalize blocker, not a silent skip.
+                //
+                // Both non-768 dims are reachable in production, not
+                // hypothetical: 384 is Tier-0 MiniLM (nexus.db.local_ef,
+                // the fastembed-less local-mode default — installs without
+                // `conexus[local]` embed at 384d), 1024 is Voyage (the
+                // cloud-mode default). staging.chunks.dim is a VALUE column
+                // by design for exactly this reason — see
+                // staging-001-landing-tables.xml's own comment: "mixed dims
+                // legal, no ANN index — never searched". A guided-upgrade
+                // migration from either of those installs can legitimately
+                // land 384/1024 orphan rows.
+                //
+                // Fix: loop over all three dims via the same chunkDim(int)
+                // accessor promoteCollection's content INSERT (5) already
+                // uses, explicit-three (not a loop over a shared dim
+                // registry — same no-common-typed-interface discipline as
+                // RekeyOps.DIMS / ChashSqlIdioms.danglingManifestCountDsl,
+                // see the chunkDim javadoc). "orphans_synthesized" stays a
+                // single summed count — same convention residual_mismatched
+                // already uses for its three explicit per-dim calls.
                 Field<JSONB> synthStamp = ChashSqlIdioms.jsonbBuildObject(
                     "chash_origin", "synthetic", "chunk_text_hash", hex(CHASH_ALIAS.NEW_CHASH));
-                Field<Vector> scEmbeddingTyped =
-                    DSL.field(DSL.name("s", "embedding"), CHUNKS_768.EMBEDDING.getDataType());
-                counts.put("orphans_synthesized", ctx.insertInto(CHUNKS_768,
-                        CHUNKS_768.TENANT_ID, CHUNKS_768.COLLECTION, CHUNKS_768.CHASH,
-                        CHUNKS_768.CHUNK_TEXT, CHUNKS_768.EMBEDDING, CHUNKS_768.METADATA)
-                    .select(ctx.select(
-                            currentTenantSetting(), scCollection, CHASH_ALIAS.NEW_CHASH, DSL.val(""),
-                            scEmbeddingTyped, ChashSqlIdioms.mergeMetadata(scChunkMeta, synthStamp))
-                        .from(sc)
-                        .join(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(scLegacyRef)
-                            .and(CHASH_ALIAS.SOURCE.eq("staging:synthetic")))
-                        .where(scChunkText.eq(""))
-                        .and(scDim.eq(768))
-                        .and(scEmbeddingRaw.isNotNull()))
-                    .onConflict(CHUNKS_768.TENANT_ID, CHUNKS_768.COLLECTION, CHUNKS_768.CHASH)
-                    .doNothing()
-                    .execute());
+                int synthesized = 0;
+                for (int d : new int[] {384, 768, 1024}) {
+                    ChunkDim dim = chunkDim(d);
+                    Field<Vector> scEmbeddingTyped =
+                        DSL.field(DSL.name("s", "embedding"), dim.embedding().getDataType());
+                    synthesized += ctx.insertInto(dim.table(),
+                            dim.tenantId(), dim.collection(), dim.chash(),
+                            dim.chunkText(), dim.embedding(), dim.metadata())
+                        .select(ctx.select(
+                                currentTenantSetting(), scCollection, CHASH_ALIAS.NEW_CHASH, DSL.val(""),
+                                scEmbeddingTyped, ChashSqlIdioms.mergeMetadata(scChunkMeta, synthStamp))
+                            .from(sc)
+                            .join(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(scLegacyRef)
+                                .and(CHASH_ALIAS.SOURCE.eq("staging:synthetic")))
+                            .where(scChunkText.eq(""))
+                            .and(scDim.eq(d))
+                            .and(scEmbeddingRaw.isNotNull()))
+                        .onConflict(dim.tenantId(), dim.collection(), dim.chash())
+                        .doNothing()
+                        .execute();
+                }
+                counts.put("orphans_synthesized", synthesized);
                 counts.put("orphans_dropped", 0);
             } else {
                 counts.put("orphans_synthesized", 0);
@@ -657,15 +706,25 @@ public final class StagingPromoteOps {
             Field<Integer> sLineEnd = DSL.field(DSL.name("s", "line_end"), Integer.class);
             Field<Integer> sCharStart = DSL.field(DSL.name("s", "char_start"), Integer.class);
             Field<Integer> sCharEnd = DSL.field(DSL.name("s", "char_end"), Integer.class);
-            var cand = ctx.selectDistinct(DSL.coalesce(CHASH_ALIAS.NEW_CHASH, sChashDecoded).as("chash"))
+            // nexus-o8dil.7 (RDR-191 GATE-2): the row's own resolved chash --
+            // shared between `cand` below (the batch-wide distinct list used
+            // for sweep-gate acquisition) and the per-row verified manifest
+            // resolution further down (which needs the SAME chash, not the
+            // batch's whole set).
+            Field<byte[]> resolvedChash = DSL.coalesce(CHASH_ALIAS.NEW_CHASH, sChashDecoded);
+            var cand = ctx.selectDistinct(resolvedChash.as("chash"))
                 .from(sdc)
                 .leftJoin(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(sChash))
                 .where(CHASH_ALIAS.NEW_CHASH.isNotNull().or(sChash.likeRegex("^[0-9a-f]{64}$")))
                 .asTable("cand");
-            var phys = ctx.select(CHUNKS_384.COLLECTION, CHUNKS_384.CHASH).from(CHUNKS_384)
-                .unionAll(ctx.select(CHUNKS_768.COLLECTION, CHUNKS_768.CHASH).from(CHUNKS_768))
-                .unionAll(ctx.select(CHUNKS_1024.COLLECTION, CHUNKS_1024.CHASH).from(CHUNKS_1024))
-                .asTable("phys");
+            // RDR-191 repoint (nexus-o8dil.17): the former three-dim UNION
+            // ALL collapses to a single SELECT — nexus.chunks is now the
+            // single table every dim's content lives in (dim-independent
+            // PK: tenant_id, collection, chash), so it already IS the union
+            // the three branches used to compute; re-unioning it with
+            // itself would triple-count. Same collapse as RekeyOps' own
+            // step-2b `phys` (see T2 nexus/rdr-191-batch-D3-2026-08-13).
+            var phys = ctx.select(CHUNKS.COLLECTION, CHUNKS.CHASH).from(CHUNKS).asTable("phys");
             var targetCollections = ctx.selectDistinct(phys.field("collection", String.class))
                 .from(cand)
                 .join(phys).on(phys.field("chash", byte[].class).eq(cand.field("chash", byte[].class)))
@@ -685,10 +744,13 @@ public final class StagingPromoteOps {
             // C): this INSERT's 9-column list omitted `collection` entirely
             // -- every finalize-promoted manifest row was a partial-NULL FK
             // key, unlike promoteCollection's CONTENT insert above (:420-433),
-            // which DOES stamp it. Stamped from the SAME source every live
-            // writer uses (CatalogRepository.physicalCollectionOf ->
-            // catalog_documents.physical_collection, NULL-if-empty for
-            // ghost/sourceless docs) -- NOT from wherever the resolved
+            // which DOES stamp it. Stamped from catalog_documents.
+            // physical_collection (NULL-if-empty for ghost/sourceless docs)
+            // -- the one caller-known fact this bulk migration path has,
+            // mirroring the explicit `collection` parameter every live
+            // writer (CatalogRepository.writeManifestRows/
+            // appendManifestChunks/importChunksBatch) now requires the
+            // caller to supply directly -- NOT from wherever the resolved
             // chash's content happens to physically live, which is a
             // DIFFERENT, collection-agnostic question (canonExists / the
             // per-collection sweep-gate resolution a few lines above) that
@@ -698,6 +760,29 @@ public final class StagingPromoteOps {
             // content-location lookup.
             Field<String> docPhysicalCollection =
                 DSL.nullif(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "");
+            // RDR-191 (Hal ruling 2026-08-12, nexus-lyhac): writers STAMP
+            // what they already know; they never INFER it. This bulk
+            // migration path's one caller-known fact about a staged chunk
+            // row's collection is the OWNING DOCUMENT's own registered
+            // `physical_collection` -- `docPhysicalCollection` above. Before
+            // this fix the INSERT below stamped it UNCONDITIONALLY,
+            // including when it was NULL (a doc_id staged here with no
+            // catalog_documents row at all, or a ghost document that has
+            // never had `physical_collection` set) -- emitting a literal
+            // NULL into a column collection now disallows (catalog-025-
+            // collection-not-null.xml is NOT NULL, no sentinel, no
+            // DEFAULT).
+            //
+            // The fix mirrors the ROOT ruling exactly, not a new mechanism:
+            // an unresolvable row is not written. A staged row whose doc has
+            // no known `physical_collection` simply stays staged -- a later
+            // finalize (this method is explicitly idempotent/re-runnable,
+            // see the class javadoc) converges it once the document is
+            // registered with one. No per-chash content-location lookup, no
+            // sibling tiebreak: `docPhysicalCollection` is a per-DOCUMENT
+            // fact, correctly scalar, and is the ONLY source this method
+            // stamps from.
+            Condition manifestPromotable = manifestResolvable.and(docPhysicalCollection.isNotNull());
             counts.put("manifest_promoted", ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
@@ -706,13 +791,13 @@ public final class StagingPromoteOps {
                     CATALOG_DOCUMENT_CHUNKS.CHAR_END, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                 .select(ctx.select(
                         currentTenantSetting(), sDocId, sPosition,
-                        DSL.coalesce(CHASH_ALIAS.NEW_CHASH, sChashDecoded),
+                        resolvedChash,
                         sChunkIndex, sLineStart, sLineEnd, sCharStart, sCharEnd,
                         docPhysicalCollection)
                     .from(sdc)
                     .leftJoin(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(sChash))
                     .leftJoin(CATALOG_DOCUMENTS).on(CATALOG_DOCUMENTS.TUMBLER.eq(sDocId))
-                    .where(manifestResolvable))
+                    .where(manifestPromotable))
                 .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION)
                 .doNothing()
@@ -722,6 +807,74 @@ public final class StagingPromoteOps {
                     .where(CHASH_ALIAS.OLD_REF.eq(sChash))))
                 .and(DSL.not(sChash.likeRegex("^[0-9a-f]{64}$").and(ChashSqlIdioms.existsInAnyDim(ctx, sChashDecoded))))
                 .fetchOne(0, Integer.class));
+            // nexus-s13u0 visibility: DISTINCT staged doc_ids with NO
+            // catalog_documents row at all -- a NARROWER diagnostic than
+            // `manifestPromotable`'s NOT-NULL gate above (which also skips a
+            // registered GHOST document with no physical_collection yet).
+            // Reported via a counter rather than a throw: aborting the
+            // WHOLE finalize transaction over one staged row referencing an
+            // unregistered doc_id would be disproportionate for this
+            // idempotent/re-runnable method (class javadoc) -- a later
+            // finalize converges it once the document exists.
+            var docsNotRegistered = ctx.selectDistinct(sDocId).from(sdc).asTable("dnr");
+            int docNotRegisteredCount = ctx.selectCount()
+                .from(docsNotRegistered)
+                .where(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENTS)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(currentTenantSetting()))
+                    .and(CATALOG_DOCUMENTS.TUMBLER.eq(docsNotRegistered.field("doc_id", String.class)))))
+                .fetchOne(0, Integer.class);
+            counts.put("manifest_doc_not_registered", docNotRegisteredCount);
+            // review finding (nexus-s13u0 follow-up): a counter alone is
+            // WEAKER than a throw against the fail-loud directive -- nobody
+            // reads a counter unless something already told them to look,
+            // and this method's own log.info("event=staging_finalize"...)
+            // below fires unconditionally, at INFO, burying this alongside
+            // routine success counts rather than calling it out. Escalate
+            // explicitly at WARN when nonzero, the same discipline
+            // insertManifestChunkRows' case-3 SKIP and writeManifestMany's
+            // aggregate failure log already apply, so this is at minimum
+            // one structured-log grep away from being found rather than
+            // silently buried in a per-tenant JSON blob nobody is currently
+            // wired to read (verified: zero Python callers of
+            // POST /v1/staging/finalize anywhere in src/nexus/, and the one
+            // E2E rehearsal script that exercises it asserts on five
+            // unrelated fields, never this one or its pre-existing sibling
+            // manifest_unresolved). A WARN log is still not a metric or an
+            // alert path -- wiring either is follow-up-bead scale, not a
+            // fit for this guard-contract change.
+            if (docNotRegisteredCount > 0) {
+                log.warn("event=staging_finalize_doc_not_registered tenant={} count={}",
+                    tenant, docNotRegisteredCount);
+            }
+
+            // nexus-0dkdx (RDR-191 GATE-2, substantive-critic round-2 finding,
+            // T2 nexus/critique-round2-nexus-j862l-test-reconciliation-2026-08-12
+            // [22340]): the OTHER half of `manifestPromotable`'s gate --
+            // `docPhysicalCollection.isNotNull()` -- was silent. A doc_id that
+            // IS registered (unlike the case above) but whose
+            // `physical_collection` is NULL/empty (a ghost/sourceless doc,
+            // see the `docPhysicalCollection` commentary above) produces NO
+            // manifest row for its staged chunks, with zero counter and zero
+            // log signal -- unlike its sibling `manifest_doc_not_registered`
+            // case, which got both in the same round. A ghost doc's staged
+            // chunks could sit stuck indefinitely with nothing to find it.
+            // Mirrors `manifest_doc_not_registered` exactly: DISTINCT staged
+            // doc_ids whose `catalog_documents` row EXISTS (that's the
+            // difference from the case above) but resolves to a NULL/empty
+            // `physical_collection`.
+            var docsNoCollection = ctx.selectDistinct(sDocId).from(sdc).asTable("dnc");
+            int docNoCollectionCount = ctx.selectCount()
+                .from(docsNoCollection)
+                .where(DSL.exists(ctx.selectOne().from(CATALOG_DOCUMENTS)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(currentTenantSetting()))
+                    .and(CATALOG_DOCUMENTS.TUMBLER.eq(docsNoCollection.field("doc_id", String.class)))
+                    .and(DSL.nullif(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "").isNull())))
+                .fetchOne(0, Integer.class);
+            counts.put("manifest_doc_no_collection", docNoCollectionCount);
+            if (docNoCollectionCount > 0) {
+                log.warn("event=staging_finalize_doc_no_collection tenant={} count={}",
+                    tenant, docNoCollectionCount);
+            }
 
             // (2b) nexus-b6enc F3: the promote above is RESOLVABLE-ONLY, so
             // the verbatim-imported documents.chunk_count can claim more
@@ -1007,20 +1160,20 @@ public final class StagingPromoteOps {
             // nexus-4okz4 increment 2: residualMismatchCount (the raw-string
             // form) was deleted when RekeyOps' step 6 converted to typed DSL
             // — this SHARED fragment's only remaining form is
-            // ChashSqlIdioms.residualMismatchCountDsl. Three explicit calls
-            // (not a loop over ChashSqlIdioms.CHUNK_TABLES) since there is no
-            // local typed per-dim registry in this class — mirrors RekeyOps'
-            // own explicit-three-constants discipline for the identical
-            // reason (no common typed interface across the three generated
-            // chunk-table classes). Same predicate, same three tables, same
-            // order — behavior-preserving swap, not a rewrite of the check.
-            int residual = 0;
-            residual += ChashSqlIdioms.residualMismatchCountDsl(
-                ctx, CHUNKS_384, CHUNKS_384.CHASH, CHUNKS_384.CHUNK_TEXT);
-            residual += ChashSqlIdioms.residualMismatchCountDsl(
-                ctx, CHUNKS_768, CHUNKS_768.CHASH, CHUNKS_768.CHUNK_TEXT);
-            residual += ChashSqlIdioms.residualMismatchCountDsl(
-                ctx, CHUNKS_1024, CHUNKS_1024.CHASH, CHUNKS_1024.CHUNK_TEXT);
+            // ChashSqlIdioms.residualMismatchCountDsl.
+            //
+            // RDR-191 repoint (nexus-o8dil.17): collapsed from three
+            // explicit per-table calls (one per former physical dim table)
+            // to ONE — nexus.chunks is now the single table holding every
+            // dim's content rows, dim-independent (tenant_id, collection,
+            // chash) identity. Summing three calls against the SAME table
+            // with the SAME predicate would now triple-count every
+            // mismatched row (the DimTables D1 hazard: table membership no
+            // longer implies dim). A single call over the unified table is
+            // the byte-for-byte same predicate over the same row set that
+            // the three summed calls used to cover — not an approximation.
+            int residual = ChashSqlIdioms.residualMismatchCountDsl(
+                ctx, CHUNKS, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT);
             counts.put("residual_mismatched", residual);
             Integer danglingManifest = ChashSqlIdioms.danglingManifestCountDsl(ctx);
             counts.put("dangling_manifest", danglingManifest);

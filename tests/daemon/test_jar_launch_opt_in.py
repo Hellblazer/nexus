@@ -98,7 +98,7 @@ def _spawn_capture(monkeypatch, *, launch_kind, artifact, max_heap=None):
         captured["argv"] = argv
         return _FakeProc()
 
-    monkeypatch.setattr(ssd.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(ssd, "_popen", _fake_popen)
     monkeypatch.setattr(ssd, "_allocate_free_port", lambda host="127.0.0.1": 55000)
     monkeypatch.setattr(
         "nexus.logging_setup.open_child_log_or_devnull",

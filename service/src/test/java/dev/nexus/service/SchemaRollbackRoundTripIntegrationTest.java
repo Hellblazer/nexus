@@ -58,26 +58,33 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  *
  * <p><strong>WHY THIS TEST BOOTS TWICE BEFORE ROLLING BACK — order fidelity.</strong>
  * Liquibase rolls back in DATABASECHANGELOG <em>execution</em> order
- * ({@code ORDEREXECUTED}), NOT in master-file order. The tree has exactly six
- * {@code runAlways} changesets (nexus-0ys55 added {@code
- * grants-003-purge-vacuum-maintain}), and they re-execute on every boot, so on
- * any cluster that has booted more than once they float to the tail of
- * execution order (master positions as of this commit, which the floor
- * changeset shifted by one):
+ * ({@code ORDEREXECUTED}), NOT in master-file order. The tree has exactly eight
+ * {@code runAlways} changesets (RDR-191 Phase 4 unify added {@code
+ * grants-005-chunks-unify-maintain} in the SAME grants-nexus-svc.xml file,
+ * immediately after nexus-hzhgl's {@code grants-004-monitor-wal-visibility},
+ * which itself followed nexus-0ys55's {@code grants-003-purge-vacuum-maintain}),
+ * and they re-execute on every boot, so on any cluster that has booted more
+ * than once they float to the tail of execution order (approximate master
+ * positions, already drifting further with every changeset RDR-191 Phase 4
+ * inserts ahead of grants-nexus-svc.xml — exact numbers are not load-bearing
+ * here, only the runAlways set and its relative order):
  *
  * <pre>
- *   master pos 194  staging-4-svc-grants
- *   master pos 205  grants-nexus-svc-1
- *   master pos 206  grants-002-changelog-read
- *   master pos 207  grants-003-purge-vacuum-maintain
- *   master pos 208  grants-nexus-diag-1
- *   master pos 209  grants-nexus-diag-2
+ *   master pos ~194  staging-4-svc-grants
+ *   master pos ~205  grants-nexus-svc-1
+ *   master pos ~206  grants-002-changelog-read
+ *   master pos ~207  grants-003-purge-vacuum-maintain
+ *   master pos ~208  grants-004-monitor-wal-visibility
+ *   master pos ~209  grants-005-chunks-unify-maintain
+ *   master pos ~210  grants-nexus-diag-1
+ *   master pos ~211  grants-nexus-diag-2
  * </pre>
  *
  * That is exactly, and in order, the five changesets the manual {@code
  * rollbackCount(10)} repro rolled back before dying on staging-4 — it was run
  * against a re-booted cluster, where staging-4 had floated from master position
- * 194 to execution depth 5 (now depth 6, after nexus-0ys55's addition).
+ * 194 to execution depth 5 (now depth 8, after nexus-0ys55's, nexus-hzhgl's,
+ * and RDR-191 Phase 4's additions).
  *
  * <p>Rolling back to a TAG reaches every changeset above the floor regardless of
  * execution order, so the second boot is NOT what makes staging-4 reachable —
@@ -159,8 +166,11 @@ class SchemaRollbackRoundTripIntegrationTest {
 
 
     /**
-     * The six {@code runAlways} changesets, in master order (nexus-0ys55 added
-     * {@code grants-003-purge-vacuum-maintain}, formerly five). Their identity is
+     * The eight {@code runAlways} changesets, in master order (RDR-191 Phase 4
+     * unify added {@code grants-005-chunks-unify-maintain}, formerly seven
+     * after nexus-hzhgl added {@code grants-004-monitor-wal-visibility},
+     * formerly six after nexus-0ys55 added {@code
+     * grants-003-purge-vacuum-maintain}, formerly five). Their identity is
      * asserted (not merely their count) so that adding or removing a
      * {@code runAlways} changeset forces a deliberate look at this test rather
      * than silently changing which changesets the rollback leg reaches first.
@@ -170,6 +180,8 @@ class SchemaRollbackRoundTripIntegrationTest {
         "grants-nexus-svc-1",
         "grants-002-changelog-read",
         "grants-003-purge-vacuum-maintain",
+        "grants-004-monitor-wal-visibility",
+        "grants-005-chunks-unify-maintain",
         "grants-nexus-diag-1",
         "grants-nexus-diag-2");
 
@@ -656,6 +668,13 @@ class SchemaRollbackRoundTripIntegrationTest {
                 + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
         su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + ADMIN_ROLE);
         su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
+        // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
+        // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
+        // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc, and
+        // PostgreSQL refuses that GRANT unless the migration role already holds
+        // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
+        // the falsification proof of this exact prerequisite.
+        su.createStatement().execute("GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
         su.createStatement().execute(
             "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
                 + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");

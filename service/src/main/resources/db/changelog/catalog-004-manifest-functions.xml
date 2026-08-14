@@ -277,10 +277,27 @@ GRANT EXECUTE ON FUNCTION nexus.manifest_backfill()     TO nexus_svc;
 GRANT EXECUTE ON FUNCTION nexus.document_text(text)     TO nexus_svc;
         </sql>
         <rollback>
-            <sql splitStatements="true">
-                REVOKE EXECUTE ON FUNCTION nexus.document_text(text)     FROM nexus_svc;
-                REVOKE EXECUTE ON FUNCTION nexus.manifest_backfill()     FROM nexus_svc;
-                REVOKE EXECUTE ON FUNCTION nexus.manifest_orphans(int)   FROM nexus_svc;
+            <!-- RDR-191 repoint batch (nexus-o8dil.18): tolerant form. In the
+                 full reverse rollback chain the batch changesets' DROP-only
+                 rollbacks remove these objects BEFORE this rollback fires, and
+                 a bare REVOKE on a missing object errors. When the object is
+                 absent its grants died with it, so skipping is exact. Rollback
+                 edits on applied changesets are checksum-safe (catalog-013-2 /
+                 catalog-020-5 precedent). -->
+            <sql splitStatements="false">
+DO $$
+BEGIN
+    IF to_regprocedure('nexus.document_text(text)') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.document_text(text)     FROM nexus_svc;
+    END IF;
+    IF to_regprocedure('nexus.manifest_backfill()') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.manifest_backfill()     FROM nexus_svc;
+    END IF;
+    IF to_regprocedure('nexus.manifest_orphans(int)') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.manifest_orphans(int)   FROM nexus_svc;
+    END IF;
+END
+$$;
             </sql>
         </rollback>
     </changeSet>

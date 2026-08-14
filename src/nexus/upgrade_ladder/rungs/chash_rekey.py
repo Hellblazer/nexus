@@ -16,10 +16,12 @@ rung walks; this rung then, under the writer freeze:
    transaction engine-side): digest-mismatch predicate, alias build,
    Item8 disposition, two-phase collapse, full cascade, in-transaction
    verification scans. The response counts are the audit envelope.
-3. **VALIDATE** — local mode: the five octet CHECKs are validated via the
-   ADMIN connection (table owner; VALIDATE scans all rows RLS-exempt —
-   deliberately NOT a Liquibase boot changeset, which would crash-loop
-   un-rekeyed stores, and NOT the svc role, which cannot VALIDATE).
+3. **VALIDATE** — local mode: the two octet CHECKs (RDR-191: the unified
+   ``nexus.chunks`` content check plus the ``catalog_document_chunks``
+   pointer/manifest check) are validated via the ADMIN connection (table
+   owner; VALIDATE scans all rows RLS-exempt — deliberately NOT a Liquibase
+   boot changeset, which would crash-loop un-rekeyed stores, and NOT the svc
+   role, which cannot VALIDATE).
    Managed mode: validation is the operator's deploy-choreography step
    (Hal-relay surface) — converge reports DEFERRED-shaped detail rather
    than pretending.
@@ -51,28 +53,61 @@ _log = structlog.get_logger(__name__)
 
 RUNG_CHASH_REKEY = "chash-rekey"
 
-#: The five octet CHECKs the rung VALIDATEs post-rekey — MUST mirror the
-#: rdr180-001 changeset's constraint names (pinned by test against the XML).
+#: The octet CHECKs the rung VALIDATEs post-rekey — MUST mirror the LIVE
+#: constraint names on the unified schema (RDR-191 vectors-004; pinned by
+#: test against the changeset XML).
+#:
+#: DERIVATION (nexus-o8dil.15 — do not hand-edit this count by analogy):
+#: RDR-180 (rdr180-001) started at FIVE octet CHECKs: three per-dim CONTENT
+#: tables (chunks_384/768/1024), one POINTER/manifest table
+#: (catalog_document_chunks), and one router table (chash_index). RDR-187
+#: dropped chash_index's table and its CHECK (nexus-piwya.9), leaving FOUR.
+#: RDR-191 (vectors-004-unify-chunks.xml) drops chunks_384/768/1024 and
+#: replaces them with ONE unified `nexus.chunks` table carrying ONE octet
+#: CHECK (`chunks_chash_octet_check`, three nullable typed embedding
+#: columns, one shared `chash` column) — collapsing the three CONTENT
+#: entries into one. The POINTER entry (catalog_document_chunks) is a
+#: separate table, untouched by vectors-004, and survives unchanged.
+#: So: 4 entries -> (3 CONTENT collapse to 1) + (1 POINTER unchanged) = 2.
 OCTET_CHECKS: tuple[tuple[str, str], ...] = (
-    ("nexus.chunks_384", "chunks_384_chash_octet_check"),
-    ("nexus.chunks_768", "chunks_768_chash_octet_check"),
-    ("nexus.chunks_1024", "chunks_1024_chash_octet_check"),
+    ("nexus.chunks", "chunks_chash_octet_check"),
     ("nexus.catalog_document_chunks", "catalog_document_chunks_chash_octet_check"),
     # ("nexus.chash_index", ...) REMOVED — RDR-187/nexus-piwya.9 (.9 critique
     # Critical 1): the router table is dropped by the paired engine's
     # rdr187-2 changeset. Left in place, this rung would VALIDATE against a
     # missing relation on EVERY nx upgrade forever (RuntimeError from
     # run_admin_sql), _pointer_debt would silently degrade to unknowable,
-    # and _validated_probe could never count to five again — permanently
-    # un-converged. Boxes that converged pre-drop stay converged: the probe
-    # counts THESE four names, and all four survive the drop.
+    # and _validated_probe could never count to len(OCTET_CHECKS) again —
+    # permanently un-converged.
+    # ("nexus.chunks_384"/"_768"/"_1024", ...) REMOVED — RDR-191
+    # vectors-004-unify-chunks.xml drops all three tables (and their three
+    # per-dim CHECKs) CASCADE, in the same transaction that creates
+    # `nexus.chunks` with the single unified `chunks_chash_octet_check`
+    # above. Boxes that converged pre-unify stay converged: the marker is
+    # "every entry in THIS tuple convalidated", and the tuple itself moved
+    # with the schema, exactly as it did for the RDR-187 chash_index drop.
 )
 
 
-#: The three CONTENT tables. Their octet CHECK is the RDR-180 contract —
-#: every chunk's identity IS its 32-byte digest — and a clean rekey always
-#: leaves them conformant, so these VALIDATE unconditionally.
-CONTENT_OCTET_CHECKS: tuple[tuple[str, str], ...] = OCTET_CHECKS[:3]
+#: EXPLICIT MEMBERSHIP, never a positional slice of OCTET_CHECKS (nexus-
+#: o8dil.15 CRITICAL fix): at 4 entries, `OCTET_CHECKS[:3]` happened to be
+#: the three CONTENT tables and `[3:]` happened to be the one POINTER
+#: table — but that was accidental positional alignment, not a contract.
+#: When the tuple collapsed to 2 entries, `[:3]` would have silently
+#: yielded BOTH (folding the pointer/manifest amnesty logic below into an
+#: unconditional VALIDATE that can fail on legitimately-dangling manifest
+#: rows) and `[3:]` would have silently yielded the EMPTY tuple (making
+#: `_pointer_debt`'s loop iterate nothing, permanently). Neither slice
+#: would have raised. Naming each check explicitly makes a table SWAPPED
+#: between the two constants a `KeyError`/set-membership failure at
+#: import/test time, not a silent product-behavior change.
+#:
+#: The unified `nexus.chunks` table. Its octet CHECK is the RDR-180/191
+#: contract — every chunk's identity IS its 32-byte digest — and a clean
+#: rekey always leaves it conformant, so this VALIDATEs unconditionally.
+CONTENT_OCTET_CHECKS: tuple[tuple[str, str], ...] = tuple(
+    (table, name) for table, name in OCTET_CHECKS if table == "nexus.chunks"
+)
 
 #: The POINTER table (the manifest — since RDR-187 dropped the chash_index
 #: router, the only one left). A lived-in store can carry orphan pointers
@@ -82,7 +117,36 @@ CONTENT_OCTET_CHECKS: tuple[tuple[str, str], ...] = OCTET_CHECKS[:3]
 #: are nexus-uu4ue's remaining scope). VALIDATE is table-grain, so it
 #: cannot succeed while they exist — that is arithmetic, not judgement — and failing
 #: the whole upgrade over pre-existing debt would strand every such install.
-POINTER_OCTET_CHECKS: tuple[tuple[str, str], ...] = OCTET_CHECKS[3:]
+POINTER_OCTET_CHECKS: tuple[tuple[str, str], ...] = tuple(
+    (table, name)
+    for table, name in OCTET_CHECKS
+    if table == "nexus.catalog_document_chunks"
+)
+
+# Non-vacuity guard on the module's own partition (nexus-o8dil.15 acceptance:
+# "the test FAILS if the arms are swapped or if one is empty"). This is the
+# import-time half of that guard — a NEW table added to OCTET_CHECKS without
+# being routed into either CONTENT_ or POINTER_OCTET_CHECKS (or a table
+# routed into BOTH by a typo'd predicate) fails LOUD here rather than
+# silently shrinking whichever arm lost it. The test-level half lives in
+# tests/upgrade/test_chash_rekey_rung.py::TestOctetCheckPartition.
+if not CONTENT_OCTET_CHECKS or not POINTER_OCTET_CHECKS:
+    raise RuntimeError(
+        "chash_rekey OCTET_CHECKS partition is degenerate: "
+        f"CONTENT={CONTENT_OCTET_CHECKS!r} POINTER={POINTER_OCTET_CHECKS!r} "
+        "— every entry in OCTET_CHECKS must route into exactly one arm"
+    )
+if set(CONTENT_OCTET_CHECKS) & set(POINTER_OCTET_CHECKS):
+    raise RuntimeError(
+        "chash_rekey OCTET_CHECKS partition overlaps between CONTENT and "
+        "POINTER — a table cannot be both"
+    )
+if len(CONTENT_OCTET_CHECKS) + len(POINTER_OCTET_CHECKS) != len(OCTET_CHECKS):
+    raise RuntimeError(
+        "chash_rekey OCTET_CHECKS partition drops entries: "
+        f"{len(CONTENT_OCTET_CHECKS)} + {len(POINTER_OCTET_CHECKS)} != "
+        f"{len(OCTET_CHECKS)}"
+    )
 
 
 def probe_from_diagnostic_output(
@@ -145,7 +209,14 @@ class ChashRekeyRung:
       and returns the counts envelope. REQUIRED.
     - ``validate_fn() -> bool | None`` — run the VALIDATE statements via
       the local admin connection. ``None`` means "not possible here"
-      (managed mode) — surfaced in the converge detail, never silent.
+      (managed mode) — surfaced in the converge detail, never silent. The
+      production wiring (``default_chash_rekey_rung``'s ``_validate``)
+      RAISES instead of returning a value when every statement's target
+      relation was absent (``AdminSqlResult.fully_skipped`` — nexus-o8dil.15
+      E1/E2 non-vacuity pairing): that shape means the checks named in
+      ``OCTET_CHECKS`` have drifted from the live schema, and this rung
+      must fail loud rather than report a converged or an
+      indistinguishable-from-unmeasured not-converged state.
     - ``reprovision_fn() -> None`` — recreate the diag counts view
       (local); no-op default for managed.
     - ``freeze_fn() -> Callable[[], None]`` — enter the writer freeze,
@@ -160,8 +231,10 @@ class ChashRekeyRung:
       diagnostic that could not run was indistinguishable from a clean
       store and the rung reported "converged and verified". Absence of a
       non-conformance signal is NOT a conformance signal.
-    - ``validated_probe_fn() -> bool | None`` — READ-ONLY: are all five
-      octet CHECKs convalidated? This is the DATA-SIDE completion marker
+    - ``validated_probe_fn() -> bool | None`` — READ-ONLY: are all of
+      ``OCTET_CHECKS`` convalidated (RDR-191: two entries — the unified
+      ``nexus.chunks`` content check and the manifest pointer check)? This
+      is the DATA-SIDE completion marker
       (nexus-p78a0): boot never VALIDATEs, only this rung's own VALIDATE
       step (or the managed operator's choreography) does — so ``True``
       means the rekey provably completed. Without it, the raw ``detect()``
@@ -215,8 +288,8 @@ class ChashRekeyRung:
         """READ-ONLY. The RUNNER consults the completion ledger, but the
         read-only surfaces (``nx doctor``'s pending sweep, ``nx upgrade
         --dry-run``, ``pending_data_rung_callout``) call this RAW — so
-        convergence must be visible from the DATA (nexus-p78a0): all five
-        octet CHECKs convalidated is the unforgeable completion marker
+        convergence must be visible from the DATA (nexus-p78a0): all of
+        ``OCTET_CHECKS`` convalidated is the unforgeable completion marker
         (only this rung's VALIDATE, or the managed operator's, sets it).
         Below that: a countable-zero probe (local diag path) reports
         converged-pending-verify; unknown (managed) reports applies — the
@@ -345,8 +418,8 @@ class ChashRekeyRung:
                     # no evidence — and note the growth check above is itself
                     # skipped when debt_before is None, so orphans this rekey
                     # CREATED would be waved through as pre-existing. Absent
-                    # evidence must not grant an exemption: validate all four
-                    # and let VALIDATE fail loud (the next run, with a working
+                    # evidence must not grant an exemption: validate every
+                    # check and let VALIDATE fail loud (the next run, with a working
                     # probe, grants the amnesty properly).
                     _log.warning(
                         "chash_rekey_debt_amnesty_refused_no_baseline",
@@ -558,8 +631,11 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
         here rather than reinvented.
         """
         from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred
+            LEGACY_POISON_CHASH_TABLES,
             chash_conformance_statements,
+            chash_era_probe_statement,
             legacy_chash_conformance_statements,
+            legacy_era_chash_conformance_statements,
         )
         from nexus.db.diag_connection import resolve_diag_credentials, run_diagnostic_sql  # noqa: PLC0415 — deferred
         from nexus.remediation.sql_lint import DiagnosticSqlViolation  # noqa: PLC0415 — deferred
@@ -590,12 +666,60 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
             except Exception as exc:  # noqa: BLE001 — a probe that could not run is FAILED, never clean
                 return ConformanceProbe.failed(f"diagnostic statement failed: {exc}")
 
+        def _unified_schema_exists() -> bool:
+            """nexus-o8dil (2026-08-14): RDR-191 F14a mirror-direction
+            straddle in the HEALING rung itself — this rung is exactly the
+            remediation health.py's fix_suggestions point operators to, so
+            it must not be era-blind in the identical window health.py now
+            handles. Mirrors ``health._probe_unified_schema_exists``: a
+            grant-free, lint-legal ``to_regclass`` existence probe. A
+            failure of the discriminator itself defaults to True — never
+            reinterpret a possibly-genuine FAILED probe as legacy-era just
+            because the discriminator itself could not answer."""
+            try:
+                out = run_diagnostic_sql((chash_era_probe_statement(),), creds)
+                return bool(out) and out[0].strip() == "1"
+            except (RuntimeError, DiagnosticSqlViolation, ValueError) as exc:
+                _log.warning(
+                    "chash_rekey_probe_era_discriminator_failed",
+                    rung=RUNG_CHASH_REKEY,
+                    error=str(exc)[:200],
+                    note="could not determine unified-vs-legacy chash "
+                         "schema — assuming unified (never reinterpret a "
+                         "possibly-genuine FAILED probe as legacy-era)",
+                )
+                return True
+
         try:
             view_probe = _run(chash_conformance_statements())
         except DiagnosticSqlViolation as exc:
             return ConformanceProbe.failed(f"diagnostic lint refused the statement: {exc}")
         if view_probe.state is ProbeState.MEASURED:
             return view_probe
+
+        # nexus-o8dil (2026-08-14): RDR-191 F14a straddle. A FAILED view leg
+        # here can mean the deployed view predates the unify (still per-dim
+        # shaped: chunks_384/768/1024) rather than being absent — existence-
+        # gate BEFORE reinterpreting as legacy-era, computed ONCE and reused
+        # below; never on a FAILED probe alone, which a genuinely broken
+        # current-era store could also produce.
+        unified_exists = _unified_schema_exists()
+
+        if not unified_exists:
+            try:
+                legacy_view_probe = _run(legacy_era_chash_conformance_statements())
+            except DiagnosticSqlViolation as exc:
+                return ConformanceProbe.failed(f"diagnostic lint refused the statement: {exc}")
+            if legacy_view_probe.state is ProbeState.MEASURED:
+                _log.info(
+                    "chash_rekey_probe_legacy_era_view_match",
+                    rung=RUNG_CHASH_REKEY,
+                    note="the unified-name view query produced no "
+                         "measurement; the store verified via the "
+                         "pre-RDR-191 per-dim table names instead (RDR-191 "
+                         "straddle window)",
+                )
+                return legacy_view_probe
 
         # LOUD, like health.py's chash_probe_view_fallback_legacy. The view is
         # legitimately absent between an engine changeset that DROPs it
@@ -624,17 +748,48 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
             return ConformanceProbe.failed(f"diagnostic lint refused the statement: {exc}")
         if legacy_probe.state is ProbeState.MEASURED:
             return legacy_probe
+
+        if not unified_exists:
+            # nexus-o8dil (2026-08-14): the direct fallback above assumes
+            # the unified table names too — on a straddle-era box
+            # nexus.chunks genuinely does not exist yet, so it fails the
+            # same way the view-path did. Retry once more against the
+            # pre-unify per-dim direct statements before giving up.
+            _log.warning(
+                "chash_rekey_probe_direct_fallback_retrying_legacy_era",
+                rung=RUNG_CHASH_REKEY,
+                error=legacy_probe.reason[:200],
+                note="unified-name direct fallback produced no measurement "
+                     "and nexus.chunks does not exist yet — retrying "
+                     "against the pre-RDR-191 per-dim table names",
+            )
+            try:
+                legacy_direct_probe = _run(
+                    legacy_chash_conformance_statements(LEGACY_POISON_CHASH_TABLES),
+                )
+            except DiagnosticSqlViolation as exc:
+                return ConformanceProbe.failed(f"diagnostic lint refused the statement: {exc}")
+            if legacy_direct_probe.state is ProbeState.MEASURED:
+                return legacy_direct_probe
+            return ConformanceProbe.failed(
+                f"view path: {view_probe.reason[:120]} | legacy direct-table "
+                f"fallback: {legacy_probe.reason[:120]} | legacy-era direct "
+                f"fallback: {legacy_direct_probe.reason[:120]}"
+            )
+
         return ConformanceProbe.failed(
             f"view path: {view_probe.reason[:120]} | legacy direct-table "
             f"fallback: {legacy_probe.reason[:120]}"
         )
 
     def _pointer_debt() -> dict[str, int] | None:
-        """Per-table non-conformant counts for the two POINTER tables
-        (nexus-noa8d). Read-only, via the same diag choke point as the poison
-        probe. ``None`` = unknowable (managed mode / no diag creds), which
-        leaves the pre-existing all-five VALIDATE behaviour untouched rather
-        than guessing a store is clean."""
+        """Per-table non-conformant counts for the POINTER table(s)
+        (nexus-noa8d; RDR-191: one table, ``catalog_document_chunks`` — the
+        manifest — since the RDR-187 router drop). Read-only, via the same
+        diag choke point as the poison probe. ``None`` = unknowable (managed
+        mode / no diag creds), which leaves the pre-existing all-of-
+        ``OCTET_CHECKS`` VALIDATE behaviour untouched rather than guessing a
+        store is clean."""
         try:
             from nexus.db.diag_connection import resolve_diag_credentials, run_diagnostic_sql  # noqa: PLC0415 — deferred
 
@@ -652,22 +807,62 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
                 )
                 out[table] = sum(int(r) for r in rows)
             return out
-        except Exception:  # noqa: BLE001 — unknowable ≠ failure; all-five behaviour stands
+        except Exception:  # noqa: BLE001 — unknowable ≠ failure; all-of-OCTET_CHECKS behaviour stands
             return None
 
     def _validate(checks: tuple[tuple[str, str], ...] = OCTET_CHECKS) -> bool | None:
-        from nexus.db.admin_sql import run_admin_sql  # noqa: PLC0415 — deferred
+        # nexus-o8dil.15 / plan [22445] risk R4 — the E1/E2 non-vacuity
+        # pairing this bead exists for. run_admin_sql_detailed's
+        # AdminSqlResult.fully_skipped is the ONLY signal that distinguishes
+        # "genuinely validated the octet CHECK(s)" from "every target
+        # relation named in `checks` was absent, so nothing was ever
+        # attempted" — the legacy run_admin_sql() wrapper collapses both
+        # into the SAME `ok=True`, which is exactly the vacuous-success
+        # shape RDR-182 forbids elsewhere in this rung (see verify()'s own
+        # docstring). Post-RDR-191, a missed OCTET_CHECKS retarget (the
+        # stale-name shape this constant's own derivation comment warns
+        # about) would otherwise report "validated=yes" — or fall through
+        # to a bare not-converged detail indistinguishable from a real
+        # unmeasured probe — FOREVER, silently. Fail loud instead: this is
+        # the F14a-existence-gate's OWN correctness bar (skip one absent
+        # relation, never crash) turned inside out — ALL of them absent,
+        # post a successful rekey, is not a skip case, it is a schema-drift
+        # bug this rung must surface, not swallow.
+        from nexus.db.admin_sql import run_admin_sql_detailed  # noqa: PLC0415 — deferred
 
-        return run_admin_sql(validate_statements(checks))
+        result = run_admin_sql_detailed(validate_statements(checks))
+        if result.fully_skipped:
+            raise RuntimeError(
+                "chash_rekey VALIDATE fully skipped: every target relation "
+                f"for all {result.total} octet CHECK(s) in this VALIDATE set "
+                "was absent (to_regclass returned NULL for each) — refusing "
+                "to report 'validated' or a not-converged state "
+                "indistinguishable from a genuine unmeasured probe. This is "
+                "the RDR-191 schema-drift shape OCTET_CHECKS's own "
+                "derivation comment warns about: a stale table/constraint "
+                f"name in `checks` no longer matches the live schema. "
+                f"checks={checks!r}"
+            )
+        return result.ok
 
     def _validated_probe() -> bool | None:
         # The data-side completion marker (see the class docstring): every
-        # octet CHECK in OCTET_CHECKS convalidated — FOUR of them since
-        # RDR-187 dropped the chash_index entry (the comment said "five"
-        # from that removal until 2026-08-10, while the compare below has
-        # always been len(OCTET_CHECKS)). pg_constraint is a metadata
-        # target under the diag lint, so this rides the same read-only
-        # choke point as the poison probe.
+        # octet CHECK in OCTET_CHECKS convalidated — TWO of them since
+        # RDR-191 (vectors-004-unify-chunks.xml) collapsed the three per-dim
+        # CONTENT checks into the one unified `nexus.chunks` check, on top
+        # of the RDR-187 chash_index drop that took it from five to four
+        # (see OCTET_CHECKS's own derivation comment). The compare below has
+        # always been len(OCTET_CHECKS), so this function needed no change
+        # beyond the constant's own definition moving. pg_constraint is a
+        # metadata target under the diag lint, so this rides the same
+        # read-only choke point as the poison probe.
+        #
+        # DOES NOT need the _validate() fully_skipped fix (nexus-o8dil.15,
+        # E1/E2 pairing): this probe never calls admin_sql at all — it is a
+        # direct pg_constraint COUNT, not a VALIDATE-with-existence-gate. A
+        # stale OCTET_CHECKS name whose relation/constraint no longer exists
+        # simply matches ZERO rows here, so `count == len(OCTET_CHECKS)` is
+        # false by construction — non-vacuous already, nothing to wire.
         try:
             from nexus.db.diag_connection import resolve_diag_credentials, run_diagnostic_sql  # noqa: PLC0415 — deferred
 

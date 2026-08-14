@@ -173,7 +173,7 @@ class PgVectorRepositoryGcQuarantineTest {
             "corpus", "code",
             "physical_collection", collection
         ));
-        catalogRepo.writeManifest(tenant, docId, List.of(
+        catalogRepo.writeManifest(tenant, docId, collection, List.of(
             Map.<String, Object>of("position", 0, "chash", chash, "chunk_index", 0)
         ));
     }
@@ -186,7 +186,7 @@ class PgVectorRepositoryGcQuarantineTest {
     private long chunkCount(String collection) throws SQLException {
         try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
             var rs = st.executeQuery(
-                "SELECT count(*) FROM nexus.chunks_1024 WHERE collection = '" + collection + "'");
+                "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection + "' AND " + DimTables.embeddingColumn(1024) + " IS NOT NULL");
             rs.next();
             return rs.getLong(1);
         }
@@ -195,7 +195,7 @@ class PgVectorRepositoryGcQuarantineTest {
     private String chunkText(String collection, String chash) throws SQLException {
         try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
             var rs = st.executeQuery(
-                "SELECT chunk_text FROM nexus.chunks_1024 WHERE collection = '" + collection
+                "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
                 + "' AND chash = decode('" + chash + "', 'hex')");
             return rs.next() ? rs.getString(1) : null;
         }
@@ -204,7 +204,7 @@ class PgVectorRepositoryGcQuarantineTest {
     private String metadataField(String collection, String chash, String key) throws SQLException {
         try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
             var rs = st.executeQuery(
-                "SELECT metadata->>'" + key + "' FROM nexus.chunks_1024 WHERE collection = '" + collection
+                "SELECT metadata->>'" + key + "' FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
                 + "' AND chash = decode('" + chash + "', 'hex')");
             return rs.next() ? rs.getString(1) : null;
         }
@@ -299,7 +299,7 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThatThrownBy(() -> {
             try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
                 st.execute(
-                    "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) "
+                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
                     + "VALUES ('" + TENANT_A + "', '" + originCol + "', NULL, 'x', "
                     + "('[' || repeat('0,', 1023) || '0]')::vector)");
             }
@@ -517,6 +517,91 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(chunkText(quarantineCol, chash)).isNull();
     }
 
+    // ── nexus-wnpet: manifest-referenced chunks are never hard-deleted ───────
+    //
+    // gc_expire_quarantine previously never read catalog_document_chunks at
+    // all -- a past-cutoff quarantined chash still named by a manifest row
+    // (e.g. gc_restore_rereferenced has not yet run, or a heal re-referenced
+    // it after quarantine) was permanently destroyed unconditionally. The
+    // fix mirrors gc_restore_rereferenced's own rescue predicate as a guard.
+
+    @Test
+    void expireQuarantine_manifestReferencedChunk_isRefusedNotExpired_survivesEvenWithForce() throws Exception {
+        String originCol = originCol("case9");
+        String quarantineCol = quarantineCol("case9");
+        String chash = ch("gcq-manifest-guard-1");
+
+        seedChunk(TENANT_A, originCol, chash, "still needed text", "Still Needed");
+        var q = vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol, "2026-07-01T00:00:00Z", 20);
+        assertThat(q.moved()).isEqualTo(1L);
+
+        // A manifest row re-references the origin collection for this chash AFTER
+        // quarantine -- simulating gc_restore_rereferenced not having run yet, or a
+        // heal landing between quarantine and expire. This is the ordering-violation
+        // case the guard exists for.
+        seedManifest(TENANT_A, "gcq.doc.guard9", chash, originCol);
+
+        var outcome = vectorRepo.expireQuarantine(
+            TENANT_A, quarantineCol, originCol,
+            "2026-08-01T00:00:00Z", /* cutoff, after quarantined_at */
+            0.5, /* floor_fraction */ 50, /* floor_min_chunks -- never trips at n=1 */ false /* force */);
+
+        assertThat(outcome.expired())
+            .as("a manifest-referenced chash must never be counted as expired")
+            .isEqualTo(0L);
+        assertThat(outcome.refused())
+            .as("a manifest-referenced chash is refused, same population class as a floor refusal")
+            .isEqualTo(1L);
+        assertThat(chunkText(quarantineCol, chash))
+            .as("the chunk must physically survive")
+            .isEqualTo("still needed text");
+
+        // force=true overrides the population-size safety heuristic (the floor), never
+        // the manifest-reference correctness guarantee -- a still-referenced chunk must
+        // stay protected regardless.
+        var forced = vectorRepo.expireQuarantine(
+            TENANT_A, quarantineCol, originCol,
+            "2026-08-01T00:00:00Z", 0.5, 50, true /* force */);
+
+        assertThat(forced.expired())
+            .as("force must not free a manifest-referenced chash")
+            .isEqualTo(0L);
+        assertThat(forced.refused()).isEqualTo(1L);
+        assertThat(chunkText(quarantineCol, chash))
+            .as("the chunk must still survive even under force=true")
+            .isEqualTo("still needed text");
+    }
+
+    @Test
+    void expireQuarantine_mixedBatch_expiresUnreferenced_refusesManifestReferenced() throws Exception {
+        String originCol = originCol("case10");
+        String quarantineCol = quarantineCol("case10");
+        String chashFree = ch("gcq-manifest-guard-free");
+        String chashHeld = ch("gcq-manifest-guard-held");
+
+        seedChunk(TENANT_A, originCol, chashFree, "free text", "Free");
+        seedChunk(TENANT_A, originCol, chashHeld, "held text", "Held");
+        var q = vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol, "2026-07-01T00:00:00Z", 20);
+        assertThat(q.moved()).isEqualTo(2L);
+
+        // Only chashHeld gets re-referenced; chashFree stays genuinely orphaned.
+        seedManifest(TENANT_A, "gcq.doc.guard10", chashHeld, originCol);
+
+        var outcome = vectorRepo.expireQuarantine(
+            TENANT_A, quarantineCol, originCol,
+            "2026-08-01T00:00:00Z", 0.9, /* floor_fraction high -- must not trip at 1/2 */
+            50, false);
+
+        assertThat(outcome.expired())
+            .as("the genuinely unreferenced chash still expires exactly as before")
+            .isEqualTo(1L);
+        assertThat(outcome.refused())
+            .as("the manifest-referenced chash is refused, not silently dropped from the count")
+            .isEqualTo(1L);
+        assertThat(chunkText(quarantineCol, chashFree)).isNull();
+        assertThat(chunkText(quarantineCol, chashHeld)).isEqualTo("held text");
+    }
+
     // ── tenant isolation (RLS, SECURITY INVOKER) ─────────────────────────────
 
     @Test
@@ -534,5 +619,159 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(chunkText(originCol, chash))
             .as("tenant A's row survives a tenant B GC pass untouched")
             .isEqualTo("tenant A only");
+    }
+
+    // ── nexus-sa731: definition pin — sweep gate + inline-guard collapse ────
+    //
+    // catalog-024's gc_quarantine_orphans evaluated its manifest-reference
+    // guard SELECT and its DELETE/move as two separate READ COMMITTED
+    // statements with no lock on the path -- a manifest write committing
+    // between the two could get quarantined out from under it (write-skew).
+    // catalog-028 fixes this by taking the SAME per-(tenant, collection)
+    // advisory sweep gate CatalogRepository#runSweepTransaction uses, plus
+    // (belt and braces) folding the guard inline into each move statement's
+    // own WHERE instead of a precomputed chash array.
+    //
+    // This is a DEFINITION PIN, not a concurrency reproduction -- a
+    // deterministic race test is exactly what this structural fix exists to
+    // avoid needing (see the catalog-028 changeset header). It asserts the
+    // LIVE function body, via pg_get_functiondef, rather than trying to
+    // provoke the race under test. Kill-controlled: temporarily removing the
+    // lock line from the catalog-028 changeset was confirmed to turn this
+    // test RED (see T2 nexus-sa731-fix-gc-quarantine-lock-2026-08-13 for the
+    // recorded run), then the line was restored and the suite re-verified
+    // GREEN.
+    //
+    // ROUND 2 (stacked review, T2 nexus/review-sa731-catalog028-2026-08-13
+    // [22403] Important finding + nexus/critique-sa731-catalog028-2026-08-13
+    // [22404] Significant finding): the initial fix's EXCLUSIVE acquisition
+    // had no lock_timeout/statement_timeout, unlike the
+    // acquireSweepGateExclusive model it claims to mirror -- an unbounded
+    // wait here would hang the synchronous HTTP handler
+    // (VectorHandler#handleGcQuarantineOrphans) indefinitely behind a
+    // long-running manifest writer holding the SHARED half. Extended below
+    // to also pin the timeout pair and the lock_not_available handler,
+    // kill-controlled the same way (removing the set_config lines turns the
+    // new assertions RED; see T2 nexus-sa731-fix-gc-quarantine-lock-2026-08-13
+    // round-2 section for the recorded run).
+
+    @Test
+    void gcQuarantineOrphans_definitionPin_hasSweepGateLock_noStandaloneGuardSelect() throws Exception {
+        String functionDef = functionDefinition(
+            "nexus.gc_quarantine_orphans(int, text, text, text, text, int)");
+
+        assertThat(functionDef)
+            .as("must take the EXCLUSIVE half of the same advisory sweep-gate key "
+                + "CatalogRepository#acquireSweepGateExclusive uses, closing the "
+                + "manifest-insert-vs-quarantine-move write-skew window")
+            .contains("pg_advisory_xact_lock(hashtext('sweepgate:'")
+            .doesNotContain("pg_advisory_xact_lock_shared");
+
+        assertThat(functionDef)
+            .as("the old precomputed-array guard (SELECT array_agg(...) INTO v_chashes, "
+                + "then chash = ANY(v_chashes)) must be gone -- the guard now lives inline "
+                + "in each move statement's own WHERE, re-evaluated at that statement's own "
+                + "snapshot, not trusted from an array computed earlier in the transaction")
+            .doesNotContain("v_chashes")
+            .doesNotContain("= ANY(v_chashes)");
+
+        // RDR-191 repoint batch (vectors-005-repoint-functions-views.xml,
+        // nexus-o8dil.18) re-created this function dim-agnostic (the row's
+        // populated embedding_<dim> column carries straight through a move
+        // regardless of dim -- see that changeset's header, "DIM DOES NOT
+        // MATTER" bucket) AND added an N7-style cross-dim collision guard
+        // (Critical-1 fix, T2 22454) that legitimately introduces its OWN
+        // array_agg, unrelated to the old registration guard's precomputed
+        // membership array: it builds v_collision_sample, a capped sample of
+        // colliding chashes for the RAISE EXCEPTION message, not a `chash =
+        // ANY(...)` guard feeding a move statement. A blanket "no array_agg
+        // anywhere" ban is therefore no longer the correct pin -- re-derived
+        // below to still assert the OLD guard shape is gone (containsOnlyOnce
+        // + tied to the collision-sample INTO target) without going vacuous.
+        assertThat(functionDef)
+            .as("array_agg's ONLY legitimate use in this function is building the "
+                + "N7-style cross-dim collision sample (v_collision_sample) for the "
+                + "Critical-1 guard (T2 22454) -- the OLD registration guard's "
+                + "precomputed membership array is already pinned absent above "
+                + "(v_chashes / = ANY(v_chashes)); this pins that array_agg has not "
+                + "crept back in as a SECOND, unrelated precomputed-array guard")
+            .containsOnlyOnce("array_agg")
+            .contains("INTO v_collision_count, v_collision_sample");
+
+        // "NOT EXISTS" occurrences: the RDR-191 repoint made this function
+        // dim-agnostic (no more x3 per-dim branching), so the count collapsed
+        // from the old dim-branched shape's 12 down to FIVE, each an
+        // INDEPENDENT re-evaluation of the manifest-reference predicate (or,
+        // for the pre-flight's outer check, of "is there anything to move at
+        // all") -- none of them handing a precomputed chash array to another:
+        // (1) the pre-flight's own outer `IF NOT EXISTS (...)`, (2) the
+        // pre-flight's inner manifest-reference guard, (3) the orphan CTE that
+        // feeds the collision-detection query, (4) the copy-to-quarantine
+        // INSERT's own inline guard, (5) the remove-from-origin DELETE's own
+        // inline guard. This count is still the load-bearing signal that the
+        // guard lives inline in each statement rather than via a standalone
+        // array-building guard SELECT (sa731 semantics preserved across the
+        // dim-collapse).
+        int notExistsCount = functionDef.split("NOT EXISTS", -1).length - 1;
+        assertThat(notExistsCount)
+            .as("inline/pre-flight NOT EXISTS occurrences must be FIVE -- pre-flight's "
+                + "outer + inner, the collision-detection orphan CTE, the copy INSERT, "
+                + "and the DELETE -- now that the RDR-191 repoint made this function "
+                + "dim-agnostic (no more x3 per-dim multiplication), not 3x total via a "
+                + "standalone array-building guard SELECT")
+            .isEqualTo(5);
+    }
+
+    // ── nexus-sa731 ROUND 2: definition pin — bounded-wait timeout mirror ───
+    //
+    // Stacked review (T2 nexus/review-sa731-catalog028-2026-08-13 [22403]
+    // Important finding + nexus/critique-sa731-catalog028-2026-08-13 [22404]
+    // Significant finding): the round-1 fix's EXCLUSIVE acquisition
+    // (PERFORM pg_advisory_xact_lock(...), asserted by the pin test above)
+    // had NO lock_timeout/statement_timeout, unlike the
+    // acquireSweepGateExclusive model the changeset header claims to
+    // mirror (CatalogRepository.java:3898-3907). This function is invoked
+    // synchronously from VectorHandler#handleGcQuarantineOrphans, an HTTP
+    // handler with no request-level timeout of its own -- an unbounded wait
+    // behind a long-running manifest writer holding the SHARED half would
+    // hang that thread indefinitely, the exact failure direction the sweep
+    // gate's own design exists to avoid.
+    //
+    // Separate test (not folded into the round-1 pin above) so a break in
+    // either invariant is unambiguous from the failing test name alone.
+    // Kill-controlled the same way as the round-1 pin: temporarily removing
+    // the two `set_config` lines from the catalog-028 changeset was
+    // confirmed to turn this test RED, then the lines were restored and the
+    // suite re-verified GREEN (see T2 nexus-sa731-fix-gc-quarantine-lock-
+    // 2026-08-13's round-2 section for the recorded run).
+
+    @Test
+    void gcQuarantineOrphans_definitionPin_boundsAcquisitionWithSweepGateTimeouts() throws Exception {
+        String functionDef = functionDefinition(
+            "nexus.gc_quarantine_orphans(int, text, text, text, text, int)");
+
+        assertThat(functionDef)
+            .as("must bound the EXCLUSIVE acquisition with the same "
+                + "lock_timeout/statement_timeout values acquireSweepGateExclusive "
+                + "sets (2000ms/5000ms), and re-raise a timed-out acquisition as an "
+                + "explicit, retryable, gate-naming error rather than blocking forever")
+            .contains("set_config('lock_timeout', '2000', true)")
+            .contains("set_config('statement_timeout', '5000', true)")
+            .contains("WHEN lock_not_available THEN")
+            .contains("ERRCODE = 'lock_not_available'");
+    }
+
+    /** {@code pg_get_functiondef} for {@code signature} (schema-qualified, e.g.
+     *  {@code "nexus.fn(int, text)"}) -- a definition pin needs no RLS/role
+     *  concern (reading a function's own source, not tenant data), so the plain
+     *  superuser connection used by the other raw-SQL fixture helpers above
+     *  suffices. */
+    private String functionDefinition(String signature) throws SQLException {
+        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
+            var rs = st.executeQuery(
+                "SELECT pg_get_functiondef('" + signature + "'::regprocedure)");
+            rs.next();
+            return rs.getString(1);
+        }
     }
 }

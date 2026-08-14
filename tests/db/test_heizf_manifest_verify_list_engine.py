@@ -76,7 +76,9 @@ def _seed_dangling_doc(
         physical_collection=collection,
     )
     chashes = [_fake_chash(seq * 100 + i) for i in range(positions)]
-    cat.write_manifest(str(tumbler), [_chunk(c, i) for i, c in enumerate(chashes)])
+    cat.write_manifest(
+        str(tumbler), [_chunk(c, i) for i, c in enumerate(chashes)], collection=collection,
+    )
     return collection, str(tumbler), chashes
 
 

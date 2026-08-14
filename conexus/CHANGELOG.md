@@ -4,6 +4,18 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.7.0] - 2026-08-14
+
+Plugin version aligned with conexus 7.7.0. One plugin-side change goes live
+with this pin advance (it was merged 2026-08-12 and inert until now, per the
+PENDING_RELEASE ledger):
+
+- `hooks/scripts/stop_failure_hook.py` no longer writes a `bd remember` entry
+  per StopFailure event (nexus-0dj7e: per-event keys accumulated unboundedly
+  and `bd prime` injected them into every session). The hook now swallows the
+  event with debug tracing only. Any keys reaccumulated while 7.6.x was
+  installed can be cleaned with `bd forget`.
+
 ## [7.6.1] - 2026-08-11
 
 Plugin version aligned with conexus 7.6.1. No plugin-side changes.

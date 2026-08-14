@@ -77,7 +77,11 @@ class SchemaMigratorIntegrationTest {
         "catalog_owners", "catalog_documents", "catalog_links",
         "catalog_document_chunks", "catalog_collections", "catalog_meta",
         "service_tokens", "session_tokens",
-        "chunks_384", "chunks_768", "chunks_1024"
+        // RDR-191 Phase 4 unify (vectors-004-1): chunks_384/768/1024 collapsed
+        // into ONE nexus.chunks table with three nullable typed embedding
+        // columns (embedding_384/768/1024) -- the three per-dim tables no
+        // longer exist post-migration (DROP TABLE ... CASCADE).
+        "chunks"
     );
 
     private static final Set<String> EXPECTED_T1_TABLES = Set.of("scratch");
@@ -131,6 +135,14 @@ class SchemaMigratorIntegrationTest {
 
             // Allow nexus_admin_test to write Liquibase's DATABASECHANGELOG to public.
             su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
+
+            // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
+            // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
+            // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc, and
+            // PostgreSQL refuses that GRANT unless the migration role already holds
+            // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
+            // the falsification proof of this exact prerequisite.
+            su.createStatement().execute("GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
 
             // Pre-create pgvector and pg_trgm extensions as superuser (DBA step).
             // CREATE EXTENSION requires superuser in PostgreSQL; in production the DBA
@@ -425,6 +437,13 @@ class SchemaMigratorIntegrationTest {
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
                 su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
                 su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
+                // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
+                // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
+                // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc,
+                // and PostgreSQL refuses that GRANT unless the migration role already holds
+                // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
+                // the falsification proof of this exact prerequisite.
+                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
@@ -494,25 +513,49 @@ class SchemaMigratorIntegrationTest {
                     .as("migration must not crash-loop when a chash-length CHECK is missing on an aged box")
                     .doesNotThrowAnyException();
 
-                // Phase E (RDR-180 era): the migration chain now ALSO carries
-                // rdr180-2 (drops every len_check, the divergence included —
-                // DROP IF EXISTS tolerates the aged box) and rdr180-11 (the
-                // octet successors, NOT VALID at boot by design). End-state:
-                // uniform across all five tables regardless of the divergence.
+                // Phase E (RDR-180 era, RE-DERIVED for RDR-191 unify): the
+                // migration chain now ALSO carries rdr180-2 (drops every
+                // len_check, the divergence included — DROP IF EXISTS
+                // tolerates the aged box), rdr180-11 (the octet successors,
+                // NOT VALID at boot by design), AND vectors-004-1 (Phase 4:
+                // chunks_384/768/1024 collapsed into ONE nexus.chunks table
+                // via DROP TABLE ... CASCADE, which takes their per-table
+                // octet CHECKs down with them — a constraint cannot outlive
+                // its table). End-state: the three per-dim tables and every
+                // constraint that named them are GONE; the unified
+                // nexus.chunks carries exactly ONE octet CHECK in their
+                // place, still NOT VALID (client rung validates post-rekey,
+                // unchanged by the unify). catalog_document_chunks is
+                // untouched by vectors-004-1 and keeps its own len/octet
+                // pair exactly as before.
                 try (Connection conn = agedDs.getConnection()) {
-                    for (String t : new String[] {
-                        "chunks_384", "chunks_768", "chunks_1024",
-                        "catalog_document_chunks"}) {
+                    assertThat(constraintExists(conn, "chunks_chash_octet_check"))
+                        .as("unified nexus.chunks carries the octet CHECK post-RDR-191-unify "
+                            + "(the aged chunks_384 divergence injected above is upstream of the "
+                            + "copy and does not survive the DROP)")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "chunks_chash_octet_check"))
+                        .as("chunks_chash_octet_check stays NOT VALID at boot (client rung validates)")
+                        .isFalse();
+                    for (String t : new String[] {"chunks_384", "chunks_768", "chunks_1024"}) {
                         assertThat(constraintExists(conn, t + "_chash_len_check"))
-                            .as("%s_chash_len_check gone post-rdr180-2 (aged divergence tolerated)", t)
+                            .as("%s no longer exists post-vectors-004-1 unify -- no len_check to find", t)
                             .isFalse();
                         assertThat(constraintExists(conn, t + "_chash_octet_check"))
-                            .as("%s_chash_octet_check present post-rdr180-11", t)
-                            .isTrue();
-                        assertThat(constraintValidated(conn, t + "_chash_octet_check"))
-                            .as("%s octet CHECK stays NOT VALID at boot (client rung validates)", t)
+                            .as("%s's own octet CHECK died with its table at the unify DROP", t)
                             .isFalse();
                     }
+                    assertThat(constraintExists(conn, "catalog_document_chunks_chash_len_check"))
+                        .as("catalog_document_chunks_chash_len_check gone post-rdr180-2 "
+                            + "(unaffected by the chunks unify)")
+                        .isFalse();
+                    assertThat(constraintExists(conn, "catalog_document_chunks_chash_octet_check"))
+                        .as("catalog_document_chunks_chash_octet_check present post-rdr180-11 "
+                            + "(unaffected by the chunks unify)")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "catalog_document_chunks_chash_octet_check"))
+                        .as("catalog_document_chunks octet CHECK stays NOT VALID at boot")
+                        .isFalse();
 
                     // Phase F (nexus-boz39 round-2 gap): prove catalog-013-2 was
                     // MARK_RAN, not soft-failed-and-still-pending -- the property
@@ -564,6 +607,13 @@ class SchemaMigratorIntegrationTest {
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
                 su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
                 su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
+                // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
+                // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
+                // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc,
+                // and PostgreSQL refuses that GRANT unless the migration role already holds
+                // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
+                // the falsification proof of this exact prerequisite.
+                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
@@ -624,24 +674,41 @@ class SchemaMigratorIntegrationTest {
                     .as("migration must not crash-loop when chash_index_chash_len_check is missing on an aged box")
                     .doesNotThrowAnyException();
 
-                // Phase E (RDR-180 era): the chain now also carries rdr180-2
-                // (drops every len_check — the divergence included, via DROP
-                // IF EXISTS) and rdr180-11 (octet successors, NOT VALID at
-                // boot). Uniform end-state regardless of the divergence.
+                // Phase E (RDR-180 era, RE-DERIVED for RDR-191 unify): the
+                // chain now also carries rdr180-2 (drops every len_check —
+                // the divergence included, via DROP IF EXISTS), rdr180-11
+                // (octet successors, NOT VALID at boot), AND vectors-004-1
+                // (chunks_384/768/1024 collapsed into ONE nexus.chunks via
+                // DROP TABLE ... CASCADE — their per-table octet CHECKs die
+                // with them). See test 5's Phase E for the full derivation;
+                // the chash_index divergence injected above is unrelated to
+                // this table set and does not change the end-state here.
                 try (Connection conn = agedDs.getConnection()) {
-                    for (String t : new String[] {
-                        "chunks_384", "chunks_768", "chunks_1024",
-                        "catalog_document_chunks"}) {
+                    assertThat(constraintExists(conn, "chunks_chash_octet_check"))
+                        .as("unified nexus.chunks carries the octet CHECK post-RDR-191-unify")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "chunks_chash_octet_check"))
+                        .as("chunks_chash_octet_check stays NOT VALID at boot (client rung validates)")
+                        .isFalse();
+                    for (String t : new String[] {"chunks_384", "chunks_768", "chunks_1024"}) {
                         assertThat(constraintExists(conn, t + "_chash_len_check"))
-                            .as("%s_chash_len_check gone post-rdr180-2 (divergence tolerated)", t)
+                            .as("%s no longer exists post-vectors-004-1 unify -- no len_check to find", t)
                             .isFalse();
                         assertThat(constraintExists(conn, t + "_chash_octet_check"))
-                            .as("%s_chash_octet_check present post-rdr180-11", t)
-                            .isTrue();
-                        assertThat(constraintValidated(conn, t + "_chash_octet_check"))
-                            .as("%s octet CHECK stays NOT VALID at boot (client rung validates)", t)
+                            .as("%s's own octet CHECK died with its table at the unify DROP", t)
                             .isFalse();
                     }
+                    assertThat(constraintExists(conn, "catalog_document_chunks_chash_len_check"))
+                        .as("catalog_document_chunks_chash_len_check gone post-rdr180-2 "
+                            + "(unaffected by the chunks unify)")
+                        .isFalse();
+                    assertThat(constraintExists(conn, "catalog_document_chunks_chash_octet_check"))
+                        .as("catalog_document_chunks_chash_octet_check present post-rdr180-11 "
+                            + "(unaffected by the chunks unify)")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "catalog_document_chunks_chash_octet_check"))
+                        .as("catalog_document_chunks octet CHECK stays NOT VALID at boot")
+                        .isFalse();
 
                     // Phase F (nexus-boz39 round-2 gap): same MARK_RAN proof as test 5.
                     assertThat(changesetExecType(conn, "catalog-013-2", "nexus-e0hd2",
@@ -659,12 +726,15 @@ class SchemaMigratorIntegrationTest {
     // ── Test 7: happy path — fresh box validates all five chash constraints ──
 
     /**
-     * Verification gate 3 (nexus-4m6i0.1 lineage, RDR-180 era): the happy
-     * path on a fresh box. The TEXT-era len_check lifecycle (added, then
-     * VALIDATEd by catalog-013) is retired by rdr180-2; the octet
-     * successors exist NOT VALID (validated only by the client rung's
-     * admin connection, post-rekey — never at boot). A defensive
-     * re-migrate stays idempotent.
+     * Verification gate 3 (nexus-4m6i0.1 lineage, RDR-180 era, RE-DERIVED for
+     * RDR-191 Phase 4 unify): the happy path on a fresh box. The TEXT-era
+     * len_check lifecycle (added, then VALIDATEd by catalog-013) is retired
+     * by rdr180-2; the octet successors exist NOT VALID (validated only by
+     * the client rung's admin connection, post-rekey — never at boot). On
+     * top of that, vectors-004-1 collapses chunks_384/768/1024 into ONE
+     * nexus.chunks table (DROP TABLE ... CASCADE), so the three per-table
+     * octet CHECKs are also gone, replaced by a single unified
+     * chunks_chash_octet_check. A defensive re-migrate stays idempotent.
      */
     @Test
     @Order(7)
@@ -672,15 +742,22 @@ class SchemaMigratorIntegrationTest {
         SchemaMigrator.migrate(adminDs); // defensive re-migrate; idempotent
 
         try (Connection conn = adminDs.getConnection()) {
-            for (String t : new String[] {
-                "chunks_384", "chunks_768", "chunks_1024",
-                "catalog_document_chunks"}) {
+            // Unified nexus.chunks (RDR-191 Phase 4): ONE octet CHECK, still
+            // NOT VALID at boot, in place of the three per-dim CHECKs.
+            assertThat(constraintExists(conn, "chunks_chash_octet_check")).isTrue();
+            assertThat(constraintValidated(conn, "chunks_chash_octet_check")).isFalse();
+            // The three per-dim tables no longer exist -- no constraints of
+            // any era survive them.
+            for (String t : new String[] {"chunks_384", "chunks_768", "chunks_1024"}) {
                 assertThat(constraintExists(conn, t + "_chash_len_check")).isFalse();
-                assertThat(constraintExists(conn, t + "_chash_octet_check")).isTrue();
-                assertThat(constraintValidated(conn, t + "_chash_octet_check")).isFalse();
+                assertThat(constraintExists(conn, t + "_chash_octet_check")).isFalse();
             }
-            // RDR-187 (nexus-piwya.9): the fifth table died at the DROP —
-            // no chash_index, no constraints of any era.
+            // catalog_document_chunks is untouched by the unify.
+            assertThat(constraintExists(conn, "catalog_document_chunks_chash_len_check")).isFalse();
+            assertThat(constraintExists(conn, "catalog_document_chunks_chash_octet_check")).isTrue();
+            assertThat(constraintValidated(conn, "catalog_document_chunks_chash_octet_check")).isFalse();
+            // RDR-187 (nexus-piwya.9): chash_index died at the DROP —
+            // no constraints of any era.
             assertThat(constraintExists(conn, "chash_index_chash_octet_check")).isFalse();
             assertThat(constraintExists(conn, "chash_index_chash_len_check")).isFalse();
         }
@@ -733,6 +810,13 @@ class SchemaMigratorIntegrationTest {
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
                 su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
                 su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
+                // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
+                // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
+                // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc,
+                // and PostgreSQL refuses that GRANT unless the migration role already holds
+                // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
+                // the falsification proof of this exact prerequisite.
+                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
@@ -795,28 +879,43 @@ class SchemaMigratorIntegrationTest {
                         + "missing on an aged box")
                     .doesNotThrowAnyException();
 
-                // Phase E: the other four fk-002 collection FKs must end up VALIDATED
-                // (each via its OWN independently-guarded changeset, fk-002-8..11);
-                // the dropped one must simply stay absent (never silently re-added,
-                // never fatal).
+                // Phase E (RE-DERIVED for RDR-191 unify): fk-002-8..11 still
+                // independently VALIDATE chunks_768/1024_collection_fk and the
+                // other collection FKs at the point they run -- unaffected by
+                // chunks_384's divergence, exactly as before. But vectors-004-1
+                // runs LATER in the same chain and DROPs chunks_384/768/1024 via
+                // CASCADE, and a constraint cannot outlive its table: EVERY
+                // fk-002 collection FK on the three per-dim tables is gone by
+                // the time this assertion runs, the validated ones included.
+                // NO COLLECTION FK IS ADDED ON nexus.chunks IN THIS BATCH (S3,
+                // T2 [22436] -- deliberately deferred to Phase 5, beads
+                // nexus-o8dil.29/.31), so the unified table carries ZERO
+                // collection-FK enforcement at this point in the rollout.
+                // topic_assignments is untouched by the unify and keeps its FK.
                 try (Connection conn = agedDs.getConnection()) {
-                    assertThat(constraintValidated(conn, "chunks_768_collection_fk"))
-                        .as("chunks_768_collection_fk must be validated despite "
-                            + "chunks_384's divergence")
-                        .isTrue();
-                    assertThat(constraintValidated(conn, "chunks_1024_collection_fk"))
-                        .as("chunks_1024_collection_fk must be validated despite "
-                            + "chunks_384's divergence")
-                        .isTrue();
-                    // (chash_index_collection_fk died with its table at HEAD —
-                    // RDR-187/nexus-piwya.9; asserted absent below with the rest.)
+                    assertThat(constraintExists(conn, "chunks_768_collection_fk"))
+                        .as("chunks_768_collection_fk died with its table at the "
+                            + "vectors-004-1 unify DROP, despite having been "
+                            + "independently validated by fk-002-8 earlier in the chain")
+                        .isFalse();
+                    assertThat(constraintExists(conn, "chunks_1024_collection_fk"))
+                        .as("chunks_1024_collection_fk died with its table at the "
+                            + "vectors-004-1 unify DROP, despite having been "
+                            + "independently validated by fk-002-9 earlier in the chain")
+                        .isFalse();
+                    // (chash_index_collection_fk died with its table even
+                    // earlier — RDR-187/nexus-piwya.9; asserted absent below.)
                     assertThat(constraintValidated(conn, "topic_assignments_collection_fk"))
                         .as("topic_assignments_collection_fk must be validated despite "
-                            + "chunks_384's divergence")
+                            + "chunks_384's divergence -- topic_assignments is untouched "
+                            + "by the chunks unify")
                         .isTrue();
                     assertThat(constraintExists(conn, "chunks_384_collection_fk"))
                         .as("the dropped chunks_384_collection_fk must remain absent, "
-                            + "not silently re-added")
+                            + "not silently re-added -- doubly so once its table is gone")
+                        .isFalse();
+                    assertThat(constraintExists(conn, "chash_index_collection_fk"))
+                        .as("chash_index_collection_fk absent -- RDR-187/nexus-piwya.9")
                         .isFalse();
 
                     // Phase F: prove fk-002-7 was MARK_RAN, not soft-failed-and-still-pending
@@ -838,11 +937,19 @@ class SchemaMigratorIntegrationTest {
     // ── Test 9: happy path — fresh box validates all ten fk-002/fk-003 collection FKs ──
 
     /**
-     * nexus-4m6i0.13 verification gate: the fk-002-7..11/fk-003-7..11 preConditions
-     * retrofit must not change happy-path behavior. On a fresh box where all ten
-     * collection FK constraints exist (the {@link #adminDs} fixture, already migrated
-     * end-to-end by {@code @Order(1)}), every one must end up {@code
-     * convalidated = true}.
+     * nexus-4m6i0.13 verification gate (RE-DERIVED for RDR-191 Phase 4 unify): the
+     * fk-002-7..11/fk-003-7..11 preConditions retrofit must not change happy-path
+     * behavior for the constraints that still exist. On a fresh box (the
+     * {@link #adminDs} fixture, already migrated end-to-end by {@code @Order(1)}),
+     * fk-002-8..11 DO independently validate chunks_768/1024_collection_fk
+     * mid-chain, exactly as before -- but vectors-004-1 runs later in the SAME
+     * chain and DROPs chunks_384/768/1024 via CASCADE, taking every fk-002
+     * collection FK on those three tables down with them (a constraint cannot
+     * outlive its table). No collection FK is added on nexus.chunks in this
+     * batch (deliberately deferred to Phase 5, beads nexus-o8dil.29/.31), so by
+     * the time this test's end-state is observed, ZERO of the three per-dim
+     * collection FKs survive -- only the six FKs on tables the unify never
+     * touched remain to validate.
      */
     @Test
     @Order(9)
@@ -850,12 +957,16 @@ class SchemaMigratorIntegrationTest {
         SchemaMigrator.migrate(adminDs); // defensive re-migrate; idempotent
 
         try (Connection conn = adminDs.getConnection()) {
-            assertThat(constraintValidated(conn, "chunks_384_collection_fk")).isTrue();
-            assertThat(constraintValidated(conn, "chunks_768_collection_fk")).isTrue();
-            assertThat(constraintValidated(conn, "chunks_1024_collection_fk")).isTrue();
+            // The three per-dim collection FKs died with their tables at the
+            // vectors-004-1 unify DROP, despite having been independently
+            // validated by fk-002-7..9 earlier in the same chain.
+            assertThat(constraintExists(conn, "chunks_384_collection_fk")).isFalse();
+            assertThat(constraintExists(conn, "chunks_768_collection_fk")).isFalse();
+            assertThat(constraintExists(conn, "chunks_1024_collection_fk")).isFalse();
             // RDR-187 (nexus-piwya.9): chash_index_collection_fk died with its
-            // table — nine surviving collection FKs validate; absence asserted.
+            // table even earlier.
             assertThat(constraintExists(conn, "chash_index_collection_fk")).isFalse();
+            // The six collection FKs on tables the unify never touched.
             assertThat(constraintValidated(conn, "topic_assignments_collection_fk")).isTrue();
             assertThat(constraintValidated(conn, "document_aspects_collection_fk")).isTrue();
             assertThat(constraintValidated(conn, "aspect_extraction_queue_collection_fk")).isTrue();
@@ -914,6 +1025,13 @@ class SchemaMigratorIntegrationTest {
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
                 su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
                 su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
+                // nexus-hzhgl: mirrors pg_provision.py's bootstrap-only GRANT pg_monitor TO
+                // nexus_admin WITH ADMIN OPTION -- required since grants-004-monitor-wal-
+                // visibility (grants-nexus-svc.xml) grants pg_monitor onward to nexus_svc,
+                // and PostgreSQL refuses that GRANT unless the migration role already holds
+                // pg_monitor WITH ADMIN OPTION (or is superuser). See GrantsPgMonitorTest for
+                // the falsification proof of this exact prerequisite.
+                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
                 su.createStatement().execute(
                     "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
                         + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
@@ -1085,6 +1203,28 @@ class SchemaMigratorIntegrationTest {
      *
      * <p>Cumulative stats reporting is asynchronous (shared memory since PG 15),
      * so poll briefly instead of asserting a single read.
+     *
+     * <p><strong>RE-DERIVED for RDR-191 Phase 4 unify — KNOWN GAP, nexus-97gii.</strong>
+     * chunks_384/768/1024 no longer exist (vectors-004-1 collapses them into
+     * nexus.chunks via CREATE + bulk INSERT...SELECT + DROP ... CASCADE), so
+     * this test's own explicit-ANALYZE invariant now targets nexus.chunks in
+     * their place. Unlike rdr180-001-bytea-chash.xml's {@code ALTER COLUMN
+     * TYPE} rewrite of the (by-then populated) per-dim tables — which pairs
+     * an explicit {@code ANALYZE nexus.chunks_384/768/1024;} in the SAME
+     * changeset — vectors-004-1 creates nexus.chunks fresh and bulk-copies
+     * into it but runs no explicit ANALYZE at all (confirmed: no
+     * {@code ANALYZE nexus.chunks;} appears anywhere under
+     * {@code db/changelog/}). That is the identical BUG-0148 risk shape this
+     * whole test exists to catch, just via "never populated" rather than
+     * "reset to stale": with default {@code autovacuum_naptime} (60s) autoanalyze
+     * is not guaranteed within this test's 10s poll window, and in production
+     * the first post-migration queries against a 384k+-row table can run
+     * planned against NULL statistics. Filed as nexus-97gii (fix: add an
+     * explicit {@code ANALYZE nexus.chunks;} to vectors-004-1, e.g. after step
+     * 5's index builds) — out of this lane's edit surface (vectors-004-1.xml
+     * belongs to Step A, already landed). This assertion pins the TRUE target
+     * contract rather than being narrowed to the tables that still exist, so
+     * it stays RED until nexus-97gii lands.
      */
     @Test
     @Order(11)
@@ -1092,10 +1232,10 @@ class SchemaMigratorIntegrationTest {
         SchemaMigrator.migrate(adminDs);  // defensive; idempotent
 
         // (chash_index left the set — RDR-187/nexus-piwya.9: dropped at HEAD,
-        // so it can carry no statistics at all.)
+        // so it can carry no statistics at all. chunks_384/768/1024 left the
+        // set — RDR-191 Phase 4: collapsed into "chunks", see nexus-97gii.)
         Set<String> expected = Set.of(
-            "chunks_384", "chunks_768", "chunks_1024",
-            "catalog_document_chunks");
+            "chunks", "catalog_document_chunks");
 
         Set<String> analyzed = new HashSet<>();
         long deadline = System.nanoTime() + java.time.Duration.ofSeconds(10).toNanos();

@@ -138,7 +138,7 @@ class ReferenceOnlyChunkUpsertTest {
      */
     @Test
     void dimMismatch_failsLoud() {
-        float[] wrongDimVec = new float[768]; // COL dispatches to chunks_1024
+        float[] wrongDimVec = new float[768]; // COL dispatches to embedding_1024
 
         assertThatThrownBy(() ->
             repo.upsertReferenceOnlyChunk(TENANT, COL, NEW_CHASH, wrongDimVec, Map.of()))

@@ -291,7 +291,8 @@ class VectorHandlerTokenUsageTest {
      *
      * <p>Produces fixed unit vectors (identical to {@link PgVectorRepositoryContractTest.FakeEmbedder}
      * for known texts, 1-hot for unknown). The model token is {@code "minilm-l6-v2-384"}
-     * so it routes to the {@code chunks_384} table without Voyage credentials.
+     * so it routes to the {@code embedding_384} column of the unified
+     * {@code nexus.chunks} table without Voyage credentials.
      */
     static final class TokenReportingEmbedder implements Embedder {
 
@@ -312,7 +313,7 @@ class VectorHandlerTokenUsageTest {
 
         @Override
         public String modelToken() {
-            // minilm-l6-v2-384: dispatches to chunks_384; no Voyage credentials needed.
+            // minilm-l6-v2-384: dispatches to embedding_384; no Voyage credentials needed.
             return "minilm-l6-v2-384";
         }
 

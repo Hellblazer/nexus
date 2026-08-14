@@ -302,18 +302,24 @@ public final class TenantScope {
      * strings; every caller today passes a {@code static final} constant, but this set
      * is the only durable guard against a future caller passing a request-derived name.
      *
-     * <p>LOCKSTEP (nexus-0ys55): must name the SAME five tables as {@code
+     * <p>LOCKSTEP (nexus-0ys55): must name the SAME three tables as {@code
      * CatalogRepository.PURGE_VACUUM_TABLES} (the only caller today) and the
-     * {@code grants-003-purge-vacuum-maintain} changeset in {@code
+     * {@code grants-005-chunks-unify-maintain} changeset in {@code
      * grants-nexus-svc.xml} (the MAINTAIN grant that makes a real vacuum possible
      * for the {@code nexus_svc} role this allowlist is otherwise silently pointless
      * for). {@code TenantScopeVacuumMaintainGrantParityTest} pins the Java-side half
-     * of that agreement; the changelog comment points back here. Package-private
+     * of that agreement AND cross-checks the changelog text directly. Package-private
      * (not private) so that test can read it directly.
+     *
+     * <p>RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-o8dil.48 part 2):
+     * {@code nexus.chunks_384/768/1024} collapsed into ONE unified {@code
+     * nexus.chunks} table — the five-table allowlist ({@code grants-003}'s
+     * frozen list, superseded by {@code grants-005}) is now three tables. See
+     * {@code vectors-004-unify-chunks.xml}'s header for the grants-boot-brick
+     * analysis that motivated {@code grants-005}.
      */
     static final Set<String> VACUUM_ALLOWED_TABLES = Set.of(
-        "nexus.chunks_384", "nexus.chunks_768", "nexus.chunks_1024",
-        "nexus.catalog_document_chunks", "nexus.catalog_documents");
+        "nexus.chunks", "nexus.catalog_document_chunks", "nexus.catalog_documents");
 
     /**
      * Runs {@code VACUUM (ANALYZE)} on each of {@code qualifiedTableNames}, one

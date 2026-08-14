@@ -39,6 +39,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 class CatalogFtsFilenameSearchTest {
 
     private static final String TENANT = "fts-fname-tenant";
+    // RDR-191: manifest writers require an explicit collection now — these
+    // two indexed_at tests don't exercise collection semantics, so any
+    // valid, non-blank value works.
+    private static final String COLLECTION = "knowledge__fts-fname__voyage-context-3__v1";
 
     PostgreSQLContainer<?> pg;
     com.zaxxer.hikari.HikariDataSource ds;
@@ -160,7 +164,7 @@ class CatalogFtsFilenameSearchTest {
             "indexed_at", "2026-07-09T17:42:10+00:00"));
         assertThat(indexedAtOf(doc)).isEqualTo("2026-07-09T17:42:10+00:00");
 
-        repo.appendManifestChunks(TENANT, doc, List.of(Map.of(
+        repo.appendManifestChunks(TENANT, doc, COLLECTION, List.of(Map.of(
             "position", 0, "chash", "c".repeat(64), "chunk_index", 0,
             "line_start", 1, "line_end", 10, "char_start", 0, "char_end", 100)));
         String after = indexedAtOf(doc);
@@ -178,10 +182,10 @@ class CatalogFtsFilenameSearchTest {
             "indexed_at", "2026-07-09T17:42:10+00:00"));
 
         // Empty REPLACE (a clear) is not an indexing event — no stamp.
-        repo.writeManifest(TENANT, doc, List.of());
+        repo.writeManifest(TENANT, doc, COLLECTION, List.of());
         assertThat(indexedAtOf(doc)).isEqualTo("2026-07-09T17:42:10+00:00");
 
-        repo.writeManifest(TENANT, doc, List.of(Map.of(
+        repo.writeManifest(TENANT, doc, COLLECTION, List.of(Map.of(
             "position", 0, "chash", "d".repeat(64), "chunk_index", 0,
             "line_start", 1, "line_end", 5, "char_start", 0, "char_end", 50)));
         assertThat(indexedAtOf(doc)).isNotEqualTo("2026-07-09T17:42:10+00:00");

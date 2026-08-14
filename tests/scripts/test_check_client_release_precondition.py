@@ -23,7 +23,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 class TestLogic:
     def test_no_preconditions_registered_is_ok(self, capsys):
         assert gate.check("engine-service-v0.0.0-nonexistent") == 0
-        assert "no client-release preconditions" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        # nexus-f9z84: exit 0 stays correct for an empty registry, but the
+        # message must be unmistakable that NOTHING was verified -- not
+        # readable as "checked and found safe".
+        assert "VACUOUS" in out
+        assert "0 preconditions" in out
+        assert "verified NOTHING" in out
 
     def test_registered_tag_blocks_when_commit_unreleased(self, monkeypatch, capsys):
         monkeypatch.setattr(gate, "latest_release_tag", lambda: "v0.0.1")
@@ -115,24 +121,62 @@ class TestStalePreconditionRowsDoNotOutliveTheFloor:
     survived the 2026-08-02 floor bump, pinned in place by its own test) —
     the same stale-interim-exception shape
     TestMvvAllowlistDoesNotOutliveItsTrigger and
-    TestSmokeLegDiscriminatorDoesNotOutliveItsPower exist to kill."""
+    TestSmokeLegDiscriminatorDoesNotOutliveItsPower exist to kill.
+
+    nexus-f9z84: the ORIGINAL ``test_every_row_names_an_engine_ahead_of_the_floor``
+    looped ``gate.ENGINE_CLIENT_PRECONDITIONS`` directly — an almost-always-empty
+    dict, so the loop body ran zero times and the test passed unconditionally
+    regardless of whether the comparison logic worked at all ("the mechanized
+    version is now in the state the prose version was in"). It is kept below
+    (still a real, valuable regression pin on the LIVE table), but is now
+    joined by tests against :func:`gate.stale_precondition_rows` with an
+    INJECTED table — proving the detector can actually produce a non-empty,
+    correct result, not just an unconditional pass.
+    """
 
     def test_every_row_names_an_engine_ahead_of_the_floor(self):
         from nexus.engine_version import REQUIRED_ENGINE_VERSION
 
-        for tag in gate.ENGINE_CLIENT_PRECONDITIONS:
-            if tag == "next":  # the about-to-be-cut sentinel is always ahead
-                continue
-            version = tuple(
-                int(n) for n in tag.removeprefix("engine-service-v").split(".")
-            )
-            assert version > REQUIRED_ENGINE_VERSION, (
-                f"ENGINE_CLIENT_PRECONDITIONS row {tag!r} is at or behind the "
-                f"pinned floor {REQUIRED_ENGINE_VERSION} — the deploy it gated "
-                "has already happened and every subsequent release supersets "
-                "its required commits. Delete the row (record it in the "
-                "docstring's pruned-rows list) per the module contract."
-            )
+        stale = gate.stale_precondition_rows()
+        assert stale == [], (
+            f"ENGINE_CLIENT_PRECONDITIONS row(s) {stale!r} are at or behind "
+            f"the pinned floor {REQUIRED_ENGINE_VERSION} — the deploy they "
+            "gated has already happened and every subsequent release "
+            "supersets their required commits. Delete the row(s) (record "
+            "in the docstring's pruned-rows list) per the module contract."
+        )
+
+    def test_detector_actually_fires_on_a_planted_stale_row(self):
+        """The non-vacuity proof: an INJECTED table with a row at/behind an
+        injected floor must come back as stale — demonstrating the
+        comparison logic runs and works, independent of whatever the real
+        (usually empty) table currently holds."""
+        floor = (0, 1, 71)
+        planted = {
+            "engine-service-v0.1.70": {"deadbeef": "at the floor minus one"},
+            "engine-service-v0.1.71": {"beadfeed": "exactly at the floor"},
+            "engine-service-v0.1.99": {"c0ffee00": "still ahead of the floor"},
+            "next": {"f00dface": "the always-ahead sentinel"},
+        }
+        stale = gate.stale_precondition_rows(table=planted, floor=floor)
+        assert set(stale) == {"engine-service-v0.1.70", "engine-service-v0.1.71"}
+
+    def test_detector_reports_nothing_stale_when_all_rows_are_ahead(self):
+        floor = (0, 1, 71)
+        planted = {"engine-service-v0.1.72": {"deadbeef": "ahead"}}
+        assert gate.stale_precondition_rows(table=planted, floor=floor) == []
+
+    def test_detector_defaults_to_the_live_table_and_pinned_floor(self):
+        """Wiring check: the no-argument call path (what the pytest test
+        above and any future caller actually uses) must reach the SAME
+        module-level table and floor as explicit args would — a signature
+        that silently ignored its defaults would make the two tests above
+        prove nothing about the code path that runs in CI."""
+        from nexus.engine_version import REQUIRED_ENGINE_VERSION
+
+        assert gate.stale_precondition_rows() == gate.stale_precondition_rows(
+            table=gate.ENGINE_CLIENT_PRECONDITIONS, floor=REQUIRED_ENGINE_VERSION,
+        )
 
 
 class TestWiring:

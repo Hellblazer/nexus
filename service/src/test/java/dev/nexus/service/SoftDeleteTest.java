@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.vectors.DimTables;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -49,15 +50,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  *       is non-empty and RAISEs with a message mentioning "tenant" when unset.
  *       Physically DELETEs catalog_documents rows WHERE deleted_at &lt;= NOW() - older_than
  *       (the fk-001 ON DELETE CASCADE then fires, removing manifest/aspects/highlights).
- *       Then sweeps orphaned chunk rows: a row in {@code nexus.chunks_<dim>} is
+ *       Then sweeps orphaned chunk rows: a row in {@code nexus.chunks} is
  *       removable only when NO live (deleted_at IS NULL) manifest row references its
  *       chash for the same tenant — anti-join against catalog_document_chunks ⋈
  *       catalog_documents WHERE deleted_at IS NULL. Returns count of documents purged.</li>
  *   <li>View {@code nexus.live_chunks}: SECURITY INVOKER anti-join — excludes chunk rows
  *       whose only referencing manifest rows belong to tombstoned documents. Consumers
- *       never see a {@code deleted_at} column from this view. Selects from
- *       {@code nexus.chunks_384} (the primary dimension table used in tests; the full
- *       view covers all three dim tables or is dim-parametric — pin the 384 contract).</li>
+ *       never see a {@code deleted_at} column from this view. Selects from the unified
+ *       {@code nexus.chunks} table (RDR-191 Phase 4; formerly a three-way UNION ALL over
+ *       chunks_384/768/1024 — tests here pin the 384-dim fixture case).</li>
  * </ul>
  *
  * <p><strong>Pinned contracts P1.2 MUST honor (derived from test assertions below):</strong>
@@ -76,8 +77,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  *       is NOT purged.</li>
  *   <li><em>purge_trash orphan sweep</em>: a chunk row referenced by at least one LIVE
  *       (non-tombstoned) document's manifest is NOT swept — shared-chash safety.</li>
- *   <li><em>live_chunks view</em>: selects from {@code nexus.chunks_384} (at minimum);
- *       exposes chunk columns but NOT {@code deleted_at}; a chunk whose only manifest
+ *   <li><em>live_chunks view</em>: selects from the unified {@code nexus.chunks} table
+ *       (dim=384 fixture case, at minimum); exposes chunk columns but NOT {@code deleted_at};
+ *       a chunk whose only manifest
  *       reference is a tombstoned doc is absent from the view; a shared chunk with a live
  *       doc is present.</li>
  *   <li><em>RLS trash contract</em>: calling {@code document_trash(tumbler)} via svc-role
@@ -105,8 +107,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  *       catalog_document_chunks, document_aspects (FK: fk_doc_aspects_catalog_doc),
  *       document_highlights (FK: fk_doc_highlights_catalog_doc),
  *       aspect_extraction_queue (FK: fk_aspect_queue_catalog_doc).</li>
- *   <li>fk-002 (post-P0): chunks_384/768/1024(tenant_id,collection) → catalog_collections NOT VALID
- *       ON DELETE RESTRICT. This means chunk rows require a registered collection.
+ *   <li>fk-002 (post-P0, RDR-191 Phase 5 pending -- NOT yet on the unified nexus.chunks
+ *       as of this bead, see vectors-004-unify-chunks.xml's own S3 note):
+ *       nexus.chunks(tenant_id,collection) → catalog_collections NOT VALID
+ *       ON DELETE RESTRICT, eventually. Fixtures register the collection first regardless,
+ *       forward-compatible with whenever that FK ships.
  *       Chunk inserts in fixtures MUST go via superuser (BYPASSRLS) AND must register the
  *       collection first to satisfy fk-002.</li>
  *   <li>catalog_document_chunks.chash is 32 chars (catalog-002-hygiene CHECK, NOT VALID).
@@ -210,13 +215,14 @@ class SoftDeleteTest {
                     "catalog_document_chunks",
                     "document_aspects",
                     "document_highlights",
-                    "aspect_extraction_queue",
-                    "chunks_384",
-                    "chunks_768",
-                    "chunks_1024")) {
+                    "aspect_extraction_queue")) {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
             }
+            // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
+            // a single GRANT now covers what three did.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT USAGE ON SEQUENCE nexus.document_aspects_id_seq TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -315,10 +321,11 @@ class SoftDeleteTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, tumbler);
+            insertCollection(su, TENANT_A, "knowledge__sd-tomb__v1");
 
             // 2 manifest rows — post-P0: needs 32-char chash
-            insertManifestRow(su, TENANT_A, tumbler, 0, validChash("tomb-chunk-0"));
-            insertManifestRow(su, TENANT_A, tumbler, 1, validChash("tomb-chunk-1"));
+            insertManifestRow(su, TENANT_A, tumbler, 0, validChash("tomb-chunk-0"), "knowledge__sd-tomb__v1");
+            insertManifestRow(su, TENANT_A, tumbler, 1, validChash("tomb-chunk-1"), "knowledge__sd-tomb__v1");
 
             // 1 document_aspects row (fk-001 ON DELETE CASCADE target)
             insertAspectRow(su, TENANT_A, tumbler, "knowledge__sd-asp__v1", "sd-aspect-path-1");
@@ -456,14 +463,14 @@ class SoftDeleteTest {
 
             // Doc A (will be tombstoned)
             insertCatalogDocument(su, TENANT_A, tumblerA);
-            insertManifestRow(su, TENANT_A, tumblerA, 0, chashA);
-            insertManifestRow(su, TENANT_A, tumblerA, 1, chashShared);
+            insertManifestRow(su, TENANT_A, tumblerA, 0, chashA, COLLECTION_A);
+            insertManifestRow(su, TENANT_A, tumblerA, 1, chashShared, COLLECTION_A);
 
             // Doc B (live — keeps chash_shared alive)
             insertCatalogDocument(su, TENANT_A, tumblerB);
-            insertManifestRow(su, TENANT_A, tumblerB, 0, chashShared);
+            insertManifestRow(su, TENANT_A, tumblerB, 0, chashShared, COLLECTION_A);
 
-            // Insert the actual chunk rows into chunks_384
+            // Insert the actual chunk rows into nexus.chunks (embedding_384)
             insertChunk384(su, TENANT_A, COLLECTION_A, chashA,      "text for chunk A only");
             insertChunk384(su, TENANT_A, COLLECTION_A, chashShared, "shared chunk text");
         }
@@ -518,7 +525,7 @@ class SoftDeleteTest {
 
             // The surviving chunk must be chash_shared
             ResultSet rsChunk = su.createStatement().executeQuery(
-                "SELECT encode(chash, 'hex') AS chash FROM nexus.chunks_384 " +
+                "SELECT encode(chash, 'hex') AS chash FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
                 "WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + COLLECTION_A + "'");
             assertThat(rsChunk.next()).isTrue();
             assertThat(rsChunk.getString("chash"))
@@ -586,7 +593,8 @@ class SoftDeleteTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, tumbler);
-            insertManifestRow(su, TENANT_A, tumbler, 0, validChash("age-filter-chunk0"));
+            insertCollection(su, TENANT_A, "knowledge__sd-age__v1");
+            insertManifestRow(su, TENANT_A, tumbler, 0, validChash("age-filter-chunk0"), "knowledge__sd-age__v1");
             insertAspectRow(su, TENANT_A, tumbler, "knowledge__sd-age__v1", "sd-age-asp-path-1");
         }
 
@@ -654,11 +662,11 @@ class SoftDeleteTest {
             insertCollection(su, TENANT_A, COLLECTION_B);
 
             insertCatalogDocument(su, TENANT_A, tumblerX);
-            insertManifestRow(su, TENANT_A, tumblerX, 0, chashOrphan);
-            insertManifestRow(su, TENANT_A, tumblerX, 1, chashLive);
+            insertManifestRow(su, TENANT_A, tumblerX, 0, chashOrphan, COLLECTION_B);
+            insertManifestRow(su, TENANT_A, tumblerX, 1, chashLive, COLLECTION_B);
 
             insertCatalogDocument(su, TENANT_A, tumblerY);
-            insertManifestRow(su, TENANT_A, tumblerY, 0, chashLive);
+            insertManifestRow(su, TENANT_A, tumblerY, 0, chashLive, COLLECTION_B);
 
             insertChunk384(su, TENANT_A, COLLECTION_B, chashOrphan, "orphan chunk text");
             insertChunk384(su, TENANT_A, COLLECTION_B, chashLive,   "live shared chunk text");
@@ -833,7 +841,7 @@ class SoftDeleteTest {
         // Verify the chunk exists and has NO manifest rows (precondition)
         try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.chunks_384 " +
+                "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
                 "WHERE tenant_id = '" + TENANT_A + "' AND chash = decode('" + manifestlessChash + "', 'hex')");
             rs.next();
             assertThat(rs.getInt(1))
@@ -860,7 +868,7 @@ class SoftDeleteTest {
         // Assert: the manifest-less chunk MUST still exist (exact == 1)
         try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.chunks_384 " +
+                "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
                 "WHERE tenant_id = '" + TENANT_A + "' AND chash = decode('" + manifestlessChash + "', 'hex')");
             rs.next();
             assertThat(rs.getInt(1))
@@ -1108,10 +1116,11 @@ class SoftDeleteTest {
      * doc_id is the tumbler of the parent catalog_documents row (fk-001 FK).
      */
     private static void insertManifestRow(Connection su, String tenantId, String docId,
-                                           int position, String chash) throws Exception {
+                                           int position, String chash, String collection) throws Exception {
         su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", decode('" + chash + "', 'hex')) " +
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
+            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", decode('" + chash + "', 'hex'), '"
+            + collection + "') " +
             "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
     }
 
@@ -1134,14 +1143,15 @@ class SoftDeleteTest {
     }
 
     /**
-     * Insert a chunks_384 row. Collection must be pre-registered (fk-002 NOT VALID FK).
-     * chash MUST be exactly 32 hex characters. PK: (tenant_id, collection, chash).
+     * Insert a nexus.chunks row with embedding_384 populated (RDR-191 unified;
+     * formerly a chunks_384 row). Collection must be pre-registered (fk-002 NOT VALID
+     * FK). chash MUST be exactly 32 hex characters. PK: (tenant_id, collection, chash).
      * Superuser insert bypasses FORCE RLS so direct fixture setup is possible.
      */
     private static void insertChunk384(Connection su, String tenantId, String collection,
                                         String chash, String chunkText) throws Exception {
         su.createStatement().execute(
-            "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
             "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chash + "', 'hex'), " +
             "'" + chunkText + "', " + vectorLiteral(384) + "::vector) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
@@ -1172,13 +1182,14 @@ class SoftDeleteTest {
     }
 
     /**
-     * Count chunks_384 rows for (tenantId, collection).
+     * Count nexus.chunks rows with embedding_384 populated for (tenantId, collection).
      */
     private static int countChunks384(Connection conn, String tenantId, String collection)
             throws Exception {
         ResultSet rs = conn.createStatement().executeQuery(
-            "SELECT COUNT(*) FROM nexus.chunks_384 " +
-            "WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'");
+            "SELECT COUNT(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " " +
+            "WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'" +
+            " AND " + DimTables.embeddingColumn(384) + " IS NOT NULL");
         rs.next();
         return rs.getInt(1);
     }

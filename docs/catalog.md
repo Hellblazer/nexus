@@ -167,7 +167,7 @@ The `traverse` MCP tool enforces mutual exclusion: passing both `link_types` and
 
 ## Topic taxonomy
 
-Nexus automatically discovers topic clusters across your indexed documents, labels them with human-readable names, and uses them to improve search quality. Topics live in T2 (SQLite); centroids are served through pgvector via `nexus-service` (`HttpCentroidStore`, one table per embedding dimension: `taxonomy_centroids_{384,768,1024}`) since RDR-155 P4a.2. Centroid **reads** (ANN assignment) go through pgvector; the discover/rebuild centroid-**write** helpers still use a raw-Chroma client for injected-client / legacy-ETL paths until RDR-155 P4b.
+Nexus automatically discovers topic clusters across your indexed documents, labels them with human-readable names, and uses them to improve search quality. Topics live in T2 (engine Postgres, `HttpTaxonomyStore`); centroids are served through pgvector via `nexus-service` (`HttpCentroidStore`, one unified `nexus.taxonomy_centroids` table with three nullable typed embedding columns since RDR-191 Phase 4 — previously three per-dim tables `taxonomy_centroids_{384,768,1024}`) since RDR-155 P4a.2. Centroid reads (ANN assignment) and writes both go through `HttpCentroidStore`; Chroma is not a live substrate in any mode (RDR-155 P4b, shipped 2026-07-25).
 
 ```bash
 nx taxonomy discover --all        # discover topics for all T3 collections
@@ -250,7 +250,7 @@ After `nx index repo` (or `nx taxonomy discover --all`):
 1. **Fetch embeddings** from each T3 collection
 2. **Cluster** via HDBSCAN density-based clustering (`min_cluster_size=5`)
 3. **Label** each cluster with c-TF-IDF keywords, refined via Claude haiku
-4. **Store** topics in T2 and centroids in pgvector (`taxonomy_centroids_{384,768,1024}`) via `nexus-service` (`HttpCentroidStore`, RDR-155 P4a.2)
+4. **Store** topics in T2 and centroids in pgvector (`nexus.taxonomy_centroids`, unified since RDR-191 Phase 4) via `nexus-service` (`HttpCentroidStore`, RDR-155 P4a.2)
 
 From then on, every `store_put` auto-assigns the new document to its nearest topic via centroid lookup, every search call boosts results sharing a topic cluster, and operator-curated labels survive rebuilds via centroid-matching merge (similarity > 0.8 transfers the old label).
 

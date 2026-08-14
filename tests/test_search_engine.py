@@ -922,7 +922,7 @@ class _FailingT3:
         if col in self._failing:
             raise VectorServiceError(
                 "POST /v1/vectors/search → HTTP 400: query embedder produced "
-                "a 1024-dim vector but the collections dispatch to chunks_384",
+                "a 1024-dim vector but the collections dispatch to the embedding_384 column",
             )
         return self._results.get(col, [])
 
@@ -1027,7 +1027,7 @@ class TestDimensionMismatchLoggingQuieted:
 
     _DIM_ERROR = (
         "POST /v1/vectors/search -> HTTP 400: query embedder produced a "
-        "1024-dim vector but the collection dispatches to chunks_384"
+        "1024-dim vector but the collection dispatches to the embedding_384 column"
     )
 
     def test_small_fraction_dimension_mismatch_downgraded_to_debug(self):

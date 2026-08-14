@@ -4,6 +4,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -32,13 +33,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * RDR-155 P1.1 (bead nexus-s7crg): RLS behavioral suite for pgvector {@code chunks_<dim>} tables.
+ * RDR-155 P1.1 (bead nexus-s7crg): RLS behavioral suite for the pgvector {@code nexus.chunks}
+ * table.
  *
- * <p><strong>TDD-RED: these tests are intentionally red until bead nexus-mf447 lands the
- * Liquibase changesets</strong> that create {@code nexus.chunks_384}, {@code nexus.chunks_768},
- * and {@code nexus.chunks_1024}. Every failure before nexus-mf447 ships should report
- * "relation nexus.chunks_NNN does not exist" (or the equivalent permission error when the
- * GRANT runs before the table exists). Compile must be green; runtime failures are expected.
+ * <p>RDR-191 Phase 4 (repoint-batch lane F1): {@code nexus.chunks_384/768/1024} are unified
+ * into ONE {@code nexus.chunks} table with three nullable {@code embedding_<dim>} columns
+ * (vectors-004-unify-chunks.xml) — the historical TDD-RED framing above (bead nexus-mf447,
+ * long since landed) is retired along with the per-dim table names. D1 semantic hazard: this
+ * suite's {@code @ParameterizedTest(ints = {384, 768, 1024})} methods reuse the SAME literal
+ * collection name across all three dim invocations (previously safe — each dim lived in its
+ * own physical table). Post-unification that would let one dim's row count bleed into
+ * another's unless every row-count query adds an {@code embedding_<dim> IS NOT NULL} guard —
+ * every counting helper below does so.
  *
  * <p><strong>Role discipline (bead nexus-5j7pb rationale):</strong> prior auth tests were
  * vacuous because they ran as a superuser or BYPASSRLS role that bypasses all RLS policies.
@@ -47,22 +53,23 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * connection is used only for schema setup and as a control to prove rows exist when RLS
  * should be hiding them.
  *
- * <p>Schema contract tested (P1.2 must implement exactly these columns and constraints):
+ * <p>Schema contract tested:
  * <ul>
- *   <li>Table: {@code nexus.chunks_384}, {@code nexus.chunks_768}, {@code nexus.chunks_1024}
+ *   <li>Table: {@code nexus.chunks} (unified; formerly {@code chunks_384/768/1024})
  *   <li>Column {@code tenant_id} TEXT NOT NULL
  *   <li>Column {@code collection} TEXT NOT NULL
- *   <li>Column {@code chash} TEXT NOT NULL
+ *   <li>Column {@code chash} BYTEA NOT NULL
  *   <li>Column {@code chunk_text} TEXT NOT NULL
- *   <li>Column {@code embedding} {@code vector(<dim>)} NOT NULL
+ *   <li>Columns {@code embedding_384}/{@code embedding_768}/{@code embedding_1024}
+ *       {@code vector(<dim>)}, nullable, exactly one populated per row
  *   <li>Primary key: {@code (tenant_id, collection, chash)}
  *   <li>RLS FORCE, policy: {@code USING (tenant_id = current_setting('nexus.tenant', true))}
  *   <li>WITH CHECK policy: {@code (tenant_id = current_setting('nexus.tenant', true))}
  *   <li>GUC: {@code nexus.tenant} (SET LOCAL via {@link TenantScope#withTenant})
  * </ul>
  *
- * <p>Deliberately NOT exercised here: the generated tsvector column and the HNSW index
- * (both part of the P1.2 schema per RDR-155 Approach, exercised by Phase 3 hybrid-search
+ * <p>Deliberately NOT exercised here: the generated tsvector column and the HNSW indexes
+ * (both part of the schema per RDR-155 Approach, exercised by Phase 3 hybrid-search
  * tests). The P1.G gate (nexus-cj7qu) must verify both are present in the landed schema
  * even though this suite does not touch them.
  *
@@ -71,7 +78,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ChunksRlsBehavioralTest {
 
-    // Dimensions under test (chunks_384, chunks_768, chunks_1024).
+    // Dimensions under test — all three now share ONE physical table
+    // (nexus.chunks), distinguished by which embedding_<dim> column is populated.
     private static final int[] DIMS = {384, 768, 1024};
 
     // Plain-LOGIN service role: NOSUPERUSER, NOT table owner, NO BYPASSRLS.
@@ -133,18 +141,13 @@ class ChunksRlsBehavioralTest {
         }
 
         // --- Step 3: grant nexus schema access + chunks-table DML to the svc role.
-        //     These GRANTs will throw "relation nexus.chunks_NNN does not exist" until
-        //     nexus-mf447 creates the tables. That is the intentional RED boundary: the
-        //     Liquibase apply above (which does NOT create chunks tables yet) succeeds;
-        //     the chunks-specific grants fail here and propagate through @BeforeAll so
-        //     every @Test in this class is marked as failing for the right reason.
+        //     RDR-191 Phase 4: a single GRANT on the unified nexus.chunks table now
+        //     covers what three per-dim GRANTs did.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            for (int dim : DIMS) {
-                su.createStatement().execute(
-                    "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chunks_" + dim + " TO " + SVC_ROLE);
-            }
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
             // RDR-156 P0.2: insertChunk now auto-stubs catalog_collections before chunk writes.
             su.createStatement().execute(
                 "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
@@ -190,23 +193,22 @@ class ChunksRlsBehavioralTest {
     @ParameterizedTest
     @ValueSource(ints = {384, 768, 1024})
     void failClosed_noGucStamp_seesZeroRows(int dim) throws Exception {
-        String table = "nexus.chunks_" + dim;
-
         // Seed 2 rows as tenant-a via TenantScope (SET LOCAL stamped, txn-local).
         insertChunk(dim, TENANT_A, COL_A, "chash-fc-1-" + dim, "text one", dim);
         insertChunk(dim, TENANT_A, COL_A, "chash-fc-2-" + dim, "text two", dim);
 
         // Superuser count: prove the rows are physically there (not empty table).
-        // Scoped to COL_A so sibling parameterized tests' rows in the same dim
-        // table cannot inflate the count (JUnit method ordering is undefined).
-        long suCount = superuserCount(table, COL_A);
+        // Scoped to COL_A + embedding_<dim> IS NOT NULL so sibling parameterized
+        // tests' rows for OTHER dims (same collection, unified table post-RDR-191)
+        // cannot inflate the count (JUnit method ordering is undefined).
+        long suCount = superuserCount(dim, COL_A);
         assertThat(suCount)
             .as("superuser must see the 2 seeded rows (rows exist, RLS is the guard)")
             .isEqualTo(2L);
 
         // Svc-role connection WITHOUT any GUC stamp: borrow a raw connection from the
         // pool and query without entering TenantScope (no set_config call).
-        long unstampedCount = unstampedSvcCount(table, COL_A);
+        long unstampedCount = unstampedSvcCount(dim, COL_A);
         assertThat(unstampedCount)
             .as("unstamped svc-role connection must see 0 rows (fail-closed RLS)")
             .isEqualTo(0L);
@@ -222,7 +224,6 @@ class ChunksRlsBehavioralTest {
     @ParameterizedTest
     @ValueSource(ints = {384, 768, 1024})
     void crossTenantSelect_tenantBSeesOnlyOwnRows(int dim) {
-        String table = "nexus.chunks_" + dim;
         String col = "knowledge__isolation__ctx3__v1";  // unique collection per test
 
         // Seed 2 rows for tenant-a and 1 row for tenant-b (distinct chash values).
@@ -233,13 +234,13 @@ class ChunksRlsBehavioralTest {
         // tenant-b must see exactly its 1 row.
         long bCount = tenantCount(dim, TENANT_B, col);
         assertThat(bCount)
-            .as("tenant-b must see exactly its own 1 row in " + table)
+            .as("tenant-b must see exactly its own 1 row in nexus.chunks (dim=" + dim + ")")
             .isEqualTo(1L);
 
         // tenant-a must see exactly its 2 rows (not 3).
         long aCount = tenantCount(dim, TENANT_A, col);
         assertThat(aCount)
-            .as("tenant-a must see exactly its own 2 rows in " + table)
+            .as("tenant-a must see exactly its own 2 rows in nexus.chunks (dim=" + dim + ")")
             .isEqualTo(2L);
     }
 
@@ -255,7 +256,6 @@ class ChunksRlsBehavioralTest {
     @ParameterizedTest
     @ValueSource(ints = {384, 768, 1024})
     void crossTenantInsert_blockedByWithCheck(int dim) {
-        String table = "nexus.chunks_" + dim;
         String col = "code__withcheck__vc3__v1";
         String vec = vectorLiteral(dim);
 
@@ -272,7 +272,8 @@ class ChunksRlsBehavioralTest {
         assertThatThrownBy(() ->
             tenantScope.withTenant(TENANT_A, ctx -> {
                 ctx.execute(
-                    "INSERT INTO " + table + " (tenant_id, collection, chash, chunk_text, embedding) " +
+                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
+                    " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ") " +
                     "VALUES (?, ?, decode(?, 'hex'), ?, ?::vector)",
                     TENANT_B, col, padChash("chash-wc-cross-" + dim), "cross-tenant inject", vec);
                 return null;
@@ -300,7 +301,6 @@ class ChunksRlsBehavioralTest {
     @ParameterizedTest
     @ValueSource(ints = {384, 768, 1024})
     void crossTenantUpdate_blockedByWithCheck(int dim) {
-        String table = "nexus.chunks_" + dim;
         String col = "code__withcheck-upd__vc3__v1";
 
         // Seed a legitimate row for tenant-a.
@@ -312,10 +312,12 @@ class ChunksRlsBehavioralTest {
         assertThat(bCountBefore).as("baseline count for tenant-b before blocked UPDATE").isEqualTo(0L);
 
         // Attempt UPDATE that would change tenant_id to tenant-b (still inside tenant-a scope).
+        // No embedding_<dim> guard needed here: chash is dim-suffixed by the caller, so the
+        // PK (tenant_id, collection, chash) already scopes this UPDATE to exactly one row.
         assertThatThrownBy(() ->
             tenantScope.withTenant(TENANT_A, ctx -> {
                 ctx.execute(
-                    "UPDATE " + table + " SET tenant_id = ? WHERE chash = decode(?, 'hex') AND collection = ?",
+                    "UPDATE " + DimTables.CHUNKS_TABLE_NAME + " SET tenant_id = ? WHERE chash = decode(?, 'hex') AND collection = ?",
                     TENANT_B, padChash("chash-wcu-own-" + dim), col);
                 return null;
             })
@@ -356,7 +358,6 @@ class ChunksRlsBehavioralTest {
     @ParameterizedTest
     @ValueSource(ints = {384, 768, 1024})
     void setLocalOverPooler_gucDoesNotBleedToNextBorrower(int dim) throws Exception {
-        String table = "nexus.chunks_" + dim;
         String col = "code__leak-probe__vc3__v1";
         TenantScope leakScope = new TenantScope(leakDs);
 
@@ -391,10 +392,12 @@ class ChunksRlsBehavioralTest {
                 .as("GUC must be NULL or empty on re-borrowed connection (no SET LOCAL bleed): got '" + gucValue + "'")
                 .isTrue();
 
-            // RLS must apply fail-closed on the unstamped connection.
+            // RLS must apply fail-closed on the unstamped connection. embedding_<dim>
+            // IS NOT NULL scopes to this parameterized run's rows only (unified table).
             long leakCount;
             try (PreparedStatement ps = conn.prepareStatement(
-                    "SELECT count(*) FROM " + table + " WHERE collection = ?")) {
+                    "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ? AND "
+                    + DimTables.embeddingColumn(dim) + " IS NOT NULL")) {
                 ps.setString(1, col);
                 try (ResultSet rs = ps.executeQuery()) {
                     rs.next();
@@ -402,7 +405,7 @@ class ChunksRlsBehavioralTest {
                 }
             }
             assertThat(leakCount)
-                .as("Unstamped re-borrowed connection must see 0 rows in " + table + " (fail-closed)")
+                .as("Unstamped re-borrowed connection must see 0 rows in nexus.chunks (dim=" + dim + ", fail-closed)")
                 .isEqualTo(0L);
         }
     }
@@ -418,7 +421,6 @@ class ChunksRlsBehavioralTest {
     @ParameterizedTest
     @ValueSource(ints = {384, 768, 1024})
     void crossTenantDelete_deletesZeroRows_rowSurvives(int dim) {
-        String table = "nexus.chunks_" + dim;
         String col = "code__delete-iso__vc3__v1";
 
         insertChunk(dim, TENANT_A, col, "chash-del-own-" + dim, "own row for delete", dim);
@@ -427,8 +429,10 @@ class ChunksRlsBehavioralTest {
             .isEqualTo(1L);
 
         // tenant-b attempts to delete tenant-a's row: RLS USING hides it, 0 affected.
+        // No embedding_<dim> guard needed: chash is dim-suffixed, so the PK already
+        // scopes this DELETE to exactly one row.
         int deleted = tenantScope.withTenant(TENANT_B, ctx ->
-            ctx.execute("DELETE FROM " + table + " WHERE chash = decode(?, 'hex') AND collection = ?",
+            ctx.execute("DELETE FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE chash = decode(?, 'hex') AND collection = ?",
                         padChash("chash-del-own-" + dim), col));
         assertThat(deleted)
             .as("cross-tenant DELETE must affect exactly 0 rows (RLS makes the row invisible)")
@@ -441,7 +445,7 @@ class ChunksRlsBehavioralTest {
 
         // The owner can delete its own row: exactly 1 affected.
         int ownDelete = tenantScope.withTenant(TENANT_A, ctx ->
-            ctx.execute("DELETE FROM " + table + " WHERE chash = decode(?, 'hex') AND collection = ?",
+            ctx.execute("DELETE FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE chash = decode(?, 'hex') AND collection = ?",
                         padChash("chash-del-own-" + dim), col));
         assertThat(ownDelete)
             .as("owner DELETE must affect exactly 1 row")
@@ -480,7 +484,6 @@ class ChunksRlsBehavioralTest {
      */
     private void insertChunk(int dim, String tenant, String collection, String chash,
                               String chunkText, int embDim) {
-        String table = "nexus.chunks_" + dim;
         String vec = vectorLiteral(embDim);
         // RDR-156 P0.2: chash_len_check requires exactly 32 chars — pad test chashes.
         String paddedChash = padChash(chash);
@@ -491,8 +494,8 @@ class ChunksRlsBehavioralTest {
                 "ON CONFLICT (tenant_id, name) DO NOTHING",
                 tenant, collection);
             ctx.execute(
-                "INSERT INTO " + table +
-                " (tenant_id, collection, chash, chunk_text, embedding)" +
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
+                " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ")" +
                 " VALUES (?, ?, decode(?, 'hex'), ?, ?::vector)" +
                 " ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
                 tenant, collection, paddedChash, chunkText, vec);
@@ -501,26 +504,30 @@ class ChunksRlsBehavioralTest {
     }
 
     /**
-     * Count rows in {@code nexus.chunks_<dim>} visible to the given tenant,
-     * scoped to {@code collection}.
+     * Count rows in the unified {@code nexus.chunks} table visible to the given
+     * tenant, scoped to {@code collection} AND {@code embedding_<dim>} populated
+     * (D1 hazard guard: all three dims now share one physical table).
      */
     private long tenantCount(int dim, String tenant, String collection) {
-        String table = "nexus.chunks_" + dim;
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.fetchOne("SELECT count(*) FROM " + table + " WHERE collection = ?", collection)
+            ctx.fetchOne("SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME
+                    + " WHERE collection = ? AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL",
+                collection)
                .get(0, Long.class));
     }
 
     /**
-     * Count rows in {@code table} for one {@code collection} using the superuser
-     * connection (bypasses RLS). Used as the control leg to prove rows exist when
-     * RLS should be hiding them. Collection-scoped so rows deposited by sibling
-     * parameterized tests in the same dim table cannot skew the exact count.
+     * Count rows in {@code nexus.chunks} for one {@code collection}+{@code dim}
+     * using the superuser connection (bypasses RLS). Used as the control leg to
+     * prove rows exist when RLS should be hiding them. Collection- AND
+     * embedding_<dim>-scoped so rows deposited by sibling parameterized tests
+     * for OTHER dims (same unified table post-RDR-191) cannot skew the count.
      */
-    private long superuserCount(String table, String collection) throws SQLException {
+    private long superuserCount(int dim, String collection) throws SQLException {
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
-                 "SELECT count(*) FROM " + table + " WHERE collection = ?")) {
+                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME
+                     + " WHERE collection = ? AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL")) {
             ps.setString(1, collection);
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
@@ -530,15 +537,17 @@ class ChunksRlsBehavioralTest {
     }
 
     /**
-     * Count rows in {@code table} for one {@code collection} from a svc-role
-     * connection that has no GUC stamp. Borrows directly from the pool without
-     * entering {@link TenantScope}. RLS zeroes the result regardless of collection;
-     * the scope keeps the helper's intent symmetric with {@link #superuserCount}.
+     * Count rows in {@code nexus.chunks} for one {@code collection}+{@code dim}
+     * from a svc-role connection that has no GUC stamp. Borrows directly from
+     * the pool without entering {@link TenantScope}. RLS zeroes the result
+     * regardless of collection/dim; the scope keeps the helper's intent
+     * symmetric with {@link #superuserCount}.
      */
-    private long unstampedSvcCount(String table, String collection) throws SQLException {
+    private long unstampedSvcCount(int dim, String collection) throws SQLException {
         try (Connection conn = svcDs.getConnection();
              PreparedStatement ps = conn.prepareStatement(
-                 "SELECT count(*) FROM " + table + " WHERE collection = ?")) {
+                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME
+                     + " WHERE collection = ? AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL")) {
             ps.setString(1, collection);
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();

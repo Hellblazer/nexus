@@ -1,0 +1,492 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-191 Phase 4 core (beads nexus-o8dil.12 + .13 + .14, ONE implementation
+    unit) — the ALWAYS-COPY migration that collapses the three dim-sharded
+    chunk tables (nexus.chunks_384/768/1024, vectors-001-baseline.xml) into
+    ONE unified nexus.chunks table with three nullable typed embedding
+    columns. Decision of record: T2 nexus/rdr-191-DECISION-always-copy-accepted
+    [22271] (Hal, 2026-08-11). Freeze derivation + the N-numbered constraints
+    this changeset satisfies: T2
+    nexus/rdr-191-phase3-always-copy-freeze-derivation-2026-08-13 [22408].
+
+    ONE CHANGESET, ONE TRANSACTION (N3): Liquibase defaults to one transaction
+    per changeset. Splitting create/copy/index/drop across changesets (the
+    naive reading of the .12/.14 bead split) forfeits the free-atomic-rollback
+    property [22271] treats as settled — a mid-way failure would leave
+    nexus.chunks half-populated with the sources undropped and earlier
+    changesets marked ran. Every SQL step below is therefore inside this ONE
+    <changeSet>, across multiple <sql> elements (which still share the one
+    changeset transaction) rather than multiple <changeSet> blocks.
+
+    STEP ORDER — copy THEN index (N4): building all three HNSW indexes WITH
+    the empty table would route 384k+ rows through pgvector's incremental
+    per-row insert path instead of a bulk CREATE INDEX build — an order-of-
+    magnitude slower regime that voids the accepted freeze estimate (~4-16
+    min). Indexes are built AFTER the copy, unconditionally on all three
+    embedding columns regardless of population (F13/C4: partial HNSW indexes
+    were measured to buy 0.11% size and cost a silent ~250x seq-scan; NO
+    WHERE ... IS NOT NULL predicate appears on any of the three).
+
+    DEVIATION FROM THE LITERAL BEAD STEP ORDER (recorded per this bead's
+    "report every deviation" requirement): the originating brief listed RLS as
+    step 2 (before the copy). This changeset moves RLS-enable to AFTER the
+    copy instead. Reason: nexus_admin (the Liquibase migration role) is the
+    schema owner but holds NO BYPASSRLS. FORCE ROW LEVEL SECURITY blocks even
+    the owner's DML (not DDL) — the exact "force_rls_migration_dml_noop" class
+    this codebase has already been bitten by twice (nexus-1wjmq /
+    catalog-013-1b; rdr180-001's own file-header warning). If nexus.chunks had
+    FORCE RLS + a WITH CHECK policy active DURING the INSERT...SELECT, every
+    inserted row would need tenant_id = current_setting('nexus.tenant', true)
+    — a GUC nothing sets during a boot-time migration — and the insert would
+    hard-fail with "new row violates row-level security policy." Enabling RLS
+    only after the copy sidesteps this entirely; nothing else needs RLS active
+    on a table that is invisible to every other session until this
+    transaction commits.
+
+    THE SAME TRAP APPLIES TO THE THREE SOURCE TABLES on the READ side: they
+    already carry FORCE ROW LEVEL SECURITY (vectors-001-5), so an unscoped
+    SELECT under nexus_admin would silently see ZERO ROWS (not an error — RLS
+    on a SELECT filters rather than rejects). Step 0 below toggles NO FORCE
+    ROW LEVEL SECURITY on all three sources before any read, mirroring
+    catalog-013-1b's exact pattern. No restore is needed afterward: the
+    sources are dropped, not kept, later in this same changeset.
+
+    LOCK-FIRST (N2, corrects [22408] §7's C1 pricing): under always-copy, a
+    lock_timeout abort AFTER the copy and index builds would discard 4-16
+    minutes of completed work, and a naive retry-on-abort loop could turn a
+    contended window into an unbounded livelock of full-price attempts. Step 0
+    acquires ACCESS EXCLUSIVE on all three sources FIRST, before any
+    expensive work, so a timeout aborts at t~=0 and any retry is free again.
+    Full transaction-level RETRY orchestration is NOT implemented here — that
+    is a deploy/operator concern outside Liquibase's single-pass update() call
+    (Main.java's existing MigrationException -> System.exit(1) contract is
+    unchanged), and [22408] N2 itself scopes full retry as a separate bead.
+    This changeset implements only the cheap, load-bearing half: take the
+    lock before doing the expensive work, so an abort is cheap to retry.
+
+    CROSS-SHARD PK COLLISION GUARD (N7): the unified PK (tenant_id,
+    collection, chash) cannot represent the SAME triple present in more than
+    one dim shard. Today's risk is ~zero (measured distribution:
+    chunks_768=0, chunks_384=1, chunks_1024=384k+) but becomes real once a
+    second dim populates for real (a known future state, not a hypothetical).
+    A Liquibase <preConditions> sqlCheck cannot be used for this: it runs
+    under the SAME force_rls_migration_dml_noop blindness as any other
+    nexus_admin SELECT (it evaluates before this changeset's own body gets a
+    chance to toggle NO FORCE), so it would silently pass by seeing zero rows
+    regardless of a real collision. The guard is instead a DO block placed
+    AFTER the NO FORCE toggles (step 0), so it sees real data, and RAISEs a
+    hard EXCEPTION (HALTs the migration) rather than let a genuine collision
+    surface as an opaque duplicate-key error mid-copy.
+
+    F14b / bead .13 RE-EXPRESSION: the octet-width CHECK is added NOT VALID
+    strictly AFTER the copy (step 4, after step 2's copy) — never before,
+    never VALID. nexus.chunks is created FRESH (no inherited constraint to
+    drop/move/re-add, unlike the RDR :383-385 prescription written for
+    adopt-in-place); the only requirement that survives is: do not let a VALID
+    (or pre-copy) octet CHECK reject an un-rekeyed store's 16-byte legacy
+    chash rows during the INSERT...SELECT — the exact GH #1390 crash-loop
+    shape rdr180-11 already exists to avoid. VALIDATE of this CHECK is
+    DELIBERATELY NOT added here, for the identical reason rdr180-11 never adds
+    one at boot time: it is the client rung's post-rekey act (chash_rekey.py,
+    via the admin connection, AFTER count-verification) so a boot never
+    crash-loops on an un-rekeyed tenant. Bead nexus-o8dil.15 retargets
+    chash_rekey.py's OCTET_CHECKS / _validated_probe from the three shards to
+    nexus.chunks — that bead's retarget IS the "new-id VALIDATE" mechanism;
+    no Liquibase VALIDATE changeset is added here for it. (This is a
+    considered DEVIATION from bead .13's literal acceptance-criterion text,
+    which asked for "a NEW-id VALIDATE changeset...per the catalog-013:200-206
+    convention" — that convention exists for the LEN-check family, which is a
+    fundamentally different, always-immediate VALIDATE. Applying it to the
+    octet family would reintroduce the exact crash-loop rdr180-11 was written
+    to prevent. Recorded on bead .13 via bd comment; see this bead's T2
+    write-back for the full reasoning.)
+
+    LEN-CHECK FAMILY DISPOSITION (bead .13's other acceptance line): NO CHANGE
+    NEEDED. SchemaMigrator.CHASH_LEN_CONSTRAINTS (chunks_384_chash_len_check
+    etc.) already reference constraint names DROPPED by rdr180-2 — this was
+    true before RDR-191 and stays true after it; nexus.chunks is bytea-chash
+    from creation and has no length(text)=32 concept at all, only the octet
+    (byte-length) family applies. Those historical entries exist solely to
+    catch a box crossing pre-rdr180 straight to head in ONE boot (the
+    preflight runs before ANY changeset in that boot, so it still sees the
+    len checks on such a box, before rdr180-2 drops them later in the SAME
+    run). RDR-191 does not touch that mechanism and does not need to.
+
+    CASCADE FALLOUT (step 6, DROP...CASCADE), stated explicitly rather than
+    left to be discovered — CORRECTED 2026-08-13 round 2 after code-review-
+    expert + substantive-critic (T2 [22435]/[22436]) independently verified
+    the original enumeration below misclassified four functions:
+
+    DROPPED IMMEDIATELY BY CASCADE (LANGUAGE sql — Postgres dependency-tracks
+    a SQL-language function body's table references in pg_depend, same as a
+    view): nexus.live_chunks and nexus.collection_vector_stats (both SELECT
+    FROM chunks_<dim>); the 9 combined-query functions
+    (search_metadata_scoped_<dim>, search_topic_scoped_<dim>,
+    search_graph_hop_<dim> — rdr180-002's live layer); AND — the correction —
+    nexus.document_text (catalog-004-manifest-functions.xml:228, LANGUAGE
+    sql), nexus.remap_membership (rdr180-002-hex-boundary-functions.xml:471,
+    LANGUAGE sql, three EXISTS clauses directly against
+    chunks_384/768/1024), nexus.manifest_verify and
+    nexus.manifest_verify_all (catalog-020-index-run-fence.xml:157/229, both
+    LANGUAGE sql, each with its own direct EXISTS clauses against
+    chunks_384/768/1024 — manifest_verify_all is NOT a thin wrapper around
+    manifest_verify, it repeats the same three-way EXISTS itself). Verified
+    directly against each CREATE statement, not inferred. Total: 2 views + 13
+    LANGUAGE sql functions = 15 objects dropped immediately at migration
+    time, not merely 2 + 9 = 11 as the original text claimed.
+
+    SURVIVE AS LATENT BREAKAGE (plpgsql — bodies are opaque strings, NOT
+    dependency-tracked by Postgres; fail on first CALL, not at migration
+    time, T2 [22416] Part 4): assign_from_chashes_<dim>,
+    gc_quarantine_orphans/gc_restore_rereferenced/gc_expire_quarantine,
+    purge_trash, manifest_orphans, chash_conformance_report.
+
+    This distinction matters for on-call debugging, not just bookkeeping: an
+    immediate "function nexus.document_text(text) does not exist" (LANGUAGE
+    sql, gone at CASCADE time) is a different symptom, at a different time,
+    from a delayed "relation nexus.chunks_384 does not exist" surfacing
+    inside a still-CREATE-able plpgsql function's body on first invocation
+    weeks later. Bead nexus-o8dil.18 recreates/retargets ALL of the above
+    (both buckets) against nexus.chunks; this changeset MUST land in the same
+    engine release as that bead's work (and .16's Java repoint) before the
+    release ships — landing this alone leaves every one of these objects
+    either gone or broken. That is the accepted, documented shape of a
+    staged multi-bead Phase 4, not an oversight. bd comment filed on
+    nexus-o8dil.18 naming the four reclassified functions explicitly
+    (manifest_verify/_all are also Phase-6 delete candidates per T2 [22416]
+    Part 6 — .18 decides re-create-vs-early-delete with the Phase-6 list in
+    hand, not this changeset).
+
+    NO COLLECTION FK ON nexus.chunks UNTIL PHASE 5 (S3, T2 [22436]): unlike
+    the three source tables (each carried a VALIDATED ON DELETE RESTRICT
+    fk-002 collection FK), nexus.chunks ships with ZERO collection-FK
+    enforcement — not even NOT VALID — from the moment this changeset ships
+    until Phase 5 (beads nexus-o8dil.29 local / .31 cloud) adds the unified
+    FK. This is a DELIBERATE, bounded, phase-sequenced risk window, not an
+    oversight: RDR-191's own title is "...enable-manifest-fk", i.e. FK
+    enforcement is explicitly Phase 5's deliverable, and
+    CatalogRepository#deleteCollectionTxn already deletes chunk rows at the
+    application layer before removing a collection (existing app-level
+    ordering that the FK's RESTRICT semantics would have been largely
+    redundant with in the collection-delete path specifically — the gap is
+    catalog_collections RENAMES and any OTHER as-yet-unaudited code path that
+    could leave a chunk row referencing a since-vanished collection with
+    nothing at the DB layer to stop it). Tracked, not silently assumed.
+
+    fk-002 NOTE: the three per-dim chunks_<dim>_collection_fk constraints
+    (fk-002-collection-registry.xml) are retired as an automatic side effect
+    of DROP TABLE (a constraint cannot outlive its table) — bead nexus-o8dil.49
+    ("new changelog to drop the three per-dim collection FKs") therefore has
+    nothing left to explicitly drop once this changeset ships; its "add the
+    unified FK" half remains live, scoped to Phase 5 (beads .29/.31, per
+    [22408] §1 — the manifest FK is explicitly NOT this changeset's concern).
+
+    POST-COMMIT REVERSIBILITY IS FORFEITED, DELIBERATELY (amendment viii; see
+    nexus-o8dil.14's 2026-08-13 decision-note comment): all three sources drop
+    in this SAME transaction, so PostgreSQL's free atomic rollback covers only
+    the PRE-commit window. The post-commit recovery story is re-index (Hal's
+    recorded stance: everything here is regenerable), not "restore from the
+    kept sources" — there is nothing kept.
+
+    GRANTS BOOT-BRICK FOUND WHILE BUILDING THIS CHANGESET (not pre-existing;
+    this changeset's own DROP causes it): grants-nexus-svc.xml's
+    grants-003-purge-vacuum-maintain changeset is runAlways="true" and
+    unconditionally GRANTs MAINTAIN on nexus.chunks_384/768/1024 by name on
+    EVERY boot. Once this changeset drops those tables, the VERY NEXT
+    execution of grants-003 (same boot, since grants-nexus-svc.xml is included
+    after this file) would raise "relation does not exist" and crash-loop the
+    service forever. Fixed in the SAME diff via a checksum-neutral
+    <preConditions> addition to grants-003 (preConditions are excluded from
+    Liquibase's checksum computation — verified in this codebase already, see
+    catalog-013-2's own history) plus a new grants-005 changeset covering
+    nexus.chunks going forward. See grants-nexus-svc.xml for the fix itself.
+
+    Sizing (N5): the in-memory HNSW build cost F13 measured (3.83s/241MB) does
+    NOT extrapolate to the cloud's 384k-row, multi-GB-graph regime (the spilled
+    build regime) — see T2 [22408] §5/§6 for the derived 182-656s per-HNSW-set
+    band. This changeset's cost is dominated by the index builds, not the copy
+    or the DDL.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-004-1" author="nexus-o8dil.12">
+        <comment>RDR-191 Phase 4: create nexus.chunks, copy all rows from chunks_384/768/1024, build all indexes, drop the three sources — ONE transaction (N3), copy-THEN-index (N4), lock-first (N2). See file header for the full derivation.</comment>
+
+        <!-- Step 0: lock-first (N2) + defuse the FORCE RLS DML-blindness trap
+             on the three sources (catalog-013-1b pattern) — no restore needed,
+             they are dropped later in this same changeset. -->
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE nexus.chunks_384, nexus.chunks_768, nexus.chunks_1024 IN ACCESS EXCLUSIVE MODE;
+ALTER TABLE nexus.chunks_384  NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks_768  NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks_1024 NO FORCE ROW LEVEL SECURITY;
+        </sql>
+
+        <!-- Step 0.6: N7 cross-shard PK collision guard. Must run with FORCE
+             RLS already off (previous step) to see real data; a Liquibase
+             <preConditions> here would be blind for the same reason. -->
+        <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE
+    collision_count bigint;
+BEGIN
+    SELECT COUNT(*) INTO collision_count FROM (
+        SELECT tenant_id, collection, chash FROM nexus.chunks_384
+        INTERSECT
+        SELECT tenant_id, collection, chash FROM nexus.chunks_768
+        UNION ALL
+        SELECT tenant_id, collection, chash FROM nexus.chunks_384
+        INTERSECT
+        SELECT tenant_id, collection, chash FROM nexus.chunks_1024
+        UNION ALL
+        SELECT tenant_id, collection, chash FROM nexus.chunks_768
+        INTERSECT
+        SELECT tenant_id, collection, chash FROM nexus.chunks_1024
+    ) collisions;
+    IF collision_count > 0 THEN
+        RAISE EXCEPTION 'RDR-191 unify (vectors-004-1): % cross-shard (tenant_id, collection, chash) collision(s) found -- the unified PK cannot represent a triple present in more than one dim shard (N7, T2 22408). Resolve the collision (dedupe or re-embed under a single dim) before retrying this migration.', collision_count;
+    END IF;
+END
+$$;
+        </sql>
+
+        <!-- Step 1: create nexus.chunks bare — PK + exactly_one_embedding CHECK
+             only. No indexes yet (N4: copy-then-index); RLS deliberately
+             deferred past the copy (see file header deviation note). -->
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.chunks (
+    tenant_id      TEXT        NOT NULL,
+    collection     TEXT        NOT NULL,
+    chash          BYTEA       NOT NULL,
+    chunk_text     TEXT        NOT NULL,
+    embedding_384  vector(384),
+    embedding_768  vector(768),
+    embedding_1024 vector(1024),
+    chunk_tsv      tsvector    GENERATED ALWAYS AS (to_tsvector('english', chunk_text)) STORED,
+    metadata       JSONB,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chunks_pk PRIMARY KEY (tenant_id, collection, chash),
+    CONSTRAINT exactly_one_embedding
+        CHECK (num_nonnulls(embedding_384, embedding_768, embedding_1024) = 1)
+);
+        </sql>
+
+        <!-- Step 2: copy ALL rows from all three shards (amendment viii). Each
+             shard's embedding lands in ITS typed column; the other two columns
+             stay NULL. chunk_tsv is GENERATED, never listed explicitly. -->
+        <sql splitStatements="true" stripComments="false">
+INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384, metadata, created_at)
+SELECT tenant_id, collection, chash, chunk_text, embedding, metadata, created_at
+FROM nexus.chunks_384;
+
+INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768, metadata, created_at)
+SELECT tenant_id, collection, chash, chunk_text, embedding, metadata, created_at
+FROM nexus.chunks_768;
+
+INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024, metadata, created_at)
+SELECT tenant_id, collection, chash, chunk_text, embedding, metadata, created_at
+FROM nexus.chunks_1024;
+        </sql>
+
+        <!-- Step 3: RLS, mirroring vectors-001-5 exactly — AFTER the copy
+             (file-header deviation note: FORCE RLS + WITH CHECK during the
+             copy would reject every inserted row, since no nexus.tenant GUC
+             is set during a boot-time migration). -->
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.chunks
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+
+        <!-- Step 4 (F14b / bead .13, re-expressed): octet-width CHECK, NOT
+             VALID, strictly after the copy. VALIDATE is deliberately NOT
+             added here — see file header. -->
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks
+    ADD CONSTRAINT chunks_chash_octet_check CHECK (octet_length(chash) = 32) NOT VALID;
+        </sql>
+
+        <!-- Step 5: indexes AFTER the copy (N4 — bulk CREATE INDEX, not
+             per-row incremental HNSW insert). All three HNSW are FULL,
+             unconditional on population (F13/C4: no WHERE predicate). -->
+        <sql splitStatements="true" stripComments="false">
+CREATE INDEX idx_chunks_embedding_384
+    ON nexus.chunks USING hnsw (embedding_384 vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_chunks_embedding_768
+    ON nexus.chunks USING hnsw (embedding_768 vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_chunks_embedding_1024
+    ON nexus.chunks USING hnsw (embedding_1024 vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_chunks_trgm
+    ON nexus.chunks USING GIN (chunk_text gin_trgm_ops);
+CREATE INDEX idx_chunks_tsv
+    ON nexus.chunks USING GIN (chunk_tsv);
+CREATE INDEX idx_chunks_tenant_chash
+    ON nexus.chunks (tenant_id, chash);
+        </sql>
+
+        <!-- Step 5b: ANALYZE the freshly bulk-copied table in the SAME changelog
+             pass (nexus-97gii). The rdr180-001 BUG-0148 invariant: a migration
+             that rewrites a table ANALYZEs it in the same pass — a bulk-copied
+             table with absent stats flips the planner off HNSW while every
+             health probe stays green (the original incident's remediation was a
+             manual ANALYZE). ANALYZE is transaction-safe, RLS-exempt
+             (maintenance runs as the migration role), and cheap relative to the
+             copy it follows. Pinned by SchemaMigratorIntegrationTest's
+             rdr180Rewrite_leavesPlannerStatsFresh (re-derived for nexus.chunks
+             in the Phase 4 batch, F2 lane). -->
+        <sql splitStatements="true" stripComments="false">
+ANALYZE nexus.chunks;
+        </sql>
+
+        <!-- Step 6: drop the three sources in the SAME transaction (amendment
+             viii). CASCADE fallout is documented in full in the file header. -->
+        <sql splitStatements="true" stripComments="false">
+DROP TABLE nexus.chunks_384, nexus.chunks_768, nexus.chunks_1024 CASCADE;
+        </sql>
+
+        <!-- ROLLBACK: faithful full inverse. Recreates chunks_384/768/1024 as
+             they existed immediately before this changeset (bytea chash, RLS,
+             all five per-table indexes, octet CHECK NOT VALID, the validated
+             fk-002 collection FK), copies rows back split by populated
+             embedding column, then drops nexus.chunks. Does NOT attempt to
+             recreate the views/functions this changeset's forward CASCADE
+             removed — SchemaRollbackRoundTripIntegrationTest's round trip
+             restores those via their OWN owning changesets' rollback +
+             re-apply cycle once chunks_384/768/1024 exist again (see file
+             header CASCADE FALLOUT note; a Liquibase rollback undoes THIS
+             changeset's own direct actions, it does not resurrect a CASCADE
+             side effect that belongs to an earlier changeset's object). -->
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.chunks_384 (
+    tenant_id  TEXT        NOT NULL,
+    collection TEXT        NOT NULL,
+    chash      BYTEA       NOT NULL,
+    chunk_text TEXT        NOT NULL,
+    embedding  vector(384) NOT NULL,
+    chunk_tsv  tsvector    GENERATED ALWAYS AS (to_tsvector('english', chunk_text)) STORED,
+    metadata   JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chunks_384_pk PRIMARY KEY (tenant_id, collection, chash)
+);
+CREATE TABLE nexus.chunks_768 (
+    tenant_id  TEXT        NOT NULL,
+    collection TEXT        NOT NULL,
+    chash      BYTEA       NOT NULL,
+    chunk_text TEXT        NOT NULL,
+    embedding  vector(768) NOT NULL,
+    chunk_tsv  tsvector    GENERATED ALWAYS AS (to_tsvector('english', chunk_text)) STORED,
+    metadata   JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chunks_768_pk PRIMARY KEY (tenant_id, collection, chash)
+);
+CREATE TABLE nexus.chunks_1024 (
+    tenant_id  TEXT         NOT NULL,
+    collection TEXT         NOT NULL,
+    chash      BYTEA        NOT NULL,
+    chunk_text TEXT         NOT NULL,
+    embedding  vector(1024) NOT NULL,
+    chunk_tsv  tsvector     GENERATED ALWAYS AS (to_tsvector('english', chunk_text)) STORED,
+    metadata   JSONB,
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT chunks_1024_pk PRIMARY KEY (tenant_id, collection, chash)
+);
+            </sql>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks NO FORCE ROW LEVEL SECURITY;
+            </sql>
+            <sql splitStatements="true" stripComments="false">
+INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding, metadata, created_at)
+SELECT tenant_id, collection, chash, chunk_text, embedding_384, metadata, created_at
+FROM nexus.chunks WHERE embedding_384 IS NOT NULL;
+
+INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding, metadata, created_at)
+SELECT tenant_id, collection, chash, chunk_text, embedding_768, metadata, created_at
+FROM nexus.chunks WHERE embedding_768 IS NOT NULL;
+
+INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding, metadata, created_at)
+SELECT tenant_id, collection, chash, chunk_text, embedding_1024, metadata, created_at
+FROM nexus.chunks WHERE embedding_1024 IS NOT NULL;
+            </sql>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks_384  ADD CONSTRAINT chunks_384_chash_octet_check  CHECK (octet_length(chash) = 32) NOT VALID;
+ALTER TABLE nexus.chunks_768  ADD CONSTRAINT chunks_768_chash_octet_check  CHECK (octet_length(chash) = 32) NOT VALID;
+ALTER TABLE nexus.chunks_1024 ADD CONSTRAINT chunks_1024_chash_octet_check CHECK (octet_length(chash) = 32) NOT VALID;
+            </sql>
+            <sql splitStatements="true" stripComments="false">
+CREATE INDEX idx_chunks_384_embedding ON nexus.chunks_384 USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_chunks_384_tsv ON nexus.chunks_384 USING GIN (chunk_tsv);
+CREATE INDEX idx_chunks_384_trgm ON nexus.chunks_384 USING GIN (chunk_text gin_trgm_ops);
+CREATE INDEX idx_chunks_384_tenant_chash ON nexus.chunks_384 (tenant_id, chash);
+
+CREATE INDEX idx_chunks_768_embedding ON nexus.chunks_768 USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_chunks_768_tsv ON nexus.chunks_768 USING GIN (chunk_tsv);
+CREATE INDEX idx_chunks_768_trgm ON nexus.chunks_768 USING GIN (chunk_text gin_trgm_ops);
+CREATE INDEX idx_chunks_768_tenant_chash ON nexus.chunks_768 (tenant_id, chash);
+
+CREATE INDEX idx_chunks_1024_embedding ON nexus.chunks_1024 USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_chunks_1024_tsv ON nexus.chunks_1024 USING GIN (chunk_tsv);
+CREATE INDEX idx_chunks_1024_trgm ON nexus.chunks_1024 USING GIN (chunk_text gin_trgm_ops);
+CREATE INDEX idx_chunks_1024_tenant_chash ON nexus.chunks_1024 (tenant_id, chash);
+            </sql>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks_384 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks_384 FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.chunks_384
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+ALTER TABLE nexus.chunks_768 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks_768 FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.chunks_768
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+ALTER TABLE nexus.chunks_1024 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks_1024 FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.chunks_1024
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+            </sql>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks_384
+    ADD CONSTRAINT chunks_384_collection_fk
+    FOREIGN KEY (tenant_id, collection)
+    REFERENCES nexus.catalog_collections (tenant_id, name)
+    ON DELETE RESTRICT
+    NOT VALID;
+ALTER TABLE nexus.chunks_384 VALIDATE CONSTRAINT chunks_384_collection_fk;
+
+ALTER TABLE nexus.chunks_768
+    ADD CONSTRAINT chunks_768_collection_fk
+    FOREIGN KEY (tenant_id, collection)
+    REFERENCES nexus.catalog_collections (tenant_id, name)
+    ON DELETE RESTRICT
+    NOT VALID;
+ALTER TABLE nexus.chunks_768 VALIDATE CONSTRAINT chunks_768_collection_fk;
+
+ALTER TABLE nexus.chunks_1024
+    ADD CONSTRAINT chunks_1024_collection_fk
+    FOREIGN KEY (tenant_id, collection)
+    REFERENCES nexus.catalog_collections (tenant_id, name)
+    ON DELETE RESTRICT
+    NOT VALID;
+ALTER TABLE nexus.chunks_1024 VALIDATE CONSTRAINT chunks_1024_collection_fk;
+            </sql>
+            <sql splitStatements="true" stripComments="false">
+DROP TABLE nexus.chunks;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -285,7 +285,13 @@ class _FakeCatalogHTTP:
         return list(self._notes)
 
     # -- writes (allowed through the whitelist) --
-    def atomic_manifest_replace(self, doc_id: str, chunks: list[dict]) -> None:
+    def atomic_manifest_replace(
+        self, doc_id: str, chunks: list[dict], *, collection: str,
+    ) -> None:
+        # RDR-191: a real caller must always supply a non-blank collection —
+        # asserting here (rather than silently accepting/dropping it) is
+        # exactly the double-side guard the bug's own postmortem calls for.
+        assert collection, "atomic_manifest_replace called with a blank collection"
         self.replaced.append((doc_id, chunks))
 
     def resync_chunk_count_cache(self, doc_id: str) -> None:

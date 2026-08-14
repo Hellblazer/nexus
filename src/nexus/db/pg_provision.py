@@ -815,6 +815,7 @@ def _provision_diag_conformance_view(bins: PgBinaries, port: int, os_user: str) 
     try:
         from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred, keeps provision import-light
             CHASH_BEARING_TABLES,
+            DIAG_CONFORMANCE_VIEW,
             diag_conformance_view_ddl,
         )
 
@@ -836,20 +837,47 @@ def _provision_diag_conformance_view(bins: PgBinaries, port: int, os_user: str) 
             "END IF; "
             "END $do$;",
         )
-        # nexus-hdumg: the DO block's IF is a NO-OP whenever the chash tables
-        # are not all present — which is the NORMAL state on a fresh provision
-        # (Liquibase creates them at first engine boot, after this runs). The
-        # old unconditional "pg_diag_conformance_view_provisioned" asserted a
-        # creation that had usually not happened, so the later, expected
-        # `diag_sql_failed` on the absent view read as an unexplained error.
-        # Say what was actually attempted.
-        _log.info(
-            "pg_diag_conformance_view_provision_attempted",
-            note="no-op unless all chash-bearing tables already exist "
-                 "(fresh provisions create them at first engine boot; the "
-                 "conformance probe falls back to legacy direct-table counts "
-                 "until a later re-provision creates the view)",
+        # nexus-o8dil.15 non-vacuity fix (RDR-191 repoint batch, risk R4):
+        # the DO block above is a fire-and-forget anonymous block — Postgres
+        # gives psql no signal whether its IF branch actually ran. The prior
+        # version logged the SAME "pg_diag_conformance_view_provision_
+        # attempted" line unconditionally, on both a genuine creation AND a
+        # total no-op (the NORMAL state on a fresh provision, before
+        # Liquibase has created the chash-bearing tables) — "attempted" is
+        # not "succeeded", and a caller/log-scan could not tell which had
+        # happened. That is the exact "reports success while converging
+        # nothing" shape RDR-182 forbids for the conformance diagnostics
+        # elsewhere in this module; a DO block that can no-op has no
+        # business sharing ONE log line with the case where it did the work.
+        # Query the view's ACTUAL post-DDL existence and log the two
+        # outcomes under DIFFERENT, greppable event names so this can never
+        # collapse back into a single silently-ambiguous line.
+        schema, relname = DIAG_CONFORMANCE_VIEW.split(".", 1)
+        exists = _psql_tuples(
+            bins, port, NEXUS_DB_NAME, os_user,
+            "SELECT 1 FROM pg_class c JOIN pg_namespace n "
+            "ON n.oid = c.relnamespace "
+            f"WHERE n.nspname = '{schema}' AND c.relname = '{relname}'",
         )
+        if exists == "1":
+            _log.info(
+                "pg_diag_conformance_view_provisioned",
+                view=DIAG_CONFORMANCE_VIEW,
+                note="the view exists after this call (freshly created here, "
+                     "or already present from an earlier provision)",
+            )
+        else:
+            _log.info(
+                "pg_diag_conformance_view_provision_skipped_tables_absent",
+                view=DIAG_CONFORMANCE_VIEW,
+                relations_required=len(CHASH_BEARING_TABLES),
+                note="not all chash-bearing tables exist yet — the DO "
+                     "block's IF branch did not fire. Normal on a fresh "
+                     "provision (Liquibase creates the tables at first "
+                     "engine boot); the conformance probe falls back to "
+                     "legacy direct-table counts until a later "
+                     "re-provision creates the view.",
+            )
     except Exception as exc:  # noqa: BLE001 — best-effort; absent view = probe falls back to legacy statements
         _log.warning("pg_diag_view_best_effort_failed", error=str(exc))
 
@@ -938,6 +966,16 @@ def _create_roles(
                   the public schema by default; on PG 15/16 the PUBLIC role
                   no longer holds CREATE on public, so nexus_admin needs it
                   explicitly — as validated by SchemaMigratorIntegrationTest).
+                  Also holds pg_monitor WITH ADMIN OPTION (nexus-hzhgl,
+                  RDR-191 Phase 3/4 pre-flight) — a bootstrap-only,
+                  superuser-conferred prerequisite so the runAlways
+                  grants-004-monitor-wal-visibility changeset can grant
+                  pg_monitor onward to nexus_svc; see that changeset's
+                  comment for the full ADMIN OPTION mechanics. This function
+                  covers FROM-SCRATCH provisioning only — an EXISTING
+                  install is backfilled separately by
+                  _backfill_pg_monitor_admin_option from provision()'s fast
+                  idempotency path (this function is never reached there).
 
     nexus_svc   — NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS LOGIN.
                   DML-only; FORCE RLS subjects it to all row-level policies.
@@ -998,6 +1036,31 @@ def _create_roles(
         admin_created = True
     else:
         _log.info("pg_role_exists_skip", role="nexus_admin")
+
+    # nexus-hzhgl (RDR-191 Phase 3/4 pre-flight, conexus relay [22411] ASK B):
+    # nexus_admin needs pg_monitor WITH ADMIN OPTION so the Liquibase
+    # changelog (grants-004-monitor-wal-visibility in grants-nexus-svc.xml,
+    # run by NOCREATEROLE nexus_admin) can in turn grant pg_monitor to
+    # nexus_svc. PostgreSQL requires the GRANTING role to already hold the
+    # target role WITH ADMIN OPTION (or be superuser) before it can grant
+    # that role's membership onward -- nexus_admin is neither by default, so
+    # this bootstrap-only step must live here, the same shape as nexus_diag's
+    # BYPASSRLS above: an attribute/privilege only a superuser can confer,
+    # unreachable from inside the changelog. GRANT of role membership is
+    # naturally idempotent in PostgreSQL.
+    #
+    # CORRECTED (round 2, code-review-expert Critical, 2026-08-13): THIS
+    # SITE ALONE DOES NOT self-heal an existing install. provision()'s fast
+    # idempotency path returns BEFORE reaching this function at all -- that
+    # path is the STEADY STATE for every already-provisioned install (the
+    # same gap class RDR-182 P2.1's nexus_diag hit). The self-heal for an
+    # existing install is _backfill_pg_monitor_admin_option, called
+    # separately from provision()'s fast path, mirroring _backfill_diag_role.
+    # This site only covers a FROM-SCRATCH provision.
+    _psql(
+        bins, port, NEXUS_DB_NAME, os_user,
+        "GRANT pg_monitor TO nexus_admin WITH ADMIN OPTION",
+    )
 
     if not _role_exists(bins, port, os_user, "nexus_svc"):
         _psql(
@@ -1255,6 +1318,46 @@ def _backfill_diag_role(
     _persist_diag_credentials(creds_path, diag_pass)
 
 
+def _backfill_pg_monitor_admin_option(bins: PgBinaries, port: int, os_user: str) -> None:
+    """Grant ``nexus_admin`` ADMIN OPTION on ``pg_monitor`` on an ALREADY-RUNNING
+    cluster (nexus-hzhgl round 2; code-review-expert Critical, 2026-08-13).
+
+    Same gap class ``_backfill_diag_role`` above closes for ``nexus_diag``: the
+    fast idempotency path in :func:`provision` returns BEFORE ``_create_roles``,
+    which is the STEADY STATE for every existing install. ``_create_roles`` is
+    where the original nexus-hzhgl fix put ``GRANT pg_monitor TO nexus_admin
+    WITH ADMIN OPTION`` — reachable only on a from-scratch provision. Without
+    this backfill, an install that provisioned ``nexus_admin`` before this
+    feature shipped never gets ADMIN OPTION, and the runAlways
+    ``grants-004-monitor-wal-visibility`` changeset (grants ``pg_monitor``
+    onward to ``nexus_svc``) then fails PERMANENTLY at every subsequent
+    engine-service boot (``Main.java`` calls ``System.exit(1)`` on any
+    ``MigrationException``) — a total local-engine outage on upgrade, not a
+    degraded WAL-visibility feature.
+
+    GRANT of role membership is naturally idempotent in PostgreSQL — this is
+    unconditional, no existence check needed (unlike ``_backfill_diag_role``'s
+    ``CREATE ROLE``, this never creates anything; it only extends a grant on a
+    role, ``nexus_admin``, that must already exist for the fast path to have
+    been reached at all).
+
+    Best-effort at the CALL SITE (matches ``_backfill_diag_role``'s posture,
+    not a fail-loud one): the fast idempotency path is the COMMON case hit at
+    every ``nx init --service`` re-run and every ``nx doctor`` self-heal pass,
+    so a raised exception here would crash-loop the very idempotent re-run
+    this function exists to repair — the identical failure mode as leaving the
+    gap unfixed, just moved earlier. The actual fail-loud enforcement point is
+    the Liquibase changeset itself at engine boot, which now raises a
+    self-explanatory, named-remedy error (not a bare permission-denied trace)
+    when this backfill has not run — see grants-004-monitor-wal-visibility's
+    changeset comment.
+    """
+    _psql(
+        bins, port, NEXUS_DB_NAME, os_user,
+        "GRANT pg_monitor TO nexus_admin WITH ADMIN OPTION",
+    )
+
+
 def _read_credentials(creds_path: Path) -> dict[str, str]:
     """Parse an existing credentials file into a {key: value} dict."""
     result: dict[str, str] = {}
@@ -1417,6 +1520,21 @@ def provision(
                     except Exception as exc:  # noqa: BLE001 — repair path must never break the no-op re-run
                         _log.warning(
                             "pg_diag_role_backfill_failed", error=str(exc)
+                        )
+                    # nexus-hzhgl round 2 (code-review-expert Critical,
+                    # 2026-08-13): independent try/except from the diag
+                    # backfill above — one failing must not prevent the other
+                    # from being attempted. See
+                    # _backfill_pg_monitor_admin_option's docstring for why
+                    # this is best-effort here and fail-loud only at the
+                    # Liquibase changeset.
+                    try:
+                        _backfill_pg_monitor_admin_option(
+                            _bins, stored_port, os_user
+                        )
+                    except Exception as exc:  # noqa: BLE001 — repair path must never break the no-op re-run
+                        _log.warning(
+                            "pg_monitor_admin_option_backfill_failed", error=str(exc)
                         )
                 _log.info(
                     "pg_provision_no_op",

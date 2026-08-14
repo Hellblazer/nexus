@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -31,6 +32,8 @@ from nexus.daemon.service_registry import (
     ServiceSupervisor,
     StaleOwnerError,
     ProcessSweepResult,
+    pid_running,
+    process_state,
     storage_service_stack_matcher,
     sweep_matching_processes,
 )
@@ -601,3 +604,101 @@ class TestSweepMatchingProcesses:
             result = sweep_matching_processes(storage_service_stack_matcher(cfg))
         assert result.pids == (196,)
         assert result.stubborn == (196,)
+
+
+class TestProcessState:
+    """``process_state`` — the zombie discriminator ``pid_alive`` cannot be
+    (nexus-o8dil.21). Parsing units only; the real-process behaviour is
+    pinned in the RDR-149 conformance suite
+    (``TestTerminationSurvivorVerdict``), where the shared termination
+    primitive's survivor verdict belongs.
+    """
+
+    def test_parses_state_from_procfs_stat_with_parens_in_comm(
+        self, tmp_path: Path,
+    ) -> None:
+        """State is the field right after ``comm``, and ``comm`` can contain
+        spaces and ``)`` — the parse must index from the LAST ``)`` (same
+        discipline as ``_procfs_enumerate``)."""
+        (tmp_path / "uptime").write_text("500.00 1000.00\n")
+        proc = tmp_path / "1234"
+        proc.mkdir()
+        (proc / "stat").write_text(
+            "1234 (py (x) thing) Z " + " ".join(["0"] * 48) + "\n",
+        )
+        with patch("nexus.daemon.service_registry.PROCFS_ROOT", tmp_path):
+            assert process_state(1234) == "Z"
+
+    def test_unreadable_or_missing_is_unknown_never_a_state(
+        self, tmp_path: Path,
+    ) -> None:
+        """``None`` means UNKNOWN. A missing /proc entry must not be
+        reported as some state a caller could act on."""
+        (tmp_path / "uptime").write_text("500.00 1000.00\n")
+        with patch("nexus.daemon.service_registry.PROCFS_ROOT", tmp_path):
+            assert process_state(999999) is None
+
+    def test_ps_fallback_takes_only_the_leading_state_character(self) -> None:
+        """On a /proc-less box (macOS/BSD) ``ps -o state=`` answers, and its
+        output carries trailing flag characters (``S+``, ``R<``) that are
+        not part of the state."""
+        with patch(
+            "nexus.daemon.service_registry._procfs_available", return_value=False,
+        ), patch(
+            "nexus.daemon.service_registry.subprocess.run",
+            return_value=SimpleNamespace(stdout="S+\n", returncode=0),
+        ):
+            assert process_state(4321) == "S"
+
+    def test_ps_absent_is_unknown(self) -> None:
+        with patch(
+            "nexus.daemon.service_registry._procfs_available", return_value=False,
+        ), patch(
+            "nexus.daemon.service_registry.subprocess.run",
+            side_effect=FileNotFoundError("no ps"),
+        ):
+            assert process_state(4321) is None
+
+
+class TestPidRunning:
+    """``pid_running`` = alive AND not a zombie. The distinction the
+    post-SIGKILL survivor verdict turns on (nexus-o8dil.21)."""
+
+    def test_zombie_is_not_running(self) -> None:
+        with patch(
+            "nexus.daemon.service_registry.pid_alive", return_value=True,
+        ), patch(
+            "nexus.daemon.service_registry.process_state", return_value="Z",
+        ):
+            assert pid_running(4321) is False
+
+    @pytest.mark.parametrize("state", ["R", "S", "D", "T", "I"])
+    def test_every_non_zombie_state_is_running(self, state: str) -> None:
+        """Especially ``D`` (uninterruptible) and ``T`` (SIGSTOPped): those
+        are the GENUINE-survivor shapes the escalation must stay loud
+        about, and the zombie fix must not silence them."""
+        with patch(
+            "nexus.daemon.service_registry.pid_alive", return_value=True,
+        ), patch(
+            "nexus.daemon.service_registry.process_state", return_value=state,
+        ):
+            assert pid_running(4321) is True
+
+    def test_unknown_state_stays_running_permissive_on_ambiguity(self) -> None:
+        with patch(
+            "nexus.daemon.service_registry.pid_alive", return_value=True,
+        ), patch(
+            "nexus.daemon.service_registry.process_state", return_value=None,
+        ):
+            assert pid_running(4321) is True
+
+    def test_dead_pid_short_circuits_before_asking_for_state(self) -> None:
+        """ESRCH is already the answer — no state probe (a `ps` fork on a
+        /proc-less box) should be spent on it."""
+        with patch(
+            "nexus.daemon.service_registry.pid_alive", return_value=False,
+        ), patch(
+            "nexus.daemon.service_registry.process_state",
+        ) as state:
+            assert pid_running(4321) is False
+        state.assert_not_called()

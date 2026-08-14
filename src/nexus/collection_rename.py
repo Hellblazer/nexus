@@ -140,11 +140,23 @@ def rename_collection_data_plane(
     counts["tax_topics"] = renamed.get("topics", 0)
     counts["tax_assignments"] = renamed.get("topic_assignments", 0)
     counts["tax_meta"] = renamed.get("taxonomy_meta", 0)
-    counts["tax_centroids"] = (
-        renamed.get("taxonomy_centroids_384", 0)
-        + renamed.get("taxonomy_centroids_768", 0)
-        + renamed.get("taxonomy_centroids_1024", 0)
-    )
+    # RDR-191 Phase 4 (nexus-o8dil.19/.47 "one era" ruling): the three
+    # per-dim centroid tables unify into nexus.taxonomy_centroids, and the
+    # engine's cascade response is expected to carry ONE "taxonomy_centroids"
+    # count post-unification. Fall back to summing the three legacy per-dim
+    # keys when the unified key is absent, so this client tolerates either
+    # response shape (relevant only transiently, if this Python repoint and
+    # the Java-side CatalogRepository repoint land in different commits of
+    # the same batch); once the engine always emits the unified key the
+    # fallback branch is simply never reached (unified key is never None).
+    _unified_centroids = renamed.get("taxonomy_centroids")
+    if _unified_centroids is None:
+        _unified_centroids = (
+            renamed.get("taxonomy_centroids_384", 0)
+            + renamed.get("taxonomy_centroids_768", 0)
+            + renamed.get("taxonomy_centroids_1024", 0)
+        )
+    counts["tax_centroids"] = _unified_centroids
     counts["chash"] = renamed.get("chash_index", 0)
     counts["aspects"] = renamed.get("document_aspects", 0)
     counts["aspect_queue"] = renamed.get("aspect_extraction_queue", 0)

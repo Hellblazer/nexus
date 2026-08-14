@@ -3,6 +3,7 @@ package dev.nexus.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.TenantConstants;
+import dev.nexus.service.vectors.DimTables;
 import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -95,7 +96,7 @@ class RemapHandlerTest {
             su.createStatement().execute(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chash_remap TO " + SVC_ROLE);
             su.createStatement().execute(
-                "GRANT SELECT ON nexus.chunks_384, nexus.chunks_768, nexus.chunks_1024 TO " + SVC_ROLE);
+                "GRANT SELECT ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);  // RDR-191 Phase 4: unified
             // RDR-180: remap_membership() now chains through chash_alias to resolve
             // legacy-era facts against a rekeyed store (rdr180-002 comment).
             su.createStatement().execute(
@@ -555,7 +556,7 @@ class RemapHandlerTest {
                 "VALUES ('" + TENANT + "', '" + collection + "') ON CONFLICT DO NOTHING");
             for (int i = 1; i <= count; i++) {
                 su.createStatement().execute(
-                    "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
+                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
                     "VALUES ('" + TENANT + "', '" + collection + "', decode('" + chash(seedPrefix + i) + "', 'hex'), " +
                     "'text', ('[1" + ",0".repeat(1023) + "]')::vector) " +
                     "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");

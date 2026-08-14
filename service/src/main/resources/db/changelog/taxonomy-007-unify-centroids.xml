@@ -1,0 +1,390 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-191 Phase 4, centroid family (bead nexus-jv3ue) — Hal ruling o8dil.47
+    (2026-08-13, "unify the centroids too, one era"): the SIBLING of
+    vectors-004-unify-chunks.xml (beads nexus-o8dil.12/.13/.14), same
+    ALWAYS-COPY discipline, same one-changeset/one-transaction shape, MUCH
+    smaller data (MBs, not 384k+ rows). Ships in the SAME engine release as
+    the chunks unification, per Hal's ruling.
+
+    Collapses the three dim-sharded centroid tables
+    (nexus.taxonomy_centroids_384/768/1024, taxonomy-002-centroids.xml) into
+    ONE unified nexus.taxonomy_centroids table with three nullable typed
+    embedding columns, mirroring nexus.chunks's shape exactly for the parts
+    that transfer (PK-then-copy-then-index-then-drop, one transaction, RLS
+    deferred past the copy, lock-first, cross-shard collision guard) and
+    DIVERGING where the source schema itself diverges (documented below,
+    each verified by direct read of taxonomy-002-centroids.xml, not assumed
+    from the chunks precedent).
+
+    ONE CHANGESET, ONE TRANSACTION (mirrors vectors-004-1's N3 rationale
+    exactly): splitting create/copy/index/drop into multiple changesets would
+    forfeit the free-atomic-rollback property a mid-way failure needs — a
+    partial run would leave nexus.taxonomy_centroids half-populated with the
+    sources undropped and an earlier changeset already marked ran. Every SQL
+    step below is inside this ONE <changeSet>, across multiple <sql>
+    elements sharing the one changeset transaction.
+
+    STEP ORDER — copy THEN index: identical reasoning to vectors-004-1 (N4)
+    — building the three HNSW indexes against an empty table would route
+    every row through pgvector's incremental per-row insert path instead of
+    a bulk CREATE INDEX build. Indexes are built AFTER the copy,
+    unconditionally on all three embedding columns regardless of population
+    (F13/C4 discipline carried over identically: no WHERE ... IS NOT NULL
+    predicate on any of the three HNSW indexes).
+
+    DIVERGENCES FROM THE CHUNKS TEMPLATE (verified against
+    taxonomy-002-centroids.xml's own schema-contract comment, not assumed):
+
+      1. NO chash / octet-CHECK family. taxonomy_centroids_<dim> has no
+         chash column at all (PK is topic_id, not a content hash) — F14b /
+         bead .13's octet-width concern does not exist for this table.
+         Confirmed by direct read of taxonomy-002-centroids.xml's full
+         column list (tenant_id, collection, topic_id, embedding, label,
+         doc_count, created_at) — no bytea column anywhere.
+
+      2. NO fk-002-style collection FK. taxonomy-002-centroids.xml's own
+         header states this explicitly: "NO FK to nexus.topics(id): the
+         centroid store mirrors the old ChromaDB collection, which had no
+         relational constraint; delete/merge clean centroids explicitly via
+         the repository." A repo-wide grep of every changelog file under
+         db/changelog/ for "taxonomy_centroids" confirms only two files
+         reference these tables in SQL at all: taxonomy-002 (defines them)
+         and taxonomy-006 (assign_from_chashes_<dim>, see CASCADE section
+         below) — no fk-NNN-*.xml file names them, so there is no per-dim FK
+         to retire the way fk-002's three chunks_<dim>_collection_fk
+         constraints retire under vectors-004-1's DROP.
+
+      3. NO trigram / tsvector indexes. Centroid rows carry no chunk_text
+         (taxonomy-002's header: "NO tsvector/GIN (centroids carry no
+         chunk_text)"), so nexus.taxonomy_centroids gets none either — only
+         the PK and the three per-dim HNSW indexes.
+
+      4. NO separate (tenant_id, collection) btree. taxonomy-002's header:
+         "The PK (tenant_id, collection, topic_id) doubles as the
+         collection-prefix btree the annQuery WHERE collection = ?/!= ?
+         filter, count(collection), and getByCollection paths use — no
+         separate index needed." The unified table's PK
+         (tenant_id, collection, topic_id) preserves that same prefix
+         property, so no analog of idx_chunks_tenant_chash is added here.
+
+      5. GRANTS: NO boot-brick, verified empirically (not merely T2 [22416]
+         cited) by a direct grep of grants-nexus-svc.xml for
+         "taxonomy_centroids" — zero hits. Unlike chunks_384/768/1024 (named
+         explicitly in grants-003-purge-vacuum-maintain's runAlways MAINTAIN
+         grant), NO changeset anywhere grants MAINTAIN on any
+         taxonomy_centroids_<dim> table, and neither
+         CatalogRepository.PURGE_VACUUM_TABLES nor
+         TenantScope.VACUUM_ALLOWED_TABLES (the two Java lockstep lists that
+         drive the purge-trash post-commit VACUUM) name a centroid table
+         (verified by direct read of both constants). This changeset's DROP
+         therefore causes NO grants-nexus-svc.xml boot-brick and needs NO
+         grants-005-style successor changeset — the vacuum/MAINTAIN path
+         simply never touched centroids and continues not to. Nothing to add
+         here; nothing for the coupling lint to require beyond the
+         mv+include registration atomicity itself (see the sibling lint's
+         own header for the resulting simpler two-piece — not three-piece —
+         invariant).
+
+    CASCADE FALLOUT (step 5, DROP...CASCADE), enumerated explicitly rather
+    than left to be discovered, per this bead's own instruction to
+    cross-check what else references taxonomy_centroids_<dim> in SQL:
+
+      A repo-wide grep of every file under db/changelog/ for
+      "taxonomy_centroids" turns up exactly two SQL-bearing files:
+      taxonomy-002-centroids.xml (defines the three tables + their HNSW
+      indexes + RLS — all owned/dropped by THIS changeset) and
+      taxonomy-006-assign-from-chashes.xml (nexus.assign_from_chashes_384/
+      768/1024). No view, no LANGUAGE sql function, no other stored routine
+      anywhere references a taxonomy_centroids_<dim> table. This is a
+      SMALLER blast radius than the chunks side, where 15 objects (2 views +
+      13 LANGUAGE sql functions) were CASCADE-dropped immediately.
+
+      assign_from_chashes_384/768/1024 are LANGUAGE plpgsql (verified by
+      direct read of taxonomy-006-assign-from-chashes.xml: "LANGUAGE plpgsql
+      SECURITY INVOKER"), NOT LANGUAGE sql. Postgres dependency-tracks a
+      LANGUAGE sql function body's table references in pg_depend (hence the
+      chunks side's 9 combined-query functions + document_text +
+      remap_membership + manifest_verify/_all were CASCADE-dropped
+      IMMEDIATELY, per T2 [22436]'s round-2 correction) but a plpgsql body is
+      an opaque string with NO pg_depend edge to the tables it happens to
+      mention — so DROP TABLE ... CASCADE on the three centroid shards
+      DROPS NOTHING ELSE. assign_from_chashes_<dim> SURVIVE this changeset's
+      DROP unchanged, exactly as they already survive vectors-004-1's DROP
+      of chunks_<dim> unchanged (they reference BOTH families in their body:
+      "FROM nexus.chunks_<dim> c JOIN nexus.taxonomy_centroids_<dim> ct").
+
+      NET EFFECT: this changeset's own DROP CASCADE has ZERO immediate
+      fallout (0 objects dropped — contrast the chunks side's 15). The THREE
+      assign_from_chashes_<dim> functions were ALREADY latent-broken the
+      moment vectors-004-1 ships (they reference chunks_<dim>, gone under
+      that changeset regardless of this one) — this changeset's DROP is a
+      SECOND, independent, redundant cause of the identical pre-existing
+      latent breakage (they also reference taxonomy_centroids_<dim>, now
+      also gone), not a NEW breakage this changeset introduces on its own.
+      Whichever of the two unify changesets lands first, the functions are
+      already broken; landing the second does not change their state.
+      Ownership is unchanged from the chunks changeset's own header: bead
+      nexus-o8dil.18 recreates/retargets assign_from_chashes_<dim> against
+      BOTH nexus.chunks and nexus.taxonomy_centroids in the SAME engine
+      release that ships both unify changesets — landing either alone
+      without .18's retarget leaves the functions broken on first call. bd
+      comment filed on nexus-o8dil.18 naming this centroid-side CASCADE
+      finding explicitly (this changeset's DROP contributes ZERO NEW
+      cascade-dropped objects, only reinforces the existing
+      already-latent-broken status of the three functions from the other
+      side).
+
+    CROSS-SHARD PK COLLISION GUARD, keyed on the CENTROID table's actual PK
+    (tenant_id, collection, topic_id) — NOT chash, since centroids have no
+    chash column. Unlike the chunks side (where a collision requires the
+    identical chunk TEXT to be embedded under two different models, measured
+    as ~zero today), a centroid collision is a topic_id being represented in
+    more than one dim's centroid table for the SAME (tenant_id, collection)
+    — a plausible, not merely hypothetical, scenario if a collection's
+    corpus is re-embedded under a different model while its topic_id
+    numbering is preserved across the switch. No distribution census for
+    centroids was performed in this round (unlike the chunks side's measured
+    chunks_768=0/chunks_384=1/chunks_1024=384k+, T2 [22408]) — this guard is
+    therefore unconditionally defensive, not calibrated against a known-safe
+    measured state, and HALTs the migration loudly on any hit rather than
+    assume today's collision count is zero.
+
+    Same force_rls_migration_dml_noop trap as the chunks side, verified by
+    direct read of taxonomy-002-4: all three centroid shards already carry
+    FORCE ROW LEVEL SECURITY. Step 0 below toggles NO FORCE on all three
+    BEFORE any read (the collision guard, the copy), mirroring vectors-004-1
+    step 0 exactly, for the identical reason (nexus_admin holds no
+    BYPASSRLS; an unscoped SELECT under FORCE RLS silently returns zero rows
+    rather than erroring). No restore needed — the sources are dropped, not
+    kept, later in this same changeset.
+
+    RLS deferred to AFTER the copy (not before), identical reasoning to
+    vectors-004-1: enabling FORCE ROW LEVEL SECURITY + a WITH CHECK policy
+    on nexus.taxonomy_centroids BEFORE the INSERT...SELECT would reject
+    every copied row (no nexus.tenant GUC is set during a boot-time
+    migration).
+
+    POST-COMMIT REVERSIBILITY IS FORFEITED, DELIBERATELY, identical to the
+    chunks side (Hal's amendment (viii) / o8dil.47 "one era" ruling): all
+    three centroid shards drop in this SAME transaction as the create+copy,
+    so PostgreSQL's free atomic rollback covers only the PRE-commit window.
+    Recovery post-commit is re-index (taxonomy discover recomputes
+    centroids from chunk embeddings + topic assignments), not "restore from
+    the kept sources" — consistent with the chunks side's accepted stance
+    that everything here is regenerable.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="taxonomy-007-1" author="nexus-jv3ue">
+        <comment>RDR-191 Phase 4 (bead nexus-jv3ue, Hal ruling o8dil.47): create nexus.taxonomy_centroids, copy all rows from taxonomy_centroids_384/768/1024, build all indexes, drop the three sources — ONE transaction, copy-THEN-index. See file header for the full derivation and divergences from the chunks template.</comment>
+
+        <!-- Step 0: lock-first + defuse the FORCE RLS DML-blindness trap on
+             the three sources (mirrors vectors-004-1 step 0). No restore
+             needed, they are dropped later in this same changeset. -->
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE nexus.taxonomy_centroids_384, nexus.taxonomy_centroids_768, nexus.taxonomy_centroids_1024 IN ACCESS EXCLUSIVE MODE;
+ALTER TABLE nexus.taxonomy_centroids_384  NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.taxonomy_centroids_768  NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.taxonomy_centroids_1024 NO FORCE ROW LEVEL SECURITY;
+        </sql>
+
+        <!-- Step 0.6: cross-shard PK collision guard, keyed on the centroid
+             table's real PK (tenant_id, collection, topic_id) - see file
+             header. Must run with FORCE RLS already off (previous step) to
+             see real data; a Liquibase <preConditions> here would be blind
+             for the same reason as vectors-004-1's N7 guard. -->
+        <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE
+    collision_count bigint;
+BEGIN
+    SELECT COUNT(*) INTO collision_count FROM (
+        SELECT tenant_id, collection, topic_id FROM nexus.taxonomy_centroids_384
+        INTERSECT
+        SELECT tenant_id, collection, topic_id FROM nexus.taxonomy_centroids_768
+        UNION ALL
+        SELECT tenant_id, collection, topic_id FROM nexus.taxonomy_centroids_384
+        INTERSECT
+        SELECT tenant_id, collection, topic_id FROM nexus.taxonomy_centroids_1024
+        UNION ALL
+        SELECT tenant_id, collection, topic_id FROM nexus.taxonomy_centroids_768
+        INTERSECT
+        SELECT tenant_id, collection, topic_id FROM nexus.taxonomy_centroids_1024
+    ) collisions;
+    IF collision_count > 0 THEN
+        RAISE EXCEPTION 'RDR-191 unify (taxonomy-007-1): % cross-shard (tenant_id, collection, topic_id) collision(s) found -- the unified PK cannot represent a topic_id present in more than one dim shard for the same collection. Resolve the collision (retire the stale-dim centroid or renumber the topic) before retrying this migration.', collision_count;
+    END IF;
+END
+$$;
+        </sql>
+
+        <!-- Step 1: create nexus.taxonomy_centroids bare - PK + exactly_one_embedding
+             CHECK only. No indexes yet (copy-then-index). RLS deliberately
+             deferred past the copy (see file header). No chash/octet-CHECK
+             family, no collection FK - neither exists on the source tables
+             (divergence 1 and 2 above). -->
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.taxonomy_centroids (
+    tenant_id      TEXT        NOT NULL,
+    collection     TEXT        NOT NULL,
+    topic_id       BIGINT      NOT NULL,
+    embedding_384  vector(384),
+    embedding_768  vector(768),
+    embedding_1024 vector(1024),
+    label          TEXT,
+    doc_count      INTEGER,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT taxonomy_centroids_pk PRIMARY KEY (tenant_id, collection, topic_id),
+    CONSTRAINT taxonomy_centroids_exactly_one_embedding
+        CHECK (num_nonnulls(embedding_384, embedding_768, embedding_1024) = 1)
+);
+        </sql>
+
+        <!-- Step 2: copy ALL rows from all three shards. Each shard's
+             embedding lands in ITS typed column; the other two columns stay
+             NULL. label/doc_count/created_at carry over verbatim. -->
+        <sql splitStatements="true" stripComments="false">
+INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_384, label, doc_count, created_at)
+SELECT tenant_id, collection, topic_id, embedding, label, doc_count, created_at
+FROM nexus.taxonomy_centroids_384;
+
+INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_768, label, doc_count, created_at)
+SELECT tenant_id, collection, topic_id, embedding, label, doc_count, created_at
+FROM nexus.taxonomy_centroids_768;
+
+INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_1024, label, doc_count, created_at)
+SELECT tenant_id, collection, topic_id, embedding, label, doc_count, created_at
+FROM nexus.taxonomy_centroids_1024;
+        </sql>
+
+        <!-- Step 3: RLS, mirroring taxonomy-002-4 exactly - AFTER the copy
+             (file-header deviation note: FORCE RLS + WITH CHECK during the
+             copy would reject every inserted row). -->
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.taxonomy_centroids ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.taxonomy_centroids FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.taxonomy_centroids
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+
+        <!-- Step 4: indexes AFTER the copy. All three HNSW are FULL,
+             unconditional on population (F13/C4 discipline carried over
+             identically: no WHERE predicate). NO trigram/tsv/extra-btree
+             (divergences 3 and 4 above - centroids carry no chunk_text and
+             the PK already doubles as the collection-prefix btree). -->
+        <sql splitStatements="true" stripComments="false">
+CREATE INDEX idx_taxonomy_centroids_embedding_384
+    ON nexus.taxonomy_centroids USING hnsw (embedding_384 vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_taxonomy_centroids_embedding_768
+    ON nexus.taxonomy_centroids USING hnsw (embedding_768 vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_taxonomy_centroids_embedding_1024
+    ON nexus.taxonomy_centroids USING hnsw (embedding_1024 vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+        </sql>
+
+        <!-- Step 5: drop the three sources in the SAME transaction. CASCADE
+             fallout is documented in full in the file header - ZERO objects
+             are cascade-dropped (assign_from_chashes_<dim> are plpgsql, not
+             dependency-tracked; no view or LANGUAGE sql function references
+             a taxonomy_centroids_<dim> table anywhere in the repo). CASCADE
+             is kept for defensive symmetry with vectors-004-1, not because
+             anything is known to depend on these tables today. -->
+        <sql splitStatements="true" stripComments="false">
+DROP TABLE nexus.taxonomy_centroids_384, nexus.taxonomy_centroids_768, nexus.taxonomy_centroids_1024 CASCADE;
+        </sql>
+
+        <!-- ROLLBACK: faithful full inverse. Recreates taxonomy_centroids_384/
+             768/1024 as they existed immediately before this changeset (PK,
+             RLS, HNSW index, NOT NULL embedding - NO chash/octet-CHECK, NO
+             collection FK, since neither existed on the sources), copies
+             rows back split by populated embedding column, then drops
+             nexus.taxonomy_centroids. -->
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.taxonomy_centroids_384 (
+    tenant_id  TEXT        NOT NULL,
+    collection TEXT        NOT NULL,
+    topic_id   BIGINT      NOT NULL,
+    embedding  vector(384) NOT NULL,
+    label      TEXT,
+    doc_count  INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT taxonomy_centroids_384_pk PRIMARY KEY (tenant_id, collection, topic_id)
+);
+CREATE TABLE nexus.taxonomy_centroids_768 (
+    tenant_id  TEXT        NOT NULL,
+    collection TEXT        NOT NULL,
+    topic_id   BIGINT      NOT NULL,
+    embedding  vector(768) NOT NULL,
+    label      TEXT,
+    doc_count  INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT taxonomy_centroids_768_pk PRIMARY KEY (tenant_id, collection, topic_id)
+);
+CREATE TABLE nexus.taxonomy_centroids_1024 (
+    tenant_id  TEXT         NOT NULL,
+    collection TEXT         NOT NULL,
+    topic_id   BIGINT       NOT NULL,
+    embedding  vector(1024) NOT NULL,
+    label      TEXT,
+    doc_count  INTEGER,
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT taxonomy_centroids_1024_pk PRIMARY KEY (tenant_id, collection, topic_id)
+);
+            </sql>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.taxonomy_centroids NO FORCE ROW LEVEL SECURITY;
+            </sql>
+            <sql splitStatements="true" stripComments="false">
+INSERT INTO nexus.taxonomy_centroids_384 (tenant_id, collection, topic_id, embedding, label, doc_count, created_at)
+SELECT tenant_id, collection, topic_id, embedding_384, label, doc_count, created_at
+FROM nexus.taxonomy_centroids WHERE embedding_384 IS NOT NULL;
+
+INSERT INTO nexus.taxonomy_centroids_768 (tenant_id, collection, topic_id, embedding, label, doc_count, created_at)
+SELECT tenant_id, collection, topic_id, embedding_768, label, doc_count, created_at
+FROM nexus.taxonomy_centroids WHERE embedding_768 IS NOT NULL;
+
+INSERT INTO nexus.taxonomy_centroids_1024 (tenant_id, collection, topic_id, embedding, label, doc_count, created_at)
+SELECT tenant_id, collection, topic_id, embedding_1024, label, doc_count, created_at
+FROM nexus.taxonomy_centroids WHERE embedding_1024 IS NOT NULL;
+            </sql>
+            <sql splitStatements="true" stripComments="false">
+CREATE INDEX idx_taxonomy_centroids_384_embedding ON nexus.taxonomy_centroids_384 USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_taxonomy_centroids_768_embedding ON nexus.taxonomy_centroids_768 USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX idx_taxonomy_centroids_1024_embedding ON nexus.taxonomy_centroids_1024 USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+            </sql>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.taxonomy_centroids_384 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.taxonomy_centroids_384 FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.taxonomy_centroids_384
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+ALTER TABLE nexus.taxonomy_centroids_768 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.taxonomy_centroids_768 FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.taxonomy_centroids_768
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+ALTER TABLE nexus.taxonomy_centroids_1024 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.taxonomy_centroids_1024 FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.taxonomy_centroids_1024
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+            </sql>
+            <sql splitStatements="true" stripComments="false">
+DROP TABLE nexus.taxonomy_centroids;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

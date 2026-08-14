@@ -114,11 +114,17 @@ class TaxonomyAssignFromChashesRepositoryTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
+            // RDR-191 unify (vectors-004/taxonomy-007): chunks_<dim> and
+            // taxonomy_centroids_<dim> collapse into ONE unified table each
+            // (nexus.chunks / nexus.taxonomy_centroids, three nullable typed
+            // embedding_<dim> columns) -- one grant apiece, not a dim loop.
+            // assign_from_chashes_<dim> stays THREE separate typed functions
+            // (DECISION 2, T2 [22445]), so its EXECUTE grant keeps the loop.
+            su.createStatement().execute(
+                "GRANT SELECT ON nexus.chunks TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "GRANT SELECT ON nexus.taxonomy_centroids TO " + SVC_ROLE);
             for (int dim : new int[] {384, 768, 1024}) {
-                su.createStatement().execute(
-                    "GRANT SELECT ON nexus.chunks_" + dim + " TO " + SVC_ROLE);
-                su.createStatement().execute(
-                    "GRANT SELECT ON nexus.taxonomy_centroids_" + dim + " TO " + SVC_ROLE);
                 su.createStatement().execute(
                     "GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_" + dim
                     + "(text, text[], boolean) TO " + SVC_ROLE);
@@ -545,14 +551,17 @@ class TaxonomyAssignFromChashesRepositoryTest {
         seedChunk(tenant, collection, hexChashValue, emb, DIM);
     }
 
-    /** Dim-parametrized variant (nexus-lns3o review: 384/768 dim-parity coverage). */
+    /** Dim-parametrized variant (nexus-lns3o review: 384/768 dim-parity coverage).
+     * RDR-191 unify: targets the unified nexus.chunks table, dim expressed via
+     * the correct embedding_&lt;dim&gt; column (the other two stay NULL, satisfying
+     * the exactly_one_embedding CHECK) rather than a separate chunks_&lt;dim&gt; table. */
     private void seedChunk(String tenant, String collection, String hexChashValue, float[] emb, int dim) throws Exception {
         registerCollection(tenant, collection);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks_" + dim
-                    + " (tenant_id, collection, chash, chunk_text, embedding)"
+                    "INSERT INTO nexus.chunks"
+                    + " (tenant_id, collection, chash, chunk_text, embedding_" + dim + ")"
                     + " VALUES (?, ?, decode(?, 'hex'), ?, ?::vector)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, collection);
@@ -564,8 +573,13 @@ class TaxonomyAssignFromChashesRepositoryTest {
         }
     }
 
-    /** chunks_&lt;dim&gt; carries an FK to catalog_collections(tenant_id, name) — pre-register
-     * every fixture collection before seeding chunk rows (idempotent). */
+    /** Pre-register every fixture collection before seeding chunk rows (idempotent).
+     * The three source chunks_&lt;dim&gt; tables carried a validated FK to
+     * catalog_collections(tenant_id, name); the unified nexus.chunks ships with
+     * ZERO collection-FK enforcement until RDR-191 Phase 5 (vectors-004-unify-chunks.xml
+     * header, "NO COLLECTION FK ON nexus.chunks UNTIL PHASE 5") — this call is now
+     * belt-and-suspenders rather than FK-required, kept for parity with the SVC_ROLE
+     * grant on catalog_collections and to mirror production's registration path. */
     private void registerCollection(String tenant, String collection) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -590,13 +604,15 @@ class TaxonomyAssignFromChashesRepositoryTest {
         seedCentroid(tenant, collection, topicId, emb, DIM);
     }
 
-    /** Dim-parametrized variant (nexus-lns3o review: 384/768 dim-parity coverage). */
+    /** Dim-parametrized variant (nexus-lns3o review: 384/768 dim-parity coverage).
+     * RDR-191 unify: targets the unified nexus.taxonomy_centroids table, dim
+     * expressed via the correct embedding_&lt;dim&gt; column. */
     private void seedCentroid(String tenant, String collection, long topicId, float[] emb, int dim) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.taxonomy_centroids_" + dim
-                    + " (tenant_id, collection, topic_id, embedding) VALUES (?, ?, ?, ?::vector)")) {
+                    "INSERT INTO nexus.taxonomy_centroids"
+                    + " (tenant_id, collection, topic_id, embedding_" + dim + ") VALUES (?, ?, ?, ?::vector)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, collection);
                 ps.setLong(3, topicId);

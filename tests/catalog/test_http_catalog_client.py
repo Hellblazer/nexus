@@ -1269,7 +1269,8 @@ class TestHttpCatalogClientRoundTrip:
         assert by_doc["1.1.1"][0].position == 0
 
         # Must send 'rows' key not 'chunks'.
-        client.write_manifest("1.1.1", [{"position": 0, "chash": CHASH_A}])
+        client.write_manifest(
+            "1.1.1", [{"position": 0, "chash": CHASH_A}], collection="code__test__v1")
 
         # GET /manifest/get?doc_id=X → response key 'rows'
         rows = client.get_manifest("1.1.1")

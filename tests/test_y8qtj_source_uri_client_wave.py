@@ -362,9 +362,11 @@ class TestDocumentForkCheck:
 
         cat.write_manifest(
             str(old_doc), [_chunk(c, i) for i, c in enumerate([*shared, unique_old])],
+            collection=coll,
         )
         cat.write_manifest(
             str(new_doc), [_chunk(c, i) for i, c in enumerate([*shared, unique_new])],
+            collection=coll,
         )
 
         with capture_logs() as cap:
@@ -399,8 +401,8 @@ class TestDocumentForkCheck:
             file_path=f"b-{_next_seq()}.pdf", physical_collection=coll,
         )
 
-        cat.write_manifest(str(doc_a), [_chunk("6" * 64, 0)])
-        cat.write_manifest(str(doc_b), [_chunk("7" * 64, 0)])
+        cat.write_manifest(str(doc_a), [_chunk("6" * 64, 0)], collection=coll)
+        cat.write_manifest(str(doc_b), [_chunk("7" * 64, 0)], collection=coll)
 
         with capture_logs() as cap:
             forks = _check_document_fork(str(doc_b), coll)
@@ -433,9 +435,10 @@ class TestDocumentForkCheck:
         shared = ["8" * 64]
         unique_new = ["9" * 64, "a" * 64, "b" * 64, "c" * 64]
 
-        cat.write_manifest(str(old_doc), [_chunk(c, i) for i, c in enumerate(shared)])
+        cat.write_manifest(str(old_doc), [_chunk(c, i) for i, c in enumerate(shared)], collection=coll)
         cat.write_manifest(
             str(new_doc), [_chunk(c, i) for i, c in enumerate([*shared, *unique_new])],
+            collection=coll,
         )
 
         forks = _check_document_fork(str(new_doc), coll)
@@ -471,9 +474,10 @@ class TestCatalogUpdateFilePath:
         # 2 of 6 shared = 0.333... — the historical fraction, above >0.25.
         shared = ["8" * 64, "9" * 64]
         unique_new = ["a" * 64, "b" * 64, "c" * 64, "d" * 64]
-        cat.write_manifest(str(old_doc), [_chunk(c, i) for i, c in enumerate(shared)])
+        cat.write_manifest(str(old_doc), [_chunk(c, i) for i, c in enumerate(shared)], collection=coll)
         cat.write_manifest(
             str(new_doc), [_chunk(c, i) for i, c in enumerate([*shared, *unique_new])],
+            collection=coll,
         )
         with structlog.testing.capture_logs() as logs:
             _check_document_fork(str(new_doc), coll)

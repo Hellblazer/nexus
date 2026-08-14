@@ -114,6 +114,7 @@ def test_chunk_char_span_resolves_via_manifest(t3_db, catalog) -> None:
             {"chash": chash_b, "position": 1, "line_start": 2, "line_end": 2,
              "char_start": 0, "char_end": len(chunk_b_text)},
         ],
+        collection=coll_name,
     )
 
     # Patch make_t3 to return our test instance (the chunk:char branch
@@ -167,6 +168,7 @@ def test_chunk_char_span_returns_none_when_position_out_of_range(
         str(tumbler),
         [{"chash": chash, "position": 0, "char_start": 0,
           "char_end": len(chunk_text)}],
+        collection=coll_name,
     )
 
     with patch("nexus.db.make_t3", return_value=t3_db):

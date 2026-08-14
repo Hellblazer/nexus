@@ -1,5 +1,7 @@
 import logging
 import os
+import unittest.mock
+import warnings
 
 import pytest
 from pathlib import Path
@@ -208,6 +210,7 @@ def pytest_sessionfinish(session, exitstatus):
         )
 
     _check_scenario_non_vacuity(session)
+    _check_mandatory_pin_non_vacuity(session)
 
 
 # ── `scenario` marker non-vacuity guard (test-suite-compression P2-reduced,
@@ -291,6 +294,33 @@ def pytest_sessionfinish(session, exitstatus):
 # run, workers only under true ``-n`` xdist — so it is populated in every
 # execution mode this guard needs to reason about.
 _SCENARIO_PROPERTY = "nx_scenario_marked"
+
+# ── `mandatory_regression_pin` marker non-vacuity guard (nexus-moht0
+# follow-up / nexus-93j33, 2026-08-12) ──────────────────────────────────────
+#
+# Same shape as the `scenario` guard above, generalized rather than
+# duplicated (see `_outcomes_from_terminalreporter` / `_check_marker_non_
+# vacuity` below) so the exact false-positive class the scenario guard's
+# history warns about (filtering `report.keywords`, which also carries a
+# truthy entry for every parametrize-id/name substring — see the FALSE-
+# POSITIVE FOUND 2026-08-05 comment above) cannot recur for this marker
+# either: BOTH guards stamp their verdict via `get_closest_marker()` into
+# `item.user_properties` at collection time and read that back, never
+# `report.keywords`.
+#
+# WHY THIS EXISTS: substantive-critic review of the nexus-f9z84/jvhsw/cqquo/
+# hs4xl vacuous-gate fixes found the fixes' OWN "mandatory regression pin"
+# tests (test_v7_6_1_merge_commit_has_real_green_evidence,
+# test_required_check_contexts_matches_live_branch_protection,
+# test_v7_6_1_source_ancestry_regression_is_red) marked `integration` to
+# dodge the unit suite -- correctly -- but a marker only moves a test
+# somewhere it CAN run; nothing proved it DID. All three need an
+# environment `ci.yml`'s `test` job deliberately does not provide (full git
+# history for tags, GITHUB_TOKEN for the live API — nexus-dhs30's `fetch-
+# tags: true` was tried and rejected there already), so wherever they
+# actually get invoked with `-m integration`, this guard is what turns "all
+# three silently skipped" into a failed run instead of a green one.
+_MANDATORY_PIN_PROPERTY = "nx_mandatory_pin_marked"
 
 
 # ── partial-view guard for session.items-based censuses (nexus-vdti6,
@@ -534,6 +564,8 @@ def pytest_collection_modifyitems(items) -> None:
     for item in items:
         if item.get_closest_marker("scenario") is not None:
             item.user_properties.append((_SCENARIO_PROPERTY, True))
+        if item.get_closest_marker("mandatory_regression_pin") is not None:
+            item.user_properties.append((_MANDATORY_PIN_PROPERTY, True))
 
     if os.environ.get(_NX_CENSUS_ONLY_ENV):
         _skip_mark_everything_but_census(items)
@@ -551,9 +583,14 @@ def _is_xdist_worker(session) -> bool:
     return hasattr(session.config, "workerinput")
 
 
-def _scenario_outcomes_from_terminalreporter(terminalreporter) -> dict[str, str]:
-    """Derive final per-test outcomes for every `scenario`-marked test
-    reported to this process, keyed by nodeid.
+def _outcomes_from_terminalreporter(terminalreporter, property_name: str) -> dict[str, str]:
+    """Derive final per-test outcomes for every test stamped with
+    *property_name* in ``item.user_properties``, keyed by nodeid.
+
+    Generalized out of the original `scenario`-only implementation
+    (nexus-93j33) so the `mandatory_regression_pin` guard below reuses the
+    exact same phase-precedence / anti-false-positive logic instead of a
+    hand-copied duplicate that could drift.
 
     Built entirely from ``terminalreporter.stats`` (see the module
     comment above for why: it is the only selection/outcome signal
@@ -573,7 +610,7 @@ def _scenario_outcomes_from_terminalreporter(terminalreporter) -> dict[str, str]
     outcomes: dict[str, str] = {}
     for reports in terminalreporter.stats.values():
         for report in reports:
-            if not dict(getattr(report, "user_properties", ())).get(_SCENARIO_PROPERTY):
+            if not dict(getattr(report, "user_properties", ())).get(property_name):
                 continue
             nodeid = getattr(report, "nodeid", None)
             if nodeid is None:
@@ -593,21 +630,35 @@ def _scenario_outcomes_from_terminalreporter(terminalreporter) -> dict[str, str]
     return outcomes
 
 
-def _check_scenario_non_vacuity(session) -> None:
-    """Fail the session loudly if too many `scenario` tests skipped —
-    never silently skip-pass (repo convention: a gate that skip-passes
-    when its dependency is absent must carry a max-skip / non-vacuity
-    assert).
+def _scenario_outcomes_from_terminalreporter(terminalreporter) -> dict[str, str]:
+    return _outcomes_from_terminalreporter(terminalreporter, _SCENARIO_PROPERTY)
+
+
+def _check_marker_non_vacuity(
+    session,
+    *,
+    property_name: str,
+    marker_label: str,
+    env_var: str,
+    default_budget: int,
+    explanation: str,
+    override_note: str,
+) -> None:
+    """Fail the session loudly if too many *marker_label*-marked tests
+    skipped — never silently skip-pass (repo convention: a gate that
+    skip-passes when its dependency is absent must carry a max-skip /
+    non-vacuity assert).
 
     No-ops on an xdist WORKER (enforcement happens once, on the
     controller/serial process whose exit status is the real process exit
-    code — see the module comment above). Inert when zero `scenario`
-    tests reported an outcome in THIS process — a shard or filtered run
-    that got none is fine. Otherwise at most ``NX_SCENARIO_SKIP_BUDGET``
-    (default 0) of them may skip; more than that fails the session even
-    if every individual test reported a clean ``pytest.skip()`` (the
-    substrate silently degrading is exactly the failure mode this exists
-    to catch).
+    code — see the module comment above). Inert when zero marked tests
+    reported an outcome in THIS process — a shard, filtered, or
+    default-addopts run that never even SELECTED any (e.g. `integration`-
+    marked tests under the default `-m 'not integration...'` addopts) is
+    fine; this guard only has teeth once such a test is actually
+    collected and run. Otherwise at most *default_budget* (overridable via
+    *env_var*) of them may skip; more than that fails the session even if
+    every individual test reported a clean ``pytest.skip()``.
     """
     if _is_xdist_worker(session):
         return
@@ -616,33 +667,77 @@ def _check_scenario_non_vacuity(session) -> None:
         # No terminal reporter registered (e.g. -p no:terminalreporter) —
         # nothing to aggregate outcomes from; nothing this guard can check.
         return
-    outcomes = _scenario_outcomes_from_terminalreporter(terminalreporter)
+    outcomes = _outcomes_from_terminalreporter(terminalreporter, property_name)
     if not outcomes:
         return
     # Honest denominator (code-review-expert, 2026-08-05): "ran" is every
-    # `scenario` nodeid with a logged outcome in this aggregate — never a
+    # marked nodeid with a logged outcome in this aggregate — never a
     # separately-tracked "selected" count that could silently overstate M
     # under a shard or partial selection.
     ran = sorted(outcomes)
     skipped = sorted(nid for nid in ran if outcomes[nid] == "skipped")
-    budget = int(os.environ.get("NX_SCENARIO_SKIP_BUDGET", "0"))
+    budget = int(os.environ.get(env_var, str(default_budget)))
     if len(skipped) <= budget:
         return
     session.exitstatus = 1
     names = ", ".join(Path(n).name for n in skipped[:5])
     suffix = "" if len(skipped) <= 5 else f" (+{len(skipped) - 5} more)"
     print(
-        f"\n\nFAIL: scenario non-vacuity guard — {len(skipped)}/{len(ran)} "
-        f"`scenario`-marked test(s) with a logged outcome SKIPPED "
+        f"\n\nFAIL: {marker_label} non-vacuity guard — {len(skipped)}/{len(ran)} "
+        f"`{marker_label}`-marked test(s) with a logged outcome SKIPPED "
         f"(budget={budget}): {names}{suffix}\n"
-        f"  A `scenario` test proves a real cross-verb journey against the "
-        f"session's engine substrate (tests/conftest.py::t2_service_env). A "
-        f"skip here usually means that substrate silently degraded (a "
-        f"stale/absent service jar) rather than a scenario genuinely being "
-        f"inapplicable — see tests/test_scenario_journeys.py.\n"
-        f"  Override (rare — e.g. a deliberately substrate-less shard): "
-        f"NX_SCENARIO_SKIP_BUDGET=<n>.\n",
+        f"  {explanation}\n"
+        f"  Override ({override_note}): {env_var}=<n>.\n",
         flush=True,
+    )
+
+
+def _check_scenario_non_vacuity(session) -> None:
+    _check_marker_non_vacuity(
+        session,
+        property_name=_SCENARIO_PROPERTY,
+        marker_label="scenario",
+        env_var="NX_SCENARIO_SKIP_BUDGET",
+        default_budget=0,
+        explanation=(
+            "A `scenario` test proves a real cross-verb journey against the "
+            "session's engine substrate (tests/conftest.py::t2_service_env). A "
+            "skip here usually means that substrate silently degraded (a "
+            "stale/absent service jar) rather than a scenario genuinely being "
+            "inapplicable — see tests/test_scenario_journeys.py."
+        ),
+        override_note="rare — e.g. a deliberately substrate-less shard",
+    )
+
+
+def _check_mandatory_pin_non_vacuity(session) -> None:
+    """nexus-93j33: the `mandatory_regression_pin` sibling of the guard
+    above. These tests (nexus-f9z84/jvhsw/hs4xl's "prove the gate fires
+    against a deliberately broken input" regression pins) are ALSO
+    `integration`-marked, so they are invisible to this guard under the
+    default addopts run (correct — see `_check_marker_non_vacuity`'s
+    "Inert when zero..." doc) and only have teeth in an invocation that
+    actually selects `-m integration` and includes their modules. That is
+    precisely the gap review found: a marker alone does not prove the
+    pin ran, only that it CAN. This is what proves it did.
+    """
+    _check_marker_non_vacuity(
+        session,
+        property_name=_MANDATORY_PIN_PROPERTY,
+        marker_label="mandatory_regression_pin",
+        env_var="NX_MANDATORY_PIN_SKIP_BUDGET",
+        default_budget=0,
+        explanation=(
+            "A `mandatory_regression_pin` test is a release/CI-gate "
+            "regression test (nexus-moht0 vacuous-gate class) whose bead "
+            "REQUIRES it to exercise a real external dependency (live git "
+            "tags, an authenticated GitHub API call) rather than a mock. A "
+            "skip here means the pin never actually proved anything this "
+            "run — usually a missing GITHUB_TOKEN / unauthenticated `gh`, "
+            "or a shallow checkout without the tags it needs (see each "
+            "test's own skip reason)."
+        ),
+        override_note="rare — e.g. a deliberately token-less/tag-less integration run",
     )
 
 
@@ -1010,6 +1105,91 @@ def _reset_service_t2_db() -> None:
     _evict()
     yield
     _evict()
+
+
+@pytest.fixture(autouse=True)
+def _restore_t3_singleton(request: pytest.FixtureRequest):
+    """SNAPSHOT/RESTORE ``mcp_infra._t3_instance`` around every test
+    (nexus-jovc9, closing the residual nexus-0ne4s filed by nexus-gtl01).
+
+    ``_t3_instance`` is a PROCESS-WIDE singleton on the production CLI write
+    path (``doc_indexer._index_document`` resolves its write handle from
+    ``mcp_infra.get_t3()``). gtl01 fixed ONE way it gets poisoned — a fixture
+    calling ``inject_t3(handle)`` without restoring — and mechanized that
+    single shape in ``test_t3_singleton_leak_lint.py``. jovc9 is the shape
+    that lint explicitly cannot see, and it needs no ``inject_t3`` call at
+    all::
+
+        with patch("nexus.db.make_t3", return_value=MagicMock()):
+            runner.invoke(main, ["memory", "promote", ...])
+        #  ^ CLI -> HookRegistry.fire_store_chains -> fire_batch
+        #    -> mcp_infra.taxonomy_assign_batch_hook -> is_service_backed(get_t3())
+        #    -> get_t3() MEMOISES make_t3()'s return into _t3_instance.
+
+    ``patch`` restores ``nexus.db.make_t3`` on exit. It cannot restore the
+    MEMO the patched factory was used to build — the mock outlives the patch
+    for the life of the worker process. A later ``nx index md`` in the same
+    xdist worker then writes its chunk into that mock, the bytes never reach
+    PG, and the RUNFENCE completion check correctly refuses with
+    ``referenced=1 present=0``. Serial-green, ``-n auto``-red, order-dependent:
+    exactly the jovc9 signature, and exactly gtl01's signature one link
+    upstream.
+
+    SNAPSHOT/RESTORE, not evict-both-sides (the shape
+    ``_reset_service_t2_db`` above takes). Restoring the PRIOR value cannot
+    invalidate a handle installed before this test — the objection that kept
+    the conftest from doing this for T3 at gtl01 time. That objection named
+    module-scoped T3 injections; a full-tree sweep at jovc9 found none (every
+    ``inject_t3`` call site is function-scoped or has setup/teardown_method),
+    so the narrower restore is safe today and stays safe if one appears.
+
+    The restore is UNCONDITIONAL; only the reporting is graded, by whether the
+    leaked handle is one production could actually have produced here:
+
+    * a ``unittest.mock`` object is never legitimate -> ``pytest.fail`` on the
+      test that left it, so the next one is fixed at the leaker instead of
+      surfacing as a journey refusal hours later in another file;
+    * a NON-service-backed handle in service mode (a ``T3Database`` over
+      ``InMemoryVectorClient``, the gtl01 shape) is the same poison with a
+      less obvious type -> warn, naming the leaker;
+    * a service-backed handle is just lazy init of the real singleton — no
+      defect, no warning. It is still restored: an ``HttpVectorClient`` bakes
+      in the tenant token it saw at construction, and the engine substrate
+      mints a fresh tenant per test, so carrying one forward is the T3 twin of
+      the nexus-aqbrk T2 defect the fixture above evicts for.
+    """
+    import nexus.mcp_infra as mcp_infra
+
+    before = mcp_infra._t3_instance
+    yield
+    after = mcp_infra._t3_instance
+    if after is before:
+        return
+    with mcp_infra._t3_lock:
+        mcp_infra._t3_instance = before
+    if after is None:
+        return  # test reset the singleton; nothing leaked
+    if isinstance(after, unittest.mock.NonCallableMock):
+        pytest.fail(
+            f"{request.node.nodeid} left a {type(after).__name__} in the "
+            "process-wide mcp_infra._t3_instance singleton. A mock on the "
+            "production T3 write path silently swallows every later chunk "
+            "write in this worker (nexus-gtl01 / nexus-jovc9). Usual cause: "
+            'patching "nexus.db.make_t3" while driving code that calls '
+            "get_t3(). Reset the singleton after the patched call — e.g. "
+            "mcp_infra.inject_t3(None) in a finally.",
+            pytrace=False,
+        )
+    from nexus.db.http_vector_client import is_service_backed, is_vector_service_mode
+
+    if is_vector_service_mode() and not is_service_backed(after):
+        warnings.warn(
+            f"{request.node.nodeid} left a non-service {type(after).__name__} "
+            "in mcp_infra._t3_instance under service mode (restored by "
+            "_restore_t3_singleton). Writes routed through it never reach the "
+            "engine — nexus-gtl01 / nexus-jovc9.",
+            stacklevel=1,
+        )
 
 
 @pytest.fixture(autouse=True)

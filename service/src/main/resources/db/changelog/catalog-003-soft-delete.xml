@@ -412,11 +412,30 @@ GRANT EXECUTE ON FUNCTION nexus.purge_trash(interval)   TO nexus_svc;
 GRANT SELECT ON nexus.live_chunks                        TO PUBLIC;
         </sql>
         <rollback>
-            <sql splitStatements="true">
-                REVOKE SELECT ON nexus.live_chunks                       FROM PUBLIC;
-                REVOKE EXECUTE ON FUNCTION nexus.purge_trash(interval)  FROM nexus_svc;
-                REVOKE EXECUTE ON FUNCTION nexus.document_restore(text) FROM nexus_svc;
-                REVOKE EXECUTE ON FUNCTION nexus.document_trash(text)   FROM nexus_svc;
+            <!-- RDR-191 repoint batch (nexus-o8dil.18): tolerant form. In the
+                 full reverse rollback chain the batch changesets' DROP-only
+                 rollbacks remove these objects BEFORE this rollback fires, and
+                 a bare REVOKE on a missing object errors. When the object is
+                 absent its grants died with it, so skipping is exact. Rollback
+                 edits on applied changesets are checksum-safe (catalog-013-2 /
+                 catalog-020-5 precedent). -->
+            <sql splitStatements="false">
+DO $$
+BEGIN
+    IF to_regclass('nexus.live_chunks') IS NOT NULL THEN
+        REVOKE SELECT ON nexus.live_chunks                       FROM PUBLIC;
+    END IF;
+    IF to_regprocedure('nexus.purge_trash(interval)') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.purge_trash(interval)  FROM nexus_svc;
+    END IF;
+    IF to_regprocedure('nexus.document_restore(text)') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.document_restore(text) FROM nexus_svc;
+    END IF;
+    IF to_regprocedure('nexus.document_trash(text)') IS NOT NULL THEN
+        REVOKE EXECUTE ON FUNCTION nexus.document_trash(text)   FROM nexus_svc;
+    END IF;
+END
+$$;
             </sql>
         </rollback>
     </changeSet>

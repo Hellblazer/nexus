@@ -124,6 +124,23 @@ public final class SchemaMigrator {
     /**
      * The five {@code length(chash)=32} CHECK constraints (catalog-002-hygiene.xml
      * + catalog-013-1) and their owning table, in {@code nexus} schema.
+     *
+     * <p>RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-o8dil.41 item 6 /
+     * bead nexus-o8dil.43's F14c concern): VERIFIED NO CHANGE NEEDED here despite
+     * {@code nexus.chunks_384/768/1024} collapsing into the unified {@code
+     * nexus.chunks} table. The three {@code chunks_<dim>_chash_len_check}
+     * entries below already reference constraint NAMES dropped by rdr180-2 —
+     * true before RDR-191 and unchanged after it, since {@link
+     * #preflightChashConstraints} probes by CONSTRAINT NAME
+     * ({@code pg_constraint WHERE conname = ?}), not by whether the owning
+     * TABLE exists. {@code nexus.chunks} is bytea-chash from creation and has
+     * no {@code length(text)=32} concept at all (only the separate octet
+     * family applies, added {@code NOT VALID} by {@code
+     * vectors-004-unify-chunks.xml} step 4) — so this preflight's per-entry
+     * lookup returns "not present" for the three {@code chunks_<dim>} rows
+     * exactly as it did pre-repoint, a no-op either way. See that changeset's
+     * own "LEN-CHECK FAMILY DISPOSITION" header note for the original
+     * verification this comment reaffirms.
      */
     private static final Map<String, String> CHASH_LEN_CONSTRAINTS = new LinkedHashMap<>();
     static {

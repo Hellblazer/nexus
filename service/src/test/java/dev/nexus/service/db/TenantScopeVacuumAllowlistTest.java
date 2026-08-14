@@ -60,7 +60,7 @@ class TenantScopeVacuumAllowlistTest {
 
     @Test
     void injectionShapedTableNameIsRejectedBeforeBorrow() {
-        String evil = "nexus.chunks_1024; DROP TABLE nexus.catalog_documents; --";
+        String evil = "nexus.chunks; DROP TABLE nexus.catalog_documents; --";
         assertThrows(IllegalArgumentException.class,
                 () -> scope.vacuumAnalyze(List.of(evil)));
         assertEquals(0, ds.borrows.get(),
@@ -74,20 +74,29 @@ class TenantScopeVacuumAllowlistTest {
         assertEquals(0, ds.borrows.get());
     }
 
+    // RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-o8dil.48 part 2): the "good"
+    // entry was "nexus.chunks_1024", allowed under the pre-unification five-table list.
+    // Post-unification that literal name is ITSELF no longer allowlisted (the physical
+    // table is dropped), which would have quietly turned this into a two-bad-entries
+    // test instead of the one-bad-poisons-a-good-batch proof it is named for. Retargeted
+    // to "nexus.chunks" (the genuinely allowed post-unification name) to keep the
+    // intended semantics.
     @Test
     void oneRejectedNameInAMixedListRejectsTheWholeBatch() {
         assertThrows(IllegalArgumentException.class,
-                () -> scope.vacuumAnalyze(List.of("nexus.chunks_1024", "nexus.not_allowed")));
+                () -> scope.vacuumAnalyze(List.of("nexus.chunks", "nexus.not_allowed")));
         assertEquals(0, ds.borrows.get(),
                 "the allowlist check must run over the WHOLE list before any borrow, "
                 + "so a batch containing one bad name never partially executes");
     }
 
+    // RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-o8dil.48 part 2):
+    // nexus.chunks_384/768/1024 collapsed into ONE unified nexus.chunks table — the
+    // allowlist is now three tables, not five.
     @Test
-    void allFivePurgeVacuumTablesPassValidationAndProceedToBorrow() {
+    void allThreePurgeVacuumTablesPassValidationAndProceedToBorrow() {
         List<String> allowed = List.of(
-            "nexus.chunks_384", "nexus.chunks_768", "nexus.chunks_1024",
-            "nexus.catalog_document_chunks", "nexus.catalog_documents");
+            "nexus.chunks", "nexus.catalog_document_chunks", "nexus.catalog_documents");
         // Every name passes the allowlist guard and proceeds to borrow a connection —
         // our stub then throws, surfacing as a wrapped RuntimeException. The borrow
         // counter proving we got PAST the allowlist is the non-vacuous assertion.

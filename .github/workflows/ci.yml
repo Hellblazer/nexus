@@ -942,7 +942,21 @@ jobs:
 
       - name: Decide whether the CA-3 build runs
         id: gate
+        # nexus-cqquo: an empty/absent/malformed paths-filter output must FAIL
+        # this step, never fall through to `run=false` -- that would silently
+        # skip the CA-3 build (a REQUIRED check per the comment above) on an
+        # UNPROVEN predicate, indistinguishable from a legitimately-false one.
         run: |
+          set -euo pipefail
+          for v in "${{ steps.changes.outputs.ca3_core }}" "${{ steps.changes.outputs.ca3_deps }}"; do
+            case "$v" in
+              true|false) ;;
+              *)
+                echo "::error::paths-filter produced no usable ca3_core/ca3_deps output ('$v') — cannot prove whether the CA-3 gate should run"
+                exit 1
+                ;;
+            esac
+          done
           if [ "${{ steps.changes.outputs.ca3_core }}" = "true" ] || \
              { [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ steps.changes.outputs.ca3_deps }}" = "true" ]; }; then
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -1172,7 +1186,21 @@ jobs:
 
       - name: Decide whether the CA-3 build runs
         id: gate
+        # nexus-cqquo: an empty/absent/malformed paths-filter output must FAIL
+        # this step, never fall through to `run=false` -- that would silently
+        # skip the CA-3 build (a REQUIRED check per the comment above) on an
+        # UNPROVEN predicate, indistinguishable from a legitimately-false one.
         run: |
+          set -euo pipefail
+          for v in "${{ steps.changes.outputs.ca3_core }}" "${{ steps.changes.outputs.ca3_deps }}"; do
+            case "$v" in
+              true|false) ;;
+              *)
+                echo "::error::paths-filter produced no usable ca3_core/ca3_deps output ('$v') — cannot prove whether the CA-3 gate should run"
+                exit 1
+                ;;
+            esac
+          done
           if [ "${{ steps.changes.outputs.ca3_core }}" = "true" ] || \
              { [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ steps.changes.outputs.ca3_deps }}" = "true" ]; }; then
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -1313,6 +1341,28 @@ jobs:
               - 'service/**'
               - '.github/workflows/ci.yml'
 
+      - name: Verify the svc predicate is usable (fail loud, never default-skip)
+        # nexus-cqquo: every step below is path-gated `if: ... == 'true'`, and
+        # this job has no job-level `if:` — so an empty, absent, or malformed
+        # `svc` output makes EVERY step below evaluate false, the job
+        # completes having built nothing, and reports GREEN on a REQUIRED
+        # CHECK. Same non-vacuity shape as the `changes` job's doc-only
+        # predicate above (ci.yml:127-145): an UNPROVEN predicate must be
+        # distinguishable from a proven-false one. This does NOT change the
+        # skip pattern itself (skipped-steps-equals-success stays correct for
+        # an affirmatively-false predicate) -- it only refuses to treat
+        # "paths-filter said nothing usable" as that same false.
+        run: |
+          set -euo pipefail
+          svc="${{ steps.changes.outputs.svc }}"
+          case "$svc" in
+            true|false) ;;
+            *)
+              echo "::error::paths-filter produced no usable svc output ('$svc') — cannot prove whether service/** changed, refusing to silently skip the native build"
+              exit 1
+              ;;
+          esac
+
       - name: Set up GraalVM 25.0.3
         if: steps.changes.outputs.svc == 'true'
         uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
@@ -1429,6 +1479,27 @@ jobs:
               - 'uv.lock'
               - 'pyproject.toml'
               - 'service/pom.xml'
+
+      - name: Verify the seam predicate is usable (fail loud, never default-skip)
+        # nexus-cqquo: same non-vacuity gap as engine-service-build above --
+        # this job has no job-level `if:` and every expensive step below is
+        # gated `if: ... == 'true'`, so an empty/absent/malformed `seam`
+        # output would skip the entire write-seam gate while the REQUIRED
+        # check still reports green. The comment two steps up already states
+        # exactly why this job must not fail open ("a floating tag compromised
+        # to always emit seam='false' would skip... while the job still
+        # reports green"); this closes the same hole for a malformed output,
+        # not just an affirmatively-false one.
+        run: |
+          set -euo pipefail
+          seam="${{ steps.changes.outputs.seam }}"
+          case "$seam" in
+            true|false) ;;
+            *)
+              echo "::error::paths-filter produced no usable seam output ('$seam') — cannot prove whether the write-seam surface changed, refusing to silently skip the gate"
+              exit 1
+              ;;
+          esac
 
       - name: Set up Java 25 (GraalVM)
         if: steps.changes.outputs.seam == 'true'

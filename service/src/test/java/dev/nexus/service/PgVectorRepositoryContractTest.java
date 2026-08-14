@@ -3,6 +3,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Contexts;
@@ -46,7 +47,8 @@ import static org.assertj.core.api.Assertions.within;
  * <p>Contract pinned here (RDR-155 §Proposed Solution, §Query path; §Approach item 2):
  * <ul>
  *   <li><strong>Runtime per-dim dispatch</strong> — the collection-name embedding-model
- *       segment routes to {@code nexus.chunks_384} / {@code chunks_768} / {@code chunks_1024}
+ *       segment routes to {@code embedding_384}/{@code embedding_768}/{@code embedding_1024} on
+ *       the unified {@code nexus.chunks} table (RDR-191 Phase 4)
  *       (RDR-103 collection-name authority); unknown segments fail loud, nothing written.
  *   <li><strong>Collection is a column</strong> — multi-collection search is a filtered
  *       union ({@code collection IN (...)}), one result list ordered by distance.
@@ -138,10 +140,10 @@ class PgVectorRepositoryContractTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            for (int dim : new int[] {384, 768, 1024}) {
-                su.createStatement().execute(
-                    "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chunks_" + dim + " TO " + SVC_ROLE);
-            }
+            // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
+            // a single GRANT now covers what three did.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT ON nexus.catalog_documents, nexus.catalog_document_chunks TO " + SVC_ROLE);
             // RDR-156 P0.2: upsertChunks now auto-stubs catalog_collections before chunk writes.
@@ -218,9 +220,9 @@ class PgVectorRepositoryContractTest {
             List.of("dispatch text one", "dispatch text two"),
             List.of(Map.of("kind", "d"), Map.of("kind", "d")));
 
-        assertThat(superuserCount(1024, col)).as("both rows in chunks_1024").isEqualTo(2L);
-        assertThat(superuserCount(768,  col)).as("nothing in chunks_768").isEqualTo(0L);
-        assertThat(superuserCount(384,  col)).as("nothing in chunks_384").isEqualTo(0L);
+        assertThat(superuserCount(1024, col)).as("both rows in nexus.chunks (dim=1024)").isEqualTo(2L);
+        assertThat(superuserCount(768,  col)).as("nothing in nexus.chunks (dim=768)").isEqualTo(0L);
+        assertThat(superuserCount(384,  col)).as("nothing in nexus.chunks (dim=384)").isEqualTo(0L);
     }
 
     // ---------------------------------------------------------------------------
@@ -242,7 +244,7 @@ class PgVectorRepositoryContractTest {
             List.of(chash), List.of("passthrough text"),
             List.of(supplied), List.of(Map.of("kind", "pt")));
 
-        assertThat(superuserCount(1024, col)).as("row landed in chunks_1024").isEqualTo(1L);
+        assertThat(superuserCount(1024, col)).as("row landed in nexus.chunks (dim=1024)").isEqualTo(1L);
         String stored = superuserChunkEmbedding(1024, col, chash);
         assertThat(stored)
             .as("the SUPPLIED vector is stored verbatim, not the embedder's [1,0,...] default")
@@ -251,7 +253,7 @@ class PgVectorRepositoryContractTest {
 
     @Test
     void upsertChunksWithVectors_dimMismatch_failsLoud() {
-        String col = COL_CTX_1024;  // dispatches to chunks_1024
+        String col = COL_CTX_1024;  // dispatches to embedding_1024
         float[] wrongDim = new float[768];  // a 768-dim vector for a 1024 collection
         wrongDim[0] = 1.0f;
         // The contamination guard: a supplied vector whose dim disagrees with the
@@ -281,9 +283,9 @@ class PgVectorRepositoryContractTest {
             List.of("voyage-3 dispatch text"),
             List.of(Map.of("kind", "d")));
 
-        assertThat(superuserCount(1024, col)).as("row in chunks_1024").isEqualTo(1L);
-        assertThat(superuserCount(768,  col)).as("nothing in chunks_768").isEqualTo(0L);
-        assertThat(superuserCount(384,  col)).as("nothing in chunks_384").isEqualTo(0L);
+        assertThat(superuserCount(1024, col)).as("row in nexus.chunks (dim=1024)").isEqualTo(1L);
+        assertThat(superuserCount(768,  col)).as("nothing in nexus.chunks (dim=768)").isEqualTo(0L);
+        assertThat(superuserCount(384,  col)).as("nothing in nexus.chunks (dim=384)").isEqualTo(0L);
     }
 
     /**
@@ -327,9 +329,9 @@ class PgVectorRepositoryContractTest {
             List.of("bge dispatch text"),
             List.of(Map.of("kind", "d")));
 
-        assertThat(superuserCount(768,  col)).as("row in chunks_768").isEqualTo(1L);
-        assertThat(superuserCount(1024, col)).as("nothing in chunks_1024").isEqualTo(0L);
-        assertThat(superuserCount(384,  col)).as("nothing in chunks_384").isEqualTo(0L);
+        assertThat(superuserCount(768,  col)).as("row in nexus.chunks (dim=768)").isEqualTo(1L);
+        assertThat(superuserCount(1024, col)).as("nothing in nexus.chunks (dim=1024)").isEqualTo(0L);
+        assertThat(superuserCount(384,  col)).as("nothing in nexus.chunks (dim=384)").isEqualTo(0L);
     }
 
     @Test
@@ -340,9 +342,9 @@ class PgVectorRepositoryContractTest {
             List.of("minilm dispatch text"),
             List.of(Map.of("kind", "d")));
 
-        assertThat(superuserCount(384,  col)).as("row in chunks_384").isEqualTo(1L);
-        assertThat(superuserCount(1024, col)).as("nothing in chunks_1024").isEqualTo(0L);
-        assertThat(superuserCount(768,  col)).as("nothing in chunks_768").isEqualTo(0L);
+        assertThat(superuserCount(384,  col)).as("row in nexus.chunks (dim=384)").isEqualTo(1L);
+        assertThat(superuserCount(1024, col)).as("nothing in nexus.chunks (dim=1024)").isEqualTo(0L);
+        assertThat(superuserCount(768,  col)).as("nothing in nexus.chunks (dim=768)").isEqualTo(0L);
     }
 
     @Test
@@ -362,7 +364,7 @@ class PgVectorRepositoryContractTest {
 
     @Test
     void upsert_dimMismatchBetweenEmbedderAndTable_failsLoud_writesNothing() throws Exception {
-        // 1024-dim embedder against a collection that dispatches to chunks_384:
+        // 1024-dim embedder against a collection that dispatches to embedding_384:
         // must fail loud (no truncation, no padding), nothing written.
         String col = "knowledge__mismatch__minilm-l6-v2-384__v1";
         assertThatThrownBy(() ->
@@ -376,7 +378,7 @@ class PgVectorRepositoryContractTest {
             .isNotInstanceOf(UnsupportedOperationException.class);
 
         assertThat(superuserCount(384, col))
-            .as("no row may land in chunks_384 after the failed mismatch upsert")
+            .as("no row may land in nexus.chunks (dim=384) after the failed mismatch upsert")
             .isEqualTo(0L);
     }
 
@@ -830,7 +832,7 @@ class PgVectorRepositoryContractTest {
 
     @Test
     void search_mixedDimCollections_failsLoud() {
-        // COL_CODE_1024 dispatches to chunks_1024, COL_BGE_768 to chunks_768: one query
+        // COL_CODE_1024 dispatches to embedding_1024, COL_BGE_768 to embedding_768: one query
         // vector cannot serve both spaces. Must fail loud, never silently skip or union.
         assertThatThrownBy(() ->
             repo1024.search(TENANT_A, "search query",
@@ -1264,11 +1266,18 @@ class PgVectorRepositoryContractTest {
     // Helpers
     // ---------------------------------------------------------------------------
 
-    /** Superuser row count for one collection in {@code nexus.chunks_<dim>} (bypasses RLS). */
+    /**
+     * Superuser row count for one collection in the unified {@code nexus.chunks} table
+     * (bypasses RLS). RDR-191 Phase 4: table collapsed from chunks_<dim>; the
+     * embedding_<dim> IS NOT NULL guard scopes the count to this dim (D1 hazard --
+     * this contract's whole point is proving a row lands in exactly ONE dim, so an
+     * unguarded count would silently defeat the "nothing in chunks_768" assertions).
+     */
     private long superuserCount(int dim, String collection) throws SQLException {
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
-                 "SELECT count(*) FROM nexus.chunks_" + dim + " WHERE collection = ?")) {
+                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ?"
+                 + " AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL")) {
             ps.setString(1, collection);
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
@@ -1281,12 +1290,12 @@ class PgVectorRepositoryContractTest {
     private String superuserChunkMetadataJson(int dim, String collection, String chash) throws SQLException {
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
-                 "SELECT metadata::text FROM nexus.chunks_" + dim
+                 "SELECT metadata::text FROM " + DimTables.CHUNKS_TABLE_NAME
                  + " WHERE collection = ? AND chash = ?")) {
             ps.setString(1, collection);
             ps.setBytes(2, java.util.HexFormat.of().parseHex(chash));
             try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("row %s/%s must exist in chunks_%d", collection, chash, dim).isTrue();
+                assertThat(rs.next()).as("row %s/%s must exist in nexus.chunks (dim=%d)", collection, chash, dim).isTrue();
                 return rs.getString(1);
             }
         }
@@ -1296,13 +1305,13 @@ class PgVectorRepositoryContractTest {
     private String superuserChunkEmbedding(int dim, String collection, String chash) throws SQLException {
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
-                 "SELECT embedding::text FROM nexus.chunks_" + dim
+                 "SELECT " + DimTables.embeddingColumn(dim) + "::text FROM " + DimTables.CHUNKS_TABLE_NAME
                  + " WHERE collection = ? AND chash = ?")) {
             ps.setString(1, collection);
             // chash is bytea(32) now (RDR-180) — bind the decoded digest, not hex text.
             ps.setBytes(2, java.util.HexFormat.of().parseHex(chash));
             try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("row %s/%s must exist in chunks_%d", collection, chash, dim).isTrue();
+                assertThat(rs.next()).as("row %s/%s must exist in nexus.chunks (dim=%d)", collection, chash, dim).isTrue();
                 return rs.getString(1);
             }
         }
@@ -1312,12 +1321,12 @@ class PgVectorRepositoryContractTest {
     private String superuserChunkText(int dim, String collection, String chash) throws SQLException {
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
-                 "SELECT chunk_text FROM nexus.chunks_" + dim
+                 "SELECT chunk_text FROM " + DimTables.CHUNKS_TABLE_NAME
                  + " WHERE collection = ? AND chash = ?")) {
             ps.setString(1, collection);
             ps.setBytes(2, java.util.HexFormat.of().parseHex(chash));
             try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("row %s/%s must exist in chunks_%d", collection, chash, dim).isTrue();
+                assertThat(rs.next()).as("row %s/%s must exist in nexus.chunks (dim=%d)", collection, chash, dim).isTrue();
                 return rs.getString(1);
             }
         }
@@ -1334,13 +1343,13 @@ class PgVectorRepositoryContractTest {
         lit.append(']');
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
-                 "SELECT embedding <=> ?::vector FROM nexus.chunks_" + dim
+                 "SELECT " + DimTables.embeddingColumn(dim) + " <=> ?::vector FROM " + DimTables.CHUNKS_TABLE_NAME
                  + " WHERE collection = ? AND chash = ?")) {
             ps.setString(1, lit.toString());
             ps.setString(2, collection);
             ps.setBytes(3, java.util.HexFormat.of().parseHex(chash));
             try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("row %s/%s must exist in chunks_%d", collection, chash, dim).isTrue();
+                assertThat(rs.next()).as("row %s/%s must exist in nexus.chunks (dim=%d)", collection, chash, dim).isTrue();
                 return rs.getDouble(1);
             }
         }

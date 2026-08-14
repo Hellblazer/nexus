@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -48,7 +49,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <ul>
  *   <li>{@link #explain_textFirstPlan_gatesViaGin_neverRanksViaHnsw} — the SELECTIVE-gate
  *       plan shape: gate the chashes via the GIN indexes (once), rank as a Sort over the
- *       chash-filtered set, the HNSW index ({@code idx_chunks_1024_embedding}) never
+ *       chash-filtered set, the HNSW index ({@code idx_chunks_embedding_1024}) never
  *       touched. This is the scale-independent structural core of the fix (it is a
  *       transcription of the two-query gate-then-rank SQL the dispatch builds for a
  *       selective gate — the behavioral tests below anchor that the production method
@@ -108,7 +109,7 @@ class HybridSelectiveGateTest {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chunks_1024 TO " + SVC_ROLE);
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
             // nexus-3ck2g: hybridSearch's inline live_chunks predicate (RDR-156 Decision 6)
@@ -170,7 +171,7 @@ class HybridSelectiveGateTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("ANALYZE nexus.chunks_1024");
+            su.createStatement().execute("ANALYZE " + DimTables.CHUNKS_TABLE_NAME);
         }
     }
 
@@ -182,7 +183,7 @@ class HybridSelectiveGateTest {
     // container scale Postgres cheaply seqscans, so the bad plan cannot be forced
     // faithfully; the production-scale recall verification is owned by the conexus
     // xr7.8.9 gate (per the bead). What IS deterministic here is the PLAN SHAPE: the
-    // retired plan ranks via the HNSW index (idx_chunks_1024_embedding) with the gate as
+    // retired plan ranks via the HNSW index (idx_chunks_embedding_1024) with the gate as
     // a filter (→ starvable); the text-first plan gates via the GIN indexes and sorts the
     // materialized set, never touching the HNSW index (→ unstarvable).
     // ════════════════════════════════════════════════════════════════════════
@@ -202,7 +203,7 @@ class HybridSelectiveGateTest {
         // actually returns the right rows at fixture scale; production-scale recall is the
         // conexus xr7.8.9 gate's.
         String gateFetch =
-            "SELECT chash FROM nexus.chunks_1024" +
+            "SELECT chash FROM " + DimTables.CHUNKS_TABLE_NAME +
             " WHERE collection = '" + COLL + "'" +
             "   AND (chunk_tsv @@ plainto_tsquery('english', '" + TOKEN + "') OR '" + TOKEN + "' <% chunk_text)" +
             " LIMIT " + (TARGETS + 1);
@@ -210,13 +211,13 @@ class HybridSelectiveGateTest {
         assertThat(gatePlan)
             .as("the gate MUST be evaluated via the GIN text indexes (tsv/trgm), once. "
                 + "Plan was:%n%s", gatePlan)
-            .containsAnyOf("idx_chunks_1024_tsv", "idx_chunks_1024_trgm", "Bitmap Index Scan");
+            .containsAnyOf("idx_chunks_tsv", "idx_chunks_trgm", "Bitmap Index Scan");
 
         String inList = targetChashes.stream().map(c -> "'" + c + "'")
             .collect(java.util.stream.Collectors.joining(","));
         String rank =
-            "SELECT chash, (embedding <=> '" + vec(1.0, 0.0) + "'::vector) AS distance" +
-            " FROM nexus.chunks_1024" +
+            "SELECT chash, (" + DimTables.embeddingColumn(1024) + " <=> '" + vec(1.0, 0.0) + "'::vector) AS distance" +
+            " FROM " + DimTables.CHUNKS_TABLE_NAME +
             " WHERE collection = '" + COLL + "' AND chash IN (" + inList + ")" +
             " ORDER BY distance ASC, chash ASC LIMIT 50";
         String rankPlan = explain(rank);
@@ -227,7 +228,7 @@ class HybridSelectiveGateTest {
         assertThat(rankPlan)
             .as("rank MUST NOT route through the HNSW index — that is what made the retired "
                 + "plan starvable by hnsw.max_scan_tuples. Plan was:%n%s", rankPlan)
-            .doesNotContain("idx_chunks_1024_embedding");
+            .doesNotContain("idx_chunks_embedding_1024");
         assertThat(rankPlan)
             .as("the rank MUST be a Sort over the chash-filtered set (exact distance), "
                 + "not an index-ordered scan. Plan was:%n%s", rankPlan)

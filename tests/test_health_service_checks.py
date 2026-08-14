@@ -860,6 +860,7 @@ _ALL_TENANT_TABLES = [
     # ("nexus.chash_index" removed — RDR-187/nexus-piwya.9: dropped table,
     # mirrors health._RLS_TENANT_TABLES)
     "nexus.chash_remap",
+    "nexus.chunks",  # RDR-191 Phase 4 (nexus-o8dil.51)
     "nexus.claude_assisted_remediation_consents",
     "nexus.document_aspects",
     "nexus.document_highlights",
@@ -877,6 +878,7 @@ _ALL_TENANT_TABLES = [
     "nexus.relevance_log",
     "nexus.retention_markers",
     "nexus.search_telemetry",
+    "nexus.taxonomy_centroids",  # RDR-191 Phase 4 (nexus-o8dil.51/.47)
     "nexus.taxonomy_meta",
     "nexus.tier_writes",
     "nexus.topic_assignments",
@@ -926,6 +928,41 @@ def _psql_rls_one_table_disabled(disabled_schema_table: str):
         for st in sorted_tables:
             if st == disabled_schema_table:
                 rows.append(_rls_row(st, "f", "f", 0))
+            else:
+                rows.append(_rls_row(st, "t", "t", 2))
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0,
+            stdout="\n".join(rows) + "\n",
+            stderr="",
+        )
+    return runner
+
+
+def _psql_rls_one_table_absent(absent_schema_table: str):
+    """Runner that reports one specific listed table as ABSENT from pg_class
+    (the LEFT JOIN NULL case: relrowsecurity/relforcerowsecurity/policy_count
+    all come back empty, since ``psql -t -A`` prints a NULL as ''). Every
+    real pg_class row always has relrowsecurity 't' or 'f' -- never NULL --
+    so an all-empty row can ONLY mean the driving VALUES row found no match.
+
+    nexus-o8dil.51 defect 2 regression harness: against the pre-fix
+    ``_check_rls_present`` (which never distinguished this from "RLS
+    explicitly disabled"), this runner made the check report FATAL forever
+    for a table that simply hadn't been migrated yet (or, post RDR-191, a
+    dropped per-dim shard) -- the permanent-false-FATAL bug this bead fixes.
+    """
+    sorted_tables = sorted(_ALL_TENANT_TABLES)
+
+    def runner(cmd: list[str], *, capture_output: bool, text: bool,
+               check: bool) -> subprocess.CompletedProcess:
+        rows = []
+        for st in sorted_tables:
+            if st == absent_schema_table:
+                # relrowsecurity/relforcerowsecurity are NULL (LEFT JOIN
+                # miss on pg_class) -> '' in -t -A output; policy_count is
+                # COUNT(p.policyname), an aggregate that is always an
+                # integer (0 here), never NULL.
+                rows.append(_rls_row(st, "", "", 0))
             else:
                 rows.append(_rls_row(st, "t", "t", 2))
         return subprocess.CompletedProcess(
@@ -1093,6 +1130,114 @@ class TestCheckRlsPresent:
         assert r.ok is False
         assert r.warn is True
         assert r.fatal is False
+
+    # ── nexus-o8dil.51 defect 2: absent listed table must not be a false FATAL ──
+
+    def test_absent_table_is_not_fatal_and_not_a_silent_pass(self, tmp_path):
+        """A listed-but-absent table (LEFT JOIN NULL) is its OWN reported
+        outcome: ok=False (so it's visible, not folded into a clean pass),
+        fatal=False (never a permanent false FATAL -- the chash_index
+        precedent), warn=True.
+
+        Against the pre-fix implementation (which only ever compared
+        rls_on/rls_force against 't', treating '' the same as 'f') this
+        exact fixture produced a FATAL result -- the bug nexus-o8dil.51
+        defect 2 describes.
+        """
+        creds = _make_creds_file(tmp_path)
+        psql = Path("/fake/psql")
+
+        results = _check_rls_present(
+            creds_path=creds,
+            psql_bin=psql,
+            psql_runner=_psql_rls_one_table_absent("nexus.chunks"),
+        )
+        assert len(results) == 1
+        r = results[0]
+        assert r.fatal is False, "an absent listed table must never be FATAL"
+        assert r.ok is False, "absence must not be folded into a silent clean pass"
+        assert r.warn is True
+        assert "nexus.chunks" in r.detail
+
+    def test_absent_table_message_distinguishes_from_disabled_rls(self, tmp_path):
+        """The absent-table detail must not read as 'RLS not enabled' --
+        that phrase is reserved for a table that EXISTS with bad RLS."""
+        creds = _make_creds_file(tmp_path)
+        psql = Path("/fake/psql")
+
+        results = _check_rls_present(
+            creds_path=creds,
+            psql_bin=psql,
+            psql_runner=_psql_rls_one_table_absent("nexus.taxonomy_centroids"),
+        )
+        r = results[0]
+        assert "RLS not enabled" not in r.detail
+        assert "not yet present" in r.detail
+
+    def test_chunks_rls_disabled_is_fatal(self, tmp_path):
+        """nexus.chunks EXISTS with RLS disabled -> FATAL, non-vacuous:
+        proves the check covers the table the RLS doctor never listed
+        before nexus-o8dil.51 (defect 1)."""
+        creds = _make_creds_file(tmp_path)
+        psql = Path("/fake/psql")
+
+        results = _check_rls_present(
+            creds_path=creds,
+            psql_bin=psql,
+            psql_runner=_psql_rls_one_table_disabled("nexus.chunks"),
+        )
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is False
+        assert r.fatal is True
+        assert r.warn is False
+        assert "nexus.chunks" in r.detail
+
+    def test_taxonomy_centroids_rls_disabled_is_fatal(self, tmp_path):
+        """nexus.taxonomy_centroids EXISTS with RLS disabled -> FATAL,
+        same coverage proof as nexus.chunks above (RDR-191 .47 "one era")."""
+        creds = _make_creds_file(tmp_path)
+        psql = Path("/fake/psql")
+
+        results = _check_rls_present(
+            creds_path=creds,
+            psql_bin=psql,
+            psql_runner=_psql_rls_one_table_disabled("nexus.taxonomy_centroids"),
+        )
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is False
+        assert r.fatal is True
+
+    def test_mixed_absent_and_disabled_reports_fatal_for_the_disabled_table(self, tmp_path):
+        """A table with bad RLS stays FATAL even when a DIFFERENT listed
+        table is simultaneously absent -- absence must never mask a real
+        failure elsewhere, and a real failure must not suppress the
+        absent-table note."""
+        creds = _make_creds_file(tmp_path)
+        psql = Path("/fake/psql")
+        sorted_tables = sorted(_ALL_TENANT_TABLES)
+
+        def runner(cmd, *, capture_output, text, check):
+            rows = []
+            for st in sorted_tables:
+                if st == "nexus.chunks":
+                    rows.append(_rls_row(st, "", "", 0))  # absent
+                elif st == "nexus.memory":
+                    rows.append(_rls_row(st, "f", "f", 0))  # present, RLS off
+                else:
+                    rows.append(_rls_row(st, "t", "t", 2))
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="\n".join(rows) + "\n", stderr="",
+            )
+
+        results = _check_rls_present(creds_path=creds, psql_bin=psql, psql_runner=runner)
+        assert len(results) == 1
+        r = results[0]
+        assert r.fatal is True
+        assert r.ok is False
+        assert "nexus.memory" in r.detail
+        assert "nexus.chunks" in r.detail  # noted, not silently dropped
 
     def test_psql_error_returns_fatal(self, tmp_path):
         """psql failure (non-zero returncode) -> fatal."""
@@ -1378,7 +1523,7 @@ class TestChashProbeViewFallback:
         )
         chash = [r for r in results if "chash" in r.label.lower()]
         assert chash and chash[0].ok is False and chash[0].warn is True
-        assert "8 chunk row(s)" in chash[0].detail  # 2 per table via LEGACY (4 poison tables post-RDR-187)
+        assert "4 chunk row(s)" in chash[0].detail  # 2 per table via LEGACY (2 chash-bearing tables post-RDR-191 unify)
         assert state["i"] == 1 + n  # one failed view call + the full legacy set
 
     def test_debt_over_zero_emits_nongating_warn(self, tmp_path):
@@ -1465,6 +1610,329 @@ class TestChashProbeViewFallback:
             "a DiagnosticSqlViolation must reach the outer handler without a "
             "single psql invocation - never a silent legacy retry"
         )
+
+
+def _content_diag_runner(
+    *,
+    unified_chunks: str = "0",
+    direct_unified_chunks: str | None = None,
+    catalog_document_chunks: str = "0",
+    legacy_chunks_384: str = "0",
+    legacy_chunks_768: str = "0",
+    legacy_chunks_1024: str = "0",
+    debt: str = "0",
+    era_answer: str = "1",
+    fail_relations: tuple[str, ...] = (),
+):
+    """A run_diagnostic_sql psql_runner keyed by SQL CONTENT rather than
+    call order — robust against exactly how many round-trips a given code
+    path issues (whether the debt-leg probe or the era discriminator
+    fires is a code-path detail, not something these tests should have to
+    predict by counting). Each keyword arg is the response for one
+    distinguishable table/leg; ``fail_relations`` names relations whose
+    query should fail outright (returncode 1, 'relation ... does not
+    exist') to simulate a genuinely absent table — the diag view itself
+    is matched via the literal ``"nexus.diag_chash_conformance"``.
+
+    ``direct_unified_chunks`` lets a test give the VIEW-path leg for
+    ``nexus.chunks`` a different answer than the DIRECT (bypass-the-view)
+    leg for the same table — needed for the mid-migration window where the
+    schema has migrated (direct COUNT works) but the deployed view is
+    still stale (view-path leg blank). Defaults to ``unified_chunks`` when
+    unset, matching every pre-existing caller's single-value behavior."""
+    if direct_unified_chunks is None:
+        direct_unified_chunks = unified_chunks
+    calls: list[str] = []
+
+    def _ok(val: str) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess([], 0, stdout=f"{val}\n", stderr="")
+
+    def _fail(rel: str) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            [], 1, stdout="", stderr=f'relation "{rel}" does not exist',
+        )
+
+    def runner(argv, env):
+        stmt = argv[-1]
+        calls.append(stmt)
+        # to_regclass FIRST: fail_relations entries like the exact
+        # "FROM nexus.chunks " marker below would otherwise false-match
+        # the era probe's "to_regclass('nexus.chunks')" substring.
+        if "to_regclass" in stmt:
+            return _ok(era_answer)
+        for rel in fail_relations:
+            if rel in stmt:
+                return _fail(rel)
+        # View-path legs are quoted ('nexus.chunks_384'); direct-fallback
+        # legs are unquoted (FROM nexus.chunks_384 ). Order matters: the
+        # per-dim checks must run before the bare "nexus.chunks" checks
+        # since "nexus.chunks_384" contains "nexus.chunks" as a prefix.
+        if "chunks_384" in stmt:
+            return _ok(legacy_chunks_384)
+        if "chunks_768" in stmt:
+            return _ok(legacy_chunks_768)
+        if "chunks_1024" in stmt:
+            return _ok(legacy_chunks_1024)
+        if "catalog_document_chunks" in stmt:
+            return _ok(catalog_document_chunks)
+        if "topic_assignments" in stmt or "frecency" in stmt or "relevance_log" in stmt:
+            return _ok(debt)
+        if "nexus.chunks" in stmt:
+            # View-path form: "...diag_chash_conformance WHERE table_name
+            # = 'nexus.chunks'"; direct form: "...FROM nexus.chunks WHERE
+            # octet_length...". Disambiguate on the view relation name.
+            if "diag_chash_conformance" in stmt:
+                return _ok(unified_chunks)
+            return _ok(direct_unified_chunks)
+        return _ok("0")
+
+    runner.calls = calls  # type: ignore[attr-defined]
+    return runner
+
+
+class TestChashProbeEraStraddle:
+    """RDR-191 F14a mirror-direction straddle in the poison gate
+    (nexus-o8dil, 2026-08-14, package-upgrade MVV failure): the pre-
+    convergence probe's client-side statements already carry the
+    POST-unify table names (``nexus.chunks``), but the store's engine may
+    not have migrated to that relation yet. The deployed
+    ``nexus.diag_chash_conformance`` view then reflects whichever
+    chash_tables.py era provisioned it — possibly OLDER than this
+    client's working-tree code — so the unified WHERE filter can execute
+    successfully yet return a NULL aggregate (blank psql line) for
+    ``nexus.chunks`` specifically. Pre-fix this reached
+    ``sum(int(c) for c in counts)`` and raised a bare
+    ``ValueError: invalid literal for int() with base 10: ''`` that named
+    no table, permanently deferring engine convergence (the exact shape
+    hit by ``tests/e2e/migration-rehearsal/run.sh --package-upgrade``)."""
+
+    def test_legacy_view_row_blank_retries_legacy_era_and_unblocks(self, tmp_path):
+        """The confirmed production shape: the unified view-path query
+        succeeds (no exception) but returns a blank aggregate for
+        ``nexus.chunks`` (deployed view still per-dim-shaped) and a real
+        value for ``nexus.catalog_document_chunks`` (name unchanged across
+        the unify) — exactly the ``['', '0']`` observed in the failing
+        MVV run. The era discriminator reports "nexus.chunks absent", so
+        the probe retries against the legacy per-dim view rows and
+        measures a real (non-vacuous) poison count instead of deferring
+        forever."""
+        runner = _content_diag_runner(
+            unified_chunks="", catalog_document_chunks="0",
+            era_answer="0",  # nexus.chunks does not exist yet
+            legacy_chunks_384="2", legacy_chunks_768="0", legacy_chunks_1024="0",
+        )
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        chash = [r for r in results if r.label == "Chunk chash conformance"]
+        assert chash, "the store must be VERIFIED (poisoned), not deferred as unverifiable"
+        assert chash[0].warn is True and chash[0].fatal is False
+        assert "2 chunk row(s)" in chash[0].detail
+        assert "could not probe" not in chash[0].detail
+
+    def test_legacy_view_all_clean_unblocks_convergence_cleanly(self, tmp_path):
+        """Same straddle shape as above, but every legacy-era leg is
+        clean (0) — convergence must proceed with NO poison result at
+        all, not a lingering unverifiable WARN."""
+        runner = _content_diag_runner(
+            unified_chunks="", catalog_document_chunks="0", era_answer="0",
+        )
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        assert [r.label for r in results] == ["Schema migrations"]
+
+    def test_neither_era_resolves_still_defers_with_named_table(self, tmp_path):
+        """NON-VACUITY (requirement 1's fail-safe): if the legacy-era
+        retry ALSO comes back blank — genuinely no candidate table
+        answers — the store stays UNVERIFIABLE (the existing defer path),
+        never a false clean. The surfaced detail now NAMES the specific
+        table that could not be parsed, instead of a bare int('')."""
+        runner = _content_diag_runner(
+            unified_chunks="", catalog_document_chunks="0", era_answer="0",
+            legacy_chunks_384="", legacy_chunks_768="", legacy_chunks_1024="",
+            # catalog_document_chunks stays "0" in BOTH the unified and
+            # legacy legs (name unchanged) — only nexus.chunks itself is
+            # unmeasurable in every era tried, which must still defer.
+        )
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        chash = next(r for r in results if r.label == "Chunk chash conformance")
+        assert chash.warn is True and chash.fatal is False
+        assert "did not run" in chash.detail
+        assert "nexus.chunks" in chash.detail  # names the offending table
+
+    def test_unified_schema_present_never_reinterprets_as_legacy(self, tmp_path):
+        """Safety rail: a genuinely poisoned CURRENT-era store (unified
+        view returns real, non-blank values) must NEVER retry against
+        legacy names or otherwise change interpretation — the era
+        discriminator is only consulted when a blank is observed."""
+        runner = _content_diag_runner(unified_chunks="3", catalog_document_chunks="0")
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        assert not any("to_regclass" in c for c in runner.calls), (
+            "a clean/poisoned unified result must never trigger the era probe"
+        )
+        chash = next(r for r in results if r.label == "Chunk chash conformance")
+        assert "3 chunk row(s)" in chash.detail
+
+    def test_view_absent_and_unified_direct_fallback_absent_retries_legacy_direct(self, tmp_path):
+        """The OLDER straddle shape: the diag view itself was never
+        provisioned on this box (RuntimeError, 'relation ... does not
+        exist'), and the existing direct-table fallback — which still
+        assumes the unified table names — ALSO fails because
+        nexus.chunks does not exist yet. The probe must retry once more
+        against the legacy per-dim direct-table statements before
+        deferring."""
+        runner = _content_diag_runner(
+            # Precise markers, not the bare "nexus.chunks" substring —
+            # that would also false-match chunks_384/768/1024 (which
+            # must SUCCEED here) and the era probe's own to_regclass call.
+            fail_relations=("nexus.diag_chash_conformance", "FROM nexus.chunks "),
+            era_answer="0",  # nexus.chunks absent -> retry legacy
+        )
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        assert [r.label for r in results] == ["Schema migrations"]
+
+    def test_schema_migrated_but_view_stale_measures_via_direct_fallback(self, tmp_path):
+        """RDR-191 F14a straddle, round-2 review SIGNIFICANT FINDING 1: the
+        MID-MIGRATION window. nexus.chunks EXISTS (the engine binary has
+        already swapped and Liquibase has run), but the deployed diag view
+        is STILL per-dim shaped — view re-provisioning only happens via
+        the chash-rekey rung's re-provision step or `nx init --service`,
+        never automatically after a bare engine swap. The unified
+        view-path leg comes back blank, the era discriminator proves
+        nexus.chunks EXISTS (era_answer='1'), so the probe must fall
+        through to the DIRECT unified-table statements and MEASURE a real
+        count — never a generic 'could not probe... did not run' WARN for
+        a store that is provably current-era and provably measurable."""
+        runner = _content_diag_runner(
+            unified_chunks="",              # view-path leg: stale view, blank
+            direct_unified_chunks="4",       # direct leg: schema migrated, real count
+            catalog_document_chunks="0",
+            era_answer="1",                  # nexus.chunks EXISTS
+        )
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        chash = [r for r in results if r.label == "Chunk chash conformance"]
+        assert chash, "a provably current-era, provably measurable store must not defer"
+        assert chash[0].warn is True and chash[0].fatal is False
+        assert "4 chunk row(s)" in chash[0].detail
+        assert "could not probe" not in chash[0].detail
+        # the legacy-era view retry must NOT have fired — unified_exists=True
+        # skips straight to the direct fallback per the safety rail.
+        legacy_leg_calls = [c for c in runner.calls if "chunks_384" in c]
+        assert not legacy_leg_calls, "a current-era store must never touch the legacy per-dim view rows"
+
+    def test_schema_migrated_view_stale_and_direct_also_fails_still_defers(self, tmp_path):
+        """The companion non-vacuity case: nexus.chunks EXISTS but BOTH the
+        stale view leg AND the direct fallback fail to produce a
+        measurement (e.g. a genuine grant gap) — the store stays
+        unverifiable, the existing fail-safe untouched."""
+        runner = _content_diag_runner(
+            unified_chunks="", era_answer="1",
+            fail_relations=("FROM nexus.chunks ",),  # direct leg also fails
+        )
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        chash = next(r for r in results if r.label == "Chunk chash conformance")
+        assert chash.warn is True and chash.fatal is False
+        assert "did not run" in chash.detail
+
+
+class TestParseConformanceSum:
+    """MINOR (round-2 review): parse_conformance_sum had zero direct test
+    coverage for its non-numeric and length-mismatch branches — every
+    existing exercise of it went through the blank-string arm only."""
+
+    def test_sums_valid_counts(self):
+        tables = chash_tables.POISON_CHASH_TABLES
+        assert chash_tables.parse_conformance_sum(tables, ("3", "5")) == 8
+
+    def test_blank_raises_naming_the_table(self):
+        tables = chash_tables.POISON_CHASH_TABLES
+        with pytest.raises(ValueError, match="nexus.chunks"):
+            chash_tables.parse_conformance_sum(tables, ("", "5"))
+
+    def test_non_numeric_raises_naming_the_table_and_value(self):
+        tables = chash_tables.POISON_CHASH_TABLES
+        with pytest.raises(ValueError, match="nexus.catalog_document_chunks"):
+            chash_tables.parse_conformance_sum(tables, ("3", "not-a-number"))
+
+    def test_length_mismatch_raises(self):
+        tables = chash_tables.POISON_CHASH_TABLES
+        with pytest.raises(ValueError, match="2.*1|partial scan"):
+            chash_tables.parse_conformance_sum(tables, ("3",))
+
+
+class TestDirectFallbackSafetyRailReRaise:
+    """MINOR (round-2 review): the direct-fallback arm's safety-rail
+    re-raise (health.py: view absent AND unified direct fallback absent
+    AND the era discriminator proves nexus.chunks EXISTS -> re-raise the
+    ORIGINAL error rather than retrying under legacy names) had no
+    dedicated test — only its legacy-era sibling
+    (test_view_absent_and_unified_direct_fallback_absent_retries_legacy_direct)
+    was covered."""
+
+    def test_current_era_store_reraises_original_error_not_retried(self, tmp_path):
+        """Both the view AND the unified direct fallback fail, but the era
+        discriminator proves nexus.chunks EXISTS — this must be a
+        genuinely broken current-era store, re-surfaced via the ORIGINAL
+        error, never silently retried against the legacy per-dim names."""
+        runner = _content_diag_runner(
+            fail_relations=("nexus.diag_chash_conformance", "FROM nexus.chunks "),
+            era_answer="1",  # nexus.chunks EXISTS — a genuinely broken current-era store
+        )
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        chash = next(r for r in results if r.label == "Chunk chash conformance")
+        assert chash.warn is True and chash.fatal is False
+        assert "did not run" in chash.detail
+        # the ORIGINAL direct-fallback error surfaces (nexus.chunks), not a
+        # legacy-era retry outcome — and the legacy per-dim names were
+        # never touched.
+        assert "nexus.chunks" in chash.detail
+        legacy_leg_calls = [c for c in runner.calls if "chunks_384" in c]
+        assert not legacy_leg_calls, "a current-era store must never retry the legacy per-dim names"
 
 
 # ── nexus-5xn3k AC5: dangling manifest chashes ───────────────────────────────
@@ -2354,7 +2822,8 @@ class TestDoctorFenceCoverageDistinction:
     coverage-gap regression this test exists to catch).
     """
 
-    def _entry(self, *, index_state, indexed_at="", index_state_reported=True, source_uri="", tumbler=""):
+    def _entry(self, *, index_state, indexed_at="", index_state_reported=True,
+               source_uri="", tumbler="", index_run_id=""):
         return type("E", (), {
             "index_state": index_state,
             "index_started_at": "",
@@ -2362,7 +2831,33 @@ class TestDoctorFenceCoverageDistinction:
             "index_state_reported": index_state_reported,
             "source_uri": source_uri,
             "tumbler": tumbler,
+            # nexus-2sa6w: _fence_begin mints a uuid4 PER DOCUMENT;
+            # _fence_begin_many shares ONE across a flush. A run id on 2+
+            # documents is proof of the begin-many route (v7.3.0+).
+            "index_run_id": index_run_id,
         })()
+
+    def _batch(self, run_id, indexed_at, *names):
+        """A begin-many flush: N documents sharing ONE run id."""
+        return [
+            self._entry(
+                index_state="complete", index_state_reported=True,
+                indexed_at=indexed_at, index_run_id=run_id,
+                source_uri=f"chroma://code__nexus/{n}",
+            )
+            for n in names
+        ]
+
+    def _baseline(self, indexed_at="2026-08-07T17:00:00+00:00"):
+        """nexus-oiu1t: a STAMPED document — the install's own evidence that it
+        has run a fully-fenced client. Without one in the fixture the check can
+        no longer attribute anything, by design, so every producer-regression
+        test must establish a baseline first."""
+        return self._entry(
+            index_state="complete", index_state_reported=True,
+            indexed_at=indexed_at,
+            source_uri="chroma://code__nexus/baseline.py",
+        )
 
     def _cat(self, entries):
         class _Cat:
@@ -2382,16 +2877,23 @@ class TestDoctorFenceCoverageDistinction:
         return h._check_stale_indexing_runs()
 
     def test_reported_null_after_fence_release_warns(self, monkeypatch) -> None:
-        """The vw594 signature: index_state reported-but-NULL on the WHOLE
-        corpus, with at least one document indexed AFTER the fence's
-        release date — an unfenced producer wrote it. Must WARN, never
-        ok=True, and must NOT reuse the pre-fence "predates" wording (that
-        wording asserts something false: this engine DOES report the
-        fence field)."""
+        """The producer-regression signature: index_state reported-but-NULL,
+        with at least one document indexed AFTER FULL PRODUCER COVERAGE
+        shipped (v7.3.0, 2026-08-07T16:00:35Z) — an unfenced producer wrote
+        it. Must WARN, never ok=True, and must NOT reuse the pre-fence
+        "predates" wording (that wording asserts something false: this
+        engine DOES report the fence field).
+
+        nexus-apig6: this fixture's date used to be 2026-08-04, which is
+        BEFORE full coverage shipped and is therefore no longer the
+        signature at all — see
+        ``test_indexed_between_first_fence_and_full_coverage_does_not_warn``.
+        """
         entries = [
+            self._baseline(),
             self._entry(
                 index_state=None, index_state_reported=True,
-                indexed_at="2026-08-04T16:03:00+00:00",
+                indexed_at="2026-08-10T16:03:00+00:00",
                 source_uri="chroma://code__nexus/foo.py",
             ),
         ]
@@ -2399,7 +2901,559 @@ class TestDoctorFenceCoverageDistinction:
         assert r.ok is False
         assert r.warn is True
         assert "predates the index-run fence" not in r.detail
-        assert "coverage gap" in r.detail or "never calling" in r.detail
+        assert "Two explanations fit" in r.detail
+        # nexus-apig6: the offending document is NAMED, so the operator can
+        # scope the remedy instead of re-embedding the corpus.
+        assert "chroma://code__nexus/foo.py" in r.detail
+
+    def test_indexed_between_first_fence_and_full_coverage_does_not_warn(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-apig6 REGRESSION PIN — the false positive that reached a
+        downstream install (460 of 462 documents flagged, filed as an open
+        upstream bug).
+
+        The threshold used to be v7.1.0's 2026-08-02T22:26Z, the tag time of
+        the FIRST client fence — which stamped at exactly 4 PDF/md/dt ingest
+        sites. Every other producer (repo-index ``_batch_flush``,
+        ``store_put``, code/prose indexers, memory, MCP) was legitimately
+        unfenced until f55435eb, public at v7.3.0 on 2026-08-07T16:00:35Z.
+
+        A document written anywhere in that five-day window by one of those
+        producers is expected, permanent no-backfill debt. It must NOT be
+        reported as a producer regression, and must NOT draw a
+        whole-corpus-re-embed remedy.
+        """
+        entries = [
+            self._baseline(),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-04T16:03:00+00:00",
+                source_uri="chroma://code__nexus/foo.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True, (
+            "a document indexed inside the 08-02..08-07 partial-coverage "
+            f"window is not a producer regression: {r.detail}"
+        )
+        assert r.warn is not True
+        assert "Two explanations fit" not in r.detail
+        assert "chroma://code__nexus/foo.py" not in r.detail, (
+            "a pre-coverage document must not be NAMED as a regression: "
+            f"{r.detail}"
+        )
+
+    def test_regression_just_after_v7_3_0_is_not_absorbed_as_legacy(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-apig6 ROUND-2 PIN (code-review-expert, 2026-08-11).
+
+        The first fix attempt anchored on v7.5.0 (2026-08-09T22:45:30Z) on the
+        unverified claim that full producer coverage shipped there. It did
+        not: f55435eb is an ancestor of v7.3.0 (2026-08-07T16:00:35Z), two
+        releases earlier —
+
+            git tag --contains f55435eb --sort=creatordate | grep '^v' | head -1
+            git merge-base --is-ancestor f55435eb v7.2.0   # non-zero
+
+        so a genuine producer regression landing in the 08-07..08-09 gap was
+        silently absorbed into the "legacy, no action needed" bucket. Same
+        defect class the bead exists to close, merely narrower — and NO
+        fixture in this class exercised that window, which is exactly why the
+        wrong anchor survived a green suite.
+
+        This document is post-coverage and MUST WARN.
+        """
+        entries = [
+            self._baseline(indexed_at="2026-08-07T17:00:00+00:00"),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-08T12:00:00+00:00",
+                source_uri="chroma://code__nexus/in_the_gap.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True, (
+            "a document indexed 2026-08-08 is AFTER full producer coverage "
+            f"(v7.3.0, 2026-08-07T16:00:35Z) and must warn: {r.detail}"
+        )
+        assert "Two explanations fit" in r.detail
+        assert "chroma://code__nexus/in_the_gap.py" in r.detail
+
+    def test_undated_reported_null_is_not_claimed_as_pre_coverage(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-apig6 (code-review-expert, 2026-08-11): a reported-but-NULL
+        document with NO usable ``indexed_at`` cannot be attributed to either
+        side of the coverage boundary. The summary must not fold it into the
+        "indexed before full producer coverage shipped, no action needed"
+        claim — that asserts something no evidence supports, which is the
+        exact overclaiming class this whole bead is about.
+        """
+        entries = [
+            self._entry(
+                index_state=None, index_state_reported=True, indexed_at="",
+                source_uri="chroma://code__nexus/undated.py",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="not-a-timestamp",
+                source_uri="chroma://code__nexus/garbage_date.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True
+        assert "fence live" in r.detail
+        assert "2 carry no usable indexed_at" in r.detail
+        assert "cannot be attributed" in r.detail
+        assert "0 indexed before" in r.detail, (
+            "with both documents undated, ZERO are attributable to the "
+            f"pre-coverage side: {r.detail}"
+        )
+
+    def test_late_upgrader_docs_after_the_release_but_before_its_own_baseline(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-oiu1t — THE CORE CASE. A release-tag anchor assumes the user
+        upgraded the day the release shipped. This install did not: it kept
+        writing with a pre-coverage client until 2026-09-15, when it finally
+        upgraded and its first document got stamped.
+
+        Its documents from 2026-08-20 and 2026-09-01 are dated well AFTER full
+        producer coverage shipped (2026-08-07) and carry no stamp — under a
+        pure release-tag anchor every one of them is reported as a producer
+        regression with a re-embed prescribed. That is the exact false
+        positive nexus-apig6 was filed for, displaced onto a later population.
+
+        The install's OWN earliest stamp is the honest anchor: before it,
+        nothing here had a fenced client.
+        """
+        entries = [
+            self._baseline(indexed_at="2026-09-15T10:00:00+00:00"),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-20T00:00:00+00:00",
+                source_uri="chroma://code__nexus/late_a.py",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-09-01T00:00:00+00:00",
+                source_uri="chroma://code__nexus/late_b.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True, (
+            "documents written before this install's own first stamp were "
+            f"written by a pre-coverage client, not a broken one: {r.detail}"
+        )
+        assert "Two explanations fit" not in r.detail
+        assert "late_a.py" not in r.detail and "late_b.py" not in r.detail
+
+    def test_late_upgrader_still_catches_a_real_regression_after_baseline(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-oiu1t NON-VACUITY CONTROL for the test above. Moving the
+        anchor to install-local evidence must not blind the check: the SAME
+        late-upgrader install, with one additional unstamped document written
+        AFTER its baseline, must still WARN and name only that document.
+
+        Without this, the previous test could be satisfied by a check that
+        simply never warns.
+        """
+        entries = [
+            self._baseline(indexed_at="2026-09-15T10:00:00+00:00"),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-09-01T00:00:00+00:00",
+                source_uri="chroma://code__nexus/late_b.py",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-09-20T00:00:00+00:00",
+                source_uri="chroma://code__nexus/real_regression.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        assert "1 document(s) report index_state" in r.detail, (
+            f"only the post-baseline document is a regression: {r.detail}"
+        )
+        assert "real_regression.py" in r.detail
+        assert "late_b.py" not in r.detail
+
+    def test_pre_coverage_document_is_never_a_candidate(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-oiu1t: the coverage FLOOR is applied when candidates are
+        gathered, and it is load-bearing independently of the install-local
+        anchor.
+
+        Here the install's own earliest stamp is dated 2026-07-01 — impossible,
+        since no client could stamp before the code to stamp existed, so it is
+        clock skew, a restored backup, or a hand-edited row. If the floor were
+        dropped from the walk, that bogus stamp would become the anchor and
+        every document in the 08-02..08-07 partial-coverage window would be
+        reported as a regression again, resurrecting nexus-apig6's false
+        positive through a different door.
+
+        Kill control (run 2026-08-11): deleting the
+        ``ia_dt > _PRODUCER_FENCE_RELEASE_DT`` guard from the walk turns this
+        test RED. Note the ORIGINAL form of this test targeted a ``max()`` in
+        the anchor derivation instead and passed with that max removed — it
+        was vacuous, because the walk-level floor already subsumed it. The
+        max() was deleted as dead code and this test re-pointed at the guard
+        that actually carries the floor.
+        """
+        entries = [
+            self._baseline(indexed_at="2026-07-01T00:00:00+00:00"),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-04T00:00:00+00:00",
+                source_uri="chroma://code__nexus/in_partial_window.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True, (
+            "an impossible pre-release stamp must not lower the anchor below "
+            f"the coverage floor: {r.detail}"
+        )
+        assert "in_partial_window.py" not in r.detail
+
+    def test_early_tier_stamp_does_not_let_the_warn_assert_a_regression(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-2sa6w — the compound scenario BOTH reviewers reproduced
+        independently (code-review-expert Critical + substantive-critic
+        Critical, 2026-08-11), and which no other fixture here covers.
+
+        The fence rolled out in TWO tiers. v7.1.0 (4b0c5fb5) fenced 4 sites,
+        all PDF/md/DEVONthink ingest; the remaining producers (code_indexer,
+        prose_indexer, store_put, ...) only at f55435eb / v7.3.0. Nothing on a
+        catalog row records WHICH producer or client version stamped it.
+
+        So an install still on v7.1.0/v7.2.x can run one PDF ingest, get a
+        stamp, and establish an anchor — while its repo-index and store_put
+        writes stay LEGITIMATELY unfenced. Here: stamp at 2026-08-05, a
+        legitimate unfenced write at 2026-08-09.
+
+        The anchor is real, so this WARNs — that part is correct and must not
+        be silenced (a genuine regression looks identical from here). What it
+        must NOT do is assert the accusatory explanation, which is what the
+        first cut of oiu1t did ("this is a NEW coverage regression — find the
+        producer"). It must name BOTH explanations and point at the cheap
+        discriminator, the client version.
+
+        A real discriminator (per-document producer/client provenance, or
+        restricting anchor evidence to the late-fenced producer family) is
+        tracked as nexus-2sa6w. Until then this check states what it knows.
+        """
+        entries = [
+            self._entry(
+                index_state="complete", index_state_reported=True,
+                indexed_at="2026-08-05T00:00:00+00:00",
+                source_uri="chroma://knowledge__nexus/early_tier_pdf.pdf",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-09T00:00:00+00:00",
+                source_uri="chroma://code__nexus/legit_unfenced.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        assert "legit_unfenced.py" in r.detail
+        # The accusation must be offered as ONE of two readings, never asserted.
+        assert "Two explanations fit" in r.detail
+        assert "v7.1.0-v7.2.x" in r.detail, (
+            "the partial-coverage-client explanation must be named, not "
+            f"implied: {r.detail}"
+        )
+        assert any("nx --version" in s for s in (r.fix_suggestions or [])), (
+            "the cheap discriminator must be the first thing suggested: "
+            f"{r.fix_suggestions}"
+        )
+
+    def test_proven_anchor_supersedes_an_early_tier_poisoned_anchor(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-2sa6w — THE FIX. The compound scenario, plus the evidence that
+        resolves it.
+
+        Same poisoned setup as the test above: a v7.1.0-era client stamps a PDF
+        on 2026-08-05 (unshared run id, an early-tier stamp), and writes an
+        unfenced repo-index document on 2026-08-09 while still partially
+        covered. A bare-earliest-stamp anchor lands on 08-05 and flags the
+        08-09 document.
+
+        Then the install upgrades and runs a batched index on 2026-09-01 — two
+        documents sharing ONE run id, which only `_fence_begin_many` produces,
+        and that route exists only from f55435eb/v7.3.0. THAT is the earliest
+        moment full coverage is PROVEN, so it becomes the anchor and the 08-09
+        write falls before it: correctly unflagged, no longer a false positive.
+        """
+        entries = [
+            self._entry(
+                index_state="complete", index_state_reported=True,
+                indexed_at="2026-08-05T00:00:00+00:00",
+                index_run_id="early-tier-solo-run",
+                source_uri="chroma://knowledge__nexus/early_tier.pdf",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-09T00:00:00+00:00",
+                source_uri="chroma://code__nexus/legit_unfenced.py",
+            ),
+        ] + self._batch(
+            "batched-flush-run", "2026-09-01T00:00:00+00:00", "a.py", "b.py",
+        )
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True, (
+            "the proven anchor (2026-09-01) supersedes the poisoned early-tier "
+            f"anchor (2026-08-05), so the 08-09 write is not flagged: {r.detail}"
+        )
+        assert "legit_unfenced.py" not in r.detail
+
+    def test_proven_anchor_still_flags_a_later_write_and_asserts_it(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-2sa6w NON-VACUITY CONTROL. Same install, same proven anchor —
+        one more unstamped document, written AFTER it.
+
+        With full coverage PROVEN by a shared run id, the partial-coverage
+        explanation is eliminated by evidence, so here (and only here) the
+        check may state the regression rather than hedging. Without this test,
+        the one above could be satisfied by a check that never flags anything.
+        """
+        entries = [
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-09T00:00:00+00:00",
+                source_uri="chroma://code__nexus/legit_unfenced.py",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-09-10T00:00:00+00:00",
+                source_uri="chroma://code__nexus/real_regression.py",
+            ),
+        ] + self._batch(
+            "batched-flush-run", "2026-09-01T00:00:00+00:00", "a.py", "b.py",
+        )
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        assert "real_regression.py" in r.detail
+        assert "legit_unfenced.py" not in r.detail, (
+            f"the pre-anchor write is not a regression: {r.detail}"
+        )
+        # Proven coverage: state it, do not hedge with the v7.1.0 alternative.
+        assert "coverage regression worth finding" in r.detail
+        assert "v7.1.0-v7.2.x" not in r.detail, (
+            "the partial-coverage explanation is eliminated by a shared run "
+            f"id and must not be offered: {r.detail}"
+        )
+        assert "Two explanations fit" not in r.detail
+        assert not any("nx --version" in s for s in (r.fix_suggestions or [])), (
+            "the client-version check is pointless once coverage is proven: "
+            f"{r.fix_suggestions}"
+        )
+
+    def test_single_document_flush_shares_no_run_id_so_proves_nothing(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-2sa6w: the discriminator is EVIDENCE-POSITIVE ONLY. A
+        begin-many flush containing exactly one document shares its run id with
+        nothing, and is indistinguishable from a per-document `_fence_begin`
+        stamp. Absence of sharing must therefore prove nothing and fall back to
+        the hedged wording — never be read as "not full coverage".
+        """
+        entries = [
+            self._entry(
+                index_state="complete", index_state_reported=True,
+                indexed_at="2026-08-05T00:00:00+00:00",
+                index_run_id="lonely-run",
+                source_uri="chroma://code__nexus/only.py",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-09T00:00:00+00:00",
+                source_uri="chroma://code__nexus/later.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        assert "Two explanations fit" in r.detail, (
+            f"an unshared run id proves nothing; stay hedged: {r.detail}"
+        )
+        assert "v7.1.0-v7.2.x" in r.detail
+
+    def test_crashed_batch_with_stale_indexed_at_cannot_prove_coverage(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-2sa6w round 2 — CRITICAL found by code-review-expert with a
+        standalone repro (scratchpad/test_stale_ledger_poison.py), 2026-08-11.
+
+        Verified in service/src/main/java/dev/nexus/service/db/
+        CatalogRepository.java: beginIndexRun writes INDEX_STATE / INDEX_RUN_ID
+        / INDEX_STARTED_AT; completeIndexRun writes INDEX_STATE /
+        INDEX_CONTENT_HASH / CHUNK_COUNT. NEITHER writes INDEXED_AT — only the
+        manifest-write/register path does.
+
+        So a row stuck at 'indexing' carries an indexed_at from its PREVIOUS,
+        unrelated successful index. Here a begin-many batch crashed mid-run:
+        two rows share a run id and carry stale 2026-08-07T16:0x dates. Read
+        naively that is "proof of full coverage at 08-07", which then flags a
+        2026-08-09 write AND asserts it as a regression with the hedge and the
+        `nx --version` suggestion both dropped. Nothing here is a regression —
+        those two documents just had a crashed re-index.
+
+        Only 'complete' rows may date the anchor. Kill control: removing the
+        `if state != "complete": continue` guard turns this test RED.
+        """
+        entries = [
+            self._entry(
+                index_state="indexing", index_state_reported=True,
+                indexed_at="2026-08-07T16:05:00+00:00",
+                index_run_id="crashed-batch",
+                source_uri="chroma://code__nexus/old_a.py",
+            ),
+            self._entry(
+                index_state="indexing", index_state_reported=True,
+                indexed_at="2026-08-07T16:06:00+00:00",
+                index_run_id="crashed-batch",
+                source_uri="chroma://code__nexus/old_b.py",
+            ),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-09T00:00:00+00:00",
+                source_uri="chroma://code__nexus/legit_unfenced.py",
+            ),
+        ]
+        results = self._run_all(monkeypatch, entries)
+        fence = [r for r in results if "cannot attribute" in r.detail
+                 or "fence baseline" in r.detail]
+        assert fence, f"expected a fence-attribution result: {results}"
+        r = fence[0]
+        assert "coverage regression worth finding" not in r.detail, (
+            "a CRASHED begin-many batch proves nothing — its indexed_at "
+            f"belongs to a previous index: {r.detail}"
+        )
+        assert "Two explanations fit" not in r.detail or (
+            "v7.1.0-v7.2.x" in r.detail
+        )
+
+    def test_run_id_ledger_cap_reports_when_it_drops_evidence(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-2sa6w round 2 — substantive-critic Significant + code-review-
+        expert Important, 2026-08-11. The ledger fills in WALK order, so any
+        _MAX_TRACKED_RUN_IDS distinct run ids seen before a genuine
+        multi-document batch cause that batch's proof to be dropped. Solo ids
+        from interactive `nx store put` / `nx memory put` each mint their own
+        uuid4, so a dogfooded install is a plausible way to hit it.
+
+        It must fail SAFE (fall back to hedged wording, never a false
+        accusation) and must SAY SO — a silent fallback here is
+        indistinguishable from "no evidence exists", which is a different
+        claim. Cap is monkeypatched rather than building a 5000-row fixture.
+        """
+        import nexus.health as h
+        monkeypatch.setattr(h, "_MAX_TRACKED_RUN_IDS", 2, raising=True)
+        entries = [
+            self._entry(
+                index_state="complete", index_state_reported=True,
+                indexed_at="2026-08-08T00:00:00+00:00",
+                index_run_id=f"solo-{i}",
+                source_uri=f"chroma://knowledge__nexus/note{i}.md",
+            )
+            for i in range(2)
+        ] + self._batch(
+            "batched-run-past-the-cap", "2026-09-01T00:00:00+00:00",
+            "a.py", "b.py",
+        ) + [
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-20T00:00:00+00:00",
+                source_uri="chroma://code__nexus/later.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        # Fell back to hedged wording — the safe direction.
+        assert "Two explanations fit" in r.detail
+        # ...and said why, rather than implying no evidence existed.
+        assert "ledger" in r.detail and "may have been missed" in r.detail, (
+            f"cap-induced fallback must not be silent: {r.detail}"
+        )
+
+    def test_no_stamped_document_anywhere_cannot_attribute(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-oiu1t: with NO stamped document in the corpus, nothing
+        establishes that this install has ever run a fully-fenced client. A
+        late upgrader and a genuine producer regression are indistinguishable
+        from here, and the release date cannot tell them apart.
+
+        This still WARNS — staying silent here would hide a genuinely unfenced
+        producer on an install that has never once stamped, which is the exact
+        shape the vw594 incident had (and is pinned live by
+        tests/test_cotmr_cli_store_fence.py::TestAcquireGateJourneyDoctorClean
+        ::test_artificially_unfenced_document_still_warns). What nexus-apig6
+        was filed for was not the existence of a warning but its CONTENT: an
+        asserted producer bug it could not prove, remedied by re-embedding the
+        whole corpus. So the WARN must state the ambiguity, must NOT assert a
+        regression, and must prescribe ONE document.
+        """
+        entries = [
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-20T00:00:00+00:00",
+                source_uri="chroma://code__nexus/unknown.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        assert "cannot attribute" in r.detail
+        assert "no document in this corpus has ever been stamped" in r.detail
+        assert "a producer is unfenced (a regression worth finding)" not in r.detail, (
+            f"must not ASSERT a producer regression it cannot prove: {r.detail}"
+        )
+        assert any("any ONE document" in s for s in (r.fix_suggestions or [])), (
+            r.fix_suggestions
+        )
+
+    def test_warn_counts_only_post_coverage_docs_and_excuses_the_rest(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-apig6: a real corpus is MIXED — a large pre-coverage legacy
+        population plus one genuine regression. The WARN must count and name
+        only the regression, and must say out loud that the legacy rows need
+        no action, or the operator reads the total as the blast radius (which
+        is precisely what happened: 460 vs the 2 that mattered).
+        """
+        entries = [
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-07-01T00:00:00+00:00",
+                source_uri=f"chroma://code__nexus/legacy{i}.py",
+            )
+            for i in range(5)
+        ] + [
+            self._baseline(),
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-08-10T09:00:00+00:00",
+                source_uri="chroma://code__nexus/regressed.py",
+            ),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        assert "1 document(s) report index_state" in r.detail, (
+            f"must count only the post-coverage document, not all 6: {r.detail}"
+        )
+        assert "chroma://code__nexus/regressed.py" in r.detail
+        assert "legacy0.py" not in r.detail
+        assert "other 5 reported-but-NULL document(s)" in r.detail
+        assert "need no action" in r.detail
 
     def test_reported_null_before_fence_release_stays_ok_with_honest_message(self, monkeypatch) -> None:
         """Quiescent case (nexus-biq4x's own prescribed fix): the fence is
@@ -2442,7 +3496,7 @@ class TestDoctorFenceCoverageDistinction:
             ),
             self._entry(
                 index_state=None, index_state_reported=True,
-                indexed_at="2026-08-04T16:03:00+00:00",
+                indexed_at="2026-08-10T16:03:00+00:00",  # nexus-apig6: post-v7.5.0
                 source_uri="chroma://code__nexus/unfenced.py",
             ),
         ]
@@ -2459,7 +3513,7 @@ class TestDoctorFenceCoverageDistinction:
         )
         assert any(
             "predates the index-run fence" not in r.detail
-            and ("coverage gap" in r.detail or "never calling" in r.detail)
+            and "Two explanations fit" in r.detail
             for r in warns
         )
 

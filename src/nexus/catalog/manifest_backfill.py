@@ -171,7 +171,7 @@ def backfill_manifest_for_collection(
 
     Iterates catalog documents whose ``physical_collection`` matches
     ``collection_name``, reads T3 chunk metadata per doc_id (paginating
-    at <=300), then calls ``catalog.write_manifest(doc_id, chunks)``
+    at <=300), then calls ``catalog.write_manifest(doc_id, chunks, collection=...)``
     for each document.
 
     Args:
@@ -243,7 +243,7 @@ def backfill_manifest_for_collection(
         chunks.sort(key=lambda c: c["position"])
 
         if not dry_run:
-            catalog.write_manifest(doc_id, chunks)
+            catalog.write_manifest(doc_id, chunks, collection=collection_name)
             result.chunks_written += len(chunks)
 
         result.docs_processed += 1

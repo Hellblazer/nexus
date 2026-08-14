@@ -30,11 +30,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>{@code staging.chash_index} (the dead-sink landing twin) is ALSO
  *       gone — dropped by rdr187-002 at nexus-piwya.11</li>
  *   <li>the SURVIVORS are intact: {@code nexus.chash_alias} (permanent by
- *       RDR-180 decision), the three
- *       {@code idx_chunks_<dim>_tenant_chash} probe indexes, and the four
- *       surviving chash octet CHECKs (3-of-4 validated narrative: the
- *       chunks three are VALIDATED at rekey; the manifest's stays NOT
- *       VALID until nexus-uu4ue)</li>
+ *       RDR-180 decision), {@code idx_chunks_tenant_chash} (RDR-191 Phase 4:
+ *       the former three per-dim probe indexes are now ONE index on the
+ *       unified {@code nexus.chunks} table), and the surviving chash octet
+ *       CHECKs ({@code chunks_chash_octet_check}, also unified from three to
+ *       one, and the manifest's own, still NOT VALID until nexus-uu4ue)</li>
  *   <li>a second Liquibase update is a clean no-op (MARK_RAN-safe
  *       preconditions)</li>
  * </ol>
@@ -115,18 +115,20 @@ class ChashIndexDropLiquibaseTest {
             .as("staging.chash_index (dead-sink landing) is dropped at "
                 + "nexus-piwya.11 (rdr187-002)")
             .isZero();
+        // RDR-191 Phase 4 (repoint-batch lane F1): the three per-dim probe
+        // indexes collapsed into ONE idx_chunks_tenant_chash on the unified
+        // nexus.chunks table (vectors-004-unify-chunks.xml step 5).
         assertThat(intOf(
             "SELECT count(*) FROM pg_indexes WHERE schemaname = 'nexus' " +
-            "AND indexname LIKE 'idx_chunks_%_tenant_chash'"))
-            .as("the (tenant_id, chash) probe indexes serve the reroute — must survive")
-            .isEqualTo(3);
-        // The four surviving octet CHECKs (the 3-of-4 VALIDATE narrative:
-        // manifest's is validated by nexus-uu4ue after the orphan cleanup).
+            "AND indexname = 'idx_chunks_tenant_chash'"))
+            .as("the (tenant_id, chash) probe index serves the reroute — must survive")
+            .isEqualTo(1);
+        // The surviving octet CHECKs: chunks_chash_octet_check is now ONE
+        // unified constraint (was three per-dim), plus the manifest's own.
         assertThat(intOf(
             "SELECT count(*) FROM pg_constraint WHERE conname IN (" +
-            "'chunks_384_chash_octet_check', 'chunks_768_chash_octet_check', " +
-            "'chunks_1024_chash_octet_check', 'catalog_document_chunks_chash_octet_check')"))
-            .isEqualTo(4);
+            "'chunks_chash_octet_check', 'catalog_document_chunks_chash_octet_check')"))
+            .isEqualTo(2);
     }
 
     @Test

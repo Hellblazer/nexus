@@ -1,0 +1,251 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-5da44 (RDR-191 GATE-2 delete-path integrity quartet) — nexus.purge_trash's
+    chunk-orphan sweep (Steps 1-3) carried NO age term while its document delete
+    (Step 4) did, so a tombstoned document INSIDE its grace window lost its chunks
+    on the very next purge call while its document row and manifest rows survived
+    (Step 4's age gate held, so fk-001's CASCADE never fired). The result: a
+    "restorable" tombstone whose content is already gone, and a dangling-manifest
+    producer inside purge_trash itself — the tombstone-protection contract
+    (PgVectorRepository#delete, nexus-mmkqe) held the chunk right up until the
+    caller that is SUPPOSED to be the eventual reaper swept it early.
+
+    THE FIX: the chunk sweep's NOT EXISTS anti-join now treats a manifest row as
+    PROTECTING its chunk when the owning document is either LIVE (deleted_at IS
+    NULL, unchanged) OR TOMBSTONED BUT STILL INSIDE THE GRACE WINDOW (deleted_at
+    &gt; NOW() - older_than) — the exact complement of Step 4's own purge
+    predicate (deleted_at &lt;= NOW() - older_than). This is the SAME older_than
+    parameter already passed into the function; the chunk sweep now scopes on it
+    exactly as the document delete always has.
+
+    THREE-WAY CONSEQUENCE, matching the RDR-191 definition-of-record (T2 nexus/
+    rdr-191-dangling-definition-of-record [22364], class (b) — soft-tombstone
+    residue, not dangling):
+      - Live document:                      chunk always protected (unchanged).
+      - Tombstoned, INSIDE grace window:     chunk protected, document survives,
+                                              manifest rows survive — ALL THREE
+                                              together, until cutoff.
+      - Tombstoned, PAST grace window:       chunk swept here (Steps 1-3), then
+                                              document + manifest rows removed
+                                              together by Step 4's cascade — ALL
+                                              THREE go together, same purge call.
+
+    Layered on top of catalog-003-soft-delete.xml via CREATE OR REPLACE FUNCTION
+    — that file already shipped and has run on dev machines and in production;
+    editing a shipped changeset's checksum is a rug-pull (same discipline as
+    catalog-024 layering on catalog-023, see that file's header). Only the chunk
+    sweep's WHERE clause changes; Step 4's document delete, the GUC guard, and the
+    return-count accounting are byte-for-byte identical to catalog-003-5.
+
+    Test-first: CatalogPurgeTrashTest (service/src/test/java/dev/nexus/service)
+    proves an in-grace-window tombstone's chunk, document, and manifest rows all
+    survive together, and that a past-window tombstone still has all three reaped
+    together by the same purge call.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-026-1" author="nexus-5da44">
+        <comment>
+            CREATE OR REPLACE nexus.purge_trash(older_than interval): the chunk-orphan
+            sweep (Steps 1-3, chunks_384/768/1024) now protects a chunk referenced by a
+            tombstoned-but-still-in-grace-window manifest row, the same older_than
+            scoping Step 4's document delete already applies. Signature, return type,
+            GUC guard, and Step 4 unchanged.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.purge_trash(older_than interval)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_tenant TEXT;
+    v_count  BIGINT;
+BEGIN
+    -- GUC guard: must have a non-empty tenant scope
+    v_tenant := current_setting('nexus.tenant', true);
+    IF v_tenant IS NULL OR v_tenant = '' THEN
+        RAISE EXCEPTION
+            'purge_trash: nexus.tenant GUC must be set to a non-empty tenant scope. '
+            'Cross-tenant purge is not permitted. Set the nexus.tenant configuration '
+            'parameter before calling purge_trash.';
+    END IF;
+
+    -- Step 1: sweep orphaned chunk rows from chunks_384.
+    -- Safety contract: a chunk is sweepable ONLY IF it has at least one manifest row
+    -- AND none of its manifest rows PROTECT it -- a row protects when its owning
+    -- document is LIVE, or TOMBSTONED but still inside the older_than grace window
+    -- (nexus-5da44: matches Step 4's own age predicate exactly, its complement).
+    -- Manifest-less chunks (MCP store_put / nx store put notes that write chunks
+    -- directly without manifest rows) are never swept -- their NOT EXISTS subquery
+    -- is trivially TRUE, so the EXISTS(...manifest row...) gate excludes them.
+    -- RDR-145 deferred scope.
+    DELETE FROM nexus.chunks_384 c
+    WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
+      AND NOT EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+            JOIN nexus.catalog_documents d
+              ON d.tenant_id = m.tenant_id
+             AND d.tumbler   = m.doc_id
+           WHERE m.tenant_id  = c.tenant_id
+             AND m.chash       = c.chash
+             AND (d.deleted_at IS NULL OR d.deleted_at &gt; NOW() - older_than)
+      );
+
+    -- Step 2: sweep orphaned chunk rows from chunks_768.
+    DELETE FROM nexus.chunks_768 c
+    WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
+      AND NOT EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+            JOIN nexus.catalog_documents d
+              ON d.tenant_id = m.tenant_id
+             AND d.tumbler   = m.doc_id
+           WHERE m.tenant_id  = c.tenant_id
+             AND m.chash       = c.chash
+             AND (d.deleted_at IS NULL OR d.deleted_at &gt; NOW() - older_than)
+      );
+
+    -- Step 3: sweep orphaned chunk rows from chunks_1024.
+    DELETE FROM nexus.chunks_1024 c
+    WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
+      AND NOT EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+            JOIN nexus.catalog_documents d
+              ON d.tenant_id = m.tenant_id
+             AND d.tumbler   = m.doc_id
+           WHERE m.tenant_id  = c.tenant_id
+             AND m.chash       = c.chash
+             AND (d.deleted_at IS NULL OR d.deleted_at &gt; NOW() - older_than)
+      );
+
+    -- Step 4: physically delete tombstoned documents older than the threshold.
+    -- fk-001 ON DELETE CASCADE removes catalog_document_chunks, document_aspects,
+    -- document_highlights, and aspect_extraction_queue rows for each deleted doc.
+    -- Unchanged from catalog-003-5.
+    DELETE FROM nexus.catalog_documents
+     WHERE tenant_id  = v_tenant
+       AND deleted_at IS NOT NULL
+       AND deleted_at &lt;= NOW() - older_than;
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$
+        </sql>
+        <rollback>
+            <!-- Restores catalog-003-5's original body verbatim (the age-independent
+                 chunk sweep) — same precedent as catalog-024's rollback of catalog-023. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.purge_trash(older_than interval)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_tenant TEXT;
+    v_count  BIGINT;
+BEGIN
+    v_tenant := current_setting('nexus.tenant', true);
+    IF v_tenant IS NULL OR v_tenant = '' THEN
+        RAISE EXCEPTION
+            'purge_trash: nexus.tenant GUC must be set to a non-empty tenant scope. '
+            'Cross-tenant purge is not permitted. Set the nexus.tenant configuration '
+            'parameter before calling purge_trash.';
+    END IF;
+
+    DELETE FROM nexus.chunks_384 c
+    WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
+      AND NOT EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+            JOIN nexus.catalog_documents d
+              ON d.tenant_id = m.tenant_id
+             AND d.tumbler   = m.doc_id
+           WHERE m.tenant_id  = c.tenant_id
+             AND m.chash       = c.chash
+             AND d.deleted_at IS NULL
+      );
+
+    DELETE FROM nexus.chunks_768 c
+    WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
+      AND NOT EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+            JOIN nexus.catalog_documents d
+              ON d.tenant_id = m.tenant_id
+             AND d.tumbler   = m.doc_id
+           WHERE m.tenant_id  = c.tenant_id
+             AND m.chash       = c.chash
+             AND d.deleted_at IS NULL
+      );
+
+    DELETE FROM nexus.chunks_1024 c
+    WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
+      AND NOT EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+            JOIN nexus.catalog_documents d
+              ON d.tenant_id = m.tenant_id
+             AND d.tumbler   = m.doc_id
+           WHERE m.tenant_id  = c.tenant_id
+             AND m.chash       = c.chash
+             AND d.deleted_at IS NULL
+      );
+
+    DELETE FROM nexus.catalog_documents
+     WHERE tenant_id  = v_tenant
+       AND deleted_at IS NOT NULL
+       AND deleted_at &lt;= NOW() - older_than;
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

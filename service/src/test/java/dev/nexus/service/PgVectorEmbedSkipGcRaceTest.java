@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Contexts;
@@ -102,7 +103,7 @@ class PgVectorEmbedSkipGcRaceTest {
     private static final String TENANT   = "gcrace-tenant";
 
     private static final String COLLECTION = "code__gcrace__voyage-code-3__v1";
-    // Full 64-hex-char chash (RDR-180: chunks_1024_chash_octet_check, octet_length=32
+    // Full 64-hex-char chash (RDR-180: chunks_chash_octet_check (unified, RDR-191), octet_length=32
     // — the full sha256 digest) — the shared chash H referenced by both docs A and B.
     private static final String CHASH_H = String.format("%064x", 0xABCDEF01L);
     private static final String SHARED_TEXT = "shared chunk text referenced by docs A and B";
@@ -148,7 +149,7 @@ class PgVectorEmbedSkipGcRaceTest {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chunks_1024 TO " + SVC_ROLE);
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -312,7 +313,7 @@ class PgVectorEmbedSkipGcRaceTest {
     private long superuserCount() throws SQLException {
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
-                 "SELECT count(*) FROM nexus.chunks_1024 WHERE collection = ? AND chash = ?")) {
+                 "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = ? AND chash = ?")) {
             ps.setString(1, COLLECTION);
             ps.setBytes(2, java.util.HexFormat.of().parseHex(CHASH_H));
             try (ResultSet rs = ps.executeQuery()) {

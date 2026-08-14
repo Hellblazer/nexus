@@ -32,7 +32,8 @@ from nexus.remediation import StoreState, emit_forensics_playbook
 # read. Everything here is schema/metadata (row counts, chash LENGTHS,
 # constraint names/validation flags) — never row/document/note content.
 _ALLOWED_READ_OBJECTS = {
-    "nexus.chunks_384", "nexus.chunks_768", "nexus.chunks_1024",
+    # RDR-191 (nexus-o8dil.19): chunks_384/768/1024 unify into ONE relation.
+    "nexus.chunks",
     "nexus.chash_index", "nexus.catalog_document_chunks",
     "pg_constraint",
     # Amendment A6 (nexus-9bufb): the superuser-owned counts view. Stronger

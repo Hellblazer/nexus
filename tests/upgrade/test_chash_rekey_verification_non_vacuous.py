@@ -338,6 +338,146 @@ class TestProductionProbeWiring:
         assert "nx init --service" in probe.reason
 
 
+def _era_straddle_run(
+    *,
+    unified_chunks: str = "0",
+    catalog_document_chunks: str = "0",
+    legacy_chunks_384: str = "0",
+    legacy_chunks_768: str = "0",
+    legacy_chunks_1024: str = "0",
+    era_answer: str = "1",
+    fail_diag_view: bool = False,
+    fail_unified_direct: bool = False,
+):
+    """A ``run_diagnostic_sql`` replacement keyed by SQL CONTENT (mirrors
+    ``tests/test_health_service_checks.py``'s ``_content_diag_runner``
+    shape — same review round, same fixture pattern, deliberately not
+    forked into a different style). ``run_diagnostic_sql`` is called ONCE
+    per statement-tuple here (the whole tuple, not per psql invocation —
+    this file mocks the choke point itself, not a psql subprocess), so a
+    "failure" mid-tuple raises immediately, matching the real function's
+    documented abort-on-first-failure behavior."""
+
+    def run(statements, _creds, **_kw):
+        out: list[str] = []
+        for s in statements:
+            if "to_regclass" in s:
+                out.append(era_answer)
+                continue
+            if fail_diag_view and "diag_chash_conformance" in s:
+                raise RuntimeError(
+                    'diagnostic statement failed (psql exit 1): ERROR: relation '
+                    '"nexus.diag_chash_conformance" does not exist'
+                )
+            if "chunks_384" in s:
+                out.append(legacy_chunks_384)
+                continue
+            if "chunks_768" in s:
+                out.append(legacy_chunks_768)
+                continue
+            if "chunks_1024" in s:
+                out.append(legacy_chunks_1024)
+                continue
+            if "catalog_document_chunks" in s:
+                out.append(catalog_document_chunks)
+                continue
+            if fail_unified_direct and "FROM nexus.chunks " in s:
+                raise RuntimeError(
+                    'diagnostic statement failed (psql exit 1): ERROR: relation '
+                    '"nexus.chunks" does not exist'
+                )
+            if "nexus.chunks" in s:
+                out.append(unified_chunks)
+                continue
+            out.append("0")
+        return out
+
+    return run
+
+
+class TestDetectProbeEraStraddle:
+    """RDR-191 F14a mirror-direction straddle, extended to the HEALING rung
+    itself (nexus-o8dil, 2026-08-14 review round 2, SIGNIFICANT FINDING 2):
+    ``_detect_probe`` is an independent consumer of the same
+    ``chash_tables`` statements ``health._check_migration_state`` era-gates
+    — pre-fix it had no knowledge of the LEGACY_* inventories or the era
+    probe, so on the exact straddle box the P1 fix targets, its view leg
+    went FAILED (blank) and its direct fallback (defaulting to the unified
+    table names) ALSO failed, leaving the rung — the very remediation
+    ``nx doctor``'s fix_suggestions point operators to — unmeasurable in
+    the identical window ``health.py`` now handles. These mirror
+    ``TestChashProbeEraStraddle`` in ``tests/test_health_service_checks.py``
+    one-for-one, adapted to this module's ``run_diagnostic_sql``-level
+    monkeypatch style (see ``TestProductionProbeWiring`` above)."""
+
+    @staticmethod
+    def _probe(monkeypatch, run_impl):
+        monkeypatch.setattr(
+            diag, "resolve_diag_credentials",
+            lambda *_a, **_k: DiagCredentials(port=1, user="d", password="p"),
+        )
+        monkeypatch.setattr(diag, "run_diagnostic_sql", run_impl)
+        return default_chash_rekey_rung()._detect_probe_fn()  # noqa: SLF001 — the seam under test
+
+    def test_legacy_view_row_blank_retries_legacy_era_and_MEASURES(self, monkeypatch):
+        """The confirmed production shape (same as health.py's straddle
+        test): the unified view-path query executes cleanly but returns a
+        blank aggregate for nexus.chunks (deployed view still per-dim
+        shaped). The era discriminator reports nexus.chunks absent, so the
+        probe retries against the legacy per-dim view rows and MEASURES a
+        real, non-vacuous count instead of FAILING."""
+        run = _era_straddle_run(
+            unified_chunks="", catalog_document_chunks="0",
+            era_answer="0",  # nexus.chunks does not exist yet
+            legacy_chunks_384="2", legacy_chunks_768="0", legacy_chunks_1024="0",
+        )
+        probe = self._probe(monkeypatch, run)
+        assert probe.state is ProbeState.MEASURED
+        assert probe.count == 2
+
+    def test_neither_era_resolves_still_FAILED_not_manufactured_zero(self, monkeypatch):
+        """NON-VACUITY: if the legacy-era view retry ALSO comes back blank
+        (and the existing direct fallback fails outright too, since
+        nexus.chunks genuinely does not exist), the rung must stay FAILED
+        — never a manufactured zero, never a crash."""
+        run = _era_straddle_run(
+            unified_chunks="", catalog_document_chunks="0", era_answer="0",
+            legacy_chunks_384="", legacy_chunks_768="", legacy_chunks_1024="",
+            fail_unified_direct=True,
+        )
+        probe = self._probe(monkeypatch, run)
+        assert probe.state is ProbeState.FAILED
+
+    def test_unified_schema_present_never_reinterprets_as_legacy(self, monkeypatch):
+        """Safety rail: the view itself is absent (RuntimeError, the
+        pre-existing v0.1.69-class shape), but the era discriminator
+        proves nexus.chunks EXISTS — the probe must go straight to the
+        EXISTING unified direct-table fallback and MEASURE there, never
+        detouring through the legacy per-dim statements for a genuinely
+        current-era store."""
+        run = _era_straddle_run(
+            fail_diag_view=True, era_answer="1",
+            unified_chunks="3", catalog_document_chunks="0",
+        )
+        probe = self._probe(monkeypatch, run)
+        assert probe.state is ProbeState.MEASURED
+        assert probe.count == 3
+
+    def test_view_absent_and_unified_direct_fallback_absent_retries_legacy_direct(self, monkeypatch):
+        """The OLDER straddle shape: the diag view was never provisioned
+        (RuntimeError) AND the existing direct fallback — which still
+        assumes the unified table names — ALSO fails because nexus.chunks
+        does not exist yet. The probe must retry once more against the
+        legacy per-dim direct-table statements before giving up FAILED."""
+        run = _era_straddle_run(
+            fail_diag_view=True, fail_unified_direct=True, era_answer="0",
+            legacy_chunks_384="0", legacy_chunks_768="0", legacy_chunks_1024="0",
+        )
+        probe = self._probe(monkeypatch, run)
+        assert probe.state is ProbeState.MEASURED
+        assert probe.count == 0
+
+
 # ── sibling: the pointer-debt amnesty must not ride an absent baseline ───────
 
 

@@ -181,7 +181,8 @@ If it exits non-zero, STOP — do not proceed with the PyPI release; cut a fresh
    Wait for CI green. Then `gh pr merge <N> --merge` (NOT `--squash` — preserves the release commit SHA for the optional `source.sha` pin in Step 8a).
 
    The `git push -u origin release/vX.Y.Z` step above is exempt from the
-   push-gated review-coverage check (`git_add_all_redirects_to_explicit_paths.py`,
+   push-gated review-coverage check
+   (`conexus/hooks/scripts/routing/git_add_all_redirects_to_explicit_paths.py`,
    nexus-4av2n round 2) — every `release/*` destination branch push allows
    through with a loud INFO line rather than denying, since the release
    branch's own `chore(release): ...` commit carries no bead id and this

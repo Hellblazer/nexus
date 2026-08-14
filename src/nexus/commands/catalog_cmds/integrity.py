@@ -688,14 +688,40 @@ def _census_lost_and_never_chunked(
     ``unclassified`` further is nexus-cdypx's reconcile job, not verify's.
 
     Also returns ``manifest_row_totals`` — total manifest ROWS (not
-    chunk_count) per ``physical_collection``, computed from this SAME
-    ``get_manifests`` call (no second round trip). Feeds
-    :func:`_class_c_unverifiable_rows` (critique CRIT-2): ``get_manifests``
-    reads ``catalog_document_chunks`` directly with no ``collection IS NOT
-    NULL`` filter (confirmed against
+    chunk_count) per COLLECTION, computed from this SAME ``get_manifests``
+    call (no second round trip). Feeds :func:`_class_c_unverifiable_rows`
+    (critique CRIT-2): ``get_manifests`` reads ``catalog_document_chunks``
+    directly with no ``collection IS NOT NULL`` filter (confirmed against
     ``CatalogRepository.getManifestMany``), so this total includes
     pre-backfill (NULL-``collection``) rows that ``manifest_verify_all``
     silently excludes.
+
+    Row-level keying (nexus-kzso5, RDR-191 follow-up to nexus-bo2d1):
+    ``get_manifest``/``get_manifests`` now carry each row's OWN stamped
+    ``collection`` on the wire (additive field, engine floor ``>=
+    v0.1.74``) — the caller-supplied, NOT NULL truth RDR-191 stamps
+    verbatim, independent of the owning document's ``physical_collection``.
+    Each row is attributed to ``row.collection`` when the wire carries it;
+    ``getattr(row, "collection", None)`` tolerates both a pre-field engine
+    (``ManifestRow.collection is None``) and a bare test double with no
+    such attribute, falling back to ``e.physical_collection`` — the exact
+    pre-kzso5 behavior — only when the row itself carries no collection of
+    its own. A ghost/sourceless document (``physical_collection == ""``)
+    therefore no longer needs to be excluded from row attribution: on a
+    field-aware engine its rows attribute correctly to whatever collection
+    they were actually written into, resolving the nexus-bo2d1
+    ghost-contamination INCOMPLETE hedge; on a pre-field engine the
+    fallback still yields ``key=None`` (empty ``physical_collection``, no
+    row collection) and the row is skipped exactly as before.
+
+    Ghost entries are still EXCLUDED from ``lost``/``never_chunked``
+    (document-health classification) — a ghost has no owning-collection
+    identity for a chunk_count-vs-manifest comparison to be meaningful
+    against, mirroring ``manifest_heal.py``'s identical skip
+    (``catalog/manifest_heal.py`` ~161: ``if not entry.physical_collection:
+    continue``) — verified SAFE by the nexus-bo2d1 audit. Callers decide
+    whether to include ghosts in ``entries`` at all; ``_verify_full`` now
+    does (nexus-kzso5), purely so their rows are visible for attribution.
 
     ``cat.get_manifests`` is exception-isolated (code-review IMPORTANT): a
     mid-sweep failure must still let the report render — with whatever
@@ -717,9 +743,16 @@ def _census_lost_and_never_chunked(
     manifest_row_totals: dict[str, int] = {}
     for e in entries:
         rows = manifests.get(str(e.tumbler), [])
-        manifest_row_totals[e.physical_collection] = (
-            manifest_row_totals.get(e.physical_collection, 0) + len(rows)
-        )
+        # nexus-kzso5: row-own collection first, e.physical_collection as
+        # the version-tolerant fallback — see docstring.
+        for r in rows:
+            key = getattr(r, "collection", None) or e.physical_collection or None
+            if key:
+                manifest_row_totals[key] = manifest_row_totals.get(key, 0) + 1
+        if not e.physical_collection:
+            # Ghost/sourceless doc — no per-document health classification
+            # (see docstring); its rows were still attributed above.
+            continue
         if e.chunk_count > 0 and len(rows) < e.chunk_count:
             lost.append({
                 "tumbler": str(e.tumbler), "title": e.title,
@@ -746,23 +779,53 @@ def _class_c_unverifiable_rows(
     damaged"). Such a row never surfaces as damaged, in either Class B or
     Class C, no matter how genuinely missing the underlying chunk is.
 
-    Grouping-key check (per the design memo): ``document_chunks.collection``
-    is stamped from the owning doc's ``physical_collection`` at write time
-    (``CatalogRepository`` writers) and by ``manifest_backfill()`` for
-    pre-existing rows (``catalog-014-manifest-collection-stamp.xml``:
-    "using the same derivation as manifest_backfill(): the owning
-    document's physical_collection") — so grouping the client-side
-    manifest-row total by ``e.physical_collection`` (done in
-    ``_census_lost_and_never_chunked``) matches the key the engine groups
-    by, once a row IS backfilled. A per-collection delta between the
-    client's total (unfiltered — ``get_manifests`` has no NULL-collection
-    guard, confirmed against ``CatalogRepository.getManifestMany``) and the
-    engine's ``referenced`` count is therefore exactly the un-backfilled
-    row count for that collection, not a grouping-key mismatch.
+    Grouping-key correction (nexus-bo2d1, substantive-critic round 3,
+    2026-08-12): the design memo's original claim — "``document_chunks.
+    collection`` is stamped from the owning doc's ``physical_collection`` at
+    write time, so grouping the client-side manifest-row total by ``e.
+    physical_collection`` matches the key the engine groups by" — is FALSE
+    under the shipped RDR-191 contract. ``CatalogRepository.java``
+    ~3530-3547: writers now take an explicit, required ``collection``
+    parameter and the engine stamps it VERBATIM on every row, with ZERO
+    relationship to the target document's own ``physical_collection``
+    field. ``_census_lost_and_never_chunked`` now excludes ghost entries
+    (no ``physical_collection`` at all) from ``manifest_row_totals``
+    entirely rather than keying them under a phantom ``""`` — but a ghost
+    can still write manifest rows into a REAL collection that a normal doc
+    in this same census also uses. Those rows count toward the engine's
+    ``referenced`` (a global anti-join over ALL rows, independent of which
+    docs this census walked) but never toward that collection's
+    ``client_total`` (built only from docs this census actually fetched
+    manifests for) — so ``client_total`` can legitimately fall BELOW
+    ``referenced`` for a real, otherwise-healthy collection.
+
+    Under the correct model ``client_total`` (unfiltered) can only be ``>=
+    referenced`` (NULL-collection-excluded) for a collection this census
+    actually walked in full — a negative delta is therefore PROOF this
+    collection's own client-side total is incomplete (some of its rows are
+    attributed to docs outside this census's ``entries``), not evidence of
+    a clean pass. It folds into *unreadable* (INCOMPLETE) exactly like a
+    positive delta, rather than being silently dropped — the false-clean
+    ``if delta > 0`` alone produced pre-fix.
 
     Folds affected collections into *unreadable* (the collection's true
     damage state cannot be determined) rather than reporting a finding —
     this is an INCOMPLETE signal, distinct from vanished/damaged/lost.
+
+    Resolution (nexus-kzso5, RDR-191 follow-up): this function itself takes
+    the already-aggregated ``manifest_row_totals`` dict and never re-derives
+    a key, so it needed no code change — the fix lives entirely upstream in
+    :func:`_census_lost_and_never_chunked`, which now keys each row by its
+    OWN stamped ``collection`` (the wire field the engine floor ``>=
+    v0.1.74`` carries) instead of the owning doc's ``physical_collection``.
+    On a field-aware engine a ghost's rows attribute correctly to their
+    real collection and ``client_total`` naturally reconciles with
+    ``referenced`` — the negative-delta INCOMPLETE hedge this docstring
+    describes no longer fires for that reason. It still fires, exactly as
+    designed, on a pre-field engine (row collection absent, ghosts
+    invisible to the client-side total by construction) or for any other
+    genuine census-incompleteness this function cannot distinguish from
+    real damage — the fold-to-INCOMPLETE safety net is unchanged.
     """
     unverifiable: list[dict] = []
     for coll, client_total in sorted(manifest_row_totals.items()):
@@ -771,6 +834,8 @@ def _class_c_unverifiable_rows(
         if delta > 0:
             unverifiable.append({"collection": coll, "unverifiable_rows": delta})
             unreadable.append(f"catalog:manifest_verify_all:unbackfilled:{coll}")
+        elif delta < 0:
+            unreadable.append(f"catalog:manifest_verify_all:census_incomplete:{coll}")
     return unverifiable
 
 
@@ -957,13 +1022,23 @@ def _verify_full(cat: "CatalogReader", *, json_out: bool) -> None:
     ``referenced_by_collection`` (critique CRIT-2) to detect pre-backfill
     manifest rows the engine's anti-join silently excludes — skipped when
     Class B itself already failed/returned nothing to compare against.
+
+    nexus-kzso5 (RDR-191 follow-up to nexus-bo2d1): ghost/sourceless docs
+    (``physical_collection == ""``) are still excluded from ``all_entries``
+    / ``total_docs`` — they have no owning-collection identity for the
+    doc-count or ``lost``/``never_chunked`` stats to mean anything — but
+    are now ALSO fetched (``ghost_entries``, merged into the census-only
+    entry list) purely so a field-aware engine's per-row ``collection``
+    lets their manifest rows attribute to whatever REAL collection they
+    were actually written into, instead of being invisible to
+    ``manifest_row_totals`` entirely. ``_census_lost_and_never_chunked``
+    itself still skips ghosts for lost/never_chunked classification.
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
-    all_entries = [
-        e for e in cat.all_documents(limit=0)
-        if not e.alias_of and e.physical_collection
-    ]
+    all_documents = [e for e in cat.all_documents(limit=0) if not e.alias_of]
+    all_entries = [e for e in all_documents if e.physical_collection]
+    ghost_entries = [e for e in all_documents if not e.physical_collection]
     total_docs = len(all_entries)
 
     unreadable: list[str] = []
@@ -982,8 +1057,11 @@ def _verify_full(cat: "CatalogReader", *, json_out: bool) -> None:
         census_entries = [
             e for e in all_entries if e.physical_collection not in vanished_names
         ]
+        # nexus-kzso5: ghosts ride along for row-collection attribution
+        # only (see docstring) — _census_lost_and_never_chunked still
+        # excludes them from lost/never_chunked.
         lost, never_chunked, manifest_row_totals = _census_lost_and_never_chunked(
-            cat, census_entries, unreadable,
+            cat, census_entries + ghost_entries, unreadable,
         )
         mv_all_incomplete = any(
             u in (

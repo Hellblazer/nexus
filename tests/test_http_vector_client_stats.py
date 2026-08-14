@@ -213,7 +213,7 @@ class TestCollectionExistsRaw:
     """collection_exists_raw() -- RAW /v1/vectors/collections listing.
 
     Unfiltered by tombstone status (trashing sets catalog_documents.deleted_at;
-    it never removes rows from chunks_384/768/1024), unlike collection_exists()
+    it never removes rows from the unified nexus.chunks table), unlike collection_exists()
     which reads the tombstone-filtered stats view (nexus-9n485).
     """
 

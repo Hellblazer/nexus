@@ -60,7 +60,9 @@ def _populate_knowledge_doc(cat: ActiveCatalog, *, title: str, chash: str,
     tumbler, _created = catalog_store_hook_tracked(
         title=title, doc_id=chash, collection_name=collection,
     )
-    cat.append_manifest_chunks(tumbler, [{"chash": chash, "position": 0}])
+    cat.append_manifest_chunks(
+        tumbler, [{"chash": chash, "position": 0}], collection=collection,
+    )
     cat.resync_chunk_count_cache(tumbler)
     return tumbler
 
@@ -177,7 +179,9 @@ def _register_knowledge_doc_directly(cat: ActiveCatalog, *, title: str,
         owner, title, content_type="knowledge", physical_collection=collection,
         meta={"doc_id": chash},
     )
-    cat.append_manifest_chunks(str(tumbler), [{"chash": chash, "position": 0}])
+    cat.append_manifest_chunks(
+        str(tumbler), [{"chash": chash, "position": 0}], collection=collection,
+    )
     cat.resync_chunk_count_cache(str(tumbler))
     return str(tumbler)
 

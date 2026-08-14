@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.vectors.DimTables;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -167,11 +168,14 @@ class CombinedQueryParityTest {
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             for (String tbl : List.of(
                     "catalog_collections", "catalog_documents", "catalog_document_chunks",
-                    "topics", "topic_assignments",
-                    "chunks_384", "chunks_768", "chunks_1024")) {
+                    "topics", "topic_assignments")) {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
             }
+            // RDR-191 Phase 4: chunks_384/768/1024 unified into ONE nexus.chunks --
+            // a single GRANT now covers what three did.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
             su.createStatement().execute("GRANT USAGE ON ALL SEQUENCES IN SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
@@ -290,7 +294,7 @@ class CombinedQueryParityTest {
             // Real row-count statistics so the planner does not under-estimate the
             // bulk-loaded tables to rows=1 and wrongly prefer a filter-first sort over
             // the HNSW index in GROUP 3.
-            for (String tbl : List.of("chunks_1024", "catalog_documents",
+            for (String tbl : List.of("chunks", "catalog_documents",
                     "catalog_document_chunks", "topic_assignments", "topics")) {
                 su.createStatement().execute("ANALYZE nexus." + tbl);
             }
@@ -323,7 +327,7 @@ class CombinedQueryParityTest {
         // Embedding: 2-D direction (g%100/100, 1) padded to 1024 — varied enough that
         // HNSW is exercised, dense in the (x,1) plane.
         su.createStatement().execute(
-            "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
             "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', decode(lpad(g::text, 64, '0'), 'hex'), 'ex'||g, " +
             "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::vector " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
@@ -496,7 +500,7 @@ class CombinedQueryParityTest {
     // EXPECTED RED: function absent until catalog-006.
     //
     // enable_seqscan=off forces the planner to reach for the index; with a literal
-    // vector argument the HNSW index idx_chunks_1024_embedding IS usable for the
+    // vector argument the HNSW index idx_chunks_embedding_1024 IS usable for the
     // ORDER BY embedding <=> p_query. The assertion proves:
     //   (a) the function is INLINABLE (a plpgsql body shows "Function Scan" and no
     //       inner index node → fails — only LANGUAGE sql exposes the index scan);
@@ -514,14 +518,14 @@ class CombinedQueryParityTest {
         String plan = explainMetaPlan(1024, COLL_EXPLAIN, null);
         assertThat(plan)
             .as("combined metadata query must use the HNSW index "
-                + "idx_chunks_1024_embedding for the ANN ordering — the vector is a "
+                + "idx_chunks_embedding_1024 for the ANN ordering — the vector is a "
                 + "plan-time argument and the function inlines. Plan was:%n%s", plan)
-            .contains("idx_chunks_1024_embedding");
+            .contains("idx_chunks_embedding_1024");
         assertThat(plan)
             .as("the metadata join must NOT defeat the index into a Seq Scan on "
-                + "chunks_1024 (a filter that defeats the index is a regression, not a "
+                + "nexus.chunks (a filter that defeats the index is a regression, not a "
                 + "simplification — Decision 5). Plan was:%n%s", plan)
-            .doesNotContain("Seq Scan on chunks_1024");
+            .doesNotContain("Seq Scan on chunks");
         assertThat(plan)
             .as("a Function Scan node means the function is not inlinable (plpgsql) — "
                 + "EXPLAIN cannot then see the index scan; catalog-006 must use an "
@@ -535,10 +539,10 @@ class CombinedQueryParityTest {
         assertThat(plan)
             .as("topic-scoped query must keep the HNSW index scan through the "
                 + "topic_assignments join. Plan was:%n%s", plan)
-            .contains("idx_chunks_1024_embedding");
+            .contains("idx_chunks_embedding_1024");
         assertThat(plan)
-            .as("topic join must not force a Seq Scan on chunks_1024. Plan was:%n%s", plan)
-            .doesNotContain("Seq Scan on chunks_1024");
+            .as("topic join must not force a Seq Scan on nexus.chunks. Plan was:%n%s", plan)
+            .doesNotContain("Seq Scan on chunks");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -681,7 +685,7 @@ class CombinedQueryParityTest {
                 "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
             assertThat(callMeta(svc, 1024, COLL_B, "paper", null, null, null, 10))
                 .as("svc GUC=A must see ZERO tenant-B rows (function is SECURITY "
-                    + "INVOKER — caller RLS on chunks_1024/catalog applies)").isEmpty();
+                    + "INVOKER — caller RLS on nexus.chunks/catalog applies)").isEmpty();
             assertThat(callMeta(svc, 1024, COLL_M, "paper", null, null, null, 10))
                 .as("svc GUC=A must still see its OWN tenant-A papers")
                 .containsExactly("m1", "m2", "m4", "m5");
@@ -709,12 +713,12 @@ class CombinedQueryParityTest {
                 "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
             assertThat(callTopic(svc, 1024, COLL_B, TOPIC_VEC, 10))
                 .as("svc GUC=A must see ZERO tenant-B topic rows (SECURITY INVOKER — "
-                    + "caller RLS on chunks_1024 applies)").isEmpty();
+                    + "caller RLS on nexus.chunks applies)").isEmpty();
         }
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // GROUP 8 — per-dim dispatch (the functions exist and behave on chunks_384)
+    // GROUP 8 — per-dim dispatch (the functions exist and behave on nexus.chunks dim=384)
     //
     // EXPECTED RED: 384 functions absent until catalog-006.
     // ══════════════════════════════════════════════════════════════════════════
@@ -916,14 +920,14 @@ class CombinedQueryParityTest {
             "  FROM nexus.catalog_documents d " +
             "  JOIN nexus.catalog_document_chunks m " +
             "    ON m.tenant_id = d.tenant_id AND m.doc_id = d.tumbler " +
-            "  JOIN nexus.chunks_" + dim + " c " +
+            "  JOIN " + DimTables.CHUNKS_TABLE_NAME + " c " +
             "    ON c.tenant_id = m.tenant_id AND c.collection = m.collection " +
             "   AND c.chash = m.chash " +
             " WHERE m.collection = '" + collection + "' " +
             "   AND d.deleted_at IS NULL " +
             (contentType == null ? "" : "   AND d.content_type = " + sqlText(contentType) + " ") +
             (author == null ? "" : "   AND d.author ILIKE '%' || " + sqlText(author) + " || '%' ") +
-            " ORDER BY c.embedding <=> " + queryVecLiteral(dim) + " ASC";
+            " ORDER BY c." + DimTables.embeddingColumn(dim) + " <=> " + queryVecLiteral(dim) + " ASC";
         return runIds(conn, sql);
     }
 
@@ -932,7 +936,7 @@ class CombinedQueryParityTest {
                                              String topicLabel) throws Exception {
         String sql =
             "SELECT encode(c.chash, 'hex') AS id " +
-            "  FROM nexus.chunks_" + dim + " c " +
+            "  FROM " + DimTables.CHUNKS_TABLE_NAME + " c " +
             "  JOIN nexus.topic_assignments ta " +
             "    ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex') " +
             "  JOIN nexus.topics t " +
@@ -947,7 +951,7 @@ class CombinedQueryParityTest {
             "                       ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id " +
             "                    WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash " +
             "                      AND d.deleted_at IS NULL)) " +
-            " ORDER BY c.embedding <=> " + queryVecLiteral(dim) + " ASC";
+            " ORDER BY c." + DimTables.embeddingColumn(dim) + " <=> " + queryVecLiteral(dim) + " ASC";
         return runIds(conn, sql);
     }
 
@@ -982,7 +986,7 @@ class CombinedQueryParityTest {
         insertCatalogDocumentFull(su, tenant, tumbler, collection, "paper", "wa", 2024, "research");
         insertManifestRow(su, tenant, tumbler, 0, chash, collection);
         su.createStatement().execute(
-            "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding, metadata)"
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ", metadata)"
             + " VALUES ('" + tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + tumbler + "', "
             + vec2(1024, x, y) + "::vector, '" + metaJson.replace("'", "''") + "'::jsonb)"
             + " ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
@@ -1063,13 +1067,13 @@ class CombinedQueryParityTest {
             "ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING");
     }
 
-    /** Insert a chunks_&lt;dim&gt; row with a 2-D unit direction embedding. */
+    /** Insert a nexus.chunks row (RDR-191 unified; formerly chunks_&lt;dim&gt;) with a 2-D unit direction embedding. */
     private static void insertChunk(Connection su, int dim, String tenantId, String collection,
                                     String chash, String chunkText, double x, double y)
             throws Exception {
         su.createStatement().execute(
-            "INSERT INTO nexus.chunks_" + dim +
-            " (tenant_id, collection, chash, chunk_text, embedding) VALUES ('" +
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
+            " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ") VALUES ('" +
             tenantId + "', '" + collection + "', decode('" + chash + "', 'hex'), '" +
             chunkText.replace("'", "''") + "', " + vec2(dim, x, y) + "::vector) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
@@ -1087,8 +1091,9 @@ class CombinedQueryParityTest {
                                       String collection) throws Exception {
         try (var st = conn.createStatement();
              ResultSet rs = st.executeQuery(
-                "SELECT count(*) FROM nexus.chunks_" + dim +
-                " WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'")) {
+                "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME +
+                " WHERE tenant_id = '" + tenantId + "' AND collection = '" + collection + "'" +
+                " AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL")) {
             rs.next();
             return rs.getLong(1);
         }
