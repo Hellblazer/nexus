@@ -690,6 +690,27 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
    against the naive shape. See Phase 5 below, where the conflict actually
    surfaces.
 
+   **AMENDMENT (xi), 2026-08-14 — RESOLVED: disposition (a). Ruled by Hal,
+   direct.** The FK ships as a three-step Liquibase sequence matching
+   `fk-002`'s own shape: `ADD CONSTRAINT ... NOT VALID` → an anti-join
+   remediation changeset that DELETEs `catalog_document_chunks` rows whose
+   chash has no matching row in `nexus.chunks` (F17's shape: an anti-join
+   against the chunk store, never a count comparison) → `VALIDATE`. All
+   three run at every boot-time Liquibase walk as ordinary run-once
+   changesets, so every future upgrader is remediated before its own
+   VALIDATE scans — the second boot-brick is closed by construction, not by
+   procedure. The unattended-deletion concern is priced and accepted: the
+   deleted object is the CHILD bookkeeping row (a position entry referencing
+   a chunk that no longer exists, through which no read path can hydrate),
+   not the chunk itself — it is lifecycle debris in `fk-002`'s own taxonomy,
+   not the "orphan chunk is real data" case its destructive-arm refusal
+   protects. The remediation changeset must log its deleted-row count so the
+   mutation is auditable. The late-upgrader boot test (dangling population
+   pre-seeded; must fail against the naive two-step shape) transfers to the
+   Phase 5 FK beads' acceptance. Decision of record: T2
+   `nexus/rdr-191-validate-placement-decision` [22557]; bead nexus-o8dil.23
+   closed on it.
+
 ## Phasing (draft)
 
 - **Phase 1 — Prune into SQL.** No schema change. Anti-join UPDATE, expiry,
@@ -780,6 +801,17 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   dangling population. That gap is OPEN QUESTION 9 above (bead
   nexus-o8dil.23) and is unresolved; do not assume the steps below are the
   complete answer for every future upgrader.**
+
+  **AMENDMENT (xi), 2026-08-14: the gap above is CLOSED by open question
+  9's resolution (disposition (a)).** The FK changelog itself carries the
+  remediation: `NOT VALID` → anti-join DELETE of dangling manifest rows →
+  `VALIDATE`, so every upgrader — first or late — is remediated in the same
+  boot that validates. The manual steps below REMAIN, demoted from sole
+  mechanism to operator-side census and record: run them on the first
+  deployment (and on cloud, per F12d) to measure and log what the
+  changeset will delete before it does, and to satisfy the F16b
+  `collections_checked` exit criterion. A box that skips them no longer
+  bricks; it loses only the pre-deletion measurement.
 
   **THE GATING INSTRUMENT IS `nx catalog manifest-verify --list`, NOT
   `nx doctor` (F16).** The draft of this phase named the doctor check
