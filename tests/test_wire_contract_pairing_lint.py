@@ -127,6 +127,15 @@ def test_detector_finds_test_envelope_client_touch() -> None:
         ("src/nexus/indexer.py", True),
         ("src/nexus/doc_indexer.py", True),
         ("src/nexus/db/http_vector_client.py", True),
+        # Structural http_ coverage (2026-08-14 consolidated review, T2
+        # [22513] recursive-gap fix): these are NOT in _CLIENT_FILE_SUBSTRINGS
+        # -- covered only because _is_client_module_path recognizes the
+        # http_ naming convention structurally.
+        ("src/nexus/db/t2/http_aspect_queue.py", True),
+        ("src/nexus/db/t2/http_taxonomy_store.py", True),
+        ("src/nexus/db/t2/http_document_aspects_store.py", True),
+        ("src/nexus/db/t2/http_document_highlights_store.py", True),
+        ("src/nexus/db/t2/http_centroid_store.py", True),
         ("src/nexus/cli.py", False),
         ("docs/architecture.md", False),
         ("tests/test_indexer.py", False),  # tests/ handled separately (content-based)
@@ -151,6 +160,67 @@ def test_client_module_path_classification(path: str, expected: bool) -> None:
 )
 def test_engine_path_classification(path: str, expected: bool) -> None:
     assert wctp._is_engine_path(path) is expected
+
+
+# ---------------------------------------------------------------------------
+# Recursive-gap drift guard (2026-08-14 consolidated review, T2 [22513]):
+# _CLIENT_FILE_SUBSTRINGS / _is_client_module_path must not silently miss a
+# NEW client module that starts issuing manifest/import wire calls -- that
+# is exactly the shape of blind spot nexus-1vogq exists to close, one level
+# up. This is the PRODUCTION gate for that; the fixture test below is its
+# non-vacuity companion / kill-control.
+# ---------------------------------------------------------------------------
+
+
+def test_live_client_modules_are_covered_by_substrings() -> None:
+    """Scans the LIVE src/nexus/**/*.py tree for the raw manifest/import
+    _post envelope idiom and asserts every match is covered by
+    _is_client_module_path -- currently true only because of the structural
+    http_ prefix rule (http_aspect_queue.py, http_taxonomy_store.py,
+    http_document_aspects_store.py, http_document_highlights_store.py all
+    match the envelope regex and are NOT in _CLIENT_FILE_SUBSTRINGS)."""
+    offenders = wctp.live_client_modules_missing_coverage(_REPO_ROOT)
+    assert offenders == [], (
+        f"{offenders} issue raw manifest/import wire calls but are not "
+        "covered by _is_client_module_path in "
+        "scripts/check_wire_contract_pairing.py -- the both-halves detector "
+        "would silently miss commits that touch this file on the client "
+        "side. Prefer widening the structural rule (the http_ prefix) over "
+        "appending to _CLIENT_FILE_SUBSTRINGS."
+    )
+
+
+def test_kill_control_new_client_module_without_coverage_fails(tmp_path: pathlib.Path) -> None:
+    """A synthetic module that issues a manifest wire call but is named
+    neither http_* nor any _CLIENT_FILE_SUBSTRINGS entry must be caught --
+    proves the drift guard actually detects a real gap, not just the
+    already-fixed http_* family."""
+    fake_src = tmp_path / "src" / "nexus"
+    fake_src.mkdir(parents=True)
+    offender = fake_src / "fake_wire_caller.py"
+    offender.write_text(
+        'class FakeWireCaller:\n'
+        '    def write(self):\n'
+        '        return self._post("/manifest/write", {"collection": "x"})\n'
+    )
+    offenders = wctp.live_client_modules_missing_coverage(tmp_path)
+    assert offenders == ["src/nexus/fake_wire_caller.py"], (
+        "kill-control failed to detect a synthetic uncovered client module -- "
+        "the drift guard would vacuously pass even with a real gap present"
+    )
+
+
+def test_kill_control_covered_module_does_not_false_positive(tmp_path: pathlib.Path) -> None:
+    """Symmetry check: a module matching the http_ prefix rule must NOT be
+    flagged, even though it issues the same wire call."""
+    fake_src = tmp_path / "src" / "nexus"
+    fake_src.mkdir(parents=True)
+    (fake_src / "http_fake_store.py").write_text(
+        'class HttpFakeStore:\n'
+        '    def write(self):\n'
+        '        return self._post("/manifest/write", {"collection": "x"})\n'
+    )
+    assert wctp.live_client_modules_missing_coverage(tmp_path) == []
 
 
 # ---------------------------------------------------------------------------

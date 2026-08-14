@@ -23,14 +23,29 @@ WHAT COUNTS AS "BOTH HALVES". A commit is flagged when it touches:
 
     (a) the engine tree -- any path under ``service/``, and
     (b) the client wire surface -- either
-        (b1) a ``src/nexus/**/*.py`` file whose name contains one of
-             :data:`_CLIENT_FILE_SUBSTRINGS` (the modules that own client-
-             method signatures for the wire contract), or
+        (b1) a ``src/nexus/**/*.py`` file whose name STARTS WITH ``http_``
+             (the stable naming convention for every T1/T2/T3 wire client in
+             this tree -- catalog, vector, pipeline, scratch, aspect queue,
+             taxonomy, telemetry, ... -- see :func:`_is_client_module_path`),
+             or contains one of :data:`_CLIENT_FILE_SUBSTRINGS` (the non-
+             ``http_``-named modules that still own wire-contract calls:
+             ``mcp_infra``, ``store_hook``, the ``indexer`` family), or
         (b2) a ``tests/**/*.py`` file whose content (AT THAT COMMIT) contains
              a raw ``_post("/manifest...`` or ``_post("/import...`` envelope
              -- the class the 2026-08-14 bead comment added: a hand-built test
              body has no method signature to diff against, so path-only
              detection on client MODULES is structurally blind to it.
+
+RECURSIVE-GAP GUARD (2026-08-14 consolidated review, T2 [22513]). (b1)'s
+coverage rule is itself just a list/pattern -- and a coverage rule that only
+knows about TODAY's client modules silently escapes its own lint the moment a
+NEW one starts issuing wire calls. :func:`live_client_modules_missing_coverage`
+closes this by scanning the LIVE ``src/nexus/**/*.py`` tree (not a commit
+diff) for the same raw-envelope idiom used in (b2), and failing loudly if any
+match is NOT covered by (b1) -- see its docstring. This is why (b1) prefers
+the structural ``http_`` prefix over an enumerated list: an enumerated list
+of "modules that today own wire calls" is exactly the shape that reopens this
+gap on the next new module; a naming CONVENTION does not.
 
 (a) is deliberately the FULL ``service/`` tree, not the narrower
 ``service/src/main/java/**/http/**`` / ``changelog/**`` surface one might
@@ -88,15 +103,27 @@ DEFAULT_LEDGER_PATH = _REPO_ROOT / "docs" / "wire-contract-pending.md"
 #: narrower main/http + changelog surface would miss a known member.
 _ENGINE_PREFIX = "service/"
 
-#: Client modules that own wire-contract method signatures (RDR-191 census,
-#: T2 [22490] Q3): the http clients, the manifest/collection glue, and the
+#: Client modules that own wire-contract method signatures beyond the
+#: structural ``http_*`` naming convention (see :func:`_is_client_module_path`)
+#: -- RDR-191 census, T2 [22490] Q3: the manifest/collection glue, and the
 #: indexer family that drives batched manifest writes (doc_indexer.py,
 #: code_indexer.py, prose_indexer.py, indexer.py, indexer_utils.py all match
 #: via the "indexer" substring -- confirmed grep, all are real manifest-write
 #: producers per [22490] Q2(b)).
+#:
+#: DELIBERATELY DOES NOT list the http_* clients (http_catalog_client,
+#: http_vector_client, ...) -- 2026-08-14 consolidated review (T2 [22513]):
+#: an enumerated list here is the SAME recursive gap the module docstring's
+#: over-flag/never-under-flag principle exists to avoid. A NEW http_*_store.py
+#: (there are ten: http_aspect_queue, http_centroid_store, http_chash_index,
+#: http_document_aspects_store, http_document_highlights_store,
+#: http_memory_store, http_pipeline_client, http_plan_library,
+#: http_scratch_store, http_taxonomy_store, http_telemetry_store,
+#: http_token_store, plus catalog/vector) would silently escape an enumerated
+#: list every time one is added. ``http_`` is a STABLE, load-bearing naming
+#: convention across every T1/T2/T3 wire client in src/nexus/ -- see
+#: :func:`_is_client_module_path`, which recognizes it structurally.
 _CLIENT_FILE_SUBSTRINGS = (
-    "http_catalog_client",
-    "http_vector_client",
     "mcp_infra",
     "store_hook",
     "indexer",
@@ -156,6 +183,14 @@ def _is_client_module_path(path: str) -> bool:
     if not (path.startswith("src/nexus/") and path.endswith(".py")):
         return False
     name = pathlib.PurePosixPath(path).name
+    # ``http_*`` is the stable naming convention for every T1/T2/T3 wire
+    # client in this tree (catalog, vector, pipeline, scratch, aspect queue,
+    # taxonomy, telemetry, token, memory, plan library, ... -- verified
+    # exhaustively: every src/nexus/**/http_*.py IS a wire client, by grep).
+    # Structural, not enumerated -- a NEW http_*_store.py is covered on day
+    # one, closing the recursive gap an enumerated list would reopen.
+    if name.startswith("http_"):
+        return True
     return any(substr in name for substr in _CLIENT_FILE_SUBSTRINGS)
 
 
@@ -194,6 +229,46 @@ def _is_client_test_envelope(
     if content is None:
         return False
     return bool(_TEST_POST_RE.search(content))
+
+
+def live_client_modules_missing_coverage(
+    repo_root: pathlib.Path | None = None,
+) -> list[str]:
+    """Drift guard for :data:`_CLIENT_FILE_SUBSTRINGS` / :func:`_is_client_module_path`
+    (2026-08-14 consolidated review, T2 [22513] -- "the recursive gap"): a
+    substring/naming list that only covers TODAY's known client modules
+    silently escapes its own lint the moment a new module starts issuing
+    wire calls. This scans the LIVE ``src/nexus/**/*.py`` tree (not a single
+    commit's diff) with the same ``_TEST_POST_RE`` envelope idiom used for
+    test-file detection, and returns every file that issues a raw
+    ``_post("/manifest...`` / ``_post("/import...`` wire call but whose path
+    :func:`_is_client_module_path` does NOT recognize as a client module --
+    i.e. a module :func:`flagged_commits` would silently fail to credit as
+    the client half of a both-halves commit.
+
+    Empty list is the passing state. A non-empty return names real gaps in
+    the coverage rule -- fix by widening :func:`_is_client_module_path`
+    (prefer a structural rule, like the ``http_`` naming convention it
+    already recognizes, over appending to the enumerated
+    :data:`_CLIENT_FILE_SUBSTRINGS` list, which is exactly how this gap
+    recurs).
+    """
+    root = repo_root or _REPO_ROOT
+    src_dir = root / "src" / "nexus"
+    offenders: list[str] = []
+    if not src_dir.is_dir():
+        return offenders
+    for file_path in sorted(src_dir.rglob("*.py")):
+        try:
+            content = file_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not _TEST_POST_RE.search(content):
+            continue
+        rel = file_path.relative_to(root).as_posix()
+        if not _is_client_module_path(rel):
+            offenders.append(rel)
+    return offenders
 
 
 @dataclass(frozen=True)
