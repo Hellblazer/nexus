@@ -301,6 +301,8 @@ git push origin vX.Y.Z
 
 Tag-push must follow the commit on origin in tight succession (seconds). marketplace.json's `source.ref` points at `vX.Y.Z`; if any user runs `/plugin install` between commit-push and tag-push, the install would fail.
 
+Tag-immediately is safe even though the merge commit's own check-runs have not arrived yet at that point (main has no push CI; the merge commit only gets its own `pytest-gate` check-run from the develop-push CI fired by step 11b's back-merge, ~15 min later). The nexus-jvhsw evidence gate (`scripts/check_release_ci_evidence.py`) accepts evidence from the merge commit's second parent — the PR head, whose checks already ran and completed at PR-merge time — when the merge commit's own evidence is still missing (nexus-au8zz). A publish run that reds citing "no check-run named 'pytest-gate'" on a genuinely fresh tag now indicates a real problem (e.g. a broken/renamed required check, or a merge commit with no PR-head parent), not this race — investigate it rather than assuming a retry will clear it.
+
 Do NOT use `gh release create`: the Release workflow at `.github/workflows/release.yml` creates the GitHub release automatically from the tag and extracts notes from CHANGELOG.md. Running `gh release create` produces a duplicate.
 
 Do NOT run `uv publish` or `twine upload` manually: the Release workflow handles this via OIDC trusted publisher.

@@ -182,6 +182,147 @@ def test_check_missing_inputs_fails_closed_not_vacuously_ok(capsys):
     assert "CANNOT VERIFY" in capsys.readouterr().err
 
 
+# ── second-parent evidence fallback (nexus-au8zz) ───────────────────────────
+#
+# v7.7.0 (run 31791811425): the tagged merge commit's own check-runs had not
+# arrived yet (the develop-push CI that populates them takes ~15 min), so
+# this gate blocked a genuinely-passing release. The fix: when the tagged
+# SHA's own evidence is incomplete AND it is a two-parent merge commit, ask
+# the SAME question of parents[1] -- the PR head that fed the merge, whose
+# check-runs were already populated at PR-merge time.
+
+_PARENT_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+_BASE_PARENT_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+
+def _fake_dispatcher(
+    check_runs_by_sha: dict[str, list[dict]],
+    commits_by_sha: dict[str, dict],
+    calls: list[str] | None = None,
+):
+    """A fake `api` callable that routes by URL shape: the check-runs
+    endpoint (suffix `/check-runs?per_page=100`) vs. the bare commit-metadata
+    endpoint `fetch_commit` uses to read `parents`."""
+
+    def fake_api(url: str) -> dict:
+        if calls is not None:
+            calls.append(url)
+        if url.endswith("/check-runs?per_page=100"):
+            sha = url.split("/commits/")[1].split("/check-runs")[0]
+            return {"check_runs": check_runs_by_sha.get(sha, [])}
+        sha = url.split("/commits/")[1]
+        return commits_by_sha.get(sha, {})
+
+    return fake_api
+
+
+def test_check_falls_back_to_merge_parent_when_own_evidence_missing_and_parent_green(capsys):
+    """Empty own-SHA check-runs + a two-parent merge commit whose PR-head
+    parent is green -> the gate PASSES, naming the evidence source."""
+    api = _fake_dispatcher(
+        check_runs_by_sha={_SHA: [], _PARENT_SHA: [_run("pytest-gate")]},
+        commits_by_sha={_SHA: {"parents": [{"sha": _BASE_PARENT_SHA}, {"sha": _PARENT_SHA}]}},
+    )
+    rc = gate.check(_REPO, _SHA, "tok", api=api)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "evidence from merge parent" in out
+    assert _PARENT_SHA in out
+    assert "PR head" in out
+    assert "merge commit itself carried none" in out
+    assert "nexus-au8zz" in out
+
+
+def test_check_reports_both_own_and_parent_problems_when_parent_also_fails(capsys):
+    """Empty own-SHA check-runs + a two-parent merge commit whose PR-head
+    parent ALSO fails -> BLOCKED, with both SHAs' problems reported."""
+    api = _fake_dispatcher(
+        check_runs_by_sha={_SHA: [], _PARENT_SHA: [_run("pytest-gate", conclusion="failure")]},
+        commits_by_sha={_SHA: {"parents": [{"sha": _BASE_PARENT_SHA}, {"sha": _PARENT_SHA}]}},
+    )
+    rc = gate.check(_REPO, _SHA, "tok", api=api)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "BLOCKED" in err
+    assert _SHA in err
+    assert "Also checked merge parent" in err
+    assert _PARENT_SHA in err
+    assert "'failure'" in err
+
+
+def test_check_non_merge_commit_never_chases_a_parent(capsys):
+    """Kill control: a single-parent (non-merge) commit with missing own
+    evidence must fail exactly as before this fix -- no parent check-runs
+    fetch is ever attempted, proving the fallback cannot fire here."""
+    calls: list[str] = []
+    api = _fake_dispatcher(
+        check_runs_by_sha={_SHA: []},
+        commits_by_sha={_SHA: {"parents": [{"sha": _BASE_PARENT_SHA}]}},
+        calls=calls,
+    )
+    rc = gate.check(_REPO, _SHA, "tok", api=api)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "BLOCKED" in err
+    assert "Also checked merge parent" not in err
+    check_run_calls = [u for u in calls if u.endswith("/check-runs?per_page=100")]
+    assert len(check_run_calls) == 1, (
+        "the non-merge commit's own check-runs fetch is the only check-runs "
+        f"call expected; a second one means the fallback fired anyway: {calls}"
+    )
+
+
+def test_check_parent_lookup_api_error_fails_unverifiable_not_blocked(capsys):
+    """An API error while resolving the merge commit's parents must degrade
+    to the existing CANNOT VERIFY (exit 2) path -- never a silent BLOCKED
+    that masks 'we could not check' as 'it failed'."""
+
+    def boom(url: str) -> dict:
+        if url.endswith("/check-runs?per_page=100"):
+            return {"check_runs": []}
+        raise urllib.error.HTTPError(url, 500, "Internal Server Error", {}, None)
+
+    rc = gate.check(_REPO, _SHA, "tok", api=boom)
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "CANNOT VERIFY" in err
+    assert "parent" in err.lower()
+
+
+def test_check_parent_check_runs_fetch_error_also_fails_unverifiable(capsys):
+    """Same guard, one hop further: the commit-metadata lookup succeeds and
+    names a merge parent, but fetching THAT parent's check-runs errors --
+    still exit 2, never a pass and never a bare BLOCKED."""
+
+    def boom(url: str) -> dict:
+        if url.endswith("/check-runs?per_page=100"):
+            if _PARENT_SHA in url:
+                raise urllib.error.URLError("connection refused")
+            return {"check_runs": []}
+        return {"parents": [{"sha": _BASE_PARENT_SHA}, {"sha": _PARENT_SHA}]}
+
+    rc = gate.check(_REPO, _SHA, "tok", api=boom)
+    assert rc == 2
+    assert "CANNOT VERIFY" in capsys.readouterr().err
+
+
+def test_check_own_sha_evidence_green_never_calls_the_parent_fallback(capsys):
+    """Own-SHA evidence still preferred when present: no commit-metadata or
+    parent check-runs call is made at all when the SHA's own check-runs
+    already prove every required context green."""
+    calls: list[str] = []
+    api = _fake_dispatcher(
+        check_runs_by_sha={_SHA: [_run("pytest-gate")]},
+        commits_by_sha={_SHA: {"parents": [{"sha": _BASE_PARENT_SHA}, {"sha": _PARENT_SHA}]}},
+        calls=calls,
+    )
+    rc = gate.check(_REPO, _SHA, "tok", api=api)
+    assert rc == 0
+    assert calls == [
+        f"https://api.github.com/repos/{_REPO}/commits/{_SHA}/check-runs?per_page=100"
+    ], "own-sha success must short-circuit before any parent lookup call"
+
+
 def test_main_reads_defaults_from_env(monkeypatch, capsys):
     monkeypatch.setenv("GITHUB_REPOSITORY", _REPO)
     monkeypatch.setenv("GITHUB_SHA", _SHA)

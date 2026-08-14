@@ -86,8 +86,17 @@ jobs:
             uv-${{ runner.os }}-3.12-
 
       - name: Verify tag matches pyproject.toml version
+        # On workflow_dispatch GITHUB_REF_NAME is the BRANCH the workflow ran
+        # from (e.g. 'main'), not the tag being published -- the retry path
+        # compared 'main' against the version and failed on its first real
+        # exercise (v7.7.0, run 31792663991; 7.6.0 moved tags instead of
+        # dispatching, so this had never run). Resolve from the tag input
+        # when present, exactly like the checkout step above does.
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
         run: |
-          TAG="${GITHUB_REF_NAME#v}"   # strip leading 'v'
+          TAG="${DISPATCH_TAG:-$GITHUB_REF_NAME}"
+          TAG="${TAG#v}"   # strip leading 'v'
           PKG=$(python3 -c "
           import re
           m = re.search(r'^version\s*=\s*\"(.+?)\"', open('pyproject.toml').read(), re.M)
