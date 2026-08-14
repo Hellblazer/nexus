@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib
 import json
+from pathlib import Path
 
 import numpy as np
 
@@ -149,6 +150,86 @@ def test_cluster_returns_labels_and_centroids() -> None:
     real = sorted({int(x) for x in labels if x >= 0})
     assert len(real) >= 2, "two separated blobs must yield >= 2 clusters"
     assert centroids.shape[1] == 384
+
+
+def test_cluster_caps_giant_cluster() -> None:
+    """nexus-9b9oi regression pin: HDBSCAN's eom selection root-grabs on real
+    embedding corpora (knowledge__delos 2026-08-14: one cluster held 94% of
+    2101 chunks), which flattens topic grouping and starves retrieval
+    diversity. The fixture is a 400-vector subsample of that exact corpus
+    (seed-42 choice, float16 — the roundtrip preserves the failure): without
+    the max_cluster_size cap it clusters as [359, 23], with the cap it yields
+    16 fine clusters. Synthetic blobs do NOT reproduce this (verified: they
+    either separate cleanly or go all-noise), so the pin must ride real
+    geometry. See tests/fixtures/PROVENANCE-hdbscan-rootgrab.md."""
+    fixture = (
+        Path(__file__).parent.parent
+        / "fixtures"
+        / "hdbscan_rootgrab_400x1024_f16.npz"
+    )
+    embeddings = np.load(fixture)["emb"].astype(np.float32)
+    n = len(embeddings)
+    assert n == 400
+    labels, _ = tc._cluster(embeddings, n, "c__rootgrab")
+    cap = tc._max_cluster_size(n)
+    sizes = [int((labels == cid).sum()) for cid in set(labels) if cid >= 0]
+    assert len(sizes) >= 4, f"expected fine-grained clusters, got {len(sizes)}"
+    assert all(s <= cap for s in sizes), (
+        f"cluster sizes {sorted(sizes, reverse=True)[:3]} exceed cap {cap}"
+    )
+
+
+def test_cluster_cap_leaves_healthy_blobs_alone() -> None:
+    """The cap must not degrade well-separated fine-grained clusters: each
+    blob is far below the 25% ceiling, so discovery output is unchanged."""
+    rng = np.random.default_rng(13)
+    blobs = []
+    for axis in range(8):
+        blob = rng.standard_normal((40, 64)).astype(np.float32) * 0.05
+        blob[:, axis] += 3.0
+        blobs.append(blob)
+    embeddings = np.vstack(blobs)
+    n = len(embeddings)
+    labels, _ = tc._cluster(embeddings, n, "c__blobs")
+    real = {int(x) for x in labels if x >= 0}
+    assert len(real) >= 6, f"expected >= 6 of 8 blobs recovered, got {len(real)}"
+    cap = tc._max_cluster_size(n)
+    assert all(int((labels == cid).sum()) <= cap for cid in real)
+
+
+def test_max_cluster_size_floor() -> None:
+    """The floor (10x min_cluster_size) rules below n=200; the 25% fraction
+    rules above. A higher floor is NOT safe: 100 no-ops across n=100-200
+    (nexus-9h7nz)."""
+    assert tc.MAX_CLUSTER_SIZE_FLOOR == 50
+    assert tc._max_cluster_size(20) == 50
+    assert tc._max_cluster_size(60) == 50
+    assert tc._max_cluster_size(150) == 50
+    assert tc._max_cluster_size(2000) == 500
+
+
+def test_cluster_caps_midwindow_collection() -> None:
+    """nexus-9h7nz regression pin: the first cut of the nexus-9b9oi fix used
+    floor=100, which is a no-op for n in [100, 200) whenever the grabbed
+    cluster is under 100 docs. This 150-vector subsample of the real-corpus
+    fixture (seed-3 choice) root-grabs 98-of-150 uncapped; the floor must
+    bind there."""
+    fixture = (
+        Path(__file__).parent.parent
+        / "fixtures"
+        / "hdbscan_rootgrab_400x1024_f16.npz"
+    )
+    emb = np.load(fixture)["emb"].astype(np.float32)
+    idx = np.random.default_rng(3).choice(400, 150, replace=False)
+    sub = emb[idx]
+    labels, _ = tc._cluster(sub, len(sub), "c__midwindow")
+    cap = tc._max_cluster_size(len(sub))
+    assert cap == tc.MAX_CLUSTER_SIZE_FLOOR, "floor must rule at n=150"
+    sizes = [int((labels == cid).sum()) for cid in set(labels) if cid >= 0]
+    assert len(sizes) >= 4, f"expected fine-grained clusters, got {len(sizes)}"
+    assert all(s <= cap for s in sizes), (
+        f"cluster sizes {sorted(sizes, reverse=True)[:3]} exceed cap {cap}"
+    )
 
 
 # ── _merge_labels ────────────────────────────────────────────────────────────
