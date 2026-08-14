@@ -322,7 +322,21 @@ class TestRequiredEngineVersion:
         # skip. Gated: full engine suite 2010/0/0 on d784d8c6e,
         # --shakeout CANDIDATE SHAKEOUT PASSED pre-tag on the same tip;
         # deploy relay is the pending step at this bump.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 74)
+        #
+        # BUMPED to (0,1,75) 2026-08-13: the RDR-191 Phase 4 GATE-4
+        # co-release (nexus-o8dil.21) — v0.1.75 cut from 40ef3696e (the
+        # repoint-batch merge) carries the unify DDL (vectors-004 /
+        # taxonomy-007 / vectors-005) AND the rung retarget (.15), the
+        # pairing F14a forbids splitting. Fully gated BEFORE this bump:
+        # full engine suite 2075/0/0 on the tagged tree, --shakeout
+        # CANDIDATE SHAKEOUT PASSED, post-publish --acquire PASSED
+        # (263 migrations, 0 failed), DEPLOYED and cloud-gated 2026-08-14
+        # (conexus [22485]: STEP-6 green, client-path gate green, row
+        # invariant exact). This floor bump rides conexus 7.7.0 per the
+        # paired-release choreography — the same release that ships the
+        # three unshipped client wire-halves (498c92953 / b361a8106 /
+        # 8c75a61a3; nexus-sh9v2).
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 75)
 
 
 class TestParseEngineVersion:
