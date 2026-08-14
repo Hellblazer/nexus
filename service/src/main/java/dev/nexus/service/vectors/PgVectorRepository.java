@@ -1501,7 +1501,19 @@ public final class PgVectorRepository {
             ctx.select(ch.chash(), ch.embedding())
                .from(ch.table())
                // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6).
+               // nexus-oizh7 D1 hazard: ch.table() is now the SAME physical nexus.chunks
+               // for all three dims -- collection membership alone no longer implies dim
+               // (a collection can legitimately hold rows at two dims at once
+               // mid-migration, mirroring TaxonomyCentroidRepository's documented
+               // centroid-side stance). Without ch.embedding().isNotNull(), a foreign-dim
+               // row matches this predicate, rec.value2() (the un-dispatched embedding
+               // column) is null, and the hydration loop below stored an EMPTY list for
+               // that chash rather than omitting it -- violating this method's own
+               // Chroma-parity "ids not present are OMITTED" contract. Pre-unification
+               // the row simply did not exist in this dim's table, so it was never a
+               // candidate at all.
                .where(ch.collection().eq(collection).and(ch.chash().in(ids))
+                      .and(ch.embedding().isNotNull())
                       .and(liveChunksCondition(ctx, ch)))
                .fetch());
 
@@ -2350,6 +2362,40 @@ public final class PgVectorRepository {
 
     /**
      * Count chunks in a collection visible to {@code tenant}.
+     *
+     * <p><strong>DECISION (nexus-hz89h, reversing an nexus-oizh7 regression):</strong>
+     * {@code count()} is deliberately DIM-AGNOSTIC — the collection's total row count
+     * across all dims, NOT scoped to the collection's dispatched dim. An earlier
+     * revision of this method added an {@code embedding_<dim> IS NOT NULL} guard by
+     * analogy with {@link #getEmbeddings}; that guard was a CRITICAL regression,
+     * caught by substantive-critic review before merge (T2
+     * {@code nexus/critique-nexus-oizh7-dim-guard-count-cross-endpoint-break.md}
+     * [22539]).
+     *
+     * <p>The break: {@code GET /v1/vectors/stats} ({@code collection_vector_stats},
+     * grouped by dim) and the Python {@code list_collections()} that sums across dims
+     * for a name stay dim-agnostic regardless of what this method does, so a
+     * dim-scoped {@code count()} disagrees with them for a mixed-dim collection —
+     * exactly the state this class's own D1-hazard commentary calls "a real
+     * reachable state, not just a corrupted-data hypothetical" (RDR-191 mid-
+     * migration). At the 100%-foreign-dim extreme (start of a re-embed, before any
+     * new-dim row has landed) a dim-scoped {@code count()} returns 0 for a
+     * collection that plainly exists, which breaks {@code
+     * HttpVectorClient._count_or_key_error}'s documented invariant that a
+     * {@code list_collections}-enumerated name can never hit its zero-count
+     * KeyError branch, and in turn makes {@code nx collection reindex <name>}
+     * (its existence check calls {@code collection_info()} first) refuse to find a
+     * collection it exists specifically to repair.
+     *
+     * <p>The analogy to {@link #getEmbeddings} does not hold: that method READS the
+     * embedding column, so returning a foreign-dim row there is a genuine shape bug
+     * (a same-length-but-empty vector). {@code count()} reads no embedding column at
+     * all — it answers "how many chunks does this collection have", the same
+     * question {@code stats}/{@code list_collections} answer, and must keep
+     * agreeing with them. {@link TaxonomyCentroidRepository#count} already settled
+     * this exact question for centroids the same way, verbatim: "this method counts
+     * centroids, not centroids-at-a-dim" — the correct precedent for THIS method,
+     * not the one the reverted revision cited.
      */
     public int count(String tenant, String collection) {
         int dim = dimForCollection(collection);
