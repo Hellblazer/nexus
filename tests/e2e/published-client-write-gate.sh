@@ -288,7 +288,10 @@ _client_nx() {
 
 CLIENT_VERSION_RAW="$(_client_nx --version 2>&1)"
 echo "[gate] published client resolved: $CLIENT_VERSION_RAW"
-CLIENT_VERSION="$(printf '%s' "$CLIENT_VERSION_RAW" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+CLIENT_VERSION=""
+if [[ "$CLIENT_VERSION_RAW" =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+    CLIENT_VERSION="${BASH_REMATCH[1]}"
+fi
 [ -n "$CLIENT_VERSION" ] || _fail "could not parse a version out of: $CLIENT_VERSION_RAW"
 
 # ── 3. Drive the write journeys ─────────────────────────────────────────────

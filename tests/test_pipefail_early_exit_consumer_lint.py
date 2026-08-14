@@ -875,17 +875,18 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_guided.sh:811",
         "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh:101",
         "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh:175",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:139",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:200",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:217",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:222",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:239",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:266",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:336",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:343",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:51",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:75",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:97",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:120",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:162",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:173",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:229",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:246",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:251",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:268",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:295",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:365",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:372",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:74",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:98",
         # gap-8/gap-15 (T2 [22511]): retargeted after the `-e` addition +
         # per-command dispositions (run_check's internal capture, several
         # `VAR=$(cmd) || true` additions). The former :111 site (the
@@ -946,11 +947,11 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_stranded.sh:361",
         "tests/e2e/migration-rehearsal/rehearse_stranded.sh:377",
         "tests/e2e/migration-rehearsal/rehearse_stranded.sh:80",
-        "tests/e2e/migration-rehearsal/run.sh:524",
-        "tests/e2e/migration-rehearsal/run.sh:555",
+        "tests/e2e/migration-rehearsal/run.sh:538",
         "tests/e2e/migration-rehearsal/run.sh:569",
-        "tests/e2e/migration-rehearsal/run.sh:581",
-        "tests/e2e/migration-rehearsal/run.sh:597",
+        "tests/e2e/migration-rehearsal/run.sh:583",
+        "tests/e2e/migration-rehearsal/run.sh:638",
+        "tests/e2e/migration-rehearsal/run.sh:655",
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.
@@ -1009,7 +1010,10 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/local-index-memory-gate.sh:849",
     }
 )
-_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 156
+# 157: +1 for rehearse_package_upgrade.sh:173 -- the 898d41762 axis-naming
+# stage added a GOT_CLIENT_VER extraction that is the same rc-irrelevant
+# `nx --version | grep | head` derivation pattern as the pre-existing :98 site.
+_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 157
 
 
 def test_pipefail_early_exit_exempt_ratchet() -> None:
