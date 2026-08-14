@@ -257,7 +257,18 @@ class TestManifestVerifyListMode:
         assert "OK" in result.output
 
     def test_clean_catalog_json(self, runner, monkeypatch):
-        cat = _FakeCat(verify_all_result={"collections": [], "count": 0})
+        """A genuinely clean, NON-VACUOUS census (collections_checked > 0,
+        none damaged) — distinct from the zero-collection case covered by
+        TestZeroCollectionsCensusIsRefused below (nexus-o8dil.24 / F16b)."""
+        cat = _FakeCat(verify_all_result={
+            "collections": [
+                {"collection": "code__x__bge-base-en-v15-768__v1",
+                 "referenced": 5, "present": 5, "missing": 0},
+                {"collection": "knowledge__x__voyage-context-3__v1",
+                 "referenced": 3, "present": 3, "missing": 0},
+            ],
+            "count": 2,
+        })
         monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
         result = runner.invoke(main, ["catalog", "manifest-verify", "--list", "--json"])
         assert result.exit_code == 0, result.output
@@ -266,7 +277,7 @@ class TestManifestVerifyListMode:
         assert payload == {
             "collections": [], "total_rows": 0,
             "unroutable_collections": [], "incomplete_collections": {},
-            "clean": True,
+            "clean": True, "collections_checked": 2,
         }
         assert "purge-trash" in population
         assert "stranded" in population
@@ -309,6 +320,7 @@ class TestManifestVerifyListMode:
         assert payload["clean"] is False
         assert payload["total_rows"] == 1
         assert payload["unroutable_collections"] == []
+        assert payload["collections_checked"] == 1
         assert payload["collections"] == [{
             "collection": coll,
             "documents": [{"doc_id": "1.2.3", "positions": "0", "distinct_chashes": 1}],
@@ -426,3 +438,125 @@ class TestManifestVerifyListMode:
         assert "manifest_verify_all failed" in result.output
         assert "engine unreachable" in result.output
         assert "OK" not in result.output
+
+    def test_collections_checked_counts_the_whole_census_not_just_damaged(
+        self, runner, monkeypatch,
+    ):
+        """`collections_checked` must be the TOTAL number of collections the
+        census compared (clean + damaged), not merely the damaged count —
+        otherwise the field would be redundant with `len(collections)` in
+        the damaged payload and would undercount in the clean payload."""
+        coll_clean_1 = "code__x__bge-base-en-v15-768__v1"
+        coll_clean_2 = "docs__x__voyage-context-3__v1"
+        coll_damaged = "knowledge__x__voyage-context-3__v1"
+        cat = _FakeCat(
+            verify_all_result={
+                "collections": [
+                    {"collection": coll_clean_1, "referenced": 5, "present": 5, "missing": 0},
+                    {"collection": coll_clean_2, "referenced": 2, "present": 2, "missing": 0},
+                    {"collection": coll_damaged, "referenced": 1, "present": 0, "missing": 1},
+                ],
+                "count": 3,
+            },
+            orphans_by_dim={1024: [
+                {"tenant_id": "t", "doc_id": "1.2.3", "position": 0, "chash": "a" * 64,
+                 "collection": coll_damaged},
+            ]},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        result = runner.invoke(main, ["catalog", "manifest-verify", "--list", "--json"])
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.stdout)
+        assert payload["collections_checked"] == 3, payload
+        assert len(payload["collections"]) == 1, "only the damaged collection is enumerated"
+
+
+class TestZeroCollectionsCensusIsRefused:
+    """RDR-191 F16b / nexus-o8dil.24 acceptance: a census that compared
+    ZERO collections is vacuous, not clean. `_manifest_verify_list` must
+    refuse it (non-zero exit) rather than print "OK" — this is what makes
+    "found nothing to look at" indistinguishable from failure at the exit
+    code, which is the property a mechanical gate needs. Demonstrated
+    against a DELIBERATELY-EMPTIED census (never asserted by assumption)."""
+
+    def test_zero_collections_json_exits_nonzero(self, runner, monkeypatch):
+        cat = _FakeCat(verify_all_result={"collections": [], "count": 0})
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        result = runner.invoke(main, ["catalog", "manifest-verify", "--list", "--json"])
+        assert result.exit_code != 0, (
+            "a zero-compared census must NOT exit 0 — this is the exact "
+            "vacuous-pass shape F16b exists to kill"
+        )
+
+    def test_zero_collections_json_carries_collections_checked_zero(self, runner, monkeypatch):
+        cat = _FakeCat(verify_all_result={"collections": [], "count": 0})
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        result = runner.invoke(main, ["catalog", "manifest-verify", "--list", "--json"])
+        payload = json.loads(result.stdout)
+        assert payload["collections_checked"] == 0
+
+    def test_zero_collections_json_is_distinguishable_from_a_clean_census(
+        self, runner, monkeypatch,
+    ):
+        """The core of F16b's trap: today the JSON shape for "zero
+        collections checked" and "N collections checked, all clean" is
+        IDENTICAL (`{"collections": [], "clean": True, ...}`). After this
+        fix the two must differ through `--json` alone — a gate script
+        parsing the payload (never the human-readable string) must be able
+        to tell them apart."""
+        zero_cat = _FakeCat(verify_all_result={"collections": [], "count": 0})
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: zero_cat)
+        zero_result = runner.invoke(main, ["catalog", "manifest-verify", "--list", "--json"])
+        zero_payload = json.loads(zero_result.stdout)
+
+        clean_cat = _FakeCat(verify_all_result={
+            "collections": [
+                {"collection": "code__x__bge-base-en-v15-768__v1",
+                 "referenced": 5, "present": 5, "missing": 0},
+            ],
+            "count": 1,
+        })
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: clean_cat)
+        clean_result = runner.invoke(main, ["catalog", "manifest-verify", "--list", "--json"])
+        clean_payload = json.loads(clean_result.stdout)
+
+        assert zero_payload["collections_checked"] != clean_payload["collections_checked"]
+        assert zero_result.exit_code != clean_result.exit_code, (
+            "a JSON-only gate must be able to tell these two apart purely "
+            "by parsing --json output; distinct exit codes plus distinct "
+            "collections_checked both suffice, but the exit code is the "
+            "property F16 requires"
+        )
+
+    def test_zero_collections_text_mode_exits_nonzero_and_never_says_ok(
+        self, runner, monkeypatch,
+    ):
+        cat = _FakeCat(verify_all_result={"collections": [], "count": 0})
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        result = runner.invoke(main, ["catalog", "manifest-verify", "--list"])
+        assert result.exit_code != 0
+        assert "OK" not in result.output
+
+
+class TestCollectionsCheckedIndependentDenominator:
+    """RDR-191 F16b acceptance item 4: the Phase-5 exit criterion is
+    `collections_checked > 0 AND == the deployment's known collection
+    count`, and the denominator MUST come from an INDEPENDENT source —
+    never manifest-verify's own output (circularity). GATE-5-LOCAL itself
+    (nexus-o8dil.28) is a separate, not-yet-started bead; this pins that
+    the two candidate sources are genuinely different code paths so that
+    future wiring cannot become circular by construction."""
+
+    def test_manifest_verify_all_and_list_collections_are_different_code_paths(self):
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        # collections_checked's source (the catalog-side manifest census)
+        # and the candidate independent denominator (the T3 vector-service
+        # collection registry) live on different classes in different
+        # modules — not merely different method names on the same object.
+        assert HttpCatalogClient.manifest_verify_all is not HttpVectorClient.list_collections
+        assert (
+            HttpCatalogClient.manifest_verify_all.__module__
+            != HttpVectorClient.list_collections.__module__
+        )

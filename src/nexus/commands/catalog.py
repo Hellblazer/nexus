@@ -480,17 +480,60 @@ def _manifest_verify_list(as_json: bool) -> None:
         raise click.ClickException(f"manifest_verify_all failed: {exc}") from exc
 
     rows = census.get("collections") or []
+    # collections_checked (RDR-191 F16b, nexus-o8dil.24): migration
+    # scaffolding for the Phase 5 non-vacuity gate, scheduled for deletion
+    # in Phase 6 along with the rest of manifest_verify_all's apparatus
+    # (RDR-191 §Approach "Phase 6 — Subtraction"). Before this field
+    # existed, the compared-collection count lived ONLY in the
+    # human-readable string below — a gate script parsing --json alone
+    # could not implement the Phase 5 exit criterion
+    # (`collections_checked > 0 AND == known collection count`) and would
+    # pass vacuously on an empty census.
+    collections_checked = len(rows)
     damaged = [r for r in rows if int(r.get("missing", 0) or 0) > 0]
+
+    if collections_checked == 0:
+        # A census that compared ZERO collections is vacuous, not clean.
+        # Refuse rather than exit 0 so "found nothing to look at" is
+        # indistinguishable from failure AT THE EXIT CODE — the property a
+        # mechanical gate needs (F16). Leaving this to an external
+        # gate-only check would reproduce F16b one layer out: a
+        # non-vacuity signal nothing consumes.
+        _log.warning(
+            "manifest_verify_list_zero_collections_checked",
+            reason="census compared zero collections; refusing rather than "
+                   "reporting a vacuous clean verdict",
+        )
+        if as_json:
+            click.echo(json.dumps({
+                "collections": [], "total_rows": 0,
+                "unroutable_collections": [], "incomplete_collections": {},
+                "clean": False, "collections_checked": 0,
+                "population": _DANGLING_MANIFEST_POPULATION_NOTE,
+            }, indent=2))
+        else:
+            click.echo(
+                "ERROR — zero collections checked; the census compared "
+                "nothing, so a clean verdict would be vacuous. This "
+                "usually means the engine/catalog is unreachable or empty "
+                "— investigate before trusting any manifest-verify result.",
+                err=True,
+            )
+        raise click.exceptions.Exit(1)
 
     if not damaged:
         if as_json:
             click.echo(json.dumps({
                 "collections": [], "total_rows": 0,
                 "unroutable_collections": [], "incomplete_collections": {},
-                "clean": True, "population": _DANGLING_MANIFEST_POPULATION_NOTE,
+                "clean": True, "collections_checked": collections_checked,
+                "population": _DANGLING_MANIFEST_POPULATION_NOTE,
             }, indent=2))
         else:
-            click.echo(f"OK — no dangling manifest rows ({len(rows)} collection(s) checked).")
+            click.echo(
+                f"OK — no dangling manifest rows "
+                f"({collections_checked} collection(s) checked)."
+            )
         return
 
     try:
@@ -520,6 +563,7 @@ def _manifest_verify_list(as_json: bool) -> None:
             "unroutable_collections": report["unroutable_collections"],
             "incomplete_collections": report["incomplete_collections"],
             "clean": False,
+            "collections_checked": collections_checked,
             "population": _DANGLING_MANIFEST_POPULATION_NOTE,
         }, indent=2))
     else:
