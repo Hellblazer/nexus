@@ -43,7 +43,12 @@ The Java CI (`service-ci.yml`) is **advisory** — it does not block auto-merge 
 > arg loop with a RETIRED message and exit 2. This step named `--guided` for
 > one cut after the retirement and would have failed the next engine cut at the
 > gate. Surviving journeys: `--era-hop`, `--package-upgrade`, `--shakeout`,
-> `--fullstack`, `--chash-window`, `--stranded` (nexus-8nlj4: two-hop
+> `--fullstack`, `--chash-window` (⚠ INVERTED since the floor crossed the
+> RDR-180 cohort: run.sh pins old-tag == floor, and a post-cohort/post-unify
+> floor engine has no pre-cohort window to open — the leg now ABORTS LOUD at
+> its era guard by design, pointing at redesign bead nexus-eo3qv; an abort
+> there is the expected state, NOT a candidate regression), `--stranded`
+> (nexus-8nlj4: two-hop
 > stranded-redirect — armed-detector refusal + pin-side migration; weekly
 > heartbeat via stranded-redirect-rehearsal.yml, dispatch it on demand when a
 > cut touches stranded_install.py or the migration-rehearsal harness), and the

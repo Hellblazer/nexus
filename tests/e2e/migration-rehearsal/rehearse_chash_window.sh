@@ -189,7 +189,16 @@ diag_sql() {
 say "Era guard — the pre-cohort store must be TEXT-era"
 COLTYPE="$(diag_sql "SELECT data_type FROM information_schema.columns WHERE table_schema='nexus' AND table_name='chunks_768' AND column_name='chash'")"
 if [ "$COLTYPE" = "bytea" ]; then
-  bad "chunks_768.chash is ALREADY bytea under $OLD_ENGINE_TAG — there is no window to rehearse (post-cutover: repoint NEXUS_CHASH_OLD_RELEASE/NEXUS_CHASH_OLD_ENGINE_TAG at the last pre-cohort pair)"
+  bad "chunks_768.chash is ALREADY bytea under $OLD_ENGINE_TAG — there is no window to rehearse (post-cutover: repoint NEXUS_CHASH_OLD_RELEASE/NEXUS_CHASH_OLD_ENGINE_TAG at the last pre-cohort pair, or redesign per nexus-eo3qv)"
+  say "ABORT (vacuous fixture)"; exit 1
+fi
+# nexus-azx14: a floor at/above v0.1.75 has UNIFIED the shards away —
+# chunks_768 is absent entirely and COLTYPE comes back empty. That is the
+# same inverted premise as the bytea case, one era further along; without
+# this arm the guard passed VACUOUSLY on the empty string and the run died
+# incomprehensibly at the first seed count instead of here.
+if [ "$COLTYPE" != "text" ]; then
+  bad "chunks_768 is ABSENT or non-TEXT under $OLD_ENGINE_TAG (data_type='$COLTYPE'; pre-cohort schema is TEXT, vectors-001) — the RDR-191 unify has already run, the premise is two eras gone. This leg needs the nexus-eo3qv redesign; repointing env vars cannot reopen the window (run.sh requires old-tag == floor)"
   say "ABORT (vacuous fixture)"; exit 1
 fi
 ok "chunks_768.chash is '$COLTYPE' — genuinely pre-cohort"
@@ -299,10 +308,16 @@ RV1="$(_release_version)"
 
 # ── THE WINDOW: engine converted, rung not run ───────────────────────────────
 say "Window assert — the store converted to bytea, legacy rows INTACT"
-COLTYPE2="$(diag_sql "SELECT data_type FROM information_schema.columns WHERE table_schema='nexus' AND table_name='chunks_768' AND column_name='chash'")"
-[ "$COLTYPE2" = "bytea" ] && ok "chunks_768.chash is bytea — rdr180-001 really ran" \
-  || { bad "chunks_768.chash is '$COLTYPE2', expected bytea — the cohort boot did not convert"; say "ABORT"; exit 1; }
-LEGACY_ROWS="$(diag_sql "SELECT count(*) FROM nexus.chunks_768 WHERE chunk_text <> '' AND octet_length(chash) = 16")"
+# RDR-191 (nexus-azx14): the cohort boot now ALSO runs vectors-004, which
+# copies chunks_768 into the unified nexus.chunks and drops the shards in
+# the same transaction — so every post-swap assert targets nexus.chunks,
+# scoped by embedding_768 IS NOT NULL to keep the original single-dim
+# semantics (the D1 discipline). An empty COLTYPE2 here means the unify
+# did not run, which fails loud exactly like the old missing-conversion.
+COLTYPE2="$(diag_sql "SELECT data_type FROM information_schema.columns WHERE table_schema='nexus' AND table_name='chunks' AND column_name='chash'")"
+[ "$COLTYPE2" = "bytea" ] && ok "nexus.chunks.chash is bytea — rdr180-001 converted and vectors-004 unified" \
+  || { bad "nexus.chunks.chash is '$COLTYPE2', expected bytea — the cohort boot did not convert+unify"; say "ABORT"; exit 1; }
+LEGACY_ROWS="$(diag_sql "SELECT count(*) FROM nexus.chunks WHERE embedding_768 IS NOT NULL AND chunk_text <> '' AND octet_length(chash) = 16")"
 [ "$LEGACY_ROWS" = "$PRE_COUNT" ] \
   && ok "all $PRE_COUNT legacy rows present as 16-byte keys (hex-decoded, nothing lost, nothing rekeyed yet)" \
   || bad "expected $PRE_COUNT 16-byte legacy rows, counted '$LEGACY_ROWS'"
@@ -326,7 +341,7 @@ else
   printf '%s\n' "$WIN_PUT" | tail -10 | sed 's/^/       /'
   bad "nx store put FAILED in the window — strict writes are broken"
 fi
-STRICT_ROWS="$(diag_sql "SELECT count(*) FROM nexus.chunks_768 WHERE octet_length(chash) = 32")"
+STRICT_ROWS="$(diag_sql "SELECT count(*) FROM nexus.chunks WHERE embedding_768 IS NOT NULL AND octet_length(chash) = 32")"
 if [ "${STRICT_ROWS:-0}" -ge 1 ] 2>/dev/null; then
   ok "$STRICT_ROWS row(s) keyed at 32 bytes — the new write passed the octet CHECK"
 else
@@ -406,18 +421,18 @@ printf '%s' "$UP_OUT" | grep -q "rung 'chash-rekey' converged" \
 
 # ── Assert: every content row keys by its digest; checks VALIDATEd ───────────
 say "Assert — full-digest keys everywhere, five octet CHECKs convalidated"
-# RDR-191 Phase 4 (nexus-o8dil.52): this runs AFTER "nx upgrade" has closed
-# the chash-rekey window -- the post-upgrade side of THIS rehearsal's own
-# axis -- so it retargets to the unified nexus.chunks the same as the
-# rehearse_guided.sh loop (one physical table now covers what used to be
-# three per-dim shards; no loop needed). Non-vacuity against an absent
-# relation is already structural: diag_sql redirects psql stderr into
-# stdout, so a query against a dropped table returns the literal ERROR
-# text, which the "$MISMATCH/$WIDTH_BAD" = "0" comparisons fail loud on
-# (never silently reads as zero rows). The single-dim POST_COUNT check
-# below this block stays chunks_768-scoped on purpose: it is out of this
-# bead's scope (nexus-o8dil.52 names only the two three-table enumeration
-# loops, not every single-dim assertion in these scripts).
+# RDR-191 Phase 4 (nexus-o8dil.52 + nexus-azx14): this runs AFTER
+# "nx upgrade" has closed the chash-rekey window -- the post-upgrade side
+# of THIS rehearsal's own axis -- so every assert targets the unified
+# nexus.chunks (one physical table now covers what used to be three
+# per-dim shards; no loop needed). Non-vacuity against an absent relation
+# is structural: diag_sql redirects psql stderr into stdout, so a query
+# against a dropped table returns the literal ERROR text, which the
+# "$MISMATCH/$WIDTH_BAD" = "0" comparisons fail loud on (never silently
+# reads as zero rows). Single-dim counts (POST_COUNT below) scope by
+# embedding_768 IS NOT NULL to preserve the pre-unify chunks_768
+# semantics — nexus-azx14 closed the o8dil.52 carve-out that had left
+# them pointed at the dropped shard.
 MISMATCH="$(diag_sql "SELECT count(*) FROM nexus.chunks WHERE chunk_text <> '' AND chash IS DISTINCT FROM sha256(convert_to(chunk_text,'UTF8'))")"
 [ "$MISMATCH" = "0" ] && ok "nexus.chunks (unified, RDR-191): zero digest-mismatched content rows" \
   || bad "nexus.chunks: $MISMATCH content row(s) NOT keyed by sha256(chunk_text)"
@@ -428,14 +443,18 @@ WIDTH_BAD="$(diag_sql "SELECT count(*) FROM nexus.chunks WHERE octet_length(chas
 # succeeds since the store-put full-digest fix — it is a 32-byte row the
 # rekey leaves untouched). Distinct texts, so no collapse.
 WANT_COUNT=$((PRE_COUNT + 1))
-POST_COUNT="$(diag_sql "SELECT count(*) FROM nexus.chunks_768 WHERE chunk_text <> ''")"
+POST_COUNT="$(diag_sql "SELECT count(*) FROM nexus.chunks WHERE embedding_768 IS NOT NULL AND chunk_text <> ''")"
 [ "$POST_COUNT" = "$WANT_COUNT" ] \
   && ok "content row count preserved through the rekey ($PRE_COUNT legacy + 1 window write = $POST_COUNT)" \
   || bad "content rows changed across the rekey: expected $WANT_COUNT ($PRE_COUNT legacy + 1 window write), counted $POST_COUNT"
-VALIDATED="$(diag_sql "SELECT count(*) FROM pg_constraint WHERE conname IN ('chunks_384_chash_octet_check','chunks_768_chash_octet_check','chunks_1024_chash_octet_check','catalog_document_chunks_chash_octet_check','chash_index_chash_octet_check') AND convalidated")"
-[ "$VALIDATED" = "5" ] \
-  && ok "all five octet CHECKs are convalidated (the rung's admin VALIDATE ran)" \
-  || bad "only $VALIDATED/5 octet CHECKs convalidated"
+# Live constraint set == chash_rekey.OCTET_CHECKS: the three per-dim
+# checks died with their tables (vectors-004 CASCADE), and
+# chash_index_chash_octet_check was retired with the router table at
+# RDR-187 (nexus-7ramw: that name had been dead in this list since then).
+VALIDATED="$(diag_sql "SELECT count(*) FROM pg_constraint WHERE conname IN ('chunks_chash_octet_check','catalog_document_chunks_chash_octet_check') AND convalidated")"
+[ "$VALIDATED" = "2" ] \
+  && ok "both live octet CHECKs are convalidated (the rung's admin VALIDATE ran)" \
+  || bad "only $VALIDATED/2 octet CHECKs convalidated"
 
 say "Assert — the alias map exists and the cascade left no dangling pointer"
 ALIAS_ROWS="$(diag_sql "SELECT count(*) FROM nexus.chash_alias")"
@@ -447,7 +466,7 @@ fi
 ALIAS_HIT="$(diag_sql "SELECT count(*) FROM nexus.chash_alias WHERE old_ref = '$LEGACY_CHASH'")"
 [ "$ALIAS_HIT" = "1" ] && ok "the captured legacy key has its alias row (old_ref recovered per the reversibility lemma)" \
   || bad "no alias row for old_ref=$LEGACY_CHASH (counted '$ALIAS_HIT')"
-DANGLING="$(diag_sql "SELECT count(*) FROM nexus.catalog_document_chunks m WHERE NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = m.chash) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = m.chash) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = m.chash)")"
+DANGLING="$(diag_sql "SELECT count(*) FROM nexus.catalog_document_chunks m WHERE NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = m.chash)")"
 [ "$DANGLING" = "0" ] && ok "catalog manifest: zero dangling chash pointers post-cascade" \
   || bad "catalog manifest holds $DANGLING dangling pointer(s) after the cascade"
 

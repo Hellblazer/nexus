@@ -808,27 +808,31 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_acquire.sh:80",
         "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:101",
         "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:149",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:235",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:238",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:274",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:279",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:284",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:312",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:315",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:336",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:339",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:387",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:403",
-        # nexus-o8dil.52 (RDR-191 Phase 4): line numbers below shifted +10
-        # after the chunks_384/768/1024 loop at the old :409-416 was
-        # retargeted to the unified nexus.chunks (net +9 lines added).
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:500",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:503",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:512",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:521",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:526",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:542",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:547",
+        # nexus-azx14 (RDR-191): every entry below :190 shifted after the
+        # post-swap asserts were retargeted to the unified nexus.chunks
+        # (the shards are dropped by vectors-004 at the cohort boot): +9
+        # from the era guard growing a table-absent arm, +6 from the
+        # window asserts, +4 from the live-constraint-set VALIDATED
+        # retarget. Numbers regenerated from the detector itself
+        # (_early_exit_consumer_hits), not arithmetic.
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:244",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:247",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:283",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:288",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:293",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:327",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:330",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:351",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:354",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:402",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:418",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:519",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:522",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:531",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:540",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:545",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:561",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:566",
         "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:82",
         "tests/e2e/migration-rehearsal/rehearse_cold.sh:113",
         "tests/e2e/migration-rehearsal/rehearse_cold.sh:77",
