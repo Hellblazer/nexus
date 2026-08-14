@@ -104,6 +104,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
+import check_wire_contract_pairing as _wire_ledger
 from nexus.db.managed_endpoint import (
     ManagedServiceError,
     ManagedServiceUnreachable,
@@ -462,6 +463,62 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
     return 0
 
 
+def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
+    """The both-halves wire-contract ledger gate for the paired-deploy path
+    (nexus-1vogq). The engine-side complement to
+    ``scripts/check_wire_contract_pairing.py``'s static tripwire: this is
+    where the DEPLOY relay itself surfaces an unshipped client half BY NAME,
+    rather than relying on someone having read the ledger prose.
+
+    A non-empty ``## Unshipped`` section blocks paired-deploy UNLESS every
+    entry's bead is named via ``--ack-client-lag <bead-id>`` -- an explicit
+    "yes, I know this client half is not out yet, deploy anyway" rather than
+    a silent pass. ``ack_beads=None`` behaves like an empty list: no
+    acknowledgment offered.
+
+    Returns ``0`` (ledger empty, or every entry acknowledged) or ``1``
+    (unacknowledged entries present -- named in the message).
+    """
+    ledger = _wire_ledger.parse_ledger(_wire_ledger.DEFAULT_LEDGER_PATH)
+    if not ledger.unshipped:
+        print(
+            f"client-lag ledger clean: 0 unshipped both-halves commits in "
+            f"{_wire_ledger.DEFAULT_LEDGER_PATH}"
+        )
+        return 0
+
+    acked = set(ack_beads or [])
+    missing = [e for e in ledger.unshipped.values() if e.bead not in acked]
+    if missing:
+        print(
+            f"PAIRED DEPLOY BLOCKED: {len(missing)} both-halves commit(s) in "
+            f"{_wire_ledger.DEFAULT_LEDGER_PATH} have an unshipped client half "
+            "and no acknowledgment:",
+            file=sys.stderr,
+        )
+        for e in missing:
+            print(
+                f"  {e.sha}  bead {e.bead}  engine tag {e.engine_tag}  ({e.note})",
+                file=sys.stderr,
+            )
+        print(
+            "\nThis engine tag cannot deploy without an explicit paired-client "
+            "acknowledgment (nexus-1vogq). Either pair this deploy with the "
+            "client release carrying the listed commit(s), or pass "
+            "--ack-client-lag <bead-id> for each entry above to deploy "
+            "anyway.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(
+        f"client-lag ledger: {len(ledger.unshipped)} unshipped both-halves "
+        f"commit(s), all explicitly acknowledged via --ack-client-lag: "
+        f"{', '.join(sorted(acked & {e.bead for e in ledger.unshipped.values()}))}"
+    )
+    return 0
+
+
 def check_paired_preconditions(
     tag: str,
     newest: object,
@@ -620,6 +677,7 @@ def check_floor(
     newest: object | None = None,
     paired_deploy: str | None = None,
     paired_tag_max_age_hours: float = _DEFAULT_PAIRED_TAG_MAX_AGE_HOURS,
+    ack_client_lag: list[str] | None = None,
 ) -> int:
     """Probe the live managed service and compare against the version floor.
 
@@ -642,6 +700,13 @@ def check_floor(
     resolved_newest = newest_published_engine() if newest is None else newest
 
     if paired_deploy is not None:
+        # nexus-1vogq: the both-halves wire-contract ledger gate runs FIRST --
+        # local, no network, same "cheap local check before anything else"
+        # ordering as pin-currency below. A ledger with unacknowledged
+        # unshipped client halves blocks the deploy outright, named by bead.
+        ledger_rc = check_client_lag_ledger(ack_client_lag)
+        if ledger_rc != 0:
+            return ledger_rc
         paired_rc = check_paired_preconditions(
             paired_deploy, resolved_newest, max_age_hours=paired_tag_max_age_hours
         )
@@ -748,11 +813,23 @@ def main(argv: list[str] | None = None) -> int:
         "exists to stop a reused --paired-deploy from silently accepting a "
         "stale pairing across multiple releases (nexus-k1c08 fix round).",
     )
+    parser.add_argument(
+        "--ack-client-lag",
+        action="append",
+        default=None,
+        metavar="BEAD-ID",
+        help="Only with --paired-deploy (nexus-1vogq). Explicit acknowledgment "
+        "that a both-halves commit's client half is not yet in a published "
+        "release -- names the OWNING BEAD of a "
+        "docs/wire-contract-pending.md ## Unshipped entry. Repeat for each "
+        "entry. Without this, a non-empty ledger blocks the deploy.",
+    )
     args = parser.parse_args(argv)
     rc = check_floor(
         url=args.url,
         paired_deploy=args.paired_deploy,
         paired_tag_max_age_hours=args.paired_tag_max_age_hours,
+        ack_client_lag=args.ack_client_lag,
     )
     if rc != 0:
         return rc

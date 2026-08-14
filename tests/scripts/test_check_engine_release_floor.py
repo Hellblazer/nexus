@@ -1067,3 +1067,130 @@ def test_main_skips_ancestry_check_when_floor_already_failed() -> None:
         rc = gate.main(["--url", _TEST_URL])
     assert rc == 1
     mock_ancestry.assert_not_called()
+
+
+# ── nexus-1vogq: both-halves wire-contract client-lag ledger gate ─────────
+# The paired-deploy path's complement to scripts/check_wire_contract_pairing.py's
+# static tripwire: a non-empty ## Unshipped section must block the deploy by
+# NAME unless every entry is explicitly acknowledged via --ack-client-lag.
+
+
+def _write_ledger(tmp_path, entry: str | None = None):
+    ledger = tmp_path / "wire-contract-pending.md"
+    body = entry or "(none)\n"
+    ledger.write_text(f"## Unshipped\n\n{body}\n## Shipped\n")
+    return ledger
+
+
+_FAKE_ENTRY = (
+    "- `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` -- bead nexus-fake -- "
+    "engine tag `engine-service-v9.9.9` -- test fixture\n"
+)
+
+
+def test_client_lag_ledger_empty_passes(capsys: pytest.CaptureFixture[str], tmp_path) -> None:
+    ledger = _write_ledger(tmp_path)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        rc = gate.check_client_lag_ledger()
+    assert rc == 0
+    assert "client-lag ledger clean" in capsys.readouterr().out
+
+
+def test_client_lag_ledger_blocks_unacknowledged_entry(
+    capsys: pytest.CaptureFixture[str], tmp_path
+) -> None:
+    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        rc = gate.check_client_lag_ledger()
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "nexus-fake" in err
+    assert "PAIRED DEPLOY BLOCKED" in err
+    assert "deadbeef" in err
+
+
+def test_client_lag_ledger_ack_by_bead_id_passes(tmp_path) -> None:
+    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        rc = gate.check_client_lag_ledger(["nexus-fake"])
+    assert rc == 0
+
+
+def test_client_lag_ledger_wrong_ack_still_blocks(tmp_path) -> None:
+    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        rc = gate.check_client_lag_ledger(["nexus-other"])
+    assert rc == 1
+
+
+def test_client_lag_ledger_partial_ack_still_blocks(tmp_path) -> None:
+    """Two entries, only one acknowledged -- must still block, naming the
+    unacknowledged one."""
+    two_entries = _FAKE_ENTRY + (
+        "- `cafef00dcafef00dcafef00dcafef00dcafef00d` -- bead nexus-other -- "
+        "engine tag `engine-service-v9.9.9` -- second fixture\n"
+    )
+    ledger = _write_ledger(tmp_path, two_entries)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        rc = gate.check_client_lag_ledger(["nexus-fake"])
+    assert rc == 1
+
+
+def test_check_floor_paired_mode_blocked_by_ledger_before_precondition_check(
+    tmp_path,
+) -> None:
+    """Ledger gate runs FIRST -- check_paired_preconditions must not even be
+    reached when the ledger blocks (cheap local check before anything else,
+    same ordering discipline as pin-currency in default mode)."""
+    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
+         patch.object(gate, "check_paired_preconditions") as mock_precond:
+        rc = gate.check_floor(paired_deploy="engine-service-v9.9.9")
+    assert rc == 1
+    mock_precond.assert_not_called()
+
+
+def test_check_floor_paired_mode_proceeds_when_ledger_clean(tmp_path) -> None:
+    ledger = _write_ledger(tmp_path)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
+         patch.object(gate, "check_paired_preconditions", return_value=1) as mock_precond:
+        rc = gate.check_floor(paired_deploy="engine-service-v9.9.9")
+    assert rc == 1
+    mock_precond.assert_called_once()
+
+
+def test_check_floor_paired_mode_proceeds_when_ledger_acknowledged(tmp_path) -> None:
+    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
+         patch.object(gate, "check_paired_preconditions", return_value=1) as mock_precond:
+        rc = gate.check_floor(
+            paired_deploy="engine-service-v9.9.9", ack_client_lag=["nexus-fake"]
+        )
+    assert rc == 1
+    mock_precond.assert_called_once()
+
+
+def test_default_mode_never_consults_client_lag_ledger(tmp_path) -> None:
+    """Non-paired mode is unaffected -- the ledger gate is a paired-deploy-only
+    precondition, not a general floor-check requirement."""
+    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
+         patch.object(gate, "check_client_lag_ledger") as mock_ledger, \
+         patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())), \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
+         patch.object(gate, "check_source_ancestry", return_value=0):
+        gate.main(["--url", _TEST_URL])
+    mock_ledger.assert_not_called()
+
+
+def test_main_accepts_ack_client_lag_flag() -> None:
+    with patch.object(gate, "check_client_lag_ledger", return_value=0) as mock_ledger, \
+         patch.object(gate, "check_paired_preconditions", return_value=1):
+        gate.main(
+            [
+                "--paired-deploy", "engine-service-v0.1.1",
+                "--ack-client-lag", "nexus-fake",
+                "--ack-client-lag", "nexus-other",
+            ]
+        )
+    mock_ledger.assert_called_once_with(["nexus-fake", "nexus-other"])
