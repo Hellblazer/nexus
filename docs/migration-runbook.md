@@ -445,14 +445,17 @@ repeated on purpose: zero rows against empty catalog tables is a vacuous
 pass; run this only after the T2 ladder's catalog leg.
 
 **Legacy note**: the Python-generated equivalents `manifest_backfill_sql()`
-and `manifest_orphan_sql(dim)` in `src/nexus/migration/vector_etl.py` are
-deprecated and kept only because bead nexus-g37fr (RDR-155 P4b) will
-delete that module wholesale. Use the stored functions above.
+and `manifest_orphan_sql(dim)` lived in `src/nexus/migration/vector_etl.py`,
+deprecated superseded-by-stored-function shims; the module itself was
+deleted wholesale by RDR-155 P4b (bead nexus-g37fr, closed). Use the
+stored functions above — there is no Python-generated equivalent anymore.
 
 Per-collection chunk counts (eyeballing a migration or comparing against a
 source inventory) come from the `nexus.collection_vector_stats` view
 (catalog-005, RDR-156 P3, bead nexus-70r3c.12) — NOT hand-assembled
-`count(*)` over the three `chunks_<dim>` tables:
+`count(*)` over `nexus.chunks` grouped by which `embedding_<dim>` column is
+populated (the unified single-table shape since RDR-191 Phase 4; formerly
+three separate `chunks_<dim>` tables):
 
 ```
 psql -h 127.0.0.1 -p $PG_PORT -U $ADMIN -d nexus \
