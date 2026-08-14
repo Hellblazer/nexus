@@ -51,6 +51,20 @@ jobs:
           # workflow runs once per release, unlike ci.yml which runs per push.
           fetch-depth: 0
 
+      - name: Resolve release tag (push vs dispatch)
+        # ONE authority for every later step (v7.7.0 retry incident, runs
+        # 31792663991 + 31792768971: on workflow_dispatch GITHUB_REF_NAME is
+        # the BRANCH, so every step deriving TAG from it compared 'main'/
+        # 'develop' against the version; the gh-release step would likewise
+        # have targeted the branch ref absent an explicit tag_name).
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          RELEASE_TAG="${DISPATCH_TAG:-$GITHUB_REF_NAME}"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
+          echo "Publishing tag $RELEASE_TAG (version ${RELEASE_TAG#v})"
+
       - name: Verify the tagged commit already carries a green required check (nexus-jvhsw)
         # EVIDENCE, NOT RE-EXECUTION (see scripts/check_release_ci_evidence.py's
         # module docstring): this reads GitHub's existing check-run record for
@@ -92,11 +106,8 @@ jobs:
         # exercise (v7.7.0, run 31792663991; 7.6.0 moved tags instead of
         # dispatching, so this had never run). Resolve from the tag input
         # when present, exactly like the checkout step above does.
-        env:
-          DISPATCH_TAG: ${{ inputs.tag }}
         run: |
-          TAG="${DISPATCH_TAG:-$GITHUB_REF_NAME}"
-          TAG="${TAG#v}"   # strip leading 'v'
+          TAG="$RELEASE_VERSION"
           PKG=$(python3 -c "
           import re
           m = re.search(r'^version\s*=\s*\"(.+?)\"', open('pyproject.toml').read(), re.M)
@@ -115,7 +126,7 @@ jobs:
           # pytest parity test catches drift on the release SHA, but the
           # tag is applied after merge — this release-time guard fails the
           # publish loud if the bundle was not bumped in lock-step.
-          TAG="${GITHUB_REF_NAME#v}"
+          TAG="$RELEASE_VERSION"
           MCPB=$(python3 -c "import json; print(json.load(open('mcpb/manifest.json')).get('version',''))")
           if [ "$TAG" != "$MCPB" ]; then
             echo "ERROR: tag '$TAG' does not match mcpb/manifest.json version '$MCPB'"
@@ -126,7 +137,7 @@ jobs:
       - name: Extract release notes from CHANGELOG
         id: changelog
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          TAG="$RELEASE_VERSION"
           python3 - <<EOF > /tmp/release_notes.md
           import re, sys
           tag = "$TAG"
@@ -183,9 +194,10 @@ jobs:
         # the issue. Bump deliberately when validating a newer v2.x.
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3.0.1
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           body_path: /tmp/release_notes.md
           files: |
             dist/*.whl
             dist/*.tar.gz
             mcpb-dist/conexus.mcpb
-          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
+          prerelease: ${{ contains(env.RELEASE_TAG, 'rc') || contains(env.RELEASE_TAG, 'alpha') || contains(env.RELEASE_TAG, 'beta') }}
