@@ -1,11 +1,11 @@
 ---
 name: release
-description: Use when cutting a release, bumping version, tagging, or publishing to PyPI. Enforces the full release checklist from CLAUDE.md § Release Process. Also surfaces as /conexus:release.
+description: Use when cutting a release, bumping version, tagging, or publishing to PyPI. Enforces the full release checklist from AGENTS.md § Cutting a release. Also surfaces as /conexus:release.
 ---
 
 # Release Checklist
 
-Follow every step in order. Do not skip or reorder. Authority: CLAUDE.md § Release Process (`docs/contributing.md#release-process` is the long form).
+Follow every step in order. Do not skip or reorder. Authority: AGENTS.md § Cutting a release (`docs/contributing.md#release-process` is the long form; T2 [22511] gap 11 — this line previously cited a "CLAUDE.md § Release Process" heading that does not exist in CLAUDE.md/AGENTS.md, only in `docs/contributing.md`).
 
 ## Steps
 
@@ -144,7 +144,7 @@ Update any drift before bumping version. Doc audit is what catches "we changed t
 CI enforces parity. Missing any one of these fails the marketplace-version-matches-pyproject test, the marketplace-source-ref-matches-pyproject test, or the mcpb-manifest-version-matches-pyproject test.
 
 - `pyproject.toml`: `version = "X.Y.Z"` (canonical source of truth)
-- `mcpb/pyproject.toml`: `version` **and** the `conexus>=X.Y.Z` dependency pin
+- `mcpb/pyproject.toml`: `version` **and** the `conexus[local]>=X.Y.Z` dependency pin (the `[local]` extra is required — without it the .mcpb's venv resolves without `fastembed` and `LocalEmbeddingFunction` silently falls back to the 384-dim ONNX MiniLM against 768/1024-dim collections; `tests/test_plugin_structure.py::test_mcpb_pins_conexus_local_extra` enforces the pin tracks the version. T2 [22511] gap 11 — this line previously said `conexus>=X.Y.Z`, missing the extra.)
 - `mcpb/manifest.json`: `version`
 - `.claude-plugin/marketplace.json`: **both `version` fields** (one for conexus, one for sn)
 - `.claude-plugin/marketplace.json`: **both `plugins[].source.ref` fields** — must be `"vX.Y.Z"` (the tag form). Easy to forget. This is what decouples installed users from main HEAD: plugin installs follow the pinned tag, not whatever main currently is. **CRITICAL: nexus-mkj6u 2026-05-23**
@@ -203,6 +203,24 @@ Required on every release (nexus-6xkdu: a diff-based trigger list was rejected �
 ```
 
 Smoke (step 6) never calls `nx index pdf`; this is the only pre-tag gate that exercises MinerU end-to-end through the production indexing path (step 3b of 11, the `bft-to-smr.pdf` formula fixture) — the slow-marked `test_mineru_path_preserves_formulas` pytest test runs in no default or scheduled suite (nexus-6xkdu). Must end `SHAKEDOWN PASSED`; a `SHAKEDOWN FAILED` verdict or non-zero exit halts the release. All four indexing steps (2, 3a, 3b, 4) can now fail the run — the `|| true` that previously made them unable to redden the run was removed at nexus-6xkdu.
+
+### 6d. Migration-release branch (CONDITIONAL — this release ships a data migration)
+
+Trigger: this release carries a schema or data migration — a new `upgrade_ladder` rung (`src/nexus/upgrade_ladder/registry.py`), or any client-side change to a shape data already has to conform to (T2 [22511] gap 9). Skip this step entirely when the release carries no such change.
+
+1. **Representative-scale rehearsal.** Run the populated-store upgrade rehearsal against a corpus seeded ABOVE a stated floor, not the harness's default toy seed (10-30 docs across `rehearse_cold.sh` / `rehearse_acquire.sh` / `rehearse_shakeout.sh` / `rehearse_hole_punch.sh`). Pre-tag, that is the worktree `--package-upgrade` run in Step 1; post-publish, close the loop with Step 11c's published-bytes run:
+   ```bash
+   NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade
+   ```
+   Name the floor and the actual seed count used in the release relay. RDR-191's cloud 385,484-row unify-chunks migration (T2 [22485]) remains the only at-scale proof this project has produced for a comparable change — and it ran in PRODUCTION. If the rehearsal cannot be brought to a genuinely representative scale before tagging, say so explicitly rather than letting a toy-scale pass stand in for one.
+
+2. **Rollback decision point, settled before the release branch is committed.** Determine whether this migration can be rolled back on an already-upgraded install. When the answer is no, write **IRREVERSIBLE** in the release notes / relay verbatim, and have the substitute in hand: a written rollback/abort runbook with exact statements and named abort criteria — the RDR-191 `nexus-o8dil.22` pattern.
+
+3. **Freeze-window derivation.** Only applies when this migration is coupled to a server-side schema change (an engine tag deploying alongside this release). If so, do not re-derive the window math here — it lives in `.claude/skills/engine-release/SKILL.md` Step 5b; confirm that step ran and its threshold/abort condition are recorded before this release's tag pushes.
+
+4. **Post-deploy data-integrity verification, beyond version identity.** Once Step 11c's published-bytes rehearsal lands, verify data integrity beyond a version match: exact row-count reconciliation, not just `/version` naming X.Y.Z — the T2 [22485] pattern ("ROW INVARIANT EXACT: 385,484 pre == post ... ANALYZE fired").
+
+Full rationale and evidence citations: `docs/contributing.md` § Schema/data-migration releases.
 
 ### 7. Commit on a release branch + PR to main (nexus-mkj6u: replaces direct-to-main)
 
@@ -414,8 +432,8 @@ nx --version                 # must print X.Y.Z
 
 ## See also
 
-- `CLAUDE.md` § Release Process (canonical; defer to it on any discrepancy)
-- `docs/contributing.md#release-process` (long form with rollback / one-time setup)
+- `AGENTS.md` § Cutting a release (canonical; defer to it on any discrepancy)
+- `docs/contributing.md#release-process` (long form — Step-by-step checklist, and the Break-glass subsection for retry / yank / revert / tag-retraction procedures, and the Schema/data-migration releases subsection Step 6d above draws its rationale from)
 - `feedback_invoke_release_skill.md` (memory entry: invoke this skill, do not freehand)
 - `feedback_post_release_reinstall.md` (memory entry: reinstall after tag)
 - `feedback_release_discipline.md` (memory entry: full suite before tag, not after)
