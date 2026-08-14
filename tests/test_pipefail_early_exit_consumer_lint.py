@@ -954,11 +954,18 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # lines to run.sh (header comments, the inverted FATAL guard, the
         # wheel-only build-branch rewiring). Numbers regenerated from the
         # detector itself (_early_exit_consumer_hits), not arithmetic.
-        "tests/e2e/migration-rehearsal/run.sh:592",
-        "tests/e2e/migration-rehearsal/run.sh:623",
-        "tests/e2e/migration-rehearsal/run.sh:639",
-        "tests/e2e/migration-rehearsal/run.sh:694",
-        "tests/e2e/migration-rehearsal/run.sh:711",
+        # Retargeted (nexus-z0ylb): the --candidate-migration additions
+        # earlier in run.sh shifted every one of these 5 pre-existing
+        # `ls -t dist/conexus-*.whl | head -1` sites by +29 lines total
+        # (+27 from the original wiring, +2 from the live-acceptance
+        # remediation's comment-only edits); a 6th (identical shape) was
+        # ADDED by --candidate-migration's own worktree-wheel staging line.
+        "tests/e2e/migration-rehearsal/run.sh:621",
+        "tests/e2e/migration-rehearsal/run.sh:652",
+        "tests/e2e/migration-rehearsal/run.sh:668",
+        "tests/e2e/migration-rehearsal/run.sh:723",
+        "tests/e2e/migration-rehearsal/run.sh:740",
+        "tests/e2e/migration-rehearsal/run.sh:788",
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.
@@ -1015,12 +1022,54 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # `VAR=$(...)` assignment (propagates through errexit) found by
         # this lint's own authoring sweep.
         "tests/e2e/local-index-memory-gate.sh:849",
+        # --- tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh
+        # (10 entries, nexus-z0ylb): the CANDIDATE-MIGRATION rehearsal --
+        # a locally-built candidate's Liquibase walk over a POPULATED
+        # store, hand-swapped in against a running floor engine (the
+        # nexus-eo3qv-disclosed gap). Same established idioms as its
+        # closest template, rehearse_chash_window.sh, reused verbatim
+        # where the shape matches -- every site below mirrors an already-
+        # exempted chash-window site of the identical shape (WHEEL `ls |
+        # head -1`, the `_wait_healthy` status poll, a captured-output
+        # `printf | grep -q` marker/string check gating an if/else, and a
+        # diagnostic `printf | head -N | sed` dump inside a failure
+        # branch that runs strictly AFTER the real grep -q decision has
+        # already been made).
+        # Retargeted (live-acceptance remediation, 2026-08-14): the
+        # --all + non-vacuous-topic-count fix (Stage 3d) and the
+        # PG-superuser diag_sql rewrite (CLUSTER 2) shifted every one of
+        # these; a NEW site (:308) was added by the Stage 3d topic-count
+        # parse (`grep -oE ... | grep -oE ... | head -1`), itself a
+        # genuine control-flow-gating pipe (feeds the loud-abort decision
+        # on zero parsed topics) -- same class as the rest of this set,
+        # not display-only, so EXEMPT rather than `|| true`.
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:110",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:161",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:308",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:358",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:361",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:446",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:482",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:485",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:501",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:506",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:511",
     }
 )
 # 157: +1 for rehearse_package_upgrade.sh:173 -- the 898d41762 axis-naming
 # stage added a GOT_CLIENT_VER extraction that is the same rc-irrelevant
 # `nx --version | grep | head` derivation pattern as the pre-existing :98 site.
-_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 157
+# 167: +10 for rehearse_candidate_migration.sh (nexus-z0ylb) -- see the
+# entries' own comment above.
+# 168: +1 net for run.sh's --candidate-migration wiring (nexus-z0ylb) -- 5
+# pre-existing `ls | head -1` sites retargeted for the +27-line shift, plus
+# 1 new site of the identical shape (--candidate-migration's own
+# worktree-wheel staging line) -- see the retargeting comment above.
+# 169: +1 for rehearse_candidate_migration.sh's live-acceptance
+# remediation (nexus-z0ylb) -- the Stage 3d topic-count parse added one
+# new early-exit-consumer pipe (`grep -oE ... | head -1`); every other
+# site in that file's set was retargeted in place, net count unchanged.
+_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 169
 
 
 def test_pipefail_early_exit_exempt_ratchet() -> None:

@@ -54,27 +54,95 @@ The Java CI (`service-ci.yml`) is **advisory** — it does not block auto-merge 
 > pre-cohort store, plus the client's window UX; (ii) `--shakeout` drives
 > the LOCALLY-BUILT candidate binary, but only on a FRESH install with no
 > pre-cohort data — it carries zero chash/rdr180/cohort logic; (iii) a
-> CANDIDATE's new migration changesets running against POPULATED
-> pre-cohort data are covered by NO leg in this harness today — tracked as
-> nexus-z0ylb (P2). Do not read `--chash-window` + `--shakeout` together as
-> closing that gap — they don't), `--stranded`
+> CANDIDATE's new migration changesets running against POPULATED data are
+> now covered by `--candidate-migration` (nexus-z0ylb, see below) — do not
+> read `--chash-window` + `--shakeout` together as closing that gap on
+> their own, they don't; `--candidate-migration` is the leg that does),
+> `--stranded`
 > (nexus-8nlj4: two-hop
 > stranded-redirect — armed-detector refusal + pin-side migration; weekly
 > heartbeat via stranded-redirect-rehearsal.yml, dispatch it on demand when a
-> cut touches stranded_install.py or the migration-rehearsal harness), and the
-> default `rehearse.sh` (Phases A/D/E).
+> cut touches stranded_install.py or the migration-rehearsal harness),
+> `--candidate-migration` (nexus-z0ylb: the locally-built CANDIDATE
+> engine's full Liquibase walk over a POPULATED store — provisions the
+> PUBLISHED FLOOR engine for real, populates through it (content + catalog
+> manifests + a real taxonomy-discovery pass), hand-swaps the candidate
+> binary in with the provenance sidecar's tag/version kept pinned at the
+> floor (HARNESS bookkeeping, not a production technique — a real release
+> `install-binary`'s an honest sidecar at download time; this rewrite only
+> keeps a LATER assert in the SAME test run from silently re-acquiring the
+> floor over the candidate mid-rehearsal, and a `nx daemon restart-stale
+> --dry-run` no-op check inside the leg proves exactly that, nothing
+> broader), then boots and asserts the changeset delta plus EXACT row
+> invariants — see the leg's own coverage statement below for what it does
+> and does NOT prove), and the default `rehearse.sh` (Phases A/D/E).
 
 > **Ordering, still load-bearing.** `--shakeout` BUILDS the candidate locally
 > (`run.sh` does the GraalVM `-Ob` native build; only the retired `--cold` path
-> skipped it and acquired a PUBLISHED binary instead). `--with-cloud` exercises
-> the conexus-DEPLOYED service, so it cannot run pre-tag either — it is part of
-> the post-deploy cloud gate (Step 6).
+> skipped it and acquired a PUBLISHED binary instead). `--candidate-migration`
+> ALSO builds the candidate locally (same `-Ob` build, stamped with the floor
+> version) — the two legs are complementary, not redundant: `--shakeout` proves
+> the candidate's CLI-verb/concurrency surface on a fresh install; `--candidate-
+> migration` proves its Liquibase walk over populated data. `--with-cloud`
+> exercises the conexus-DEPLOYED service, so it cannot run pre-tag either — it
+> is part of the post-deploy cloud gate (Step 6).
 
 ```bash
 tests/e2e/migration-rehearsal/run.sh --shakeout
 ```
 
 Must end `CANDIDATE SHAKEOUT PASSED`.
+
+**`--candidate-migration` — MANDATORY whenever this cut's `service/` delta
+touches `db/changelog/**` (a new or modified Liquibase changeset); optional
+otherwise** (a cut that only touches Java handler/repository code with no
+schema change has nothing new for this leg to prove beyond what
+`--candidate-migration` already proved on a prior cut of the same schema
+generation — run it anyway when in doubt, it is not expensive relative to
+`--shakeout`). MANDATORY here means "this class of change gets no other
+pre-tag rehearsal against populated data," not "this leg proves the
+changeset is safe in every dimension" — read the coverage statement below
+before treating a green run as exhaustive:
+
+```bash
+tests/e2e/migration-rehearsal/run.sh --candidate-migration
+# a cut whose changeset count is known ahead of time pins it instead of
+# merely reporting it, e.g. a cut adding exactly 3 new changesets:
+EXPECT_NEW_CHANGESETS=3 tests/e2e/migration-rehearsal/run.sh --candidate-migration
+```
+
+Must end `CANDIDATE-MIGRATION REHEARSAL PASSED`. Reports (never asserts to
+an exact value unless `EXPECT_NEW_CHANGESETS` is set) the changeset delta
+between the floor's post-init `DATABASECHANGELOG` count and the candidate's
+post-boot count — `delta=0` is a legitimate, explicitly-stated outcome (it
+still proves boot-over-populated-store + checksum stability + grants
+idempotence), not a silent skip.
+
+**Coverage — what this leg DOES and does NOT prove** (substantive-critic
+finding, 2026-08-14, T2
+`nexus/critique-nexus-z0ylb-candidate-migration-rehearsal-2026-08-14`
+[22547] — the leg's own script header carries the identical statement,
+kept in lockstep). It exercises: boot succeeding over populated data (a
+changeset that silently assumes an empty table fails here, not at a
+customer's box); RLS not going DML-blind mid-migration; a changeset's own
+GRANT/ownership statements not bricking boot; CASCADE fallout on a DROP
+TABLE; and checksum/row-count integrity (Liquibase's own checksum
+re-validation plus this leg's EXACT row-invariant asserts, now spanning
+chunks, catalog manifest/documents, taxonomy centroids AND
+`topic_assignments`).
+
+It structurally CANNOT catch two classes, by construction of what this leg
+seeds:
+- **Cross-shard PK collision** (the "cross-shard collision" `DO $$` guards
+  that vectors-004/taxonomy-007-style changesets carry) — this leg seeds
+  ONE embedding dimension (bge-768) only; reproducing a genuine collision
+  needs a second populated dimension sharing a colliding key.
+- **Planner-statistics flips** from a stats-absent post-migration table
+  picking a different query plan under real data volume — this leg's
+  corpus tops out around ~190 rows, far too small to exhibit one. That
+  class is pinned at the JAVA layer instead:
+  `SchemaMigratorIntegrationTest::rdr180Rewrite_leavesPlannerStatsFresh`
+  (`service/src/test/java/dev/nexus/service/SchemaMigratorIntegrationTest.java`).
 
 This is strictly stronger than the `--guided` gate it replaces. It performs the
 same native-image build — the `-Ob` quick build has the SAME reachability
@@ -103,6 +171,10 @@ Notes:
 - When the two-hop stranded-redirect rehearsal lands (nexus-8nlj4) it becomes
   the acceptance journey that replaced the retired guided legs; add it here
   then, alongside `--shakeout` rather than instead of it.
+- `--candidate-migration` requires a native build the same way `--shakeout`
+  does and refuses `--no-build`; it does NOT combine with any other leg
+  (standalone entrypoint, same discipline as every other journey in this
+  harness).
 
 ### 3b. Client-release preconditions — a DEPLOY gate, NOT a tag gate
 
