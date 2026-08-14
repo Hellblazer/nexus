@@ -108,7 +108,7 @@ def _spawn_and_capture_argv(sup) -> list[str]:
     ), patch(
         "nexus.logging_setup.open_child_log_or_devnull", return_value=MagicMock()
     ), patch(
-        "nexus.daemon.storage_service_daemon.subprocess.Popen", return_value=fake_proc
+        "nexus.daemon.storage_service_daemon._popen", return_value=fake_proc
     ) as popen:
         proc, port = sup._spawn_service()
     assert proc is fake_proc

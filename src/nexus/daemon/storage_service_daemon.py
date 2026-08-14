@@ -67,6 +67,15 @@ import shutil
 import signal
 import socket
 import subprocess
+
+# TEST SEAM (nexus-9p6sv): patch THIS attribute, never
+# ``daemon_mod.subprocess.Popen`` -- ``daemon_mod.subprocess`` IS the stdlib
+# module, so patching its Popen is PROCESS-GLOBAL and breaks every concurrent
+# ``subprocess.run`` in the same xdist worker (service_registry.process_state's
+# ``ps`` probe unpacks empty output -> ValueError). The spawn call site below
+# routes through this indirection precisely so tests can mock the JVM spawn
+# without touching the stdlib.
+_popen = subprocess.Popen
 import threading
 import time
 from dataclasses import dataclass
@@ -797,7 +806,7 @@ class StorageServiceSupervisor:
 
         svc_log = open_child_log_or_devnull(self._svc_log_name, self._config_dir)
         try:
-            proc = subprocess.Popen(
+            proc = _popen(
                 argv,
                 env=env,
                 stdout=svc_log,

@@ -1497,7 +1497,7 @@ class TestSpawnServiceVoyageKeyPlumbing:
             return MagicMock(pid=43210)
 
         monkeypatch.setattr(
-            "nexus.daemon.storage_service_daemon.subprocess.Popen", _fake_popen,
+            "nexus.daemon.storage_service_daemon._popen", _fake_popen,
         )
         sup._spawn_service()
         return captured
@@ -1701,7 +1701,7 @@ class TestCredsReloadAfterBackfill:
             return MagicMock(pid=44100)
 
         monkeypatch.setattr(
-            "nexus.daemon.storage_service_daemon.subprocess.Popen", _fake_popen,
+            "nexus.daemon.storage_service_daemon._popen", _fake_popen,
         )
         sup._spawn_service()  # Step 2 -- builds the JVM env from self._creds
 
@@ -1938,7 +1938,7 @@ class TestEnsureStorageSupervisor:
         # (nexus-o8dil.21). The lease's supervisor_pid IS this live test
         # process, so "S" is the faithful answer.
         with patch("nexus.daemon.service_registry.process_state", return_value="S"), \
-             patch.object(daemon_mod.subprocess, "Popen") as popen:
+             patch.object(daemon_mod, "_popen") as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
         assert rec is not None
         popen.assert_not_called()  # idempotent: a live lease is never re-spawned
@@ -1965,7 +1965,7 @@ class TestEnsureStorageSupervisor:
         monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
 
         with patch("nexus.daemon.service_registry.process_state", return_value="S"), \
-             patch.object(daemon_mod.subprocess, "Popen") as popen:
+             patch.object(daemon_mod, "_popen") as popen:
             with pytest.raises(StorageServiceStartError, match="DIFFERENT artifact"):
                 daemon_mod.ensure_storage_supervisor(config_dir)
         popen.assert_not_called()
@@ -2001,7 +2001,7 @@ class TestEnsureStorageSupervisor:
         monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
 
         with patch("nexus.daemon.service_registry.process_state", return_value="S"), \
-             patch.object(daemon_mod.subprocess, "Popen") as popen:
+             patch.object(daemon_mod, "_popen") as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
         popen.assert_not_called()
         assert rec is not None and rec.endpoint.get("port") == 18099
@@ -2020,7 +2020,7 @@ class TestEnsureStorageSupervisor:
             return MagicMock()
 
         with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
-             patch.object(daemon_mod.subprocess, "Popen", side_effect=_popen_publishes) as popen:
+             patch.object(daemon_mod, "_popen", side_effect=_popen_publishes) as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
         popen.assert_called_once()
         assert rec is not None and rec.endpoint.get("port") == 18092
@@ -2036,7 +2036,7 @@ class TestEnsureStorageSupervisor:
         monkeypatch.setattr(daemon_mod.time, "monotonic", lambda: next(ticks))
         monkeypatch.setattr(daemon_mod.time, "sleep", lambda _s: None)
         with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
-             patch.object(daemon_mod.subprocess, "Popen", return_value=MagicMock()):
+             patch.object(daemon_mod, "_popen", return_value=MagicMock()):
             with pytest.raises(StorageServiceStartError):
                 daemon_mod.ensure_storage_supervisor(config_dir)
 
@@ -2066,7 +2066,7 @@ class TestEnsureStorageSupervisor:
 
         with patch.object(ssd_mod, "_pid_is_running", return_value=False), \
              patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
-             patch.object(daemon_mod.subprocess, "Popen", side_effect=_popen_publishes) as popen:
+             patch.object(daemon_mod, "_popen", side_effect=_popen_publishes) as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
 
         popen.assert_called_once()  # dead lease must trigger a re-spawn
@@ -2130,11 +2130,8 @@ class TestEnsureStorageSupervisor:
             # global Popen mock would break that real probe — which is the
             # thing under test here (nexus-o8dil.21).
             popen = MagicMock(side_effect=_popen_publishes)
-            fake_subprocess = SimpleNamespace(
-                Popen=popen, DEVNULL=subprocess.DEVNULL,
-            )
             with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
-                 patch.object(daemon_mod, "subprocess", fake_subprocess):
+                 patch.object(daemon_mod, "_popen", popen):
                 rec = daemon_mod.ensure_storage_supervisor(config_dir)
         finally:
             with contextlib.suppress(ChildProcessError, OSError, subprocess.TimeoutExpired):
@@ -2163,7 +2160,7 @@ class TestEnsureStorageSupervisor:
         sup._publish(18095)
 
         with patch.object(ssd_mod, "_pid_is_running", return_value=False), \
-             patch.object(daemon_mod.subprocess, "Popen") as popen:
+             patch.object(daemon_mod, "_popen") as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
 
         popen.assert_not_called()  # absent supervisor_pid → trust TTL, no re-spawn
@@ -2253,7 +2250,7 @@ class TestLeaseTtlAndHeapBound:
             captured["argv"] = argv
             return _FakeProc(pid=49100)
 
-        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_popen", _fake_popen)
         monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18078)
         sup._spawn_service()
         # -Xmx must immediately follow the binary path (native-image consumes
@@ -2272,7 +2269,7 @@ class TestLeaseTtlAndHeapBound:
         monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18088)
         # A malformed heap value fails loud BEFORE spawning (no /health-timeout
         # misdiagnosis); Popen is never reached.
-        monkeypatch.setattr(ssd_mod.subprocess, "Popen",
+        monkeypatch.setattr(ssd_mod, "_popen",
                             lambda *a, **k: (_ for _ in ()).throw(AssertionError("Popen reached")))
         with pytest.raises(StorageServiceStartError, match="NX_SERVICE_MAX_HEAP"):
             sup._spawn_service()
@@ -2290,7 +2287,7 @@ class TestLeaseTtlAndHeapBound:
             captured["argv"] = argv
             return _FakeProc(pid=49101)
 
-        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_popen", _fake_popen)
         monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
         sup._spawn_service()
         # Production default: no -Xmx — the binary keeps native-image's default heap.
@@ -2317,7 +2314,7 @@ class TestPdeathsigOrphanPrevention:
             captured.update(kw)
             return _FakeProc(pid=49201)
 
-        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_popen", _fake_popen)
         monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
         sup._spawn_service()
         assert captured.get("preexec_fn") is ssd_mod._set_pdeathsig_preexec, (
@@ -2337,7 +2334,7 @@ class TestPdeathsigOrphanPrevention:
             captured.update(kw)
             return _FakeProc(pid=49202)
 
-        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_popen", _fake_popen)
         monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
         sup._spawn_service()
         assert captured.get("preexec_fn") is None, (
@@ -2359,7 +2356,7 @@ class TestPdeathsigOrphanPrevention:
             captured.update(kw)
             return _FakeProc(pid=49203)
 
-        monkeypatch.setattr(ssd_mod.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_popen", _fake_popen)
         monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
         sup._spawn_service()
         assert captured["env"].get("NX_SERVICE_PARENT_DEATH_EXIT") == "1"

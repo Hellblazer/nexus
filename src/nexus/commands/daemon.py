@@ -16,6 +16,12 @@ import shlex
 import shutil
 import signal
 import subprocess
+
+# TEST SEAM (nexus-9p6sv): patch THIS, never the stdlib module's Popen --
+# a process-global Popen mock breaks concurrent subprocess.run callers in
+# the same worker (service_registry.process_state's `ps` probe). Same seam
+# idiom as storage_service_daemon._popen.
+_popen = subprocess.Popen
 import sys
 import threading
 import time
@@ -661,7 +667,7 @@ def ensure_storage_supervisor(config_dir: Path):
 
     spawn_log = open_child_log_or_devnull("storage_service.crash", config_dir)
     try:
-        subprocess.Popen(
+        _popen(
             argv,
             stdin=subprocess.DEVNULL,  # detached daemon: never inherit a TTY stdin (avoids read-block / dangling fd)
             stdout=spawn_log,
