@@ -198,3 +198,16 @@ Decide:
 2. **Does the test actually exercise cloud-mode behavior** (real Voyage embedder, `_has_credentials()` gated path, `CloudClient` routing)? → add `cloud_mode` to the test's fixture list, or `pytestmark = pytest.mark.usefixtures("cloud_mode")` at module scope.
 
 If the lint fails on a CI run after your edit, the failure message lists the offending nodeids and the two options above.
+
+## CI's pytest jar is UNSTAMPED — deliberately
+
+ci.yml's pytest-matrix service jar is built plain (`-DskipTests package`), so
+`release_version` is BLANK and every cloud-mode probe fail-closes. A dev box's
+`scripts/build-gate-jar.sh` STAMPS the version, so a unit test that
+accidentally builds a REAL cloud vector client passes locally and fails only
+in CI with `ManagedServiceIncompatible` naming the current floor — the floor
+is (almost always) innocent; the test is reaching a real client it should be
+injecting. Local repro: blank `release.properties` inside the jar (zip
+update), run the failing test standalone, restore the stamp with
+build-gate-jar. Precedent: release-7.7.0 shard reds, bead nexus-c7l4n,
+T2 release-7.7.0-ci-shard-reds-2026-08-14.

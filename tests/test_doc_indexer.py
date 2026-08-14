@@ -1250,6 +1250,21 @@ def test_index_pdf_return_metadata_true_returns_dict(sample_pdf, monkeypatch, mo
 
 
 def test_index_pdf_return_metadata_true_skipped_returns_empty_dict(sample_pdf, monkeypatch, cloud_mode):
+    # ``t3=`` is LOAD-BEARING, not decoration (nexus-c7l4n). Since RDR-152
+    # Seam B, ``index_pdf`` resolves a None *t3* through
+    # ``mcp_infra.get_t3()`` whenever ``is_vector_service_mode()`` — which is
+    # unconditionally True since the RDR-155 P4a.2 serving cutover — and only
+    # falls back to ``nexus.doc_indexer.make_t3`` outside service mode. The
+    # ``patch("nexus.doc_indexer.make_t3")`` below is therefore a DEAD seam
+    # for the write handle: without an explicit ``t3=``, this test reached
+    # the REAL factory, whose cloud probe fail-closes against CI's unstamped
+    # service jar (``release_version=null`` — CI builds with a plain
+    # ``mvn package``; a dev box builds via ``scripts/build-gate-jar.sh``,
+    # which stamps, so the failure is CI-only by construction). The two
+    # passing siblings above already pass ``t3=mock_t3``; this one did not,
+    # and only survived on a MagicMock another test had leaked into the
+    # process-wide ``mcp_infra._t3_instance`` — a shield that the
+    # ``_restore_t3_singleton`` guard (nexus-jovc9) correctly removed.
     set_credentials(monkeypatch)
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
     mock_col = MagicMock()
@@ -1266,7 +1281,9 @@ def test_index_pdf_return_metadata_true_skipped_returns_empty_dict(sample_pdf, m
                     ext_cls.return_value.extract.return_value = MagicMock(
                         text="text", metadata={"extraction_method": "x", "page_count": 1,
                                                "format": "markdown", "page_boundaries": []})
-                    result = index_pdf(sample_pdf, corpus="test", return_metadata=True)
+                    result = index_pdf(
+                        sample_pdf, corpus="test", t3=mock_t3, return_metadata=True,
+                    )
     assert isinstance(result, dict) and result["chunks"] == 0 and result["pages"] == []
 
 

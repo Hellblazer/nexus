@@ -324,12 +324,40 @@ def test_memory_search_under_discover_topics_load(tmp_path: Path) -> None:
 
 
 def test_memory_get_under_concurrent_write_load(tmp_path: Path) -> None:
-    """memory.get() p95 must stay within 3.0x baseline under write load.
+    """memory.get() must not be starved by concurrent write load.
 
-    Ratio gate: 3.0x. CI runners (especially Python 3.13 on GitHub
-    Actions) show 2.0-2.5x ratios from noisy-neighbor CPU contention.
-    The test catches order-of-magnitude lock regressions (10x+), not
-    slight per-core scheduling variance.
+    TWO gates, neither of them a tail-vs-tail ratio (nexus-c7l4n):
+
+    * relative, on the MEDIAN — the stable statistic at this timescale;
+    * absolute, on p95 — the starvation ceiling an operator cares about.
+
+    The ratio used to be ``load_p95 / baseline_p95`` at 3.0x, which is a
+    tail divided by a tail on sub-5ms samples. nexus-3m01p already caught
+    that shape once from the denominator side (a lucky-fast baseline
+    manufacturing a ratio) and floored the denominator at 1.0ms. GHA fired
+    it again from the NUMERATOR side on the 7.7.0 release PR (CI run
+    31773244689, py3.13 shard 4/4)::
+
+        baseline_p95=1.50ms (denom=1.50ms) load_p50=2.56ms
+        load_p95=4.54ms load_p99=5.95ms ratio=3.03x   FAILED (threshold 3.0x)
+
+    Nothing was starved: load_p95 sat 11x under the 50ms ceiling. The
+    baseline landed at 1.50ms — BELOW the 1.70-2.18ms clean-box band the
+    1.0ms floor was calibrated against, so the floor did not bind — while
+    the load tail landed at 2.2x the highest previously observed load_p95
+    (2.08ms). Both tails moved, in opposite directions, on a shared-tenancy
+    2-vCPU runner where two spinning writer threads plus the measuring
+    thread genuinely oversubscribe the CPU. A tail ratio cannot tell CPU
+    oversubscription from lock contention; the median can (a lock
+    regression serializes EVERY read, not just the tail), and the absolute
+    ceiling can (starvation costs tens to hundreds of ms, not ~4ms).
+
+    The 10.0x median threshold matches
+    ``test_memory_search_under_discover_topics_load`` in this file, which reached
+    the same conclusion for the same reason ("p95 of a ~1ms baseline can
+    swing +/-30% from a single OS scheduling event"), and matches what this
+    docstring always claimed the test was for: order-of-magnitude lock
+    regressions, not per-core scheduling variance.
     """
     db_path = tmp_path / "get_underload.db"
     db = T2Database(db_path)
@@ -437,27 +465,39 @@ def test_memory_get_under_concurrent_write_load(tmp_path: Path) -> None:
     # lowest of five clean runs), so it does not weaken the ratio in the regime
     # the ratio is for; it only stops a sub-millisecond denominator from
     # inventing one.
+    #
+    # nexus-c7l4n keeps that floor and moves the ratio itself off the tail:
+    # the denominator is now the baseline MEDIAN (still floored, for the same
+    # reason), and the numerator is the under-load MEDIAN. See the docstring
+    # for the GHA observation that forced it.
     _BASELINE_FLOOR_MS = 1.0
-    denom = max(baseline_p95, _BASELINE_FLOOR_MS)
-    ratio = load_p95 / denom
+    baseline_median = statistics.median(baseline)  # baseline already sorted
+    denom = max(baseline_median, _BASELINE_FLOOR_MS)
+    ratio = load_p50 / denom
+    _MEDIAN_RATIO_MAX = 10.0
 
     print(
         f"\n[rdr-063 under-load] memory_get n=100 entries=200 "
-        f"baseline_p95={baseline_p95:.2f}ms (denom={denom:.2f}ms) "
+        f"baseline_p95={baseline_p95:.2f}ms "
+        f"baseline_median={baseline_median:.2f}ms (denom={denom:.2f}ms) "
         f"load_p50={load_p50:.2f}ms load_p95={load_p95:.2f}ms "
-        f"load_p99={load_p99:.2f}ms ratio={ratio:.2f}x"
+        f"load_p99={load_p99:.2f}ms median_ratio={ratio:.2f}x"
     )
 
     # NON-VACUITY: the measurement has to have happened at all. A zeroed or
     # empty sample would satisfy both assertions below trivially.
     assert load_p95 > 0.0, "under-load sample is degenerate; nothing was measured"
+    assert load_p50 > 0.0, "under-load median is degenerate; nothing was measured"
 
     # (1) Relative: reads must not slow down against their OWN baseline on this
-    #     machine. Machine-independent, which is why it is worth keeping.
-    assert load_p95 < denom * 3.0, (
-        f"memory.get p95 inflated under concurrent write load: "
-        f"baseline_p95={baseline_p95:.2f}ms (denom={denom:.2f}ms) "
-        f"load_p95={load_p95:.2f}ms ratio={ratio:.2f}x (threshold 3.0x)"
+    #     machine. Machine-independent, which is why it is worth keeping — but
+    #     measured on the median, which a lock regression moves and scheduler
+    #     jitter does not.
+    assert load_p50 < denom * _MEDIAN_RATIO_MAX, (
+        f"memory.get median inflated under concurrent write load: "
+        f"baseline_median={baseline_median:.2f}ms (denom={denom:.2f}ms) "
+        f"load_p50={load_p50:.2f}ms ratio={ratio:.2f}x "
+        f"(threshold {_MEDIAN_RATIO_MAX:.1f}x)"
     )
 
     # (2) Absolute: the thing an operator actually cares about. Starvation —
@@ -475,11 +515,18 @@ def test_memory_get_under_concurrent_write_load(tmp_path: Path) -> None:
 
 
 def test_memory_search_under_concurrent_write_load(tmp_path: Path) -> None:
-    """memory_search p95 must stay within 3.0x baseline under write load.
+    """memory_search must not be starved by concurrent write load.
 
-    Ratio gate: 3.0x. CI runners show noisy-neighbor variance up to
-    2.5x. The test catches order-of-magnitude lock regressions, not
-    slight scheduling jitter.
+    Same two-gate shape as ``test_memory_get_under_concurrent_write_load``
+    above — see that docstring for the measurement argument. This test
+    carried the ORIGINAL, un-floored ``load_p95 / baseline_p95`` at 3.0x:
+    the exact form that fired on a dev box (nexus-3m01p) and then on GHA
+    (nexus-c7l4n) in its sibling, and it had no absolute ceiling at all, so
+    the only thing standing between it and the same spurious red was which
+    of the two the shard scheduler happened to run on a busy runner.
+    Converted here in the same change rather than left as a known landmine:
+    the relative gate moves to the floored MEDIAN, and it GAINS the 50ms
+    absolute starvation ceiling plus a non-vacuity assert it never had.
     """
     db_path = tmp_path / "underload.db"
     db = T2Database(db_path)
@@ -563,20 +610,43 @@ def test_memory_search_under_concurrent_write_load(tmp_path: Path) -> None:
     load_p50 = statistics.median(under_load)
     load_p95 = under_load[94]
     load_p99 = under_load[98]
-    ratio = load_p95 / baseline_p95 if baseline_p95 else float("inf")
+    _BASELINE_FLOOR_MS = 1.0
+    baseline_median = statistics.median(baseline)  # baseline already sorted
+    denom = max(baseline_median, _BASELINE_FLOOR_MS)
+    ratio = load_p50 / denom
+    _MEDIAN_RATIO_MAX = 10.0
 
     print(
         f"\n[rdr-063 under-load] memory_search n=100 entries=200 "
         f"baseline_p95={baseline_p95:.2f}ms "
+        f"baseline_median={baseline_median:.2f}ms (denom={denom:.2f}ms) "
         f"load_p50={load_p50:.2f}ms load_p95={load_p95:.2f}ms "
-        f"load_p99={load_p99:.2f}ms ratio={ratio:.2f}x"
+        f"load_p99={load_p99:.2f}ms median_ratio={ratio:.2f}x"
     )
 
-    # The acceptance gate: <3.0x baseline (CI runners are noisy).
-    assert load_p95 < baseline_p95 * 3.0, (
-        f"memory_search p95 inflated under concurrent write load: "
-        f"baseline_p95={baseline_p95:.2f}ms load_p95={load_p95:.2f}ms "
-        f"ratio={ratio:.2f}x (threshold 3.0x)"
+    # NON-VACUITY (new here): a zeroed or empty sample would satisfy both
+    # gates below trivially.
+    assert load_p95 > 0.0, "under-load sample is degenerate; nothing was measured"
+    assert load_p50 > 0.0, "under-load median is degenerate; nothing was measured"
+
+    # (1) Relative, on the median — a lock regression moves it, scheduler
+    #     jitter does not.
+    assert load_p50 < denom * _MEDIAN_RATIO_MAX, (
+        f"memory_search median inflated under concurrent write load: "
+        f"baseline_median={baseline_median:.2f}ms (denom={denom:.2f}ms) "
+        f"load_p50={load_p50:.2f}ms ratio={ratio:.2f}x "
+        f"(threshold {_MEDIAN_RATIO_MAX:.1f}x)"
+    )
+
+    # (2) Absolute (new here): the starvation ceiling. A read stuck behind a
+    #     write transaction costs tens to hundreds of ms, not the few ms this
+    #     measures, so it cannot fire on ordinary runner noise.
+    _LOAD_P95_CEILING_MS = 50.0
+    assert load_p95 < _LOAD_P95_CEILING_MS, (
+        f"memory_search p95 under concurrent write load is {load_p95:.2f}ms, "
+        f"over the {_LOAD_P95_CEILING_MS:.0f}ms starvation ceiling — reads are "
+        f"being blocked by writers, not merely slowed "
+        f"(load_p99={load_p99:.2f}ms)"
     )
 
 
