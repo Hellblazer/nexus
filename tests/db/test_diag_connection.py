@@ -41,7 +41,7 @@ class TestChokePoint:
         runner = _RecordingRunner()
         with pytest.raises(DiagnosticSqlViolation):
             run_diagnostic_sql(
-                ["SELECT count(*) FROM nexus.chunks_768",
+                ["SELECT count(*) FROM nexus.chunks",
                  "DELETE FROM nexus.memory"],
                 _CREDS, psql_bin=Path("/nope/psql"), psql_runner=runner,
             )
@@ -59,7 +59,7 @@ class TestChokePoint:
     def test_clean_statements_run_in_read_only_session(self):
         runner = _RecordingRunner()
         out = run_diagnostic_sql(
-            ["SELECT count(*) FROM nexus.chunks_768 WHERE length(chash) <> 32"],
+            ["SELECT count(*) FROM nexus.chunks WHERE length(chash) <> 32"],
             _CREDS, psql_bin=Path("/x/psql"), psql_runner=runner,
         )
         assert out == ["42"]
@@ -144,7 +144,7 @@ class TestLiveStoreDetailLocalOnly:
 
         with patch("nexus.config.is_local_mode", return_value=False):
             text = live_store_detail(
-                ["SELECT COUNT(*) FROM nexus.chunks_768;"],
+                ["SELECT COUNT(*) FROM nexus.chunks;"],
                 resolve=lambda: None, run=_run,
             )
         assert "LOCAL-ONLY" in text
@@ -328,7 +328,7 @@ class TestBundleLibLoaderGuard:
         runner = _RecordingRunner()
         psql = self._bundle_psql(tmp_path)
         run_diagnostic_sql(
-            ["SELECT count(*) FROM nexus.chunks_768"],
+            ["SELECT count(*) FROM nexus.chunks"],
             _CREDS, psql_bin=psql, psql_runner=runner,
         )
         env = runner.envs[0]
@@ -349,7 +349,7 @@ class TestBundleLibLoaderGuard:
         psql = tmp_path / "bin" / "psql"  # no sibling lib/
         psql.write_text("")
         run_diagnostic_sql(
-            ["SELECT count(*) FROM nexus.chunks_768"],
+            ["SELECT count(*) FROM nexus.chunks"],
             _CREDS, psql_bin=psql, psql_runner=runner,
         )
         env = runner.envs[0]

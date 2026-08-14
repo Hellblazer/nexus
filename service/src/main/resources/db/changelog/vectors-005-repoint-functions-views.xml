@@ -4,11 +4,16 @@
     every SQL object that named nexus.chunks_384/768/1024 or
     nexus.taxonomy_centroids_384/768/1024 directly, retargeted at the unified
     nexus.chunks / nexus.taxonomy_centroids tables
-    (db/changelog-staged/vectors-004-unify-chunks.xml,
-    db/changelog-staged/taxonomy-007-unify-centroids.xml). STAGED, dormant,
-    same convention as its two siblings — see this file's own header for why
-    (db.changelog-master.xml's comment block after catalog-028 has the full
-    changelog-parity-drift-lint rationale, identical for all three files).
+    (db/changelog/vectors-004-unify-chunks.xml,
+    db/changelog/taxonomy-007-unify-centroids.xml). LIVE and registered
+    together with its two siblings in db.changelog-master.xml (include block
+    after catalog-028) — see db.changelog-master.xml's comment block after
+    catalog-028 for the registration-order rationale, identical for all
+    three files. (nexus-evqoc, 2026-08-14: this paragraph previously read
+    "STAGED, dormant" under a db/changelog-staged/ path — accurate while the
+    batch was still awaiting registration, stale once o8dil.16-.19 landed
+    and registered it atomically; corrected here, no changeSet content
+    touched.)
 
     Plan of record: T2 nexus/rdr-191-repoint-batch-execution-plan-2026-08-13
     [22445] Step A, incorporating the four nx_plan_audit revisions recorded on

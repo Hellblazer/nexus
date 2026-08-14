@@ -3,8 +3,12 @@
 """Backfill ``document_aspects.doc_id`` for rows that the je0b PK
 migration left empty (nexus-f8u8).
 
-The 2026-05-11 RDR-108 Phase 5 verification (``scripts/rdr-108-verify.py``
-PROBE 5) surfaced 329 rows with NULL or empty ``doc_id``. These rows
+The 2026-05-11 RDR-108 Phase 5 verification (formerly
+``scripts/rdr-108-verify.py`` PROBE 5 -- deleted nexus-evqoc, 2026-08-14:
+a broken ``from nexus.catalog import open_cached`` import against a
+symbol that no longer exists, plus direct ``sqlite3`` access to the
+retired T2 store; see git history for the original probe) surfaced 329
+rows with NULL or empty ``doc_id``. These rows
 were written under the legacy ``(collection, source_path)`` PK and were
 not retroactively populated when je0b switched the PK to ``doc_id``.
 

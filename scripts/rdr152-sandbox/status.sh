@@ -96,7 +96,10 @@ if [[ -f "${CREDS_FILE}" ]]; then
         echo ""
         echo "=== Sandbox Postgres row counts (OS superuser, bypasses RLS) ==="
         OS_USER="${USER:-$(id -un)}"
-        for table in memory plans chash_index topics topic_assignments topic_links; do
+        # chash_index dropped at RDR-187 (nexus.chunks/nexus.chash_index no
+        # longer route through a separate router table) -- removed here per
+        # the nexus-rmver audit.
+        for table in memory plans topics topic_assignments topic_links; do
             CNT="$("${PSQL_BIN}" -h 127.0.0.1 -p "${PG_PORT}" \
                 -U "${OS_USER}" -d nexus \
                 -t -c "SELECT COUNT(*) FROM nexus.${table};" \
