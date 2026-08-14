@@ -37,6 +37,51 @@
       GRANT is naturally idempotent in PostgreSQL: re-granting an already-held privilege
       is a no-op (no error).  runAlways="true" is safe.
 -->
+<!--
+    nexus-bb5c8 (2026-08-14): grants-004-monitor-wal-visibility below grants
+    nexus_svc MEMBERSHIP in pg_monitor — that membership is not necessarily
+    usable privilege on its own; it depends on nexus_svc's INHERIT
+    attribute, which currently DIVERGES between deployment postures
+    (nexus-v80f2, tracked separately): the CLOUD deployment's nexus_svc IS
+    NOINHERIT (measured live, conexus relay [22485]) — a DELIBERATE security
+    posture there, since nexus_svc holds several role memberships whose
+    privileges must never become AMBIENT on every connection just because
+    the role holds them (RLS/BYPASSRLS adjacency). Local provisioning
+    (src/nexus/db/pg_provision.py's _create_roles) issues no NOINHERIT
+    clause today and keeps PostgreSQL's own INHERIT default, so
+    pg_monitor's privileges are already ambient on a local nexus_svc
+    session. Under NOINHERIT, a plain nexus_svc session gets permission
+    denied from pg_ls_waldir() / pg_stat_* until it explicitly issues SET
+    ROLE pg_monitor first, then (optionally) RESET ROLE after —
+    PostgreSQL's documented behaviour for NOINHERIT membership, not a bug
+    in this grant; under INHERIT the same SET ROLE is a harmless no-op.
+
+    DECISION OF RECORD: SET ROLE is the SUPPORTED path, issued
+    UNCONDITIONALLY so it is correct in both postures without probing which
+    one is live — not a workaround. Rejected alternatives: ALTER ROLE
+    nexus_svc INHERIT (would make EVERY granted role's privileges ambient
+    on every connection, not just pg_monitor's — far beyond WAL visibility,
+    and moot for the cloud posture this decision must also cover) and a
+    SECURITY DEFINER wrapper function (adds an owned function surface for
+    something SET ROLE already does cleanly). The product-side
+    implementation of this contract is src/nexus/db/svc_monitor.py — the
+    one place a nexus_svc session escalates to pg_monitor for a query, then
+    drops back; see its module docstring for the full rationale. The nx
+    doctor check-wal-retention flag is its first consumer.
+
+    CHECKSUM SAFETY of this note's placement: it sits entirely outside any
+    changeSet element — between the closing delimiter of the file's
+    original top comment above and the opening databaseChangeLog tag
+    below — so it cannot affect any changeset's MD5 checksum. Every
+    changeSet in this file is runAlways="true" regardless, for which
+    Liquibase's ValidatingVisitor skips the checksum comparison entirely
+    (shouldAlwaysRun()), so editing a changeset body here would also be
+    checksum-safe (same as grants-003's own body-guard comment already
+    documents); this note is placed at the file level anyway, to stay
+    visible to a reader scanning the header independent of any single
+    changeset, and to avoid growing the already-long grants-004 comment
+    further.
+-->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"

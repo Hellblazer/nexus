@@ -1364,6 +1364,23 @@ def _run_check_mineru() -> None:
          "is informational (a bare CLI legitimately has none).",
 )
 @click.option(
+    "--check-wal-retention",
+    "check_wal_retention",
+    is_flag=True,
+    default=False,
+    help="Sample retained WAL bytes (local service only) via "
+         "pg_ls_waldir(), escalating a nexus_svc session to pg_monitor "
+         "with SET ROLE first — unconditionally, since nexus_svc's "
+         "INHERIT attribute currently diverges between deployment "
+         "postures (cloud is NOINHERIT, measured; local provisioning "
+         "keeps PG's INHERIT default, nexus-v80f2), and SET ROLE is a "
+         "harmless no-op under INHERIT. Reports UNMEASURED, never a "
+         "false clean, when no local nexus_svc credentials exist "
+         "(managed/BYO deployment) or the escalation is refused "
+         "(grants-004 not applied). Always exit 0 — informational. "
+         "nexus-bb5c8.",
+)
+@click.option(
     "--check-t3-legacy-metadata",
     "check_t3_legacy_metadata",
     is_flag=True,
@@ -1421,6 +1438,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_post_store_hooks: bool,
                check_aspect_queue: bool,
                check_t1: bool,
+               check_wal_retention: bool,
                check_t3_legacy_metadata: bool,
                strict_legacy_metadata: bool,
                check_dangling_links: bool,
@@ -1491,6 +1509,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_t1:
         _run_check_t1()
+        return
+
+    if check_wal_retention:
+        _run_check_wal_retention()
         return
 
     if check_tier_discipline:
@@ -1890,6 +1912,35 @@ def _run_check_t1() -> None:
         f"rm {lease_path}"
     )
     raise click.exceptions.Exit(1)
+
+
+def _run_check_wal_retention() -> None:
+    """Diagnostic: retained WAL bytes via nexus_svc's pg_monitor escalation.
+
+    nexus-bb5c8: grants-004-monitor-wal-visibility grants nexus_svc
+    MEMBERSHIP in pg_monitor, but membership alone does not make
+    pg_ls_waldir() callable under NOINHERIT -- and the CLOUD deployment's
+    nexus_svc IS NOINHERIT (measured live, conexus relay [22485]); local
+    provisioning currently keeps PostgreSQL's INHERIT default instead
+    (divergence tracked separately as nexus-v80f2). See
+    nexus.db.svc_monitor's module docstring for the full posture split --
+    its SET-ROLE escalation is issued unconditionally and is correct
+    either way. This is the first product consumer of that escalation --
+    no other call site samples pg_ls_waldir() in-repo.
+
+    Always exit 0: this is informational (RDR-191 Phase 4 trough-window
+    context, not a pass/fail gate), and every degrade path
+    (nexus.db.svc_monitor.wal_retention_report) already renders an
+    explicit UNMEASURED marker rather than a false clean -- there is
+    nothing here for a hard failure to add.
+    """
+    from nexus.db.svc_monitor import wal_retention_report  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    report = wal_retention_report()
+    if report.startswith("WAL retention: UNMEASURED"):
+        click.echo(f"[ ] {report}")
+    else:
+        click.echo(f"[✓] {report}")
 
 
 # ── --check-quotas (nexus-c590) ──────────────────────────────────────────────
