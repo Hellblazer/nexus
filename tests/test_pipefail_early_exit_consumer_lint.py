@@ -806,34 +806,33 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_acquire.sh:122",
         "tests/e2e/migration-rehearsal/rehearse_acquire.sh:134",
         "tests/e2e/migration-rehearsal/rehearse_acquire.sh:80",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:101",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:149",
-        # nexus-azx14 (RDR-191): every entry below :190 shifted after the
-        # post-swap asserts were retargeted to the unified nexus.chunks
-        # (the shards are dropped by vectors-004 at the cohort boot): +9
-        # from the era guard growing a table-absent arm, +6 from the
-        # window asserts, +4 from the live-constraint-set VALIDATED
-        # retarget. Numbers regenerated from the detector itself
-        # (_early_exit_consumer_hits), not arithmetic.
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:244",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:247",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:283",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:288",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:293",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:327",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:330",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:351",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:354",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:402",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:418",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:519",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:522",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:531",
+        # nexus-eo3qv (post-cutover REDESIGN): every entry below shifted
+        # after the header docstring grew (+~20 lines), the old Stage 4
+        # engine-swap block was retired (-~14 lines net after the Stage
+        # 4/5 rewrite), and the era-guard prose was reworded. Numbers
+        # regenerated from the detector itself (_early_exit_consumer_hits),
+        # not arithmetic.
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:99",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:118",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:167",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:266",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:269",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:301",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:306",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:311",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:345",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:348",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:369",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:372",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:420",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:436",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:537",
         "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:540",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:545",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:561",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:566",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:82",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:549",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:558",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:563",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:579",
+        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:584",
         "tests/e2e/migration-rehearsal/rehearse_cold.sh:113",
         "tests/e2e/migration-rehearsal/rehearse_cold.sh:77",
         "tests/e2e/migration-rehearsal/rehearse_era_hop.sh:143",
@@ -951,11 +950,15 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_stranded.sh:361",
         "tests/e2e/migration-rehearsal/rehearse_stranded.sh:377",
         "tests/e2e/migration-rehearsal/rehearse_stranded.sh:80",
-        "tests/e2e/migration-rehearsal/run.sh:538",
-        "tests/e2e/migration-rehearsal/run.sh:569",
-        "tests/e2e/migration-rehearsal/run.sh:583",
-        "tests/e2e/migration-rehearsal/run.sh:638",
-        "tests/e2e/migration-rehearsal/run.sh:655",
+        # nexus-eo3qv: shifted after the CHASH_WINDOW redesign added net
+        # lines to run.sh (header comments, the inverted FATAL guard, the
+        # wheel-only build-branch rewiring). Numbers regenerated from the
+        # detector itself (_early_exit_consumer_hits), not arithmetic.
+        "tests/e2e/migration-rehearsal/run.sh:592",
+        "tests/e2e/migration-rehearsal/run.sh:623",
+        "tests/e2e/migration-rehearsal/run.sh:639",
+        "tests/e2e/migration-rehearsal/run.sh:694",
+        "tests/e2e/migration-rehearsal/run.sh:711",
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.

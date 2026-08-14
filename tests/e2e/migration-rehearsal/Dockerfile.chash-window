@@ -1,17 +1,26 @@
 # syntax=docker/dockerfile:1
-# nexus-p78a0 — RDR-180 CHASH-WINDOW rehearsal box.
+# nexus-p78a0 (RDR-180) + nexus-eo3qv (post-cutover REDESIGN) —
+# CHASH-WINDOW rehearsal box.
 #
-# Same quarantine posture as Dockerfile.cold (no system PostgreSQL, no
-# pre-staged engine, no ONNX model), with TWO deliberate differences:
+# Same quarantine posture as Dockerfile.cold / Dockerfile.era-hop (no
+# system PostgreSQL, no pre-staged engine, no ONNX model). NO pre-installed
+# conexus AT ALL — the driver `uv tool install`s the last pre-cohort
+# release (conexus==$OLD_RELEASE) from real PyPI at runtime, then
+# force-reinstalls the staged worktree wheel over it into the SAME tool
+# venv. A TOOL install (not a plain venv) because running_from_tool_install()
+# gates the version-transition finish pass whose [upgrade-finish] callout
+# line is the surface under test.
 #
-#   1. NO pre-installed conexus AT ALL — the driver `uv tool install`s the
-#      last pre-cohort release from real PyPI at runtime, then swaps to the
-#      staged worktree wheel. A TOOL install (not a venv) because
-#      running_from_tool_install() gates the version-transition finish pass
-#      whose [upgrade-finish] callout line is the surface under test.
-#   2. The locally-built COHORT engine binary travels in under native/ —
-#      the cohort tag is unpublished pre-cutover, so the driver swaps it in
-#      by hand (documented there as the harness's only engine supply).
+# nexus-eo3qv: NO engine binary of any kind travels in this image. Both
+# engines are acquired at runtime by the product's own code — the
+# pre-cohort engine ($OLD_ENGINE_TAG, a HISTORICAL PIN — see run.sh's
+# CHASH_OLD_ENGINE_TAG comment) via `nx daemon service install-binary`,
+# and the current floor engine via converge_engine's real download path
+# when the version transition fires on the first new-client invocation.
+# Same runtime-acquisition posture as Dockerfile.era-hop /
+# Dockerfile.package-upgrade: the harness never supplies an engine binary,
+# because if it did the window-close assertions would prove nothing about
+# the real upgrade path.
 FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -38,9 +47,9 @@ RUN pip3 install --no-cache-dir --break-system-packages uv
 USER nexus
 WORKDIR /home/nexus
 
-# The staged cohort engine (nexus-service + the -Ob build's .so siblings),
-# the worktree wheel (real PEP 427 name preserved), and the driver.
-COPY --chown=nexus:nexus native/ /home/nexus/native/
+# The worktree wheel (real PEP 427 name preserved) and the driver. No
+# engine artifact — both engines are acquired at runtime by the product's
+# own code (see the header comment above).
 COPY --chown=nexus:nexus worktree-wheel/ /home/nexus/worktree-wheel/
 COPY --chown=nexus:nexus rehearse_chash_window.sh /home/nexus/rehearse_chash_window.sh
 

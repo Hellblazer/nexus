@@ -43,11 +43,21 @@ The Java CI (`service-ci.yml`) is **advisory** — it does not block auto-merge 
 > arg loop with a RETIRED message and exit 2. This step named `--guided` for
 > one cut after the retirement and would have failed the next engine cut at the
 > gate. Surviving journeys: `--era-hop`, `--package-upgrade`, `--shakeout`,
-> `--fullstack`, `--chash-window` (⚠ INVERTED since the floor crossed the
-> RDR-180 cohort: run.sh pins old-tag == floor, and a post-cohort/post-unify
-> floor engine has no pre-cohort window to open — the leg now ABORTS LOUD at
-> its era guard by design, pointing at redesign bead nexus-eo3qv; an abort
-> there is the expected state, NOT a candidate regression), `--stranded`
+> `--fullstack`, `--chash-window` (LIVE again post-nexus-eo3qv: run.sh now
+> pins CHASH_OLD_RELEASE/CHASH_OLD_ENGINE_TAG as a HISTORICAL PIN at the
+> last genuinely pre-cohort pair — 6.13.1 / engine-service-v0.1.47, frozen
+> forever, never rotating with the floor — instead of requiring old-tag ==
+> floor. COVERAGE, stated plainly (substantive-critic finding, 2026-08-14,
+> T2 nexus/critique-nexus-eo3qv-chash-window-redesign-2026-08-14): (i) this
+> leg exercises the PUBLISHED floor engine's changeset walk (rdr180-001
+> bytea + the RDR-191 vectors-004 unify) against a genuinely populated
+> pre-cohort store, plus the client's window UX; (ii) `--shakeout` drives
+> the LOCALLY-BUILT candidate binary, but only on a FRESH install with no
+> pre-cohort data — it carries zero chash/rdr180/cohort logic; (iii) a
+> CANDIDATE's new migration changesets running against POPULATED
+> pre-cohort data are covered by NO leg in this harness today — tracked as
+> nexus-z0ylb (P2). Do not read `--chash-window` + `--shakeout` together as
+> closing that gap — they don't), `--stranded`
 > (nexus-8nlj4: two-hop
 > stranded-redirect — armed-detector refusal + pin-side migration; weekly
 > heartbeat via stranded-redirect-rehearsal.yml, dispatch it on demand when a

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# nexus-p78a0 (RDR-180, critic-180-cohort finding 6) — the CHASH-WINDOW
-# rehearsal. Runs INSIDE the container.
+# nexus-p78a0 (RDR-180, critic-180-cohort finding 6) + nexus-eo3qv
+# (post-cutover REDESIGN) — the CHASH-WINDOW rehearsal. Runs INSIDE the
+# container.
 #
 # The window under test: a pre-cutover (legacy 32-hex chash) store whose
-# ENGINE has been swapped to the RDR-180 cohort (Liquibase rdr180-001/002
+# ENGINE has been converged to the RDR-180 cohort (Liquibase rdr180-001/002
 # converts the chash columns to bytea at boot) while the client's
 # chash-rekey rung has NOT yet run. In production this window opens when
 # the CLI auto-converge (check_version_transition -> converge_engine)
@@ -21,6 +22,23 @@
 #      its digest, the five octet CHECKs are convalidated, and citations
 #      resolve at BOTH widths (64 direct, 32 via the chash_alias route).
 #
+# nexus-eo3qv REDESIGN (post-cutover: the floor engine is itself
+# post-unify, RDR-191). The old premise — CHASH_OLD_ENGINE_TAG == the
+# floor, with a locally-built cohort binary hand-swapped in because the
+# cohort tag was unpublished pre-cutover — inverted once the floor moved
+# past the cohort. CHASH_OLD_RELEASE/CHASH_OLD_ENGINE_TAG (run.sh) are now
+# a HISTORICAL PIN, frozen forever at the last genuinely pre-cohort pair
+# (6.13.1 / engine-service-v0.1.47) — the same pattern ERA_RELEASE/
+# ERA_ENGINE_TAG already uses. There is no more harness-supplied engine
+# binary of any kind: BOTH engines in this rehearsal are acquired for real
+# by the product's own code — the OLD one via `nx daemon service
+# install-binary` (Stage 2), the FLOOR one via converge_engine's real
+# download path when the transition fires (Stage 5). A single container
+# boot therefore walks BOTH eras in the store in the same Liquibase pass:
+# rdr180-001 (chash TEXT -> bytea) AND vectors-004 (per-dim shards -> the
+# unified nexus.chunks, RDR-191) — the floor engine's changelog carries
+# both by now.
+#
 #   uv tool install conexus==$OLD_RELEASE   the last pre-cohort release,
 #                                            from real PyPI. A TOOL install
 #                                            deliberately (not a venv):
@@ -30,31 +48,30 @@
 #                                            exact surface the callout
 #                                            assert exercises.
 #   nx daemon service install-binary +      the last pre-cohort engine
-#   nx init --service                        ($OLD_ENGINE_TAG): TEXT-era
+#   nx init --service                        ($OLD_ENGINE_TAG, a REAL
+#                                            published download): TEXT-era
 #                                            chash schema, provenance
-#                                            sidecar written at the FLOOR
-#                                            version.
+#                                            sidecar written at
+#                                            $OLD_ENGINE_TAG (below the
+#                                            floor).
 #   nx store put xN                         the OLD producer seeds real
 #                                            legacy 32-hex chashes.
-#   <binary swap>                           THE ONLY ENGINE SUPPLY IN THIS
-#                                            HARNESS, deliberate: the
-#                                            cohort tag is UNPUBLISHED
-#                                            pre-cutover, so converge's
-#                                            download path cannot deliver
-#                                            it (that path is
-#                                            --package-upgrade's claim).
-#                                            The provenance sidecar is
-#                                            left untouched at the floor
-#                                            == $OLD_ENGINE_TAG, so
-#                                            converge_engine must NO-OP
-#                                            over the swap — asserted by
-#                                            sha256 after the transition.
-#   uv tool install --force <wheel>         the RDR-180-aware client.
+#   uv tool install --force <wheel>         the RDR-180-aware client, over
+#                                            the SAME tool venv — the
+#                                            pre-cohort engine keeps
+#                                            running underneath, untouched,
+#                                            exactly like a real persistent
+#                                            daemon surviving a
+#                                            package-only client upgrade.
 #   nx daemon service start                 FIRST new-client invocation:
-#                                            the transition fires, the
-#                                            callout must surface; boot
-#                                            runs the Liquibase bytea
-#                                            conversion.
+#                                            the transition fires;
+#                                            converge_engine downloads the
+#                                            PUBLISHED floor engine for
+#                                            real (the sidecar is still
+#                                            below floor) and cycles the
+#                                            service; boot runs the
+#                                            Liquibase bytea conversion
+#                                            (+ the RDR-191 unify).
 #   nx upgrade                              closes the window.
 set -uo pipefail
 
@@ -110,9 +127,10 @@ fi
 
 # ── Stage 2: the OLD engine + provision ──────────────────────────────────────
 # install-binary writes the provenance sidecar the convergence detector
-# reads; the tag is the FLOOR tag, so after the wheel swap converge_engine
-# sees installed == required and must not touch the (by then swapped)
-# binary. run.sh guards OLD_ENGINE_TAG == floor before launching.
+# reads; the tag is the HISTORICAL pre-cohort tag, genuinely below the
+# floor, so after the client package swap (Stage 4) converge_engine sees
+# installed != required and downloads the real floor engine for itself
+# (Stage 5) — run.sh guards OLD_ENGINE_TAG < floor before launching.
 say "Stage 2a — pre-stage the pre-cohort engine + PG bundle ($OLD_ENGINE_TAG)"
 unset NEXUS_SERVICE_TAG NX_SERVICE_TAG 2>/dev/null || true
 if nx daemon service install-binary "$OLD_ENGINE_TAG" 2>&1 | tail -8 | sed 's/^/       /'; then
@@ -181,24 +199,28 @@ diag_sql() {
 
 # ── ERA GUARD: the old engine must really be TEXT-era ────────────────────────
 # The package-upgrade/era-hop staleness-guard morphology, enforced against
-# the REAL store instead of tag arithmetic: once the cohort ships as the
-# pinned engine, this leg's "old era" would already be bytea and every
-# window assert below would grade a store that never had a window. At that
-# point the leg needs a redesign (OLD_* moves to the last pre-cohort pair,
-# and the swap step can retire in favour of converge's real download path).
+# the REAL store instead of tag arithmetic. Post nexus-eo3qv,
+# CHASH_OLD_RELEASE/CHASH_OLD_ENGINE_TAG (run.sh) are a HISTORICAL PIN,
+# frozen forever at the last genuinely pre-cohort pair — they do not rotate
+# with the floor, so this guard should always see a real TEXT-era store.
+# run.sh's own arg-loop guard already refuses any OLD_ENGINE_TAG that is
+# not below the floor before this container even builds; a failure here
+# means OLD_ENGINE_TAG was misconfigured by an env override, not that the
+# window closed for good — repointing NEXUS_CHASH_OLD_RELEASE/
+# NEXUS_CHASH_OLD_ENGINE_TAG at the genuine last pre-cohort pair reopens it.
 say "Era guard — the pre-cohort store must be TEXT-era"
 COLTYPE="$(diag_sql "SELECT data_type FROM information_schema.columns WHERE table_schema='nexus' AND table_name='chunks_768' AND column_name='chash'")"
 if [ "$COLTYPE" = "bytea" ]; then
-  bad "chunks_768.chash is ALREADY bytea under $OLD_ENGINE_TAG — there is no window to rehearse (post-cutover: repoint NEXUS_CHASH_OLD_RELEASE/NEXUS_CHASH_OLD_ENGINE_TAG at the last pre-cohort pair, or redesign per nexus-eo3qv)"
+  bad "chunks_768.chash is ALREADY bytea under $OLD_ENGINE_TAG — OLD_ENGINE_TAG is misconfigured (not genuinely pre-cohort); check NEXUS_CHASH_OLD_ENGINE_TAG overrides against run.sh's historical pin"
   say "ABORT (vacuous fixture)"; exit 1
 fi
 # nexus-azx14: a floor at/above v0.1.75 has UNIFIED the shards away —
 # chunks_768 is absent entirely and COLTYPE comes back empty. That is the
-# same inverted premise as the bytea case, one era further along; without
-# this arm the guard passed VACUOUSLY on the empty string and the run died
-# incomprehensibly at the first seed count instead of here.
+# same misconfiguration one era further along; without this arm the guard
+# passed VACUOUSLY on the empty string and the run died incomprehensibly at
+# the first seed count instead of here.
 if [ "$COLTYPE" != "text" ]; then
-  bad "chunks_768 is ABSENT or non-TEXT under $OLD_ENGINE_TAG (data_type='$COLTYPE'; pre-cohort schema is TEXT, vectors-001) — the RDR-191 unify has already run, the premise is two eras gone. This leg needs the nexus-eo3qv redesign; repointing env vars cannot reopen the window (run.sh requires old-tag == floor)"
+  bad "chunks_768 is ABSENT or non-TEXT under $OLD_ENGINE_TAG (data_type='$COLTYPE'; pre-cohort schema is TEXT, vectors-001) — OLD_ENGINE_TAG is misconfigured (not genuinely pre-cohort); check NEXUS_CHASH_OLD_ENGINE_TAG overrides against run.sh's historical pin"
   say "ABORT (vacuous fixture)"; exit 1
 fi
 ok "chunks_768.chash is '$COLTYPE' — genuinely pre-cohort"
@@ -248,36 +270,32 @@ else
   bad "old-era search cannot find the seeded marker — fixture broken before the swap"
 fi
 
-# ── Stage 4: stop, swap the ENGINE, swap the CLIENT ──────────────────────────
-say "Stage 4 — stop service; swap in the cohort engine (the ONLY harness engine supply)"
-nx daemon service stop 2>&1 | tail -3 | sed 's/^/       /' || true
+# ── Stage 4: package swap to the working tree ────────────────────────────────
+# nexus-eo3qv: the old "stop service; swap in the cohort engine" stage is
+# RETIRED — there is no harness-supplied engine binary any more. The
+# pre-cohort engine from Stage 2 is left running, untouched, through the
+# package swap below — exactly like a real persistent daemon surviving a
+# package-only client upgrade (`uv tool install --force` only replaces the
+# CLIENT venv; nothing here stops or touches the storage service). OLD_SHA
+# is captured now, before the swap, so Stage 5 can prove converge_engine
+# genuinely re-downloads a DIFFERENT binary rather than no-op'ing.
+say "Stage 4 — package swap to the working tree (uv tool install --force)"
 SVCDIR="$HOME/.config/nexus/service"
 OLD_SHA="$(sha256sum "$SVCDIR/nexus-service" | awk '{print $1}')"
-cp /home/nexus/native/nexus-service "$SVCDIR/nexus-service"
-chmod +x "$SVCDIR/nexus-service"
-if compgen -G "/home/nexus/native/*.so" > /dev/null; then
-  cp /home/nexus/native/*.so "$SVCDIR/"   # local -Ob build dlopen's JDK libs from its own dir
-fi
-COHORT_SHA="$(sha256sum "$SVCDIR/nexus-service" | awk '{print $1}')"
-[ "$OLD_SHA" != "$COHORT_SHA" ] \
-  && ok "cohort binary swapped in (sha ${COHORT_SHA:0:12}…, was ${OLD_SHA:0:12}…)" \
-  || bad "binary sha unchanged after the swap — the cohort binary did not land"
-note "provenance sidecar left at $OLD_ENGINE_TAG (== floor): converge_engine must no-op"
-
-say "Stage 5 — package swap to the working tree (uv tool install --force)"
 if uv tool install --python 3.12 --force "$WHEEL" 2>&1 | tail -4 | sed 's/^/       /'; then
   ok "tool reinstalled from the worktree wheel"
 else
   bad "uv tool install --force failed"; say "ABORT"; exit 1
 fi
+note "provenance sidecar still names $OLD_ENGINE_TAG (== $OLD_EXPECT, below the floor v$FLOOR_VERSION) — the pre-cohort engine is still running underneath the new client"
 
-# ── Stage 6: FIRST new-client invocation — the transition + the callout ──────
+# ── Stage 5: FIRST new-client invocation — the transition + the callout ──────
 # `nx daemon service start` is deliberately the first invocation: the root
 # CLI group runs check_version_transition BEFORE the subcommand, so the
-# [upgrade-finish] summary (converge no-op + pending_data_rung_callout)
-# lands in THIS capture, with the cohort binary on disk — the same summary
-# a production box prints when auto-converge opens the window for real.
-say "Stage 6 — nx daemon service start (transition fires; boot converts to bytea)"
+# [upgrade-finish] summary (a REAL converge_engine download + cycle, plus
+# pending_data_rung_callout) lands in THIS capture — the same summary a
+# production box prints when auto-converge opens the window for real.
+say "Stage 5 — nx daemon service start (transition fires; converge downloads the floor engine; boot converts to bytea)"
 START_OUT="$(nx daemon service start 2>&1 < /dev/null)"
 printf '%s\n' "$START_OUT" | sed 's/^/       /'
 if printf '%s' "$START_OUT" | grep -q "\[upgrade-finish\]"; then
@@ -294,17 +312,17 @@ GOT_VER2="$(nx --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 [ "$GOT_VER2" = "$WHEEL_VER" ] && ok "client is now the worktree build ($GOT_VER2)" \
   || bad "client reports $GOT_VER2, expected $WHEEL_VER"
 POST_TRANSITION_SHA="$(sha256sum "$SVCDIR/nexus-service" | awk '{print $1}')"
-[ "$POST_TRANSITION_SHA" = "$COHORT_SHA" ] \
-  && ok "converge_engine left the swapped binary alone (floor satisfied by the sidecar)" \
-  || bad "the transition REPLACED the cohort binary (sha ${POST_TRANSITION_SHA:0:12}…) — the floor/sidecar premise broke and the window collapsed"
+[ -n "$POST_TRANSITION_SHA" ] && [ "$POST_TRANSITION_SHA" != "$OLD_SHA" ] \
+  && ok "converge_engine downloaded + installed the floor engine for real (sha changed: ${POST_TRANSITION_SHA:0:12}…, was ${OLD_SHA:0:12}…)" \
+  || bad "engine binary sha256 did not change (got '$POST_TRANSITION_SHA') — convergence did not really download the floor engine over the pre-cohort one"
 
-if _wait_healthy 60; then ok "cohort engine healthy (Liquibase conversion completed at boot)"; else
+if _wait_healthy 60; then ok "floor engine healthy (Liquibase conversion completed at boot)"; else
   nx daemon service status 2>&1 | sed 's/^/       /' || true
-  bad "cohort engine did not reach healthy — Liquibase conversion failed?"; say "ABORT"; exit 1
+  bad "floor engine did not reach healthy — Liquibase conversion failed?"; say "ABORT"; exit 1
 fi
 RV1="$(_release_version)"
-[ "$RV1" = "$FLOOR_VERSION" ] && ok "/version release_version=$RV1 (the stamped cohort build)" \
-  || note "/version release_version=$RV1 (informational — identity is proven by sha + schema, not the stamp)"
+[ "$RV1" = "$FLOOR_VERSION" ] && ok "/version release_version=$RV1 — converge_engine installed the published floor engine" \
+  || bad "/version release_version=$RV1, expected $FLOOR_VERSION — convergence did not install the floor engine"
 
 # ── THE WINDOW: engine converted, rung not run ───────────────────────────────
 say "Window assert — the store converted to bytea, legacy rows INTACT"
@@ -406,8 +424,8 @@ else
   say "ABORT (vacuous fixture)"; exit 1
 fi
 
-# ── Stage 7: CLOSE the window — nx upgrade ───────────────────────────────────
-say "Stage 7 — nx upgrade (freeze -> rekey -> VALIDATE -> re-provision; unattended)"
+# ── Stage 6: CLOSE the window — nx upgrade ───────────────────────────────────
+say "Stage 6 — nx upgrade (freeze -> rekey -> VALIDATE -> re-provision; unattended)"
 UP_OUT="$(nx upgrade 2>&1 < /dev/null)"
 UP_RC=$?
 printf '%s\n' "$UP_OUT" | sed 's/^/       /'
