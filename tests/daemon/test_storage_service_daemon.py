@@ -17,9 +17,14 @@ and Java JAR; they are excluded from the default unit suite.
 """
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -30,6 +35,7 @@ from nexus.daemon.service_registry import (
     ServiceRegistry,
     ServiceSupervisor,
     StaleOwnerError,
+    process_state,
 )
 from nexus.daemon.storage_service_daemon import (
     StopOutcome,
@@ -1927,7 +1933,12 @@ class TestEnsureStorageSupervisor:
         from nexus.commands import daemon as daemon_mod
 
         self._publish_fresh_lease(config_dir)
-        with patch.object(daemon_mod.subprocess, "Popen") as popen:
+        # process_state stubbed alive-shaped: on a /proc-less box it shells out
+        # to `ps` via the same stdlib subprocess symbol this test mocks
+        # (nexus-o8dil.21). The lease's supervisor_pid IS this live test
+        # process, so "S" is the faithful answer.
+        with patch("nexus.daemon.service_registry.process_state", return_value="S"), \
+             patch.object(daemon_mod.subprocess, "Popen") as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
         assert rec is not None
         popen.assert_not_called()  # idempotent: a live lease is never re-spawned
@@ -1953,7 +1964,8 @@ class TestEnsureStorageSupervisor:
         monkeypatch.setenv("NEXUS_SERVICE_BIN", str(other_binary))
         monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
 
-        with patch.object(daemon_mod.subprocess, "Popen") as popen:
+        with patch("nexus.daemon.service_registry.process_state", return_value="S"), \
+             patch.object(daemon_mod.subprocess, "Popen") as popen:
             with pytest.raises(StorageServiceStartError, match="DIFFERENT artifact"):
                 daemon_mod.ensure_storage_supervisor(config_dir)
         popen.assert_not_called()
@@ -1988,7 +2000,8 @@ class TestEnsureStorageSupervisor:
         monkeypatch.setenv("NEXUS_SERVICE_BIN", str(other_binary))
         monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
 
-        with patch.object(daemon_mod.subprocess, "Popen") as popen:
+        with patch("nexus.daemon.service_registry.process_state", return_value="S"), \
+             patch.object(daemon_mod.subprocess, "Popen") as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
         popen.assert_not_called()
         assert rec is not None and rec.endpoint.get("port") == 18099
@@ -2040,7 +2053,9 @@ class TestEnsureStorageSupervisor:
         from nexus.daemon.service_registry import ServiceRegistry
 
         # A fresh, supervised lease (payload carries supervisor_pid). Patch
-        # _pid_is_alive False so the guard treats that supervisor as dead.
+        # the guard's probe False so it treats that supervisor as dead.
+        # The probe is ``_pid_is_running``, not ``_pid_is_alive``, since
+        # nexus-o8dil.21 — see the zombie sibling test below for why.
         self._publish_fresh_lease(config_dir, port=18093)
         scope = str(os.getuid())
         assert ServiceRegistry(dir=config_dir, tier="storage_service").discover(scope) is not None
@@ -2049,7 +2064,7 @@ class TestEnsureStorageSupervisor:
             self._publish_fresh_lease(config_dir, port=18094)
             return MagicMock()
 
-        with patch.object(ssd_mod, "_pid_is_alive", return_value=False), \
+        with patch.object(ssd_mod, "_pid_is_running", return_value=False), \
              patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
              patch.object(daemon_mod.subprocess, "Popen", side_effect=_popen_publishes) as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
@@ -2057,12 +2072,85 @@ class TestEnsureStorageSupervisor:
         popen.assert_called_once()  # dead lease must trigger a re-spawn
         assert rec is not None and rec.endpoint.get("port") == 18094
 
+    def test_zombie_supervisor_pid_relinquishes_and_respawns(
+        self, config_dir: Path
+    ) -> None:
+        """nexus-o8dil.21. Same heal, but with a REAL zombie and NO patched
+        probe — which is the only way to prove the fix, since the whole
+        defect is that the old probe could not tell a corpse from a
+        supervisor.
+
+        ``_pid_is_alive`` is ``os.kill(pid, 0)`` and succeeds indefinitely
+        on a killed-but-unreaped process. When PID 1 is not a real init (a
+        container whose PID 1 is a shell script; a CI runner), a
+        hard-crashed supervisor stays exactly that — so this heal, which
+        exists for the hard-crash case, never fired there: the fresh lease
+        stayed, ``start`` short-circuited onto it, and the box served a
+        dead supervisor's endpoint until the TTL ran out.
+
+        RED-FIRST: against the pre-fix call site (``_pid_is_alive``) the
+        guard sees "alive", no re-spawn happens, and ``popen`` is never
+        called.
+        """
+        from nexus.commands import daemon as daemon_mod
+        from nexus.daemon.service_registry import (
+            ServiceRegistry,
+            ServiceSupervisor,
+        )
+
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [sys.executable, "-c", "import time; time.sleep(120)"],
+        )
+        try:
+            os.kill(proc.pid, signal.SIGKILL)
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline and process_state(proc.pid) != "Z":
+                time.sleep(0.02)
+            assert process_state(proc.pid) == "Z", "fixture must be a zombie"
+
+            registry = ServiceRegistry(
+                dir=config_dir, tier="storage_service", clock=time.time,
+            )
+            ServiceSupervisor(
+                registry, str(os.getuid()), version="0.0.0",
+                endpoint_provider=lambda: {
+                    "host": "127.0.0.1", "port": 18096, "pid": proc.pid,
+                    "token": "tok",
+                },
+                payload={"supervisor_pid": proc.pid},
+            ).publish_once()
+
+            def _popen_publishes(*_a, **_k):
+                self._publish_fresh_lease(config_dir, port=18097)
+                return MagicMock()
+
+            # Shadow daemon_mod's OWN `subprocess` reference rather than
+            # patching the stdlib module's Popen attribute: process_state
+            # legitimately shells out to `ps` on a /proc-less box, and a
+            # global Popen mock would break that real probe — which is the
+            # thing under test here (nexus-o8dil.21).
+            popen = MagicMock(side_effect=_popen_publishes)
+            fake_subprocess = SimpleNamespace(
+                Popen=popen, DEVNULL=subprocess.DEVNULL,
+            )
+            with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
+                 patch.object(daemon_mod, "subprocess", fake_subprocess):
+                rec = daemon_mod.ensure_storage_supervisor(config_dir)
+        finally:
+            with contextlib.suppress(ChildProcessError, OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=5)
+
+        # A zombie supervisor is a CRASHED supervisor: its fresh lease must be
+        # reclaimed and the stack re-spawned.
+        popen.assert_called_once()
+        assert rec is not None and rec.endpoint.get("port") == 18097
+
     def test_absent_supervisor_pid_trusts_ttl_freshness(
         self, config_dir: Path
     ) -> None:
         """A lease WITHOUT a supervisor_pid (legacy/non-supervised) must fall
         through to the existing TTL-freshness short-circuit — no spurious
-        re-spawn — even when _pid_is_alive would report dead."""
+        re-spawn — even when the liveness probe would report dead."""
         import time as _time
 
         import nexus.daemon.storage_service_daemon as ssd_mod
@@ -2074,7 +2162,7 @@ class TestEnsureStorageSupervisor:
         sup._service_port = 18095
         sup._publish(18095)
 
-        with patch.object(ssd_mod, "_pid_is_alive", return_value=False), \
+        with patch.object(ssd_mod, "_pid_is_running", return_value=False), \
              patch.object(daemon_mod.subprocess, "Popen") as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)
 
@@ -2607,3 +2695,51 @@ class TestRdr175MvvSingleSupervisor:
         assert ensure_pg_calls == [1], "PG restarted in place exactly once"
         assert sup._proc is fake_proc, "Java process must NOT be bounced for a PG-only restart"
         assert sup._proc.pid == pid_before
+
+
+class TestStopDoesNotWaitOnAnAlreadyDeadSupervisor:
+    """nexus-o8dil.21, the double-killer leg.
+
+    ``stop_storage_service``'s lease branch SIGTERMs the supervisor and
+    then waits up to ``_GRACEFUL_STOP_TIMEOUT`` for it to go away. The
+    wait probe used to be ``os.kill(pid, 0)``, which succeeds forever on a
+    ZOMBIE — a supervisor already killed by a previous stop, an upgrade
+    sweep, or any concurrent killer, whose parent has not reaped it. So a
+    second stop burned the whole grace window and then sent a pointless
+    SIGKILL to a corpse.
+
+    Uses a REAL zombie rather than a patched probe: the whole defect is
+    that the probe cannot tell the difference, so a faked probe would
+    assert nothing.
+    """
+
+    def test_zombie_supervisor_is_not_waited_on(self, config_dir: Path) -> None:
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [sys.executable, "-c", "import time; time.sleep(120)"],
+        )
+        try:
+            os.kill(proc.pid, signal.SIGKILL)
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline and process_state(proc.pid) != "Z":
+                time.sleep(0.02)
+            assert process_state(proc.pid) == "Z", (
+                "fixture must produce a real unreaped zombie"
+            )
+            _write_stale_or_fresh_lease(
+                config_dir, supervisor_pid=proc.pid, engine_pid=None,
+                age_s=1.0, ttl=15.0,
+            )
+            t0 = time.monotonic()
+            outcome = stop_storage_service(config_dir=config_dir)
+            elapsed = time.monotonic() - t0
+        finally:
+            with contextlib.suppress(ChildProcessError, OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=5)
+
+        assert elapsed < 2.0, (
+            "an already-dead (zombie) supervisor must not hold the graceful "
+            f"stop window open; took {elapsed:.2f}s of a 5s budget"
+        )
+        assert outcome.stubborn == (), (
+            f"a corpse is not a stubborn survivor: {outcome}"
+        )

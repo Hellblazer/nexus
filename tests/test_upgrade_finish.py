@@ -568,8 +568,14 @@ class TestFailLoud:
         stop_ok = MagicMock(returncode=0, stdout="", stderr="")
         start_ok = MagicMock(returncode=0, stdout="", stderr="")
         running = MagicMock(version="v0.1.60", pid=214)
+        # process_state is pinned "S" (running, not a zombie) alongside
+        # _pid_alive: this test asserts the SURVIVOR path, and on a
+        # /proc-less box process_state would otherwise shell out to `ps`
+        # and consume one of subprocess.run's side_effect items below
+        # (nexus-o8dil.21).
         with patch.object(uf, "service_stack_pids", return_value=survivors), \
              patch.object(uf, "_pid_alive", return_value=True), \
+             patch.object(uf, "process_state", return_value="S"), \
              patch.object(uf, "process_command",
                           return_value=survivors[0][1]), \
              patch.object(uf, "terminate_pids") as term, \
@@ -655,6 +661,69 @@ class TestFailLoud:
             note = _sweep_surviving_stack(cfg, [(196, "x"), (214, "y")])
         assert note == ""
         term.assert_not_called()
+
+    def test_sweep_treats_a_zombie_as_stopped_not_as_a_survivor(self, tmp_path):
+        """nexus-o8dil.21. ``_pid_alive`` is ``os.kill(pid, 0)``, which
+        SUCCEEDS for a terminated-but-unreaped process. Orphans of a PID 1
+        that is not a real init (the package-upgrade MVV container's PID 1
+        is a shell script) stay zombies indefinitely, so this sweep
+        re-signalled corpses and then narrated the successful stop as
+        having "left pid(s) running".
+
+        RED-FIRST: against the pre-fix body (``_pid_alive`` alone) both
+        pids are re-terminated and the note is non-empty.
+        """
+        cfg = tmp_path / "nexus"
+        before = [
+            (196, f"nx daemon service start --foreground --config-dir {cfg}"),
+            (214, f"{cfg}/service/nexus-service -Xmx1g"),
+        ]
+        killed: list[list[int]] = []
+        with patch("nexus.upgrade_finish._pid_alive", return_value=True), \
+                patch("nexus.upgrade_finish.process_state", return_value="Z"), \
+                patch(
+                    "nexus.upgrade_finish.terminate_pids",
+                    side_effect=lambda pids, **_: killed.append(pids) or [],
+                ):
+            from nexus.upgrade_finish import _sweep_surviving_stack  # noqa: PLC0415 — file pattern: deferred imports
+
+            note = _sweep_surviving_stack(cfg, before)
+        assert note == "", (
+            "a stop that killed the stack and left only unreaped zombies "
+            f"succeeded — it must not be narrated as incomplete: {note!r}"
+        )
+        assert killed == [], (
+            f"zombies must not be re-signalled: {killed}"
+        )
+
+    def test_sweep_note_never_asserts_an_unobserved_lease_cause(self, tmp_path):
+        """The note must report what this function OBSERVED (pids alive
+        after the stop returned), never a cause it cannot see.
+
+        The pre-fix strings hardcoded "(its lease-based check saw no live
+        lease)" into every note. In the 2026-08-14 package-upgrade MVV that
+        invented diagnosis sent the investigation after a cross-version
+        lease-discovery gap that did not exist — the same run's stop
+        printed "Storage service stopped (pid(s)=...)", which the CLI emits
+        ONLY when the lease WAS discovered.
+        """
+        cfg = tmp_path / "nexus"
+        before = [(196, f"nx daemon service start --foreground --config-dir {cfg}")]
+        with patch("nexus.upgrade_finish._pid_alive", return_value=True), \
+                patch("nexus.upgrade_finish.process_state", return_value="S"), \
+                patch(
+                    "nexus.upgrade_finish.process_command",
+                    return_value=before[0][1],
+                ), \
+                patch("nexus.upgrade_finish.terminate_pids", return_value=[]):
+            from nexus.upgrade_finish import _sweep_surviving_stack  # noqa: PLC0415 — file pattern: deferred imports
+
+            note = _sweep_surviving_stack(cfg, before)
+        assert "stop-sweep" in note and "196" in note, note
+        assert "lease" not in note.lower(), (
+            "the sweep has no visibility into the stop's lease outcome and "
+            f"must not claim one: {note!r}"
+        )
 
     def test_procfs_enumerate_parses_a_synthetic_proc_tree(self, tmp_path):
         """The /proc reader itself: NUL-separated cmdline, and an age

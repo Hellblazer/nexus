@@ -814,23 +814,112 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+def process_state(pid: int) -> str | None:
+    """The kernel's scheduler-state letter for *pid* (``R``, ``S``, ``D``,
+    ``Z``, ``T``, ...), or ``None`` when it cannot be determined.
+
+    ``None`` means UNKNOWN, never "dead": the process may be gone, the
+    state may be unreadable (permissions, hidepid), or this box may offer
+    no way to ask at all. Callers must fall back to their permissive
+    default on ``None`` rather than reading it as a state — see
+    :func:`pid_running`.
+
+    Linux answers from ``/proc/<pid>/stat``: the state is the field
+    immediately after ``comm``, and ``comm`` is parenthesised and may
+    itself contain spaces or ``)``, so the parse indexes from the LAST
+    ``)`` (the same discipline as :func:`_procfs_enumerate`). Elsewhere
+    (macOS, BSD) ``ps -o state=`` is the portable equivalent; its output
+    can carry trailing flag characters (``S+``, ``R<``), so only the first
+    character is significant.
+    """
+    if pid <= 0:
+        return None
+    if _procfs_available():
+        try:
+            stat = (PROCFS_ROOT / str(pid) / "stat").read_text()
+        except OSError:
+            return None
+        try:
+            return stat[stat.rindex(")") + 1:].split()[0]
+        except (ValueError, IndexError):
+            return None
+    try:
+        probe = subprocess.run(
+            ["ps", "-o", "state=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+    state = probe.stdout.strip()
+    return state[0] if state else None
+
+
+def pid_running(pid: int) -> bool:
+    """True when *pid* is alive AND actually EXECUTING — i.e. NOT a zombie
+    awaiting reap by its parent.
+
+    :func:`pid_alive` is ``os.kill(pid, 0)``, which SUCCEEDS for a zombie:
+    a terminated process whose exit status no parent has collected still
+    owns its pid and still accepts signal 0. That is correct for "may I
+    signal this pid?" and WRONG for "did my kill work?" — SIGKILL is
+    unblockable, so a pid that still answers ``os.kill(pid, 0)`` after one
+    is either a zombie or genuinely wedged in uninterruptible sleep, and
+    only the second is worth alarming about.
+
+    The distinction is load-bearing, not theoretical (nexus-o8dil.21): a
+    storage-service supervisor + engine orphaned to a PID 1 that is not a
+    real init (a container whose PID 1 is a shell script, a CI runner)
+    stay zombies indefinitely, so ``nx daemon service stop`` reported
+    "pid(s) N survived SIGKILL", exited 1, and told the operator not to
+    run ``start`` — on a stop that had in fact succeeded completely.
+
+    UNKNOWN state (``process_state`` -> ``None``) is treated as RUNNING,
+    matching :func:`pid_alive`'s permissive-on-ambiguity discipline: a
+    genuine survivor (uninterruptible ``D``) must stay loud, and an
+    unaskable box must never be silently downgraded to "clean stop".
+    """
+    if not pid_alive(pid):
+        return False
+    return process_state(pid) != "Z"
+
+
+#: How long a SIGKILLed pid gets to actually leave the process table (or at
+#: least reach ``Z``) before :func:`terminate_pids` reports it as a
+#: survivor. The predecessor was a single flat ``sleep(0.5)``, which is a
+#: race even on a box with a prompt reaper: a JVM being SIGKILLed plus the
+#: parent's ``wait()`` round-trip under load routinely exceeds 500 ms.
+#: Polling to a bound is both faster in the common case (returns as soon as
+#: the pid is gone) and correct in the slow one.
+_POST_KILL_SETTLE_S: float = 5.0
+
+
 def terminate_pids(pids: list[int], *, grace_s: float = 10.0) -> list[int]:
-    """SIGTERM, wait up to *grace_s*, then SIGKILL. Returns pids still alive.
+    """SIGTERM, wait up to *grace_s*, then SIGKILL. Returns pids still
+    RUNNING afterwards (never zombies — see :func:`pid_running`).
 
     A SIGSTOPped process never acts on SIGTERM while stopped, which is
     exactly why the escalation to the uncatchable, unblockable SIGKILL is
     unconditional rather than a best-effort nicety (nexus-oyo2g repro c:
-    double-spawn from a frozen supervisor).
+    double-spawn from a frozen supervisor). A ``T``-state process is still
+    reported as running here and still gets the escalation — only ``Z``
+    (already dead, merely unreaped) is excluded.
+
+    The survivor verdict is zombie-aware and bounded-retry rather than a
+    single post-SIGKILL sleep (nexus-o8dil.21), which makes this tolerant
+    of a CONCURRENT killer as a side effect: a pid another sweep already
+    killed and reaped reads as ESRCH, and one it killed but has not reaped
+    yet reads as ``Z`` — neither is a survivor. Both legs previously
+    produced a false "survived SIGKILL".
     """
-    live = [p for p in pids if pid_alive(p)]
+    live = [p for p in pids if pid_running(p)]
     for pid in live:
         try:
             os.kill(pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
-    deadline = time.time() + grace_s
-    while time.time() < deadline:
-        live = [p for p in live if pid_alive(p)]
+    deadline = time.monotonic() + grace_s
+    while time.monotonic() < deadline:
+        live = [p for p in live if pid_running(p)]
         if not live:
             return []
         time.sleep(0.2)
@@ -839,8 +928,12 @@ def terminate_pids(pids: list[int], *, grace_s: float = 10.0) -> list[int]:
             os.kill(pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-    time.sleep(0.5)
-    return [p for p in live if pid_alive(p)]
+    settle_deadline = time.monotonic() + _POST_KILL_SETTLE_S
+    while True:
+        live = [p for p in live if pid_running(p)]
+        if not live or time.monotonic() >= settle_deadline:
+            return live
+        time.sleep(0.1)
 
 
 def storage_service_stack_matcher(config_dir: Path) -> Callable[[str], bool]:

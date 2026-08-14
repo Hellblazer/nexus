@@ -83,6 +83,7 @@ from nexus.daemon.service_registry import (
     ServiceSupervisor,
     exit_if_process_unowned,
     pid_alive,
+    pid_running,
     ttl_for_tier,
 )
 
@@ -505,6 +506,13 @@ def _port_accepting(host: str, port: int, timeout: float = 0.5) -> bool:
 # ``nexus.daemon.storage_service_daemon._pid_is_alive`` keeps working
 # unchanged.
 _pid_is_alive = pid_alive
+
+#: "Alive AND actually executing" — the same re-export discipline, for the
+#: places that must not count a ZOMBIE (killed, awaiting reap) as something
+#: still worth waiting on (nexus-o8dil.21). Kept SEPARATE from
+#: ``_pid_is_alive`` rather than replacing it: that name is the "may I
+#: signal this pid?" probe and is what tests patch to choose a branch.
+_pid_is_running = pid_running
 
 
 # ── Version helper ─────────────────────────────────────────────────────────────
@@ -1794,12 +1802,19 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
                 os.kill(supervisor_pid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 pass
+            # The WAIT is zombie-aware (nexus-o8dil.21): a supervisor that
+            # is already dead-and-unreaped — because a previous stop, an
+            # upgrade sweep, or any concurrent killer got there first —
+            # answers ``os.kill(pid, 0)`` forever, so an alive-only wait
+            # burns the whole grace window and then sends a pointless
+            # SIGKILL on every double-stop. Whether we ENTER this branch
+            # still keys off ``_pid_is_alive`` above, unchanged.
             deadline = time.monotonic() + _GRACEFUL_STOP_TIMEOUT
             while time.monotonic() < deadline:
-                if not _pid_is_alive(supervisor_pid):
+                if not _pid_is_running(supervisor_pid):
                     break
                 time.sleep(0.1)
-            if _pid_is_alive(supervisor_pid):
+            if _pid_is_running(supervisor_pid):
                 try:
                     os.kill(supervisor_pid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):

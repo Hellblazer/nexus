@@ -49,16 +49,26 @@ single event loop for the one live-daemon self-heal proof, which is
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
 import pytest
 
 from nexus.daemon.service_registry import (
+    LeaseRecord,
     ServiceRegistry,
     ServiceSupervisor,
+    pid_alive,
+    pid_running,
+    process_state,
+    terminate_pids,
     ttl_for_tier,
 )
 from nexus import session as _sess
@@ -855,3 +865,223 @@ class TestRelinquishCleansElectLock:
         )
         # Successor addr file should also still be present.
         assert (config_dir / "storage_service_addr.shared-scope").exists()
+
+
+# ---------------------------------------------------------------------------
+# The SHARED termination primitive's survivor verdict (nexus-o8dil.21).
+# ---------------------------------------------------------------------------
+
+
+def _spawn_unreaped_zombie() -> "subprocess.Popen[bytes]":
+    """A REAL zombie: a child that is SIGKILLed and deliberately not
+    ``wait()``ed on, so it stays in the process table owning its pid.
+
+    The Popen handle is RETURNED, not dropped: ``Popen.__del__`` runs an
+    internal poll that reaps the child, so letting the handle fall out of
+    scope destroys the very state under test (observed — the first draft of
+    this helper returned a bare pid and the zombie was gone by the next
+    statement). The caller keeps it referenced and reaps explicitly.
+    """
+    proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+    )
+    os.kill(proc.pid, signal.SIGKILL)
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        if process_state(proc.pid) == "Z":
+            return proc
+        time.sleep(0.02)
+    with contextlib.suppress(ChildProcessError, OSError):
+        proc.wait(timeout=5)
+    pytest.fail(
+        f"could not drive pid {proc.pid} into a zombie state within 30s — "
+        "this platform reaps differently and the fixture needs revisiting",
+    )
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+class TestTerminationSurvivorVerdict:
+    """``terminate_pids`` is the ONE termination primitive every tier's stop
+    path funnels through (``stop_storage_service``'s tree sweep,
+    ``sweep_matching_processes``, ``upgrade_finish._sweep_surviving_stack``),
+    so its "did the kill work?" verdict is a lifecycle-conformance property,
+    not a storage-service detail — it belongs here alongside the lease
+    properties rather than in one tier's copy (the daemon-lifecycle rule).
+
+    Tier string is incidental for the same reason ``TestDiscoverReapToctou``
+    and ``TestRelinquishCleansElectLock`` are tier-incidental.
+
+    RED-FIRST (nexus-o8dil.21): against the pre-fix primitive
+    (``pid_alive`` + a flat ``time.sleep(0.5)``) the first test below FAILS
+    — the zombie is returned as a stubborn survivor, which is exactly how
+    the 2026-08-14 package-upgrade MVV turned a fully successful stop into
+    ``nx daemon service stop: FAILED`` / ``NEEDS HUMAN``.
+    """
+
+    def test_zombie_is_not_reported_as_a_sigkill_survivor(self) -> None:
+        proc = _spawn_unreaped_zombie()
+        pid = proc.pid
+        try:
+            # Precondition: the OLD probe genuinely cannot tell the
+            # difference. Without this the test could pass vacuously on a
+            # platform that reaps before we ever look.
+            assert pid_alive(pid) is True, (
+                "fixture precondition: os.kill(pid, 0) must still succeed on "
+                "an unreaped zombie, or this test proves nothing"
+            )
+            assert pid_running(pid) is False, (
+                f"a zombie is dead, not running: state={process_state(pid)!r}"
+            )
+            t0 = time.monotonic()
+            stubborn = terminate_pids([pid], grace_s=5.0)
+            elapsed = time.monotonic() - t0
+        finally:
+            with contextlib.suppress(ChildProcessError, OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=5)
+        assert stubborn == [], (
+            f"pid {pid} was SIGKILLed and is merely awaiting reap — reporting "
+            "it as a SIGKILL survivor breaks `nx daemon service stop`'s exit "
+            "code and the documented stop && start remedy chain"
+        )
+        assert elapsed < 2.0, (
+            "an already-dead pid must not burn the SIGTERM grace window "
+            f"before the verdict; took {elapsed:.2f}s"
+        )
+
+    def test_live_process_is_still_terminated_and_reported_clean(self) -> None:
+        """Non-vacuity, other direction: a genuinely running process must
+        still be killed by the escalation and then reported clean."""
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [sys.executable, "-c",
+             "import signal,time\n"
+             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+             "time.sleep(120)\n"],
+        )
+        try:
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline and not pid_running(proc.pid):
+                time.sleep(0.02)
+            assert pid_running(proc.pid) is True, "fixture must be running"
+            # SIGTERM is ignored by the child, so this exercises the SIGKILL
+            # escalation, not the graceful leg.
+            stubborn = terminate_pids([proc.pid], grace_s=0.5)
+            assert stubborn == [], (
+                f"SIGKILL is unblockable — pid {proc.pid} must not be reported "
+                "as a survivor"
+            )
+            assert pid_running(proc.pid) is False
+        finally:
+            with contextlib.suppress(ChildProcessError, OSError):
+                os.kill(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError, OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=5)
+
+    def test_genuine_survivor_is_still_reported_loudly(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The zombie fix must NOT be a blanket silencer. A pid that is
+        alive and in a non-``Z`` state after the escalation (the
+        uninterruptible-``D`` case a kill genuinely cannot clear) must
+        still come back as stubborn.
+        """
+        monkeypatch.setattr(
+            "nexus.daemon.service_registry.pid_alive", lambda _pid: True,
+        )
+        monkeypatch.setattr(
+            "nexus.daemon.service_registry.process_state", lambda _pid: "D",
+        )
+        monkeypatch.setattr(
+            "nexus.daemon.service_registry._POST_KILL_SETTLE_S", 0.05,
+        )
+        # os.kill is deliberately NOT patched: 424242 does not exist, so the
+        # real signal raises ProcessLookupError, which terminate_pids
+        # swallows. Patching `service_registry.os.kill` would rebind the
+        # stdlib os module itself for the duration of the test.
+        assert terminate_pids([424242], grace_s=0.05) == [424242], (
+            "a genuinely-unkillable pid must stay loud"
+        )
+
+    def test_unknown_state_is_treated_as_running_not_silently_clean(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Permissive-on-ambiguity, matching ``pid_alive``: a box that
+        cannot answer the state question must never be downgraded into a
+        clean-stop claim it did not verify."""
+        monkeypatch.setattr(
+            "nexus.daemon.service_registry.pid_alive", lambda _pid: True,
+        )
+        monkeypatch.setattr(
+            "nexus.daemon.service_registry.process_state", lambda _pid: None,
+        )
+        assert pid_running(424243) is True
+
+
+# ---------------------------------------------------------------------------
+# Cross-version lease discovery (nexus-o8dil.21 hypothesis A, FALSIFIED —
+# pinned so it stays falsified).
+# ---------------------------------------------------------------------------
+
+
+class TestCrossVersionLeaseDiscovery:
+    """An upgraded client must still discover a lease that the PREVIOUS
+    release's client published into the same config dir.
+
+    The 2026-08-14 package-upgrade MVV's failure line blamed exactly this
+    ("its lease-based check saw no live lease"), and that claim was a
+    hardcoded string, not an observation (fixed in
+    ``upgrade_finish._sweep_surviving_stack``). The record below is the
+    VERBATIM lease bytes a conexus 7.6.1 client wrote in that run, minus
+    the heartbeat stamp which is re-based to now so freshness is the thing
+    under test rather than the age of the capture. If a future change to
+    the record schema, the addr-file path, or the scope key ever does make
+    an old lease invisible, this goes red instead of shipping as a silent
+    stop-that-no-ops on every just-upgraded box.
+    """
+
+    _V761_LEASE = {
+        "endpoint": {
+            "artifact": "/home/nexus/.config/nexus/service/nexus-service",
+            "host": "127.0.0.1", "launch_kind": "native", "pid": 203,
+            "port": 50541, "token": "e2d4213" + "0" * 57,
+        },
+        "format_version": 1,
+        "generation": 1,
+        "heartbeat_epoch": 1786679444.8741927,
+        "owner_token": "70090bdc23094bec82e0621dbfbc5428",
+        "payload": {"supervisor_pid": 186},
+        "scope_key": "1000",
+        "status": "live",
+        "ttl": 15.0,
+        "version": "7.6.1",
+    }
+
+    def test_previous_release_lease_is_discovered_by_the_current_client(
+        self, config_dir: Path,
+    ) -> None:
+        # Real wall clock on purpose: discover()'s freshness gate compares
+        # heartbeat_epoch against time.time(), and this test is about the
+        # RECORD SHAPE surviving an upgrade, not about clock injection.
+        payload = dict(self._V761_LEASE, heartbeat_epoch=time.time())
+        (config_dir / "storage_service_addr.1000").write_text(json.dumps(payload))
+
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+        record = registry.discover("1000")
+
+        assert record is not None, (
+            "a 7.6.1-published lease must remain discoverable by the current "
+            "client — a miss here means `nx daemon service stop` silently "
+            "no-ops on a just-upgraded box, leaving the OLD engine serving"
+        )
+        assert record.payload["supervisor_pid"] == 186
+        assert record.endpoint["pid"] == 203
+        assert record.version == "7.6.1"
+
+    def test_the_capture_still_parses_as_a_lease_record(self) -> None:
+        """Schema-level companion: the exact bytes round-trip through
+        ``LeaseRecord.from_json`` (a discover-level assertion alone would
+        pass for the wrong reason if a future reader silently tolerated a
+        missing field)."""
+        record = LeaseRecord.from_json(json.dumps(self._V761_LEASE))
+        assert record.scope_key == "1000"
+        assert record.format_version == 1
+        assert record.ttl == 15.0

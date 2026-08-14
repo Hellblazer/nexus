@@ -607,10 +607,18 @@ def ensure_storage_supervisor(config_dir: Path):
         # short-circuit, never re-spawned spuriously. (RDR-149-gate-safe: this is
         # in the storage-specific caller, not service_registry.discover.)
         supervisor_pid = existing.payload.get("supervisor_pid")
+        # ``_pid_is_running``, not ``_pid_is_alive`` (nexus-o8dil.21): a
+        # ZOMBIE supervisor — hard-killed, and its parent has not reaped it
+        # (routine when PID 1 is a shell script rather than a real init, as
+        # in containers and CI runners) — answers ``os.kill(pid, 0)``
+        # indefinitely. Under the alive-only probe this heal never fired for
+        # exactly the crashed-supervisor case it exists to catch: the fresh
+        # lease stayed, ``start`` short-circuited onto it, and the box kept
+        # serving a dead supervisor's endpoint until the TTL expired.
         if (
             isinstance(supervisor_pid, int)
             and supervisor_pid > 0
-            and not _ssd._pid_is_alive(supervisor_pid)
+            and not _ssd._pid_is_running(supervisor_pid)
         ):
             _log.warning(
                 "storage_service_dead_lease_reclaim",
