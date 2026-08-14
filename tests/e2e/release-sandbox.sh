@@ -607,7 +607,12 @@ case "$MODE" in
             echo "  [FAIL] nx index repo exited non-zero" >&2
             SHAKEDOWN_FAILED+=("2/11 nx index repo")
         else
-            _index_floor_check "2/11 nx index repo" "$REPO_FLOOR" "$REPO_FLOOR" "$RDOCS_BEFORE" "$RCHUNKS_BEFORE"
+            # Chunk floor is 3x the doc floor (same 1:3 ratio as the PDF
+            # steps): live evidence 2026-08-14 measured ~47 chunks/doc on
+            # this fixture set, so 3x has wide margin while still catching
+            # a chunking-degraded-to-1-per-doc regression that the old
+            # equal doc==chunk floor waved through.
+            _index_floor_check "2/11 nx index repo" "$REPO_FLOOR" "$((REPO_FLOOR * 3))" "$RDOCS_BEFORE" "$RCHUNKS_BEFORE"
         fi
 
         echo
@@ -666,7 +671,9 @@ case "$MODE" in
             echo "  [FAIL] nx index rdr exited non-zero" >&2
             SHAKEDOWN_FAILED+=("4/11 nx index rdr")
         else
-            _index_floor_check "4/11 nx index rdr" 10 10 "$ODOCS_BEFORE" "$OCHUNKS_BEFORE"
+            # 1:3 doc:chunk ratio floor, matching the other steps; live
+            # evidence 2026-08-14 measured ~36 chunks/doc here.
+            _index_floor_check "4/11 nx index rdr" 10 30 "$ODOCS_BEFORE" "$OCHUNKS_BEFORE"
         fi
 
         echo
@@ -858,8 +865,10 @@ case "$MODE" in
         # required to succeed for THIS gate to be meaningful — the
         # collections-drift check right below is the actual assertion, and
         # it runs WITHOUT `|| true`) but the soft-ness is now
-        # VERDICT-COUNTED, not invisible: a silent backfill failure used to
-        # vanish into the `|| true`. It is recorded as an explicit
+        # SUMMARY-SURFACED, not invisible: a silent backfill failure used
+        # to vanish into the `|| true`. SHAKEDOWN_SOFT entries print in the
+        # final summary but never gate the exit code (only SHAKEDOWN_FAILED
+        # does). It is recorded as an explicit
         # soft/advisory finding so a reviewer can see it happened, without
         # failing the run on a step whose job is prep, not verification.
         if ! nx catalog backfill-collections --no-dry-run 2>&1 | tail -5 | sed 's/^/    /'; then
