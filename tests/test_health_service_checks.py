@@ -1615,6 +1615,7 @@ class TestChashProbeViewFallback:
 def _content_diag_runner(
     *,
     unified_chunks: str = "0",
+    direct_unified_chunks: str | None = None,
     catalog_document_chunks: str = "0",
     legacy_chunks_384: str = "0",
     legacy_chunks_768: str = "0",
@@ -1631,7 +1632,16 @@ def _content_diag_runner(
     distinguishable table/leg; ``fail_relations`` names relations whose
     query should fail outright (returncode 1, 'relation ... does not
     exist') to simulate a genuinely absent table — the diag view itself
-    is matched via the literal ``"nexus.diag_chash_conformance"``."""
+    is matched via the literal ``"nexus.diag_chash_conformance"``.
+
+    ``direct_unified_chunks`` lets a test give the VIEW-path leg for
+    ``nexus.chunks`` a different answer than the DIRECT (bypass-the-view)
+    leg for the same table — needed for the mid-migration window where the
+    schema has migrated (direct COUNT works) but the deployed view is
+    still stale (view-path leg blank). Defaults to ``unified_chunks`` when
+    unset, matching every pre-existing caller's single-value behavior."""
+    if direct_unified_chunks is None:
+        direct_unified_chunks = unified_chunks
     calls: list[str] = []
 
     def _ok(val: str) -> subprocess.CompletedProcess:
@@ -1668,7 +1678,12 @@ def _content_diag_runner(
         if "topic_assignments" in stmt or "frecency" in stmt or "relevance_log" in stmt:
             return _ok(debt)
         if "nexus.chunks" in stmt:
-            return _ok(unified_chunks)
+            # View-path form: "...diag_chash_conformance WHERE table_name
+            # = 'nexus.chunks'"; direct form: "...FROM nexus.chunks WHERE
+            # octet_length...". Disambiguate on the view relation name.
+            if "diag_chash_conformance" in stmt:
+                return _ok(unified_chunks)
+            return _ok(direct_unified_chunks)
         return _ok("0")
 
     runner.calls = calls  # type: ignore[attr-defined]
@@ -1802,6 +1817,122 @@ class TestChashProbeEraStraddle:
             diag_runner=runner,
         )
         assert [r.label for r in results] == ["Schema migrations"]
+
+    def test_schema_migrated_but_view_stale_measures_via_direct_fallback(self, tmp_path):
+        """RDR-191 F14a straddle, round-2 review SIGNIFICANT FINDING 1: the
+        MID-MIGRATION window. nexus.chunks EXISTS (the engine binary has
+        already swapped and Liquibase has run), but the deployed diag view
+        is STILL per-dim shaped — view re-provisioning only happens via
+        the chash-rekey rung's re-provision step or `nx init --service`,
+        never automatically after a bare engine swap. The unified
+        view-path leg comes back blank, the era discriminator proves
+        nexus.chunks EXISTS (era_answer='1'), so the probe must fall
+        through to the DIRECT unified-table statements and MEASURE a real
+        count — never a generic 'could not probe... did not run' WARN for
+        a store that is provably current-era and provably measurable."""
+        runner = _content_diag_runner(
+            unified_chunks="",              # view-path leg: stale view, blank
+            direct_unified_chunks="4",       # direct leg: schema migrated, real count
+            catalog_document_chunks="0",
+            era_answer="1",                  # nexus.chunks EXISTS
+        )
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        chash = [r for r in results if r.label == "Chunk chash conformance"]
+        assert chash, "a provably current-era, provably measurable store must not defer"
+        assert chash[0].warn is True and chash[0].fatal is False
+        assert "4 chunk row(s)" in chash[0].detail
+        assert "could not probe" not in chash[0].detail
+        # the legacy-era view retry must NOT have fired — unified_exists=True
+        # skips straight to the direct fallback per the safety rail.
+        legacy_leg_calls = [c for c in runner.calls if "chunks_384" in c]
+        assert not legacy_leg_calls, "a current-era store must never touch the legacy per-dim view rows"
+
+    def test_schema_migrated_view_stale_and_direct_also_fails_still_defers(self, tmp_path):
+        """The companion non-vacuity case: nexus.chunks EXISTS but BOTH the
+        stale view leg AND the direct fallback fail to produce a
+        measurement (e.g. a genuine grant gap) — the store stays
+        unverifiable, the existing fail-safe untouched."""
+        runner = _content_diag_runner(
+            unified_chunks="", era_answer="1",
+            fail_relations=("FROM nexus.chunks ",),  # direct leg also fails
+        )
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        chash = next(r for r in results if r.label == "Chunk chash conformance")
+        assert chash.warn is True and chash.fatal is False
+        assert "did not run" in chash.detail
+
+
+class TestParseConformanceSum:
+    """MINOR (round-2 review): parse_conformance_sum had zero direct test
+    coverage for its non-numeric and length-mismatch branches — every
+    existing exercise of it went through the blank-string arm only."""
+
+    def test_sums_valid_counts(self):
+        tables = chash_tables.POISON_CHASH_TABLES
+        assert chash_tables.parse_conformance_sum(tables, ("3", "5")) == 8
+
+    def test_blank_raises_naming_the_table(self):
+        tables = chash_tables.POISON_CHASH_TABLES
+        with pytest.raises(ValueError, match="nexus.chunks"):
+            chash_tables.parse_conformance_sum(tables, ("", "5"))
+
+    def test_non_numeric_raises_naming_the_table_and_value(self):
+        tables = chash_tables.POISON_CHASH_TABLES
+        with pytest.raises(ValueError, match="nexus.catalog_document_chunks"):
+            chash_tables.parse_conformance_sum(tables, ("3", "not-a-number"))
+
+    def test_length_mismatch_raises(self):
+        tables = chash_tables.POISON_CHASH_TABLES
+        with pytest.raises(ValueError, match="2.*1|partial scan"):
+            chash_tables.parse_conformance_sum(tables, ("3",))
+
+
+class TestDirectFallbackSafetyRailReRaise:
+    """MINOR (round-2 review): the direct-fallback arm's safety-rail
+    re-raise (health.py: view absent AND unified direct fallback absent
+    AND the era discriminator proves nexus.chunks EXISTS -> re-raise the
+    ORIGINAL error rather than retrying under legacy names) had no
+    dedicated test — only its legacy-era sibling
+    (test_view_absent_and_unified_direct_fallback_absent_retries_legacy_direct)
+    was covered."""
+
+    def test_current_era_store_reraises_original_error_not_retried(self, tmp_path):
+        """Both the view AND the unified direct fallback fail, but the era
+        discriminator proves nexus.chunks EXISTS — this must be a
+        genuinely broken current-era store, re-surfaced via the ORIGINAL
+        error, never silently retried against the legacy per-dim names."""
+        runner = _content_diag_runner(
+            fail_relations=("nexus.diag_chash_conformance", "FROM nexus.chunks "),
+            era_answer="1",  # nexus.chunks EXISTS — a genuinely broken current-era store
+        )
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        chash = next(r for r in results if r.label == "Chunk chash conformance")
+        assert chash.warn is True and chash.fatal is False
+        assert "did not run" in chash.detail
+        # the ORIGINAL direct-fallback error surfaces (nexus.chunks), not a
+        # legacy-era retry outcome — and the legacy per-dim names were
+        # never touched.
+        assert "nexus.chunks" in chash.detail
+        legacy_leg_calls = [c for c in runner.calls if "chunks_384" in c]
+        assert not legacy_leg_calls, "a current-era store must never retry the legacy per-dim names"
 
 
 # ── nexus-5xn3k AC5: dangling manifest chashes ───────────────────────────────

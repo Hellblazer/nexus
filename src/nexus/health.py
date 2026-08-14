@@ -3067,36 +3067,69 @@ def _check_migration_state(
             # the deployed view was built by an OLDER engine's own
             # provisioning and still carries rows keyed by the pre-unify
             # per-dim names, so the unified WHERE filter matches no row.
-            # Existence-gate before reinterpreting: only retry under
-            # legacy names when nexus.chunks provably does not exist yet —
-            # never on a blank leg alone, which a genuinely poisoned
-            # current-era store could also (in principle) produce.
-            if view_era and any(not c.strip() for c in counts) \
-                    and not _probe_unified_schema_exists():
-                try:
-                    legacy_view_counts = _run_diag(
-                        legacy_era_chash_conformance_statements(),
-                    )
-                except DiagnosticSqlViolation:
-                    raise
-                except (RuntimeError, ValueError) as legacy_view_exc:
-                    _log.warning(
-                        "chash_probe_legacy_era_view_fallback_failed",
-                        error=str(legacy_view_exc)[:200],
-                    )
-                    legacy_view_counts = None
-                if legacy_view_counts is not None and not any(
-                    not c.strip() for c in legacy_view_counts
-                ):
-                    _log.info(
-                        "chash_probe_legacy_era_view_match",
-                        note="the unified-name view query returned a NULL "
-                             "aggregate; the store verified via the "
-                             "pre-RDR-191 per-dim table names instead "
-                             "(RDR-191 straddle window)",
-                    )
-                    counts = legacy_view_counts
-                    poison_tables = LEGACY_POISON_CHASH_TABLES
+            # Existence-gate before reinterpreting: consulted UNCONDITIONALLY
+            # on a blank leg (never skipped), because the answer decides
+            # which of TWO distinct straddle windows this is.
+            if view_era and any(not c.strip() for c in counts):
+                if _probe_unified_schema_exists():
+                    # nexus-o8dil (2026-08-14, review round 2 SIGNIFICANT 1):
+                    # nexus.chunks EXISTS — the engine has already migrated —
+                    # yet the leg came back blank, so the deployed VIEW is
+                    # stale (still per-dim shaped): view re-provisioning only
+                    # happens via the chash-rekey rung's re-provision step or
+                    # `nx init --service`, never automatically after a bare
+                    # engine binary swap. This store IS measurable, just not
+                    # through the stale view — fall through to the SAME
+                    # direct unified-table statements used when the
+                    # view-path raises outright, instead of surfacing a
+                    # generic "could not probe" WARN for a store that is
+                    # provably current-era.
+                    try:
+                        direct_counts = _run_diag(legacy_chash_conformance_statements())
+                    except DiagnosticSqlViolation:
+                        raise
+                    except (RuntimeError, ValueError) as direct_exc:
+                        _log.warning(
+                            "chash_probe_direct_fallback_for_stale_view_failed",
+                            error=str(direct_exc)[:200],
+                            note="nexus.chunks exists but the view-path leg "
+                                 "was blank (stale per-dim view) and the "
+                                 "direct unified-table fallback also failed",
+                        )
+                    else:
+                        _log.info(
+                            "chash_probe_direct_fallback_for_stale_view",
+                            note="the diag view is stale (still per-dim "
+                                 "shaped) though the schema has already "
+                                 "migrated; measured via direct "
+                                 "unified-table counts instead",
+                        )
+                        counts = direct_counts
+                else:
+                    try:
+                        legacy_view_counts = _run_diag(
+                            legacy_era_chash_conformance_statements(),
+                        )
+                    except DiagnosticSqlViolation:
+                        raise
+                    except (RuntimeError, ValueError) as legacy_view_exc:
+                        _log.warning(
+                            "chash_probe_legacy_era_view_fallback_failed",
+                            error=str(legacy_view_exc)[:200],
+                        )
+                        legacy_view_counts = None
+                    if legacy_view_counts is not None and not any(
+                        not c.strip() for c in legacy_view_counts
+                    ):
+                        _log.info(
+                            "chash_probe_legacy_era_view_match",
+                            note="the unified-name view query returned a "
+                                 "NULL aggregate; the store verified via "
+                                 "the pre-RDR-191 per-dim table names "
+                                 "instead (RDR-191 straddle window)",
+                        )
+                        counts = legacy_view_counts
+                        poison_tables = LEGACY_POISON_CHASH_TABLES
 
             nonconforming = parse_conformance_sum(poison_tables, counts)
         except (RuntimeError, DiagnosticSqlViolation, ValueError) as exc:

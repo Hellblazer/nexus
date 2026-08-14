@@ -631,8 +631,11 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
         here rather than reinvented.
         """
         from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred
+            LEGACY_POISON_CHASH_TABLES,
             chash_conformance_statements,
+            chash_era_probe_statement,
             legacy_chash_conformance_statements,
+            legacy_era_chash_conformance_statements,
         )
         from nexus.db.diag_connection import resolve_diag_credentials, run_diagnostic_sql  # noqa: PLC0415 — deferred
         from nexus.remediation.sql_lint import DiagnosticSqlViolation  # noqa: PLC0415 — deferred
@@ -663,12 +666,60 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
             except Exception as exc:  # noqa: BLE001 — a probe that could not run is FAILED, never clean
                 return ConformanceProbe.failed(f"diagnostic statement failed: {exc}")
 
+        def _unified_schema_exists() -> bool:
+            """nexus-o8dil (2026-08-14): RDR-191 F14a mirror-direction
+            straddle in the HEALING rung itself — this rung is exactly the
+            remediation health.py's fix_suggestions point operators to, so
+            it must not be era-blind in the identical window health.py now
+            handles. Mirrors ``health._probe_unified_schema_exists``: a
+            grant-free, lint-legal ``to_regclass`` existence probe. A
+            failure of the discriminator itself defaults to True — never
+            reinterpret a possibly-genuine FAILED probe as legacy-era just
+            because the discriminator itself could not answer."""
+            try:
+                out = run_diagnostic_sql((chash_era_probe_statement(),), creds)
+                return bool(out) and out[0].strip() == "1"
+            except (RuntimeError, DiagnosticSqlViolation, ValueError) as exc:
+                _log.warning(
+                    "chash_rekey_probe_era_discriminator_failed",
+                    rung=RUNG_CHASH_REKEY,
+                    error=str(exc)[:200],
+                    note="could not determine unified-vs-legacy chash "
+                         "schema — assuming unified (never reinterpret a "
+                         "possibly-genuine FAILED probe as legacy-era)",
+                )
+                return True
+
         try:
             view_probe = _run(chash_conformance_statements())
         except DiagnosticSqlViolation as exc:
             return ConformanceProbe.failed(f"diagnostic lint refused the statement: {exc}")
         if view_probe.state is ProbeState.MEASURED:
             return view_probe
+
+        # nexus-o8dil (2026-08-14): RDR-191 F14a straddle. A FAILED view leg
+        # here can mean the deployed view predates the unify (still per-dim
+        # shaped: chunks_384/768/1024) rather than being absent — existence-
+        # gate BEFORE reinterpreting as legacy-era, computed ONCE and reused
+        # below; never on a FAILED probe alone, which a genuinely broken
+        # current-era store could also produce.
+        unified_exists = _unified_schema_exists()
+
+        if not unified_exists:
+            try:
+                legacy_view_probe = _run(legacy_era_chash_conformance_statements())
+            except DiagnosticSqlViolation as exc:
+                return ConformanceProbe.failed(f"diagnostic lint refused the statement: {exc}")
+            if legacy_view_probe.state is ProbeState.MEASURED:
+                _log.info(
+                    "chash_rekey_probe_legacy_era_view_match",
+                    rung=RUNG_CHASH_REKEY,
+                    note="the unified-name view query produced no "
+                         "measurement; the store verified via the "
+                         "pre-RDR-191 per-dim table names instead (RDR-191 "
+                         "straddle window)",
+                )
+                return legacy_view_probe
 
         # LOUD, like health.py's chash_probe_view_fallback_legacy. The view is
         # legitimately absent between an engine changeset that DROPs it
@@ -697,6 +748,35 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
             return ConformanceProbe.failed(f"diagnostic lint refused the statement: {exc}")
         if legacy_probe.state is ProbeState.MEASURED:
             return legacy_probe
+
+        if not unified_exists:
+            # nexus-o8dil (2026-08-14): the direct fallback above assumes
+            # the unified table names too — on a straddle-era box
+            # nexus.chunks genuinely does not exist yet, so it fails the
+            # same way the view-path did. Retry once more against the
+            # pre-unify per-dim direct statements before giving up.
+            _log.warning(
+                "chash_rekey_probe_direct_fallback_retrying_legacy_era",
+                rung=RUNG_CHASH_REKEY,
+                error=legacy_probe.reason[:200],
+                note="unified-name direct fallback produced no measurement "
+                     "and nexus.chunks does not exist yet — retrying "
+                     "against the pre-RDR-191 per-dim table names",
+            )
+            try:
+                legacy_direct_probe = _run(
+                    legacy_chash_conformance_statements(LEGACY_POISON_CHASH_TABLES),
+                )
+            except DiagnosticSqlViolation as exc:
+                return ConformanceProbe.failed(f"diagnostic lint refused the statement: {exc}")
+            if legacy_direct_probe.state is ProbeState.MEASURED:
+                return legacy_direct_probe
+            return ConformanceProbe.failed(
+                f"view path: {view_probe.reason[:120]} | legacy direct-table "
+                f"fallback: {legacy_probe.reason[:120]} | legacy-era direct "
+                f"fallback: {legacy_direct_probe.reason[:120]}"
+            )
+
         return ConformanceProbe.failed(
             f"view path: {view_probe.reason[:120]} | legacy direct-table "
             f"fallback: {legacy_probe.reason[:120]}"
