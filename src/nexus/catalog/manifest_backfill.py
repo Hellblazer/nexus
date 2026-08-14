@@ -11,7 +11,24 @@ same content. A crash mid-run leaves partial manifest data; re-running
 resolves it.
 
 Edge-case contracts:
-  - Zero-chunk doc: produces an empty manifest row-set. Valid, not an error.
+  - Zero-chunk-match doc: SKIPPED, counted in
+    ``BackfillResult.docs_skipped_zero_chunks``, and logged as a structured
+    warning naming the doc and the lookup keys tried. NEVER written as an
+    empty manifest (nexus-gvmbo). ``write_manifest``/``atomic_manifest_replace``
+    is an atomic DELETE+INSERT server-side (``CatalogHandler.java``); writing
+    ``[]`` for a doc whose chunks simply didn't match the lookup key(s) would
+    DESTROY any existing manifest for that doc. Backfill cannot distinguish
+    "this doc genuinely has 0 T3 chunks" from "the lookup missed them", so it
+    always skips rather than ever writing empty — a genuinely empty doc's
+    manifest is created by whichever path first CREATES the doc, not backfill.
+  - Chunk lookup key: matched by EITHER metadata ``doc_id`` (indexer-origin
+    chunks: ``indexer.py`` stamps the tumbler under ``doc_id``) OR metadata
+    ``catalog_doc_id`` (store_put-origin chunks: ``http_vector_client.py``
+    stamps the tumbler under ``catalog_doc_id`` and reserves ``doc_id`` for
+    the chash) (nexus-b91tv). The engine's ``where`` grammar has no ``$or``
+    (``PgVectorRepository.appendWherePredicate`` fails loud on a
+    ``$``-prefixed key), so both keys are queried separately and merged,
+    deduped by chash.
   - taxonomy__* carve-out: skipped. Centroids use ``centroid_hash`` from
     ``topics``, not ``chunk_text_hash``. Detected by collection-name prefix.
   - Pre-RDR-053 chunks lacking ``chunk_text_hash``: FAIL LOUD with
@@ -19,6 +36,11 @@ Edge-case contracts:
     re-index that collection or carve it out.
   - Quota compliance: paginates T3 at <=300 records per ``col.get()``
     call; ``INSERT INTO document_chunks`` batches <=300 per write.
+  - Successful non-dry-run writes resync ``chunk_count`` via
+    ``catalog.resync_chunk_count_cache`` (mirrors ``manifest_heal.py``'s
+    ``atomic_manifest_replace`` + resync pairing) — otherwise the row stays
+    at whatever stale ``chunk_count`` it had (often 0) and every gap
+    detector re-flags the doc forever.
 """
 from __future__ import annotations
 
@@ -100,27 +122,44 @@ class BackfillResult:
     # chunk_index is missing from metadata (multi-chunk only). Operator
     # action: re-index the affected collection.
     docs_skipped_phase3_no_index: int = 0
+    # nexus-gvmbo: count docs whose chunk lookup (both doc_id AND
+    # catalog_doc_id keys) matched zero T3 chunks. Never written as an
+    # empty manifest -- see the module docstring's "Zero-chunk-match doc"
+    # contract. Non-vacuity: a caller pointing backfill at a collection
+    # with key-mismatched chunks must SEE this count rise, not a silent 0.
+    docs_skipped_zero_chunks: int = 0
     skipped_taxonomy: bool = False
 
 
-def _iter_chunks_for_doc(
+# nexus-b91tv: the two metadata keys a doc's tumbler can be stamped under.
+# indexer-origin chunks use "doc_id"; store_put-origin chunks use
+# "catalog_doc_id" (store_put reserves "doc_id" for the chash instead).
+_DOC_LOOKUP_KEYS: tuple[str, ...] = ("doc_id", "catalog_doc_id")
+
+
+def _fetch_chunks_by_key(
     col: "_ServiceCollectionStub",
     doc_id: str,
     collection: str,
+    where_key: str,
 ) -> list[dict]:
-    """Paginate T3 and collect chunk metadata for one doc_id.
+    """Paginate T3 for chunks whose ``metadata[where_key] == doc_id``.
 
-    Returns a list of chunk dicts with keys:
-      chash, position, line_start, line_end, char_start, char_end
+    Returns raw chunk dicts (chash, position, line_start, line_end,
+    char_start, char_end, chunk_index_present). Does not merge across
+    keys, dedup, or apply the Phase-3 chunk_index check -- the caller
+    (:func:`_iter_chunks_for_doc`) does that over the UNION of both keys'
+    results so the check sees the doc's true chunk population, not one
+    key's partial slice.
 
-    Raises MissingChunkHashError if any chunk lacks chunk_text_hash.
+    Raises MissingChunkHashError if any matched chunk lacks
+    ``chunk_text_hash``.
     """
     chunks: list[dict] = []
-    chunk_index_seen = 0
     offset = 0
     while True:
         result = col.get(
-            where={"doc_id": doc_id},
+            where={where_key: doc_id},
             limit=_PAGE_SIZE,
             offset=offset,
             include=["metadatas"],
@@ -135,23 +174,54 @@ def _iter_chunks_for_doc(
             chash = meta.get("chunk_text_hash") or ""
             if not chash:
                 raise MissingChunkHashError(chunk_id=cid, collection=collection)
-            # nexus-w5zv: track explicit chunk_index presence so multi-chunk
-            # Phase-3 docs (where chunk_index was dropped from metadata) fail
-            # loud rather than collapse every chunk to position=0.
-            if "chunk_index" in meta:
-                chunk_index_seen += 1
-            chunk_index = int(meta.get("chunk_index", 0) or 0)
             chunks.append({
                 "chash": chash,
-                "position": chunk_index,
+                "position": int(meta.get("chunk_index", 0) or 0),
                 "line_start": meta.get("line_start"),
                 "line_end": meta.get("line_end"),
                 "char_start": meta.get("chunk_start_char"),
                 "char_end": meta.get("chunk_end_char"),
+                "chunk_index_present": "chunk_index" in meta,
             })
         if len(page_ids) < _PAGE_SIZE:
             break
         offset += _PAGE_SIZE
+    return chunks
+
+
+def _iter_chunks_for_doc(
+    col: "_ServiceCollectionStub",
+    doc_id: str,
+    collection: str,
+) -> list[dict]:
+    """Paginate T3 and collect chunk metadata for one doc_id.
+
+    Queries BOTH lookup keys in ``_DOC_LOOKUP_KEYS`` (nexus-b91tv: the
+    engine's where-grammar has no ``$or``, so this is two queries, not
+    one compound filter) and merges the results, deduped by chash so a
+    chunk carrying both keys is never double-counted.
+
+    Returns a list of chunk dicts with keys:
+      chash, position, line_start, line_end, char_start, char_end
+
+    Raises MissingChunkHashError if any chunk lacks chunk_text_hash.
+    """
+    merged: dict[str, dict] = {}
+    chunk_index_seen = 0
+    for where_key in _DOC_LOOKUP_KEYS:
+        for chunk in _fetch_chunks_by_key(col, doc_id, collection, where_key):
+            chash = chunk["chash"]
+            if chash in merged:
+                continue
+            # nexus-w5zv: track explicit chunk_index presence so multi-chunk
+            # Phase-3 docs (where chunk_index was dropped from metadata) fail
+            # loud rather than collapse every chunk to position=0. Counted
+            # once per unique chash, over the merged set of both keys.
+            if chunk.pop("chunk_index_present"):
+                chunk_index_seen += 1
+            merged[chash] = chunk
+
+    chunks = list(merged.values())
     if len(chunks) > 1 and chunk_index_seen == 0:
         raise Phase3ChunkIndexMissingError(
             doc_id=doc_id, collection=collection, chunk_count=len(chunks),
@@ -240,10 +310,32 @@ def backfill_manifest_for_collection(
                 doc_id=doc_id,
             )
             continue
+
+        if not chunks:
+            # nexus-gvmbo: never write an empty manifest. write_manifest is
+            # an atomic DELETE+INSERT server-side -- writing [] for a doc
+            # whose chunks simply didn't match either lookup key would
+            # DESTROY any existing manifest for that doc. Skip and count
+            # instead; the operator sees exactly which doc and which keys
+            # were tried.
+            result.docs_skipped_zero_chunks += 1
+            _log.warning(
+                "manifest_backfill_doc_skipped_zero_chunks",
+                collection=collection_name,
+                doc_id=doc_id,
+                lookup_keys=_DOC_LOOKUP_KEYS,
+            )
+            continue
+
         chunks.sort(key=lambda c: c["position"])
 
         if not dry_run:
             catalog.write_manifest(doc_id, chunks, collection=collection_name)
+            # nexus-gvmbo (item 3, remediation-blockers addendum): mirror
+            # manifest_heal.py's atomic_manifest_replace + resync pairing --
+            # write_manifest alone leaves chunk_count stale (often 0), which
+            # re-trips every gap detector on a doc this pass just healed.
+            catalog.resync_chunk_count_cache(doc_id)
             result.chunks_written += len(chunks)
 
         result.docs_processed += 1

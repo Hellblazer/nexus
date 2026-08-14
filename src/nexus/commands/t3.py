@@ -697,6 +697,7 @@ def backfill_manifest_cmd(
     total_docs = 0
     total_chunks = 0
     total_skipped_no_t3 = 0
+    total_skipped_zero_chunks = 0
     skipped_taxonomy = 0
     errors: list[str] = []
     docs_processed_overall = 0
@@ -746,10 +747,18 @@ def backfill_manifest_cmd(
             if result.docs_skipped_no_t3
             else ""
         )
+        # nexus-gvmbo: zero-chunk-match skips must be COUNTED and visible in
+        # the command's own output, never silent -- this is what turns the
+        # "never write empty" fix into an observable non-vacuity guarantee.
+        zero_chunks_part = (
+            f" ({result.docs_skipped_zero_chunks} skipped: zero_chunks)"
+            if result.docs_skipped_zero_chunks
+            else ""
+        )
         print(
             f"[{idx}/{total}] {coll_name}: processed {result.docs_processed} "
             f"doc(s), {verb} {result.chunks_written} chunk manifest row(s)"
-            f"{skipped_part}",
+            f"{skipped_part}{zero_chunks_part}",
             file=sys.stderr,
         )
 
@@ -762,11 +771,17 @@ def backfill_manifest_cmd(
                 if result.docs_skipped_no_t3
                 else ""
             )
+            + (
+                f" ({result.docs_skipped_zero_chunks} skipped: zero chunk matches)"
+                if result.docs_skipped_zero_chunks
+                else ""
+            )
         )
 
         total_docs += result.docs_processed
         total_chunks += result.chunks_written
         total_skipped_no_t3 += result.docs_skipped_no_t3
+        total_skipped_zero_chunks += result.docs_skipped_zero_chunks
         docs_processed_overall += result.docs_processed
 
         # SIG-6: periodic progress every _PROGRESS_INTERVAL docs.
@@ -787,10 +802,16 @@ def backfill_manifest_cmd(
         if total_skipped_no_t3
         else ""
     )
+    skipped_zero_chunks_part = (
+        f", {total_skipped_zero_chunks} doc(s) skipped (zero chunk matches)"
+        if total_skipped_zero_chunks
+        else ""
+    )
     click.echo(
         f"\nSummary: processed {total_docs} doc(s), "
         f"{verb} {total_chunks} manifest row(s)"
         + skipped_no_t3_part
+        + skipped_zero_chunks_part
         + (f", skipped {skipped_taxonomy} taxonomy collection(s)" if skipped_taxonomy else "")
         + (f", {len(errors)} error(s)" if errors else "")
     )

@@ -391,3 +391,306 @@ class TestSIG6ProgressOutput:
 # ``nexus/catalog/catalog_db.py`` (its own docstring scheduled exactly this).
 
 
+# ── nexus-gvmbo: zero-chunk-match docs must never write an empty manifest ──
+
+
+class TestGvmboEmptyManifestGuard:
+    """nexus-gvmbo: ``backfill_manifest_for_collection`` must SKIP a
+    zero-chunk-match doc, never call ``write_manifest(doc_id, [], ...)``.
+
+    That call is an atomic DELETE+INSERT server-side
+    (``CatalogHandler.java`` -> ``repo.writeManifest``): writing ``[]`` for
+    a doc whose lookup simply missed its chunks DESTROYS any existing
+    manifest. Kill-control: this test was run against the pre-fix code
+    (guard removed, resync call removed) and failed — ``after`` came back
+    empty and ``docs_skipped_zero_chunks`` stayed 0 — before the fix in
+    ``manifest_backfill.py`` landed.
+    """
+
+    def test_zero_match_never_destroys_existing_manifest(self, active_catalog, t3_db):
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        tumbler = _register_doc(active_catalog, coll)
+        chunk_id = f"c1-{coll}"
+        _seed_chunk(
+            t3_db, collection=coll, chunk_id=chunk_id,
+            content="alive", doc_id=tumbler, chunk_index=0,
+            chunk_text_hash="c" * 64,
+        )
+
+        # Pass 1: real chunk present, establishes a real manifest.
+        first = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False
+        )
+        assert first.chunks_written == 1
+        assert first.docs_skipped_zero_chunks == 0
+        before = active_catalog.get_manifest(tumbler)
+        assert len(before) == 1
+
+        # Remove the T3 chunk out from under the manifest -- reproduces the
+        # key-mismatch damage class this bead is filed for: the doc HAS an
+        # existing manifest, but a subsequent lookup now matches zero chunks.
+        col = t3_db._client.get_or_create_collection(coll)
+        col.delete(ids=[chunk_id])
+
+        # Pass 2: lookup matches zero chunks.
+        second = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False
+        )
+
+        # Non-vacuity: the skip is COUNTED, not silent.
+        assert second.docs_skipped_zero_chunks == 1
+        assert second.docs_processed == 0
+        assert second.chunks_written == 0
+
+        # The manifest from pass 1 must survive pass 2 untouched -- this is
+        # the assertion that fails red on the pre-fix code (which would have
+        # called write_manifest(tumbler, [], ...) and wiped it to 0 rows).
+        after = active_catalog.get_manifest(tumbler)
+        assert after == before
+        assert len(after) == 1
+
+    def test_zero_match_surfaced_in_cli_summary(self, active_catalog, t3_db, runner):
+        """The skip must appear in the command's own summary output --
+        never silent (bead gvmbo's non-vacuity requirement)."""
+        coll = _unique_coll()
+        # A registered doc with NO matching T3 chunks under either lookup key.
+        tumbler = _register_doc(active_catalog, coll)
+        # The T3 collection must actually EXIST (otherwise this doc takes
+        # the "no_t3" branch, not the zero-chunks branch under test) --
+        # seed an unrelated chunk under a DIFFERENT doc_id so get_collection
+        # succeeds but the target doc still matches zero chunks.
+        other = _register_doc(active_catalog, coll)
+        assert other != tumbler
+        _seed_chunk(
+            t3_db, collection=coll, chunk_id=f"other-{coll}",
+            content="unrelated", doc_id=other, chunk_index=0,
+            chunk_text_hash="1" * 64,
+        )
+
+        with (
+            patch("nexus.commands.t3._make_catalog", return_value=active_catalog),
+            patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
+        ):
+            result = runner.invoke(
+                main,
+                ["t3", "backfill-manifest", "--collection", coll, "--no-dry-run"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "zero_chunks" in result.output or "zero chunk" in result.output, (
+            result.output
+        )
+
+
+# ── nexus-b91tv: chunk lookup must match BOTH doc_id and catalog_doc_id ────
+
+
+class TestB91tvKeyUnionLookup:
+    """nexus-b91tv: store_put stamps the tumbler under metadata
+    ``catalog_doc_id`` (``doc_id`` there carries the chash instead), while
+    indexer-origin chunks stamp it under ``doc_id``. Backfill must match
+    EITHER key so store_put-origin docs are no longer structurally
+    unreachable.
+    """
+
+    def _seed_store_put_shaped_chunk(
+        self, t3_db: T3Database, *, collection: str, chunk_id: str,
+        content: str, catalog_doc_id: str, chash: str,
+    ) -> None:
+        """Seed a chunk in the store_put shape: metadata carries
+        ``catalog_doc_id`` = tumbler and ``doc_id`` = chash (never
+        ``content_hash`` -- store_hook.py stamps only ``doc_id``), per
+        ``http_vector_client.py:1705-1706`` / ``store_hook.py:328,357,386``.
+        """
+        col = t3_db._client.get_or_create_collection(collection)
+        col.add(
+            ids=[chunk_id],
+            documents=[content],
+            metadatas=[{
+                "doc_id": chash,  # chash, NOT the tumbler -- this is the bug
+                "catalog_doc_id": catalog_doc_id,
+                "chunk_text_hash": chash,
+            }],
+        )
+
+    def test_store_put_shaped_chunk_matches_via_catalog_doc_id(
+        self, active_catalog, t3_db,
+    ):
+        """A chunk whose ONLY tumbler-carrying key is catalog_doc_id (no
+        chunk_index, no doc_id==tumbler) must still be found."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll("knowledge")
+        tumbler = _register_doc(active_catalog, coll)
+        self._seed_store_put_shaped_chunk(
+            t3_db, collection=coll, chunk_id=f"sp-{coll}",
+            content="store_put note", catalog_doc_id=tumbler, chash="d" * 64,
+        )
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False
+        )
+
+        assert result.docs_skipped_zero_chunks == 0
+        assert result.docs_processed == 1
+        assert result.chunks_written == 1
+        manifest = active_catalog.get_manifest(tumbler)
+        assert len(manifest) == 1
+        assert manifest[0].chash == "d" * 64
+
+    def test_indexer_shaped_chunk_still_matches_via_doc_id(
+        self, active_catalog, t3_db,
+    ):
+        """Regression: the pre-existing indexer-origin (doc_id-keyed) path
+        must still work after the key-union change."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        tumbler = _register_doc(active_catalog, coll)
+        _seed_chunk(
+            t3_db, collection=coll, chunk_id=f"idx-{coll}",
+            content="indexed", doc_id=tumbler, chunk_index=0,
+            chunk_text_hash="e" * 64,
+        )
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False
+        )
+
+        assert result.docs_processed == 1
+        assert result.chunks_written == 1
+        manifest = active_catalog.get_manifest(tumbler)
+        assert len(manifest) == 1
+        assert manifest[0].chash == "e" * 64
+
+    def test_collection_with_mixed_origin_docs_both_backfill(
+        self, active_catalog, t3_db,
+    ):
+        """One backfill pass over a collection holding BOTH an
+        indexer-origin doc (doc_id-keyed chunk) and a store_put-origin doc
+        (catalog_doc_id-keyed chunk) must match and write BOTH -- neither
+        lookup key starves the other doc in the same collection.
+
+        (A single DOCUMENT with chunks from both origins is not the
+        production shape this bead targets -- store_put and the indexer
+        never co-write one doc's chunk_index space -- so the union is
+        exercised across two documents here, and same-chash-under-both-
+        keys dedup is covered separately below.)
+        """
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        indexer_doc = _register_doc(active_catalog, coll)
+        store_put_doc = _register_doc(active_catalog, coll)
+        assert indexer_doc != store_put_doc
+        _seed_chunk(
+            t3_db, collection=coll, chunk_id=f"idx-{coll}",
+            content="indexed part", doc_id=indexer_doc, chunk_index=0,
+            chunk_text_hash="f" * 64,
+        )
+        self._seed_store_put_shaped_chunk(
+            t3_db, collection=coll, chunk_id=f"sp-{coll}",
+            content="store_put part", catalog_doc_id=store_put_doc, chash="a" * 64,
+        )
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False
+        )
+
+        assert result.docs_skipped_zero_chunks == 0
+        assert result.docs_processed == 2
+        assert result.chunks_written == 2
+        indexer_manifest = active_catalog.get_manifest(indexer_doc)
+        store_put_manifest = active_catalog.get_manifest(store_put_doc)
+        assert [r.chash for r in indexer_manifest] == ["f" * 64]
+        assert [r.chash for r in store_put_manifest] == ["a" * 64]
+
+    def test_same_chash_under_both_keys_not_double_counted(
+        self, active_catalog, t3_db,
+    ):
+        """A chunk that happens to carry BOTH doc_id==tumbler AND
+        catalog_doc_id==tumbler (same chash) is deduped to one manifest row,
+        not written twice."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        tumbler = _register_doc(active_catalog, coll)
+        col = t3_db._client.get_or_create_collection(coll)
+        col.add(
+            ids=[f"both-{coll}"],
+            documents=["dual-keyed"],
+            metadatas=[{
+                "doc_id": tumbler,
+                "catalog_doc_id": tumbler,
+                "chunk_text_hash": "b" * 64,
+                "chunk_index": 0,
+            }],
+        )
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False
+        )
+
+        assert result.chunks_written == 1
+        manifest = active_catalog.get_manifest(tumbler)
+        assert len(manifest) == 1
+
+
+# ── nexus-gvmbo item 3: successful writes must resync chunk_count ─────────
+
+
+class TestChunkCountResync:
+    """A successful non-dry-run backfill pass must resync
+    ``documents.chunk_count`` (mirrors ``manifest_heal.py:304``'s
+    ``atomic_manifest_replace`` + ``resync_chunk_count_cache`` pairing).
+    Without it the row stays at whatever stale value it had (registered at
+    0 in these tests) and every gap detector re-flags a doc this pass just
+    healed."""
+
+    def test_successful_write_resyncs_chunk_count(self, active_catalog, t3_db):
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        tumbler = _register_doc(active_catalog, coll)  # chunk_count=0 at register
+        _seed_chunk(
+            t3_db, collection=coll, chunk_id=f"rc-{coll}",
+            content="resync me", doc_id=tumbler, chunk_index=0,
+            chunk_text_hash="9" * 64,
+        )
+
+        before = active_catalog.by_doc_id(tumbler)
+        assert before.chunk_count == 0
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False
+        )
+        assert result.chunks_written == 1
+
+        after = active_catalog.by_doc_id(tumbler)
+        assert after.chunk_count == 1
+
+    def test_dry_run_does_not_resync(self, active_catalog, t3_db):
+        """dry_run must not touch chunk_count -- no writes at all."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        tumbler = _register_doc(active_catalog, coll)
+        _seed_chunk(
+            t3_db, collection=coll, chunk_id=f"dr-{coll}",
+            content="dry run only", doc_id=tumbler, chunk_index=0,
+            chunk_text_hash="8" * 64,
+        )
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=True
+        )
+        assert result.docs_processed == 1
+        assert result.chunks_written == 0
+
+        after = active_catalog.by_doc_id(tumbler)
+        assert after.chunk_count == 0
+
+
