@@ -1,5 +1,7 @@
 import logging
 import os
+import unittest.mock
+import warnings
 
 import pytest
 from pathlib import Path
@@ -1103,6 +1105,91 @@ def _reset_service_t2_db() -> None:
     _evict()
     yield
     _evict()
+
+
+@pytest.fixture(autouse=True)
+def _restore_t3_singleton(request: pytest.FixtureRequest):
+    """SNAPSHOT/RESTORE ``mcp_infra._t3_instance`` around every test
+    (nexus-jovc9, closing the residual nexus-0ne4s filed by nexus-gtl01).
+
+    ``_t3_instance`` is a PROCESS-WIDE singleton on the production CLI write
+    path (``doc_indexer._index_document`` resolves its write handle from
+    ``mcp_infra.get_t3()``). gtl01 fixed ONE way it gets poisoned — a fixture
+    calling ``inject_t3(handle)`` without restoring — and mechanized that
+    single shape in ``test_t3_singleton_leak_lint.py``. jovc9 is the shape
+    that lint explicitly cannot see, and it needs no ``inject_t3`` call at
+    all::
+
+        with patch("nexus.db.make_t3", return_value=MagicMock()):
+            runner.invoke(main, ["memory", "promote", ...])
+        #  ^ CLI -> HookRegistry.fire_store_chains -> fire_batch
+        #    -> mcp_infra.taxonomy_assign_batch_hook -> is_service_backed(get_t3())
+        #    -> get_t3() MEMOISES make_t3()'s return into _t3_instance.
+
+    ``patch`` restores ``nexus.db.make_t3`` on exit. It cannot restore the
+    MEMO the patched factory was used to build — the mock outlives the patch
+    for the life of the worker process. A later ``nx index md`` in the same
+    xdist worker then writes its chunk into that mock, the bytes never reach
+    PG, and the RUNFENCE completion check correctly refuses with
+    ``referenced=1 present=0``. Serial-green, ``-n auto``-red, order-dependent:
+    exactly the jovc9 signature, and exactly gtl01's signature one link
+    upstream.
+
+    SNAPSHOT/RESTORE, not evict-both-sides (the shape
+    ``_reset_service_t2_db`` above takes). Restoring the PRIOR value cannot
+    invalidate a handle installed before this test — the objection that kept
+    the conftest from doing this for T3 at gtl01 time. That objection named
+    module-scoped T3 injections; a full-tree sweep at jovc9 found none (every
+    ``inject_t3`` call site is function-scoped or has setup/teardown_method),
+    so the narrower restore is safe today and stays safe if one appears.
+
+    The restore is UNCONDITIONAL; only the reporting is graded, by whether the
+    leaked handle is one production could actually have produced here:
+
+    * a ``unittest.mock`` object is never legitimate -> ``pytest.fail`` on the
+      test that left it, so the next one is fixed at the leaker instead of
+      surfacing as a journey refusal hours later in another file;
+    * a NON-service-backed handle in service mode (a ``T3Database`` over
+      ``InMemoryVectorClient``, the gtl01 shape) is the same poison with a
+      less obvious type -> warn, naming the leaker;
+    * a service-backed handle is just lazy init of the real singleton — no
+      defect, no warning. It is still restored: an ``HttpVectorClient`` bakes
+      in the tenant token it saw at construction, and the engine substrate
+      mints a fresh tenant per test, so carrying one forward is the T3 twin of
+      the nexus-aqbrk T2 defect the fixture above evicts for.
+    """
+    import nexus.mcp_infra as mcp_infra
+
+    before = mcp_infra._t3_instance
+    yield
+    after = mcp_infra._t3_instance
+    if after is before:
+        return
+    with mcp_infra._t3_lock:
+        mcp_infra._t3_instance = before
+    if after is None:
+        return  # test reset the singleton; nothing leaked
+    if isinstance(after, unittest.mock.NonCallableMock):
+        pytest.fail(
+            f"{request.node.nodeid} left a {type(after).__name__} in the "
+            "process-wide mcp_infra._t3_instance singleton. A mock on the "
+            "production T3 write path silently swallows every later chunk "
+            "write in this worker (nexus-gtl01 / nexus-jovc9). Usual cause: "
+            'patching "nexus.db.make_t3" while driving code that calls '
+            "get_t3(). Reset the singleton after the patched call — e.g. "
+            "mcp_infra.inject_t3(None) in a finally.",
+            pytrace=False,
+        )
+    from nexus.db.http_vector_client import is_service_backed, is_vector_service_mode
+
+    if is_vector_service_mode() and not is_service_backed(after):
+        warnings.warn(
+            f"{request.node.nodeid} left a non-service {type(after).__name__} "
+            "in mcp_infra._t3_instance under service mode (restored by "
+            "_restore_t3_singleton). Writes routed through it never reach the "
+            "engine — nexus-gtl01 / nexus-jovc9.",
+            stacklevel=1,
+        )
 
 
 @pytest.fixture(autouse=True)

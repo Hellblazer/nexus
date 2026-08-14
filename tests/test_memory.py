@@ -279,13 +279,26 @@ def _promote(runner, db, row_id, col="knowledge__proj", extra=None, use_cm=False
     mt3 = _mock_t3()
     t2 = _t2_cm(db) if use_cm else db
     args = ["memory", "promote", str(row_id), "--collection", col, *(extra or [])]
-    with (
-        patch("nexus.commands.memory.t2_handle", return_value=t2),
-        patch("nexus.config.get_credential", return_value="fake-key"),
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.db.make_t3", return_value=mt3),
-    ):
-        result = runner.invoke(main, args)
+    try:
+        with (
+            patch("nexus.commands.memory.t2_handle", return_value=t2),
+            patch("nexus.config.get_credential", return_value="fake-key"),
+            patch("nexus.config.is_local_mode", return_value=False),
+            patch("nexus.db.make_t3", return_value=mt3),
+        ):
+            result = runner.invoke(main, args)
+    finally:
+        # nexus-jovc9: ``memory promote`` fires the store chains, whose
+        # ``taxonomy_assign_batch_hook`` calls ``mcp_infra.get_t3()`` — which
+        # MEMOISES the patched ``make_t3``'s MagicMock into the process-wide
+        # ``_t3_instance``. ``patch`` restores the factory; it cannot restore
+        # the memo, so the mock outlived this test and silently swallowed
+        # every later chunk write in the same xdist worker (the journeys'
+        # ``referenced=1 present=0`` completion refusals). conftest's
+        # ``_restore_t3_singleton`` now catches this class suite-wide; clearing
+        # it here fixes it at the leaker.
+        from nexus.mcp_infra import inject_t3
+        inject_t3(None)
     return result, mt3
 
 
