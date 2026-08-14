@@ -21,21 +21,45 @@ Add a row to :data:`ENGINE_CLIENT_PRECONDITIONS` whenever an engine change
 breaks clients that predate a specific client commit. Delete rows once the
 floor moves past the engine version that carried the requirement.
 
+**Gap 1 fix (protocol-audit [22511], 2026-08-14).** The hand-filled table
+above is only HALF the deploy-order precondition. The AUTOMATED detector for
+the same bug class -- :mod:`check_wire_contract_pairing` /
+``docs/wire-contract-pending.md``, which flags commits touching both the
+engine tree and the client wire surface in one changeset -- used to be
+consulted ONLY from ``check_engine_release_floor.py``'s ``--paired-deploy``
+branch. An ORDINARY unpaired engine deploy (an operator running this script
+with no paired client release in flight -- exactly the shape of the
+2026-08-13 ``engine-service-v0.1.73`` deploy that caused the 910-doc
+manifest-400 outage) read only the empty hand table above and never the
+ledger. :func:`check_wire_contract_ledger` closes that: every run of
+:func:`check` also asks the ledger whether it has ANY unacknowledged
+``## Unshipped`` entry, and blocks (exit 1) if so, with the same named-bead
+``--ack-client-lag`` escape :func:`check_engine_release_floor.check_client_lag_ledger`
+already offers on the paired-deploy path. Unlike the hand table (keyed to one
+specific *engine_tag*), the ledger check is NOT tag-scoped -- a non-empty
+``## Unshipped`` section means some client half is missing from every
+released version, and an unpaired deploy of ANY engine tag risks carrying
+that gap live, so it blocks regardless of which tag is being checked.
+
 Usage::
 
     uv run python scripts/check_client_release_precondition.py
     uv run python scripts/check_client_release_precondition.py --engine-tag engine-service-v0.1.61
+    uv run python scripts/check_client_release_precondition.py --ack-client-lag nexus-1234
 
 Exit codes: ``0`` all preconditions satisfied (or none registered for the
-tag), ``1`` a required client commit is missing from the latest released
-``v*`` tag, ``2`` git state could not be interrogated ("could not verify" is
-never "must be fine").
+tag, and the wire-contract ledger is clean), ``1`` a required client commit
+is missing from the latest released ``v*`` tag, OR the wire-contract ledger
+has an unacknowledged ``## Unshipped`` entry, ``2`` git state could not be
+interrogated ("could not verify" is never "must be fine").
 """
 from __future__ import annotations
 
 import argparse
 import subprocess
 import sys
+
+import check_wire_contract_pairing as _wire_ledger
 
 #: engine tag (or the literal "next" for the tag about to be cut) -> the
 #: client commits that must be in a RELEASED conexus version before that
@@ -61,6 +85,69 @@ _REMEDY = (
     "§ Engine-service release, paired-release choreography). Then re-run "
     "this check."
 )
+
+_LEDGER_REMEDY = (
+    "Remedy: this engine deploy carries an engine-side wire change "
+    "(docs/wire-contract-pending.md ## Unshipped) whose client half is not "
+    "yet in a published release (nexus-1vogq class -- the 08-13 v0.1.73 "
+    "manifest-400 outage shape). Either pair this deploy with the client "
+    "release carrying the listed commit(s) (see AGENTS.md § Engine-service "
+    "release, paired-release choreography), or pass --ack-client-lag "
+    "<bead-id> for each entry below to deploy anyway."
+)
+
+
+def check_wire_contract_ledger(ack_beads: list[str] | None = None) -> tuple[int, bool]:
+    """Gap 1 fix: consult the mechanized both-halves wire-contract ledger,
+    not only :data:`ENGINE_CLIENT_PRECONDITIONS` above. See the module
+    docstring's "Gap 1 fix" section for why the hand table alone left the
+    unpaired-deploy path blind to exactly the bug class that caused the
+    2026-08-13 outage.
+
+    Not tag-scoped (unlike :func:`check`'s hand-table half): a non-empty
+    ``## Unshipped`` section means SOME client half is missing from every
+    released version, so it blocks an unpaired deploy of any engine tag,
+    mirroring :func:`check_engine_release_floor.check_client_lag_ledger`'s
+    unconditional-block-unless-acknowledged shape on the paired-deploy path.
+
+    Returns ``(rc, is_vacuous)``. ``is_vacuous`` is True iff the ledger's
+    ``## Unshipped`` section is entirely empty -- kept distinct from "checked
+    and found clean" so :func:`check` can print an honest combined message
+    when BOTH this and the hand table above verified nothing.
+    """
+    ledger = _wire_ledger.parse_ledger(_wire_ledger.DEFAULT_LEDGER_PATH)
+    if not ledger.unshipped:
+        print(
+            f"wire-contract ledger: 0 unshipped entries in "
+            f"{_wire_ledger.DEFAULT_LEDGER_PATH}"
+        )
+        return 0, True
+
+    acked = set(ack_beads or [])
+    missing = [e for e in ledger.unshipped.values() if e.bead not in acked]
+    if missing:
+        print(
+            f"BLOCKED: {len(missing)} both-halves commit(s) in "
+            f"{_wire_ledger.DEFAULT_LEDGER_PATH} have an unshipped client "
+            "half and no acknowledgment:",
+            file=sys.stderr,
+        )
+        for e in missing:
+            print(
+                f"  {e.sha}  bead {e.bead}  engine tag {e.engine_tag}  "
+                f"({e.note})",
+                file=sys.stderr,
+            )
+        print(f"\n{_LEDGER_REMEDY}", file=sys.stderr)
+        return 1, False
+
+    print(
+        f"wire-contract ledger: {len(ledger.unshipped)} unshipped "
+        "both-halves commit(s), all explicitly acknowledged via "
+        "--ack-client-lag: "
+        f"{', '.join(sorted(acked & {e.bead for e in ledger.unshipped.values()}))}"
+    )
+    return 0, False
 
 
 def _git(*args: str) -> str:
@@ -94,58 +181,74 @@ def is_ancestor(commit: str, tag: str) -> bool:
     )
 
 
-def check(engine_tag: str) -> int:
+def check(engine_tag: str, ack_client_lag: list[str] | None = None) -> int:
     required = ENGINE_CLIENT_PRECONDITIONS.get(engine_tag, {})
+    hand_table_vacuous = not required
     if not required:
         # nexus-f9z84: an empty table is a LEGITIMATE state (most engine
         # tags carry no client-breaking coupling), but it is INDISTINGUISHABLE
         # from "nobody filled the row in" unless the wording says so out
-        # loud. This prints "OK" because exit 0 IS still correct here --
-        # justification: this script gates the DEPLOY-ORDER precondition
-        # specifically (9ssih dangling-endpoint class), not release safety in
-        # general; an empty registry means "no KNOWN engine/client coupling
-        # for this tag", which is a fact about the registry, not a verified
-        # safety property. The engine-release skill's Step 3b is where a
-        # human is expected to add a row (or consciously leave none) when
-        # cutting the tag -- this script cannot force that decision, only
-        # report honestly that it verified NOTHING when the table is empty.
-        print(
-            f"OK (VACUOUS -- 0 preconditions registered for {engine_tag}): "
-            "this run verified NOTHING. An empty registry means either "
-            "'no known client coupling for this engine tag' or 'nobody "
-            "added the row' -- this script cannot tell the two apart. "
-            "See ENGINE_CLIENT_PRECONDITIONS's module docstring before "
-            "treating this as evidence the deploy is safe."
-        )
-        return 0
-    try:
-        release = latest_release_tag()
-    except RuntimeError as e:
-        print(f"CANNOT VERIFY: {e}", file=sys.stderr)
-        return 2
-    missing = []
-    for commit, why in required.items():
+        # loud. Exit 0 IS still correct here -- justification: this script
+        # gates the DEPLOY-ORDER precondition specifically (9ssih
+        # dangling-endpoint class), not release safety in general; an empty
+        # registry means "no KNOWN engine/client coupling for this tag",
+        # which is a fact about the registry, not a verified safety
+        # property. The engine-release skill's Step 3b is where a human is
+        # expected to add a row (or consciously leave none) when cutting the
+        # tag -- this script cannot force that decision, only report
+        # honestly that it verified NOTHING when the table is empty.
+        #
+        # Gap 1 fix: the hand table's own vacuity is no longer printed
+        # unconditionally here -- the mechanized wire-contract ledger below
+        # is a SECOND, independent source, and the combined "verified
+        # nothing" claim is only true when BOTH are empty. See the combined
+        # message at the bottom of this function.
+        pass
+    else:
         try:
-            ok = is_ancestor(commit, release)
+            release = latest_release_tag()
         except RuntimeError as e:
-            print(f"CANNOT VERIFY {commit}: {e}", file=sys.stderr)
+            print(f"CANNOT VERIFY: {e}", file=sys.stderr)
             return 2
-        status = "in" if ok else "MISSING FROM"
-        print(f"  {commit}  {status} {release}  ({why.splitlines()[0]}...)")
-        if not ok:
-            missing.append((commit, why))
-    if missing:
+        missing = []
+        for commit, why in required.items():
+            try:
+                ok = is_ancestor(commit, release)
+            except RuntimeError as e:
+                print(f"CANNOT VERIFY {commit}: {e}", file=sys.stderr)
+                return 2
+            status = "in" if ok else "MISSING FROM"
+            print(f"  {commit}  {status} {release}  ({why.splitlines()[0]}...)")
+            if not ok:
+                missing.append((commit, why))
+        if missing:
+            print(
+                f"\nBLOCKED: {engine_tag} must not deploy — "
+                f"{len(missing)} required client commit(s) absent from the "
+                f"latest release {release}:",
+                file=sys.stderr,
+            )
+            for commit, why in missing:
+                print(f"  {commit}: {why}", file=sys.stderr)
+            print(f"\n{_REMEDY}", file=sys.stderr)
+            return 1
+        print(f"OK: all client preconditions for {engine_tag} are in {release}")
+
+    ledger_rc, ledger_vacuous = check_wire_contract_ledger(ack_client_lag)
+    if ledger_rc != 0:
+        return ledger_rc
+
+    if hand_table_vacuous and ledger_vacuous:
         print(
-            f"\nBLOCKED: {engine_tag} must not deploy — "
-            f"{len(missing)} required client commit(s) absent from the "
-            f"latest release {release}:",
-            file=sys.stderr,
+            f"OK (VACUOUS -- 0 preconditions registered for {engine_tag} AND "
+            f"0 entries in {_wire_ledger.DEFAULT_LEDGER_PATH}'s ## Unshipped "
+            "section): this run verified NOTHING from EITHER source. An "
+            "empty hand table plus an empty ledger means either 'no known "
+            "client coupling for this engine tag' or 'nobody added rows to "
+            "either source' -- this script cannot tell the two apart. See "
+            "ENGINE_CLIENT_PRECONDITIONS's module docstring before treating "
+            "this as evidence the deploy is safe."
         )
-        for commit, why in missing:
-            print(f"  {commit}: {why}", file=sys.stderr)
-        print(f"\n{_REMEDY}", file=sys.stderr)
-        return 1
-    print(f"OK: all client preconditions for {engine_tag} are in {release}")
     return 0
 
 
@@ -187,7 +290,7 @@ def _pinned_engine_tag() -> str:
     return "engine-service-v" + ".".join(str(n) for n in REQUIRED_ENGINE_VERSION)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--engine-tag",
@@ -195,8 +298,19 @@ def main() -> int:
         help="engine tag whose client preconditions to verify "
         "(default: the pinned REQUIRED_ENGINE_VERSION tag)",
     )
-    args = ap.parse_args()
-    return check(args.engine_tag or _pinned_engine_tag())
+    ap.add_argument(
+        "--ack-client-lag",
+        action="append",
+        default=None,
+        metavar="BEAD-ID",
+        help="Gap 1 fix. Explicit acknowledgment that a both-halves "
+        "commit's client half is not yet in a published release -- names "
+        "the OWNING BEAD of a docs/wire-contract-pending.md ## Unshipped "
+        "entry. Repeat for each entry. Without this, a non-empty ledger "
+        "blocks the deploy regardless of --engine-tag.",
+    )
+    args = ap.parse_args(argv)
+    return check(args.engine_tag or _pinned_engine_tag(), args.ack_client_lag)
 
 
 if __name__ == "__main__":

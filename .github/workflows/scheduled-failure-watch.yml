@@ -22,6 +22,21 @@ name: Scheduled-gate watchdog (daily)
 #
 # CI-cost discipline: a few API calls on ubuntu-latest, once a day. No
 # checkout of history, no build, no matrix.
+#
+# SECOND job below (protocol-audit [22511] Gap 2, 2026-08-14): the
+# engine-release skill's `--paired-deploy` acceptance prints "POST-TAG VERIFY
+# REQUIRED: re-run this script WITHOUT --paired-deploy once the deploy lands"
+# (scripts/check_engine_release_floor.py) — pure stdout prose, nothing ran it
+# automatically. A deploy that failed AFTER a successful PyPI publish, or one
+# that silently never converged, went unnoticed until the next release
+# (cloud sat on engine-service-v0.1.17 for 9+ days across releases,
+# nexus-i5c2u). `engine-floor-verify` runs the BARE gate (no
+# --paired-deploy) daily, self-discovered: this workflow already sweeps
+# every `.github/workflows/*.yml` declaring `on.schedule` for silent
+# failures, and this very file is one of them — a red `engine-floor-verify`
+# run fails the whole workflow run, which tomorrow's `watch` job (run as
+# part of the SAME schedule) then reports on the same way it reports on any
+# other rotted scheduled gate. No separate discovery wiring needed.
 
 on:
   schedule:
@@ -98,3 +113,46 @@ jobs:
               echo "clean; no issue to manage"
             fi
           fi
+
+  engine-floor-verify:
+    name: Verify deployed engine meets the pinned floor (deploy-window VERIFY)
+    # protocol-audit [22511] Gap 2: the deploy-window VERIFY that
+    # --paired-deploy's acceptance message asks a human to re-run by hand
+    # ("POST-TAG VERIFY REQUIRED", check_engine_release_floor.py), mechanized.
+    # Runs the BARE gate (no --paired-deploy, no --url) against the real
+    # public managed endpoint. A red run here means the deployed cloud
+    # engine is stale relative to REQUIRED_ENGINE_VERSION, or this release's
+    # pinned engine tag has drifted from HEAD's service/src/main source —
+    # either way, the `watch` job above picks it up on tomorrow's sweep
+    # (see the header comment) because this workflow file is itself one of
+    # the `on.schedule` workflows being swept.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          # fetch-depth: 0, NOT fetch-tags (same reasoning as release.yml,
+          # nexus-dhs30): the pin-currency and source-ancestry arms both walk
+          # `git tag -l engine-service-v*` / `v*` and `git diff <tag> HEAD`,
+          # which need full history — `fetch-tags: true` on a shallow
+          # checkout does not deliver tags outside the fetched range.
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Install project
+        run: uv sync
+
+      - name: Verify cloud engine meets required floor
+        # No GITHUB_TOKEN needed: the bare invocation (no --paired-deploy)
+        # never shells out to `gh` — that only happens inside
+        # --paired-deploy's `gh release view` publication check. This leg
+        # only needs outbound HTTPS to the public managed endpoint plus the
+        # `contents: read` permission above for actions/checkout.
+        run: uv run python scripts/check_engine_release_floor.py

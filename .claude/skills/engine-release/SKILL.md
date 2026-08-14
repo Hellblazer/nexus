@@ -103,6 +103,17 @@ latest RELEASED `v*` tag. Register new preconditions in the script's
 `ENGINE_CLIENT_PRECONDITIONS` whenever an engine change ships a wire behavior
 old clients mishandle. Prose deploy-gates get skipped; this one does not.
 
+This is also where the mechanized both-halves wire-contract ledger
+(`docs/wire-contract-pending.md`, `scripts/check_wire_contract_pairing.py`)
+gets consulted on the **unpaired** deploy path (protocol-audit [22511] Gap 1,
+2026-08-14) — an ordinary "refresh the cloud engine" run with no paired
+client release in flight. A non-empty `## Unshipped` section blocks (exit 1)
+regardless of `--engine-tag` unless every entry's bead is acknowledged:
+
+```bash
+uv run python scripts/check_client_release_precondition.py --ack-client-lag nexus-1234
+```
+
 **A red exit blocks the DEPLOY, never the tag cut** (Hal directive
 2026-08-02; the pre-tag wiring of this check is what forced conexus 7.1.0 to
 ship pinned to a pre-fence engine — its own flagship feature inert on fresh
@@ -243,6 +254,24 @@ re-propose it. Instance of `nexus-1e2eh` (release-only procedures rot silently).
 > tests the *previously*-deployed cloud engine, not the candidate. It is part of
 > the post-deploy cloud-gate, below.
 
+### 5b. Migration-release branch (CONDITIONAL — this tag carries schema or data DDL)
+
+Trigger: `service/` since the last engine tag includes a new Liquibase changeset, or any change to a data shape existing rows already have to conform to (T2 [22511] gap 9). Skip this step entirely when the cut carries no such change.
+
+1. **Representative-scale rehearsal.** Run the populated-store rehearsal in PUBLISHED-bytes mode against a corpus seeded ABOVE a stated floor, not the harness's default toy seed (10-30 docs across `rehearse_cold.sh` / `rehearse_acquire.sh` / `rehearse_shakeout.sh` / `rehearse_hole_punch.sh`):
+   ```bash
+   NEXUS_TARGET_RELEASE=<published-conexus-version> tests/e2e/migration-rehearsal/run.sh --package-upgrade
+   ```
+   Name the floor and the actual seed count used in the deploy relay. RDR-191's cloud 385,484-row unify-chunks migration (T2 [22485]) remains the only at-scale proof this project has produced for a chunk-table DDL change — and it ran in PRODUCTION. If the rehearsal cannot be brought to a genuinely representative scale before the deploy relay fires, say so explicitly rather than letting a toy-scale pass stand in for one.
+
+2. **Rollback decision point, settled before the relay fires.** Determine whether this migration can be rolled back after it commits on the managed deployment. Non-transactional DDL (`CREATE INDEX CONCURRENTLY`, any Liquibase changeset that cannot run inside a transaction) forfeits the free atomic rollback a transactional migration gets — `nexus-o8dil.22`'s own wording: "CIC, non-blocking, +11%, cannot run in a transaction, and therefore forfeits the free atomic rollback that the local path gets." When the answer is no, write **IRREVERSIBLE** in the deploy relay verbatim, and have the substitute in hand before the operator opens the window: a written rollback/abort runbook with exact statements and named abort criteria.
+
+3. **Freeze-window derivation from measurement, not a guess.** Generalizing `nexus-o8dil.22`'s pre-flight (T2 [22420] / [22427] / [22485]): derive and state (a) copy-peak — the largest transient storage footprint the migration needs mid-flight; (b) WAL budget — retained WAL under the deployment's replication settings during the window, checked against `max_wal_size`; (c) disk floor — abort unless available disk clears (steady-state floor + copy-peak) with a stated margin, re-measured immediately before executing (corpus growth between planning and execution shrinks the margin). Name the resulting threshold and the abort condition in the operator runbook.
+
+4. **Post-deploy data-integrity verification, beyond `/version`.** A version match proves the binary shipped, not that the data survived. Verify, per T2 [22485]'s pattern: exact row-count reconciliation pre vs. post (per dimension/table, not an aggregate), that `ANALYZE` actually fired, and that Step 6.1's client-visibility gate plus the deploy gate's parity/recall legs are green post-migration. [22485]'s own verdict is the bar to match: "ROW INVARIANT EXACT: 385,484 pre == post ... ANALYZE fired ... STEP-6 green (112/113 parity, recall 12/12 pools identical), cloud client-path gate PASSED all four legs."
+
+Full rationale and evidence citations: `docs/contributing.md` § Schema/data-migration releases.
+
 ### 6. Relay deploy + post-deploy cloud validation to conexus (passive bus)
 
 Deploy and cloud-validation are **conexus-side operations** — the bus is passive, so surface an explicit relay to Hal; never frame the cross-instance deploy as autonomous:
@@ -252,6 +281,16 @@ Deploy and cloud-validation are **conexus-side operations** — the bus is passi
 **THIS is where 3b's precondition check blocks.** Re-run `check_client_release_precondition.py --engine-tag <tag>` before surfacing the relay: a red exit means the deploy waits for the client tag carrying the listed commits. In the paired-release choreography that is not a long wait — the deploy relay fires at client-tag push, in parallel with the client's PyPI publish, so the precondition is satisfied the instant the client tag exists and the engine is live before any user can install the client that requires it.
 
 The post-deploy `--with-cloud` rehearsal (`run.sh --with-cloud`, the cloud → cloud Voyage journey) requires the candidate to be **deployed on conexus** first — it runs as part of this cloud-gate, once the deploy lands, not in Step 5. For cross-repo gate / deploy status, **read the authoritative bead + the conexus bus, not memory** — cross-repo state goes stale fast (2026-06-26: a `luxe6` condition had been cleared a week earlier than memory implied).
+
+### 6.1. Post-deploy client-visibility gate (MANDATORY, run from a cloud-mode box)
+
+```bash
+tests/e2e/cloud-client-path-gate.sh
+```
+
+Run this AFTER Step 6's deploy relay confirms the tag is live, and BEFORE Step 7's downstream-ref bump or signing off any release shakeout that depends on this engine (T2 [22511] gap 7 — this gate existed only as one prose line in AGENTS.md, in no numbered step of this checklist, since it was born from the nexus-bwulw incident). The gates above prove the ENGINE works, direct; they do not prove the PUBLIC edge (`api.conexus-nexus.com`) exposes the same contracts — 2026-07-23 (nexus-bwulw): the edge stubbed `/version` and auth-gated `/health`, silently disabling voyage threshold gating and dimension-orphan tooling and blocking guided migrations to cloud, while three client features shipped green through every engine-direct gate above. This asserts the engine's pinned contracts (`/version` fields, the `ez5.1` `/health` contract, the client `embedding_mode` probe, the `/v1` read path) survive the public edge.
+
+Client version to run it from: the working tree (`HEAD`), the same dev-client × new-engine pairing every other gate in this checklist uses — this script has no separate published-client mode. It is NOT a substitute for Step 3c's `published-client-write-gate.sh`, which is the leg that pairs the CURRENTLY-PUBLISHED client against the candidate; this step's job is edge-contract visibility, not client-write compatibility.
 
 ### 7. After conexus confirms deployed + cloud-gated green, bump downstream refs
 

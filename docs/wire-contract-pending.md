@@ -31,6 +31,11 @@ carries no method signature for a contract change to reconcile against) is a
   a non-empty `## Unshipped` section blocks the paired-deploy path unless
   every entry's bead is named via `--ack-client-lag <bead-id>` (explicit
   paired-client acknowledgment, not a silent pass).
+- `scripts/check_client_release_precondition.py` (protocol-audit [22511]
+  Gap 1, 2026-08-14) reads this ledger too, unconditionally, on the
+  UNPAIRED deploy path -- the ordinary "refresh the cloud engine" run that
+  the paired-deploy branch above does not cover. Same `--ack-client-lag
+  <bead-id>` escape shape.
 
 ---
 
