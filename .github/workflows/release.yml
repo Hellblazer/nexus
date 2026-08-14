@@ -19,6 +19,19 @@ on:
         required: true
         type: string
 
+# Gap 6 (T2 [22511]): without a concurrency group, the workflow_dispatch retry
+# path above (added for exactly "a transient upload error") can race the
+# original tag-push run instead of queuing behind it -- both ci.yml and
+# engine-service-release.yml already carry one, this workflow didn't.
+# `inputs.tag || github.ref_name` covers both triggers: on a tag push
+# `inputs.tag` is unset so it falls through to the pushed tag's ref_name; on
+# workflow_dispatch `inputs.tag` names the tag being retried. cancel-in-progress
+# is deliberately false -- this publishes to PyPI, and cancelling a mid-publish
+# run is worse than making the retry wait.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   # 2026-07-06 CI-cost pass: the pytest matrix that used to run here was
   # removed. A v* tag always points at a main merge commit whose identical
@@ -184,6 +197,16 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2 (COMMIT sha, not the annotated-tag object sha)
         # No api-token needed — uses OIDC trusted publisher
+        with:
+          # Gap 6 (T2 [22511]): the 4.34.4 incident (see the GH-release step
+          # below) had PyPI publish SUCCEED and only the GH-release sub-step
+          # fail, repaired by hand. The workflow_dispatch retry path exists
+          # for exactly this shape of partial failure -- but without
+          # skip-existing, re-running after a successful PyPI upload hard-fails
+          # here on the duplicate-file rejection before ever reaching the step
+          # that actually needs retrying. skip-existing makes a re-run of an
+          # already-published version a no-op here instead of a hard stop.
+          skip-existing: true
 
       - name: Create GitHub Release
         # Pinned to v2.6.2 SHA after the floating @v2 tag was implicated

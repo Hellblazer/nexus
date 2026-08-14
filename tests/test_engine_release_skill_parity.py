@@ -41,6 +41,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).parent.parent
 RUN_SH = REPO_ROOT / "tests" / "e2e" / "migration-rehearsal" / "run.sh"
@@ -327,20 +328,52 @@ def test_the_pin_currency_gate_exists_and_is_wired_into_the_release_workflow() -
     """The directive is only as strong as the check that enforces it.
 
     Three things must hold together: the gate implements the pin direction, the
-    release workflow runs the gate, and the checkout fetches tags (without which
-    the gate sees no tags — it fails closed by design, so a missing fetch-tags
-    breaks every release rather than passing vacuously, but either way the
+    release workflow runs the gate, and the checkout fetches full history (without
+    which the gate sees no tags — it fails closed by design, so missing tag
+    history breaks every release rather than passing vacuously, but either way the
     release is not protected as intended).
+
+    nexus-dhs30 / gap 5 (T2 [22511]): the checkout does NOT use `fetch-tags: true`
+    — on a shallow checkout that flag does not deliver tags whose commits sit
+    outside the fetched history, so release.yml deliberately uses
+    `fetch-depth: 0` (full history, which does bring every tag) instead. A prior
+    version of this assertion substring-matched `"fetch-tags: true" in wf` and
+    was satisfied by the explanatory COMMENT stating the opposite ("fetch-depth:
+    0, NOT fetch-tags") — a purely textual match that a fetch-depth regression
+    would not have caught. This parses the actual checkout step's `with:` block
+    instead of substring-matching prose.
     """
     gate_src = (REPO_ROOT / "scripts" / "check_engine_release_floor.py").read_text(encoding="utf-8")
     assert "def check_pin_currency" in gate_src
     assert "def newest_published_engine" in gate_src
 
-    wf = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-    assert "check_engine_release_floor.py" in wf, "release workflow no longer runs the gate"
-    assert "fetch-tags: true" in wf, (
-        "release.yml checkout must fetch tags or the pin-currency half cannot "
-        "see any engine-service-v* tag"
+    wf_path = REPO_ROOT / ".github" / "workflows" / "release.yml"
+    wf_text = wf_path.read_text(encoding="utf-8")
+    assert "check_engine_release_floor.py" in wf_text, "release workflow no longer runs the gate"
+
+    wf = yaml.safe_load(wf_text)
+    publish_steps = wf["jobs"]["publish"]["steps"]
+    checkout_steps = [
+        step for step in publish_steps if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    assert checkout_steps, "release.yml publish job no longer has an actions/checkout step"
+    checkout_with = checkout_steps[0].get("with", {})
+
+    assert checkout_with.get("fetch-depth") == 0, (
+        "release.yml checkout must set fetch-depth: 0 (full history) or the "
+        "pin-currency half cannot see any engine-service-v* tag whose commit "
+        f"sits outside a shallow fetch; got with: {checkout_with!r}"
+    )
+    # Kill-control for the exact bug this test replaces: a shallow checkout
+    # (fetch-depth left at its default of 1) plus `fetch-tags: true` looks
+    # tag-aware but is NOT — see nexus-dhs30 in the comment above the
+    # checkout step in release.yml. Assert the flag is genuinely absent so a
+    # future edit cannot silently swap the working fetch-depth: 0 config for
+    # this look-alike, broken one.
+    assert "fetch-tags" not in checkout_with, (
+        "release.yml checkout sets fetch-tags, which on a non-full-history "
+        "checkout does NOT reliably deliver engine-service-v* tags (nexus-dhs30) "
+        "— use fetch-depth: 0 instead, not fetch-tags: true"
     )
 
 

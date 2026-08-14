@@ -15,6 +15,7 @@ the named context, never an aggregate.
 from __future__ import annotations
 
 import urllib.error
+from pathlib import Path
 
 import pytest
 
@@ -690,7 +691,16 @@ def test_required_check_contexts_matches_live_branch_protection():
     check_client_release_precondition.py's ENGINE_CLIENT_PRECONDITIONS) with
     no lint against live branch protection. This compares it against the
     real API so a rename shows up here first, instead of as a mysteriously
-    red release gate naming a check that "never ran"."""
+    red release gate naming a check that "never ran".
+
+    NON-VACUITY NOTE (gap 4, T2 [22511]): this test skip-passes with no
+    max-skip guard whenever no admin-scoped GITHUB_TOKEN/`gh` is available --
+    true for the release job's own token and for most local checkouts, so it
+    effectively never runs. It remains the stronger live-API check and is
+    kept for the environments where it CAN run, but the non-vacuous,
+    always-runs guarantee for this constant comes from the sibling
+    ``test_required_check_contexts_matches_ci_workflow_job_names`` below,
+    which parses ci.yml directly and needs no token."""
     import json
     import subprocess
 
@@ -726,4 +736,49 @@ def test_required_check_contexts_matches_live_branch_protection():
         f"from main's live required contexts {sorted(live_contexts)} -- "
         "update the constant (and its module-docstring justification) in "
         "scripts/check_release_ci_evidence.py"
+    )
+
+
+def test_required_check_contexts_matches_ci_workflow_job_names():
+    """OFFLINE parity leg for the drift check above (gap 4, T2 [22511]).
+
+    ``test_required_check_contexts_matches_live_branch_protection`` is the
+    stronger integration-layer check, but it skip-passes in every
+    environment this repo actually runs in: no ``GITHUB_TOKEN`` in CI (the
+    publish job's token deliberately lacks ``administration:read``), and no
+    admin-scoped ``gh`` for most local dev checkouts either -- three
+    independent skip paths, no max-skip / non-vacuity assert. That violates
+    the standing directive that a gate skip-passing on an absent dependency
+    must carry a non-vacuity guard.
+
+    This leg is deterministic and needs no network or token: it parses
+    ``.github/workflows/ci.yml`` and asserts every name in
+    ``REQUIRED_CHECK_CONTEXTS`` is a real job's ``name:`` in that workflow.
+    It cannot catch a live branch-protection change made outside this repo,
+    but it DOES catch the realistic drift class -- a job rename or removal
+    in ci.yml that silently orphans the release gate's required-context
+    check -- and it always runs, in CI and locally alike.
+
+    Non-vacuity: deliberately unmarked (not ``integration``, not ``lint``)
+    so it runs under the DEFAULT addopts selection, not just an opt-in leg.
+    """
+    import yaml
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    ci_yml_path = repo_root / ".github" / "workflows" / "ci.yml"
+    ci_workflow = yaml.safe_load(ci_yml_path.read_text(encoding="utf-8"))
+
+    jobs = ci_workflow.get("jobs", {})
+    assert jobs, f"{ci_yml_path} parsed with no jobs -- parser or file is broken"
+
+    job_names = {job.get("name") for job in jobs.values() if job.get("name")}
+    assert job_names, f"{ci_yml_path} has jobs but none carry a 'name:' field"
+
+    missing = [ctx for ctx in gate.REQUIRED_CHECK_CONTEXTS if ctx not in job_names]
+    assert not missing, (
+        f"REQUIRED_CHECK_CONTEXTS {gate.REQUIRED_CHECK_CONTEXTS} names "
+        f"{missing} which is not a job 'name:' in {ci_yml_path} (job names "
+        f"found: {sorted(job_names)}) -- either the ci.yml job was renamed/"
+        "removed (fix the workflow or the constant) or the required-check "
+        "list in scripts/check_release_ci_evidence.py has drifted"
     )
