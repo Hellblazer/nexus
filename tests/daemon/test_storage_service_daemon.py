@@ -1575,6 +1575,166 @@ class TestSpawnServiceVoyageKeyPlumbing:
         assert env["NX_VOYAGE_API_KEY"] == "chain-key"
 
 
+class TestCredsReloadAfterBackfill:
+    """nexus-hzhgl round 3 review Significant-1: ``_backfill_provision_grants()``
+    (called from ``_ensure_pg_running``) can rewrite ``pg_credentials`` on
+    disk via ``provision()``'s fast path, but ``self._creds`` was frozen at
+    ``__init__`` time. ``_spawn_service()`` — the very next step in
+    ``_start_locked`` — builds the JVM's entire env from ``self._creds``.
+    Without a reload in between, a future backfill that rotates an
+    env-relevant credential would land on disk but never reach the freshly
+    spawned process.
+    """
+
+    def test_ensure_pg_running_reloads_creds_after_backfill(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Direct proof on ``_ensure_pg_running`` alone: a backfill that
+        mutates the on-disk file is reflected in ``self._creds`` immediately
+        afterward, with no real PG or subprocess involved."""
+        creds_file = config_dir / "pg_credentials"
+        creds_file.write_text(
+            "PG_PORT=15432\n"
+            "PG_DATA=/tmp/testpgdata\n"
+            "NX_DB_URL=jdbc:postgresql://127.0.0.1:15432/nexus\n"
+            "NX_DB_USER=nexus_svc\n"
+            "NX_DB_PASS=original-pass\n"
+            "NX_DB_ADMIN_URL=jdbc:postgresql://127.0.0.1:15432/nexus\n"
+            "NX_DB_ADMIN_USER=nexus_admin\n"
+            "NX_DB_ADMIN_PASS=testadminpass\n"
+        )
+        creds_file.chmod(0o600)
+
+        sup = _make_supervisor(
+            config_dir, clock,
+            creds={
+                "NX_DB_URL": "jdbc:...", "NX_DB_USER": "nexus_svc",
+                "NX_DB_PASS": "original-pass",
+                "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "nexus_admin",
+                "NX_DB_ADMIN_PASS": "testadminpass", "PG_PORT": "15432",
+                "PG_DATA": "/tmp/testpgdata",
+                "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
+            },
+        )
+
+        def _fake_backfill_mutates_disk() -> None:
+            # Simulate a future provision() fast-path backfill rotating a
+            # DB credential on disk -- the exact class Significant-1 warns
+            # about (today's backfills don't touch these keys; a future one
+            # might).
+            text = creds_file.read_text().replace(
+                "NX_DB_PASS=original-pass", "NX_DB_PASS=fresh-post-backfill-pass",
+            )
+            creds_file.write_text(text)
+
+        monkeypatch.setattr(
+            "nexus.daemon.storage_service_daemon._port_accepting",
+            lambda *a, **k: True,  # PG already running -> short-circuit branch
+        )
+        monkeypatch.setattr(sup, "_backfill_provision_grants", _fake_backfill_mutates_disk)
+
+        assert sup._creds["NX_DB_PASS"] == "original-pass"  # precondition
+
+        sup._ensure_pg_running()
+
+        assert sup._creds["NX_DB_PASS"] == "fresh-post-backfill-pass", (
+            "self._creds was not reloaded after _backfill_provision_grants() "
+            "ran -- _spawn_service() would build the JVM env from stale creds"
+        )
+
+    def test_spawned_env_carries_post_backfill_value(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End-to-end proof through the real call sequence the reviewer
+        asked for: a backfill mutates a cred value, then the SPAWNED env
+        (captured via a mocked Popen -- no real JVM needed) carries the
+        fresh value, not the construction-time snapshot."""
+        creds_file = config_dir / "pg_credentials"
+        creds_file.write_text(
+            "PG_PORT=15432\n"
+            "PG_DATA=/tmp/testpgdata\n"
+            "NX_DB_URL=jdbc:postgresql://127.0.0.1:15432/nexus\n"
+            "NX_DB_USER=nexus_svc\n"
+            "NX_DB_PASS=original-pass\n"
+            "NX_DB_ADMIN_URL=jdbc:postgresql://127.0.0.1:15432/nexus\n"
+            "NX_DB_ADMIN_USER=nexus_admin\n"
+            "NX_DB_ADMIN_PASS=testadminpass\n"
+        )
+        creds_file.chmod(0o600)
+
+        sup = _make_supervisor(
+            config_dir, clock,
+            creds={
+                "NX_DB_URL": "jdbc:...", "NX_DB_USER": "nexus_svc",
+                "NX_DB_PASS": "original-pass",
+                "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "nexus_admin",
+                "NX_DB_ADMIN_PASS": "testadminpass", "PG_PORT": "15432",
+                "PG_DATA": "/tmp/testpgdata",
+                "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
+            },
+        )
+
+        def _fake_backfill_mutates_disk() -> None:
+            text = creds_file.read_text().replace(
+                "NX_DB_PASS=original-pass", "NX_DB_PASS=fresh-post-backfill-pass",
+            )
+            creds_file.write_text(text)
+
+        monkeypatch.setattr(
+            "nexus.daemon.storage_service_daemon._port_accepting",
+            lambda *a, **k: True,
+        )
+        monkeypatch.setattr(sup, "_backfill_provision_grants", _fake_backfill_mutates_disk)
+
+        sup._ensure_pg_running()  # Step 1 -- runs the (fake) backfill + reload
+
+        captured: dict[str, str] = {}
+
+        def _fake_popen(cmd, env=None, **kwargs):
+            captured.update(env or {})
+            return MagicMock(pid=44100)
+
+        monkeypatch.setattr(
+            "nexus.daemon.storage_service_daemon.subprocess.Popen", _fake_popen,
+        )
+        sup._spawn_service()  # Step 2 -- builds the JVM env from self._creds
+
+        assert captured["NX_DB_PASS"] == "fresh-post-backfill-pass", (
+            "_spawn_service() built the JVM env from a stale credentials "
+            "snapshot -- a real post-upgrade credential rotation would "
+            "silently spawn the new engine with the OLD value"
+        )
+
+
+class TestEnsurePgRunningCalledOnFreshStart:
+    """nexus-hzhgl round 3 review Significant-2, positive case: with NO live
+    lease, ``start()`` must reach ``_ensure_pg_running()`` (and so the
+    backfill). The negative case (live lease -> NOT called) is already
+    pinned by ``TestRdr175MvvSingleSupervisor::
+    test_second_start_short_circuits_to_single_lease``; this test closes the
+    other side so the lease short-circuit is proven to be the ONLY skip
+    path, not merely one that happens to skip it in the cases already
+    covered.
+    """
+
+    def test_no_live_lease_reaches_ensure_pg_running(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        from nexus.daemon.service_registry import ServiceRegistry
+
+        scope = str(os.getuid())
+        assert ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock).discover(scope) is None
+
+        sup = _make_supervisor(config_dir, clock)
+        proc = _FakeProc(pid=51300)
+        with patch.object(sup, "_ensure_pg_running") as ensure_pg, \
+             patch.object(sup, "_spawn_service", return_value=(proc, 19800)), \
+             patch.object(sup, "_wait_for_service_ready"):
+            sup.start()
+
+        ensure_pg.assert_called_once()
+
+
 class TestNativeStartHasNoSchemaSkewGate:
     """RDR-161: the JVM-only schema-skew gate (nexus-pebfx.4) is expunged with
     the legacy launch path. A native start goes PG -> spawn with no skew probe;

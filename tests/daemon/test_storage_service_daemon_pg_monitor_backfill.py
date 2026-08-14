@@ -8,14 +8,19 @@ THE BUG (package-upgrade MVV P1, 2026-08-14): round 2
 (``_backfill_pg_monitor_admin_option``) wired the ADMIN OPTION backfill into
 ``provision()``'s own fast idempotency path — the steady state for every
 already-provisioned install. But nothing on the engine-convergence /
-service-restart path (``nx daemon restart-stale`` -> ``nx daemon service
-stop`` && ``nx daemon service start``) ever called ``provision()`` again.
-``StorageServiceSupervisor._ensure_pg_running`` only ever called
-``pg_provision._start_cluster`` directly, and when PG was ALREADY running
-(the steady state after ``nx daemon service stop``, which leaves PG up by
-design) it short-circuited with no backfill at all. A box provisioned
-before the round-2 fix shipped converges its on-disk engine binary cleanly,
-then crash-loops PERMANENTLY at Liquibase's
+service-restart path ever called ``provision()`` again. Note
+``nx daemon restart-stale`` itself deliberately does NOT auto-cycle a
+running storage service (bouncing it can sever an in-flight client, GH
+#1419 Issue 3b) — it converges the on-disk BINARY (a plain file copy) and
+emits "NEEDS HUMAN: service ... cycle it via its own lifecycle", leaving
+the actual ``nx daemon service stop`` && ``nx daemon service start`` cycle
+to the human (or the migration-rehearsal script) who runs it. THAT cycle is
+what reaches this code path. ``StorageServiceSupervisor._ensure_pg_running``
+only ever called ``pg_provision._start_cluster`` directly, and when PG was
+ALREADY running (the steady state after ``nx daemon service stop``, which
+leaves PG up by design) it short-circuited with no backfill at all. A box
+provisioned before the round-2 fix shipped has its on-disk engine binary
+converged cleanly, then crash-loops PERMANENTLY at Liquibase's
 ``grants-004-monitor-wal-visibility`` changeset on every subsequent boot.
 
 Uses a REAL, hermetic, tmp-provisioned Postgres cluster (mirrors
@@ -27,6 +32,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -269,4 +275,72 @@ class TestBackfillSkippedWithoutPgData:
         ) == "f", (
             "a managed/BYO config must never mutate grants on a Postgres "
             "this supervisor does not own"
+        )
+
+
+class TestStartReachesBackfillBeforeSpawn:
+    """nexus-hzhgl round 3 review Significant-2: coverage through the REAL
+    entrypoint. All three tests above call ``_ensure_pg_running()``
+    directly; this one drives the actual public path
+    (``start()`` -> ``_start_locked()``) on the bug-precondition state (PG
+    running, grant absent, NO live lease) so the
+    ``registry.discover()`` lease short-circuit at the top of
+    ``_start_locked`` is proven NOT to swallow the backfill on the path
+    production and the MVV rehearsal script actually take. The original
+    bug was exactly this shape — a call path silently skipping a needed
+    call — so proving it one level up from ``_ensure_pg_running`` (through
+    the lease-discovery gate) is the higher-value regression guard; see
+    also ``tests/daemon/test_storage_service_daemon.py::
+    TestRdr175MvvSingleSupervisor::test_second_start_short_circuits_to_single_lease``
+    (live lease -> skip, the negative case) and ``TestEnsurePgRunningCalledOnFreshStart::
+    test_no_live_lease_reaches_ensure_pg_running`` (no lease -> called, unit
+    level) in that same file for the two halves of the branch pinned at the
+    mock level.
+    """
+
+    def test_start_restores_grant_before_spawn_is_invoked(
+        self, upgrade_shaped_cluster, bins, monkeypatch,
+    ):
+        result, config_dir = upgrade_shaped_cluster
+        sup = _make_supervisor(result, config_dir)
+        os_user = _os_user()
+
+        from nexus.daemon.service_registry import ServiceRegistry
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+        assert registry.discover(str(os.getuid())) is None, (
+            "precondition: no live lease -- this must NOT short-circuit"
+        )
+
+        observed = {"admin_option_before_spawn": None, "spawn_called": False}
+
+        def _fake_spawn_service():
+            # Query INSIDE the mocked spawn call: this captures the grant
+            # state at the EXACT moment a real spawn would fire (the point
+            # Liquibase would consume it at), not merely "at some point
+            # during start()".
+            observed["admin_option_before_spawn"] = _query(
+                bins, result.port, NEXUS_DB_NAME, os_user,
+                "SELECT m.admin_option FROM pg_auth_members m "
+                "JOIN pg_roles r ON r.oid = m.roleid AND r.rolname = 'pg_monitor' "
+                "JOIN pg_roles g ON g.oid = m.member AND g.rolname = 'nexus_admin'",
+            )
+            observed["spawn_called"] = True
+            fake_proc = MagicMock()
+            fake_proc.pid = 61999
+            return fake_proc, 19900
+
+        monkeypatch.setattr(sup, "_spawn_service", _fake_spawn_service)
+        monkeypatch.setattr(sup, "_wait_for_service_ready", lambda *a, **k: None)
+
+        sup.start()
+
+        assert observed["spawn_called"], (
+            "_spawn_service was never reached -- start() did not follow the "
+            "expected Step1(_ensure_pg_running) -> Step2(_spawn_service) path"
+        )
+        assert observed["admin_option_before_spawn"] == "t", (
+            "the grant did not exist at the moment _spawn_service() was "
+            "invoked -- start() reached spawn without the backfill having "
+            "run first, reproducing the original bug's call-path-skip shape "
+            "one level up from _ensure_pg_running"
         )
