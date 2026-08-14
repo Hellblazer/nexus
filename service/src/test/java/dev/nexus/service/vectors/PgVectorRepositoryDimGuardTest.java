@@ -74,10 +74,23 @@ class PgVectorRepositoryDimGuardTest {
     private static final String CHASH_FOREIGN_DIM =
         Chash.ofText("dim-guard-foreign-dim-chunk").toHex();
 
+    // Second, dedicated collection + fixture for the nexus-74zvm NULL-distance guard
+    // tests below (search/hybridSearch) -- these need WELL-DEFINED (non-zero-norm)
+    // vectors, since pgvector's <=> cosine-distance operator errors on a zero vector,
+    // which the COLLECTION fixture above deliberately uses (ZeroEmbedder) for its own
+    // getEmbeddings/count tests that never touch <=>.
+    private static final String COLLECTION_NULLGUARD = "code__dimguard2__voyage-code-3__v1";
+    private static final String CHASH_NULLGUARD_OWN =
+        Chash.ofText("dim-guard-nullguard-own-dim-chunk").toHex();
+    private static final String CHASH_NULLGUARD_FOREIGN =
+        Chash.ofText("dim-guard-nullguard-foreign-dim-chunk").toHex();
+
     private PostgreSQLContainer<?> pg;
     private HikariDataSource svcDs;
     private TenantScope tenantScope;
     private PgVectorRepository repo;
+    /** Backed by {@link UnitAxisEmbedder} -- for the nexus-74zvm search/hybridSearch tests. */
+    private PgVectorRepository repoNullGuard;
 
     @BeforeAll
     void startAll() throws Exception {
@@ -157,6 +170,29 @@ class PgVectorRepositoryDimGuardTest {
             ps.setString(5, zeroVectorLiteral(768));
             ps.execute();
         }
+
+        // nexus-74zvm fixture: a SECOND mixed-dim collection, with well-defined
+        // (unit, non-zero-norm) vectors so search/hybridSearch's <=> cosine-distance
+        // operator does not error. Own-dim row via the real write path (also registers
+        // catalog_collections for COLLECTION_NULLGUARD, same as the COLLECTION fixture
+        // above); foreign-dim row via a direct superuser insert, same technique.
+        var unitEmbedder = new UnitAxisEmbedder(1024);
+        repoNullGuard = new PgVectorRepository(tenantScope, unitEmbedder, unitEmbedder);
+        repoNullGuard.upsertChunks(TENANT, COLLECTION_NULLGUARD,
+            List.of(CHASH_NULLGUARD_OWN), List.of("own dim ng chunk text"), List.of(Map.of()));
+        try (Connection su = pg.createConnection("");
+             PreparedStatement ps = su.prepareStatement(
+                 "INSERT INTO nexus.chunks "
+                 + "(tenant_id, collection, chash, chunk_text, embedding_768, metadata, created_at) "
+                 + "VALUES (?, ?, decode(?, 'hex'), ?, ?::vector, '{}'::jsonb, now())")) {
+            su.setAutoCommit(true);
+            ps.setString(1, TENANT);
+            ps.setString(2, COLLECTION_NULLGUARD);
+            ps.setString(3, CHASH_NULLGUARD_FOREIGN);
+            ps.setString(4, "foreign dim ng chunk text");
+            ps.setString(5, unitVectorLiteral(768));
+            ps.execute();
+        }
     }
 
     @AfterAll
@@ -170,6 +206,15 @@ class PgVectorRepositoryDimGuardTest {
         for (int i = 0; i < dim; i++) {
             if (i > 0) sb.append(',');
             sb.append('0');
+        }
+        return sb.append(']').toString();
+    }
+
+    /** {@code [1,0,0,...,0]} -- well-defined (non-zero-norm) unit vector for <=> tests. */
+    private static String unitVectorLiteral(int dim) {
+        StringBuilder sb = new StringBuilder("[1");
+        for (int i = 1; i < dim; i++) {
+            sb.append(",0");
         }
         return sb.append(']').toString();
     }
@@ -227,6 +272,103 @@ class PgVectorRepositoryDimGuardTest {
             .isEqualTo(2);
     }
 
+    /**
+     * DECIDED semantics (nexus-3rprg, completing the nexus-hz89h/{@code count()} line for
+     * the rest of the metadata-read family): {@code list()} is deliberately DIM-AGNOSTIC,
+     * same as {@code count()} -- a chunk's text/metadata is collection content regardless
+     * of which dim's embedding column it populates. See {@link PgVectorRepository
+     * #dimForCollection}'s DECISION for the anchor statement of this contract.
+     */
+    @Test
+    void list_isDimAgnostic_listsOwnDimAndForeignDimRows() {
+        var envelope = repo.list(TENANT, COLLECTION, 100, 0);
+
+        @SuppressWarnings("unchecked")
+        List<String> ids = (List<String>) envelope.get("ids");
+
+        assertThat(ids)
+            .as("list() must be dim-agnostic (collection membership only), surfacing BOTH "
+                + "the own-dim (embedding_1024) row AND the foreign-dim (embedding_768) row "
+                + "-- text/metadata is collection content regardless of embedding dim")
+            .containsExactlyInAnyOrder(CHASH_OWN_DIM, CHASH_FOREIGN_DIM);
+    }
+
+    /**
+     * nexus-74zvm DECISION (GUARD chosen): {@link PgVectorRepository#search} (via {@link
+     * PgVectorRepository#searchWithTokens}) must never surface a foreign-dim row -- its
+     * {@code embedding_<dim>} is NULL under the collection's dispatched dim, so pre-fix its
+     * distance was NULL and, absent the guard, could have been emitted once live (same-dim)
+     * matches ran out (NULLS LAST). Both rows here match on plain collection membership, so
+     * without the {@code embedding_<dim> IS NOT NULL} guard the foreign-dim row would be a
+     * candidate.
+     */
+    @Test
+    void search_foreignDimRow_neverEmittedWithNullDistance() {
+        var results = repoNullGuard.search(
+            TENANT, "query text", List.of(COLLECTION_NULLGUARD), 10, null);
+
+        assertThat(results)
+            .as("search results must never include the foreign-dim row")
+            .extracting(r -> r.get("id"))
+            .containsExactly(CHASH_NULLGUARD_OWN)
+            .doesNotContain(CHASH_NULLGUARD_FOREIGN);
+        assertThat(results)
+            .as("every returned row must carry a real (non-null) distance")
+            .allSatisfy(r -> assertThat(r.get("distance")).isNotNull());
+    }
+
+    /**
+     * nexus-74zvm DECISION (GUARD chosen), hybridSearch companion: the text gate has no
+     * dim awareness, so the foreign-dim row's text ("foreign dim ng chunk text") matches
+     * the same FTS/trigram gate as the own-dim row's text ("own dim ng chunk text") -- both
+     * share "dim", "ng", "chunk", "text". Without the guard the foreign-dim chash would
+     * enter the (small, SELECTIVE) rank query and be ranked with a NULL distance.
+     */
+    @Test
+    void hybridSearch_foreignDimRow_neverEmittedWithNullDistance() {
+        var results = repoNullGuard.hybridSearch(
+            TENANT, "chunk text", List.of(COLLECTION_NULLGUARD), 10, null);
+
+        assertThat(results)
+            .as("hybridSearch results must never include the foreign-dim row even though "
+                + "its text matches the FTS/trigram gate")
+            .extracting(r -> r.get("id"))
+            .containsExactly(CHASH_NULLGUARD_OWN)
+            .doesNotContain(CHASH_NULLGUARD_FOREIGN);
+        assertThat(results)
+            .as("every returned row must carry a real (non-null) distance")
+            .allSatisfy(r -> assertThat(r.get("distance")).isNotNull());
+    }
+
+    /**
+     * nexus-74zvm DECISION follow-up (code-review-expert, dim-guard batch review): the
+     * previous {@code hybridSearch_foreignDimRow_neverEmittedWithNullDistance} test only
+     * exercises the SELECTIVE-gate branch — this fixture's 2-row gate match count sits far
+     * under {@link PgVectorRepository#SELECTIVE_GATE_MAX} (5000), so the DENSE-gate
+     * (HNSW-first) branch's guard was proven only via EXPLAIN plan shape
+     * ({@code PgVectorRepositoryRawSqlPlanShapeTest}), never behaviorally. This test forces
+     * the dense-gate branch on the SAME mixed-dim fixture via the public 6-arg {@link
+     * PgVectorRepository#hybridSearch(String, String, List, int, Map, int)} overload
+     * (selectiveGateMax=1): the fixture's 2 gate matches (own + foreign) exceed 1, so
+     * {@code gateChashes.size() <= selectiveGateMax} is false and the HNSW-first branch
+     * runs instead of the selective-chash-IN branch.
+     */
+    @Test
+    void hybridSearch_denseGateBranch_foreignDimRow_neverEmittedWithNullDistance() {
+        var results = repoNullGuard.hybridSearch(
+            TENANT, "chunk text", List.of(COLLECTION_NULLGUARD), 10, null, 1);
+
+        assertThat(results)
+            .as("hybridSearch's DENSE-GATE (HNSW-first) branch must never include the "
+                + "foreign-dim row even though its text matches the FTS/trigram gate")
+            .extracting(r -> r.get("id"))
+            .containsExactly(CHASH_NULLGUARD_OWN)
+            .doesNotContain(CHASH_NULLGUARD_FOREIGN);
+        assertThat(results)
+            .as("every returned row must carry a real (non-null) distance")
+            .allSatisfy(r -> assertThat(r.get("distance")).isNotNull());
+    }
+
     private static final class ZeroEmbedder implements Embedder {
         private final int dim;
 
@@ -238,6 +380,26 @@ class PgVectorRepositoryDimGuardTest {
         public List<float[]> embed(List<String> texts) {
             List<float[]> out = new java.util.ArrayList<>(texts.size());
             for (String ignored : texts) out.add(new float[dim]);
+            return out;
+        }
+    }
+
+    /** {@code [1,0,0,...,0]} for every text -- well-defined (non-zero-norm) query vectors. */
+    private static final class UnitAxisEmbedder implements Embedder {
+        private final int dim;
+
+        UnitAxisEmbedder(int dim) {
+            this.dim = dim;
+        }
+
+        @Override
+        public List<float[]> embed(List<String> texts) {
+            List<float[]> out = new java.util.ArrayList<>(texts.size());
+            for (String ignored : texts) {
+                float[] v = new float[dim];
+                v[0] = 1.0f;
+                out.add(v);
+            }
             return out;
         }
     }
