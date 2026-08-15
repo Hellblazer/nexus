@@ -288,11 +288,16 @@ class TestWireContractLedger:
         assert (rc, vacuous) == (0, False)
 
 
+@pytest.mark.real_ledger
 class TestWireContractLedgerNonVacuitySelfTest:
     """Proves the ``import check_wire_contract_pairing as _wire_ledger``
     wiring actually reaches the REAL checked-in ledger, not a stub or a
     dead path -- a test that only ever monkeypatches DEFAULT_LEDGER_PATH
-    could pass even if production code imported the wrong module."""
+    could pass even if production code imported the wrong module.
+
+    ``real_ledger`` opts this class out of tests/scripts/conftest.py's
+    autouse empty-ledger isolation; without the marker the fixture would
+    silently vacuate exactly the contract this class exists to prove."""
 
     def test_default_ledger_path_is_the_real_checked_in_file(self):
         assert gate._wire_ledger.DEFAULT_LEDGER_PATH.is_file()
