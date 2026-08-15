@@ -905,6 +905,26 @@ class TestPipelineIndexPdf:
         client = make_vector_test_client()
         t3 = T3Database(_client=client, local_mode=True)
 
+        # nexus-dbzxb (RDR-191 Phase 5 Python collateral): t3 is a fake
+        # in-memory client, but pipeline_index_pdf's manifest write always
+        # goes through the REAL engine catalog; fk_catalog_chunks_chunk
+        # now requires a matching real nexus.chunks row. Wrap the write
+        # choke point so the real ids this pipeline computes are also
+        # seeded into the real engine (mirrors test_indexer_duplicate_
+        # content.py's _do_index / test_doc_indexer.py's
+        # _wrap_write_batch_with_fk_seed).
+        from tests._catalog_fixture_ops import seed_manifest_chunks
+
+        _orig_write_batch = t3._write_batch
+
+        def _seeding_write_batch(col, collection_name, ids, documents, metadatas,
+                                  embeddings=None, **kwargs):
+            _orig_write_batch(col, collection_name, ids, documents, metadatas,
+                               embeddings, **kwargs)
+            seed_manifest_chunks(collection_name, ids)
+
+        monkeypatch.setattr(t3, "_write_batch", _seeding_write_batch)
+
         fc = _tc(
             ("chunk 0 text", 0, {"page_number": 1, "chunk_type": "text",
                                   "chunk_start_char": 0, "chunk_end_char": 12}),

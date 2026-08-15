@@ -104,6 +104,34 @@ def _no_op(*args, **kwargs):
     pass
 
 
+def _seed_for_store_put(t3, content: str, collection: str = "knowledge") -> None:
+    """Pre-seed a REAL ``nexus.chunks`` row for what a store_put-shaped
+    write (MCP ``store_put``, CLI ``nx store put``, ``nx memory promote``)
+    is about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral).
+
+    This file's ``local_t3`` / ad hoc ``T3Database(_client=make_vector_
+    test_client(), ...)`` fixtures inject a FAKE in-memory T3 client (see
+    the module docstring: "a real in-memory T3" — real logic, fake
+    substrate), but the manifest write (``store_put_manifest_direct``,
+    C3's direct call, independent of the hook chain) always goes through
+    the REAL engine catalog (autouse ``_pin_t2_substrate``).
+    ``fk_catalog_chunks_chunk`` now requires the manifest's chash to have
+    a matching REAL ``nexus.chunks`` row, which the fake T3 client can
+    never provide.
+
+    Computes the exact ``(collection, chash)`` the production write will
+    use via the same derivation production code uses
+    (``t3_collection_name`` / ``sha256(content)``), then seeds a real stub
+    chunk — idiom 1/2. Nothing under test reads this row's content.
+    """
+    from nexus.corpus import t3_collection_name
+    from tests._catalog_fixture_ops import seed_manifest_chunks
+
+    col_name = t3_collection_name(collection, t3=t3)
+    chash = hashlib.sha256(content.encode()).hexdigest()
+    seed_manifest_chunks(col_name, [chash])
+
+
 def _mcp_store_put_with(t3, content: str, title: str) -> str:
     from nexus.mcp.core import store_put
 
@@ -336,6 +364,7 @@ class TestMcpManifestFailLoud:
         fire_* chain dead — the manifest leg no longer rides the
         swallowing hook chain (C3's exact silent-drift mechanism)."""
         content = "healthy store_put content"
+        _seed_for_store_put(local_t3, content)
         result = _mcp_store_put_with(local_t3, content, "b6enc-healthy-mcp")
         assert result.startswith("Stored:"), result
 
@@ -461,6 +490,7 @@ class TestCliStorePut:
             _client=make_vector_test_client(),
             _ef_override=DefaultEmbeddingFunction(),
         )
+        _seed_for_store_put(local, "cli healthy content")
         result = self._invoke(
             tmp_path, local, "b6enc-ok-cli", "cli healthy content",
         )
@@ -559,6 +589,7 @@ class TestPromoteGhostRegisterCompensation:
             _ef_override=DefaultEmbeddingFunction(),
         )
         content = "healthy promote content"
+        _seed_for_store_put(local, content)
         result = self._invoke_promote(
             tmp_path, local, "b6enc-ok-promote", content,
         )
@@ -641,6 +672,7 @@ class TestDirectPlusHookCoexistence:
         from nexus.mcp.core import store_put
 
         content = "coexistence double write content"
+        _seed_for_store_put(local_t3, content)
         with patch("nexus.mcp.core._get_t3", return_value=local_t3), \
              patch("nexus.mcp.core._hooks.fire_single", side_effect=_no_op), \
              patch("nexus.mcp.core._hooks.fire_document", side_effect=_no_op), \
@@ -674,6 +706,7 @@ class TestStoreDeleteAsymmetry:
         self, catalog_env: Path, local_t3: T3Database,
     ) -> None:
         content = "delete me cleanly"
+        _seed_for_store_put(local_t3, content)
         put_result = _mcp_store_put_with(local_t3, content, "b6enc-del")
         assert put_result.startswith("Stored:"), put_result
         rows = _catalog_rows(catalog_env, "b6enc-del")

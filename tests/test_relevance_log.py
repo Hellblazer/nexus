@@ -28,6 +28,25 @@ from nexus.mcp_infra import (
 from tests.conftest import make_vector_test_client
 
 
+def _seed_for_store_put(content: str, collection: str = "knowledge") -> None:
+    """Pre-seed a REAL ``nexus.chunks`` row for what MCP ``store_put`` is
+    about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral).
+
+    ``mock_t3`` here fully mocks the T3 write, but the manifest write
+    always goes through the REAL engine catalog (autouse
+    ``_pin_t2_substrate``). ``fk_catalog_chunks_chunk`` now requires the
+    manifest's chash to have a matching REAL ``nexus.chunks`` row.
+    """
+    import hashlib
+
+    from nexus.corpus import t3_collection_name
+    from tests._catalog_fixture_ops import seed_manifest_chunks
+
+    col_name = t3_collection_name(collection)
+    chash = hashlib.sha256(content.encode()).hexdigest()
+    seed_manifest_chunks(col_name, [chash])
+
+
 # ── T2 relevance_log schema + methods ────────────────────────────────────────
 
 
@@ -209,6 +228,7 @@ def test_store_put_logs_relevance_for_recent_searches(t1, tmp_path, monkeypatch)
     )
 
     # Call store_put — should log relevance for both chunks
+    _seed_for_store_put("some notes about vector search")
     result = store_put(content="some notes about vector search", collection="knowledge")
     assert "Stored" in result
 
@@ -236,6 +256,7 @@ def test_store_put_without_search_trace_no_log(t1, tmp_path, monkeypatch):
 
     # No search trace — direct store_put
     clear_search_traces()
+    _seed_for_store_put("random notes")
     result = store_put(content="random notes", collection="knowledge")
     assert "Stored" in result
 

@@ -12,7 +12,11 @@ from click.testing import CliRunner
 from nexus.cli import main
 from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS
 from nexus.db.http_vector_client import HttpVectorClient
-from tests._catalog_fixture_ops import ActiveCatalog, unroutable_write_target
+from tests._catalog_fixture_ops import (
+    ActiveCatalog,
+    bypass_fk_seed_chunk,
+    unroutable_write_target,
+)
 
 # nexus-aqbrk: the dies-roster here was OVER-BROAD BY 20 TESTS, and its stated
 # cause was a symptom. It read "the CLI routes catalog commands to the service
@@ -1221,11 +1225,27 @@ class TestVerifyCommand:
     @staticmethod
     def _register_chunked(
         cat, owner_str, title, coll, *, chunk_count=0, chashes=None,
-        content_type="knowledge",
+        content_type="knowledge", tenant="",
     ):
         """Register a doc with a physical_collection + chunk_count and,
         when *chashes* is given, write a real manifest (the RDR-108
-        identity: tumbler -> document_chunks.chash -> T3 chunk id)."""
+        identity: tumbler -> document_chunks.chash -> T3 chunk id).
+
+        nexus-dbzxb (RDR-191 Phase 5 Python collateral, idiom 3): every
+        caller of this helper is a manifest-verify DAMAGE fixture — the
+        chash is deliberately meant to be a "ghost"/ABSENT-from-T3 chash
+        (the whole point of ``TestVerifyCommand``'s damaged/heal/
+        clean-pct tests, which patch T3's ``existing_ids`` to report it
+        missing). Seeding a REAL T3 chunk here (idiom 1/2) would defeat
+        the fixture's own premise. ``fk_catalog_chunks_chunk`` still
+        requires the row to exist, so this is exactly the "genuinely-
+        dangling manifest row" case the sweep's idiom 3 covers: a direct
+        stub insert into ``nexus.chunks`` via the test substrate's own
+        psql connection, bypassing the manifest write's normal T3-backed
+        path entirely. The verify command's OWN presence check is
+        against the (separately mocked) T3 client, not this row, so the
+        test's damaged/ghost semantics are unaffected.
+        """
         from nexus.catalog.tumbler import Tumbler
         t = cat.register(
             Tumbler.parse(owner_str), title,
@@ -1234,6 +1254,8 @@ class TestVerifyCommand:
             chunk_count=chunk_count,
         )
         if chashes:
+            for chash in chashes:
+                bypass_fk_seed_chunk(tenant, coll, chash)
             cat.atomic_manifest_replace(str(t), [
                 {
                     "chash": chash, "position": i, "chunk_index": i,
@@ -1942,7 +1964,7 @@ class TestVerifyCommand:
     # ── --collection scoped mode (real ActiveCatalog + mocked T3) ──────────
 
     def test_verify_collection_filter(
-        self, initialized_catalog, catalog_env, monkeypatch,
+        self, initialized_catalog, catalog_env, monkeypatch, t2_service_env,
     ):
         """--collection scopes the sweep to a single physical_collection —
         the out-of-scope collection is never even examined."""
@@ -1951,10 +1973,12 @@ class TestVerifyCommand:
         self._register_chunked(
             initialized_catalog, "1.1", "In Scope",
             "knowledge__foo", chunk_count=1, chashes=[missing_chash],
+            tenant=t2_service_env,
         )
         self._register_chunked(
             initialized_catalog, "1.1", "Out Of Scope",
             "knowledge__bar", chunk_count=1, chashes=[present_chash],
+            tenant=t2_service_env,
         )
         self._patch_t3(monkeypatch, {"knowledge__bar": [present_chash]})
 
@@ -1968,13 +1992,14 @@ class TestVerifyCommand:
         assert "Out Of Scope" not in result.output
 
     def test_verify_scoped_json_output(
-        self, initialized_catalog, catalog_env, monkeypatch,
+        self, initialized_catalog, catalog_env, monkeypatch, t2_service_env,
     ):
         """--collection --json emits per-doc damaged detail."""
         chash = "f" * 64
         self._register_chunked(
             initialized_catalog, "1.1", "Ghost",
             "knowledge__x", chunk_count=1, chashes=[chash],
+            tenant=t2_service_env,
         )
         self._patch_t3(monkeypatch, {"knowledge__x": []})
 
@@ -1991,7 +2016,7 @@ class TestVerifyCommand:
         assert data["damaged"][0]["missing"] == 1
 
     def test_verify_excludes_alias_rows(
-        self, initialized_catalog, catalog_env, monkeypatch,
+        self, initialized_catalog, catalog_env, monkeypatch, t2_service_env,
     ):
         """Alias rows (alias_of != '') must NOT appear as findings.
 
@@ -2006,6 +2031,7 @@ class TestVerifyCommand:
         self._register_chunked(
             initialized_catalog, "1.1", "Canonical",
             coll, chunk_count=1, chashes=[chash],
+            tenant=t2_service_env,
         )
         alias_tumbler = initialized_catalog.register(
             Tumbler.parse("1.1"), "Alias Doc",
@@ -2028,13 +2054,14 @@ class TestVerifyCommand:
         )
 
     def test_verify_heal_drops_damaged(
-        self, initialized_catalog, catalog_env, monkeypatch,
+        self, initialized_catalog, catalog_env, monkeypatch, t2_service_env,
     ):
         """--collection --heal with `d` (drop) removes the damaged tumbler."""
         chash = "7" * 64
         self._register_chunked(
             initialized_catalog, "1.1", "Ghost",
             "knowledge__thing", chunk_count=1, chashes=[chash],
+            tenant=t2_service_env,
         )
         self._patch_t3(monkeypatch, {"knowledge__thing": []})
 
@@ -2054,7 +2081,7 @@ class TestVerifyCommand:
         assert documents_by_title("Ghost") == []
 
     def test_verify_scoped_all_damaged_not_100_percent_clean(
-        self, initialized_catalog, catalog_env, monkeypatch,
+        self, initialized_catalog, catalog_env, monkeypatch, t2_service_env,
     ):
         """nexus-sj4a3 substantive critique SIG-3: scoped mode's clean-pct
         must subtract damaged docs (a real per-doc count in scoped mode) —
@@ -2064,10 +2091,12 @@ class TestVerifyCommand:
         self._register_chunked(
             initialized_catalog, "1.1", "Ghost A", "knowledge__thing",
             chunk_count=1, chashes=[chash_a],
+            tenant=t2_service_env,
         )
         self._register_chunked(
             initialized_catalog, "1.1", "Ghost B", "knowledge__thing",
             chunk_count=1, chashes=[chash_b],
+            tenant=t2_service_env,
         )
         self._patch_t3(monkeypatch, {"knowledge__thing": []})
 

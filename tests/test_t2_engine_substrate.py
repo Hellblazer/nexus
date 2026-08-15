@@ -114,6 +114,13 @@ class TestB6encStoreHookEngineSubstrate:
         )
         assert created2 is False and tumbler2 == tumbler
 
+        # nexus-dbzxb (RDR-191 Phase 5 Python collateral): fk_catalog_
+        # chunks_chunk requires a matching real nexus.chunks row before
+        # store_put_manifest_direct's write lands.
+        from tests._catalog_fixture_ops import seed_manifest_chunks
+
+        seed_manifest_chunks(col, [chash])
+
         # Direct fail-loud manifest write + its verify leg, over the wire.
         store_put_manifest_direct(tumbler, metadatas, collection=col)
         reader = make_catalog_reader()

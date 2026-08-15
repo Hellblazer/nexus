@@ -126,9 +126,33 @@ def mock_voyage_client():
 
 
 def _do_index(repo: Path, registry: RepoRegistry, t3: T3Database, monkeypatch) -> None:
+    """Run the real ``index_repository`` pipeline against *t3* (a FAKE
+    in-memory T3 client — see ``local_t3``).
+
+    nexus-dbzxb (RDR-191 Phase 5 Python collateral): the catalog manifest
+    write this pipeline performs always goes through the REAL engine
+    catalog, so ``fk_catalog_chunks_chunk`` now requires each manifest
+    chash to have a matching REAL ``nexus.chunks`` row. Wrap
+    ``t3._write_batch`` (the ONE choke point both ``upsert_chunks`` and
+    ``upsert_chunks_with_embeddings`` funnel through) so every real write
+    the indexer performs ALSO seeds the real engine with the SAME
+    ``(collection, ids)`` — mirrors ``test_indexer_duplicate_content.py``'s
+    identical fixture-file trick.
+    """
     from nexus.indexer import index_repository
+    from tests._catalog_fixture_ops import seed_manifest_chunks
 
     monkeypatch.setenv("NX_LOCAL", "1")
+    orig_write_batch = t3._write_batch
+
+    def _seeding_write_batch(col, collection_name, ids, documents, metadatas,
+                              embeddings=None, **kwargs):
+        orig_write_batch(col, collection_name, ids, documents, metadatas,
+                          embeddings, **kwargs)
+        seed_manifest_chunks(collection_name, ids)
+
+    monkeypatch.setattr(t3, "_write_batch", _seeding_write_batch)
+
     with patch("nexus.db.make_t3", return_value=t3), \
          patch("nexus.config.get_credential", side_effect=fake_credentials()):
         index_repository(repo, registry, force=False)

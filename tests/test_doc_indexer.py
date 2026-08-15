@@ -17,7 +17,33 @@ from nexus.doc_indexer import (
     _lookup_existing_doc_id, _markdown_chunks,
     batch_index_markdowns, batch_index_pdfs, index_markdown, index_pdf,
 )
-from tests._catalog_fixture_ops import ActiveCatalog, documents_by_file_path
+from tests._catalog_fixture_ops import ActiveCatalog, documents_by_file_path, seed_manifest_chunks
+
+
+def _wrap_write_batch_with_fk_seed(t3):
+    """Wrap ``t3._write_batch`` (the ONE choke point ``upsert_chunks`` and
+    ``upsert_chunks_with_embeddings`` funnel through — see
+    ``T3Database._write_batch``) so every real T3 write this fake client
+    performs ALSO seeds the real engine with the SAME ``(collection, ids)``
+    (nexus-dbzxb, RDR-191 Phase 5 Python collateral, idiom 1/2 applied at
+    the choke point instead of per-call-site, since the indexer computes
+    the chashes internally — mirrors ``test_indexer_duplicate_content.py``'s
+    ``_do_index``). ``t3._client`` here is a FAKE in-memory vector client
+    (``_setup_phase_a_catalog``), but the catalog manifest write these
+    pipelines perform always goes through the REAL engine catalog, which
+    ``fk_catalog_chunks_chunk`` now requires a matching real ``nexus.chunks``
+    row for. Call BEFORE invoking the indexer with this ``t3``; no cleanup
+    needed since ``t3`` is a fresh fixture instance per test.
+    """
+    orig_write_batch = t3._write_batch
+
+    def _seeding_write_batch(col, collection_name, ids, documents, metadatas,
+                              embeddings=None, **kwargs):
+        orig_write_batch(col, collection_name, ids, documents, metadatas,
+                          embeddings, **kwargs)
+        seed_manifest_chunks(collection_name, ids)
+
+    t3._write_batch = _seeding_write_batch
 from tests.conftest import set_credentials
 from tests.conftest import make_vector_test_client
 
@@ -2061,6 +2087,7 @@ def test_index_pdf_writes_doc_id_when_catalog_initialized(
     resolved tumbler through to the chunker.
     """
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+    _wrap_write_batch_with_fk_seed(t3)
 
     with pdf_extract_patches_ctx():
         index_pdf(sample_pdf, corpus="rdr102-pdf", t3=t3, embed_fn=_fake_embed)
@@ -2095,6 +2122,7 @@ def test_index_markdown_writes_doc_id_when_catalog_initialized(
     the manifest has rows for the indexed markdown file.
     """
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+    _wrap_write_batch_with_fk_seed(t3)
 
     n = index_markdown(sample_md, corpus="rdr102-md", t3=t3)
     assert n > 0, "expected index_markdown to upsert chunks"
@@ -2124,6 +2152,7 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
     metadata no longer carries doc_id directly.
     """
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+    _wrap_write_batch_with_fk_seed(t3)
     rdr_path = tmp_path / "rdr-102-test.md"
     rdr_path.write_text(
         "---\ntitle: RDR-102 Test\nstatus: draft\n---\n\n"

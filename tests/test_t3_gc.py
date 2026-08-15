@@ -38,7 +38,7 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.db.t3 import T3Database
-from tests._catalog_fixture_ops import ActiveCatalog
+from tests._catalog_fixture_ops import ActiveCatalog, seed_manifest_chunks
 from tests.conftest import make_vector_test_client
 
 
@@ -215,6 +215,14 @@ def _register_doc_active(
         chunk_count=len(chashes or []),
     )
     if chashes:
+        # nexus-dbzxb (RDR-191 Phase 5 Python collateral): fk_catalog_
+        # chunks_chunk requires a real nexus.chunks row per manifest chash;
+        # seed one (idiom 1) — the "live" chash here represents a chunk
+        # that IS present in T3 (in production; this fixture's T3 side is
+        # a separate fake client), so a real bookkeeping stub is faithful
+        # to the fixture's own "alive" semantics, unlike orphan_chash
+        # (never referenced by the manifest, so never write_manifest'd).
+        seed_manifest_chunks(collection, chashes)
         catalog.write_manifest(str(tumbler), [
             {"chash": c, "position": i} for i, c in enumerate(chashes)
         ], collection=collection)
@@ -229,7 +237,7 @@ def test_gc_dry_run_reports_orphans_no_mutation(
     t3_db, active_catalog, tmp_path, runner,
 ):
     """Default dry-run prints orphan candidates but does not delete or emit."""
-    coll = "knowledge__test_gc_dryrun"
+    coll = "knowledge__test-gc-dryrun__bge-base-en-v15-768__v1"
     long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
     live_chash = "a" * 64
     orphan_chash = "b" * 64
@@ -618,7 +626,7 @@ def test_gc_complete_document_is_never_a_blocker(t3_db, active_catalog, runner):
     """
     from types import SimpleNamespace
 
-    coll = "knowledge__test_gc_g6k6b_complete"
+    coll = "knowledge__test-gc-g6k6b-complete__bge-base-en-v15-768__v1"
     long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
     live_chash = "7" * 64
     orphan_chash = "8" * 64
@@ -715,7 +723,7 @@ def test_gc_default_window_is_30_days(t3_db, tmp_path, runner):
 
 def test_gc_no_orphans_clean_summary(t3_db, active_catalog, runner):
     """Every chunk's chash referenced in the manifest → 0 orphans, no events."""
-    coll = "knowledge__test_gc_clean"
+    coll = "knowledge__test-gc-clean__bge-base-en-v15-768__v1"
     long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
     live_chash = "a" * 64
     _register_doc_active(
@@ -878,7 +886,7 @@ def test_gc_chunk_id_shape_irrelevant_under_manifest_path(
     ``meta.chunk_text_hash[:32]`` is in the manifest's referenced set.
     A UUID7-keyed chunk whose chash IS referenced survives; a content-
     derived-keyed chunk whose chash is NOT referenced is GC'd."""
-    coll = "knowledge__test_gc_chunk_id_shape"
+    coll = "knowledge__test-gc-chunk-id-shape__bge-base-en-v15-768__v1"
     long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
     live_chash = "a" * 64
 

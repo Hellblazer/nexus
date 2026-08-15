@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._catalog_fixture_ops import ActiveCatalog, count_documents
+from tests._catalog_fixture_ops import ActiveCatalog, count_documents, seed_manifest_chunks
 
 
 @pytest.fixture(autouse=True)
@@ -237,7 +237,7 @@ class TestStorePutHook:
         owner = cat.register_owner("knowledge", "curator")
         ghost = cat.register(
             owner, "Legacy Ghost", content_type="knowledge",
-            physical_collection="knowledge__legacy",
+            physical_collection="knowledge__legacy__bge-base-en-v15-768__v1",
             meta={"doc_id": "stale-legacy-doc-id"},
             # source_uri deliberately omitted (defaults to "") — this is
             # the shape of a pre-sdp0u-fix ghost row.
@@ -249,19 +249,20 @@ class TestStorePutHook:
         # source_uri lookup misses because the ghost's source_uri is "").
         first = _catalog_store_hook(
             title="Legacy Ghost", doc_id="first-content-hash",
-            collection_name="knowledge__legacy",
+            collection_name="knowledge__legacy__bge-base-en-v15-768__v1",
         )
         assert first == str(ghost), "must reuse the ghost's tumbler"
         entry = cat.resolve(ghost)
-        assert entry.source_uri == uri_for("knowledge__legacy", "Legacy Ghost"), (
+        assert entry.source_uri == uri_for("knowledge__legacy__bge-base-en-v15-768__v1", "Legacy Ghost"), (
             'ghost-reconcile branch must stamp source_uri, not leave it ""'
         )
 
         # Simulate the manifest population that follows every real re-put
         # (store_put_manifest_direct) — chunk_count becomes > 0, so the
         # ghost-by-title fallback is no longer reachable for this row.
+        seed_manifest_chunks("knowledge__legacy__bge-base-en-v15-768__v1", ["b" * 64])
         cat.append_manifest_chunks(
-            first, [{"chash": "b" * 64, "position": 0}], collection="knowledge__legacy",
+            first, [{"chash": "b" * 64, "position": 0}], collection="knowledge__legacy__bge-base-en-v15-768__v1",
         )
         cat.resync_chunk_count_cache(first)
         assert cat.resolve(first).chunk_count == 1
@@ -273,7 +274,7 @@ class TestStorePutHook:
         # the first (ghost-path) reconcile.
         second = _catalog_store_hook(
             title="Legacy Ghost", doc_id="second-content-hash",
-            collection_name="knowledge__legacy",
+            collection_name="knowledge__legacy__bge-base-en-v15-768__v1",
         )
         assert second == first, (
             "second re-put must reconcile onto the SAME document via "
@@ -306,12 +307,13 @@ class TestStorePutHook:
         owner = cat.register_owner("knowledge", "curator")
         legacy = cat.register(
             owner, "Legacy Note", content_type="knowledge",
-            physical_collection="knowledge__legacy",
+            physical_collection="knowledge__legacy__bge-base-en-v15-768__v1",
             meta={"doc_id": "legacy-content-hash"},
             # source_uri deliberately omitted — pre-sdp0u vintage.
         )
+        seed_manifest_chunks("knowledge__legacy__bge-base-en-v15-768__v1", ["c" * 64])
         cat.append_manifest_chunks(
-            str(legacy), [{"chash": "c" * 64, "position": 0}], collection="knowledge__legacy",
+            str(legacy), [{"chash": "c" * 64, "position": 0}], collection="knowledge__legacy__bge-base-en-v15-768__v1",
         )
         cat.resync_chunk_count_cache(str(legacy))
         assert cat.resolve(legacy).source_uri == ""
@@ -320,18 +322,18 @@ class TestStorePutHook:
         # First post-fix re-put: every lookup misses -> ONE bounded duplicate.
         first = _catalog_store_hook(
             title="Legacy Note", doc_id="new-content-hash",
-            collection_name="knowledge__legacy",
+            collection_name="knowledge__legacy__bge-base-en-v15-768__v1",
         )
         assert first != str(legacy), "legacy non-ghost row is not reachable; a new doc is minted"
         assert count_documents() == 2, "exactly one bounded duplicate"
-        assert cat.resolve(first).source_uri == uri_for("knowledge__legacy", "Legacy Note"), (
+        assert cat.resolve(first).source_uri == uri_for("knowledge__legacy__bge-base-en-v15-768__v1", "Legacy Note"), (
             "the minted duplicate must carry the synthesized identity"
         )
 
         # Second re-put: converges onto the minted doc via by_source_uri.
         second = _catalog_store_hook(
             title="Legacy Note", doc_id="third-content-hash",
-            collection_name="knowledge__legacy",
+            collection_name="knowledge__legacy__bge-base-en-v15-768__v1",
         )
         assert second == first, "second re-put converges via by_source_uri"
         assert count_documents() == 2, "no further duplicates after convergence"
@@ -353,17 +355,18 @@ class TestStorePutHook:
 
         first = _catalog_store_hook(
             title="Real Doc", doc_id="original-content-hash",
-            collection_name="knowledge__real",
+            collection_name="knowledge__real__bge-base-en-v15-768__v1",
         )
+        seed_manifest_chunks("knowledge__real__bge-base-en-v15-768__v1", ["a" * 64])
         cat.append_manifest_chunks(first, [
             {"chash": "a" * 64, "position": 0},
-        ], collection="knowledge__real")
+        ], collection="knowledge__real__bge-base-en-v15-768__v1")
         cat.resync_chunk_count_cache(first)
         assert cat.resolve(first).chunk_count == 1, "fixture must not be a ghost"
 
         result = _catalog_store_hook(
             title="Real Doc", doc_id="different-content-hash",
-            collection_name="knowledge__real",
+            collection_name="knowledge__real__bge-base-en-v15-768__v1",
         )
         assert result == first, "re-put of the same identity reuses the tumbler"
 
@@ -372,7 +375,7 @@ class TestStorePutHook:
 
         entry = cat.resolve(first)
         assert entry.meta.get("doc_id") == "different-content-hash"
-        assert entry.physical_collection == "knowledge__real"
+        assert entry.physical_collection == "knowledge__real__bge-base-en-v15-768__v1"
 
     def test_cross_collection_same_title_stays_distinct(self, tmp_path, monkeypatch):
         """A same-titled document in a DIFFERENT collection is a distinct
@@ -385,14 +388,15 @@ class TestStorePutHook:
 
         first = _catalog_store_hook(
             title="Shared Title", doc_id="hash-a",
-            collection_name="knowledge__alpha",
+            collection_name="knowledge__alpha__bge-base-en-v15-768__v1",
         )
         # Populate it (chunk_count > 0) so the ghost-by-title fallback
         # (title-only, no collection scoping) cannot itself reconcile the
         # second call onto this row — isolating the source_uri behavior
         # under test.
+        seed_manifest_chunks("knowledge__alpha__bge-base-en-v15-768__v1", ["a" * 64])
         cat.append_manifest_chunks(
-            first, [{"chash": "a" * 64, "position": 0}], collection="knowledge__alpha",
+            first, [{"chash": "a" * 64, "position": 0}], collection="knowledge__alpha__bge-base-en-v15-768__v1",
         )
         cat.resync_chunk_count_cache(first)
 

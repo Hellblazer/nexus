@@ -208,7 +208,28 @@ class TestAcquireGateJourneyDoctorClean:
             lambda *a, **k: None,
         )
         title = "cotmr-artificially-unfenced"
-        result = _invoke_store_put(tmp_path, _local_t3(), title, "artificially unfenced body")
+        # nexus-dbzxb (RDR-191 Phase 5 Python collateral, round 2): unlike
+        # the other _local_t3() call above (test_manifest_failure_is_
+        # explicit_error, which mocks the manifest write itself and never
+        # reaches the real FK), this test's manifest write is REAL and
+        # unmocked — fk_catalog_chunks_chunk requires a matching real
+        # nexus.chunks row for it to land. Round 1 used seed_manifest_
+        # chunks (idiom 1/2, a REAL T3 upsert) here, which broke this
+        # test's own documented premise: per the docstring above, the
+        # expected NULL index_state depends on the chunk being genuinely
+        # ABSENT from the real engine's T3 (this test's local_t3 is a fake
+        # client specifically so the manifest_complete ride's fail-closed
+        # verify sees nothing and correctly refuses to stamp 'complete')
+        # — "against a real T3, completion can stamp 'complete' without a
+        # prior begin". A real seed reintroduces exactly the confound the
+        # fake-T3 design exists to avoid. fk_dropped_for_dangling_seed
+        # (idiom 3b) satisfies the FK without making the chunk genuinely
+        # present, preserving the original test intent bit-for-bit.
+        from tests._catalog_fixture_ops import fk_dropped_for_dangling_seed
+
+        _content = "artificially unfenced body"
+        with fk_dropped_for_dangling_seed():
+            result = _invoke_store_put(tmp_path, _local_t3(), title, _content)
         assert result.exit_code == 0, result.output
         assert _index_state_for(title) is None, (
             "with _fence_begin disabled, index_state must stay NULL "

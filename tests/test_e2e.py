@@ -221,6 +221,20 @@ def test_cli_store_put_and_search(
     """nx store put → nx store search round-trip via CLI."""
     uid = _uid()
 
+    # nexus-dbzxb (RDR-191 Phase 5 Python collateral): local_t3 is a fake
+    # in-memory T3 client, but the manifest write goes through the REAL
+    # engine catalog; fk_catalog_chunks_chunk requires a matching real
+    # nexus.chunks row. Compute the exact (collection, chash) production
+    # will use and seed it (idiom 1).
+    import hashlib
+
+    from nexus.corpus import t3_collection_name
+    from tests._catalog_fixture_ops import seed_manifest_chunks
+
+    _content = f"CLI integration content {uid}"
+    _col_name = t3_collection_name(f"knowledge__cli-{uid}")
+    seed_manifest_chunks(_col_name, [hashlib.sha256(_content.encode()).hexdigest()])
+
     with patch("nexus.commands.store._t3", return_value=local_t3), \
          patch("nexus.commands.search_cmd._t3", return_value=local_t3):
 
@@ -228,7 +242,7 @@ def test_cli_store_put_and_search(
             "store", "put", "-",
             "--collection", f"knowledge__cli-{uid}",
             "--title", f"{uid}.md",
-        ], input=f"CLI integration content {uid}")
+        ], input=_content)
         assert put_result.exit_code == 0, put_result.output
 
         search_result = runner.invoke(main, [

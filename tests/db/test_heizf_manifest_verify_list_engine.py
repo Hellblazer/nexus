@@ -27,7 +27,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
-from tests._catalog_fixture_ops import ActiveCatalog, active_reader
+from tests._catalog_fixture_ops import ActiveCatalog, active_reader, fk_dropped_for_dangling_seed
 
 _SEQ = [0]
 
@@ -64,6 +64,19 @@ def _seed_dangling_doc(
     ``dim_for_model_token`` resolves it to 768); pass an unrecognized one
     to seed the actual h1zu0 divergence shape against the real engine.
 
+    nexus-dbzxb (RDR-191 Phase 5 Python collateral, idiom 3): this whole
+    file's SUBJECT is a genuinely-dangling manifest row (per its own
+    module docstring) — the chash must NEVER be upserted to T3, which is
+    exactly the state ``fk_catalog_chunks_chunk`` now makes unreachable
+    via the normal write path (write_manifest 409s immediately without a
+    matching real ``nexus.chunks`` row). The census/enumeration functions
+    under test read ``nexus.chunks``/``chunks_<dim>`` directly, so seeding
+    a REAL stub chunk (idiom 1/2's approach) would flip "missing" to
+    "present" and invert this suite's own premise —
+    ``fk_dropped_for_dangling_seed`` (idiom 3) drops the constraint for
+    this one write, producing a row that stays genuinely dangling after
+    commit, indistinguishable from pre-catalog-029 production data.
+
     Returns ``(collection, doc_id, [chash, ...])``.
     """
     cat = ActiveCatalog()
@@ -76,9 +89,10 @@ def _seed_dangling_doc(
         physical_collection=collection,
     )
     chashes = [_fake_chash(seq * 100 + i) for i in range(positions)]
-    cat.write_manifest(
-        str(tumbler), [_chunk(c, i) for i, c in enumerate(chashes)], collection=collection,
-    )
+    with fk_dropped_for_dangling_seed():
+        cat.write_manifest(
+            str(tumbler), [_chunk(c, i) for i, c in enumerate(chashes)], collection=collection,
+        )
     return collection, str(tumbler), chashes
 
 

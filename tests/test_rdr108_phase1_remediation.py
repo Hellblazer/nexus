@@ -40,7 +40,13 @@ from tests.conftest import make_vector_test_client
 
 
 def _unique_coll(prefix: str = "code") -> str:
-    return f"{prefix}__{uuid.uuid4().hex[:12]}"
+    # nexus-dbzxb (RDR-191 Phase 5 Python collateral): four-segment
+    # conformant (RDR-103) — was f"{prefix}__{uuid...[:12]}" (two segments).
+    # ``_seed_chunk`` now ALSO writes a real T3 chunk (via
+    # ``seed_manifest_chunks``) to satisfy ``fk_catalog_chunks_chunk``, and
+    # the real ``/v1/vectors/upsert-chunks`` endpoint refuses a
+    # non-conformant collection name.
+    return f"{prefix}__mtest-{uuid.uuid4().hex[:8]}__bge-base-en-v15-768__v1"
 
 
 @pytest.fixture()
@@ -123,6 +129,20 @@ def _seed_chunk(
             "chunk_text_hash": chunk_text_hash,
         }],
     )
+    # nexus-dbzxb (RDR-191 Phase 5 Python collateral): backfill_manifest's
+    # WRITE side (write_manifest / atomic_manifest_replace) always goes
+    # through the REAL engine catalog (``active_catalog``, see its
+    # docstring), while its READ side is this fixture's fake in-memory
+    # ``t3_db`` — a deliberate split so these tests exercise the real
+    # catalog write behavior without paying for a real T3 round trip on
+    # every seed. ``fk_catalog_chunks_chunk`` now requires the manifest's
+    # chash to have a matching REAL ``nexus.chunks`` row, which the fake
+    # client can never provide — so seed a stub chunk in the real engine
+    # too, purely for FK bookkeeping. Nothing under test reads this row;
+    # the code under test's T3 reads all go through ``t3_db`` above.
+    from tests._catalog_fixture_ops import seed_manifest_chunks
+
+    seed_manifest_chunks(collection, [chunk_text_hash])
 
 
 # ── K10: bare except swallows non-NotFound errors ────────────────────────────
@@ -515,6 +535,11 @@ class TestB91tvKeyUnionLookup:
                 "chunk_text_hash": chash,
             }],
         )
+        # nexus-dbzxb: see _seed_chunk's comment — real-engine FK bookkeeping
+        # stub, not read by the test itself.
+        from tests._catalog_fixture_ops import seed_manifest_chunks
+
+        seed_manifest_chunks(collection, [chash])
 
     def test_store_put_shaped_chunk_matches_via_catalog_doc_id(
         self, active_catalog, t3_db,
@@ -629,6 +654,11 @@ class TestB91tvKeyUnionLookup:
                 "chunk_index": 0,
             }],
         )
+        # nexus-dbzxb: see _seed_chunk's comment — real-engine FK bookkeeping
+        # stub, not read by the test itself.
+        from tests._catalog_fixture_ops import seed_manifest_chunks
+
+        seed_manifest_chunks(coll, ["b" * 64])
 
         result = backfill_manifest_for_collection(
             active_catalog, t3_db, coll, dry_run=False

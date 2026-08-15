@@ -38,7 +38,7 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from nexus.db.t3 import T3Database
 from nexus.mcp.core import store_delete
 from tests.conftest import make_vector_test_client
-from tests._catalog_fixture_ops import ActiveCatalog, documents_by_title
+from tests._catalog_fixture_ops import ActiveCatalog, documents_by_title, seed_manifest_chunks
 
 # Two DISTINCT, already-conformant physical collection names -- passed
 # through t3_collection_name untouched, so there is no ambiguity about
@@ -81,6 +81,11 @@ def _seed_live_doc(local_t3: T3Database, *, collection: str, title: str, content
     tumbler, _created = catalog_store_hook_tracked(
         title=title, doc_id=chash, collection_name=collection,
     )
+    # nexus-dbzxb (RDR-191 Phase 5 Python collateral): local_t3.put above
+    # writes to a fake in-memory T3 client, but this manifest write goes
+    # through the REAL engine catalog; seed a real bookkeeping stub
+    # (idiom 1/2) so fk_catalog_chunks_chunk doesn't reject it.
+    seed_manifest_chunks(collection, [chash])
     cat.append_manifest_chunks(
         tumbler, [{"chash": chash, "position": 0}], collection=collection,
     )

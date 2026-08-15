@@ -1526,7 +1526,7 @@ def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
     import hashlib
 
     from nexus.indexer import _prune_deleted_files
-    from tests._catalog_fixture_ops import ActiveCatalog
+    from tests._catalog_fixture_ops import ActiveCatalog, seed_manifest_chunks
 
     cat = ActiveCatalog()
 
@@ -1554,6 +1554,13 @@ def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
             chunk_count=1,
         ))
 
+    # nexus-dbzxb (RDR-191 Phase 5 Python collateral): fk_catalog_chunks_
+    # chunk requires a real nexus.chunks row per manifest chash; both
+    # chashes here represent chunks meant to genuinely exist in T3 (this
+    # test's subject is GC sweeping the orphan AFTER its document is
+    # deleted, not FK-dangling detection), so a real bookkeeping stub is
+    # idiom 1, faithful to the fixture's own intent.
+    seed_manifest_chunks(coll_name, [live_chash, orphan_chash])
     cat.write_manifest(tumblers["live.py"], [
         {"chash": live_chash, "position": 0},
     ], collection=coll_name)

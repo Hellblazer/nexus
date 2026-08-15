@@ -12,6 +12,28 @@ from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
 
 
+def _seed_for_store_put(content: str, collection: str = "knowledge") -> None:
+    """Pre-seed a REAL ``nexus.chunks`` row for what CLI ``nx store put``
+    is about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral).
+
+    ``mock_store`` / the inline ``MagicMock(spec=HttpVectorClient)`` fully
+    mock the T3 write here, but the catalog manifest write
+    (``store_put_manifest_direct``) always goes through the REAL engine
+    catalog (autouse ``_pin_t2_substrate``). ``fk_catalog_chunks_chunk``
+    now requires the manifest's chash to have a matching REAL
+    ``nexus.chunks`` row. Computes the exact ``(collection, chash)``
+    production will use via the same derivation production code uses.
+    """
+    import hashlib
+
+    from nexus.corpus import t3_collection_name
+    from tests._catalog_fixture_ops import seed_manifest_chunks
+
+    col_name = t3_collection_name(collection)
+    chash = hashlib.sha256(content.encode()).hexdigest()
+    seed_manifest_chunks(col_name, [chash])
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
@@ -80,6 +102,7 @@ def test_store_put_tenant_optional(runner, monkeypatch, tmp_path):
     monkeypatch.setenv("CHROMA_DATABASE", "mydb")
     src = tmp_path / "f.txt"
     src.write_text("content")
+    _seed_for_store_put("content")
     with patch("nexus.commands.store._t3") as mt3:
         db = MagicMock(spec=HttpVectorClient)
         db.__enter__ = MagicMock(return_value=db)
@@ -100,6 +123,7 @@ def test_store_put_stdin_requires_title(runner, mock_store):
 
 def test_store_put_stdin_with_title_succeeds(runner, mock_store):
     mock_store.put.return_value = "doc-id-abc"
+    _seed_for_store_put("content here")
     result = runner.invoke(main, ["store", "put", "-", "--title", "my-title.md"], input="content here")
     assert result.exit_code == 0
     assert "doc-id-abc" in result.output
@@ -113,6 +137,7 @@ def test_store_put_file_uses_filename_as_title(runner, mock_store, tmp_path):
     src = tmp_path / "analysis.md"
     src.write_text("finding: important")
     mock_store.put.return_value = "doc-id-xyz"
+    _seed_for_store_put("finding: important")
     result = runner.invoke(main, ["store", "put", str(src)])
     assert result.exit_code == 0
     assert "doc-id-xyz" in result.output

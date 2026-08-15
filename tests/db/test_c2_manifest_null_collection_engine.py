@@ -54,7 +54,7 @@ fixture request needed (same precedent as
 """
 from __future__ import annotations
 
-from tests._catalog_fixture_ops import ActiveCatalog, active_reader
+from tests._catalog_fixture_ops import ActiveCatalog, active_reader, fk_dropped_for_dangling_seed
 
 _SEQ = [0]
 
@@ -128,7 +128,15 @@ class TestManifestNullCollectionFalseClean:
 
         before = active_reader().manifest_null_collection_report()
         chash = _never_embedded_chash(seq)
-        cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
+        # nexus-dbzxb (RDR-191 Phase 5 Python collateral, idiom 3): this
+        # chash is DELIBERATELY never backed by a real T3 chunk (see
+        # _never_embedded_chash's docstring) — the whole point of this
+        # module is a manifest row whose chash has no real content behind
+        # it. fk_catalog_chunks_chunk makes that state unreachable via the
+        # normal write path; drop the constraint for this one write so the
+        # row lands genuinely dangling, exactly as this test needs.
+        with fk_dropped_for_dangling_seed():
+            cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
         after = active_reader().manifest_null_collection_report()
 
         assert after["total"] == before["total"], (
@@ -168,7 +176,8 @@ class TestManifestNullCollectionFalseClean:
         cat, tumbler = _register_ghost(seq, "ghost-bf")
         collection = _ghost_write_collection("ghost-bf", seq)
         chash = _never_embedded_chash(seq + 1_000_000)
-        cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
+        with fk_dropped_for_dangling_seed():
+            cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
         assert len(active_reader().get_manifest(str(tumbler))) == 1, (
             "the caller-supplied collection means the row is written, not "
             "skipped"
@@ -201,7 +210,8 @@ class TestManifestNullCollectionFalseClean:
         cat, tumbler = _register_ghost(seq, "falseclean")
         collection = _ghost_write_collection("falseclean", seq)
         chash = _never_embedded_chash(seq + 2_000_000)
-        cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
+        with fk_dropped_for_dangling_seed():
+            cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
         assert len(active_reader().get_manifest(str(tumbler))) == 1
 
         results = h._check_dangling_manifests()
@@ -233,7 +243,8 @@ class TestManifestNullCollectionFalseClean:
         cat, tumbler = _register_ghost(seq, "fix")
         collection = _ghost_write_collection("fix", seq)
         chash = _never_embedded_chash(seq + 3_000_000)
-        cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
+        with fk_dropped_for_dangling_seed():
+            cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
         assert len(active_reader().get_manifest(str(tumbler))) == 1
 
         dangling = h._check_dangling_manifests()
