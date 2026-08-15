@@ -20,12 +20,14 @@ tombstone below.
 """
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 from click.testing import CliRunner
@@ -113,15 +115,31 @@ def _seed_chunk(
     t3_db: T3Database,
     *,
     collection: str,
-    chunk_id: str,
     content: str,
     doc_id: str,
     chunk_index: int,
     chunk_text_hash: str,
+    chunk_id: str | None = None,
+    seed_fk: bool = True,
 ) -> None:
+    """Seed one T3 chunk.
+
+    nexus-dmf7r: the T3 chunk's own id IS the chash by construction
+    (RDR-108/RDR-180) -- ``chunk_id`` defaults to ``chunk_text_hash`` so
+    every ordinary call site matches that production invariant. Pass
+    ``chunk_id=`` explicitly ONLY to construct a deliberately DIVERGENT
+    fixture (the nexus-dmf7r regression class backfill must now detect
+    and skip).
+
+    nexus-r7g3i: ``seed_fk=False`` skips the real-engine FK bookkeeping
+    insert below, constructing a chunk whose chash has NO matching
+    ``nexus.chunks`` row -- a real ``write_manifest`` call for it
+    genuinely 409s against ``fk_catalog_chunks_chunk``. Default True
+    (the FK-safe shape every other test in this file wants).
+    """
     col = t3_db._client.get_or_create_collection(collection)
     col.add(
-        ids=[chunk_id],
+        ids=[chunk_id if chunk_id is not None else chunk_text_hash],
         documents=[content],
         metadatas=[{
             "doc_id": doc_id,
@@ -129,6 +147,8 @@ def _seed_chunk(
             "chunk_text_hash": chunk_text_hash,
         }],
     )
+    if not seed_fk:
+        return
     # nexus-dbzxb (RDR-191 Phase 5 Python collateral): backfill_manifest's
     # WRITE side (write_manifest / atomic_manifest_replace) always goes
     # through the REAL engine catalog (``active_catalog``, see its
@@ -317,10 +337,13 @@ class TestSIG6ProgressOutput:
         # mismatched doc_id yields zero chunks per doc.
         for i in range(3):
             tumbler = _register_doc(active_catalog, coll)
+            # Distinct chunk_text_hash per iteration -- id defaults to it
+            # (nexus-dmf7r), so three docs sharing one hash would collide
+            # onto the same T3 chunk row instead of seeding three.
             _seed_chunk(
-                t3_db, collection=coll, chunk_id=f"c{i}-{coll}",
+                t3_db, collection=coll,
                 content=f"content {i}", doc_id=tumbler, chunk_index=0,
-                chunk_text_hash="a" * 64,
+                chunk_text_hash=str(i) * 64,
             )
 
         with (
@@ -368,12 +391,12 @@ class TestSIG6ProgressOutput:
         first = _register_doc(active_catalog, coll)
         second = _register_doc(active_catalog, coll)
         _seed_chunk(
-            t3_db, collection=coll, chunk_id=f"c1-{coll}",
+            t3_db, collection=coll,
             content="first", doc_id=first, chunk_index=0,
             chunk_text_hash="a" * 64,
         )
         _seed_chunk(
-            t3_db, collection=coll, chunk_id=f"c2-{coll}",
+            t3_db, collection=coll,
             content="second", doc_id=second, chunk_index=0,
             chunk_text_hash="b" * 64,
         )
@@ -432,11 +455,11 @@ class TestGvmboEmptyManifestGuard:
 
         coll = _unique_coll()
         tumbler = _register_doc(active_catalog, coll)
-        chunk_id = f"c1-{coll}"
+        chash = "c" * 64
         _seed_chunk(
-            t3_db, collection=coll, chunk_id=chunk_id,
+            t3_db, collection=coll,
             content="alive", doc_id=tumbler, chunk_index=0,
-            chunk_text_hash="c" * 64,
+            chunk_text_hash=chash,
         )
 
         # Pass 1: real chunk present, establishes a real manifest.
@@ -452,7 +475,7 @@ class TestGvmboEmptyManifestGuard:
         # key-mismatch damage class this bead is filed for: the doc HAS an
         # existing manifest, but a subsequent lookup now matches zero chunks.
         col = t3_db._client.get_or_create_collection(coll)
-        col.delete(ids=[chunk_id])
+        col.delete(ids=[chash])
 
         # Pass 2: lookup matches zero chunks.
         second = backfill_manifest_for_collection(
@@ -484,7 +507,7 @@ class TestGvmboEmptyManifestGuard:
         other = _register_doc(active_catalog, coll)
         assert other != tumbler
         _seed_chunk(
-            t3_db, collection=coll, chunk_id=f"other-{coll}",
+            t3_db, collection=coll,
             content="unrelated", doc_id=other, chunk_index=0,
             chunk_text_hash="1" * 64,
         )
@@ -517,17 +540,21 @@ class TestB91tvKeyUnionLookup:
     """
 
     def _seed_store_put_shaped_chunk(
-        self, t3_db: T3Database, *, collection: str, chunk_id: str,
+        self, t3_db: T3Database, *, collection: str,
         content: str, catalog_doc_id: str, chash: str,
+        chunk_id: str | None = None,
     ) -> None:
         """Seed a chunk in the store_put shape: metadata carries
         ``catalog_doc_id`` = tumbler and ``doc_id`` = chash (never
         ``content_hash`` -- store_hook.py stamps only ``doc_id``), per
         ``http_vector_client.py:1705-1706`` / ``store_hook.py:328,357,386``.
+
+        nexus-dmf7r: ``chunk_id`` defaults to ``chash`` -- see
+        ``_seed_chunk``'s docstring for why.
         """
         col = t3_db._client.get_or_create_collection(collection)
         col.add(
-            ids=[chunk_id],
+            ids=[chunk_id if chunk_id is not None else chash],
             documents=[content],
             metadatas=[{
                 "doc_id": chash,  # chash, NOT the tumbler -- this is the bug
@@ -551,7 +578,7 @@ class TestB91tvKeyUnionLookup:
         coll = _unique_coll("knowledge")
         tumbler = _register_doc(active_catalog, coll)
         self._seed_store_put_shaped_chunk(
-            t3_db, collection=coll, chunk_id=f"sp-{coll}",
+            t3_db, collection=coll,
             content="store_put note", catalog_doc_id=tumbler, chash="d" * 64,
         )
 
@@ -576,7 +603,7 @@ class TestB91tvKeyUnionLookup:
         coll = _unique_coll()
         tumbler = _register_doc(active_catalog, coll)
         _seed_chunk(
-            t3_db, collection=coll, chunk_id=f"idx-{coll}",
+            t3_db, collection=coll,
             content="indexed", doc_id=tumbler, chunk_index=0,
             chunk_text_hash="e" * 64,
         )
@@ -612,12 +639,12 @@ class TestB91tvKeyUnionLookup:
         store_put_doc = _register_doc(active_catalog, coll)
         assert indexer_doc != store_put_doc
         _seed_chunk(
-            t3_db, collection=coll, chunk_id=f"idx-{coll}",
+            t3_db, collection=coll,
             content="indexed part", doc_id=indexer_doc, chunk_index=0,
             chunk_text_hash="f" * 64,
         )
         self._seed_store_put_shaped_chunk(
-            t3_db, collection=coll, chunk_id=f"sp-{coll}",
+            t3_db, collection=coll,
             content="store_put part", catalog_doc_id=store_put_doc, chash="a" * 64,
         )
 
@@ -645,7 +672,7 @@ class TestB91tvKeyUnionLookup:
         tumbler = _register_doc(active_catalog, coll)
         col = t3_db._client.get_or_create_collection(coll)
         col.add(
-            ids=[f"both-{coll}"],
+            ids=["b" * 64],  # nexus-dmf7r: id == chash (RDR-108/RDR-180 invariant)
             documents=["dual-keyed"],
             metadatas=[{
                 "doc_id": tumbler,
@@ -686,7 +713,7 @@ class TestChunkCountResync:
         coll = _unique_coll()
         tumbler = _register_doc(active_catalog, coll)  # chunk_count=0 at register
         _seed_chunk(
-            t3_db, collection=coll, chunk_id=f"rc-{coll}",
+            t3_db, collection=coll,
             content="resync me", doc_id=tumbler, chunk_index=0,
             chunk_text_hash="9" * 64,
         )
@@ -709,7 +736,7 @@ class TestChunkCountResync:
         coll = _unique_coll()
         tumbler = _register_doc(active_catalog, coll)
         _seed_chunk(
-            t3_db, collection=coll, chunk_id=f"dr-{coll}",
+            t3_db, collection=coll,
             content="dry run only", doc_id=tumbler, chunk_index=0,
             chunk_text_hash="8" * 64,
         )
@@ -747,12 +774,12 @@ class TestG1OnlyGappedFilter:
         gapped = _register_doc(active_catalog, coll)
 
         _seed_chunk(
-            t3_db, collection=coll, chunk_id=f"h-{coll}",
+            t3_db, collection=coll,
             content="healthy doc", doc_id=healthy, chunk_index=0,
             chunk_text_hash="1" * 64,
         )
         _seed_chunk(
-            t3_db, collection=coll, chunk_id=f"g-{coll}",
+            t3_db, collection=coll,
             content="gapped doc", doc_id=gapped, chunk_index=0,
             chunk_text_hash="2" * 64,
         )
@@ -895,7 +922,8 @@ class TestG1G2CliCounters:
         tumbler = _register_doc(active_catalog, coll)
         col = t3_db._client.get_or_create_collection(coll)
         col.add(
-            ids=[f"p1-{coll}", f"p2-{coll}"],
+            # nexus-dmf7r: id == chash (RDR-108/RDR-180 invariant).
+            ids=["3" * 64, "4" * 64],
             documents=["chunk one", "chunk two"],
             metadatas=[
                 {"doc_id": tumbler, "chunk_text_hash": "3" * 64},
@@ -923,12 +951,12 @@ class TestG1G2CliCounters:
         healthy = _register_doc(active_catalog, coll)
         gapped = _register_doc(active_catalog, coll)
         _seed_chunk(
-            t3_db, collection=coll, chunk_id=f"h-{coll}",
+            t3_db, collection=coll,
             content="healthy", doc_id=healthy, chunk_index=0,
             chunk_text_hash="5" * 64,
         )
         _seed_chunk(
-            t3_db, collection=coll, chunk_id=f"g-{coll}",
+            t3_db, collection=coll,
             content="gapped", doc_id=gapped, chunk_index=0,
             chunk_text_hash="6" * 64,
         )
@@ -963,5 +991,551 @@ class TestG1G2CliCounters:
         # The gapped doc healed; the healthy one untouched.
         assert len(active_catalog.get_manifest(gapped)) == 1
         assert len(active_catalog.get_manifest(healthy)) == 1
+
+
+# ── nexus-dmf7r: manifest chash keyed on the T3 chunk's own id ────────────
+
+
+class TestDmf7rChashKeyedOnId:
+    """nexus-dmf7r: the manifest's chash must come from the T3 chunk's
+    own id (what ``fk_catalog_chunks_chunk`` actually validates against),
+    never from ``metadata['chunk_text_hash']`` -- a redundant copy that
+    can silently diverge from the row it was copied from. A divergence
+    skips the WHOLE document (never guesses which value is correct),
+    counted in ``docs_skipped_chash_divergent``.
+    """
+
+    def test_aligned_chunk_writes_manifest_keyed_on_id(self, active_catalog, t3_db):
+        """The ordinary (aligned) case: id == metadata chash. The
+        manifest row carries that value; no divergence counted."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        tumbler = _register_doc(active_catalog, coll)
+        _seed_chunk(
+            t3_db, collection=coll,
+            content="aligned", doc_id=tumbler, chunk_index=0,
+            chunk_text_hash="7" * 64,
+        )
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False,
+        )
+
+        assert result.docs_skipped_chash_divergent == 0
+        assert result.docs_processed == 1
+        assert result.chunks_written == 1
+        manifest = active_catalog.get_manifest(tumbler)
+        assert len(manifest) == 1
+        assert manifest[0].chash == "7" * 64
+
+    def test_divergent_id_and_metadata_skips_doc_not_write(
+        self, active_catalog, t3_db,
+    ):
+        """A chunk whose T3 id disagrees with its ``chunk_text_hash``
+        metadata copy must skip the whole document -- never write a
+        manifest row keyed on the divergent copy (which would 409
+        against ``fk_catalog_chunks_chunk`` on cloud)."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        tumbler = _register_doc(active_catalog, coll)
+        # Deliberately divergent: the T3 row's real id differs from the
+        # chunk_text_hash metadata copy the pre-fix code trusted.
+        _seed_chunk(
+            t3_db, collection=coll,
+            content="divergent", doc_id=tumbler, chunk_index=0,
+            chunk_text_hash="8" * 64,
+            chunk_id="stale-chunk-id-not-a-chash",
+        )
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False,
+        )
+
+        assert result.docs_skipped_chash_divergent == 1
+        assert result.docs_processed == 0
+        assert result.chunks_written == 0
+        # Never written -- no manifest row for this doc at all.
+        assert active_catalog.get_manifest(tumbler) == []
+
+    def test_divergent_doc_does_not_destroy_existing_manifest(
+        self, active_catalog, t3_db,
+    ):
+        """A doc that already has a healthy manifest must NOT have it
+        wiped out by a later pass whose T3 chunk has since diverged
+        (e.g. a rekey / hand-patched metadata row) -- the same
+        never-destroy guarantee nexus-gvmbo established for
+        zero-chunk-match, extended to this skip class."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        tumbler = _register_doc(active_catalog, coll)
+        chash = "9" * 63 + "1"
+        _seed_chunk(
+            t3_db, collection=coll,
+            content="was healthy", doc_id=tumbler, chunk_index=0,
+            chunk_text_hash=chash,
+        )
+        first = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False,
+        )
+        assert first.chunks_written == 1
+        before = active_catalog.get_manifest(tumbler)
+        assert len(before) == 1
+
+        # Simulate the metadata copy drifting from the row's own id (a
+        # rekey / hand patch) without re-seeding a fresh, aligned chunk.
+        col = t3_db._client.get_or_create_collection(coll)
+        col.update(
+            ids=[chash],
+            metadatas=[{
+                "doc_id": tumbler,
+                "chunk_index": 0,
+                "chunk_text_hash": "a" * 64,  # diverged from the id above
+            }],
+        )
+
+        second = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False,
+        )
+        assert second.docs_skipped_chash_divergent == 1
+        assert second.docs_processed == 0
+
+        after = active_catalog.get_manifest(tumbler)
+        assert after == before
+        assert len(after) == 1
+
+    def test_chash_divergent_surfaced_in_cli_output(
+        self, active_catalog, t3_db, runner,
+    ):
+        """The skip must appear in the command's own summary output --
+        never silent (mirrors nexus-gvmbo's non-vacuity requirement)."""
+        coll = _unique_coll()
+        tumbler = _register_doc(active_catalog, coll)
+        _seed_chunk(
+            t3_db, collection=coll,
+            content="divergent", doc_id=tumbler, chunk_index=0,
+            chunk_text_hash="b" * 64,
+            chunk_id="not-the-chash",
+        )
+
+        with (
+            patch("nexus.commands.t3._make_catalog", return_value=active_catalog),
+            patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
+        ):
+            result = runner.invoke(
+                main,
+                ["t3", "backfill-manifest", "--collection", coll, "--no-dry-run"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "chash id/metadata divergent" in result.output, result.output
+
+
+# ── nexus-r7g3i: FK-409 on write_manifest is a per-doc skip, not a ────────
+# ── per-collection abort ───────────────────────────────────────────────
+
+
+class TestR7g3iFk409Skip:
+    """nexus-r7g3i: a manifest write that 409s against
+    ``fk_catalog_chunks_chunk`` (no matching ``nexus.chunks`` row for the
+    written chash) must be caught PER DOCUMENT, counted in
+    ``docs_skipped_fk_409``, and NOT abort the rest of the collection --
+    pre-fix, any per-doc write error propagated out of this function and
+    was caught per-COLLECTION by the CLI, abandoning every unprocessed
+    document in that collection without marking any of them.
+    """
+
+    def test_fk_409_skips_doc_and_continues_collection(
+        self, active_catalog, t3_db,
+    ):
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        # doomed: its chash has NO matching nexus.chunks row -- a real
+        # write_manifest call for it genuinely 409s against
+        # fk_catalog_chunks_chunk.
+        doomed = _register_doc(active_catalog, coll)
+        _seed_chunk(
+            t3_db, collection=coll,
+            content="no FK backing", doc_id=doomed, chunk_index=0,
+            chunk_text_hash="c" * 64,
+            seed_fk=False,
+        )
+        # healthy: seeded normally (real nexus.chunks row present) --
+        # proves the loop kept going past the 409 rather than stopping.
+        healthy = _register_doc(active_catalog, coll)
+        _seed_chunk(
+            t3_db, collection=coll,
+            content="FK-safe", doc_id=healthy, chunk_index=0,
+            chunk_text_hash="d" * 64,
+        )
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False,
+        )
+
+        assert result.docs_skipped_fk_409 == 1
+        assert result.docs_processed == 1
+        assert result.chunks_written == 1
+        assert active_catalog.get_manifest(doomed) == []
+        healthy_manifest = active_catalog.get_manifest(healthy)
+        assert len(healthy_manifest) == 1
+        assert healthy_manifest[0].chash == "d" * 64
+
+    def test_fk_409_surfaced_in_cli_output(self, active_catalog, t3_db, runner):
+        coll = _unique_coll()
+        doomed = _register_doc(active_catalog, coll)
+        _seed_chunk(
+            t3_db, collection=coll,
+            content="no FK backing", doc_id=doomed, chunk_index=0,
+            chunk_text_hash="e" * 64,
+            seed_fk=False,
+        )
+
+        with (
+            patch("nexus.commands.t3._make_catalog", return_value=active_catalog),
+            patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
+        ):
+            result = runner.invoke(
+                main,
+                ["t3", "backfill-manifest", "--collection", coll, "--no-dry-run"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "FK conflict" in result.output, result.output
+
+    def test_other_write_errors_still_propagate(self, active_catalog, t3_db):
+        """A non-409 write failure must still propagate (preserve prior
+        per-collection abort behavior) -- only a 409 is downgraded to a
+        per-doc skip."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        tumbler = _register_doc(active_catalog, coll)
+        _seed_chunk(
+            t3_db, collection=coll,
+            content="whatever", doc_id=tumbler, chunk_index=0,
+            chunk_text_hash="f" * 64,
+        )
+
+        boom = httpx.HTTPStatusError(
+            "server error", request=MagicMock(), response=MagicMock(status_code=500),
+        )
+        with (
+            patch.object(active_catalog, "write_manifest", side_effect=boom),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            backfill_manifest_for_collection(
+                active_catalog, t3_db, coll, dry_run=False,
+            )
+
+
+# ── nexus-r7g3i: --resume + --only-gapped combine correctly ───────────────
+
+
+class _ScopedCollectionsCatalog:
+    """Thin proxy limiting ``list_collections()`` to an explicit set,
+    delegating everything else to *inner*.
+
+    A real ``--resume``/``--only-gapped`` run with no ``-c`` enumerates
+    EVERY collection in the tenant's catalog via ``list_collections()``,
+    which would make the combined-flags test below slow and
+    non-deterministic against a shared engine substrate holding other
+    tests' collections too. Everything else -- ``list_by_collection``,
+    ``get_manifests``, ``write_manifest``, ``resync_chunk_count_cache`` --
+    still goes through the real catalog via ``__getattr__``.
+    """
+
+    def __init__(self, inner: Any, collections: list[str]) -> None:
+        self._inner = inner
+        self._collections = collections
+
+    def list_collections(self) -> list[dict]:
+        return [{"name": c} for c in self._collections]
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class TestResumeOnlyGappedCombined:
+    """nexus-r7g3i (critique T2 [22623]): --resume and --only-gapped are
+    structurally orthogonal -- --resume skips whole COLLECTIONS already
+    marked done in the state file, --only-gapped skips individual
+    DOCUMENTS within a collection that still has a manifest. A combined
+    invocation must apply both correctly at once: a done collection is
+    skipped entirely (never even queried for gapped docs), while a
+    pending collection still gets per-doc gapped filtering.
+    """
+
+    def test_resume_skips_done_collection_only_gapped_filters_the_rest(
+        self, active_catalog, t3_db, runner, tmp_path,
+    ):
+        coll_done = _unique_coll("done")
+        coll_pending = _unique_coll("pending")
+
+        # coll_done: a gapped doc that would be healed if this collection
+        # were touched at all -- proves --resume skipped it outright, not
+        # "processed it and it happened to be filtered away by chance".
+        done_doc = _register_doc(active_catalog, coll_done)
+        _seed_chunk(
+            t3_db, collection=coll_done,
+            content="done collection doc", doc_id=done_doc, chunk_index=0,
+            chunk_text_hash="1" * 64,
+        )
+
+        # coll_pending: one healthy (has manifest) doc + one gapped doc.
+        healthy = _register_doc(active_catalog, coll_pending)
+        gapped = _register_doc(active_catalog, coll_pending)
+        _seed_chunk(
+            t3_db, collection=coll_pending,
+            content="healthy", doc_id=healthy, chunk_index=0,
+            chunk_text_hash="2" * 64,
+        )
+        _seed_chunk(
+            t3_db, collection=coll_pending,
+            content="gapped", doc_id=gapped, chunk_index=0,
+            chunk_text_hash="3" * 64,
+        )
+        active_catalog.write_manifest(
+            healthy,
+            [{
+                "chash": "2" * 64, "position": 0, "line_start": None,
+                "line_end": None, "char_start": None, "char_end": None,
+            }],
+            collection=coll_pending,
+        )
+
+        state_file = tmp_path / "backfill_state.json"
+        state_file.write_text(json.dumps({coll_done: ["__done__"]}))
+
+        scoped_cat = _ScopedCollectionsCatalog(
+            active_catalog, [coll_done, coll_pending],
+        )
+        write_manifest_orig = active_catalog.write_manifest
+        with (
+            patch("nexus.commands.t3._make_catalog", return_value=scoped_cat),
+            patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
+            patch.object(active_catalog, "write_manifest", wraps=write_manifest_orig) as spy,
+            patch.dict(os.environ, {"NEXUS_BACKFILL_STATE_FILE": str(state_file)}),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "t3", "backfill-manifest",
+                    "--no-dry-run", "--resume", "--only-gapped",
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+
+        # coll_done was skipped ENTIRELY -- its gapped doc was never
+        # touched, so it must still have zero manifest rows.
+        assert active_catalog.get_manifest(done_doc) == []
+        called_doc_ids = [call.args[0] for call in spy.call_args_list]
+        assert done_doc not in called_doc_ids
+
+        # coll_pending: --only-gapped still filtered within it.
+        assert healthy not in called_doc_ids
+        assert gapped in called_doc_ids
+        assert len(active_catalog.get_manifest(gapped)) == 1
+        assert len(active_catalog.get_manifest(healthy)) == 1  # untouched, pre-existing
+
+
+# ── nexus-69c94 critique S1/S2 (substantive-critic, T2 scratch 79007753) ──
+
+
+class TestNexus69c94CritiqueFixes:
+    """S1: an fk_409/chash_divergent residual must NOT mark the
+    collection __done__ in the resume state file (both classes are
+    caught per-doc and never raise, so the collection "completes"
+    without error) -- it is marked __partial__ instead, and a future
+    --resume reprocesses the whole collection rather than permanently
+    stranding the un-healed docs.
+
+    C2: docs_skipped_zero_chunks joins the same residual -- it is the
+    DOMINANT live gap class (894/895 in the nexus-3n7pr population), and
+    a future remediation pass (re-index / re-put) can make exactly those
+    docs recoverable. A collection whose ONLY gaps are zero_chunks must
+    also stay revisitable by --resume, not be marked permanently done.
+
+    S2: the fk_409 structlog line must name the attempted chash(es),
+    matching the actionability of chash_divergent's chunk_id/meta_chash
+    logging.
+    """
+
+    def test_fk_409_residual_marks_partial_not_done_and_resume_reprocesses(
+        self, active_catalog, t3_db, runner, tmp_path,
+    ):
+        coll = _unique_coll()
+        doomed = _register_doc(active_catalog, coll)
+        _seed_chunk(
+            t3_db, collection=coll,
+            content="no FK backing", doc_id=doomed, chunk_index=0,
+            chunk_text_hash="1" * 64,
+            seed_fk=False,
+        )
+        healthy = _register_doc(active_catalog, coll)
+        _seed_chunk(
+            t3_db, collection=coll,
+            content="FK-safe", doc_id=healthy, chunk_index=0,
+            chunk_text_hash="2" * 64,
+        )
+
+        state_file = tmp_path / "backfill_state.json"
+
+        with (
+            patch("nexus.commands.t3._make_catalog", return_value=active_catalog),
+            patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
+            patch.dict(os.environ, {"NEXUS_BACKFILL_STATE_FILE": str(state_file)}),
+        ):
+            result1 = runner.invoke(
+                main,
+                ["t3", "backfill-manifest", "--collection", coll, "--no-dry-run"],
+                catch_exceptions=False,
+            )
+            assert result1.exit_code == 0, result1.output
+            assert "NOT marked done" in result1.output, result1.output
+
+            state = json.loads(state_file.read_text())
+            assert state[coll][0] == "__partial__", state
+            assert state[coll] != ["__done__"]
+
+            # Second run, --resume: the collection must be REPROCESSED,
+            # not skipped -- the doomed doc fails again with fk_409,
+            # proving the resume-skip gate did not treat this collection
+            # as done.
+            result2 = runner.invoke(
+                main,
+                [
+                    "t3", "backfill-manifest", "--collection", coll,
+                    "--no-dry-run", "--resume",
+                ],
+                catch_exceptions=False,
+            )
+        assert result2.exit_code == 0, result2.output
+        assert "FK conflict" in result2.output, result2.output
+
+    def test_zero_chunks_only_residual_marks_partial_not_done(
+        self, active_catalog, t3_db, runner, tmp_path,
+    ):
+        """C2: a collection whose ONLY gaps are zero_chunks (no fk_409,
+        no chash_divergent) must ALSO be marked __partial__, not
+        __done__ -- a future Phase-5 remediation pass (re-index /
+        re-put) can make exactly those docs recoverable, so --resume
+        must keep revisiting the collection."""
+        coll = _unique_coll()
+        # No matching T3 chunk under either lookup key at all -- the
+        # doc takes the zero_chunks branch, not no_t3 (an unrelated
+        # chunk exists so `col` resolves) and not fk_409/chash_divergent.
+        stranded = _register_doc(active_catalog, coll)
+        other = _register_doc(active_catalog, coll)
+        _seed_chunk(
+            t3_db, collection=coll,
+            content="unrelated", doc_id=other, chunk_index=0,
+            chunk_text_hash="5" * 64,
+        )
+
+        state_file = tmp_path / "backfill_state.json"
+
+        with (
+            patch("nexus.commands.t3._make_catalog", return_value=active_catalog),
+            patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
+            patch.dict(os.environ, {"NEXUS_BACKFILL_STATE_FILE": str(state_file)}),
+        ):
+            result1 = runner.invoke(
+                main,
+                ["t3", "backfill-manifest", "--collection", coll, "--no-dry-run"],
+                catch_exceptions=False,
+            )
+            assert result1.exit_code == 0, result1.output
+            assert "NOT marked done" in result1.output, result1.output
+
+            state = json.loads(state_file.read_text())
+            assert state[coll][0] == "__partial__", state
+            assert state[coll] != ["__done__"]
+            assert any(entry.startswith("zero_chunks=1") for entry in state[coll]), state
+
+            # A second --resume run must REPROCESS the collection, not
+            # skip it -- the stranded doc still shows zero_chunks again.
+            result2 = runner.invoke(
+                main,
+                [
+                    "t3", "backfill-manifest", "--collection", coll,
+                    "--no-dry-run", "--resume",
+                ],
+                catch_exceptions=False,
+            )
+        assert result2.exit_code == 0, result2.output
+        assert "zero chunk matches" in result2.output, result2.output
+        assert active_catalog.get_manifest(stranded) == []
+
+    def test_clean_collection_still_marks_done(
+        self, active_catalog, t3_db, runner, tmp_path,
+    ):
+        """Regression guard: a collection with ZERO fk_409/chash_divergent/
+        zero_chunks residual must still be marked __done__ as before --
+        the fix only changes behavior for the residual case."""
+        coll = _unique_coll()
+        healthy = _register_doc(active_catalog, coll)
+        _seed_chunk(
+            t3_db, collection=coll,
+            content="clean", doc_id=healthy, chunk_index=0,
+            chunk_text_hash="3" * 64,
+        )
+
+        state_file = tmp_path / "backfill_state.json"
+
+        with (
+            patch("nexus.commands.t3._make_catalog", return_value=active_catalog),
+            patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
+            patch.dict(os.environ, {"NEXUS_BACKFILL_STATE_FILE": str(state_file)}),
+        ):
+            result = runner.invoke(
+                main,
+                ["t3", "backfill-manifest", "--collection", coll, "--no-dry-run"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "NOT marked done" not in result.output, result.output
+        state = json.loads(state_file.read_text())
+        assert state[coll] == ["__done__"]
+
+    def test_fk_409_log_line_names_the_attempted_chashes(
+        self, active_catalog, t3_db,
+    ):
+        from structlog.testing import capture_logs
+
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        doomed = _register_doc(active_catalog, coll)
+        chash = "4" * 64
+        _seed_chunk(
+            t3_db, collection=coll,
+            content="no FK backing", doc_id=doomed, chunk_index=0,
+            chunk_text_hash=chash,
+            seed_fk=False,
+        )
+
+        with capture_logs() as logs:
+            result = backfill_manifest_for_collection(
+                active_catalog, t3_db, coll, dry_run=False,
+            )
+
+        assert result.docs_skipped_fk_409 == 1
+        events = [
+            e for e in logs
+            if e["event"] == "manifest_backfill_doc_skipped_fk_409"
+        ]
+        assert len(events) == 1, logs
+        assert events[0]["chashes"] == [chash]
+        assert events[0]["doc_id"] == doomed
+        assert events[0]["collection"] == coll
 
 

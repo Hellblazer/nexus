@@ -34,6 +34,27 @@ Edge-case contracts:
   - Pre-RDR-053 chunks lacking ``chunk_text_hash``: FAIL LOUD with
     ``MissingChunkHashError`` (per re-gate S3 finding). Operator must
     re-index that collection or carve it out.
+  - chash divergence (nexus-dmf7r): the manifest row's chash is keyed on
+    the T3 chunk's own id, never on ``metadata["chunk_text_hash"]``. The
+    id IS the chash by construction (RDR-108/RDR-180); the metadata field
+    is a redundant copy written at index time. They agree in every
+    healthy state, but a rekey, a hand-patched metadata row, or an
+    RDR-180-class width change could let them diverge -- and writing the
+    (possibly stale) metadata copy into the manifest is exactly what
+    trips ``fk_catalog_chunks_chunk`` (validated on cloud since
+    engine-service-v0.1.76) with a 409, since the FK checks the id's
+    referent, not the copy. Backfill asserts equality per chunk; a
+    mismatch skips the WHOLE document (never guesses which value is
+    correct), counted in ``BackfillResult.docs_skipped_chash_divergent``.
+  - FK-409 on write (nexus-r7g3i): a manifest write whose chash has no
+    matching ``nexus.chunks`` row 409s against ``fk_catalog_chunks_chunk``.
+    This is caught PER DOCUMENT around the ``write_manifest`` call, counted
+    in ``BackfillResult.docs_skipped_fk_409``, and the collection's
+    remaining documents keep processing -- previously any per-doc write
+    error propagated out of this function and was caught per-COLLECTION by
+    the CLI, abandoning every unprocessed document in that collection
+    without marking any of them. Any OTHER exception (not a 409) still
+    propagates unchanged.
   - Quota compliance: paginates T3 at <=300 records per ``col.get()``
     call; ``INSERT INTO document_chunks`` batches <=300 per write.
   - Successful non-dry-run writes resync ``chunk_count`` via
@@ -60,6 +81,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import httpx
 import structlog
 from nexus.errors import collection_not_found_errors
 
@@ -123,6 +145,38 @@ class Phase3ChunkIndexMissingError(ValueError):
         )
 
 
+class ChashDivergentError(ValueError):
+    """Raised when a T3 chunk's own id disagrees with its metadata copy
+    of ``chunk_text_hash`` (nexus-dmf7r).
+
+    The T3 chunk id IS the chash by construction (RDR-108/RDR-180) -- the
+    metadata field is a redundant copy written at index time, and they
+    agree in every healthy state. A divergence (a rekey, a hand-patched
+    metadata row, an RDR-180-class id-width change) means the metadata
+    copy no longer names the row the FK (``fk_catalog_chunks_chunk``,
+    validated on cloud since engine-service-v0.1.76) actually checks
+    against; writing that copy into the manifest would 409. Backfill
+    cannot decide which of the two is "correct" -- it never writes a
+    manifest row for a chunk it cannot verify, and the caller skips the
+    whole document rather than guess.
+    """
+
+    def __init__(
+        self, doc_id: str, collection: str, chunk_id: str, meta_chash: str,
+    ) -> None:
+        self.doc_id = doc_id
+        self.collection = collection
+        self.chunk_id = chunk_id
+        self.meta_chash = meta_chash
+        super().__init__(
+            f"Document {doc_id!r} in collection {collection!r} has a T3 "
+            f"chunk whose id {chunk_id!r} disagrees with its "
+            f"metadata['chunk_text_hash'] copy {meta_chash!r}. The id is "
+            f"the FK's actual referent; refusing to write a manifest row "
+            f"keyed on the divergent copy. Skipping the document."
+        )
+
+
 @dataclass
 class BackfillResult:
     """Summary of one backfill run over a single collection."""
@@ -146,6 +200,20 @@ class BackfillResult:
     # --only-gapped at a fully-healthy collection must SEE this count equal
     # docs_processed's would-be value, not a silent 0.
     docs_skipped_has_manifest: int = 0
+    # nexus-dmf7r: count docs skipped because a T3 chunk's id (the FK's
+    # actual referent) disagreed with its metadata['chunk_text_hash']
+    # copy -- see ChashDivergentError. Never written. Non-vacuity: a
+    # caller pointing backfill at a corpus with a rekeyed or
+    # hand-patched metadata copy must SEE this count rise, not a
+    # silent 0.
+    docs_skipped_chash_divergent: int = 0
+    # nexus-r7g3i: count docs whose write_manifest call 409'd against
+    # fk_catalog_chunks_chunk (no matching nexus.chunks row for the
+    # written chash). Never partially written -- the server-side write
+    # is atomic and the 409 means it did not happen at all. Non-vacuity:
+    # a caller pointing backfill at docs with no recoverable T3 content
+    # must SEE this count rise, not a silent abort of the collection.
+    docs_skipped_fk_409: int = 0
     skipped_taxonomy: bool = False
 
 
@@ -171,7 +239,8 @@ def _fetch_chunks_by_key(
     key's partial slice.
 
     Raises MissingChunkHashError if any matched chunk lacks
-    ``chunk_text_hash``.
+    ``chunk_text_hash``. Raises ChashDivergentError (nexus-dmf7r) if any
+    matched chunk's own id disagrees with its ``chunk_text_hash`` copy.
     """
     chunks: list[dict] = []
     offset = 0
@@ -189,11 +258,22 @@ def _fetch_chunks_by_key(
         for cid, meta in zip(page_ids, page_metas):
             if not isinstance(meta, dict):
                 meta = {}
-            chash = meta.get("chunk_text_hash") or ""
-            if not chash:
+            meta_chash = meta.get("chunk_text_hash") or ""
+            if not meta_chash:
                 raise MissingChunkHashError(chunk_id=cid, collection=collection)
+            # nexus-dmf7r: key the manifest row on `cid` -- the T3 chunk's
+            # own id, which IS the chash by construction (RDR-108/RDR-180)
+            # and is what fk_catalog_chunks_chunk actually validates
+            # against -- never on `meta_chash`, a redundant copy that can
+            # silently diverge from the row it was copied from. Assert
+            # equality rather than trusting the copy.
+            if cid != meta_chash:
+                raise ChashDivergentError(
+                    doc_id=doc_id, collection=collection,
+                    chunk_id=cid, meta_chash=meta_chash,
+                )
             chunks.append({
-                "chash": chash,
+                "chash": cid,
                 "position": int(meta.get("chunk_index", 0) or 0),
                 "line_start": meta.get("line_start"),
                 "line_end": meta.get("line_end"),
@@ -223,6 +303,8 @@ def _iter_chunks_for_doc(
       chash, position, line_start, line_end, char_start, char_end
 
     Raises MissingChunkHashError if any chunk lacks chunk_text_hash.
+    Raises ChashDivergentError (nexus-dmf7r) if any chunk's id disagrees
+    with its chunk_text_hash copy.
     """
     merged: dict[str, dict] = {}
     chunk_index_seen = 0
@@ -284,6 +366,12 @@ def backfill_manifest_for_collection(
 
     Raises:
         MissingChunkHashError: if any chunk lacks ``chunk_text_hash``.
+
+    ChashDivergentError (nexus-dmf7r) and an FK-409 on
+    ``write_manifest`` (nexus-r7g3i) are both caught PER DOCUMENT inside
+    this function and turned into skip counters
+    (``docs_skipped_chash_divergent``, ``docs_skipped_fk_409``) rather
+    than propagating -- see the module docstring's edge-case contracts.
     """
     result = BackfillResult(collection=collection_name)
 
@@ -379,6 +467,19 @@ def backfill_manifest_for_collection(
                 doc_id=doc_id,
             )
             continue
+        except ChashDivergentError as exc:
+            # nexus-dmf7r: a T3 chunk's id disagreed with its
+            # chunk_text_hash metadata copy. Never write a manifest row
+            # keyed on the unverifiable copy -- skip the whole document.
+            result.docs_skipped_chash_divergent += 1
+            _log.warning(
+                "manifest_backfill_doc_skipped_chash_divergent",
+                collection=collection_name,
+                doc_id=doc_id,
+                chunk_id=exc.chunk_id,
+                meta_chash=exc.meta_chash,
+            )
+            continue
 
         if not chunks:
             # nexus-gvmbo: never write an empty manifest. write_manifest is
@@ -399,7 +500,38 @@ def backfill_manifest_for_collection(
         chunks.sort(key=lambda c: c["position"])
 
         if not dry_run:
-            catalog.write_manifest(doc_id, chunks, collection=collection_name)
+            try:
+                catalog.write_manifest(doc_id, chunks, collection=collection_name)
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code if exc.response is not None else 0
+                if status != 409:
+                    raise
+                # nexus-r7g3i: fk_catalog_chunks_chunk (validated on cloud
+                # since engine-service-v0.1.76) rejected this manifest
+                # write -- no nexus.chunks row matches the written chash.
+                # The write is atomic server-side, so nothing partial
+                # landed. Previously this propagated out of the function
+                # and was caught per-COLLECTION by the CLI, abandoning
+                # every unprocessed document in the collection without
+                # marking any of them. Skip + count instead; the
+                # remainder of the collection keeps processing.
+                result.docs_skipped_fk_409 += 1
+                _log.warning(
+                    "manifest_backfill_doc_skipped_fk_409",
+                    collection=collection_name,
+                    doc_id=doc_id,
+                    chunk_count=len(chunks),
+                    # nexus-69c94 critique S2 (substantive-critic): name the
+                    # attempted chash(es) -- write_manifest sends every chunk
+                    # in ONE insert and the 409 body doesn't say which row
+                    # tripped the FK, so the full attempted list is the most
+                    # specific signal available; an operator acting on this
+                    # skip should not have to re-derive candidates by hand
+                    # (asymmetric with chash_divergent's chunk_id/meta_chash
+                    # logging above until this fix).
+                    chashes=[c["chash"] for c in chunks],
+                )
+                continue
             # nexus-gvmbo (item 3, remediation-blockers addendum): mirror
             # manifest_heal.py's atomic_manifest_replace + resync pairing --
             # write_manifest alone leaves chunk_count stale (often 0), which
