@@ -594,7 +594,9 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Each dict carries from_topic_id, to_topic_id, link_count, link_types.
         ``link_types`` is JSON-serialized (list -> string) before sending, exactly
         matching the oracle's ``json.dumps(link["link_types"])``; the Java
-        upsertTopicLink stores it verbatim as a string. The per-link POST loop is
+        upsertTopicLink writes it into a jsonb column now (nexus-cefa1.6,
+        taxonomy-008-link-types-jsonb.xml) but the wire contract is unchanged --
+        this method still sends a plain JSON string over HTTP. The per-link POST loop is
         parity-correct: INSERT OR REPLACE is per-PK idempotent with no cross-set
         atomicity need, so projection links written by ``_discover_cross_links``
         survive (only matching PK pairs are overwritten). Returns the number of
