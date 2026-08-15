@@ -125,6 +125,40 @@ as a measurement obligation (an `EXPLAIN` of `assign_from_chashes_1024` at
 No server-side clustering exists anywhere in `service/`; pgvector exposes no
 k-means / HDBSCAN primitive (IVFFlat's build-time k-means is internal).
 
+### Gap 3: Registration precedes chunkability, so unchunkable files become phantom catalog documents
+
+Added 2026-08-15 (Hal; evidence from the nexus-3n7pr forensics, bead
+nexus-rqsh1 P1). The client-side reconcile loop of Gap 1 registers a catalog
+document for every file the extension filter admits, BEFORE the chunker
+decides whether the file has any content it can chunk. Binary and data files
+that slip the docs filter (XML-shaped VTK `.vtp`/`.vtu`, Gmsh `.msh`, voxel
+`.vol`, `.jks`, `.stl`, `.bundle`, `.npz`) and zero-byte files (empty
+`__init__.py`, empty `.md`) get a tumbler, an owner, a `physical_collection`
+and `chunk_count 0`, then produce no chunks and no manifest, and nothing ever
+retracts the row. Measured on the live store 2026-08-15: of the 910-document
+"zero-manifest" population that drove weeks of forensics, roughly 600 were
+this class (WeakAuras2 371 `docs__` rows, simc, searxng, t8code's 8 VTK
+fixtures, Luciferase's 7 voxel/keystore files, dozens of empty `__init__.py`);
+only the ~245 store_put-origin documents were real damage. Every census
+(`nx catalog verify` never_chunked, `reconcile-stale` reindex_candidate, the
+backfill dry-run) reported the phantoms as gaps, prescribed a re-index that
+cannot change anything (`--force` re-chunks the repo and skips exactly the
+phantom count, observed 8/7/2/1/2 across five repos), and every plan cycle
+inherited them as data loss. "Register, then skip" is the classic
+identity-before-content ordering bug.
+
+What Part A must therefore also decide: the server-side reconcile registers a
+document ONLY when the client presents at least one chunk for it (or the
+engine's own chunkability decision admits it), never on file enumeration
+alone; existing phantoms are swept (a counted, dry-run-first tombstone pass,
+`zero_content_by_design` in the census output rather than a re-index
+prescription); and the census surfaces (verify, reconcile-stale) stop
+labelling zero-content sources as repairable. This is a correctness gap in
+Gap 1's design, not a performance one, and it is the reason the migration to
+server-side reconcile is the right place to fix it: the client loop cannot
+know chunkability at registration time without doing the chunking, and the
+engine can require the manifest and the document to arrive together.
+
 ## Constraints and Verified Facts
 
 - **Everything is service mode.** Every install (local = bundled PG17+pgvector
