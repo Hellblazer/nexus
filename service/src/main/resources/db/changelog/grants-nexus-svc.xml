@@ -41,16 +41,17 @@
     nexus-bb5c8 (2026-08-14): grants-004-monitor-wal-visibility below grants
     nexus_svc MEMBERSHIP in pg_monitor — that membership is not necessarily
     usable privilege on its own; it depends on nexus_svc's INHERIT
-    attribute, which currently DIVERGES between deployment postures
-    (nexus-v80f2, tracked separately): the CLOUD deployment's nexus_svc IS
+    attribute. nexus-v80f2 (2026-08-15) found this DIVERGED between
+    deployment postures and aligned it: NOINHERIT is now the posture in
+    EVERY mode. The CLOUD deployment's nexus_svc IS
     NOINHERIT (measured live, conexus relay [22485]) — a DELIBERATE security
     posture there, since nexus_svc holds several role memberships whose
     privileges must never become AMBIENT on every connection just because
     the role holds them (RLS/BYPASSRLS adjacency). Local provisioning
-    (src/nexus/db/pg_provision.py's _create_roles) issues no NOINHERIT
-    clause today and keeps PostgreSQL's own INHERIT default, so
-    pg_monitor's privileges are already ambient on a local nexus_svc
-    session. Under NOINHERIT, a plain nexus_svc session gets permission
+    (src/nexus/db/pg_provision.py's _create_roles, plus
+    _backfill_svc_noinherit for an already-provisioned install) now issues
+    the same NOINHERIT clause, matching role-001-nexus-svc.xml's fallback
+    bootstrap, which always has. Under NOINHERIT, a plain nexus_svc session gets permission
     denied from pg_ls_waldir() / pg_stat_* until it explicitly issues SET
     ROLE pg_monitor first, then (optionally) RESET ROLE after —
     PostgreSQL's documented behaviour for NOINHERIT membership, not a bug

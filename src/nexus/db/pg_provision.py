@@ -10,8 +10,14 @@ TWO-ROLE CONTRACT (net63):
                 Schema owner; has CREATE on the nexus DB so Liquibase DDL runs.
                 Mapped to NX_DB_ADMIN_URL / NX_DB_ADMIN_USER / NX_DB_ADMIN_PASS.
 
-  nexus_svc   — NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS LOGIN.
+  nexus_svc   — NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT LOGIN.
                 DML-only (SELECT/INSERT/UPDATE/DELETE); FORCE RLS applies.
+                NOINHERIT (nexus-v80f2, 2026-08-15): matches the cloud posture
+                (measured rolinherit=FALSE, conexus relay [22485]) and the
+                role-001-nexus-svc.xml fallback bootstrap, which has always
+                created it NOINHERIT. Granted-role privileges (pg_monitor via
+                grants-004) are NOT ambient on a plain nexus_svc session —
+                callers must SET ROLE first; see src/nexus/db/svc_monitor.py.
                 Mapped to NX_DB_URL / NX_DB_USER / NX_DB_PASS.
 
   nexus_diag  — NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS LOGIN
@@ -1066,7 +1072,7 @@ def _create_roles(
         _psql(
             bins, port, NEXUS_DB_NAME, os_user,
             f"CREATE ROLE nexus_svc "
-            f"NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS LOGIN "
+            f"NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT LOGIN "
             f"PASSWORD '{svc_pass}'",
         )
         _log.info("pg_role_created", role="nexus_svc")
@@ -1358,6 +1364,49 @@ def _backfill_pg_monitor_admin_option(bins: PgBinaries, port: int, os_user: str)
     )
 
 
+def _backfill_svc_noinherit(bins: PgBinaries, port: int, os_user: str) -> None:
+    """Converge ``nexus_svc`` to NOINHERIT on an ALREADY-RUNNING cluster
+    (nexus-v80f2, 2026-08-15).
+
+    Same gap class ``_backfill_diag_role`` / ``_backfill_pg_monitor_admin_option``
+    close above: the fast idempotency path in :func:`provision` returns BEFORE
+    ``_create_roles``, which is the STEADY STATE for every existing install.
+    ``_create_roles`` now issues ``NOINHERIT`` on a from-scratch provision, but a
+    cluster provisioned before this fix keeps whatever attribute it was created
+    with (PostgreSQL's INHERIT default) forever unless something converges it —
+    exactly the divergence nexus-v80f2 found: cloud measured ``rolinherit=FALSE``
+    (conexus relay [22485]) while every pre-fix local install stayed INHERIT, so
+    granted-role privileges (``pg_monitor`` via grants-004) were ambient on a
+    local ``nexus_svc`` session but require ``SET ROLE`` on cloud — a security-
+    posture and observable-behavior divergence by install mode.
+
+    ``ALTER ROLE ... NOINHERIT`` is naturally idempotent in PostgreSQL (setting
+    an attribute to its current value is a no-op), so this always runs
+    unconditionally; the current value is queried first purely so the flip is
+    logged when it actually happens, not on every already-converged re-run —
+    matches ``_backfill_pg_monitor_admin_option``'s best-effort posture at the
+    call site (the fast path is the COMMON case hit at every ``nx init
+    --service`` re-run and every ``nx doctor`` self-heal pass, so a raised
+    exception here must never crash-loop the idempotent re-run this function
+    exists to repair).
+    """
+    current = _psql_tuples(
+        bins, port, NEXUS_DB_NAME, os_user,
+        "SELECT rolinherit FROM pg_roles WHERE rolname = 'nexus_svc'",
+    )
+    if current == "t":
+        _log.info(
+            "pg_svc_role_noinherit_converge",
+            role="nexus_svc",
+            previous="inherit",
+            new="noinherit",
+        )
+    _psql(
+        bins, port, NEXUS_DB_NAME, os_user,
+        "ALTER ROLE nexus_svc NOINHERIT",
+    )
+
+
 def _read_credentials(creds_path: Path) -> dict[str, str]:
     """Parse an existing credentials file into a {key: value} dict."""
     result: dict[str, str] = {}
@@ -1535,6 +1584,19 @@ def provision(
                     except Exception as exc:  # noqa: BLE001 — repair path must never break the no-op re-run
                         _log.warning(
                             "pg_monitor_admin_option_backfill_failed", error=str(exc)
+                        )
+                    # nexus-v80f2 (2026-08-15): independent try/except, same
+                    # shape as the two backfills above — one failing must not
+                    # prevent the others from being attempted. Converges an
+                    # existing local nexus_svc onto the NOINHERIT posture
+                    # _create_roles now creates fresh installs with.
+                    try:
+                        _backfill_svc_noinherit(
+                            _bins, stored_port, os_user
+                        )
+                    except Exception as exc:  # noqa: BLE001 — repair path must never break the no-op re-run
+                        _log.warning(
+                            "pg_svc_role_noinherit_backfill_failed", error=str(exc)
                         )
                 _log.info(
                     "pg_provision_no_op",

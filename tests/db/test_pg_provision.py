@@ -306,6 +306,18 @@ class TestRoleAttributes:
         val = _role_attr(bins, result.port, self._os_user(), "nexus_svc", "rolcanlogin")
         assert val == "t", f"nexus_svc must have LOGIN, got rolcanlogin={val}"
 
+    def test_nexus_svc_noinherit(self, provisioned, bins):
+        """nexus-v80f2: local must match the cloud posture (measured
+        rolinherit=FALSE, conexus relay [22485]) — granted-role privileges
+        (pg_monitor via grants-004) must never be ambient on a plain
+        nexus_svc session; callers SET ROLE explicitly (src/nexus/db/
+        svc_monitor.py). A regression here would silently make every
+        role nexus_svc is ever granted membership in ambiently usable
+        again, diverging local from cloud exactly as nexus-bb5c8 found."""
+        result, _ = provisioned
+        val = _role_attr(bins, result.port, self._os_user(), "nexus_svc", "rolinherit")
+        assert val == "f", f"nexus_svc must be NOINHERIT, got rolinherit={val}"
+
 
 # ── Test 3: credentials file ───────────────────────────────────────────────────
 
@@ -528,6 +540,39 @@ class TestIdempotency:
             "JOIN pg_roles r ON r.oid = m.roleid AND r.rolname = 'pg_monitor' "
             "JOIN pg_roles g ON g.oid = m.member AND g.rolname = 'nexus_admin'",
         ) == "t", "nexus_admin's pg_monitor grant not restored WITH ADMIN OPTION"
+
+    def test_idempotent_rerun_converges_svc_role_to_noinherit(self, provisioned, bins):
+        """nexus-v80f2 (2026-08-15): the fast idempotency path must converge
+        an ALREADY-RUNNING cluster's nexus_svc to NOINHERIT -- the steady
+        state for every existing local install provisioned before this fix,
+        which is exactly the population that measurably diverged from the
+        cloud posture (rolinherit=FALSE, conexus relay [22485]). Simulate a
+        pre-fix cluster (ALTER ROLE ... INHERIT), re-run provision(), assert
+        NOINHERIT is restored via the fast path.
+
+        NOTE: mutates the module-scoped ``provisioned`` cluster; restores the
+        attribute via the very backfill under test, so sibling order is safe.
+        """
+        result, config_dir = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "ALTER ROLE nexus_svc INHERIT")
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT rolinherit FROM pg_roles WHERE rolname = 'nexus_svc'",
+        ) == "t", "INHERIT precondition failed"
+
+        result2 = provision(config_dir)
+
+        assert result2.already_provisioned, "repair re-run must hit the fast path"
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT rolinherit FROM pg_roles WHERE rolname = 'nexus_svc'",
+        ) == "f", (
+            "nexus_svc not converged back to NOINHERIT by the fast-path backfill -- "
+            "this is exactly the local/cloud posture divergence nexus-v80f2 found"
+        )
 
 
 # ── heal_diag_view_grants_and_ownership (nexus-cfgo9, GH #1402 2nd symptom) ────

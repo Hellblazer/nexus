@@ -120,4 +120,42 @@ class CatalogSchemaLiquibaseTest {
                 .isTrue();
         }
     }
+
+    /**
+     * nexus-v80f2 (2026-08-15, substantive-critic finding S2): pin
+     * {@code nexus_svc}'s NOINHERIT attribute on the SHARED-CLUSTER path,
+     * not just {@code GrantsPgMonitorTest}'s hand-rolled {@code
+     * startDedicated()} fixture. Uses the same shared, already-migrated
+     * cluster every other test in this class (and the large majority of
+     * this suite) runs against -- {@link PgContainerHelper#start()} --
+     * so this exercises the REAL {@code role-001-nexus-svc.xml} changeset
+     * as it actually executes for the shared-cluster population, not a
+     * hand-replayed literal.
+     *
+     * <p>Falsifiable: {@link SharedCluster} no longer pre-creates {@code
+     * nexus_svc} itself (that redundant pre-create, which raced and won
+     * against role-001's own {@code CREATE ROLE ... IF NOT EXISTS}, is
+     * exactly what let this attribute drift unnoticed -- see {@code
+     * SharedCluster#ensureBootstrapped}'s comment). role-001-nexus-svc.xml
+     * is therefore the SOLE source of {@code nexus_svc} on this template;
+     * dropping {@code NOINHERIT} from its {@code CREATE ROLE} turns this
+     * test red.
+     */
+    @Test
+    void nexusSvcRoleIsNoinherit() throws Exception {
+        try (var pg = PgContainerHelper.start();
+             Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT rolinherit FROM pg_roles WHERE rolname = 'nexus_svc'");
+            assertThat(rs.next())
+                .as("nexus_svc role must exist on the shared-cluster template "
+                    + "(created by role-001-nexus-svc.xml)")
+                .isTrue();
+            assertThat(rs.getBoolean("rolinherit"))
+                .as("nexus_svc must be NOINHERIT (nexus-v80f2: the posture in "
+                    + "every mode -- cloud measured, local provisioning aligned, "
+                    + "role-001-nexus-svc.xml's fallback bootstrap always has)")
+                .isFalse();
+        }
+    }
 }

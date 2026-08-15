@@ -190,8 +190,14 @@ run:
    `vectors-001-1` fails without this pre-step. Once the extensions exist the
    changeset is an idempotent no-op.
 2. **Roles.** Create `nexus_admin` (schema owner, NOSUPERUSER) and `nexus_svc`
-   (NOSUPERUSER NOBYPASSRLS LOGIN data role). The changelog's grant changesets
-   give `nexus_svc` its DML rights automatically during the first run.
+   (NOSUPERUSER NOBYPASSRLS NOINHERIT LOGIN data role). `NOINHERIT` is
+   REQUIRED, not optional decoration — a bring-your-own-Postgres cluster has
+   no `bootstrap_superuser` to self-heal it later (unlike the local bundle's
+   `_backfill_svc_noinherit`), so a DBA who leaves it off here bakes in the
+   INHERIT-default divergence nexus-v80f2 fixed everywhere else; see the
+   NOINHERIT discussion below for why it matters. The changelog's grant
+   changesets give `nexus_svc` its DML rights automatically during the first
+   run.
    Optionally create `nexus_diag` (NOSUPERUSER NOCREATEDB NOCREATEROLE
    BYPASSRLS LOGIN) — the client-side diagnostic role for the pre-upgrade
    chash-poison probe and `nx forensics`; without it those checks degrade to a
@@ -209,21 +215,22 @@ run:
    free space) fails loud on every migration run.
 
    **The grant alone does not necessarily make the privilege usable**
-   (nexus-bb5c8) — it depends on `nexus_svc`'s INHERIT attribute, which
-   currently diverges between deployment postures (nexus-v80f2, tracked
-   separately): the managed conexus cloud deployment's `nexus_svc` is
-   `NOINHERIT` (measured live) — a deliberate posture, not an oversight,
-   so that its OTHER role memberships never become ambient on every
-   connection. A bring-your-own-Postgres deployment that also provisions
-   `nexus_svc` `NOINHERIT` gets the same behavior: a plain session gets
-   `permission denied` from `pg_ls_waldir()` even after this grant, until
-   it issues `SET ROLE pg_monitor` first (and, optionally, `RESET ROLE`
-   after) — the same PostgreSQL behavior any NOINHERIT membership has
-   everywhere, not a defect in this changeset. (Local `nx init`
-   provisioning, exempt from this whole section per the note at the top,
-   currently leaves `nexus_svc` at PostgreSQL's INHERIT default instead —
-   also tracked under nexus-v80f2.) Product code never needs a
-   bring-your-own DBA to do anything about this either way:
+   (nexus-bb5c8) — it depends on `nexus_svc`'s INHERIT attribute.
+   `NOINHERIT` is the posture in **every** mode (nexus-v80f2, 2026-08-15):
+   the managed conexus cloud deployment's `nexus_svc` is `NOINHERIT`
+   (measured live) — a deliberate posture, not an oversight, so that its
+   OTHER role memberships never become ambient on every connection — and
+   local `nx init` provisioning now creates `nexus_svc` `NOINHERIT` too
+   (`src/nexus/db/pg_provision.py`'s `_create_roles`, converged on an
+   already-provisioned install via `_backfill_svc_noinherit`), matching
+   `role-001-nexus-svc.xml`'s fallback bootstrap, which always has. A
+   bring-your-own-Postgres deployment that provisions `nexus_svc`
+   `NOINHERIT` per this section gets the same behavior: a plain session
+   gets `permission denied` from `pg_ls_waldir()` even after this grant,
+   until it issues `SET ROLE pg_monitor` first (and, optionally,
+   `RESET ROLE` after) — the same PostgreSQL behavior any NOINHERIT
+   membership has everywhere, not a defect in this changeset. Product code
+   never needs a bring-your-own DBA to do anything about this either way:
    `src/nexus/db/svc_monitor.py` is the one place a `nexus_svc` session
    performs that escalation — unconditionally, so it is correct whether
    the role is NOINHERIT or INHERIT — and `nx doctor

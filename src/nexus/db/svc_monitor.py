@@ -8,17 +8,19 @@
 can read ``pg_ls_waldir()`` / ``pg_stat_*`` for WAL-retention visibility
 (the RDR-191 Phase 4 always-copy trough window). That grant alone is not
 necessarily usable privilege -- it depends on ``nexus_svc``'s INHERIT
-attribute, which currently DIVERGES between deployment postures
-(nexus-v80f2, filed separately): the CLOUD deployment's ``nexus_svc`` is
-``NOINHERIT`` (measured live, conexus relay [22485]) -- a deliberate
-security posture there, since ``nexus_svc`` holds several role memberships
-whose privileges must never become AMBIENT just because the role holds
-them (RLS/BYPASSRLS adjacency); making it INHERIT would make EVERY granted
-role's privileges ambient on every connection, not just ``pg_monitor``'s.
-Local provisioning (``src/nexus/db/pg_provision.py``'s ``_create_roles``)
-currently issues no ``NOINHERIT`` clause at all, so a local ``nexus_svc``
-keeps PostgreSQL's own INHERIT default -- ``pg_monitor``'s privileges are
-already ambient there today. Under NOINHERIT, a plain ``nexus_svc``
+attribute. nexus-v80f2 (2026-08-15) found this DIVERGED between deployment
+postures and aligned it: NOINHERIT is now the posture in EVERY mode. The
+CLOUD deployment's ``nexus_svc`` is ``NOINHERIT`` (measured live, conexus
+relay [22485]) -- a deliberate security posture there, since ``nexus_svc``
+holds several role memberships whose privileges must never become AMBIENT
+just because the role holds them (RLS/BYPASSRLS adjacency); making it
+INHERIT would make EVERY granted role's privileges ambient on every
+connection, not just ``pg_monitor``'s. Local provisioning
+(``src/nexus/db/pg_provision.py``'s ``_create_roles``, plus
+``_backfill_svc_noinherit`` for an already-provisioned install) now issues
+the same ``NOINHERIT`` clause, matching
+``role-001-nexus-svc.xml``'s fallback bootstrap, which always has. Under
+NOINHERIT, a plain ``nexus_svc``
 session gets ``permission denied`` from ``pg_ls_waldir()`` until it
 explicitly ``SET ROLE pg_monitor`` first -- exactly PostgreSQL's
 documented behaviour for a NOINHERIT membership; under INHERIT the same
