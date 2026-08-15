@@ -602,6 +602,11 @@ public final class TaxonomyHandler implements HttpHandler {
         long   toId      = requireLong(body, "to_topic_id");
         int    linkCount = optIntDefault(body, "link_count", 1);
         String linkTypes = optStringOrNull(body, "link_types");
+        // nexus-cefa1.6: link_types writes into a jsonb column now
+        // (taxonomy-008-link-types-jsonb.xml) — a non-blank value that fails
+        // Jackson#readTree is not valid JSON and 400s here, same shared
+        // helper AspectHandler/PlanHandler use.
+        HttpUtil.rejectMalformedJson(MAPPER, "link_types", linkTypes);
         repo.upsertTopicLink(tenant, fromId, toId, linkCount, linkTypes);
         HttpUtil.send(ex, 200, "{\"ok\":true}");
     }
@@ -709,6 +714,8 @@ public final class TaxonomyHandler implements HttpHandler {
         long   toId      = requireLong(body, "to_topic_id");
         int    linkCount = optIntDefault(body, "link_count", 1);
         String linkTypes = optStringOrNull(body, "link_types");
+        // nexus-cefa1.6: see handleUpsertLink's identical comment above.
+        HttpUtil.rejectMalformedJson(MAPPER, "link_types", linkTypes);
         repo.importTopicLink(tenant, fromId, toId, linkCount, linkTypes);
         HttpUtil.send(ex, 200, "{\"ok\":true}");
     }
@@ -741,13 +748,30 @@ public final class TaxonomyHandler implements HttpHandler {
             throw new IllegalArgumentException("field 'rows' must be a JSON array");
         }
         List<Map<String, Object>> rows = new ArrayList<>(rawRows.size());
+        int rowIndex = 0;
         for (Object o : rawRows) {
             if (!(o instanceof Map<?, ?> rm)) {
                 throw new IllegalArgumentException("each element of 'rows' must be an object");
             }
             @SuppressWarnings("unchecked")
             Map<String, Object> row = (Map<String, Object>) rm;
+            // nexus-cefa1.6: the "link" kind's link_types field writes into a jsonb
+            // column now (taxonomy-008-link-types-jsonb.xml) — validate it here too,
+            // same as the single-row /import/link path, naming the failing row
+            // (mirrors PlanHandler.handleImportBatch's rows[i] convention). The value is
+            // coerced through optStringOrNull first, exactly as the single-row
+            // /upsert/link and /import/link paths do, so a non-string link_types
+            // (a native JSON array/object) is validated as its string form rather
+            // than skipping the gate (rejectMalformedJson only inspects Strings).
+            if ("link".equals(kind)) {
+                try {
+                    HttpUtil.rejectMalformedJson(MAPPER, "link_types", optStringOrNull(row, "link_types"));
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException("rows[" + rowIndex + "]: " + e.getMessage(), e);
+                }
+            }
             rows.add(row);
+            rowIndex++;
         }
         int imported = repo.importBatch(tenant, kind, rows);
         HttpUtil.send(ex, 200, json(Map.of("imported", imported)));

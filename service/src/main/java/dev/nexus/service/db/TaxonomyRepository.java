@@ -1,6 +1,7 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
+import org.jooq.JSONB;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static dev.nexus.service.db.JsonbSupport.jsonbRequired;
 import static dev.nexus.service.jooq.nexus.Tables.*;
 import static org.jooq.impl.DSL.*;
 
@@ -938,15 +940,20 @@ public final class TaxonomyRepository {
      * EXCLUDED for the same reason (RDR-152 nexus-1di3r.4).
      */
     public void upsertTopicLink(String tenant, long fromId, long toId, int linkCount, String linkTypes) {
+        // nexus-cefa1.6: link_types is jsonb NOT NULL now (taxonomy-008-link-
+        // types-jsonb.xml) — jsonbRequired rejects null/blank as a
+        // repository-layer backstop (the primary gate is TaxonomyHandler's
+        // own 400, mirroring AspectHandler.rejectMalformedJson).
+        JSONB linkTypesJb = jsonbRequired(linkTypes, "link_types");
         tenantScope.withTenant(tenant, ctx -> {
             ctx.insertInto(TOPIC_LINKS,
                     TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
                     TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES)
-               .values(tenant, fromId, toId, linkCount, linkTypes)
+               .values(tenant, fromId, toId, linkCount, linkTypesJb)
                .onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
                .doUpdate()
                .set(TOPIC_LINKS.LINK_COUNT, field("EXCLUDED.link_count", Integer.class))
-               .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", String.class))
+               .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", JSONB.class))
                .execute();
             return null;
         });
@@ -1261,6 +1268,8 @@ public final class TaxonomyRepository {
     /** Fidelity-preserving import for a topic_links row. */
     public void importTopicLink(String tenant, long fromId, long toId,
                                  int linkCount, String linkTypes) {
+        // nexus-cefa1.6: see upsertTopicLink's identical comment above.
+        JSONB linkTypesJb = jsonbRequired(linkTypes, "link_types");
         tenantScope.withTenant(tenant, ctx -> {
             // GREATEST(existing.link_count, EXCLUDED.link_count) — ETL path uses GREATEST
             // to never downgrade a live PG value from a stale SQLite snapshot.
@@ -1268,12 +1277,12 @@ public final class TaxonomyRepository {
             ctx.insertInto(TOPIC_LINKS,
                     TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
                     TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES)
-               .values(tenant, fromId, toId, linkCount, linkTypes)
+               .values(tenant, fromId, toId, linkCount, linkTypesJb)
                .onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
                .doUpdate()
                .set(TOPIC_LINKS.LINK_COUNT,
                     field("GREATEST(nexus.topic_links.link_count, EXCLUDED.link_count)", Integer.class))
-               .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", String.class))
+               .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", JSONB.class))
                .execute();
             return null;
         });
@@ -1474,14 +1483,15 @@ public final class TaxonomyRepository {
                     TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
                     TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES);
             for (var r : batch) {
+                // nexus-cefa1.6: see upsertTopicLink's identical jsonbRequired comment.
                 insert = insert.values(tenant, reqL(r, "from_topic_id"), reqL(r, "to_topic_id"),
-                        optI(r, "link_count", 0), optS(r, "link_types"));
+                        optI(r, "link_count", 0), jsonbRequired(optS(r, "link_types"), "link_types"));
             }
             insert.onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
                   .doUpdate()
                   .set(TOPIC_LINKS.LINK_COUNT,
                        field("GREATEST(nexus.topic_links.link_count, EXCLUDED.link_count)", Integer.class))
-                  .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", String.class))
+                  .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", JSONB.class))
                   .execute();
         }
         return rows.size();
@@ -1874,6 +1884,10 @@ public final class TaxonomyRepository {
 
             if (pairs.isEmpty()) return 0;
 
+            // nexus-cefa1.6: link_types is jsonb now — a hardcoded, always-valid
+            // literal, so JSONB.valueOf directly rather than jsonbRequired's
+            // null-check (this value is never client-supplied).
+            JSONB cooccurrenceTypes = JSONB.valueOf("[\"cooccurrence\"]");
             for (var r : pairs) {
                 long fromId = r.get("from_id", Long.class);
                 long toId   = r.get("to_id",   Long.class);
@@ -1881,11 +1895,11 @@ public final class TaxonomyRepository {
                 ctx.insertInto(TOPIC_LINKS,
                         TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
                         TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES)
-                   .values(tenant, fromId, toId, cnt, "[\"cooccurrence\"]")
+                   .values(tenant, fromId, toId, cnt, cooccurrenceTypes)
                    .onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
                    .doUpdate()
                    .set(TOPIC_LINKS.LINK_COUNT, field("EXCLUDED.link_count", Integer.class))
-                   .set(TOPIC_LINKS.LINK_TYPES, "[\"cooccurrence\"]")
+                   .set(TOPIC_LINKS.LINK_TYPES, cooccurrenceTypes)
                    .execute();
             }
             log.info("cooccurrence_links generated count={}", pairs.size());
@@ -1942,7 +1956,12 @@ public final class TaxonomyRepository {
 
                 String mergedTypes;
                 if (!existing.isEmpty() && existing.get(0).get(TOPIC_LINKS.LINK_TYPES) != null) {
-                    String lt = existing.get(0).get(TOPIC_LINKS.LINK_TYPES);
+                    // nexus-cefa1.6: link_types is jsonb now — .data() recovers the
+                    // raw JSON-array text so the merge algorithm below runs UNCHANGED
+                    // (jsonb array element order survives the round trip verbatim;
+                    // only object-key canonicalization would reorder anything, and
+                    // this column never holds an object).
+                    String lt = existing.get(0).get(TOPIC_LINKS.LINK_TYPES).data();
                     if (!lt.contains("\"projection\"")) {
                         // Insert projection into the JSON array
                         mergedTypes = lt.replace("]", ", \"projection\"]")
@@ -1958,14 +1977,21 @@ public final class TaxonomyRepository {
                     mergedTypes = "[\"projection\"]";
                 }
 
+                // nexus-cefa1.6: mergedTypes is always a valid JSON array here — either
+                // a hardcoded literal above, the untouched jsonb-read-back-then-.data()
+                // value, or that value with "projection" spliced in by the same string
+                // surgery this arc did not change — jsonbRequired is the uniform write
+                // helper the rest of this class uses (this value is never null/blank).
+                JSONB mergedTypesJb = jsonbRequired(mergedTypes, "link_types");
+
                 ctx.insertInto(TOPIC_LINKS,
                         TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
                         TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES)
-                   .values(tenant, fromId, toId, entry.getValue(), mergedTypes)
+                   .values(tenant, fromId, toId, entry.getValue(), mergedTypesJb)
                    .onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
                    .doUpdate()
                    .set(TOPIC_LINKS.LINK_COUNT, field("EXCLUDED.link_count", Integer.class))
-                   .set(TOPIC_LINKS.LINK_TYPES,  field("EXCLUDED.link_types",  String.class))
+                   .set(TOPIC_LINKS.LINK_TYPES,  field("EXCLUDED.link_types",  JSONB.class))
                    .execute();
             }
 

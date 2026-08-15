@@ -433,7 +433,10 @@ class TaxonomyRepositoryTest {
         assertThat(ids).doesNotContain(bothProj1, bothProj2, lonely);
 
         // and once the link exists, the drift clears
-        repo.upsertTopicLink(TENANT_A, drifted, partner, 1, "projection");
+        // nexus-cefa1.6: link_types is jsonb now — every literal below is a
+        // valid JSON array (previously a bare unquoted string, tolerated
+        // only because the column was untyped TEXT).
+        repo.upsertTopicLink(TENANT_A, drifted, partner, 1, "[\"projection\"]");
         var after = repo.linkDrift(TENANT_A, 50);
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> afterRows = (List<Map<String, Object>>) after.get("rows");
@@ -467,8 +470,8 @@ class TaxonomyRepositoryTest {
         // upsertTopicLink is the LIVE-COMPUTE path: EXCLUDED (overwrite), NOT
         // GREATEST. A decremented recompute must lower the stored count (RDR-152
         // nexus-1di3r.4). Contrast importTopicLink (ETL) below, which keeps GREATEST.
-        repo.upsertTopicLink(TENANT_A, t1, t2, 5, "co-occurrence");
-        repo.upsertTopicLink(TENANT_A, t1, t2, 3, "co-occurrence"); // EXCLUDED overwrites -> 3
+        repo.upsertTopicLink(TENANT_A, t1, t2, 5, "[\"co-occurrence\"]");
+        repo.upsertTopicLink(TENANT_A, t1, t2, 3, "[\"co-occurrence\"]"); // EXCLUDED overwrites -> 3
 
         List<Map<String, Object>> pairs = repo.getTopicLinkPairs(TENANT_A, List.of(t1, t2));
         assertThat(pairs).isNotEmpty();
@@ -478,6 +481,76 @@ class TaxonomyRepositoryTest {
             .findFirst();
         assertThat(link).isPresent();
         assertThat(((Number) link.get().get("link_count")).intValue()).isEqualTo(3);
+    }
+
+    /**
+     * nexus-cefa1.6: link_types is jsonb now (taxonomy-008-link-types-jsonb.xml)
+     * — dedicated coverage for the documented behaviour change, mirroring
+     * PlanRepositoryTest.savePlan_planJson_jsonbCanonicalizesWhitespaceAndKeyOrder
+     * (nexus-cefa1.5). link_types holds a JSON ARRAY, not an object: PostgreSQL's
+     * jsonb canonicalization only reorders OBJECT keys (shorter-first, ties
+     * broken bytewise) — array ELEMENT ORDER is preserved verbatim. Whitespace
+     * still normalizes to the canonical form (a space after every comma)
+     * regardless of what was submitted. {@code getTopicLinkPairs} never
+     * projects link_types, so this reads the raw column back via JDBC.
+     */
+    @Test @Order(193)
+    void upsertTopicLink_linkTypesJsonbCanonicalizesWhitespace_arrayOrderPreserved() throws Exception {
+        long t1 = repo.insertTopic(TENANT_A, "canon-link-t1", null, COL_A, 0, null, null);
+        long t2 = repo.insertTopic(TENANT_A, "canon-link-t2", null, COL_A, 0, null, null);
+
+        // Non-canonical spacing (no space after the comma); "zeta" written before
+        // "alpha" — arrays are not reordered the way object keys are.
+        repo.upsertTopicLink(TENANT_A, t1, t2, 1, "[\"zeta\",\"alpha\"]");
+
+        try (java.sql.Connection su = pg.createConnection("")) {
+            var rs = su.createStatement().executeQuery(
+                "SELECT link_types::text AS lt FROM nexus.topic_links "
+                + "WHERE tenant_id = '" + TENANT_A + "' "
+                + "AND from_topic_id = " + t1 + " AND to_topic_id = " + t2);
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getString("lt"))
+                .as("jsonb array canonical text inserts a space after each comma but "
+                    + "preserves element order — zeta stays before alpha")
+                .isEqualTo("[\"zeta\", \"alpha\"]");
+        }
+    }
+
+    /**
+     * nexus-cefa1.6: {@code refreshProjectionLinks}'s string-merge algorithm
+     * (splice "projection" into an existing link_types JSON array via crude
+     * bracket-replace string surgery) is UNCHANGED by the jsonb conversion —
+     * only the plumbing that gets a Java String in and a JSONB out changed
+     * (JSONB.data() unwrap on read, jsonbRequired wrap on write). This proves
+     * the merge still lands both types when a cooccurrence link already
+     * exists and a projection assignment later makes the same pair eligible
+     * for refreshProjectionLinks.
+     */
+    @Test @Order(194)
+    void refreshProjectionLinks_mergesIntoExistingLinkTypes_preservingBothTypes() throws Exception {
+        long t1 = repo.insertTopic(TENANT_A, "merge-link-t1", null, COL_A, 0, null, null);
+        long t2 = repo.insertTopic(TENANT_A, "merge-link-t2", null, COL_A, 0, null, null);
+
+        // Seed an existing cooccurrence-only link (as generateCooccurrenceLinks would).
+        repo.upsertTopicLink(TENANT_A, t1, t2, 1, "[\"cooccurrence\"]");
+
+        // Make (t1, t2) eligible for refreshProjectionLinks: t1 gets a projection
+        // assignment on a doc t2 also holds via a non-projection assigned_by.
+        repo.assignTopic(TENANT_A, "merge-doc", t1, "projection", 0.9, COL_A, null);
+        repo.assignTopic(TENANT_A, "merge-doc", t2, "hdbscan", 0.8, COL_A, null);
+
+        repo.refreshProjectionLinks(TENANT_A);
+
+        try (java.sql.Connection su = pg.createConnection("")) {
+            var rs = su.createStatement().executeQuery(
+                "SELECT link_types::text AS lt FROM nexus.topic_links "
+                + "WHERE tenant_id = '" + TENANT_A + "' "
+                + "AND from_topic_id = " + Math.min(t1, t2) + " AND to_topic_id = " + Math.max(t1, t2));
+            assertThat(rs.next()).isTrue();
+            String lt = rs.getString("lt");
+            assertThat(lt).as("original cooccurrence type must survive the merge").contains("cooccurrence");
+            assertThat(lt).as("projection type must be spliced in by the merge").contains("projection");
+        }
     }
 
     // ── ICF ────────────────────────────────────────────────────────────────────
@@ -661,8 +734,8 @@ class TaxonomyRepositoryTest {
         long t2 = repo.importTopic(TENANT_A, 9900004L, "link-import-t2", null, COL_A,
                                    null, 0, PAST_TS, "pending", null);
 
-        repo.importTopicLink(TENANT_A, t1, t2, 7, "co-occur");
-        repo.importTopicLink(TENANT_A, t1, t2, 3, "co-occur"); // GREATEST 7 preserved
+        repo.importTopicLink(TENANT_A, t1, t2, 7, "[\"co-occur\"]");
+        repo.importTopicLink(TENANT_A, t1, t2, 3, "[\"co-occur\"]"); // GREATEST 7 preserved
 
         List<Map<String, Object>> pairs = repo.getTopicLinkPairs(TENANT_A, List.of(t1, t2));
         var link = pairs.stream()
@@ -1181,8 +1254,8 @@ class TaxonomyRepositoryTest {
                                    null, 0, PAST_TS, "pending", null);
 
         int n = repo.importBatch(TENANT_A, "link", List.of(
-            m("from_topic_id", t0, "to_topic_id", t1, "link_count", 7, "link_types", "co-occur"),
-            m("from_topic_id", t0, "to_topic_id", t2, "link_count", 4, "link_types", "co-occur")));
+            m("from_topic_id", t0, "to_topic_id", t1, "link_count", 7, "link_types", "[\"co-occur\"]"),
+            m("from_topic_id", t0, "to_topic_id", t2, "link_count", 4, "link_types", "[\"co-occur\"]")));
         assertThat(n).isEqualTo(2);
 
         var pairs = repo.getTopicLinkPairs(TENANT_A, List.of(t0, t1, t2));
@@ -1190,7 +1263,7 @@ class TaxonomyRepositoryTest {
 
         // Re-import with a LOWER link_count for (t0,t1) — GREATEST(7,3) keeps 7.
         repo.importBatch(TENANT_A, "link", List.of(
-            m("from_topic_id", t0, "to_topic_id", t1, "link_count", 3, "link_types", "co-occur")));
+            m("from_topic_id", t0, "to_topic_id", t1, "link_count", 3, "link_types", "[\"co-occur\"]")));
         var updated = repo.getTopicLinkPairs(TENANT_A, List.of(t0, t1, t2)).stream()
             .filter(p -> ((Number) p.get("from_topic_id")).longValue() == t0
                       && ((Number) p.get("to_topic_id")).longValue() == t1)

@@ -1,123 +1,58 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Non-vacuity test for the ``scripts/sql/schema_type_hygiene_preflight_tier_{a,b,
-b_hook_failures,b_document_aspects,b_plans}.sql`` probes (nexus-cefa1.1, P0
-pre-flight audit of the schema type-hygiene arc; the third file split out at
-P2, nexus-cefa1.3, the fourth at P3, nexus-cefa1.4, the fifth at P4,
-nexus-cefa1.5 -- see below).
+"""Non-vacuous type-state check for the schema type-hygiene arc (nexus-cefa1,
+P0-P5; plan of record T2 nexus/plan-schema-type-hygiene-2026-08-12 [22360]).
 
-Proves the probe FIRES on deliberately malformed data rather than assuming
-it works from reading the SQL. Runs the shipped probe files verbatim via
-``psql -f`` (RLS/tenant-visibility caveats are each probe file's own header;
-this test sidesteps them entirely by using the substrate's OS-superuser
-connection — ``tests/_engine_substrate.py``'s ``pg_port``/``pg_user``, trust
-auth, no RLS at all -- the same seam ``tests/db/test_yu9w5_assign_from_
-chashes_integration.py`` and ``tests/test_o8dil7_prune_misclassified_
-manifest_antijoin_engine.py`` already use for raw substrate SQL), so it is a
-faithful stand-in for option (a) in each probe file's own RLS discussion.
+ARC COMPLETE as of nexus-cefa1.6 (P5, taxonomy-008-link-types-jsonb.xml):
+all 10 audited columns (4 Tier A TEXT-to-timestamptz/boolean, 6 Tier B
+TEXT-to-jsonb) have shipped their conversions. topic_links.link_types was
+the LAST still-TEXT column; its conversion retired this file's
+malformed-seed generation machinery entirely (see history below), leaving
+``test_column_types_match_migration_state`` as the sole ongoing,
+non-vacuous check: a real ``information_schema.columns.data_type`` query
+per column, asserted against its final converted type. There is no longer
+a "some columns are still text" branch to probe with seeded malformed
+rows -- adding a fabricated "prove ran_any_tier is False" assertion here
+would be exactly the vacuous check the arc's own design (see HISTORY
+below) was built to avoid, so none was added. Should a future Tier C (or a
+re-opened, rolled-back column) reintroduce a still-TEXT audited column,
+its own malformed-seed probe + non-vacuity test should be authored fresh
+against that column's actual failure modes, not resurrected from history
+here -- prior probe SQL files remain on disk (see HISTORY) as reference
+for that shape.
 
-Malformed rows are seeded ONLY under the fresh tenant ``t2_service_env``
-mints for this test (the substrate's throwaway-tenant isolation contract --
-see that fixture's docstring: "Tests never share or clean up state", each
-test gets its own unused tenant id) -- never against shared/seeded data, and
-the whole hermetic PG cluster is torn down at session end
-(``tests/_engine_substrate.py::_teardown``), so nothing here is durable.
+HISTORY (why this file no longer runs malformed-seed probes): originally
+(nexus-cefa1.1/.2) a single combined probe assumed all 10 columns were
+still TEXT; that assumption broke the moment the first phase converted a
+column, so the probe SQL was split per phase as each shipped:
+``schema_type_hygiene_preflight_tier_a.sql`` (Tier A, all 4 columns
+converted together by ONE changeset, catalog-031-type-hygiene.xml,
+nexus-cefa1.2) and ``..._tier_b*.sql`` (Tier B, converted across FIVE
+separate phases -- P2 hook_failures.batch_doc_ids
+(telemetry-004-type-hygiene.xml, nexus-cefa1.3), split into
+``..._tier_b_hook_failures.sql``; P3 document_aspects.extras/
+.salient_sentences (aspects-003-type-hygiene.xml, nexus-cefa1.4), split
+into ``..._tier_b_document_aspects.sql``; P4 plans.plan_json/
+.default_bindings (plans-002-jsonb.xml, nexus-cefa1.5), split into
+``..._tier_b_plans.sql``; P5 topic_links.link_types
+(taxonomy-008-link-types-jsonb.xml, nexus-cefa1.6), the LAST column,
+converted in place in ``..._tier_b.sql`` itself with nothing left to
+split out). Each probe file documents its own RLS/BYPASSRLS caveats and
+its own malformed-seed SQL shape; they remain on disk, unexecuted by any
+test, as reference material for a pre-P5 (or rolled-back) cluster's own
+manual audit -- consistent with how ``..._tier_b_hook_failures.sql`` etc.
+already stayed shipped-but-dormant after THEIR phases converted.
 
-nexus-cefa1.2 / nexus-irxcq — SCHEMA-AWARENESS. The original combined probe
-(scripts/sql/schema_type_hygiene_preflight.sql, retired) assumed all 10
-audited columns were still TEXT. That assumption broke the moment
-catalog-031-type-hygiene.xml (nexus-cefa1.2) landed: the four Tier-A
-timestamp columns are timestamptz now, and every ``col = ''`` / ``col !~
-...`` / ``pg_input_is_valid(col,'timestamptz')`` predicate against them
-raises a Postgres type error on a migrated cluster instead of returning zero
-rows. The probe is split into ``schema_type_hygiene_preflight_tier_a.sql``
-(the 4 timestamp columns — ALL converted together by one changeset, no
-partial-migration state) and ``..._tier_b.sql`` (originally the 6
-jsonb-target columns — converted across FOUR SEPARATE future phases, P2-P5,
-so this file CAN be partially migrated for long stretches). nexus-cefa1.3 /
-P2 (telemetry-004-type-hygiene.xml) shipped the first Tier-B conversion
-(hook_failures.batch_doc_ids), which — exactly as the original header
-predicted — broke whole-file execution of ``..._tier_b.sql``'s UNION ALL the
-moment that column converted; its branch was split out into
-``..._tier_b_hook_failures.sql`` (a single-column file). nexus-cefa1.4 / P3
-(aspects-003-type-hygiene.xml) then shipped the second Tier-B conversion
-(document_aspects.extras / .salient_sentences), split out the same way into
-``..._tier_b_document_aspects.sql`` (a two-column file). nexus-cefa1.5 / P4
-(plans-002-jsonb.xml) then shipped the third Tier-B conversion (plans.
-plan_json / plans.default_bindings), split out the same way into
-``..._tier_b_plans.sql`` (a two-column file), leaving ``..._tier_b.sql``
-auditing the ONE remaining still-text column (topic_links.link_types, P5).
-
-This test reads ``information_schema.columns.data_type`` for each of the 10
-audited columns FIRST and classifies it against ``_COLUMN_EXPECTATIONS``
-below:
-  - expected == "text": the column is asserted to still BE text (catching
-    drift the moment a future migration ships without updating this list),
-    then folded into its SQL file's malformed-seed audit IF (and only if)
-    EVERY column that file's UNION ALL touches is still text — the SQL
-    files are whole-file UNION ALL statements; the moment one column in a
-    file converts, running the WHOLE file breaks (see
-    schema_type_hygiene_preflight_tier_b.sql's own header), so the
-    malformed-seed audit for that file is then RETIRED here rather than run
-    against invalid SQL. ``_tier_is_all_text`` gates the two atomic tiers
-    (A, and pre-split B); ``_columns_all_text`` gates the three post-split
-    Tier-B files independently by their own explicit column lists.
-  - expected == a real PG type name (e.g. "timestamp with time zone",
-    "jsonb"): the column is asserted to ALREADY be that type — the
-    non-vacuous replacement for what a lesser implementation would leave as
-    a silent skip. A converted column that is NOT its expected type is
-    exactly as loud a failure as a not-yet-converted column that
-    unexpectedly IS.
-
-ONE-LINE EDIT PER PHASE (P2..P5): when a phase's own changeset ships, flip
-that column's expected value in ``_COLUMN_EXPECTATIONS`` from ``"text"`` to
-its converted PG type name (``"jsonb"`` for every Tier-B column — P2/
-hook_failures.batch_doc_ids, P3/document_aspects.extras+salient_sentences,
-and P4/plans.plan_json+default_bindings already flipped). If that flip
-leaves its file's UNION ALL with a MIX of text and converted columns, that
-file must be split further at that point (drop the newly-converted column's
-UNION ALL branch into its own file, add its own explicit column-list
-constant, and gate it via ``_columns_all_text`` the same way the P2/P3/P4
-splits did) before its malformed-seed audit can run again — this test will
-correctly stop running that file's malformed-seed audit the moment the mix
-appears, rather than executing broken SQL. THE STILL-TEXT COLUMNS' AUDIT
-MUST KEEP RUNNING: a split retargets, it does not retire, the surviving
-file's malformed-seed coverage (see ``_assert_tier_b_malformed_seed``'s P5
-retarget to topic_links.link_types below).
-
-PRISTINE-BASELINE ASSUMPTION, STATED EXPLICITLY: this is a SHARED substrate
--- many other tests in the same worker process write real rows into
-``nexus.catalog_documents`` / ``nexus.hook_failures`` / ``nexus.plans``
-(and the other audited columns) for their own tenants before, during, and
-after this test runs, so ``total_rows`` is NOT expected to be 0 at any
-point and is never asserted here. What IS asserted as a pristine-baseline
-zero is narrower and verified true by inspection (grep swept ``tests/`` for
-raw ``INSERT INTO nexus.catalog_documents`` / ``INSERT INTO nexus.
-hook_failures`` / ``INSERT INTO nexus.document_aspects`` / ``INSERT INTO
-nexus.plans``, 2026-08-15: three raw catalog_documents inserts exist --
-test_o8dil7_prune_misclassified_manifest_antijoin_engine.py,
-test_http_aspects_stores_integration.py,
-test_http_taxonomy_store_integration.py -- and NONE of them sets
-``indexed_at``; no raw hook_failures, document_aspects, plans, or
-topic_links insert exists; every other write to these tables goes through
-the real HTTP/JSON write path, which never emits malformed JSON) -- that
-``invalid_cast_count`` for hook_failures.batch_doc_ids (pre-P2, historical),
-document_aspects.extras (pre-P3, historical), plans.default_bindings
-(pre-P4, historical), and topic_links.link_types (nexus-cefa1.5's new
-malformed-seed target) is 0 before this test seeds anything.
-
-A GENUINE PROBE FINDING, historical (Tier A no longer runs its malformed-
-seed audit post-migration, but the finding stays true and stays documented
-in schema_type_hygiene_preflight_tier_a.sql's own header): PostgreSQL's
+A GENUINE PROBE FINDING from that era, still true and still documented in
+``schema_type_hygiene_preflight_tier_a.sql``'s own header: PostgreSQL's
 timestamp/timestamptz input grammar recognizes a small set of relative
 keywords ('yesterday', 'today', 'tomorrow', 'now', 'epoch', 'infinity',
 '-infinity', 'allballs') as VALID input -- so
 ``pg_input_is_valid('yesterday', 'timestamptz')`` is TRUE even though
-'yesterday' plainly fails the lexical ``!~ '^[0-9]{4}-'`` ISO-prefix check.
+'yesterday' plainly fails the lexical ``!~ '^[0-9]{4}-'`` ISO-prefix check
+a naive audit might reach for instead.
 """
 from __future__ import annotations
 
-import csv
-import io
 import subprocess
 from pathlib import Path
 
@@ -125,43 +60,11 @@ import pytest
 
 pytestmark = [pytest.mark.integration]
 
-_SQL_DIR = Path(__file__).resolve().parents[2] / "scripts" / "sql"
-_TIER_A_SQL = _SQL_DIR / "schema_type_hygiene_preflight_tier_a.sql"
-_TIER_B_SQL = _SQL_DIR / "schema_type_hygiene_preflight_tier_b.sql"
-_TIER_B_HOOK_FAILURES_SQL = _SQL_DIR / "schema_type_hygiene_preflight_tier_b_hook_failures.sql"
-_TIER_B_DOCUMENT_ASPECTS_SQL = _SQL_DIR / "schema_type_hygiene_preflight_tier_b_document_aspects.sql"
-_TIER_B_PLANS_SQL = _SQL_DIR / "schema_type_hygiene_preflight_tier_b_plans.sql"
-
-# nexus-cefa1.3: hook_failures.batch_doc_ids (P2) shipped and was split out of
-# _TIER_B_SQL into its own single-column file. nexus-cefa1.4: document_aspects.
-# extras / .salient_sentences (P3) shipped and were split out the same way into
-# a two-column file. nexus-cefa1.5: plans.plan_json / .default_bindings (P4)
-# shipped and were split out the same way into a two-column file, leaving
-# _TIER_B_SQL auditing the ONE remaining still-text column
-# (topic_links.link_types, P5). Tier B is now MIXED (1 still-text column + 5
-# already-jsonb columns across three split files), so the per-tier
-# "_tier_is_all_text" gate below is no longer sufficient on its own; these
-# four column groups gate their respective SQL files independently.
-_TIER_B_COLUMNS: list[tuple[str, str]] = [
-    ("topic_links", "link_types"),
-]
-_TIER_B_HOOK_FAILURES_COLUMNS: list[tuple[str, str]] = [
-    ("hook_failures", "batch_doc_ids"),
-]
-_TIER_B_DOCUMENT_ASPECTS_COLUMNS: list[tuple[str, str]] = [
-    ("document_aspects", "extras"),
-    ("document_aspects", "salient_sentences"),
-]
-_TIER_B_PLANS_COLUMNS: list[tuple[str, str]] = [
-    ("plans", "plan_json"),
-    ("plans", "default_bindings"),
-]
-
-# (tier, table, column, expected) — expected is "text" (not yet migrated,
-# still audited) or the live PG type name it must already be (converted,
-# non-vacuously verified). ONE-LINE EDIT per phase: flip the 4th element
-# from "text" to the converted type once that column's own changeset ships
-# (see module docstring "ONE-LINE EDIT PER PHASE").
+# (tier, table, column, expected) -- expected is the live PG type name every
+# column must already be, now that the arc (P0-P5) is complete. A column
+# that is NOT its expected type is loud, non-vacuous failure -- exactly the
+# same assertion shape this list carried while some columns were still
+# "text" mid-arc, just with no more "text" entries left.
 _COLUMN_EXPECTATIONS: list[tuple[str, str, str, str]] = [
     ("A", "catalog_documents", "indexed_at", "timestamp with time zone"),
     ("A", "catalog_documents", "bib_enriched_at", "timestamp with time zone"),
@@ -169,7 +72,7 @@ _COLUMN_EXPECTATIONS: list[tuple[str, str, str, str]] = [
     ("A", "catalog_links", "created_at", "timestamp with time zone"),
     ("B", "plans", "plan_json", "jsonb"),
     ("B", "plans", "default_bindings", "jsonb"),
-    ("B", "topic_links", "link_types", "text"),
+    ("B", "topic_links", "link_types", "jsonb"),
     ("B", "document_aspects", "extras", "jsonb"),
     ("B", "document_aspects", "salient_sentences", "jsonb"),
     ("B", "hook_failures", "batch_doc_ids", "jsonb"),
@@ -207,8 +110,8 @@ def _psql(state: dict, sql: str) -> list[str]:
 
 def _actual_data_type(state: dict, table: str, column: str) -> str:
     """Live ``information_schema.columns.data_type`` for (table, column) in
-    the ``nexus`` schema — the schema-awareness primitive every other check
-    in this file is built from."""
+    the ``nexus`` schema -- the schema-awareness primitive this file's one
+    remaining check is built from."""
     rows = _psql(state, (
         "SELECT data_type FROM information_schema.columns "
         f"WHERE table_schema = 'nexus' AND table_name = '{table}' "
@@ -218,64 +121,12 @@ def _actual_data_type(state: dict, table: str, column: str) -> str:
     return rows[0]
 
 
-def _run_probe(state: dict, sql_file: Path, expected_rows: int) -> list[dict]:
-    """Run *sql_file* verbatim (``psql -f ... --csv``) and parse its
-    one-row-per-column output into dicts keyed by the probe's own column
-    names. Integer fields are parsed to ``int``; ``non_iso_prefix_count`` is
-    ``None`` for Tier-B rows (the probe emits a literal SQL NULL there)."""
-    psql = Path(state["pg_bin"]) / "psql"
-    proc = subprocess.run(
-        [
-            str(psql),
-            "-h", "127.0.0.1",
-            "-p", str(state["pg_port"]),
-            "-U", state["pg_user"],
-            "-d", state["pg_dbname"],
-            "-v", "ON_ERROR_STOP=1",
-            "--csv",
-            "-f", str(sql_file),
-        ],
-        capture_output=True, text=True, timeout=60,
-    )
-    assert proc.returncode == 0, (
-        f"probe SQL failed ({proc.returncode}) running {sql_file.name}:\n"
-        f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
-    )
-    reader = csv.DictReader(io.StringIO(proc.stdout))
-    rows = []
-    for r in reader:
-        rows.append({
-            "tier": r["tier"],
-            "table_name": r["table_name"],
-            "column_name": r["column_name"],
-            "total_rows": int(r["total_rows"]),
-            "null_count": int(r["null_count"]),
-            "empty_string_count": int(r["empty_string_count"]),
-            "non_iso_prefix_count": (
-                int(r["non_iso_prefix_count"]) if r["non_iso_prefix_count"] != "" else None
-            ),
-            "invalid_cast_count": int(r["invalid_cast_count"]),
-        })
-    assert len(rows) == expected_rows, (
-        f"{sql_file.name} must emit exactly one row per audited column; "
-        f"expected {expected_rows}, got {len(rows)}: {rows}"
-    )
-    return rows
-
-
-def _row(rows: list[dict], table: str, column: str) -> dict:
-    for r in rows:
-        if r["table_name"] == table and r["column_name"] == column:
-            return r
-    raise AssertionError(f"probe emitted no row for {table}.{column}: {rows}")
-
-
 def test_column_types_match_migration_state(t2_service_env):
     """Non-vacuous replacement for a skip: EVERY audited column gets a real
-    assertion against its LIVE type, whichever side of its migration it is
-    on. A column marked "text" that has already converted (a maintainer
-    forgot to flip its _COLUMN_EXPECTATIONS entry) fails here just as loudly
-    as a column marked "converted" that has not."""
+    assertion against its LIVE type. A column whose _COLUMN_EXPECTATIONS
+    entry drifts from the actual schema (a migration landed without
+    updating this list, or a rollback reverted a column) fails here just as
+    loudly regardless of which direction the drift goes."""
     from tests._engine_substrate import ensure_engine
 
     state = ensure_engine()
@@ -284,336 +135,7 @@ def test_column_types_match_migration_state(t2_service_env):
         actual = _actual_data_type(state, table, column)
         assert actual == expected, (
             f"nexus.{table}.{column} (Tier {tier}): expected data_type "
-            f"{expected!r} per _COLUMN_EXPECTATIONS, got {actual!r} — "
+            f"{expected!r} per _COLUMN_EXPECTATIONS, got {actual!r} -- "
             "either a migration landed without updating this list, or this "
             "list is stale relative to the actual schema state"
         )
-
-
-def _tier_is_all_text(tier: str) -> bool:
-    return all(exp == "text" for t, _tbl, _col, exp in _COLUMN_EXPECTATIONS if t == tier)
-
-
-def _columns_all_text(cols: list[tuple[str, str]]) -> bool:
-    """Like ``_tier_is_all_text`` but scoped to an explicit (table, column)
-    list rather than a whole tier label -- needed once a tier's SQL file has
-    been split (nexus-cefa1.3: Tier B split into the 5-column file and the
-    1-column hook_failures file; nexus-cefa1.4: the 5-column file split
-    again into the 3-column file and the 2-column document_aspects file) so
-    each split file gates independently instead of the whole tier retiring
-    the moment ANY one column in it converts."""
-    lookup = {(t, c): exp for _tier, t, c, exp in _COLUMN_EXPECTATIONS}
-    return all(lookup[(t, c)] == "text" for t, c in cols)
-
-
-def test_probe_fires_on_seeded_malformed_rows(t2_service_env):
-    """BEFORE: the columns this test touches show zero invalid/non-ISO
-    counts. Seeds malformed rows into a fresh throwaway tenant. AFTER: the
-    probe's counts move by exactly the expected amount for each column and
-    each malformed shape -- never asserted as vacuous ">= 1", the delta is
-    pinned to the specific number of rows of each shape this test inserted.
-
-    Only runs a tier's (or split-file's) malformed-seed audit while EVERY
-    column it covers is still text (see module docstring) -- Tier A is
-    currently retired here (test_column_types_match_migration_state covers
-    it instead, non-vacuously); Tier B's one still-text column
-    (topic_links.link_types) runs in full; the hook_failures.batch_doc_ids
-    single-column split (P2 shipped, nexus-cefa1.3), the document_aspects
-    two-column split (P3 shipped, nexus-cefa1.4), and the plans two-column
-    split (P4 shipped, nexus-cefa1.5) are retired the same way Tier A was,
-    for the same reason.
-    """
-    from tests._engine_substrate import ensure_engine
-
-    state = ensure_engine()
-    tenant = t2_service_env
-
-    ran_any_tier = False
-
-    if _tier_is_all_text("A"):
-        ran_any_tier = True
-        _assert_tier_a_malformed_seed(state, tenant)
-
-    if _columns_all_text(_TIER_B_COLUMNS):
-        ran_any_tier = True
-        _assert_tier_b_malformed_seed(state, tenant)
-
-    if _columns_all_text(_TIER_B_HOOK_FAILURES_COLUMNS):
-        ran_any_tier = True
-        _assert_tier_b_hook_failures_malformed_seed(state, tenant)
-
-    if _columns_all_text(_TIER_B_DOCUMENT_ASPECTS_COLUMNS):
-        ran_any_tier = True
-        _assert_tier_b_document_aspects_malformed_seed(state, tenant)
-
-    if _columns_all_text(_TIER_B_PLANS_COLUMNS):
-        ran_any_tier = True
-        _assert_tier_b_plans_malformed_seed(state, tenant)
-
-    assert ran_any_tier, (
-        "no column group is fully text any more — Tier A, Tier B, the "
-        "hook_failures split, the document_aspects split, and the plans "
-        "split have all fully migrated. This test's malformed-seed coverage "
-        "is now fully retired; if a future Tier C (or a re-opened group) is "
-        "added, wire its own _assert_*_malformed_seed helper and a "
-        "_tier_is_all_text / _columns_all_text guard the same way rather "
-        "than leaving this test silently passing on nothing"
-    )
-
-
-def _assert_tier_b_malformed_seed(state: dict, tenant: str) -> None:
-    """nexus-cefa1.5: retargeted a THIRD time, from plans.default_bindings
-    (P4 shipped, now audited instead by test_column_types_match_migration_state
-    plus the retired _assert_tier_b_plans_malformed_seed below) to
-    topic_links.link_types -- the ONE column still text in this split file,
-    exercising the identical bare ``::jsonb`` (no NULLIF -- link_types is
-    NOT NULL DEFAULT '[]', the same empty-string-is-an-abort-signal shape as
-    plans.plan_json had) this tier's own future ALTER will use. (First
-    retarget was nexus-cefa1.3: hook_failures.batch_doc_ids ->
-    document_aspects.extras. Second was nexus-cefa1.4: document_aspects.extras
-    -> plans.default_bindings.)"""
-    before = _run_probe(state, _TIER_B_SQL, expected_rows=1)
-    link_before = _row(before, "topic_links", "link_types")
-
-    assert link_before["invalid_cast_count"] == 0, (
-        "pristine-baseline assumption violated: some other path already "
-        "wrote non-JSON topic_links.link_types -- see this file's module "
-        "docstring PRISTINE-BASELINE ASSUMPTION section"
-    )
-
-    # topic_links.from_topic_id / .to_topic_id carry NOT NULL FKs to
-    # nexus.topics(id) (taxonomy-001-baseline.xml) -- seed topics first.
-    # topics.collection carries a NOT VALID FK to catalog_collections
-    # (tenant_id, name) -- topics_collection_fk, fk-003-collection-registry-
-    # extra.xml -- so the collection must be registered first, same
-    # precondition _assert_tier_b_document_aspects_malformed_seed already
-    # handles for document_aspects.collection.
-    # topic_links' PK is (tenant_id, from_topic_id, to_topic_id), so the two
-    # malformed rows below use DISTINCT topic pairs to avoid colliding.
-    coll = "cefa1-preflight-topics"
-    _psql(state, (
-        "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-        f"VALUES ('{tenant}', '{coll}') ON CONFLICT DO NOTHING"
-    ))
-
-    def _mk_topic(label: str) -> str:
-        rows = _psql(state, (
-            "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
-            f"VALUES ('{tenant}', '{label}', '{coll}', now()) "
-            "RETURNING id"
-        ))
-        return rows[0]
-
-    topic_a = _mk_topic("cefa1-preflight-topic-a")
-    topic_b = _mk_topic("cefa1-preflight-topic-b")
-    topic_c = _mk_topic("cefa1-preflight-topic-c")
-
-    # A non-JSON string into topic_links.link_types.
-    _psql(state, (
-        "INSERT INTO nexus.topic_links (tenant_id, from_topic_id, to_topic_id, link_types) "
-        f"VALUES ('{tenant}', {topic_a}, {topic_b}, 'not-json-at-all')"
-    ))
-    # Empty-string sentinel: must count as empty_string_count, NOT invalid_cast_count.
-    _psql(state, (
-        "INSERT INTO nexus.topic_links (tenant_id, from_topic_id, to_topic_id, link_types) "
-        f"VALUES ('{tenant}', {topic_a}, {topic_c}, '')"
-    ))
-
-    after = _run_probe(state, _TIER_B_SQL, expected_rows=1)
-    link_after = _row(after, "topic_links", "link_types")
-
-    assert link_after["invalid_cast_count"] == link_before["invalid_cast_count"] + 1
-    assert link_after["empty_string_count"] == link_before["empty_string_count"] + 1
-    assert link_after["total_rows"] == link_before["total_rows"] + 2
-
-
-def _assert_tier_b_plans_malformed_seed(state: dict, tenant: str) -> None:
-    """Retained for the day plans.plan_json / .default_bindings are text
-    again (e.g. a rollback of plans-002-jsonb.xml) -- NOT reachable on
-    develop today (P4 has shipped, _columns_all_text(_TIER_B_PLANS_COLUMNS)
-    is False): this body is currently dead code, kept deliberately the same
-    way _assert_tier_b_hook_failures_malformed_seed and
-    _assert_tier_b_document_aspects_malformed_seed are, because the SQL it
-    drives (schema_type_hygiene_preflight_tier_b_plans.sql) is still shipped
-    for pre-plans-002 clusters and still documents the probe shape. It last
-    passed against a pre-plans-002 substrate (the same content this function
-    exercised as the P4-era _assert_tier_b_malformed_seed, before the P4
-    split)."""
-    before = _run_probe(state, _TIER_B_PLANS_SQL, expected_rows=2)
-    bindings_before = _row(before, "plans", "default_bindings")
-
-    assert bindings_before["invalid_cast_count"] == 0, (
-        "pristine-baseline assumption violated: some other path already "
-        "wrote non-JSON plans.default_bindings -- see this file's module "
-        "docstring PRISTINE-BASELINE ASSUMPTION section"
-    )
-
-    # plans rows require these NOT NULL columns (plans-001-baseline.xml) and a
-    # unique (tenant_id, project, query) -- no FK on this table, unlike
-    # document_aspects' collection FK.
-    common_cols = "tenant_id, project, query, plan_json, created_at, default_bindings"
-    # A non-JSON string into plans.default_bindings.
-    _psql(state, (
-        f"INSERT INTO nexus.plans ({common_cols}) VALUES ("
-        f"'{tenant}', 'cefa1-preflight-proj', 'cefa1-preflight-probe-garbage', "
-        "'{}', now(), 'not-json-at-all')"
-    ))
-    # Empty-string sentinel: must count as empty_string_count, NOT invalid_cast_count.
-    _psql(state, (
-        f"INSERT INTO nexus.plans ({common_cols}) VALUES ("
-        f"'{tenant}', 'cefa1-preflight-proj', 'cefa1-preflight-probe-empty', "
-        "'{}', now(), '')"
-    ))
-
-    after = _run_probe(state, _TIER_B_PLANS_SQL, expected_rows=2)
-    bindings_after = _row(after, "plans", "default_bindings")
-
-    assert bindings_after["invalid_cast_count"] == bindings_before["invalid_cast_count"] + 1
-    assert bindings_after["empty_string_count"] == bindings_before["empty_string_count"] + 1
-    assert bindings_after["total_rows"] == bindings_before["total_rows"] + 2
-
-
-def _assert_tier_b_document_aspects_malformed_seed(state: dict, tenant: str) -> None:
-    """Retained for the day document_aspects.extras/.salient_sentences are
-    text again (e.g. a rollback of aspects-003-type-hygiene.xml) -- NOT
-    reachable on develop today (P3 has shipped,
-    _columns_all_text(_TIER_B_DOCUMENT_ASPECTS_COLUMNS) is False): this body
-    is currently dead code, kept deliberately the same way
-    _assert_tier_b_hook_failures_malformed_seed is, because the SQL it
-    drives (schema_type_hygiene_preflight_tier_b_document_aspects.sql) is
-    still shipped for pre-P3 clusters and still documents the probe shape.
-    It last passed against a pre-aspects-003 substrate (the same content
-    this function exercised as part of _assert_tier_b_malformed_seed,
-    before the P3 split)."""
-    before = _run_probe(state, _TIER_B_DOCUMENT_ASPECTS_SQL, expected_rows=2)
-    extras_before = _row(before, "document_aspects", "extras")
-
-    assert extras_before["invalid_cast_count"] == 0, (
-        "pristine-baseline assumption violated: some other path already "
-        "wrote non-JSON document_aspects.extras -- see this file's module "
-        "docstring PRISTINE-BASELINE ASSUMPTION section"
-    )
-
-    # document_aspects.collection carries a NOT VALID FK to catalog_collections
-    # (tenant_id, name) -- document_aspects_collection_fk, fk-003-1 -- so the
-    # collection must be registered first or the INSERT below fails loud with a
-    # foreign key violation (verified empirically: this test originally omitted
-    # this step and hit exactly that).
-    coll = "cefa1-preflight-doc-aspects"
-    _psql(state, (
-        "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-        f"VALUES ('{tenant}', '{coll}') ON CONFLICT DO NOTHING"
-    ))
-
-    # document_aspects rows require these NOT NULL columns (aspects-001-baseline.xml).
-    common_cols = (
-        "tenant_id, collection, source_path, extracted_at, model_version, "
-        "extractor_name, extras"
-    )
-    # A non-JSON string into document_aspects.extras.
-    _psql(state, (
-        f"INSERT INTO nexus.document_aspects ({common_cols}) VALUES ("
-        f"'{tenant}', '{coll}', 'cefa1-preflight-probe-garbage', "
-        "now(), 'cefa1-preflight-v1', 'cefa1-preflight', 'not-json-at-all')"
-    ))
-    # Empty-string sentinel: must count as empty_string_count, NOT invalid_cast_count.
-    _psql(state, (
-        f"INSERT INTO nexus.document_aspects ({common_cols}) VALUES ("
-        f"'{tenant}', '{coll}', 'cefa1-preflight-probe-empty', "
-        "now(), 'cefa1-preflight-v1', 'cefa1-preflight', '')"
-    ))
-
-    after = _run_probe(state, _TIER_B_DOCUMENT_ASPECTS_SQL, expected_rows=2)
-    extras_after = _row(after, "document_aspects", "extras")
-
-    assert extras_after["invalid_cast_count"] == extras_before["invalid_cast_count"] + 1
-    assert extras_after["empty_string_count"] == extras_before["empty_string_count"] + 1
-    assert extras_after["total_rows"] == extras_before["total_rows"] + 2
-
-
-def _assert_tier_b_hook_failures_malformed_seed(state: dict, tenant: str) -> None:
-    """Retained for the day hook_failures.batch_doc_ids is text again (e.g. a
-    rollback of telemetry-004-type-hygiene.xml) -- NOT reachable on develop
-    today (P2 has shipped, _columns_all_text(_TIER_B_HOOK_FAILURES_COLUMNS)
-    is False): this body is currently dead code, kept deliberately the same
-    way _assert_tier_a_malformed_seed is, because the SQL it drives
-    (schema_type_hygiene_preflight_tier_b_hook_failures.sql) is still shipped
-    for pre-P2 clusters and still documents the probe shape. It last passed
-    against a pre-telemetry-004 substrate (the same content this function
-    exercised as part of the original _assert_tier_b_malformed_seed, before
-    the P2 split)."""
-    before = _run_probe(state, _TIER_B_HOOK_FAILURES_SQL, expected_rows=1)
-    hook_before = _row(before, "hook_failures", "batch_doc_ids")
-
-    assert hook_before["invalid_cast_count"] == 0, (
-        "pristine-baseline assumption violated: some other path already "
-        "wrote non-JSON hook_failures.batch_doc_ids -- see this file's "
-        "module docstring PRISTINE-BASELINE ASSUMPTION section"
-    )
-
-    # A non-JSON string into hook_failures.batch_doc_ids.
-    _psql(state, (
-        "INSERT INTO nexus.hook_failures (tenant_id, hook_name, batch_doc_ids) "
-        f"VALUES ('{tenant}', 'cefa1-preflight-probe-garbage', 'not-json-at-all')"
-    ))
-    # Empty-string sentinel: must count as empty_string_count, NOT invalid_cast_count.
-    _psql(state, (
-        "INSERT INTO nexus.hook_failures (tenant_id, hook_name, batch_doc_ids) "
-        f"VALUES ('{tenant}', 'cefa1-preflight-probe-empty', '')"
-    ))
-
-    after = _run_probe(state, _TIER_B_HOOK_FAILURES_SQL, expected_rows=1)
-    hook_after = _row(after, "hook_failures", "batch_doc_ids")
-
-    assert hook_after["invalid_cast_count"] == hook_before["invalid_cast_count"] + 1
-    assert hook_after["empty_string_count"] == hook_before["empty_string_count"] + 1
-    assert hook_after["total_rows"] == hook_before["total_rows"] + 2
-
-
-def _assert_tier_a_malformed_seed(state: dict, tenant: str) -> None:
-    """Retained for the day Tier A (or a future re-split tier of the same
-    shape) is text again -- e.g. a rollback. NOT reachable on develop today
-    (catalog-031 has shipped, _tier_is_all_text("A") is False): this body is
-    currently dead code, kept deliberately because the SQL it drives
-    (schema_type_hygiene_preflight_tier_a.sql) is still shipped for
-    pre-031 clusters (the cloud pre-flight ran it) and still documents the
-    GENUINE PROBE FINDING this seeds against. It last passed against a
-    pre-031 substrate at commit ac49908d5.
-    """
-    before = _run_probe(state, _TIER_A_SQL, expected_rows=4)
-    doc_before = _row(before, "catalog_documents", "indexed_at")
-
-    assert doc_before["non_iso_prefix_count"] == 0, (
-        "pristine-baseline assumption violated: some other path already "
-        "wrote a non-ISO catalog_documents.indexed_at value"
-    )
-    assert doc_before["invalid_cast_count"] == 0
-
-    # (1) a PG relative-keyword: fails the lexical ISO-prefix check but is
-    #     ACCEPTED by pg_input_is_valid(...,'timestamptz') -- see
-    #     schema_type_hygiene_preflight_tier_a.sql's GENUINE PROBE FINDING.
-    _psql(state, (
-        "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, indexed_at) "
-        f"VALUES ('{tenant}', 'cefa1-preflight-relword', 'cefa1 preflight probe doc', 'yesterday')"
-    ))
-    # (2) genuinely un-parseable garbage: fails BOTH checks.
-    _psql(state, (
-        "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, indexed_at) "
-        f"VALUES ('{tenant}', 'cefa1-preflight-garbage', 'cefa1 preflight probe doc 2', 'not-a-timestamp-at-all')"
-    ))
-    # (3) the empty-string sentinel: neither check should fire; only empty_string_count.
-    _psql(state, (
-        "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, indexed_at) "
-        f"VALUES ('{tenant}', 'cefa1-preflight-empty', 'cefa1 preflight probe doc 3', '')"
-    ))
-
-    after = _run_probe(state, _TIER_A_SQL, expected_rows=4)
-    doc_after = _row(after, "catalog_documents", "indexed_at")
-
-    # TWO rows fail the lexical check ('yesterday' + garbage); only ONE of
-    # those two also fails the real cast (garbage; 'yesterday' is a valid PG
-    # relative-timestamp keyword); ONE empty-string row.
-    assert doc_after["non_iso_prefix_count"] == doc_before["non_iso_prefix_count"] + 2
-    assert doc_after["invalid_cast_count"] == doc_before["invalid_cast_count"] + 1
-    assert doc_after["empty_string_count"] == doc_before["empty_string_count"] + 1
-    assert doc_after["total_rows"] == doc_before["total_rows"] + 3

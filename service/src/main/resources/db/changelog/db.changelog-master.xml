@@ -609,6 +609,26 @@
          audit. -->
     <include file="db/changelog/plans-002-jsonb.xml"/>
 
+    <!-- Schema type-hygiene pass, Tier B, P5 (epic nexus-cefa1, bead
+         nexus-cefa1.6) — the FINAL phase of the arc: retires
+         topic_links.link_types (TEXT NOT NULL DEFAULT '[]' -> jsonb NOT
+         NULL DEFAULT '[]'::jsonb, DROP DEFAULT -> TYPE ... USING -> SET
+         DEFAULT, the same bracket shape as telemetry-004's is_batch
+         boolean conversion applied here to jsonb). Ordinary DDL, no
+         runAlways. Placed after plans-002-jsonb.xml (P4) and before the
+         grants-nexus-svc.xml runAlways block — NOT back in the
+         taxonomy-00N family's own section above, matching the established
+         convention (every RDR-156+ changeset appends near the current tail
+         rather than splicing back into its family's original block; see
+         catalog-031's / telemetry-004's / aspects-003's / plans-002's own
+         <include> comments for the identical reasoning). See
+         taxonomy-008-link-types-jsonb.xml's own header for the full
+         data-safety trace, the refreshProjectionLinks string-merge
+         preservation, and the link_types consumer audit. After this
+         changeset, all 10 audited columns of the schema type-hygiene arc
+         are converted. -->
+    <include file="db/changelog/taxonomy-008-link-types-jsonb.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
