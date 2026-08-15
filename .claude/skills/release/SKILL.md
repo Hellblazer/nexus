@@ -43,6 +43,27 @@ git log --oneline <last-engine-tag>..HEAD -- service/        # cloud-relevant dr
 
 This gate exists because the engine silently drifted 22 `service/` commits / 4 days behind the cloud (2026-06-26); the PyPI checklist had no step that would have caught it.
 
+### 0b. Remediation-commit gate (open beads whose fix must ride this release)
+
+nexus-fix9t: nexus-3n7pr's remediation was sequenced "after the client release ships" — 7.7.0 shipped, but the commit its plan depended on (5f59ede70, nexus-gvmbo / nexus-b91tv) was NOT an ancestor of v7.7.0, so the installed `nx` at 7.7.0 carried the pre-fix DESTRUCTIVE `manifest_backfill` module the plan assumed was already safe. Nothing checked this at release time.
+
+```bash
+uv run python scripts/check_remediation_commits_ride_release.py --release-ref vX.Y.Z
+```
+
+Run it against the **release tag** (or the branch tip about to be tagged). Non-zero exit = **STOP** — a red line names the bead and the missing commit; the remedy is one of:
+
+- re-sequence the named bead to run after a release that DOES carry the commit, or
+- include the commit in this release before cutting it.
+
+**Bead-authoring convention this gate reads**: when sequencing a remediation bead behind a specific commit ("do not run this until commit X has shipped"), write a line anywhere in the bead's description or a comment:
+
+```
+requires-commit: <sha>
+```
+
+one sha per line (7-40 hex chars). This is the structured form the gate scans for first. It also nets two free-text phrasings ("requires commit `<sha>`", "must include `<sha>`") for beads written before this convention existed, but the marker is the reliable form — prefer it. Closed beads are never scanned.
+
 ### 1. Run unit + integration suite
 
 ```bash

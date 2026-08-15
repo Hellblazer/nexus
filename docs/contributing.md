@@ -249,6 +249,38 @@ Every step below is **required**. Missing any one of them has caused problems in
    run from the `engine-release` skill before a new `engine-service-v*` tag
    deploys (nexus-9ssih deploy order); it is not part of this PyPI checklist.
 
+0b. **Remediation-commit gate (BLOCKING — run alongside step 0)**
+   ```bash
+   uv run python scripts/check_remediation_commits_ride_release.py --release-ref vX.Y.Z
+   ```
+   Run against the release tag (or the branch tip about to be tagged). This
+   closes the gap nexus-3n7pr's incident exposed (nexus-fix9t): a
+   remediation bead sequenced "after the client release ships" implicitly
+   assumes the commit its plan depends on will actually be an ancestor of
+   that release. Nothing checked this — 7.7.0 shipped before commit
+   `5f59ede70` (the `nexus-gvmbo` / `nexus-b91tv` `manifest_backfill`
+   safety fixes), so the installed `nx` at 7.7.0 carried the pre-fix
+   DESTRUCTIVE module the remediation plan assumed was already safe.
+
+   Non-zero exit = STOP. The output names the bead and the missing commit;
+   the remedy is either re-sequence the named bead to run after a release
+   that DOES carry the commit, or include the commit in this release before
+   cutting it.
+
+   **Bead-authoring convention this gate reads**: when a bead's remediation
+   is sequenced behind a specific commit ("do not run this until commit X
+   has shipped"), write a line anywhere in the bead's description or a
+   comment:
+   ```
+   requires-commit: <sha>
+   ```
+   one sha per line (7-40 hex characters). This structured marker is
+   scanned first and is the reliable form. Two free-text phrasings are also
+   recognized as a best-effort net for beads written before this convention
+   existed — `requires commit <sha>` and `must include <sha>` — but do not
+   rely on free-text scraping for a bead you are writing today; use the
+   marker. Closed beads are never scanned.
+
 1. **Verify the full release test battery passes**
    ```bash
    uv run pytest                                             # unit suite (no API keys)
