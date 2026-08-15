@@ -131,6 +131,53 @@ class ManifestCollectionStampTest {
         }
     }
 
+    /**
+     * RDR-191 Phase 5 (nexus-o8dil.29): {@code fk_catalog_chunks_chunk} now requires
+     * every {@code catalog_document_chunks} row's {@code (tenant_id, collection,
+     * chash)} to have a matching {@code nexus.chunks} row. This file tests
+     * COLLECTION-STAMPING behaviour, not chunk membership, so stubbing a real chunk
+     * for every row via the existing {@link #seedChunkContent} helper is harmless —
+     * these tests never assert anything about chunk absence. A chash that is not
+     * EXACTLY 64 hex chars is left unstubbed (nexus.chunks carries the same
+     * octet_length=32 CHECK as catalog_document_chunks, so a wrong-length stub would
+     * itself violate that check).
+     */
+    private void stubChunk(String collection, Object chashObj) throws Exception {
+        if (!(chashObj instanceof String chashHex) || chashHex.length() != 64) {
+            return;
+        }
+        if (!chashHex.matches("(?i)^[0-9a-f]+$")) {
+            return;
+        }
+        seedChunkContent(collection, chashHex, "stub " + chashHex);
+    }
+
+    private void writeManifestSeeded(String tenant, String docId, String collection,
+                                      List<Map<String, Object>> rows) throws Exception {
+        for (var row : rows) {
+            stubChunk(collection, row.get("chash"));
+        }
+        repo.writeManifest(tenant, docId, collection, rows);
+    }
+
+    private void appendManifestChunksSeeded(String tenant, String docId, String collection,
+                                             List<Map<String, Object>> rows) throws Exception {
+        for (var row : rows) {
+            stubChunk(collection, row.get("chash"));
+        }
+        repo.appendManifestChunks(tenant, docId, collection, rows);
+    }
+
+    private int importChunksBatchSeeded(String tenant, String docId, String collection,
+                                         List<Map<String, Object>> rows) throws Exception {
+        if (rows != null) {
+            for (var row : rows) {
+                stubChunk(collection, row.get("chash"));
+            }
+        }
+        return repo.importChunksBatch(tenant, docId, collection, rows);
+    }
+
     private String collectionOf(String chash) throws Exception {
         try (Connection su = pg.createConnection(""); Statement st = su.createStatement();
              ResultSet rs = st.executeQuery(
@@ -154,7 +201,7 @@ class ManifestCollectionStampTest {
 
     @Test
     void writeManifest_stampsCollection_andCombinedQuerySeesTheRow() throws Exception {
-        repo.writeManifest(TENANT, docTumbler, COLL, List.of(
+        writeManifestSeeded(TENANT, docTumbler, COLL, List.of(
             Map.of("position", 0, "chash", CH_A)));
         assertThat(collectionOf(CH_A))
             .as("REPLACE writer stamps the caller-supplied collection")
@@ -166,7 +213,7 @@ class ManifestCollectionStampTest {
 
         // REPLACE again (re-index) — the stamp must SURVIVE, not be wiped
         // (pre-fix, re-indexing was what erased manifest_backfill's work).
-        repo.writeManifest(TENANT, docTumbler, COLL, List.of(
+        writeManifestSeeded(TENANT, docTumbler, COLL, List.of(
             Map.of("position", 0, "chash", CH_A)));
         assertThat(collectionOf(CH_A)).isEqualTo(COLL);
         assertThat(combinedQueryHits()).isEqualTo(1);
@@ -174,14 +221,14 @@ class ManifestCollectionStampTest {
 
     @Test
     void appendAndImport_stampCollection() throws Exception {
-        repo.appendManifestChunks(TENANT, docTumbler, COLL, List.of(
+        appendManifestChunksSeeded(TENANT, docTumbler, COLL, List.of(
             Map.of("position", 1, "chash", CH_B)));
         assertThat(collectionOf(CH_B))
             .as("append writer stamps the caller-supplied collection too")
             .isEqualTo(COLL);
 
         // The catalog-ETL path (the shape every migrated tenant's rows took).
-        repo.importChunksBatch(TENANT, docTumbler, COLL, List.of(
+        importChunksBatchSeeded(TENANT, docTumbler, COLL, List.of(
             Map.of("position", 2, "chash", "c".repeat(64))));
         assertThat(collectionOf("c".repeat(64)))
             .as("ETL import stamps too — migrated tenants stop regressing")
@@ -218,7 +265,7 @@ class ManifestCollectionStampTest {
         String doc = repo.registerDocument(TENANT, "9.2", Map.of(
             "title", "f12c append doc", "content_type", "knowledge"));
         String ch = "e".repeat(64);
-        repo.appendManifestChunks(TENANT, doc, COLL_F12C_GHOST, List.of(Map.of("position", 50, "chash", ch)));
+        appendManifestChunksSeeded(TENANT, doc, COLL_F12C_GHOST, List.of(Map.of("position", 50, "chash", ch)));
         assertThat(collectionOf(ch))
             .as("first append: stamps the caller-supplied collection")
             .isEqualTo(COLL_F12C_GHOST);
@@ -227,7 +274,7 @@ class ManifestCollectionStampTest {
         // A later append upsert for the SAME (doc, position) — e.g. a
         // reclassification re-run — with a DIFFERENT caller-supplied
         // collection must OVERWRITE the stamp, not preserve the old one.
-        repo.appendManifestChunks(TENANT, doc, reclassified, List.of(Map.of("position", 50, "chash", ch)));
+        appendManifestChunksSeeded(TENANT, doc, reclassified, List.of(Map.of("position", 50, "chash", ch)));
         assertThat(collectionOf(ch))
             .as("RDR-191: the plain SET on conflict honors the new "
                 + "caller-supplied collection unconditionally")
@@ -244,13 +291,13 @@ class ManifestCollectionStampTest {
         String doc = repo.registerDocument(TENANT, "9.3", Map.of(
             "title", "f12c import doc", "content_type", "knowledge"));
         String ch = "f".repeat(64);
-        repo.importChunksBatch(TENANT, doc, COLL_F12C_GHOST, List.of(Map.of("position", 60, "chash", ch)));
+        importChunksBatchSeeded(TENANT, doc, COLL_F12C_GHOST, List.of(Map.of("position", 60, "chash", ch)));
         assertThat(collectionOf(ch))
             .as("first import: stamps the caller-supplied collection")
             .isEqualTo(COLL_F12C_GHOST);
 
         String reclassified = "knowledge__mcs-f12c-import-reclassified__voyage-context-3__v1";
-        repo.importChunksBatch(TENANT, doc, reclassified, List.of(Map.of("position", 60, "chash", ch)));
+        importChunksBatchSeeded(TENANT, doc, reclassified, List.of(Map.of("position", 60, "chash", ch)));
         assertThat(collectionOf(ch))
             .as("RDR-191: the import-arm upsert must also honor a new "
                 + "caller-supplied collection on conflict")
@@ -272,14 +319,14 @@ class ManifestCollectionStampTest {
         String doc = repo.registerDocument(TENANT, "9.4", Map.of(
             "title", "case2 replace doc", "content_type", "knowledge"));
         String chA = "1".repeat(64);
-        repo.writeManifest(TENANT, doc, COLL_F12C_GHOST, List.of(Map.of("position", 0, "chash", chA)));
+        writeManifestSeeded(TENANT, doc, COLL_F12C_GHOST, List.of(Map.of("position", 0, "chash", chA)));
         assertThat(collectionOf(chA))
             .as("first write: stamps the caller-supplied collection")
             .isEqualTo(COLL_F12C_GHOST);
 
         String reclassified = "knowledge__mcs-g4-reclassified__voyage-context-3__v1";
         String chB = "2".repeat(64);
-        repo.writeManifest(TENANT, doc, reclassified, List.of(Map.of("position", 0, "chash", chB)));
+        writeManifestSeeded(TENANT, doc, reclassified, List.of(Map.of("position", 0, "chash", chB)));
         assertThat(collectionOf(chB))
             .as("RDR-191: REPLACE stamps whatever collection THIS call "
                 + "supplies, never the doc's own prior stamp")
@@ -303,12 +350,12 @@ class ManifestCollectionStampTest {
         String doc = repo.registerDocument(TENANT, "9.5", Map.of(
             "title", "case2 append refresh doc", "content_type", "knowledge"));
         String chOld = "3".repeat(64);
-        repo.appendManifestChunks(TENANT, doc, COLL_F12C_GHOST, List.of(Map.of("position", 70, "chash", chOld)));
+        appendManifestChunksSeeded(TENANT, doc, COLL_F12C_GHOST, List.of(Map.of("position", 70, "chash", chOld)));
         assertThat(collectionOf(chOld)).isEqualTo(COLL_F12C_GHOST);
 
         String chNew = "4".repeat(64);
         String reclassified = "knowledge__mcs-g5-reclassified__voyage-context-3__v1";
-        repo.appendManifestChunks(TENANT, doc, reclassified, List.of(Map.of("position", 70, "chash", chNew)));
+        appendManifestChunksSeeded(TENANT, doc, reclassified, List.of(Map.of("position", 70, "chash", chNew)));
         assertThat(collectionOf(chNew))
             .as("a later upsert must REFRESH both the chash and the collection")
             .isEqualTo(reclassified);
@@ -326,12 +373,12 @@ class ManifestCollectionStampTest {
         String doc = repo.registerDocument(TENANT, "9.6", Map.of(
             "title", "case2 import refresh doc", "content_type", "knowledge"));
         String chOld = "5".repeat(64);
-        repo.importChunksBatch(TENANT, doc, COLL_F12C_GHOST, List.of(Map.of("position", 80, "chash", chOld)));
+        importChunksBatchSeeded(TENANT, doc, COLL_F12C_GHOST, List.of(Map.of("position", 80, "chash", chOld)));
         assertThat(collectionOf(chOld)).isEqualTo(COLL_F12C_GHOST);
 
         String chNew = "6".repeat(64);
         String reclassified = "knowledge__mcs-g6-reclassified__voyage-context-3__v1";
-        repo.importChunksBatch(TENANT, doc, reclassified, List.of(Map.of("position", 80, "chash", chNew)));
+        importChunksBatchSeeded(TENANT, doc, reclassified, List.of(Map.of("position", 80, "chash", chNew)));
         assertThat(collectionOf(chNew))
             .as("the import-arm upsert must also REFRESH both chash and collection")
             .isEqualTo(reclassified);
@@ -340,7 +387,7 @@ class ManifestCollectionStampTest {
 
     @Test
     void writeManifest_nonexistentDoc_throwsDocumentNotFoundException() {
-        assertThatThrownBy(() -> repo.writeManifest(TENANT, "9.999-does-not-exist", COLL,
+        assertThatThrownBy(() -> writeManifestSeeded(TENANT, "9.999-does-not-exist", COLL,
                 List.of(Map.of("position", 0, "chash", "8".repeat(64)))))
             .isInstanceOf(CatalogRepository.DocumentNotFoundException.class);
     }
@@ -360,11 +407,11 @@ class ManifestCollectionStampTest {
     void writeManifest_blankOrNullCollection_rejectedLoudly_notSilentlySkipped() throws Exception {
         String doc = repo.registerDocument(TENANT, "9.7", Map.of(
             "title", "case3 doc", "content_type", "knowledge"));
-        assertThatThrownBy(() -> repo.writeManifest(TENANT, doc, "", List.of(
+        assertThatThrownBy(() -> writeManifestSeeded(TENANT, doc, "", List.of(
                 Map.of("position", 0, "chash", "9".repeat(64)))))
             .as("blank collection is rejected, not silently treated as unresolvable")
             .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> repo.writeManifest(TENANT, doc, null, List.of(
+        assertThatThrownBy(() -> writeManifestSeeded(TENANT, doc, null, List.of(
                 Map.of("position", 0, "chash", "9".repeat(64)))))
             .as("null collection is rejected the same way")
             .isInstanceOf(IllegalArgumentException.class);
@@ -406,7 +453,7 @@ class ManifestCollectionStampTest {
 
         String doc = repo.registerDocument(TENANT, "9.10", Map.of(
             "title", "g10 heterogeneous doc", "content_type", "knowledge"));
-        repo.writeManifest(TENANT, doc, collX, List.of(
+        writeManifestSeeded(TENANT, doc, collX, List.of(
             Map.of("position", 1, "chash", chInX),
             Map.of("position", 2, "chash", chInY)));
 
@@ -431,7 +478,7 @@ class ManifestCollectionStampTest {
 
         String doc = repo.registerDocument(TENANT, "9.12", Map.of(
             "title", "g12 heterogeneous doc", "content_type", "knowledge"));
-        repo.appendManifestChunks(TENANT, doc, collX, List.of(
+        appendManifestChunksSeeded(TENANT, doc, collX, List.of(
             Map.of("position", 1, "chash", chInX),
             Map.of("position", 2, "chash", chInY)));
 
@@ -454,7 +501,7 @@ class ManifestCollectionStampTest {
 
         String doc = repo.registerDocument(TENANT, "9.14", Map.of(
             "title", "g14 heterogeneous doc", "content_type", "knowledge"));
-        repo.importChunksBatch(TENANT, doc, collX, List.of(
+        importChunksBatchSeeded(TENANT, doc, collX, List.of(
             Map.of("position", 1, "chash", chInX),
             Map.of("position", 2, "chash", chInY)));
 
@@ -489,7 +536,7 @@ class ManifestCollectionStampTest {
 
         String doc = repo.registerDocument(TENANT, "9.8", Map.of(
             "title", "g9 ambiguous doc", "content_type", "knowledge"));
-        repo.appendManifestChunks(TENANT, doc, collZ, List.of(Map.of("position", 1, "chash", shared)));
+        appendManifestChunksSeeded(TENANT, doc, collZ, List.of(Map.of("position", 1, "chash", shared)));
         assertThat(collectionOf(shared))
             .as("RDR-191: no membership check runs, ambiguous or otherwise -- "
                 + "the row is stamped with collZ exactly because the caller "
@@ -504,11 +551,24 @@ class ManifestCollectionStampTest {
         // manifest's denormalized collection — post-rename the combined
         // queries would go empty again for that collection.
         String renamed = "knowledge__mcs-renamed__voyage-context-3__v1";
-        repo.writeManifest(TENANT, docTumbler, COLL, List.of(
+        writeManifestSeeded(TENANT, docTumbler, COLL, List.of(
             Map.of("position", 0, "chash", CH_A)));
         Map<String, Integer> counts = repo.renameCollection(TENANT, COLL, renamed);
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk's ON UPDATE
+        // CASCADE (F10a, verified for exactly this rename case) now re-homes the
+        // manifest row AUTOMATICALLY the instant COLLECTION_SCOPED_TABLES' "chunks"
+        // entry (renamed FIRST, list order) UPDATEs nexus.chunks.collection -- by
+        // the time renameCollectionTxn's OWN explicit
+        // "UPDATE catalog_document_chunks ... WHERE collection = oldName" runs
+        // (the list's SECOND entry), the row already carries the NEW name, so that
+        // statement's own affected-row count is legitimately 0, not 1. The manifest
+        // join key is still correctly re-homed -- verified by the combined-query
+        // assertion below -- just by the FK's cascade instead of the explicit UPDATE.
         assertThat(counts.get("catalog_document_chunks"))
-            .as("rename re-homes the manifest join key").isEqualTo(1);
+            .as("rename re-homes the manifest join key via the FK's own ON UPDATE "
+                + "CASCADE now (F10a) -- the explicit per-table UPDATE that used to "
+                + "do this work finds nothing left to touch")
+            .isEqualTo(0);
         try (Connection su = pg.createConnection(""); Statement st = su.createStatement();
              ResultSet rs = st.executeQuery(
                  "SELECT count(*) FROM nexus.search_metadata_scoped_1024("

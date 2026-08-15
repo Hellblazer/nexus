@@ -241,16 +241,20 @@ class CatalogDeleteCollectionCascadeTest {
         // catalog_documents + manifest
         st.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
             + "VALUES ('" + tenant + "', 'dc-doc-1', 'Doc 1', '" + COLL + "')");
-        // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
-        // (catalog-025-collection-not-null.xml) — the document above is
-        // already registered under COLL, so stamp the manifest row the same.
-        st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-            + "VALUES ('" + tenant + "', 'dc-doc-1', 0, '" + chash("dcman1") + "', '" + COLL + "')");
         // chunks: 2/1/1 across three dims, one unified nexus.chunks table (RDR-191).
         st.execute(chunkInsert(tenant, 384, "dc384a"));
         st.execute(chunkInsert(tenant, 384, "dc384b"));
         st.execute(chunkInsert(tenant, 768, "dc768a"));
         st.execute(chunkInsert(tenant, 1024, "dc1024a"));
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for the manifest insert below -- reuse dc384a's
+        // chash (rather than minting a fifth, distinct chunk) so the "chunks
+        // (unified, 2+1+1)" count assertion above stays exactly 4.
+        // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
+        // (catalog-025-collection-not-null.xml) — the document above is
+        // already registered under COLL, so stamp the manifest row the same.
+        st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+            + "VALUES ('" + tenant + "', 'dc-doc-1', 0, '" + chash("dc384a") + "', '" + COLL + "')");
         // (chash_index seeds removed — RDR-187/nexus-piwya.9: router dropped)
         // topics: 1 (explicit id)
         long topicId = Math.abs((long) (tenant + COLL).hashCode());

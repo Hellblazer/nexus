@@ -225,6 +225,15 @@ class CatalogPurgeTrashVacuumTest {
                     "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES ('"
                     + tenant + "', '" + docId + "', '" + docId + "', '" + collection + "')");
             }
+        }
+
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // chunk vectors to land BEFORE the manifest rows below (previously
+        // order-independent).
+        vecRepo.upsertChunks(tenant, collection, chashes, texts, metas);
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
             // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
             // (catalog-025-collection-not-null.xml) — the document already
             // carries a real physical_collection above, so stamp the
@@ -242,8 +251,6 @@ class CatalogPurgeTrashVacuumTest {
                 }
             }
         }
-
-        vecRepo.upsertChunks(tenant, collection, chashes, texts, metas);
 
         for (String docId : docIds) {
             assertThat(repo.deleteDocument(tenant, docId)).isEqualTo(1);

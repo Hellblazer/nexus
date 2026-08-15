@@ -1235,7 +1235,10 @@ class PgVectorRepositoryContractTest {
             List.of("b460b20af2d6236d5932c51c4eb1206ec499e868ee10250db8363dd15baa848f"), List.of("resolvable chunk"), List.of(Map.of()));
         seedCatalogDocument(TENANT_A, tumbler, "Broken Manifest Doc");
         seedManifestRow(TENANT_A, tumbler, 0, "b460b20af2d6236d5932c51c4eb1206ec499e868ee10250db8363dd15baa848f", col);
-        seedManifestRow(TENANT_A, tumbler, 1, "292001b2349cbd9c24bf8c243d4eb3eab82324f766669c5e0f6657c3296088bb", col);  // dangling chash
+        // dangling chash -- this test's whole SUBJECT. RDR-191 Phase 5
+        // (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a matching
+        // nexus.chunks row, so bypass the FK locally around this one insert.
+        seedManifestRowBypassingFk(TENANT_A, tumbler, 1, "292001b2349cbd9c24bf8c243d4eb3eab82324f766669c5e0f6657c3296088bb", col);
 
         assertThatThrownBy(() -> repo1024.fetchDocumentChunks(TENANT_A, tumbler))
             .as("a manifest row whose (collection, chash) has no chunk must fail loud — "
@@ -1381,6 +1384,30 @@ class PgVectorRepositoryContractTest {
             ps.setBytes(4, java.util.HexFormat.of().parseHex(chash));
             ps.setString(5, collection);
             ps.executeUpdate();
+        }
+    }
+
+    /**
+     * RDR-191 Phase 5 (nexus-o8dil.29): {@code fk_catalog_chunks_chunk} now rejects a
+     * manifest row with no matching {@code nexus.chunks} row. This helper drops the
+     * constraint, inserts the (deliberately dangling) row via {@link #seedManifestRow},
+     * then re-adds the constraint {@code NOT VALID} — scoped to callers whose actual
+     * test subject IS the dangling row, so the shared {@link #seedManifestRow} used by
+     * every correctly-matched fixture stays fully FK-checked.
+     */
+    private void seedManifestRowBypassingFk(String tenant, String docId, int position,
+                                             String chash, String collection) throws SQLException {
+        try (Connection su = pg.createConnection("")) {
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+        }
+        seedManifestRow(tenant, docId, position, chash, collection);
+        try (Connection su = pg.createConnection("")) {
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks "
+                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
         }
     }
 

@@ -895,8 +895,21 @@ class RekeyOpsIntegrationTest {
                 external.rollback();
 
                 Map<String, Object> counts = future.get(15, TimeUnit.SECONDS);
+                // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk's ON
+                // UPDATE CASCADE (F10a, verified for exactly this rekey case) now
+                // re-points the manifest row AUTOMATICALLY the instant step (4)'s
+                // content rekey (ChashSqlIdioms.contentRekeyUpdateDsl) UPDATEs
+                // nexus.chunks.chash -- by the time step (5)'s own explicit
+                // "UPDATE catalog_document_chunks ... WHERE chash = old_bytes"
+                // runs, the row already carries the NEW chash, so that
+                // statement's own affected-row count is legitimately 0, not 1.
+                // The manifest is still correctly repointed -- verified by the
+                // chash assertion after this block -- just by the FK's cascade
+                // instead of the explicit UPDATE.
                 assertThat(counts.get("manifest_repointed"))
-                    .as("gate released -- the manifest repoint completes").isEqualTo(1);
+                    .as("gate released -- the manifest repoint completes via the FK's own ON "
+                        + "UPDATE CASCADE now (F10a) -- the explicit UPDATE that used to do this "
+                        + "work finds nothing left to touch").isEqualTo(0);
             } finally {
                 executor.shutdownNow();
             }
@@ -1037,8 +1050,21 @@ class RekeyOpsIntegrationTest {
                 external.rollback();
 
                 Map<String, Object> counts = future.get(15, TimeUnit.SECONDS);
+                // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk's ON
+                // UPDATE CASCADE (F10a, verified for exactly this rekey case) now
+                // re-points the manifest row AUTOMATICALLY the instant step (4)'s
+                // content rekey (ChashSqlIdioms.contentRekeyUpdateDsl) UPDATEs
+                // nexus.chunks.chash -- by the time step (5)'s own explicit
+                // "UPDATE catalog_document_chunks ... WHERE chash = old_bytes"
+                // runs, the row already carries the NEW chash, so that
+                // statement's own affected-row count is legitimately 0, not 1.
+                // The manifest is still correctly repointed -- verified by the
+                // chash assertion after this block -- just by the FK's cascade
+                // instead of the explicit UPDATE.
                 assertThat(counts.get("manifest_repointed"))
-                    .as("gate released -- the manifest repoint completes").isEqualTo(1);
+                    .as("gate released -- the manifest repoint completes via the FK's own ON "
+                        + "UPDATE CASCADE now (F10a) -- the explicit UPDATE that used to do this "
+                        + "work finds nothing left to touch").isEqualTo(0);
             } finally {
                 executor.shutdownNow();
             }
@@ -1124,6 +1150,13 @@ class RekeyOpsIntegrationTest {
             // real, already-registered collection (chosen for no reason
             // other than existing); the dangling detection correlates on
             // chash alone, so this does not touch the coverage.
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now
+            // requires a matching nexus.chunks row -- a genuinely-dangling row
+            // is exactly this test's SUBJECT, so bypass the FK locally: drop
+            // the constraint, insert, then re-add it NOT VALID (catalog-029-0's
+            // exact shape) so it is live again (unvalidated) afterward.
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.catalog_document_chunks "
                     + "(tenant_id, doc_id, position, chash, collection) VALUES (?, 'ghost-doc', 0, ?, ?)")) {
@@ -1132,6 +1165,11 @@ class RekeyOpsIntegrationTest {
                 ps.setString(3, col384);
                 ps.executeUpdate();
             }
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks "
+                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
         }
 
         assertThatThrownBy(() -> rekeyOps.rekey(tenant, false))

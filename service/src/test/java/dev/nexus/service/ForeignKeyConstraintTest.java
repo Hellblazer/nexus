@@ -631,6 +631,12 @@ class ForeignKeyConstraintTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES " +
                 "('" + TENANT_A + "', 'fk-chunk-coll') ON CONFLICT DO NOTHING");
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
+            // a matching nexus.chunks row for this CONTROL insert to succeed.
+            su.createStatement().execute(
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES " +
+                "('" + TENANT_A + "', 'fk-chunk-coll', 'abc123abc123abc123abc123abc12300', 'text', " +
+                "('[" + "0.1,".repeat(383) + "0.1]')::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks " +
                 "(tenant_id, doc_id, position, chash, collection) VALUES " +
@@ -670,6 +676,14 @@ class ForeignKeyConstraintTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES " +
                 "('" + TENANT_A + "', 'fk-chunk-coll') ON CONFLICT DO NOTHING");
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
+            // a matching nexus.chunks row for each of these two manifest inserts.
+            su.createStatement().execute(
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES " +
+                "('" + TENANT_A + "', 'fk-chunk-coll', 'hash0000000000000000000000000000', 'text0', " +
+                "('[" + "0.1,".repeat(383) + "0.1]')::vector), " +
+                "('" + TENANT_A + "', 'fk-chunk-coll', 'hash1111111111111111111111111111', 'text1', " +
+                "('[" + "0.1,".repeat(383) + "0.1]')::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks " +
                 "(tenant_id, doc_id, position, chash, collection) VALUES " +

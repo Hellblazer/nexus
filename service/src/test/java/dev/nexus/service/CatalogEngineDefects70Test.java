@@ -58,6 +58,65 @@ class CatalogEngineDefects70Test {
         return m;
     }
 
+    /**
+     * RDR-191 Phase 5 (nexus-o8dil.29): {@code fk_catalog_chunks_chunk} now requires
+     * every {@code catalog_document_chunks} row's {@code (tenant_id, collection,
+     * chash)} to have a matching {@code nexus.chunks} row. Every manifest-write call
+     * site below is routed through one of the {@code *Seeded} wrappers, which stub a
+     * minimal {@code nexus.chunks} row (single {@code embedding_384} vector,
+     * arbitrary text) for each row's chash first. A chash that is null, not valid
+     * hex, or not EXACTLY 64 hex chars (32 bytes) is left unstubbed on purpose:
+     * nexus.chunks carries the SAME {@code chunks_chash_octet_check} (octet_length=32)
+     * as catalog_document_chunks, so a wrong-length stub would itself violate that
+     * check rather than reaching whatever violation a given test is actually after.
+     */
+    private static final String STUB_VECTOR_384 =
+        "[" + "0.1,".repeat(383) + "0.1]";
+
+    private void stubChunk(String tenant, String collection, Object chashObj) {
+        if (!(chashObj instanceof String chashHex) || chashHex.length() != 64) {
+            return;
+        }
+        if (!chashHex.matches("(?i)^[0-9a-f]+$")) {
+            return;
+        }
+        tenantScope.withTenant(tenant, ctx -> ctx.execute(
+            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
+            + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::vector) "
+            + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
+            tenant, collection, chashHex, STUB_VECTOR_384));
+    }
+
+    private void writeManifestSeeded(String tenant, String docId, String collection,
+                                      List<Map<String, Object>> rows) {
+        for (var row : rows) {
+            stubChunk(tenant, collection, row.get("chash"));
+        }
+        repo.writeManifest(tenant, docId, collection, rows);
+    }
+
+    private void appendManifestChunksSeeded(String tenant, String docId, String collection,
+                                             List<Map<String, Object>> rows) {
+        for (var row : rows) {
+            stubChunk(tenant, collection, row.get("chash"));
+        }
+        repo.appendManifestChunks(tenant, docId, collection, rows);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> writeManifestManySeeded(String tenant, List<Map<String, Object>> docs,
+                                                          String collection) {
+        for (var doc : docs) {
+            var rows = (List<Map<String, Object>>) doc.get("rows");
+            if (rows != null) {
+                for (var row : rows) {
+                    stubChunk(tenant, collection, row.get("chash"));
+                }
+            }
+        }
+        return repo.writeManifestMany(tenant, docs, collection);
+    }
+
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     CatalogRepository repo;
@@ -148,7 +207,7 @@ class CatalogEngineDefects70Test {
             "physical_collection", coll,
             "source_uri", "file:///defects70/gc1/doc.md"));
         String h = ch("defects70-gc1-chunk");
-        repo.writeManifest(TENANT, t, coll, List.of(row(0, h)));
+        writeManifestSeeded(TENANT, t, coll, List.of(row(0, h)));
 
         // NON-VACUITY: visible while live.
         assertThat(repo.chashesForCollection(TENANT, coll)).contains(h);
@@ -171,7 +230,7 @@ class CatalogEngineDefects70Test {
             "physical_collection", coll,
             "source_uri", "file:///defects70/gc2/doc.md"));
         String h = ch("defects70-gc2-chunk");
-        repo.writeManifest(TENANT, t, coll, List.of(row(0, h)));
+        writeManifestSeeded(TENANT, t, coll, List.of(row(0, h)));
 
         assertThat(repo.docsForChashes(TENANT, List.of(h))).containsExactly(t);
 
@@ -200,7 +259,7 @@ class CatalogEngineDefects70Test {
             "physical_collection", coll,
             "source_uri", "file:///defects70/rchash/doc.md"));
         String h = ch("defects70-rchash-chunk");
-        repo.writeManifest(TENANT, t, coll, List.of(row(0, h)));
+        writeManifestSeeded(TENANT, t, coll, List.of(row(0, h)));
         seedChunkRow(coll, h, "resolve-chash body");
 
         var before = repo.resolveChash(TENANT, h, coll);
@@ -227,7 +286,7 @@ class CatalogEngineDefects70Test {
         String t = repo.registerDocument(TENANT, owner, Map.of(
             "title", "resync-dead", "content_type", "prose", "chunk_count", 0,
             "source_uri", "file:///defects70/resyncdead/doc.md"));
-        repo.appendManifestChunks(TENANT, t, "knowledge__defects70-resyncdead__v1",
+        appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-resyncdead__v1",
             List.of(row(0, ch("defects70-rs-0"))));
         assertThat(repo.deleteDocument(TENANT, t)).isEqualTo(1);
 
@@ -245,7 +304,7 @@ class CatalogEngineDefects70Test {
             "title", "man1", "content_type", "code",
             "physical_collection", "code__defects70-man1__voyage-code-3__v1",
             "source_uri", "file:///defects70/man1/doc.md"));
-        repo.appendManifestChunks(TENANT, t, "code__defects70-man1__voyage-code-3__v1", List.of(
+        appendManifestChunksSeeded(TENANT, t, "code__defects70-man1__voyage-code-3__v1", List.of(
             row(0, ch("defects70-man1-0")),
             row(1, ch("defects70-man1-1")),
             row(2, ch("defects70-man1-2"))));
@@ -276,8 +335,8 @@ class CatalogEngineDefects70Test {
         String dead = repo.registerDocument(TENANT, owner, Map.of(
             "title", "many-dead", "content_type", "code",
             "source_uri", "file:///defects70/many/dead.md"));
-        repo.writeManifest(TENANT, live, coll, List.of(row(0, ch("defects70-many-live"))));
-        repo.writeManifest(TENANT, dead, coll, List.of(row(0, ch("defects70-many-dead"))));
+        writeManifestSeeded(TENANT, live, coll, List.of(row(0, ch("defects70-many-live"))));
+        writeManifestSeeded(TENANT, dead, coll, List.of(row(0, ch("defects70-many-dead"))));
 
         assertThat(repo.getManifestMany(TENANT, List.of(live, dead)))
             .containsKeys(live, dead);
@@ -354,7 +413,7 @@ class CatalogEngineDefects70Test {
         String t = repo.registerDocument(TENANT, owner, Map.of(
             "title", "rederive", "content_type", "prose", "chunk_count", 0,
             "source_uri", "file:///defects70/rederive/doc.md"));
-        repo.appendManifestChunks(TENANT, t, "knowledge__defects70-rederive__voyage-context-3__v1", List.of(
+        appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-rederive__voyage-context-3__v1", List.of(
             row(0, ch("defects70-rd-0")), row(1, ch("defects70-rd-1")),
             row(2, ch("defects70-rd-2")), row(3, ch("defects70-rd-3")),
             row(4, ch("defects70-rd-4"))));
@@ -377,7 +436,7 @@ class CatalogEngineDefects70Test {
         String t = repo.registerDocument(TENANT, owner, Map.of(
             "title", "caller-count", "content_type", "prose", "chunk_count", 0,
             "source_uri", "file:///defects70/callercount/doc.md"));
-        repo.appendManifestChunks(TENANT, t, "knowledge__defects70-callercount__v1", List.of(
+        appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-callercount__v1", List.of(
             row(0, ch("defects70-cc-0")), row(1, ch("defects70-cc-1")),
             row(2, ch("defects70-cc-2"))));
 
@@ -437,13 +496,13 @@ class CatalogEngineDefects70Test {
             "title", "append-fold", "content_type", "prose", "chunk_count", 0,
             "source_uri", "file:///defects70/appendfold/doc.md"));
 
-        repo.appendManifestChunks(TENANT, t, "knowledge__defects70-appendfold__voyage-context-3__v1", List.of(
+        appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-appendfold__voyage-context-3__v1", List.of(
             row(0, ch("defects70-af-0")), row(1, ch("defects70-af-1"))));
         assertThat(repo.getDocument(TENANT, t).get("chunk_count"))
             .as("append must fold the count in the same transaction")
             .isEqualTo(2);
 
-        repo.appendManifestChunks(TENANT, t, "knowledge__defects70-appendfold__voyage-context-3__v1",
+        appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-appendfold__voyage-context-3__v1",
             List.of(row(2, ch("defects70-af-2"))));
         assertThat(repo.getDocument(TENANT, t).get("chunk_count")).isEqualTo(3);
     }
@@ -460,7 +519,7 @@ class CatalogEngineDefects70Test {
         String t = repo.registerDocument(TENANT, owner, Map.of(
             "title", "batch-rederive", "content_type", "prose", "chunk_count", 0,
             "source_uri", "file:///defects70/batchrederive/doc.md"));
-        repo.appendManifestChunks(TENANT, t, "knowledge__defects70-batchrederive__voyage-context-3__v1", List.of(
+        appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-batchrederive__voyage-context-3__v1", List.of(
             row(0, ch("defects70-br-0")), row(1, ch("defects70-br-1"))));
         forceStaleChunkCount(t, 77);
         assertThat(repo.getDocument(TENANT, t).get("chunk_count"))
@@ -563,7 +622,7 @@ class CatalogEngineDefects70Test {
         repo.updateDocument(TENANT, t, Map.of("indexed_at", "2020-01-01T00:00:00.000000+00:00"));
         assertThat(repo.deleteDocument(TENANT, t)).isEqualTo(1);
 
-        assertThatThrownBy(() -> repo.appendManifestChunks(TENANT, t, "knowledge__defects70-stampidx__v1",
+        assertThatThrownBy(() -> appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-stampidx__v1",
                 List.of(row(0, ch("defects70-eldyi-stampidx-0")))))
             .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
 
@@ -598,7 +657,7 @@ class CatalogEngineDefects70Test {
     @Test
     void eldyi_writeManifest_refusesTombstonedDoc() {
         String t = tombstonedDoc("writemanifest");
-        assertThatThrownBy(() -> repo.writeManifest(TENANT, t, "knowledge__defects70-writemanifest__v1",
+        assertThatThrownBy(() -> writeManifestSeeded(TENANT, t, "knowledge__defects70-writemanifest__v1",
                 List.of(row(0, ch("defects70-eldyi-wm-0")))))
             .as("writeManifest must refuse a tombstoned target, not silently write orphan chunks")
             .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
@@ -610,7 +669,7 @@ class CatalogEngineDefects70Test {
     @Test
     void eldyi_appendManifestChunks_refusesTombstonedDoc() {
         String t = tombstonedDoc("appendmanifest");
-        assertThatThrownBy(() -> repo.appendManifestChunks(TENANT, t, "knowledge__defects70-appendmanifest__v1",
+        assertThatThrownBy(() -> appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-appendmanifest__v1",
                 List.of(row(0, ch("defects70-eldyi-am-0")))))
             .as("appendManifestChunks must refuse a tombstoned target")
             .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
@@ -626,7 +685,7 @@ class CatalogEngineDefects70Test {
         String t = repo.registerDocument(TENANT, owner, Map.of(
             "title", "purgemanifest", "content_type", "prose",
             "source_uri", "file:///defects70/eldyi/purgemanifest/doc.md"));
-        repo.appendManifestChunks(TENANT, t, "knowledge__defects70-purgemanifest__v1",
+        appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-purgemanifest__v1",
             List.of(row(0, ch("defects70-eldyi-pm-0"))));
         assertThat(repo.deleteDocument(TENANT, t)).isEqualTo(1);
 
@@ -1223,7 +1282,7 @@ class CatalogEngineDefects70Test {
             .doesNotContainKey(tumbler);
 
         // The repair path the verb drives.
-        repo.writeManifest(TENANT, tumbler, coll, List.of(
+        writeManifestSeeded(TENANT, tumbler, coll, List.of(
             row(0, ch("recon1-0")), row(1, ch("recon1-1"))));
         assertThat(repo.getManifest(TENANT, tumbler)).hasSize(2);
         assertThat(repo.getDocument(TENANT, tumbler).get("chunk_count"))
@@ -1302,7 +1361,7 @@ class CatalogEngineDefects70Test {
         injectDamagedDoc("9004.1", coll, 5, "{}");
         injectDamagedDoc("9004.2", coll, 5, "{}");
 
-        var result = repo.writeManifestMany(TENANT, List.of(
+        var result = writeManifestManySeeded(TENANT, List.of(
             Map.of("doc_id", "9004.1", "rows", List.of(row(0, ch("recon4-a")))),
             // No such document — the FK on catalog_document_chunks rejects it.
             Map.of("doc_id", "9004.404", "rows", List.of(row(0, ch("recon4-x")))),

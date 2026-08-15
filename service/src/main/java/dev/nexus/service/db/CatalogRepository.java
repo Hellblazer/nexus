@@ -5998,8 +5998,27 @@ public final class CatalogRepository {
         return counts;
     }
 
+    /**
+     * RDR-191 Phase 5 (nexus-o8dil.29, class-B site 2): fk_catalog_chunks_chunk
+     * (catalog-029-0, DEFERRABLE INITIALLY IMMEDIATE) would otherwise raise on
+     * {@link #deleteCollectionTxn}'s step 1 — it deletes FROM nexus.chunks while the
+     * manifest rows that reference those chunks still exist (step 1b, immediately
+     * after, then step 6's fk-001 CASCADE for anything step 1b missed). Deferring
+     * pushes the check to the caller's transaction commit ({@code
+     * tenantScope.withTenant}), by which point every referencing manifest row is
+     * gone. Mirrors the Liquibase-side fix in {@code nexus.purge_trash}
+     * (catalog-029-3) — same F8a/F10b class-B shape, Java call site instead of a
+     * stored function. Hoisted into its own named method (RawSqlGateTest's
+     * SANCTIONED_STATEMENTS is method-granular and cannot see into a lambda body).
+     */
+    private static void deferManifestChunkFk(DSLContext ctx) {
+        ctx.execute("SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED");
+    }
+
     private Map<String, Integer> deleteCollectionTxn(String tenant, String name) {
         return tenantScope.withTenant(tenant, ctx -> {
+            deferManifestChunkFk(ctx);
+
             Map<String, Integer> counts = new LinkedHashMap<>();
             // 1. T3 chunk vectors (registry children, fk-002 RESTRICT). RDR-191
             //    (nexus-o8dil.48): one DELETE against the unified nexus.chunks,

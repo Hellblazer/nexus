@@ -509,11 +509,7 @@ class ManifestFunctionsTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, docId, COLLECTION_384);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks " +
-                "  (tenant_id, doc_id, position, chash, collection) " +
-                "VALUES ('" + TENANT_A + "', '" + docId + "', 0, '" + chash + "', '" + COLLECTION_384 + "') " +
-                "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+            insertManifestRowWithCollection(su, TENANT_A, docId, 0, chash, COLLECTION_384);
         }
 
         // Step 2: backfill — nothing to stamp, must be a no-op.
@@ -929,11 +925,27 @@ class ManifestFunctionsTest {
                                                          String docId, int position,
                                                          String chash, String collection)
             throws Exception {
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for every catalog_document_chunks insert. This
+        // file exercises manifest_orphans/document_text/manifest_backfill, whose
+        // whole point is detecting/handling a chash with NO matching chunk -- a
+        // state the FK now prevents in normal operation (these functions are named
+        // in RDR-191 Decision item 4 as retiring in a LATER phase, out of this
+        // bead's scope). Bypass locally: drop the constraint, insert, then re-add
+        // it NOT VALID (catalog-029-0's exact shape) so it is live again
+        // (unvalidated) for every subsequent statement in this container.
+        su.createStatement().execute(
+            "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks " +
             "  (tenant_id, doc_id, position, chash, collection) " +
             "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", '" + chash + "', '" + collection + "') " +
             "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        su.createStatement().execute(
+            "ALTER TABLE nexus.catalog_document_chunks " +
+            "ADD CONSTRAINT fk_catalog_chunks_chunk " +
+            "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) " +
+            "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
     }
 
     /**

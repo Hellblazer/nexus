@@ -724,8 +724,28 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         catalogRepo.upsertDocument(TENANT, Map.of(
             "tumbler", "gate2-gc-expire-doc", "title", "gc expire doc",
             "content_type", "code", "corpus", "code", "physical_collection", coll));
+        // RDR-191 Phase 5 (nexus-o8dil.29): this manifest row is dangling BY
+        // CONSTRUCTION (refChash's only physical backing lives in
+        // quarantineColl, never in coll -- see the class javadoc above), so
+        // fk_catalog_chunks_chunk would refuse this writeManifest call outright.
+        // Bypass the FK locally around this one Java-level write: drop the
+        // constraint, write, then re-add it NOT VALID (catalog-029-0's exact
+        // shape) so it is live again (unvalidated) for the rest of this test.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+        }
         catalogRepo.writeManifest(TENANT, "gate2-gc-expire-doc", coll,
             List.of(Map.of("position", 0, "chash", refChash, "chunk_index", 0)));
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks "
+                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+        }
         // unrefChash deliberately has NO manifest row anywhere.
 
         int danglingBefore;
@@ -838,9 +858,21 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             // table anywhere (same construction as Order 90's class-(a)
             // ghost) — the owner below is tombstoned, turning this into the
             // negative-direction twin.
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now
+            // requires a matching nexus.chunks row -- a genuinely-dangling row
+            // is exactly this test's SUBJECT, so bypass the FK locally: drop
+            // the constraint, insert, then re-add it NOT VALID (catalog-029-0's
+            // exact shape) so it is live again (unvalidated) afterward.
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
             su.createStatement().execute("INSERT INTO nexus.catalog_document_chunks "
                 + "(tenant_id, doc_id, position, chash, collection) VALUES "
                 + "('" + TENANT + "', 'gate2-control-tombstone-doc', 0, '" + ghostChash + "', '" + coll + "')");
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks "
+                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
         }
         // Real production tombstone path (CatalogRepository.deleteDocument),
         // not a raw UPDATE — matches Order 45's own discipline. Soft
@@ -925,9 +957,21 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
                 + "('" + TENANT + "', 'gate2-control-doc', 'control doc', '" + coll + "')");
             // Genuinely dangling: ghostChash resolves in NO chunk table, and
             // the owning document is LIVE (no deleted_at set above).
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now
+            // requires a matching nexus.chunks row -- a genuinely-dangling row
+            // is exactly this test's SUBJECT, so bypass the FK locally: drop
+            // the constraint, insert, then re-add it NOT VALID (catalog-029-0's
+            // exact shape) so it is live again (unvalidated) afterward.
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
             su.createStatement().execute("INSERT INTO nexus.catalog_document_chunks "
                 + "(tenant_id, doc_id, position, chash, collection) VALUES "
                 + "('" + TENANT + "', 'gate2-control-doc', 0, '" + ghostChash + "', '" + coll + "')");
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks "
+                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
         }
 
         try (Connection su = pg.createConnection("")) {

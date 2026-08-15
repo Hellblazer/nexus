@@ -227,14 +227,16 @@ class GraphHopParityTest {
         // RDR-180: chash is bytea(32) now — the lpad'd decimal string is still valid
         // hex (digits 0-9 only), padded to the full 64-hex canonical width and
         // decoded at the seam.
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-            "SELECT '" + TENANT_A + "', 'ex'||g, 0, decode(lpad(g::text, 64, '0'), 'hex'), '" + COLL_EXPLAIN + "' " +
-            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // nexus.chunks row before the manifest row below -- chunk insert first.
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
             "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', decode(lpad(g::text, 64, '0'), 'hex'), 'ex'||g, " +
             "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::vector " +
+            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        su.createStatement().execute(
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
+            "SELECT '" + TENANT_A + "', 'ex'||g, 0, decode(lpad(g::text, 64, '0'), 'hex'), '" + COLL_EXPLAIN + "' " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         // edges exseed --cites--> ex1..exN
         su.createStatement().execute(
@@ -713,15 +715,17 @@ class GraphHopParityTest {
             "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
             "VALUES ('" + tenant + "', '" + tumbler + "', 'Doc " + tumbler + "', 'a', 2024, " +
             "'paper', 'research', '" + collection + "') ON CONFLICT (tenant_id, tumbler) DO NOTHING");
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-            "VALUES ('" + tenant + "', '" + tumbler + "', 0, decode('" + chash + "', 'hex'), '" + collection + "') " +
-            "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // chunk row to land BEFORE the manifest row (previously order-independent).
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
             " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ") VALUES ('" +
             tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + tumbler + "', " +
             vec2(dim, x, y) + "::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+        su.createStatement().execute(
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
+            "VALUES ('" + tenant + "', '" + tumbler + "', 0, decode('" + chash + "', 'hex'), '" + collection + "') " +
+            "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
     }
 
     private static void link(Connection su, String tenant, String from, String to, String type)

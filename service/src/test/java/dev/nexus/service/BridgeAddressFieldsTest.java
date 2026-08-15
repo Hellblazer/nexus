@@ -196,19 +196,27 @@ class BridgeAddressFieldsTest {
                 + " VALUES ('" + TENANT2 + "', 'g5addr.1', 'G5 Test Note 2', 'markdown',"
                 + " 'file:///vault/tenant2/other.md', now())"
                 + " ON CONFLICT DO NOTHING");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks"
-                + " (tenant_id, doc_id, position, chash, chunk_index, collection)"
-                + " VALUES ('" + TENANT2 + "', 'g5addr.1', 0, decode('" + CHASH_WITH_URI + "', 'hex'), 0, '" + COL + "')"
-                + " ON CONFLICT DO NOTHING");
         }
 
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires
+        // TENANT2's own chunk row (a separate PK entry, tenant_id is part of the
+        // key) to exist BEFORE the manifest insert below -- moved ahead of it
+        // (previously ran after, order-independent pre-FK).
         // Upsert CHASH_WITH_URI also for TENANT2 (needs the chunk to search against)
         postAs(TOKEN2, "/v1/vectors/upsert-chunks", Map.of(
             "collection", COL,
             "ids",        List.of(CHASH_WITH_URI),
             "documents",  List.of("chunk with source_uri in catalog"),
             "metadatas",  List.of(Map.of("chunk_text_hash", FULL_HASH_1))));
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_document_chunks"
+                + " (tenant_id, doc_id, position, chash, chunk_index, collection)"
+                + " VALUES ('" + TENANT2 + "', 'g5addr.1', 0, decode('" + CHASH_WITH_URI + "', 'hex'), 0, '" + COL + "')"
+                + " ON CONFLICT DO NOTHING");
+        }
     }
 
     @AfterAll

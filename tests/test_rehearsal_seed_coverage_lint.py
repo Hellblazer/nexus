@@ -173,6 +173,18 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # straddling-seed/effect-assert shape as vectors-004-1 (all three
         # dims freshly seeded here, no chunks-style reuse available).
         ("taxonomy-007-1", "nexus-jv3ue"),
+        # nexus-o8dil.29 (RDR-191 Phase 5): catalog-029-1's anti-join DELETE
+        # runs inside the same NO FORCE/FORCE toggle-wrap shape as
+        # catalog-013-1b/catalog-014-0/catalog-025-0. Reuses the 1.1.100
+        # KEEP-arm fixture rather than a fresh dangling row: any row that
+        # would exercise catalog-029-1's DELETE arm is, by construction,
+        # ALSO dangling under catalog-025-0's structurally identical
+        # anti-join (against the pre-unify per-dim tables vectors-004-1
+        # copies verbatim into nexus.chunks earlier in this same hop), so
+        # catalog-025-0 would remove it first; effect-asserted via the
+        # KEEP-arm survival (1.1.100's two content-backed rows still present)
+        # plus fk_catalog_chunks_chunk existing and VALIDATED at HEAD.
+        ("catalog-029-1", "nexus-o8dil.29"),
     }
 )
 

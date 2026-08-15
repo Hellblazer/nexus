@@ -399,6 +399,12 @@ class ReadShapeViewsTest {
                                    String collection) throws Exception {
         // chash must be exactly 32 chars (catalog_document_chunks_chash_len_check).
         String c = (chash + "00000000000000000000000000000000").substring(0, 32);
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for every manifest write below.
+        su.createStatement().execute(
+            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES ("
+            + "'" + tenant + "', '" + collection + "', '" + c + "', 'stub', "
+            + "('[" + "0.1,".repeat(383) + "0.1]')::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
             + "VALUES ('" + tenant + "', '" + docId + "', " + pos + ", '" + c + "', '" + collection + "')");

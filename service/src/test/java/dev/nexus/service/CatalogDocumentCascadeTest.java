@@ -210,6 +210,11 @@ class CatalogDocumentCascadeTest {
             + "ON CONFLICT DO NOTHING");
         st.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
             + "VALUES ('" + tenant + "', '" + tumbler + "', 'Doc', '" + COLL + "')");
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for the manifest insert below.
+        st.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES "
+            + "('" + tenant + "', '" + COLL + "', '" + chash("man" + tenant + tumbler) + "', 'text', "
+            + "('[" + "0.1,".repeat(383) + "0.1]')::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
         // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
         // (catalog-025-collection-not-null.xml) — the document above is
         // already registered under COLL, so stamp the manifest row the same.

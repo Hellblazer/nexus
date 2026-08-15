@@ -311,6 +311,23 @@ class CatalogRenameCollectionTest {
                 + "VALUES ('" + TENANT_A + "', 'xm-doc-1', 'XM Doc', '" + src + "')");
             // target registry already exists (cross-model copy registered it)
             su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + tgt + "')");
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
+            // a matching nexus.chunks row for the manifest insert below, at BOTH
+            // ends: the pre-rename manifest row needs a chunk under src, and
+            // renameCollectionTxn's COPY branch (target pre-registered) never
+            // touches nexus.chunks itself -- only catalog_documents +
+            // catalog_document_chunks (containsOnlyKeys assertion below) -- so the
+            // post-rename manifest row (now pointing at tgt) needs its OWN
+            // same-chash chunk under tgt too, matching what the REAL cross-model
+            // copy this branch models would already have written there.
+            su.createStatement().execute("INSERT INTO nexus.chunks "
+                + "(tenant_id, collection, chash, chunk_text, embedding_384) VALUES "
+                + "('" + TENANT_A + "', '" + src + "', '" + "e".repeat(32) + "', 'text', "
+                + "('[" + "0.1,".repeat(383) + "0.1]')::vector)");
+            su.createStatement().execute("INSERT INTO nexus.chunks "
+                + "(tenant_id, collection, chash, chunk_text, embedding_768) VALUES "
+                + "('" + TENANT_A + "', '" + tgt + "', '" + "e".repeat(32) + "', 'text', "
+                + "('[" + "0.1,".repeat(767) + "0.1]')::vector)");
             // a manifest row still homed at the SOURCE (the pre-rename state)
             su.createStatement().execute("ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY");
             su.createStatement().execute("INSERT INTO nexus.catalog_document_chunks "
@@ -457,16 +474,20 @@ class CatalogRenameCollectionTest {
         st.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '" + coll + "')");
         st.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
             + "VALUES ('" + tenant + "', 'rn-doc-1', 'Doc 1', '" + coll + "')");
-        // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
-        // (catalog-025-collection-not-null.xml) — the document above is
-        // already registered under coll, so stamp the manifest row the same.
-        st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-            + "VALUES ('" + tenant + "', 'rn-doc-1', 0, '" + chash("rnman1") + "', '" + coll + "')");
         // chunks: 2/1/1 across three dims, one unified nexus.chunks table (RDR-191).
         st.execute(chunkInsert(tenant, coll, 384, "rn384a"));
         st.execute(chunkInsert(tenant, coll, 384, "rn384b"));
         st.execute(chunkInsert(tenant, coll, 768, "rn768a"));
         st.execute(chunkInsert(tenant, coll, 1024, "rn1024a"));
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for the manifest insert below -- reuse rn384a's
+        // chash (rather than minting a fifth, distinct chunk) so the "chunks
+        // (unified, 2+1+1)" count assertion elsewhere stays exactly 4.
+        // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
+        // (catalog-025-collection-not-null.xml) — the document above is
+        // already registered under coll, so stamp the manifest row the same.
+        st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+            + "VALUES ('" + tenant + "', 'rn-doc-1', 0, '" + chash("rn384a") + "', '" + coll + "')");
         // (chash_index seeds removed — RDR-187/nexus-piwya.9: router dropped)
         // topics: 1 (explicit id)
         long topicId = Math.abs((long) (tenant + coll).hashCode());

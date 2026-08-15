@@ -199,16 +199,9 @@ class VectorsRepointFunctionsIntegrationTest {
                 ps.executeUpdate();
             }
 
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_document_chunks "
-                        + "(tenant_id, doc_id, position, chash, collection) VALUES (?, ?, 0, ?, ?)")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, docTumbler);
-                ps.setBytes(3, chash);
-                ps.setString(4, collection);
-                ps.executeUpdate();
-            }
-
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+            // nexus.chunks row to exist before the manifest row referencing it is
+            // inserted — chunk insert MUST precede the manifest insert below.
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
                         + "VALUES (?, ?, ?, ?, ?::vector)")) {
@@ -217,6 +210,16 @@ class VectorsRepointFunctionsIntegrationTest {
                 ps.setBytes(3, chash);
                 ps.setString(4, "vectors-005 repoint fixture chunk text");
                 ps.setString(5, vectorLiteral(384, 0.01));
+                ps.executeUpdate();
+            }
+
+            try (PreparedStatement ps = su.prepareStatement(
+                    "INSERT INTO nexus.catalog_document_chunks "
+                        + "(tenant_id, doc_id, position, chash, collection) VALUES (?, ?, 0, ?, ?)")) {
+                ps.setString(1, TENANT);
+                ps.setString(2, docTumbler);
+                ps.setBytes(3, chash);
+                ps.setString(4, collection);
                 ps.executeUpdate();
             }
 
@@ -651,6 +654,22 @@ class VectorsRepointFunctionsIntegrationTest {
 
                 // ── gc_restore_rereferenced: re-reference the orphan at
                 //    origin, then it MUST come back. ─────────────────────
+                //
+                // RDR-191 Phase 5 (nexus-o8dil.29) / nexus-zlv38: at this exact
+                // instant the orphan's nexus.chunks row sits ONLY in the
+                // quarantine collection (moved by gc_quarantine_orphans above)
+                // -- NOT at origin. fk_catalog_chunks_chunk now rejects a
+                // manifest write that re-references a chash before
+                // gc_restore_rereferenced has copied it back to origin; that
+                // production-behavior gap is tracked by nexus-zlv38, out of
+                // scope for this changeset. Bypass the FK locally for this one
+                // insert so the test can keep proving gc_restore_rereferenced's
+                // own copy-back + delete-from-quarantine behavior.
+                try (Connection ddl = rig.pg().createConnection("")) {
+                    ddl.setAutoCommit(true);
+                    ddl.createStatement().execute(
+                        "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+                }
                 try (PreparedStatement ps = conn.prepareStatement(
                         "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
                             + "VALUES (?, ?, 1, ?, ?)")) {
@@ -659,6 +678,14 @@ class VectorsRepointFunctionsIntegrationTest {
                     ps.setBytes(3, orphanChash);
                     ps.setString(4, origin);
                     ps.executeUpdate();
+                }
+                try (Connection ddl = rig.pg().createConnection("")) {
+                    ddl.setAutoCommit(true);
+                    ddl.createStatement().execute(
+                        "ALTER TABLE nexus.catalog_document_chunks "
+                        + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                        + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                        + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
                 }
                 try (PreparedStatement ps = conn.prepareStatement(
                         "SELECT nexus.gc_restore_rereferenced(384, ?, ?, ?)")) {
@@ -948,15 +975,8 @@ class VectorsRepointFunctionsIntegrationTest {
                         ps.setString(4, collection);
                         ps.executeUpdate();
                     }
-                    try (PreparedStatement ps = su.prepareStatement(
-                            "INSERT INTO nexus.catalog_document_chunks "
-                                + "(tenant_id, doc_id, position, chash, collection) VALUES (?, ?, 0, ?, ?)")) {
-                        ps.setString(1, TENANT);
-                        ps.setString(2, tumbler);
-                        ps.setBytes(3, chash);
-                        ps.setString(4, collection);
-                        ps.executeUpdate();
-                    }
+                    // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk
+                    // requires the nexus.chunks row before the manifest row below.
                     try (PreparedStatement ps = su.prepareStatement(
                             "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
                                 + "VALUES (?, ?, ?, ?, ?::vector)")) {
@@ -965,6 +985,15 @@ class VectorsRepointFunctionsIntegrationTest {
                         ps.setBytes(3, chash);
                         ps.setString(4, tumbler + " chunk text");
                         ps.setString(5, vectorLiteral(384, 0.09));
+                        ps.executeUpdate();
+                    }
+                    try (PreparedStatement ps = su.prepareStatement(
+                            "INSERT INTO nexus.catalog_document_chunks "
+                                + "(tenant_id, doc_id, position, chash, collection) VALUES (?, ?, 0, ?, ?)")) {
+                        ps.setString(1, TENANT);
+                        ps.setString(2, tumbler);
+                        ps.setBytes(3, chash);
+                        ps.setString(4, collection);
                         ps.executeUpdate();
                     }
                 }

@@ -10,6 +10,7 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.postgresql.util.PSQLException;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 
@@ -21,6 +22,7 @@ import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-152 bead nexus-net63 — SchemaMigrator end-to-end integration test.
@@ -1304,7 +1306,318 @@ class SchemaMigratorIntegrationTest {
         }
     }
 
+    // ── Test 11: late-upgrading deployment with a pre-existing dangling manifest
+    //    population must boot successfully through the full RDR-191 Phase 5
+    //    ADD-NOT-VALID -> remediate -> VALIDATE walk (nexus-o8dil.29) ──────────
+
+    /**
+     * The MANDATORY acceptance test for the manifest FK's three-step Liquibase
+     * shape (T2 {@code nexus/rdr-191-validate-placement-decision} [22557]; RDR-191
+     * amendment (xi)). A late-upgrading deployment's OWN accumulated
+     * dangling-manifest population — a {@code catalog_document_chunks} row whose
+     * chash has no matching {@code nexus.chunks} row, created while the FK did not
+     * yet exist — must not brick the box: {@code catalog-029-1}'s anti-join
+     * remediation must clean it up immediately before {@code catalog-029-2}'s
+     * VALIDATE scans, in the SAME migration walk, for every future upgrader.
+     *
+     * <p>Uses a dedicated container for the same reason as tests 5/6/8/10: the
+     * dangling population must be injected on a schema that has {@code
+     * nexus.chunks} / {@code catalog_document_chunks} but NOT YET the FK — i.e.
+     * BEFORE {@code catalog-029-0} first runs — and the shared {@link #pg}/{@link
+     * #adminDs} fixture has already migrated cleanly (FK included) by {@code
+     * @Order(1)}.
+     *
+     * <p>The RED/GREEN hinge, and this test's own falsification proof, is the
+     * sibling test {@link #bareValidateWithoutRemediation_againstDanglingPopulation_throws}:
+     * against the naive two-step shape (ADD NOT VALID -&gt; VALIDATE, skipping
+     * remediation), {@code VALIDATE CONSTRAINT} raises a hard Postgres ERROR on
+     * this exact population — proving the remediation changeset is load-bearing,
+     * not incidental, for this test's own success below.
+     */
+    @Test
+    @Order(13)
+    void lateUpgradingDeployment_withPreExistingDanglingManifestPopulation_bootsSuccessfully_andRemediates()
+            throws Exception {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
+        try {
+            final String role = "nexus_admin_o8dil29_test";
+            final String pass = "nexus_admin_o8dil29_test_pass";
+
+            // Phase A: same minimal DBA-equivalent bootstrap as tests 5/6/8/10.
+            try (Connection su = agedPg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
+                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
+                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
+                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
+                su.createStatement().execute(
+                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            }
+
+            var cfg = new com.zaxxer.hikari.HikariConfig();
+            cfg.setJdbcUrl(agedPg.getJdbcUrl());
+            cfg.setUsername(role);
+            cfg.setPassword(pass);
+            cfg.setMaximumPoolSize(2);
+            cfg.setPoolName("nexus-admin-o8dil29-test");
+
+            try (var agedDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+
+                // Phase B: migrate only up through the changeset immediately BEFORE
+                // catalog-029-0 (the FK's ADD ... NOT VALID) -- so the dangling
+                // population can be injected on a schema that has nexus.chunks /
+                // catalog_document_chunks but NOT YET the FK, exactly the
+                // late-upgrading-deployment shape amendment (x)/(xi) targets.
+                int changesetsBeforeFk;
+                try (Connection conn = agedDs.getConnection()) {
+                    Database database = DatabaseFactory.getInstance()
+                        .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+                    try (Liquibase liquibase = new Liquibase(
+                            "db/changelog/db.changelog-master.xml",
+                            new ClassLoaderResourceAccessor(),
+                            database)) {
+                        List<ChangeSet> unrun = liquibase.listUnrunChangeSets(
+                            new Contexts(), new LabelExpression());
+                        int idx = -1;
+                        for (int i = 0; i < unrun.size(); i++) {
+                            if ("catalog-029-0".equals(unrun.get(i).getId())) {
+                                idx = i;
+                                break;
+                            }
+                        }
+                        assertThat(idx)
+                            .as("catalog-029-0 must be present in the master changelog")
+                            .isGreaterThanOrEqualTo(0);
+                        changesetsBeforeFk = idx;
+
+                        liquibase.update(changesetsBeforeFk, new Contexts(), new LabelExpression());
+                    }
+                }
+
+                // Phase C: seed the pre-existing dangling population directly, on
+                // the pre-FK schema -- exactly what a late upgrader's own
+                // accumulated drift looks like. One GOOD (chunk-backed) row and one
+                // DANGLING (no matching chunk) row, same tenant/collection/doc.
+                final String tenant = "o8dil29-late-upgrade-tenant";
+                final String collection = "knowledge__o8dil29-late-upgrade__voyage-context-3__v1";
+                final String goodChash = "a".repeat(64);
+                final String danglingChash = "b".repeat(64);
+                try (Connection su = agedPg.createConnection("")) {
+                    su.setAutoCommit(true);
+                    su.createStatement().execute(
+                        "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
+                        + "VALUES ('" + tenant + "', 'o8dil29-doc', 'late upgrade doc', '" + collection + "')");
+                    su.createStatement().execute(
+                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES "
+                        + "('" + tenant + "', '" + collection + "', decode('" + goodChash + "', 'hex'), 'good text', "
+                        + "('[" + "0.1,".repeat(383) + "0.1]')::vector)");
+                    su.createStatement().execute(
+                        "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+                        + "VALUES ('" + tenant + "', 'o8dil29-doc', 0, decode('" + goodChash + "', 'hex'), '"
+                        + collection + "')");
+                    // The dangling row: no matching nexus.chunks row exists for
+                    // danglingChash. Legal to insert here ONLY because the FK does
+                    // not exist yet on this pre-catalog-029-0 schema -- exactly the
+                    // pre-existing drift this test's remediation step must clean up.
+                    su.createStatement().execute(
+                        "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+                        + "VALUES ('" + tenant + "', 'o8dil29-doc', 1, decode('" + danglingChash + "', 'hex'), '"
+                        + collection + "')");
+                }
+
+                // Phase D: resume the rest of the migration chain -- catalog-029-0
+                // (ADD NOT VALID), catalog-029-1 (remediate), catalog-029-2
+                // (VALIDATE), catalog-029-3 (purge_trash fix), plus everything
+                // after. This is the RED/GREEN hinge: against the naive two-step
+                // shape (ADD NOT VALID -> VALIDATE, no remediation),
+                // catalog-029-2's VALIDATE would raise a hard Postgres ERROR on the
+                // danglingChash row and MigrationException would propagate here
+                // (see the sibling falsification test).
+                assertThatCode(() -> SchemaMigrator.migrate(agedDs))
+                    .as("a late-upgrading deployment with a pre-existing dangling manifest "
+                        + "population must boot successfully through the full "
+                        + "ADD-NOT-VALID -> remediate -> VALIDATE walk (RDR-191 Phase 5, "
+                        + "nexus-o8dil.29) -- the naive two-step shape would throw "
+                        + "MigrationException here")
+                    .doesNotThrowAnyException();
+
+                // Phase E: the FK exists and is VALIDATED, the dangling row is
+                // gone, and the good (chunk-backed) row survived untouched.
+                //
+                // catalog-029-1's own toggle-wrap correctly restores FORCE ROW LEVEL
+                // SECURITY on both tables before it commits (production-correct — we
+                // WANT it back on). That means these Phase E SELECTs run under FORCE
+                // RLS same as any other post-migration caller: the table OWNER
+                // (nexus_admin_o8dil29_test, NOT BYPASSRLS) must stamp the
+                // nexus.tenant GUC even for itself, or every row is invisible and a
+                // plain COUNT(*) reads 0 regardless of what's actually in the table
+                // (the exact php10/nexus-1wjmq trap this file's own Test 4 —
+                // nexusSvc_noGucStamp_rlsFailClosed_returnsZeroRows — documents).
+                try (Connection conn = agedDs.getConnection()) {
+                    conn.setAutoCommit(false);
+                    try (var ps = conn.prepareStatement("SELECT set_config('nexus.tenant', ?, true)")) {
+                        ps.setString(1, tenant);
+                        ps.execute();
+                    }
+
+                    assertThat(constraintValidated(conn, "fk_catalog_chunks_chunk"))
+                        .as("fk_catalog_chunks_chunk must exist and be VALIDATED "
+                            + "(pg_constraint.convalidated=true) after the full walk")
+                        .isTrue();
+
+                    assertThat(rows(conn, "SELECT COUNT(*) FROM nexus.catalog_document_chunks "
+                        + "WHERE tenant_id = '" + tenant + "' AND chash = decode('" + danglingChash + "', 'hex')"))
+                        .as("the dangling row must have been remediated (deleted) by catalog-029-1 "
+                            + "before catalog-029-2's VALIDATE ran")
+                        .isEqualTo(0);
+
+                    assertThat(rows(conn, "SELECT COUNT(*) FROM nexus.catalog_document_chunks "
+                        + "WHERE tenant_id = '" + tenant + "' AND chash = decode('" + goodChash + "', 'hex')"))
+                        .as("the non-dangling (chunk-backed) manifest row must be untouched by "
+                            + "remediation -- the anti-join must not over-delete")
+                        .isEqualTo(1);
+                }
+            }
+        } finally {
+            agedPg.stop();
+        }
+    }
+
+    // ── Test 12: falsification proof — VALIDATE alone, without catalog-029-1's
+    //    remediation, must fail loud against the SAME dangling population ──────
+
+    /**
+     * The MUST-FAIL demonstration the test above depends on: reproduces the
+     * naive two-step shape (ADD CONSTRAINT ... NOT VALID, then a bare VALIDATE
+     * CONSTRAINT, skipping the anti-join remediation) against the identical
+     * dangling-manifest population, and asserts it throws. This is the evidence
+     * that {@code catalog-029-1} is load-bearing, not incidental, for {@link
+     * #lateUpgradingDeployment_withPreExistingDanglingManifestPopulation_bootsSuccessfully_andRemediates}'s
+     * success — the two tests share the exact same fixture shape, differing only
+     * in whether the remediation changeset runs before VALIDATE.
+     */
+    @Test
+    @Order(14)
+    void bareValidateWithoutRemediation_againstDanglingPopulation_throws() throws Exception {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
+        try {
+            final String role = "nexus_admin_o8dil29_neg_test";
+            final String pass = "nexus_admin_o8dil29_neg_test_pass";
+
+            try (Connection su = agedPg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
+                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
+                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
+                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
+                su.createStatement().execute(
+                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            }
+
+            var cfg = new com.zaxxer.hikari.HikariConfig();
+            cfg.setJdbcUrl(agedPg.getJdbcUrl());
+            cfg.setUsername(role);
+            cfg.setPassword(pass);
+            cfg.setMaximumPoolSize(2);
+            cfg.setPoolName("nexus-admin-o8dil29-neg-test");
+
+            try (var agedDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+
+                // Migrate through catalog-029-0 INCLUSIVE (idx+1) -- the FK exists,
+                // NOT VALID, but catalog-029-1's remediation has NOT run.
+                int changesetsThroughFk;
+                try (Connection conn = agedDs.getConnection()) {
+                    Database database = DatabaseFactory.getInstance()
+                        .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+                    try (Liquibase liquibase = new Liquibase(
+                            "db/changelog/db.changelog-master.xml",
+                            new ClassLoaderResourceAccessor(),
+                            database)) {
+                        List<ChangeSet> unrun = liquibase.listUnrunChangeSets(
+                            new Contexts(), new LabelExpression());
+                        int idx = -1;
+                        for (int i = 0; i < unrun.size(); i++) {
+                            if ("catalog-029-0".equals(unrun.get(i).getId())) {
+                                idx = i;
+                                break;
+                            }
+                        }
+                        assertThat(idx)
+                            .as("catalog-029-0 must be present in the master changelog")
+                            .isGreaterThanOrEqualTo(0);
+                        changesetsThroughFk = idx + 1;
+
+                        liquibase.update(changesetsThroughFk, new Contexts(), new LabelExpression());
+                    }
+                }
+
+                final String tenant = "o8dil29-neg-tenant";
+                final String collection = "knowledge__o8dil29-neg__voyage-context-3__v1";
+                final String danglingChash = "c".repeat(64);
+                try (Connection su = agedPg.createConnection("")) {
+                    su.setAutoCommit(true);
+                    su.createStatement().execute(
+                        "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
+                        + "VALUES ('" + tenant + "', 'o8dil29-neg-doc', 'neg doc', '" + collection + "')");
+                    // Legal here: the FK is NOT VALID (added by catalog-029-0
+                    // above) but has not yet had its pre-existing rows checked --
+                    // NOT VALID only enforces NEW writes going forward, and this
+                    // INSERT is itself checked (would fail if the FK enforced
+                    // new writes against a missing chunk) ... except NOT VALID
+                    // enforces new INSERTs too. So seed the dangling row via the
+                    // SAME bypass idiom used elsewhere in this suite: drop, insert,
+                    // re-add NOT VALID -- reproducing exactly what a genuinely aged
+                    // box looks like immediately before its own first VALIDATE.
+                    su.createStatement().execute(
+                        "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+                    su.createStatement().execute(
+                        "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+                        + "VALUES ('" + tenant + "', 'o8dil29-neg-doc', 0, decode('" + danglingChash + "', 'hex'), '"
+                        + collection + "')");
+                    su.createStatement().execute(
+                        "ALTER TABLE nexus.catalog_document_chunks "
+                        + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                        + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                        + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+                }
+
+                // The naive two-step shape: VALIDATE alone, skipping remediation.
+                // Must throw against the dangling row seeded above.
+                try (Connection su = agedPg.createConnection("")) {
+                    su.setAutoCommit(true);
+                    assertThatThrownBy(() -> su.createStatement().execute(
+                            "ALTER TABLE nexus.catalog_document_chunks VALIDATE CONSTRAINT fk_catalog_chunks_chunk"))
+                        .as("VALIDATE CONSTRAINT alone, without catalog-029-1's anti-join remediation, "
+                            + "must fail loud against a genuinely dangling row -- this is the naive "
+                            + "two-step shape the three-step decision (T2 "
+                            + "nexus/rdr-191-validate-placement-decision [22557]) exists to avoid, and "
+                            + "the falsification proof that the sibling test's success is not vacuous")
+                        .isInstanceOf(PSQLException.class)
+                        .hasMessageContaining("fk_catalog_chunks_chunk");
+                }
+            }
+        } finally {
+            agedPg.stop();
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private int rows(Connection conn, String sql) throws Exception {
+        ResultSet rs = conn.createStatement().executeQuery(sql);
+        rs.next();
+        return rs.getInt(1);
+    }
 
     private Set<String> tablesInSchema(Connection conn, String schema) throws Exception {
         Set<String> names = new HashSet<>();

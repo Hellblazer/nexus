@@ -228,6 +228,17 @@ class Catalog013RlsReplayTest {
             ps.setString(3, collection);
             ps.executeUpdate();
         }
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for every catalog_document_chunks insert. This
+        // test's whole point is replaying a LEGACY 16-byte (pre-octet-CHECK) chash
+        // shape through catalog-013's chash-length migration and RLS toggling --
+        // nexus.chunks carries the SAME octet_length=32 CHECK, so a matching chunk
+        // is not constructible for a deliberately-legacy 16-byte chash. Bypass the
+        // FK locally: drop the constraint, insert, then re-add it NOT VALID
+        // (catalog-029-0's exact shape) so it is live again (unvalidated) for every
+        // subsequent statement on this connection/container.
+        c.createStatement().execute(
+            "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
         try (var ps = c.prepareStatement(
             "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
             + "VALUES (?, ?, 0, ?, ?)")) {
@@ -237,6 +248,11 @@ class Catalog013RlsReplayTest {
             ps.setString(4, collection);
             ps.executeUpdate();
         }
+        c.createStatement().execute(
+            "ALTER TABLE nexus.catalog_document_chunks "
+            + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+            + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+            + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
     }
 
     private static int count(Connection c, String sql) throws Exception {

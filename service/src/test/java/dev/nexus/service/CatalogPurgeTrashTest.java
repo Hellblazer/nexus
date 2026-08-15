@@ -177,16 +177,24 @@ class CatalogPurgeTrashTest {
                 + "('" + TENANT + "', '" + DOC_LIVE + "', 'Live', '" + COLLECTION + "'), "
                 + "('" + TENANT + "', '" + DOC_FRESH_TOMB + "', 'Fresh Tomb', '" + COLLECTION + "'), "
                 + "('" + TENANT + "', '" + DOC_AGED_TOMB + "', 'Aged Tomb', '" + COLLECTION + "')");
+        }
+
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for every catalog_document_chunks insert, so
+        // the chunk vectors must land BEFORE the manifest rows below (previously
+        // order-independent; upsertChunks ran after insertManifestRow here).
+        vecRepo.upsertChunks(TENANT, COLLECTION,
+            List.of(CHASH_LIVE, CHASH_FRESH, CHASH_AGED, CHASH_ORPHAN),
+            List.of("live text", "fresh tomb text", "aged tomb text", "orphan text"),
+            List.of(Map.of(), Map.of(), Map.of(), Map.of()));
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
             insertManifestRow(su, DOC_LIVE, CHASH_LIVE);
             insertManifestRow(su, DOC_FRESH_TOMB, CHASH_FRESH);
             insertManifestRow(su, DOC_AGED_TOMB, CHASH_AGED);
             // CHASH_ORPHAN: no manifest row (RDR-145 manifest-less note chunk).
         }
-
-        vecRepo.upsertChunks(TENANT, COLLECTION,
-            List.of(CHASH_LIVE, CHASH_FRESH, CHASH_AGED, CHASH_ORPHAN),
-            List.of("live text", "fresh tomb text", "aged tomb text", "orphan text"),
-            List.of(Map.of(), Map.of(), Map.of(), Map.of()));
 
         // Tombstone FRESH and AGED via the real production path.
         assertThat(catalogRepo.deleteDocument(TENANT, DOC_FRESH_TOMB)).isEqualTo(1);
@@ -421,14 +429,19 @@ class CatalogPurgeTrashTest {
                 + "('" + TENANT + "', '" + DOC_BOUNDARY_AT + "', 'Boundary At', '" + COLLECTION + "'), "
                 + "('" + TENANT + "', '" + DOC_BOUNDARY_INSIDE + "', 'Boundary Inside', '" + COLLECTION + "'), "
                 + "('" + TENANT + "', '" + DOC_BOUNDARY_OUTSIDE + "', 'Boundary Outside', '" + COLLECTION + "')");
-            insertManifestRow(su, DOC_BOUNDARY_AT, CHASH_BOUNDARY_AT);
-            insertManifestRow(su, DOC_BOUNDARY_INSIDE, CHASH_BOUNDARY_INSIDE);
-            insertManifestRow(su, DOC_BOUNDARY_OUTSIDE, CHASH_BOUNDARY_OUTSIDE);
         }
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // chunk vectors to land BEFORE the manifest rows below.
         vecRepo.upsertChunks(TENANT, COLLECTION,
             List.of(CHASH_BOUNDARY_AT, CHASH_BOUNDARY_INSIDE, CHASH_BOUNDARY_OUTSIDE),
             List.of("boundary at text", "boundary inside text", "boundary outside text"),
             List.of(Map.of(), Map.of(), Map.of()));
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            insertManifestRow(su, DOC_BOUNDARY_AT, CHASH_BOUNDARY_AT);
+            insertManifestRow(su, DOC_BOUNDARY_INSIDE, CHASH_BOUNDARY_INSIDE);
+            insertManifestRow(su, DOC_BOUNDARY_OUTSIDE, CHASH_BOUNDARY_OUTSIDE);
+        }
 
         assertThat(catalogRepo.deleteDocument(TENANT, DOC_BOUNDARY_AT)).isEqualTo(1);
         assertThat(catalogRepo.deleteDocument(TENANT, DOC_BOUNDARY_INSIDE)).isEqualTo(1);

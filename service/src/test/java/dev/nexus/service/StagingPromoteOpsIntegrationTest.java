@@ -502,11 +502,23 @@ class StagingPromoteOpsIntegrationTest {
         // which collection value it carries. COLL_A is an arbitrary real,
         // already-registered collection in this fixture.
         String ghost = digestHex("pre-existing corruption ghost");
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
+        // a matching nexus.chunks row -- a genuinely-dangling row is exactly this
+        // test's SUBJECT, so bypass the FK locally: drop the constraint, insert,
+        // then re-add it NOT VALID (catalog-029-0's exact shape) so it is live
+        // again (unvalidated) afterward.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
                 + "VALUES ('" + T1 + "', '1.1.1', 88, decode('" + ghost + "', 'hex'), '" + COLL_A + "')");
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks "
+                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
         }
         try {
             org.assertj.core.api.Assertions.assertThatThrownBy(() -> ops.finalizeTenant(T1, false))
@@ -523,8 +535,15 @@ class StagingPromoteOpsIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
                 + "VALUES ('" + T1 + "', '1.1.1', 89, decode('" + ghost + "', 'hex'), '" + COLL_A + "')");
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks "
+                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
         }
         try {
             Map<String, Integer> residue = scope.withTenant(T1, ctx ->

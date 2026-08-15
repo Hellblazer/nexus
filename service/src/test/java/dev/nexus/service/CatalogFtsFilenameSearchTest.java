@@ -156,6 +156,23 @@ class CatalogFtsFilenameSearchTest {
         return doc == null ? null : String.valueOf(doc.get("indexed_at"));
     }
 
+    /**
+     * RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+     * matching nexus.chunks row for every catalog_document_chunks insert. Stub a
+     * minimal chunk (single embedding_384 vector, arbitrary text) under COLLECTION.
+     */
+    private void stubChunk(String chashHex) {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES ("
+                + "'" + TENANT + "', '" + COLLECTION + "', decode('" + chashHex + "', 'hex'), 'stub', "
+                + "('[" + "0.1,".repeat(383) + "0.1]')::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     @Test
     void manifest_append_refreshes_indexed_at() {
         String doc = repo.registerDocument(TENANT, "9.3", Map.of(
@@ -164,6 +181,9 @@ class CatalogFtsFilenameSearchTest {
             "indexed_at", "2026-07-09T17:42:10+00:00"));
         assertThat(indexedAtOf(doc)).isEqualTo("2026-07-09T17:42:10+00:00");
 
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for the manifest write below.
+        stubChunk("c".repeat(64));
         repo.appendManifestChunks(TENANT, doc, COLLECTION, List.of(Map.of(
             "position", 0, "chash", "c".repeat(64), "chunk_index", 0,
             "line_start", 1, "line_end", 10, "char_start", 0, "char_end", 100)));
@@ -185,6 +205,9 @@ class CatalogFtsFilenameSearchTest {
         repo.writeManifest(TENANT, doc, COLLECTION, List.of());
         assertThat(indexedAtOf(doc)).isEqualTo("2026-07-09T17:42:10+00:00");
 
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for the manifest write below.
+        stubChunk("d".repeat(64));
         repo.writeManifest(TENANT, doc, COLLECTION, List.of(Map.of(
             "position", 0, "chash", "d".repeat(64), "chunk_index", 0,
             "line_start", 1, "line_end", 5, "char_start", 0, "char_end", 50)));

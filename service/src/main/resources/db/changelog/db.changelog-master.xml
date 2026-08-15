@@ -477,6 +477,16 @@
     <include file="db/changelog/taxonomy-007-unify-centroids.xml"/>
     <include file="db/changelog/vectors-005-repoint-functions-views.xml"/>
 
+    <!-- RDR-191 Phase 5 (bead nexus-o8dil.29): the manifest FK,
+         catalog_document_chunks (tenant_id, collection, chash) -> nexus.chunks.
+         Three-step ADD-NOT-VALID -> anti-join-remediate -> VALIDATE shape (Hal
+         ruling, T2 nexus/rdr-191-validate-placement-decision [22557]; RDR-191
+         amendment xi), plus the purge_trash deferred-constraint fix (class-B
+         site 1). Must come after fk-002-validate.xml (already true by file
+         order) and after the Phase 4 repoint batch immediately above, since
+         nexus.chunks, the FK's referenced table, does not exist before it. -->
+    <include file="db/changelog/catalog-029-manifest-chunk-fk.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

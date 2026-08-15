@@ -751,6 +751,12 @@ class CollectionRegistryFkTest {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "chk-manifest-doc");  // idempotent
             insertCollection(su, TENANT_A, "chk-manifest-coll");
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
+            // a matching nexus.chunks row for this CONTROL insert to succeed.
+            su.createStatement().execute(
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
+                "VALUES ('" + TENANT_A + "', 'chk-manifest-coll', '" + validChash("manifestok") + "', 'text', " +
+                vectorLiteral(384) + "::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
                 "VALUES ('" + TENANT_A + "', 'chk-manifest-doc', 2, '" + validChash("manifestok") + "', 'chk-manifest-coll')");
@@ -787,6 +793,12 @@ class CollectionRegistryFkTest {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "pos-chk-doc");  // idempotent
             insertCollection(su, TENANT_A, "pos-chk-coll");
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
+            // a matching nexus.chunks row for this CONTROL insert to succeed.
+            su.createStatement().execute(
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
+                "VALUES ('" + TENANT_A + "', 'pos-chk-coll', '" + validChash("pos-zero") + "', 'text', " +
+                vectorLiteral(384) + "::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
                 "VALUES ('" + TENANT_A + "', 'pos-chk-doc', 0, '" + validChash("pos-zero") + "', 'pos-chk-coll') " +

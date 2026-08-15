@@ -651,12 +651,30 @@ class ManifestVerifyTest {
     private static void insertManifestRow(Connection su, String tenantId, String docId,
                                            int position, String chashHex, String collection)
             throws Exception {
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for every catalog_document_chunks insert. This
+        // file's whole purpose is manifest_verify's detection of a chash with NO
+        // matching chunk -- a state the FK now prevents in normal operation.
+        // manifest_verify/manifest_verify_all are named in RDR-191 Decision item 4
+        // as retiring in a LATER phase (out of this bead's scope, nexus-o8dil.29
+        // scopes the FK itself only), so this helper bypasses the FK LOCALLY to
+        // keep every existing test's semantics unchanged: drop the constraint,
+        // insert, then re-add it NOT VALID (catalog-029-0's exact shape) so it is
+        // live again (unvalidated) for every subsequent statement in this
+        // container, including any other test's real inserts.
+        su.createStatement().execute(
+            "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks " +
             "  (tenant_id, doc_id, position, chash, collection) " +
             "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", " +
             "decode('" + chashHex + "', 'hex'), '" + collection + "') " +
             "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        su.createStatement().execute(
+            "ALTER TABLE nexus.catalog_document_chunks " +
+            "ADD CONSTRAINT fk_catalog_chunks_chunk " +
+            "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) " +
+            "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
     }
 
     private static void insertManifestRowNullCollection(Connection su, String tenantId,

@@ -320,16 +320,18 @@ class CombinedQueryParityTest {
         // decoded at the seam. topic_assignments.doc_id stays TEXT (mixed identity
         // space) but is padded to the SAME 64-hex width so it matches
         // encode(c.chash,'hex') at topic-scoped join time.
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-            "SELECT '" + TENANT_A + "', 'ex'||g, 0, decode(lpad(g::text, 64, '0'), 'hex'), '" + COLL_EXPLAIN + "' " +
-            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // nexus.chunks row before the manifest row below -- chunk insert first.
         // Embedding: 2-D direction (g%100/100, 1) padded to 1024 — varied enough that
         // HNSW is exercised, dense in the (x,1) plane.
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
             "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', decode(lpad(g::text, 64, '0'), 'hex'), 'ex'||g, " +
             "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::vector " +
+            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        su.createStatement().execute(
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
+            "SELECT '" + TENANT_A + "', 'ex'||g, 0, decode(lpad(g::text, 64, '0'), 'hex'), '" + COLL_EXPLAIN + "' " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         su.createStatement().execute(
             "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, source_collection, assigned_at) " +
@@ -971,8 +973,10 @@ class CombinedQueryParityTest {
         String chash = validChash(tumbler);
         insertCatalogDocumentFull(su, tenant, tumbler, collection, contentType, author,
                                   year, corpus);
-        insertManifestRow(su, tenant, tumbler, 0, chash, collection);
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // chunk row to land BEFORE the manifest row (previously order-independent).
         insertChunk(su, dim, tenant, collection, chash, tumbler, x, y);
+        insertManifestRow(su, tenant, tumbler, 0, chash, collection);
     }
 
     /**
@@ -984,12 +988,14 @@ class CombinedQueryParityTest {
         String tenant = tenantFor(collection);
         String chash = validChash(tumbler);
         insertCatalogDocumentFull(su, tenant, tumbler, collection, "paper", "wa", 2024, "research");
-        insertManifestRow(su, tenant, tumbler, 0, chash, collection);
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // chunk row to land BEFORE the manifest row (previously order-independent).
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ", metadata)"
             + " VALUES ('" + tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + tumbler + "', "
             + vec2(1024, x, y) + "::vector, '" + metaJson.replace("'", "''") + "'::jsonb)"
             + " ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+        insertManifestRow(su, tenant, tumbler, 0, chash, collection);
     }
 
     /**
@@ -1002,8 +1008,10 @@ class CombinedQueryParityTest {
         String tenant = tenantFor(collection);
         insertCatalogDocumentFull(su, tenant, tumbler, collection,
                                   "paper", "topicauthor", 2024, "research");
-        insertManifestRow(su, tenant, tumbler, 0, chash, collection);
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // chunk row to land BEFORE the manifest row (previously order-independent).
         insertChunk(su, dim, tenant, collection, chash, tumbler, x, y);
+        insertManifestRow(su, tenant, tumbler, 0, chash, collection);
         // Topic membership is CHUNK-level: topic_assignments.doc_id is the chunk chash
         // (nexus-sa14p), NOT the document tumbler.
         insertTopicAssignment(su, tenant, chash, topicId, collection);

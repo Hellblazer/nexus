@@ -1,0 +1,378 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-191 Phase 5 (bead nexus-o8dil.29) — the manifest FK:
+    nexus.catalog_document_chunks (tenant_id, collection, chash) -> nexus.chunks
+    (tenant_id, collection, chash).
+
+    THREE-STEP SHAPE, decided by Hal (2026-08-14, disposition (a), T2
+    nexus/rdr-191-validate-placement-decision [22557]; RDR-191 amendment
+    (xi)) — matches fk-002's own ADD-NOT-VALID -> reconcile -> VALIDATE
+    shape:
+
+      1. catalog-029-0: ADD CONSTRAINT ... NOT VALID.
+      2. catalog-029-1: anti-join remediation — DELETE every
+         catalog_document_chunks row whose (tenant_id, collection, chash)
+         has no matching nexus.chunks row (F17's shape: an anti-join
+         against the chunk store, never a count comparison). Closes the
+         SECOND boot-brick (amendment x/xi): a late-upgrading deployment's
+         OWN dangling population, accumulated after any prior
+         catalog-025/manual remediation, is cleaned immediately before
+         THIS box's own VALIDATE — for every future upgrader, not just the
+         release that first ships this file.
+      3. catalog-029-2: VALIDATE CONSTRAINT.
+
+    All three are ORDINARY RUN-ONCE changesets (no runAlways — the
+    nexus-be0xb deferred-effect class) and run unconditionally at every
+    boot-time Liquibase walk, per the decision. No preConditions guard is
+    needed on catalog-029-2's VALIDATE (unlike fk-002-validate.xml's
+    nexus-4m6i0.13 MARK_RAN retrofit): that guard exists because fk-002's
+    ADD-NOT-VALID and VALIDATE shipped in SEPARATE RELEASES and could
+    diverge on an aged box between them. All three changesets here ship
+    TOGETHER, in ONE file, in ONE release — changeset 1 always runs before
+    changeset 3 in the same migration walk, so if changeset 1 succeeds the
+    constraint necessarily exists when changeset 3 runs.
+
+    FK SHAPE (RDR-191 F10/F10a/F10b, F8/F8a — read the RDR's Decision item
+    3 and Consequences item F10 before touching this):
+      - ON UPDATE CASCADE is MANDATORY (F10a): nexus.chunks is the PARENT;
+        a collection rename or an RDR-180-style chash rekey is a
+        parent-key UPDATE that must propagate to the manifest, not fail.
+        fk-002-5 already uses this on topic_assignments for the identical
+        reason — house pattern, not a novel choice.
+      - The delete side is DEFERRABLE INITIALLY IMMEDIATE, NOT a plain
+        (non-deferrable) ON DELETE RESTRICT (F8a/F10b). RESTRICT in
+        PostgreSQL can NEVER be deferred (only NO ACTION can), so the
+        constraint below carries no explicit ON DELETE action (defaults
+        to NO ACTION) plus DEFERRABLE INITIALLY IMMEDIATE. F10b measured
+        RESTRICT and NO ACTION as behaviourally identical on every
+        deletion case — the real axis is deferrability. INITIALLY
+        IMMEDIATE (checked at end-of-statement by default, deferrable
+        on demand via SET CONSTRAINTS) was chosen over INITIALLY DEFERRED
+        for statement-local error locality on the combined-write hot path
+        (F10b) — the two call sites whose own chunk-before-manifest
+        ordering needs the deferred behaviour explicitly opt in via
+        SET CONSTRAINTS (catalog-029-3 below; CatalogRepository
+        .deleteCollectionTxn, Java-side, nexus-o8dil.29 companion commit).
+      - Natural key throughout: (tenant_id, collection, chash), the same
+        triple as nexus.chunks' own PK (vectors-004-unify-chunks.xml) and
+        catalog_document_chunks.collection's NOT NULL promotion
+        (catalog-025-collection-not-null.xml) — never a metadata copy
+        (Hal standing directive, RDR-191 Phase 1 note).
+      - MATCH SIMPLE (the PostgreSQL FK default): no row in
+        catalog_document_chunks can carry a NULL chash (catalog-001's
+        NOT NULL) or NULL collection (catalog-025's NOT NULL promotion),
+        so MATCH SIMPLE's null-exemption is structurally inert here —
+        documented for completeness, not because it does any work.
+
+    RLS DISCIPLINE (catalog-029-1 only; changesets catalog-029-0/2/3 are
+    pure DDL/VALIDATE, no DML): catalog_document_chunks and nexus.chunks
+    both carry FORCE ROW LEVEL SECURITY (catalog-001-baseline.xml,
+    vectors-004-unify-chunks.xml). Liquibase runs as nexus_admin, the
+    table owner but NOT BYPASSRLS (role-001-nexus-svc.xml) — under FORCE
+    RLS with no nexus.tenant GUC set at migration time, an untoggled read
+    of nexus.chunks returns ZERO rows for every tenant, which would make
+    the anti-join misclassify EVERY manifest row as dangling and delete
+    the entire manifest (the identical trap catalog-025's own header
+    documents for its dangling-row check against chunks_384/768/1024).
+    Both tables are toggled NO FORCE, then restored to FORCE, symmetrically,
+    inside catalog-029-1's own changeset (nexus-1wjmq toggle-wrapped shape).
+
+    NO LOCK TABLE ... ACCESS EXCLUSIVE is needed before catalog-029-1's
+    DELETE (unlike catalog-025's fourth-boot-brick guard): that guard
+    exists because catalog-025 makes collection NOT NULL, a schema change
+    a concurrent OLD BINARY could race against with no invariant yet in
+    place. Here, changeset catalog-029-0 (in this SAME migration walk,
+    always immediately before catalog-029-1) already adds the FK NOT
+    VALID, which enforces EVERY new write from the instant it commits — no
+    writer running after catalog-029-0 commits can create a NEW dangling
+    row, so catalog-029-1's anti-join only ever needs to clean up rows
+    that predate this walk. The gap window fk-002-validate.xml's own
+    header describes (gap-window rows created between an earlier release's
+    ADD-NOT-VALID and a LATER release's VALIDATE) does not exist here
+    because all three steps run in the SAME walk.
+
+    Must come after fk-002-validate.xml AND after the RDR-191 Phase 4
+    repoint batch (vectors-004-unify-chunks.xml / taxonomy-007-unify-
+    centroids.xml / vectors-005-repoint-functions-views.xml) in
+    db.changelog-master.xml — nexus.chunks (the FK's referenced table)
+    does not exist before that batch runs. Registered immediately after
+    that batch's three <include>s and before the runAlways grants
+    (grants-nexus-svc.xml / grants-nexus-diag.xml), matching every other
+    late-appended changelog's file-order convention (catalog-011 through
+    catalog-028).
+
+    catalog-029-3 (CLASS-B SITE 1 OF 2): nexus.purge_trash's Step 1
+    deletes FROM nexus.chunks WHILE the manifest rows that reference those
+    chunks STILL EXIST (they are only removed later, via fk-001's CASCADE
+    off catalog_documents, in Step 4 of the SAME function call) — the
+    exact F8a "chunk-before-manifest, same transaction" shape (site L1-L3
+    in F8's census). Layered CREATE OR REPLACE on top of vectors-005-15
+    (that changeset already shipped and is checksum-immutable — never
+    edited in place, same discipline as catalog-024-on-023 / catalog-026-
+    on-catalog-003-5). The fix is one line (F10b, verified inside a
+    plpgsql function body): SET CONSTRAINTS fk_catalog_chunks_chunk
+    DEFERRED right after the GUC guard, before Step 1 — the FK check for
+    every row Step 1 deletes is then deferred to the CALLER's COMMIT,
+    by which point Step 4 has already cascaded away the manifest rows
+    that referenced them. CLASS-B SITE 2 OF 2 is Java-side:
+    CatalogRepository.deleteCollectionTxn (companion commit, same bead) —
+    it cannot live in a Liquibase changelog since it is a jOOQ-issued
+    SET CONSTRAINTS statement inside an existing Java transaction, not
+    schema DDL.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset catalog-029-0: ADD CONSTRAINT ... NOT VALID ────────────── -->
+    <changeSet id="catalog-029-0" author="nexus-o8dil.29">
+        <comment>
+            fk_catalog_chunks_chunk: FOREIGN KEY (tenant_id, collection, chash)
+            REFERENCES nexus.chunks (tenant_id, collection, chash) ON UPDATE CASCADE
+            DEFERRABLE INITIALLY IMMEDIATE NOT VALID. ON UPDATE CASCADE is mandatory
+            (F10a: chunks is the parent; collection rename / chash rekey are parent-key
+            UPDATEs that must propagate). No explicit ON DELETE action (defaults to
+            NO ACTION, the only PostgreSQL action that can be deferred — RESTRICT
+            cannot, F8a) plus DEFERRABLE INITIALLY IMMEDIATE (F10b): statement-local
+            error locality everywhere except the two class-B call sites, which opt
+            into SET CONSTRAINTS ... DEFERRED explicitly (catalog-029-3 below;
+            CatalogRepository.deleteCollectionTxn, Java-side). NOT VALID: enforces
+            every new write immediately; retroactive validation of pre-existing rows
+            is catalog-029-1 (remediate) then catalog-029-2 (VALIDATE).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_document_chunks
+    ADD CONSTRAINT fk_catalog_chunks_chunk
+    FOREIGN KEY (tenant_id, collection, chash)
+    REFERENCES nexus.chunks (tenant_id, collection, chash)
+    ON UPDATE CASCADE
+    DEFERRABLE INITIALLY IMMEDIATE
+    NOT VALID;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset catalog-029-1: anti-join remediation (F17 shape) ───────── -->
+    <changeSet id="catalog-029-1" author="nexus-o8dil.29">
+        <comment>
+            Delete every catalog_document_chunks row whose (tenant_id, collection,
+            chash) has no matching nexus.chunks row — an anti-join against the chunk
+            store (F17), never a count comparison. Closes the second boot-brick
+            (amendment x/xi) for every future late-upgrading deployment, not just the
+            release that first ships this file. RLS toggle-wrapped (nexus-1wjmq
+            shape): both catalog_document_chunks and nexus.chunks carry FORCE ROW
+            LEVEL SECURITY and Liquibase's nexus_admin owner is not BYPASSRLS, so both
+            are toggled off for the DELETE and restored before this changeset ends.
+            The deleted-row count is surfaced via RAISE NOTICE, which Liquibase's
+            JdbcExecutor captures from the JDBC Statement's SQLWarning chain and logs
+            through its own (SLF4J-backed) logger by default (SHOW_SQL_WARNING_MESSAGES
+            defaults true) -- no runAlways, no DDL-in-Python, no bespoke Java capture.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_deleted_count BIGINT;
+BEGIN
+    DELETE FROM nexus.catalog_document_chunks c
+    WHERE NOT EXISTS (
+        SELECT 1 FROM nexus.chunks v
+         WHERE v.tenant_id  = c.tenant_id
+           AND v.collection = c.collection
+           AND v.chash      = c.chash
+    );
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    RAISE NOTICE 'RDR-191 Phase 5 manifest-FK remediation (nexus-o8dil.29): deleted % dangling catalog_document_chunks row(s) with no matching nexus.chunks row', v_deleted_count;
+END $$;
+
+ALTER TABLE nexus.chunks FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_document_chunks FORCE ROW LEVEL SECURITY;
+        </sql>
+        <rollback>
+            <!-- No rollback: the deleted rows are unrecoverable manifest bookkeeping
+                 debris (RDR-191 amendment xi prices this deletion as safe: the CHILD
+                 position entry, not the chunk itself). Rolling back the FK/VALIDATE is
+                 catalog-029-0's / catalog-029-2's own rollback. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset catalog-029-2: VALIDATE CONSTRAINT ──────────────────────── -->
+    <changeSet id="catalog-029-2" author="nexus-o8dil.29">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT COUNT(*) FROM pg_constraint WHERE conname = 'fk_catalog_chunks_chunk'</sqlCheck>
+        </preConditions>
+        <comment>
+            VALIDATE fk_catalog_chunks_chunk — retroactively check pre-existing rows
+            now that catalog-029-1 has remediated any dangling population. Guarded by a
+            whole-changeset precondition (nexus-4m6i0.13/nexus-ms57z shape 1, same as
+            fk-002-7..11/fk-003-7..11): skips (marks ran, once) instead of hard-ERRORing
+            a crash-loop boot on any box where the constraint doesn't exist. All three
+            catalog-029 changesets ship together in one file/release, so this guard is
+            expected to be a permanent no-op in practice (catalog-029-0 always runs
+            first in the same walk) — it is added purely to satisfy the project's
+            blanket "every bare VALIDATE CONSTRAINT is guarded" tripwire
+            (tests/test_changelog_validate_precondition_lint.py), which does not carve
+            out a same-release exception.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_document_chunks VALIDATE CONSTRAINT fk_catalog_chunks_chunk;
+        </sql>
+        <rollback>
+            <!-- VALIDATE cannot be un-done (no INVALIDATE in PG); the constraint
+                 itself is dropped by catalog-029-0's rollback. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset catalog-029-3: purge_trash deferred-constraint fix (class-B site 1) ── -->
+    <changeSet id="catalog-029-3" author="nexus-o8dil.29">
+        <comment>
+            CREATE OR REPLACE nexus.purge_trash(older_than interval): adds
+            SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED right after the GUC
+            guard, before Step 1 -- Step 1 deletes FROM nexus.chunks while the
+            manifest rows that reference those chunks still exist (they are removed
+            later, in Step 4, via fk-001's CASCADE off catalog_documents, in the SAME
+            function call / transaction). Without deferring, Step 1's DELETE would
+            raise fk_catalog_chunks_chunk immediately for every chunk it deletes
+            (F8a/F10b, site L1-L3). Also pins SET search_path = nexus, public at the
+            function level: unlike every other statement in this body (already
+            schema-qualified), SET CONSTRAINTS's constraint_name has no
+            schema-qualification syntax in Postgres -- it resolves via the CALLING
+            session's search_path. Production nexus_svc connections get "nexus" on
+            their search_path via HikariCP connection properties, but any other
+            caller (a superuser session with the Postgres default search_path, an
+            ad-hoc psql session, a test harness's raw JDBC connection) does not, and
+            SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED then fails with
+            "constraint fk_catalog_chunks_chunk does not exist" even though the
+            constraint is right there on nexus.catalog_document_chunks. Pinning the
+            function's own search_path makes the fix caller-independent, exactly like
+            the schema-qualification already used everywhere else in this body.
+            Everything else is byte-for-byte identical to vectors-005-15 -- that
+            changeset already shipped and is checksum-immutable, layered on via
+            CREATE OR REPLACE per the catalog-024-on-023 / catalog-026-on-catalog-003-5
+            discipline.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.purge_trash(older_than interval)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = nexus, public
+AS $$
+DECLARE
+    v_tenant TEXT;
+    v_count  BIGINT;
+BEGIN
+    -- GUC guard: must have a non-empty tenant scope
+    v_tenant := current_setting('nexus.tenant', true);
+    IF v_tenant IS NULL OR v_tenant = '' THEN
+        RAISE EXCEPTION
+            'purge_trash: nexus.tenant GUC must be set to a non-empty tenant scope. '
+            'Cross-tenant purge is not permitted. Set the nexus.tenant configuration '
+            'parameter before calling purge_trash.';
+    END IF;
+
+    -- RDR-191 Phase 5 (nexus-o8dil.29, class-B site 1): fk_catalog_chunks_chunk is
+    -- DEFERRABLE INITIALLY IMMEDIATE (catalog-029-0). Step 1 below deletes FROM
+    -- nexus.chunks while its referencing catalog_document_chunks rows still exist
+    -- (removed only in Step 4, later in this same transaction) -- defer the check
+    -- to this call's COMMIT, by which point Step 4 has cascaded them away.
+    SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED;
+
+    -- Step 1-3 (collapsed): sweep orphaned chunk rows from the unified
+    -- nexus.chunks. Safety contract unchanged from catalog-026-1: a chunk
+    -- is sweepable ONLY IF it has at least one manifest row AND none of its
+    -- manifest rows PROTECT it -- a row protects when its owning document
+    -- is LIVE, or TOMBSTONED but still inside the older_than grace window.
+    -- Manifest-less chunks are never swept (RDR-145 deferred scope).
+    DELETE FROM nexus.chunks c
+    WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
+      AND NOT EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+            JOIN nexus.catalog_documents d
+              ON d.tenant_id = m.tenant_id
+             AND d.tumbler   = m.doc_id
+           WHERE m.tenant_id  = c.tenant_id
+             AND m.chash       = c.chash
+             AND (d.deleted_at IS NULL OR d.deleted_at &gt; NOW() - older_than)
+      );
+
+    -- Step 4: physically delete tombstoned documents older than the threshold.
+    -- fk-001 ON DELETE CASCADE removes catalog_document_chunks, document_aspects,
+    -- document_highlights, and aspect_extraction_queue rows for each deleted doc.
+    -- Unchanged from catalog-026-1 / vectors-005-15.
+    DELETE FROM nexus.catalog_documents
+     WHERE tenant_id  = v_tenant
+       AND deleted_at IS NOT NULL
+       AND deleted_at &lt;= NOW() - older_than;
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$
+        </sql>
+        <rollback>
+            <!-- Restores vectors-005-15's body verbatim (no SET CONSTRAINTS). -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.purge_trash(older_than interval)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_tenant TEXT;
+    v_count  BIGINT;
+BEGIN
+    v_tenant := current_setting('nexus.tenant', true);
+    IF v_tenant IS NULL OR v_tenant = '' THEN
+        RAISE EXCEPTION
+            'purge_trash: nexus.tenant GUC must be set to a non-empty tenant scope. '
+            'Cross-tenant purge is not permitted. Set the nexus.tenant configuration '
+            'parameter before calling purge_trash.';
+    END IF;
+
+    DELETE FROM nexus.chunks c
+    WHERE c.tenant_id = v_tenant
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+           WHERE m.tenant_id = c.tenant_id
+             AND m.chash      = c.chash
+      )
+      AND NOT EXISTS (
+          SELECT 1
+            FROM nexus.catalog_document_chunks m
+            JOIN nexus.catalog_documents d
+              ON d.tenant_id = m.tenant_id
+             AND d.tumbler   = m.doc_id
+           WHERE m.tenant_id  = c.tenant_id
+             AND m.chash       = c.chash
+             AND (d.deleted_at IS NULL OR d.deleted_at &gt; NOW() - older_than)
+      );
+
+    DELETE FROM nexus.catalog_documents
+     WHERE tenant_id  = v_tenant
+       AND deleted_at IS NOT NULL
+       AND deleted_at &lt;= NOW() - older_than;
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

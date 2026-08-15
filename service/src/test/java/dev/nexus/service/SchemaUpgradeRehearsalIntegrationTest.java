@@ -364,6 +364,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   catalog-025-0 nexus-71gw2
                 //   vectors-004-1 nexus-o8dil.12
                 //   taxonomy-007-1 nexus-jv3ue
+                //   catalog-029-1 nexus-o8dil.29
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -678,6 +679,44 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     assertThat(changesetExecType(su, "catalog-013-2", "nexus-e0hd2"))
                         .as("with all five constraints present, catalog-013-2 must EXECUTE for real")
                         .isEqualTo("EXECUTED");
+
+                    // catalog-029-1 leg (nexus-o8dil.29, RDR-191 Phase 5, seed-coverage
+                    // lint follow-up): fk_catalog_chunks_chunk's own NO FORCE/FORCE
+                    // toggle around the anti-join DELETE (catalog-029-1) is the SAME
+                    // toggle-wrap shape catalog-013-1b/catalog-014-0/catalog-025-0
+                    // already prove work under the real NOBYPASSRLS hop -- this
+                    // reuses the 1.1.100 KEEP-arm fixture already seeded above for
+                    // catalog-014-0/catalog-025-0 rather than adding a fresh dangling
+                    // row of its own: a manifest row that would be dangling by
+                    // catalog-029-1's (tenant, collection, chash) anti-join is, by
+                    // construction, ALSO dangling under catalog-025-0's structurally
+                    // identical anti-join (against the pre-unify chunks_384/768/1024
+                    // tables that vectors-004-1 copies verbatim into nexus.chunks a
+                    // few changesets later in this SAME hop) -- so any row that would
+                    // exercise catalog-029-1's DELETE arm is necessarily removed by
+                    // catalog-025-0 first, and a fresh dangling seed here would be
+                    // dead by the time catalog-029-1 runs. The KEEP-arm proof is the
+                    // one this hop CAN carry end to end: if the toggle silently failed
+                    // to turn FORCE off (the nexus-1wjmq/nexus-php10 failure class),
+                    // the anti-join would see zero rows in nexus.chunks and WRONGLY
+                    // delete the two content-backed 1.1.100 rows too (over-delete),
+                    // and/or catalog-029-2's VALIDATE would fail against whatever
+                    // survived -- either failure mode is caught below.
+                    assertThat(constraintExists(su, "fk_catalog_chunks_chunk"))
+                        .as("fk_catalog_chunks_chunk must exist at HEAD (catalog-029-0)")
+                        .isTrue();
+                    assertThat(constraintValidated(su, "fk_catalog_chunks_chunk"))
+                        .as("fk_catalog_chunks_chunk must be VALIDATED at HEAD -- catalog-029-2's "
+                            + "VALIDATE only succeeds if catalog-029-1's anti-join DELETE actually "
+                            + "ran (toggle correctly off) and left no dangling row behind")
+                        .isTrue();
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.catalog_document_chunks "
+                        + "WHERE tenant_id = 't1' AND doc_id = '1.1.100'"))
+                        .as("the two content-backed 1.1.100 manifest rows must still exist at HEAD -- "
+                            + "a broken catalog-029-1 toggle (FORCE never turned off) would see zero "
+                            + "nexus.chunks rows and wrongly delete these two as false-dangling")
+                        .isEqualTo(2);
                 }
             }
         } finally {
