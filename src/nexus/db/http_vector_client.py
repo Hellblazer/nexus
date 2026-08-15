@@ -2236,12 +2236,12 @@ class HttpVectorClient:
         """True if *name* has ANY physical chunk row for this tenant — LIVE or TOMBSTONED.
 
         Hits ``GET /v1/vectors/collections`` directly — a bare ``SELECT
-        DISTINCT collection`` union over ``chunks_384``/``chunks_768``/
-        ``chunks_1024`` (:meth:`PgVectorRepository.listCollections` on the
+        DISTINCT collection`` scan over the unified ``nexus.chunks`` table
+        (:meth:`PgVectorRepository.listCollections` on the
         Java side), NOT the tombstone-filtered ``collection_vector_stats``
         view :meth:`collection_exists` reads. Trashing a document
         (catalog-003) only sets ``catalog_documents.deleted_at`` — it never
-        deletes rows from the physical chunk tables (that is ``purge_trash``'s
+        deletes rows from the physical chunk table (that is ``purge_trash``'s
         job, a separate later step) — so a collection whose every document is
         trashed still appears in this raw listing even though
         :meth:`collection_exists` reads it as absent.
