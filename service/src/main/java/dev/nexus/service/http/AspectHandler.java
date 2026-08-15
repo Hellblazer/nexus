@@ -216,15 +216,14 @@ public final class AspectHandler implements HttpHandler {
      * columns now. A blank/null value is fine (the changeset's own {@code
      * NULLIF(...,'')::jsonb} USING clause maps it to SQL NULL); a non-blank value
      * that fails {@code Jackson#readTree} is not valid JSON and 400s here.
+     *
+     * <p>nexus-cefa1.5: delegates to the shared {@link HttpUtil#rejectMalformedJson}
+     * (extracted here when {@code PlanHandler} needed the identical check for
+     * {@code plan_json}/{@code default_bindings}) rather than each handler carrying
+     * its own copy.
      */
     private static void rejectMalformedJson(String field, Object value) {
-        if (!(value instanceof String s) || s.isBlank()) return;
-        try {
-            MAPPER.readTree(s);
-        } catch (Exception e) {
-            throw new IllegalArgumentException(
-                "field '" + field + "' must be valid JSON: " + e.getMessage());
-        }
+        HttpUtil.rejectMalformedJson(MAPPER, field, value);
     }
 
     private void handleUpsert(HttpExchange ex, String tenant, String method) throws IOException {

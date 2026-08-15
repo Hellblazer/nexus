@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Non-vacuity test for the ``scripts/sql/schema_type_hygiene_preflight_tier_{a,b,
-b_hook_failures,b_document_aspects}.sql`` probes (nexus-cefa1.1, P0 pre-flight
-audit of the schema type-hygiene arc; the third file split out at P2,
-nexus-cefa1.3, the fourth at P3, nexus-cefa1.4 -- see below).
+b_hook_failures,b_document_aspects,b_plans}.sql`` probes (nexus-cefa1.1, P0
+pre-flight audit of the schema type-hygiene arc; the third file split out at
+P2, nexus-cefa1.3, the fourth at P3, nexus-cefa1.4, the fifth at P4,
+nexus-cefa1.5 -- see below).
 
 Proves the probe FIRES on deliberately malformed data rather than assuming
 it works from reading the SQL. Runs the shipped probe files verbatim via
@@ -40,9 +41,11 @@ moment that column converted; its branch was split out into
 ``..._tier_b_hook_failures.sql`` (a single-column file). nexus-cefa1.4 / P3
 (aspects-003-type-hygiene.xml) then shipped the second Tier-B conversion
 (document_aspects.extras / .salient_sentences), split out the same way into
-``..._tier_b_document_aspects.sql`` (a two-column file), leaving
-``..._tier_b.sql`` auditing the remaining THREE still-text columns
-(plans.plan_json, plans.default_bindings, topic_links.link_types).
+``..._tier_b_document_aspects.sql`` (a two-column file). nexus-cefa1.5 / P4
+(plans-002-jsonb.xml) then shipped the third Tier-B conversion (plans.
+plan_json / plans.default_bindings), split out the same way into
+``..._tier_b_plans.sql`` (a two-column file), leaving ``..._tier_b.sql``
+auditing the ONE remaining still-text column (topic_links.link_types, P5).
 
 This test reads ``information_schema.columns.data_type`` for each of the 10
 audited columns FIRST and classifies it against ``_COLUMN_EXPECTATIONS``
@@ -68,18 +71,18 @@ below:
 ONE-LINE EDIT PER PHASE (P2..P5): when a phase's own changeset ships, flip
 that column's expected value in ``_COLUMN_EXPECTATIONS`` from ``"text"`` to
 its converted PG type name (``"jsonb"`` for every Tier-B column — P2/
-hook_failures.batch_doc_ids and P3/document_aspects.extras+
-salient_sentences already flipped). If that flip leaves its file's UNION ALL
-with a MIX of text and converted columns, that file must be split further at
-that point (drop the newly-converted column's UNION ALL branch into its own
-file, add its own explicit column-list constant, and gate it via
-``_columns_all_text`` the same way the P2 and P3 splits did) before its
-malformed-seed audit can run again — this test will correctly stop running
-that file's malformed-seed audit the moment the mix appears, rather than
-executing broken SQL. THE STILL-TEXT COLUMNS' AUDIT MUST KEEP RUNNING: a
-split retargets, it does not retire, the surviving file's malformed-seed
-coverage (see ``_assert_tier_b_malformed_seed``'s P3 retarget to
-plans.default_bindings below).
+hook_failures.batch_doc_ids, P3/document_aspects.extras+salient_sentences,
+and P4/plans.plan_json+default_bindings already flipped). If that flip
+leaves its file's UNION ALL with a MIX of text and converted columns, that
+file must be split further at that point (drop the newly-converted column's
+UNION ALL branch into its own file, add its own explicit column-list
+constant, and gate it via ``_columns_all_text`` the same way the P2/P3/P4
+splits did) before its malformed-seed audit can run again — this test will
+correctly stop running that file's malformed-seed audit the moment the mix
+appears, rather than executing broken SQL. THE STILL-TEXT COLUMNS' AUDIT
+MUST KEEP RUNNING: a split retargets, it does not retire, the surviving
+file's malformed-seed coverage (see ``_assert_tier_b_malformed_seed``'s P5
+retarget to topic_links.link_types below).
 
 PRISTINE-BASELINE ASSUMPTION, STATED EXPLICITLY: this is a SHARED substrate
 -- many other tests in the same worker process write real rows into
@@ -94,13 +97,13 @@ nexus.plans``, 2026-08-15: three raw catalog_documents inserts exist --
 test_o8dil7_prune_misclassified_manifest_antijoin_engine.py,
 test_http_aspects_stores_integration.py,
 test_http_taxonomy_store_integration.py -- and NONE of them sets
-``indexed_at``; no raw hook_failures, document_aspects, or plans insert
-exists; every other write to these tables goes through the real HTTP/JSON
-write path, which never emits malformed JSON) -- that ``invalid_cast_count``
-for hook_failures.batch_doc_ids (pre-P2, historical),
-document_aspects.extras (pre-P3, historical), and plans.default_bindings
-(nexus-cefa1.4's new malformed-seed target) is 0 before this test seeds
-anything.
+``indexed_at``; no raw hook_failures, document_aspects, plans, or
+topic_links insert exists; every other write to these tables goes through
+the real HTTP/JSON write path, which never emits malformed JSON) -- that
+``invalid_cast_count`` for hook_failures.batch_doc_ids (pre-P2, historical),
+document_aspects.extras (pre-P3, historical), plans.default_bindings
+(pre-P4, historical), and topic_links.link_types (nexus-cefa1.5's new
+malformed-seed target) is 0 before this test seeds anything.
 
 A GENUINE PROBE FINDING, historical (Tier A no longer runs its malformed-
 seed audit post-migration, but the finding stays true and stays documented
@@ -127,17 +130,19 @@ _TIER_A_SQL = _SQL_DIR / "schema_type_hygiene_preflight_tier_a.sql"
 _TIER_B_SQL = _SQL_DIR / "schema_type_hygiene_preflight_tier_b.sql"
 _TIER_B_HOOK_FAILURES_SQL = _SQL_DIR / "schema_type_hygiene_preflight_tier_b_hook_failures.sql"
 _TIER_B_DOCUMENT_ASPECTS_SQL = _SQL_DIR / "schema_type_hygiene_preflight_tier_b_document_aspects.sql"
+_TIER_B_PLANS_SQL = _SQL_DIR / "schema_type_hygiene_preflight_tier_b_plans.sql"
 
 # nexus-cefa1.3: hook_failures.batch_doc_ids (P2) shipped and was split out of
 # _TIER_B_SQL into its own single-column file. nexus-cefa1.4: document_aspects.
 # extras / .salient_sentences (P3) shipped and were split out the same way into
-# a two-column file. Tier B is now MIXED (3 still-text columns + 3
-# already-jsonb columns across two split files), so the per-tier
+# a two-column file. nexus-cefa1.5: plans.plan_json / .default_bindings (P4)
+# shipped and were split out the same way into a two-column file, leaving
+# _TIER_B_SQL auditing the ONE remaining still-text column
+# (topic_links.link_types, P5). Tier B is now MIXED (1 still-text column + 5
+# already-jsonb columns across three split files), so the per-tier
 # "_tier_is_all_text" gate below is no longer sufficient on its own; these
-# three column groups gate their respective SQL files independently.
+# four column groups gate their respective SQL files independently.
 _TIER_B_COLUMNS: list[tuple[str, str]] = [
-    ("plans", "plan_json"),
-    ("plans", "default_bindings"),
     ("topic_links", "link_types"),
 ]
 _TIER_B_HOOK_FAILURES_COLUMNS: list[tuple[str, str]] = [
@@ -146,6 +151,10 @@ _TIER_B_HOOK_FAILURES_COLUMNS: list[tuple[str, str]] = [
 _TIER_B_DOCUMENT_ASPECTS_COLUMNS: list[tuple[str, str]] = [
     ("document_aspects", "extras"),
     ("document_aspects", "salient_sentences"),
+]
+_TIER_B_PLANS_COLUMNS: list[tuple[str, str]] = [
+    ("plans", "plan_json"),
+    ("plans", "default_bindings"),
 ]
 
 # (tier, table, column, expected) — expected is "text" (not yet migrated,
@@ -158,8 +167,8 @@ _COLUMN_EXPECTATIONS: list[tuple[str, str, str, str]] = [
     ("A", "catalog_documents", "bib_enriched_at", "timestamp with time zone"),
     ("A", "catalog_documents", "index_started_at", "timestamp with time zone"),
     ("A", "catalog_links", "created_at", "timestamp with time zone"),
-    ("B", "plans", "plan_json", "text"),
-    ("B", "plans", "default_bindings", "text"),
+    ("B", "plans", "plan_json", "jsonb"),
+    ("B", "plans", "default_bindings", "jsonb"),
     ("B", "topic_links", "link_types", "text"),
     ("B", "document_aspects", "extras", "jsonb"),
     ("B", "document_aspects", "salient_sentences", "jsonb"),
@@ -307,10 +316,12 @@ def test_probe_fires_on_seeded_malformed_rows(t2_service_env):
     Only runs a tier's (or split-file's) malformed-seed audit while EVERY
     column it covers is still text (see module docstring) -- Tier A is
     currently retired here (test_column_types_match_migration_state covers
-    it instead, non-vacuously); Tier B's three still-text columns run in
-    full; the hook_failures.batch_doc_ids single-column split (P2 shipped,
-    nexus-cefa1.3) and the document_aspects two-column split (P3 shipped,
-    nexus-cefa1.4) are retired the same way Tier A was, for the same reason.
+    it instead, non-vacuously); Tier B's one still-text column
+    (topic_links.link_types) runs in full; the hook_failures.batch_doc_ids
+    single-column split (P2 shipped, nexus-cefa1.3), the document_aspects
+    two-column split (P3 shipped, nexus-cefa1.4), and the plans two-column
+    split (P4 shipped, nexus-cefa1.5) are retired the same way Tier A was,
+    for the same reason.
     """
     from tests._engine_substrate import ensure_engine
 
@@ -335,26 +346,100 @@ def test_probe_fires_on_seeded_malformed_rows(t2_service_env):
         ran_any_tier = True
         _assert_tier_b_document_aspects_malformed_seed(state, tenant)
 
+    if _columns_all_text(_TIER_B_PLANS_COLUMNS):
+        ran_any_tier = True
+        _assert_tier_b_plans_malformed_seed(state, tenant)
+
     assert ran_any_tier, (
         "no column group is fully text any more — Tier A, Tier B, the "
-        "hook_failures split, and the document_aspects split have all fully "
-        "migrated. This test's malformed-seed coverage is now fully "
-        "retired; if a future Tier C (or a re-opened group) is added, wire "
-        "its own _assert_*_malformed_seed helper and a _tier_is_all_text / "
-        "_columns_all_text guard the same way rather than leaving this test "
-        "silently passing on nothing"
+        "hook_failures split, the document_aspects split, and the plans "
+        "split have all fully migrated. This test's malformed-seed coverage "
+        "is now fully retired; if a future Tier C (or a re-opened group) is "
+        "added, wire its own _assert_*_malformed_seed helper and a "
+        "_tier_is_all_text / _columns_all_text guard the same way rather "
+        "than leaving this test silently passing on nothing"
     )
 
 
 def _assert_tier_b_malformed_seed(state: dict, tenant: str) -> None:
-    """nexus-cefa1.4: retargeted a second time, from document_aspects.extras
-    (P3 shipped, now audited instead by test_column_types_match_migration_state
-    plus the retired _assert_tier_b_document_aspects_malformed_seed below) to
-    plans.default_bindings -- one of the three columns still text in this
-    split file, exercising the identical NULLIF(col,'')::jsonb shape this
-    tier's own future ALTER will use. (First retarget was nexus-cefa1.3:
-    hook_failures.batch_doc_ids -> document_aspects.extras.)"""
-    before = _run_probe(state, _TIER_B_SQL, expected_rows=3)
+    """nexus-cefa1.5: retargeted a THIRD time, from plans.default_bindings
+    (P4 shipped, now audited instead by test_column_types_match_migration_state
+    plus the retired _assert_tier_b_plans_malformed_seed below) to
+    topic_links.link_types -- the ONE column still text in this split file,
+    exercising the identical bare ``::jsonb`` (no NULLIF -- link_types is
+    NOT NULL DEFAULT '[]', the same empty-string-is-an-abort-signal shape as
+    plans.plan_json had) this tier's own future ALTER will use. (First
+    retarget was nexus-cefa1.3: hook_failures.batch_doc_ids ->
+    document_aspects.extras. Second was nexus-cefa1.4: document_aspects.extras
+    -> plans.default_bindings.)"""
+    before = _run_probe(state, _TIER_B_SQL, expected_rows=1)
+    link_before = _row(before, "topic_links", "link_types")
+
+    assert link_before["invalid_cast_count"] == 0, (
+        "pristine-baseline assumption violated: some other path already "
+        "wrote non-JSON topic_links.link_types -- see this file's module "
+        "docstring PRISTINE-BASELINE ASSUMPTION section"
+    )
+
+    # topic_links.from_topic_id / .to_topic_id carry NOT NULL FKs to
+    # nexus.topics(id) (taxonomy-001-baseline.xml) -- seed topics first.
+    # topics.collection carries a NOT VALID FK to catalog_collections
+    # (tenant_id, name) -- topics_collection_fk, fk-003-collection-registry-
+    # extra.xml -- so the collection must be registered first, same
+    # precondition _assert_tier_b_document_aspects_malformed_seed already
+    # handles for document_aspects.collection.
+    # topic_links' PK is (tenant_id, from_topic_id, to_topic_id), so the two
+    # malformed rows below use DISTINCT topic pairs to avoid colliding.
+    coll = "cefa1-preflight-topics"
+    _psql(state, (
+        "INSERT INTO nexus.catalog_collections (tenant_id, name) "
+        f"VALUES ('{tenant}', '{coll}') ON CONFLICT DO NOTHING"
+    ))
+
+    def _mk_topic(label: str) -> str:
+        rows = _psql(state, (
+            "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
+            f"VALUES ('{tenant}', '{label}', '{coll}', now()) "
+            "RETURNING id"
+        ))
+        return rows[0]
+
+    topic_a = _mk_topic("cefa1-preflight-topic-a")
+    topic_b = _mk_topic("cefa1-preflight-topic-b")
+    topic_c = _mk_topic("cefa1-preflight-topic-c")
+
+    # A non-JSON string into topic_links.link_types.
+    _psql(state, (
+        "INSERT INTO nexus.topic_links (tenant_id, from_topic_id, to_topic_id, link_types) "
+        f"VALUES ('{tenant}', {topic_a}, {topic_b}, 'not-json-at-all')"
+    ))
+    # Empty-string sentinel: must count as empty_string_count, NOT invalid_cast_count.
+    _psql(state, (
+        "INSERT INTO nexus.topic_links (tenant_id, from_topic_id, to_topic_id, link_types) "
+        f"VALUES ('{tenant}', {topic_a}, {topic_c}, '')"
+    ))
+
+    after = _run_probe(state, _TIER_B_SQL, expected_rows=1)
+    link_after = _row(after, "topic_links", "link_types")
+
+    assert link_after["invalid_cast_count"] == link_before["invalid_cast_count"] + 1
+    assert link_after["empty_string_count"] == link_before["empty_string_count"] + 1
+    assert link_after["total_rows"] == link_before["total_rows"] + 2
+
+
+def _assert_tier_b_plans_malformed_seed(state: dict, tenant: str) -> None:
+    """Retained for the day plans.plan_json / .default_bindings are text
+    again (e.g. a rollback of plans-002-jsonb.xml) -- NOT reachable on
+    develop today (P4 has shipped, _columns_all_text(_TIER_B_PLANS_COLUMNS)
+    is False): this body is currently dead code, kept deliberately the same
+    way _assert_tier_b_hook_failures_malformed_seed and
+    _assert_tier_b_document_aspects_malformed_seed are, because the SQL it
+    drives (schema_type_hygiene_preflight_tier_b_plans.sql) is still shipped
+    for pre-plans-002 clusters and still documents the probe shape. It last
+    passed against a pre-plans-002 substrate (the same content this function
+    exercised as the P4-era _assert_tier_b_malformed_seed, before the P4
+    split)."""
+    before = _run_probe(state, _TIER_B_PLANS_SQL, expected_rows=2)
     bindings_before = _row(before, "plans", "default_bindings")
 
     assert bindings_before["invalid_cast_count"] == 0, (
@@ -380,7 +465,7 @@ def _assert_tier_b_malformed_seed(state: dict, tenant: str) -> None:
         "'{}', now(), '')"
     ))
 
-    after = _run_probe(state, _TIER_B_SQL, expected_rows=3)
+    after = _run_probe(state, _TIER_B_PLANS_SQL, expected_rows=2)
     bindings_after = _row(after, "plans", "default_bindings")
 
     assert bindings_after["invalid_cast_count"] == bindings_before["invalid_cast_count"] + 1

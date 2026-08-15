@@ -134,6 +134,14 @@ public final class PlanHandler implements HttpHandler {
         String scopeTags       = optStringOrEmpty(body, "scope_tags");
         String matchText       = optStringOrEmpty(body, "match_text");
 
+        // nexus-cefa1.5: plan_json / default_bindings write into jsonb columns now
+        // (plans-002-jsonb.xml). requireString already rejected a null/blank
+        // plan_json above; this additionally rejects a non-blank value that is not
+        // valid JSON, same shared helper AspectHandler uses for extras/
+        // salient_sentences (nexus-cefa1.4).
+        HttpUtil.rejectMalformedJson(MAPPER, "plan_json", planJson);
+        HttpUtil.rejectMalformedJson(MAPPER, "default_bindings", defaultBindings);
+
         long id = repo.savePlan(tenant, project, query, planJson,
                                 outcome.isBlank() ? "success" : outcome,
                                 tags, ttl, name, verb, scope, dimensions,
@@ -373,13 +381,21 @@ public final class PlanHandler implements HttpHandler {
             throw new IllegalArgumentException("field 'rows' must be a JSON array");
         }
         List<PlanRepository.ImportRow> rows = new ArrayList<>(rawRows.size());
+        int i = 0;
         for (Object o : rawRows) {
             if (!(o instanceof Map<?, ?> rm)) {
                 throw new IllegalArgumentException("each element of 'rows' must be an object");
             }
             @SuppressWarnings("unchecked")
             Map<String, Object> row = (Map<String, Object>) rm;
-            rows.add(parsePlanRow(row));
+            try {
+                rows.add(parsePlanRow(row));
+            } catch (IllegalArgumentException e) {
+                // nexus-cefa1.5 (mirrors AspectHandler.handleImportAspect,
+                // nexus-cefa1.4 critique): a bulk caller needs the failing row.
+                throw new IllegalArgumentException("rows[" + i + "]: " + e.getMessage(), e);
+            }
+            i++;
         }
         int imported = repo.importBatch(tenant, rows);
         HttpUtil.send(ex, 200, json(Map.of("imported", imported)));
@@ -402,6 +418,12 @@ public final class PlanHandler implements HttpHandler {
         String parentDims      = optStringOrNull(body, "parent_dims");
         String scopeTags       = optStringOrEmpty(body, "scope_tags");
         String matchText       = optStringOrEmpty(body, "match_text");
+
+        // nexus-cefa1.5: same jsonb validation as handleSave, shared across
+        // /save, /import, and /import_batch (this method is the ONE call site
+        // for the latter two).
+        HttpUtil.rejectMalformedJson(MAPPER, "plan_json", planJson);
+        HttpUtil.rejectMalformedJson(MAPPER, "default_bindings", defaultBindings);
 
         String caRaw = requireString(body, "created_at");
         OffsetDateTime createdAt;

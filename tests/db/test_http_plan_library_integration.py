@@ -273,7 +273,12 @@ class TestPlansMVV:
         row = plan_store.get_plan(pid)
         assert row is not None, "get_plan must find saved row"
         assert row["query"]     == "Walk an RDR to implementing code"
-        assert row["plan_json"] == '{"steps":[{"type":"search"}]}'
+        # nexus-cefa1.5: plan_json is jsonb now (plans-002-jsonb.xml).
+        # PostgreSQL's jsonb canonical text output inserts a space after each
+        # object-key colon, so the written '{"steps":[{"type":"search"}]}'
+        # (no spaces) no longer round-trips byte-identical over the real
+        # cross-language service -- assert the canonical shape.
+        assert row["plan_json"] == '{"steps": [{"type": "search"}]}'
         assert row["outcome"]   == "success"
         assert row["tags"]      == "research,rdr"
         assert row["verb"]      == "research"

@@ -3,6 +3,7 @@ package dev.nexus.service.db;
 import dev.nexus.service.jooq.nexus.tables.records.PlansRecord;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
+import org.jooq.JSONB;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -13,6 +14,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
+import static dev.nexus.service.db.JsonbSupport.jsonbOrNull;
+import static dev.nexus.service.db.JsonbSupport.jsonbRequired;
 import static dev.nexus.service.jooq.nexus.Tables.PLANS;
 import static org.jooq.impl.DSL.*;
 
@@ -555,9 +558,11 @@ public final class PlanRepository {
                     String normScope = r.scopeTags() != null ? r.scopeTags() : "";
                     String normMatch = r.matchText() != null ? r.matchText() : "";
                     String normOut   = r.outcome()   != null ? r.outcome()   : "success";
+                    // nexus-cefa1.5: see doSave's identical comment above.
                     insert = insert.values(tenant, r.project() != null ? r.project() : "", r.query(),
-                            r.planJson(), normOut, normTags, r.createdAt(), r.ttlDays(), r.name(),
-                            r.verb(), r.scope(), r.dimensions(), r.defaultBindings(), r.parentDims(),
+                            jsonbRequired(r.planJson(), "plan_json"), normOut, normTags, r.createdAt(),
+                            r.ttlDays(), r.name(), r.verb(), r.scope(), r.dimensions(),
+                            jsonbOrNull(r.defaultBindings()), r.parentDims(),
                             r.useCount(), r.lastUsed(), r.matchCount(), r.matchConfSum(), r.successCount(),
                             r.failureCount(), normScope, normMatch, r.disabledAt());
                 }
@@ -620,11 +625,19 @@ public final class PlanRepository {
         String normMatch = matchText  != null ? matchText  : "";
         String normOut   = outcome    != null ? outcome    : "success";
 
+        // nexus-cefa1.5: plan_json is jsonb NOT NULL (plans-002-jsonb.xml) —
+        // jsonbRequired rejects null/blank as a repository-layer backstop
+        // (the primary gate is PlanHandler's own 400, mirroring
+        // AspectHandler.rejectMalformedJson). default_bindings is jsonb
+        // NULL — jsonbOrNull maps null/blank to a real SQL NULL.
+        JSONB planJsonb  = jsonbRequired(planJson, "plan_json");
+        JSONB bindingsJb = jsonbOrNull(defaultBindings);
+
         var result = ctx.insertInto(PLANS)
                         .set(PLANS.TENANT_ID,        tenant)
                         .set(PLANS.PROJECT,          project != null ? project : "")
                         .set(PLANS.QUERY,            query)
-                        .set(PLANS.PLAN_JSON,        planJson)
+                        .set(PLANS.PLAN_JSON,        planJsonb)
                         .set(PLANS.OUTCOME,          normOut)
                         .set(PLANS.TAGS,             normTags)
                         .set(PLANS.CREATED_AT,       createdAt)
@@ -633,7 +646,7 @@ public final class PlanRepository {
                         .set(PLANS.VERB,             verb)
                         .set(PLANS.SCOPE,            scope)
                         .set(PLANS.DIMENSIONS,       dimensions)
-                        .set(PLANS.DEFAULT_BINDINGS, defaultBindings)
+                        .set(PLANS.DEFAULT_BINDINGS, bindingsJb)
                         .set(PLANS.PARENT_DIMS,      parentDims)
                         .set(PLANS.USE_COUNT,        0)
                         .set(PLANS.MATCH_COUNT,      0)
@@ -644,7 +657,7 @@ public final class PlanRepository {
                         .set(PLANS.MATCH_TEXT,       normMatch)
                         .onConflict(PLANS.TENANT_ID, PLANS.PROJECT, PLANS.QUERY)
                         .doUpdate()
-                        .set(PLANS.PLAN_JSON,        planJson)
+                        .set(PLANS.PLAN_JSON,        planJsonb)
                         .set(PLANS.OUTCOME,          normOut)
                         .set(PLANS.TAGS,             normTags)
                         .set(PLANS.CREATED_AT,       createdAt)
@@ -653,7 +666,7 @@ public final class PlanRepository {
                         .set(PLANS.VERB,             verb)
                         .set(PLANS.SCOPE,            scope)
                         .set(PLANS.DIMENSIONS,       dimensions)
-                        .set(PLANS.DEFAULT_BINDINGS, defaultBindings)
+                        .set(PLANS.DEFAULT_BINDINGS, bindingsJb)
                         .set(PLANS.PARENT_DIMS,      parentDims)
                         .set(PLANS.SCOPE_TAGS,       normScope)
                         .set(PLANS.MATCH_TEXT,       normMatch)
@@ -693,12 +706,15 @@ public final class PlanRepository {
         String normScope = scopeTags != null ? scopeTags : "";
         String normMatch = matchText != null ? matchText : "";
         String normOut   = outcome   != null ? outcome   : "success";
+        // nexus-cefa1.5: see doSave's identical comment above.
+        JSONB planJsonb  = jsonbRequired(planJson, "plan_json");
+        JSONB bindingsJb = jsonbOrNull(defaultBindings);
 
         var result = ctx.insertInto(PLANS)
                         .set(PLANS.TENANT_ID,        tenant)
                         .set(PLANS.PROJECT,          project != null ? project : "")
                         .set(PLANS.QUERY,            query)
-                        .set(PLANS.PLAN_JSON,        planJson)
+                        .set(PLANS.PLAN_JSON,        planJsonb)
                         .set(PLANS.OUTCOME,          normOut)
                         .set(PLANS.TAGS,             normTags)
                         .set(PLANS.CREATED_AT,       createdAt)
@@ -707,7 +723,7 @@ public final class PlanRepository {
                         .set(PLANS.VERB,             verb)
                         .set(PLANS.SCOPE,            scope)
                         .set(PLANS.DIMENSIONS,       dimensions)
-                        .set(PLANS.DEFAULT_BINDINGS, defaultBindings)
+                        .set(PLANS.DEFAULT_BINDINGS, bindingsJb)
                         .set(PLANS.PARENT_DIMS,      parentDims)
                         .set(PLANS.USE_COUNT,        useCount)
                         .set(PLANS.LAST_USED,        lastUsed)
@@ -774,7 +790,11 @@ public final class PlanRepository {
         m.put("id",               r.getId());
         m.put("project",          r.getProject() != null ? r.getProject() : "");
         m.put("query",            r.getQuery());
-        m.put("plan_json",        r.getPlanJson());
+        // nexus-cefa1.5: plan_json / default_bindings are jsonb now — JSONB.data()
+        // unwraps back to the raw JSON string, keeping the wire contract a string
+        // exactly as before (see JsonbSupport's siblings in AspectRepository /
+        // TelemetryRepository for the identical unwrap pattern).
+        m.put("plan_json",        r.getPlanJson() != null ? r.getPlanJson().data() : null);
         m.put("outcome",          r.getOutcome() != null ? r.getOutcome() : "success");
         m.put("tags",             r.getTags() != null ? r.getTags() : "");
         m.put("created_at",       r.getCreatedAt() != null
@@ -785,7 +805,7 @@ public final class PlanRepository {
         m.put("verb",             r.getVerb());
         m.put("scope",            r.getScope());
         m.put("dimensions",       r.getDimensions());
-        m.put("default_bindings", r.getDefaultBindings());
+        m.put("default_bindings", r.getDefaultBindings() != null ? r.getDefaultBindings().data() : null);
         m.put("parent_dims",      r.getParentDims());
         m.put("use_count",        r.getUseCount() != null ? r.getUseCount() : 0);
         m.put("last_used",        r.getLastUsed() != null

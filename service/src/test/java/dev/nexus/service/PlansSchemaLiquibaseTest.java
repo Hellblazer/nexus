@@ -437,7 +437,8 @@ class PlansSchemaLiquibaseTest {
                 ctx.execute(
                     "INSERT INTO nexus.plans " +
                     "(tenant_id, project, query, plan_json, outcome, match_text, created_at) " +
-                    "VALUES (?, ?, ?, ?, ?, ?, now())",
+                    // nexus-cefa1.5: plan_json is jsonb now — see insertPlan's identical comment.
+                    "VALUES (?, ?, ?, ?::jsonb, ?, ?, now())",
                     "delta-plans",         // tenant_id mismatch — WITH CHECK must reject
                     "gamma-proj",
                     "Cross-tenant insert attempt",
@@ -499,7 +500,12 @@ class PlansSchemaLiquibaseTest {
         try (var ps = su.prepareStatement(
                 "INSERT INTO nexus.plans " +
                 "(tenant_id, project, query, plan_json, outcome, tags, match_text, created_at) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, now()) " +
+                // nexus-cefa1.5: plan_json is jsonb now (plans-002-jsonb.xml) — a raw
+                // JDBC varchar-bound parameter has no implicit assignment cast to
+                // jsonb, so the placeholder needs an explicit ::jsonb cast (same
+                // idiom as CatalogRepositoryTest / VectorsRepointFunctionsIntegrationTest's
+                // ?::jsonb raw-SQL inserts elsewhere in this test tree).
+                "VALUES (?, ?, ?, ?::jsonb, ?, ?, ?, now()) " +
                 "ON CONFLICT (tenant_id, project, query) DO NOTHING")) {
             ps.setString(1, tenant);
             ps.setString(2, project);

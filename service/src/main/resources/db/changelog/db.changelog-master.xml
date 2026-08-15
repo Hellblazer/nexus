@@ -592,6 +592,23 @@
          data-safety trace and consumer audit. -->
     <include file="db/changelog/aspects-003-type-hygiene.xml"/>
 
+    <!-- Schema type-hygiene pass, Tier B, P4 (epic nexus-cefa1, bead
+         nexus-cefa1.5): retires plans.plan_json (TEXT NOT NULL -> jsonb NOT
+         NULL) and plans.default_bindings (TEXT -> jsonb NULL).
+         plans.dimensions / .parent_dims are deliberately EXCLUDED (identity
+         index; own bead + dedup audit if ever converted). Ordinary DDL, no
+         runAlways. Placed after aspects-003-type-hygiene.xml (P3) and
+         before the grants-nexus-svc.xml runAlways block — NOT back in the
+         plans-00N family's own section above, matching the established
+         convention (every RDR-156+ changeset appends near the current tail
+         rather than splicing back into its family's original block; see
+         catalog-031's / telemetry-004's / aspects-003's own <include>
+         comments for the identical reasoning). See plans-002-jsonb.xml's
+         own header for the full data-safety trace, the dimensions/
+         parent_dims deferral, and the plan_json/default_bindings consumer
+         audit. -->
+    <include file="db/changelog/plans-002-jsonb.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

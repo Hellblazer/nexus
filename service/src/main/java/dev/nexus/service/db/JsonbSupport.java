@@ -30,4 +30,24 @@ final class JsonbSupport {
     static JSONB jsonbOrNull(String v) {
         return (v == null || v.isBlank()) ? null : JSONB.valueOf(v);
     }
+
+    /**
+     * For NOT NULL jsonb columns (e.g. {@code plans.plan_json},
+     * nexus-cefa1.5, P4): unlike {@link #jsonbOrNull}, a null/blank value is
+     * never valid input here — the column's own changeset casts with a
+     * plain {@code ::jsonb} (no {@code NULLIF}), so a null/blank write must
+     * be rejected before it ever reaches the database rather than being
+     * silently coerced to something the NOT NULL constraint would then
+     * reject anyway with a less informative error. The primary gate is the
+     * HTTP handler's own 400 ({@code PlanHandler}, {@code Jackson#readTree}
+     * validation, mirroring {@code AspectHandler.rejectMalformedJson}); this
+     * is the repository-layer backstop for any caller that reaches here
+     * directly (e.g. a future write path that bypasses the handler).
+     */
+    static JSONB jsonbRequired(String v, String field) {
+        if (v == null || v.isBlank()) {
+            throw new IllegalArgumentException("field '" + field + "' must not be null or blank");
+        }
+        return JSONB.valueOf(v);
+    }
 }

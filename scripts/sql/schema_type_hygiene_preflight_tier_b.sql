@@ -14,9 +14,11 @@
 --   P3 (document_aspects.extras, document_aspects.salient_sentences) —
 --       SHIPPED (aspects-003-type-hygiene.xml, nexus-cefa1.4). Its branch
 --       was likewise SPLIT OUT into
---       schema_type_hygiene_preflight_tier_b_document_aspects.sql. This file
---       now audits the remaining THREE columns only.
---   P4 (plans.plan_json, plans.default_bindings)
+--       schema_type_hygiene_preflight_tier_b_document_aspects.sql.
+--   P4 (plans.plan_json, plans.default_bindings) — SHIPPED
+--       (plans-002-jsonb.xml, nexus-cefa1.5). Its branch was likewise SPLIT
+--       OUT into schema_type_hygiene_preflight_tier_b_plans.sql. This file
+--       now audits the ONE remaining column: topic_links.link_types.
 --   P5 (topic_links.link_types)
 -- So this file can be in a PARTIALLY migrated state — some columns still
 -- TEXT, others already jsonb — for long stretches between phases. Once a
@@ -30,13 +32,16 @@
 -- which classifies each column as still-TEXT (audit) or already-converted
 -- (assert the new type) and only ever runs this file's UNION ALL as a whole
 -- while EVERY column remaining in it is still TEXT. The NEXT column here to
--- convert (P4's plans.plan_json / .default_bindings) breaks whole-file
--- execution again — at that point split it out the same way this file
--- split hook_failures.batch_doc_ids and document_aspects.extras/
--- .salient_sentences, rather than patching with dynamic SQL.
+-- convert (P5's topic_links.link_types) will retire this file's
+-- malformed-seed audit entirely (it is the LAST still-text Tier-B column) —
+-- at that point this file has nothing left to split, it simply stops firing
+-- its malformed-seed branch, the same way schema_type_hygiene_preflight_
+-- tier_a.sql, ..._tier_b_hook_failures.sql, ..._tier_b_document_aspects.sql,
+-- and ..._tier_b_plans.sql each retire once their own columns convert.
 --
--- Audits: plans.plan_json, plans.default_bindings, topic_links.link_types
--- (all -> jsonb). hook_failures.batch_doc_ids moved to
+-- Audits: topic_links.link_types (-> jsonb). plans.plan_json /
+-- .default_bindings moved to schema_type_hygiene_preflight_tier_b_plans.sql
+-- (P4 shipped). hook_failures.batch_doc_ids moved to
 -- schema_type_hygiene_preflight_tier_b_hook_failures.sql (P2 shipped).
 -- document_aspects.extras / .salient_sentences moved to
 -- schema_type_hygiene_preflight_tier_b_document_aspects.sql (P3 shipped).
@@ -47,20 +52,12 @@
 --   total_rows            count(*) over the whole table.
 --   null_count             col IS NULL.
 --   empty_string_count      col = ''. Reported separately from
---                          invalid_cast_count on purpose: for
---                          default_bindings the eventual USING clause is
---                          NULLIF(col,'')::jsonb, so '' becomes NULL and
---                          never reaches the cast — benign (same shape as
---                          the already-shipped batch_doc_ids/extras/
---                          salient_sentences columns, now audited by their
---                          own split files). But
---                          plans.plan_json (NOT NULL, kept NOT NULL per the
---                          plan of record) and topic_links.link_types (NOT
---                          NULL DEFAULT '[]') have NO NULLIF step:
---                          ''::jsonb is invalid input, so for THOSE TWO
---                          columns a non-zero empty_string_count IS itself
---                          an ALTER-abort signal needing a named
---                          remediation before that phase ships.
+--                          invalid_cast_count on purpose: topic_links.
+--                          link_types is NOT NULL DEFAULT '[]' with NO
+--                          NULLIF step in its eventual USING clause (plain
+--                          ::jsonb) — a non-zero empty_string_count here IS
+--                          itself an ALTER-abort signal needing a named
+--                          remediation before P5 ships.
 --   non_iso_prefix_count   Always NULL (literal SQL NULL) — Tier-A-only
 --                          column, kept for row-shape parity with Tier A so
 --                          a caller merging both tiers' output sees a
@@ -70,12 +67,11 @@
 --
 -- WHAT invalid_cast_count DOES NOT CATCH: pg_input_is_valid(col,'jsonb')
 -- accepts bare JSON scalars ('1', '"x"', 'null', 'true'). Consumers of
--- plan_json/extras/link_types expect an object or array; a scalar converts
--- cleanly and then breaks the reader. Occurrence-time remedy:
--- jsonb_typeof(col) IN ('object','array') spot-check on the affected
--- column, only if the write path is ever shown to have emitted one (per the
--- 2026-08-14 directive: prose note, not a new probe column, until a live
--- population shows up).
+-- link_types expect an array; a scalar converts cleanly and then breaks the
+-- reader. Occurrence-time remedy: jsonb_typeof(col) = 'array' spot-check on
+-- the affected column, only if the write path is ever shown to have emitted
+-- one (per the 2026-08-14 directive: prose note, not a new probe column,
+-- until a live population shows up).
 --
 -- ACCEPTANCE (nexus-cefa1.1): every invalid_cast_count must be 0 before its
 -- own phase's ALTER TABLE ships. A non-zero count is a required, NAMED
@@ -85,9 +81,8 @@
 -- MULTI-TENANT CLUSTER (e.g. the cloud engine):
 -- All source tables are ENABLE + FORCE ROW LEVEL SECURITY with the standard
 -- `tenant_isolation` policy (`tenant_id = current_setting('nexus.tenant',
--- true)`) — verified against plans-001-baseline.xml, taxonomy-001-
--- baseline.xml. A plain tenant-scoped application connection sees ONE
--- tenant's rows and
+-- true)`) — verified against taxonomy-001-baseline.xml. A plain
+-- tenant-scoped application connection sees ONE tenant's rows and
 -- silently UNDERCOUNTS every column here (nexus-vounk: demonstrated 0-vs-9
 -- on exactly this failure shape) — a false-clean, not a legitimately empty
 -- store. Run this file through ONE of:
@@ -125,36 +120,14 @@ SELECT tier, table_name, column_name,
        total_rows, null_count, empty_string_count,
        non_iso_prefix_count, invalid_cast_count
 FROM (
-    -- ── column: plans.plan_json ────────────────────────────────────────
-    SELECT 'B' AS tier, 'plans' AS table_name, 'plan_json' AS column_name,
-           count(*) AS total_rows,
-           count(*) FILTER (WHERE plan_json IS NULL) AS null_count,
-           count(*) FILTER (WHERE plan_json = '') AS empty_string_count,
-           NULL::bigint AS non_iso_prefix_count,
-           count(*) FILTER (WHERE plan_json IS NOT NULL AND plan_json <> ''
-                             AND NOT pg_input_is_valid(plan_json, 'jsonb')) AS invalid_cast_count
-    FROM nexus.plans
-
-    UNION ALL
-    -- ── column: plans.default_bindings ──────────────────────────────────
-    SELECT 'B', 'plans', 'default_bindings',
-           count(*),
-           count(*) FILTER (WHERE default_bindings IS NULL),
-           count(*) FILTER (WHERE default_bindings = ''),
-           NULL::bigint,
-           count(*) FILTER (WHERE default_bindings IS NOT NULL AND default_bindings <> ''
-                             AND NOT pg_input_is_valid(default_bindings, 'jsonb'))
-    FROM nexus.plans
-
-    UNION ALL
     -- ── column: topic_links.link_types ──────────────────────────────────
-    SELECT 'B', 'topic_links', 'link_types',
-           count(*),
-           count(*) FILTER (WHERE link_types IS NULL),
-           count(*) FILTER (WHERE link_types = ''),
-           NULL::bigint,
+    SELECT 'B' AS tier, 'topic_links' AS table_name, 'link_types' AS column_name,
+           count(*) AS total_rows,
+           count(*) FILTER (WHERE link_types IS NULL) AS null_count,
+           count(*) FILTER (WHERE link_types = '') AS empty_string_count,
+           NULL::bigint AS non_iso_prefix_count,
            count(*) FILTER (WHERE link_types IS NOT NULL AND link_types <> ''
-                             AND NOT pg_input_is_valid(link_types, 'jsonb'))
+                             AND NOT pg_input_is_valid(link_types, 'jsonb')) AS invalid_cast_count
     FROM nexus.topic_links
 ) t
 ORDER BY tier, table_name, column_name;

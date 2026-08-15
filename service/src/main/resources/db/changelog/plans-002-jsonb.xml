@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cefa1.5 — schema type-hygiene pass, Tier B, P4 (epic nexus-cefa1;
+    plan of record T2 nexus/plan-schema-type-hygiene-2026-08-12 [22360]).
+    Template: aspects-003-type-hygiene.xml (nexus-cefa1.4, P3) — the closest
+    sibling for a bare TYPE ... USING with no DROP/SET DEFAULT bracketing
+    (neither plans.plan_json nor plans.default_bindings carries a DEFAULT
+    per plans-001-baseline.xml:76,85).
+
+    Retires two RDR-152 SQLite-port TEXT columns on nexus.plans, in ONE
+    changeset (ONE ALTER TABLE, one table rewrite):
+
+    - plan_json: TEXT NOT NULL -> jsonb NOT NULL, via TYPE jsonb USING
+      plan_json::jsonb (plain cast, no NULLIF — NOT NULL stays NOT NULL, and
+      the P0 pre-flight found empty_string_count=0 on the only populated
+      deployment, so there is no '' value that a NULLIF step would need to
+      catch; a plain ::jsonb cast on an empty string would abort the ALTER
+      with "invalid input syntax for type json" — column is safe without it
+      because that value never occurs, confirmed by the count, not assumed).
+    - default_bindings: TEXT NULL -> jsonb NULL, via TYPE jsonb USING
+      NULLIF(default_bindings, '')::jsonb (same NULLIF-guard shape as every
+      other nullable Tier-B column in this arc — an empty string is not a
+      valid jsonb literal, so it must become SQL NULL first).
+
+    NOT NULL is preserved automatically across ALTER COLUMN TYPE on
+    plan_json (never touched, no DROP/SET NOT NULL needed); neither column
+    carries a DEFAULT to drop or restore.
+
+    ALTER COLUMN TYPE is ordinary DDL (an ACCESS EXCLUSIVE table rewrite),
+    not RLS-filtered DML — no FORCE RLS toggle needed, and the changeset
+    touches no row via INSERT/UPDATE/DELETE.
+
+    EXCLUDED from this pass (recorded per the plan of record's explicit
+    deferral, plan-schema-type-hygiene-2026-08-12 §Scope):
+    - plans.dimensions / plans.parent_dims stay TEXT. A jsonb conversion of
+      `dimensions` would break BYTE-EQUALITY matching: the partial unique
+      index `idx_plans_tenant_dimensions ON nexus.plans (tenant_id, project,
+      dimensions) WHERE dimensions IS NOT NULL` (plans-001-baseline.xml:104)
+      IS the plan-identity constraint, and jOOQ's `PLANS.DIMENSIONS.eq(...)`
+      equality lookup in `PlanRepository.getByDimensions`
+      (service/src/main/java/dev/nexus/service/db/PlanRepository.java:111)
+      compares the caller-supplied dimensions string against the stored
+      value verbatim. jsonb round-tripping is NOT byte-identical (key order
+      and whitespace canonicalize on write: Postgres stores jsonb object
+      keys sorted by key length, then bytewise, never in input order, and
+      re-serializes with its own canonical spacing; pinned by
+      PlanRepositoryTest.savePlan_planJson_jsonbCanonicalizesWhitespaceAndKeyOrder),
+      so a jsonb
+      `dimensions` column would silently break both the partial unique index
+      semantics (two dimensionally-identical-but-differently-formatted JSON
+      strings currently collide on the unique index; canonicalization could
+      either newly collide non-identical dimension sets after roundtrip
+      normalization, or fail to collide two calls that intended the same
+      identity but serialized their JSON differently) and the eq-match
+      lookup (a caller re-submitting dimensions in a different key order
+      would silently miss a plan that canonical-form jsonb would have
+      matched). Converting `dimensions` / `parent_dims` needs its own bead
+      and its own dedup audit against the unique index and every
+      `PLANS.DIMENSIONS.eq(...)` call site, not a drive-by fold into this
+      changeset.
+
+    Data-safety evidence: T2 nexus/schema-hygiene-p0-preflight-2026-08-15
+    [22588] (nexus-cefa1.1), cloud (the only populated deployment; this
+    box's local substrate is a fresh hermetic pytest engine with no seeded
+    data): plans.plan_json total_rows=53, null_count=0,
+    empty_string_count=0, invalid_cast_count=0; plans.default_bindings
+    total_rows=53, null_count=39, empty_string_count=0,
+    invalid_cast_count=0. Every row already holds valid JSON (or SQL NULL
+    for default_bindings) — both USING clauses above are confirmed safe on
+    live data, not merely reasoned from the writers.
+
+    Consumer audit (nexus-cefa1.5, mirroring nexus-cefa1.2/.3/.4's sweeps —
+    full findings: T2 nexus/schema-hygiene-p4-plan-jsonb-audit-2026-08-15):
+    jsonb round-trip is NOT byte-identical (key order / whitespace
+    canonicalize). Swept every Java and Python consumer of plan_json /
+    default_bindings for text-equality or hash comparisons:
+    - Java: PlanRepository's ON CONFLICT keys are (tenant_id, project,
+      query) — never plan_json / default_bindings. No `.eq(...)` or hash
+      call touches either column anywhere in PlanRepository.java or
+      PlanHandler.java (grepped; only PLANS.DIMENSIONS.eq exists, and
+      dimensions is excluded above, unaffected by this changeset).
+    - Python: nexus.plans.match.Match.from_plan_row and
+      nexus.plans.scope._infer_scope_tags both `json.loads(...)` the
+      content — parsing is canonicalization-immune (key order and
+      whitespace do not change the decoded structure). nexus.plans.
+      seed_loader's dedup key is `canonical_dimensions_json(dimensions)`,
+      the SAME excluded-column identity above, not plan_json.
+      nexus.mcp.core's RDR-084 plan-growth auto-save
+      (`_do_grow`/`db.plans.save_plan`) upserts on `query`, not plan_json
+      content; no plan_json hash or string-equality check gates the save.
+      No hashlib / `==` / dedup-by-content call touches plan_json or
+      default_bindings anywhere in src/nexus/plans/*.py, src/nexus/mcp/
+      core.py, or src/nexus/db/t2/*.py (grepped). CONCLUSION: nothing
+      breaks under canonicalization — no fix was required.
+    - PlanHandler malformed-JSON validation (this bead, new): plan_json is
+      REQUIRED (requireString already rejects null/blank before reaching
+      the repository) and, additionally, must now parse as valid JSON — a
+      non-JSON string 400s at the handler via the shared
+      HttpUtil.rejectMalformedJson helper (extracted from AspectHandler's
+      private rejectMalformedJson, nexus-cefa1.4, so this is the SECOND
+      caller rather than a third copy). default_bindings is optional; when
+      present and non-blank it is validated the same way. A write path
+      that bypasses the handler (a direct repository call) still falls
+      back to the existing class-22 SQLSTATE 422 branch
+      (HttpUtil.sendTypedDbError) as the backstop, same as every prior
+      phase in this arc.
+
+    ANALYZE after the rewrite (BUG-0148 invariant, rdr180-16-analyze-
+    rewritten-tables precedent, mechanically enforced by
+    tests/test_changelog_analyze_lint.py) — the ALTER COLUMN ... TYPE above
+    resets nexus.plans's planner statistics.
+
+    Rollback: mirrors aspects-003's document_aspects rollback exactly — a
+    bare TYPE TEXT USING col::text cast restores the pre-migration shape
+    for free (plan_json's TEXT NOT NULL and default_bindings's nullable
+    TEXT, no COALESCE-to-'' needed for either, since neither carried a
+    DEFAULT and plan_json's NOT NULL survives the round trip unchanged).
+
+    Ordering: registered after aspects-003-type-hygiene.xml (P3) and before
+    the grants-nexus-svc.xml runAlways block, NOT back in the plans-00N
+    family's own section near the top of the changelog — matches the
+    master changelog's established convention for every new changeset
+    since RDR-156 (catalog-031, telemetry-004, aspects-003 all append near
+    the current tail rather than splicing back into their family's
+    original block).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset plans-002-1-type-hygiene ──────────────────────────────── -->
+    <changeSet id="plans-002-1-type-hygiene" author="nexus-cefa1.5">
+        <comment>
+            plans.plan_json TEXT NOT NULL -> jsonb NOT NULL; plans.default_bindings TEXT ->
+            jsonb NULL (ONE ALTER TABLE, one rewrite). plans.dimensions / .parent_dims stay
+            TEXT — deferred, see header (byte-equality plan-identity index / eq-match).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.plans
+    ALTER COLUMN plan_json TYPE jsonb USING plan_json::jsonb,
+    ALTER COLUMN default_bindings TYPE jsonb USING NULLIF(default_bindings, '')::jsonb;
+
+-- BUG-0148 invariant (rdr180-16-analyze-rewritten-tables precedent, mechanically
+-- enforced by tests/test_changelog_analyze_lint.py): the ALTER COLUMN ... TYPE
+-- above rewrites nexus.plans and resets its planner statistics.
+ANALYZE nexus.plans;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+ALTER TABLE nexus.plans
+    ALTER COLUMN plan_json TYPE TEXT USING plan_json::text,
+    ALTER COLUMN default_bindings TYPE TEXT USING default_bindings::text;
+
+ANALYZE nexus.plans;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

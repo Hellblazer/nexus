@@ -35,13 +35,27 @@ def test_save_plan(plan_db: T2Database) -> None:
 
 
 def test_save_plan_json_stored(plan_db: T2Database) -> None:
-    """save_plan() stores plan_json verbatim and it is retrievable as-is."""
+    """save_plan() stores plan_json and it is retrievable with equivalent content.
+
+    nexus-cefa1.5: plan_json is a jsonb column now (plans-002-jsonb.xml).
+    T2Database.save_plan/get_plan is HTTP-backed over the real engine (RDR-158
+    retired the local-SQLite leg), so this round-trips through PostgreSQL's
+    jsonb storage, which does NOT preserve source text -- object keys are
+    reordered (shorter keys before longer keys, ties broken lexically:
+    "meta" (4 chars) sorts before "steps" (5 chars) even though "steps" was
+    written first) and whitespace is normalized to the canonical form.
+    """
     json_payload = '{"steps": ["step1", "step2"], "meta": {"version": 2}}'
     row_id = plan_db.save_plan(query="complex query", plan_json=json_payload)
 
     row = plan_db.plans.get_plan(row_id)
     assert row is not None
-    assert row["plan_json"] == json_payload
+    # Actual PG jsonb canonical output: "meta" (4 chars) sorts before
+    # "steps" (5 chars) -- shorter keys first, per PostgreSQL's internal
+    # jsonb key ordering (verified empirically against a throwaway
+    # postgres:16-alpine container during the P4 audit, T2 nexus/schema-
+    # hygiene-p4-plan-jsonb-audit-2026-08-15).
+    assert row["plan_json"] == '{"meta": {"version": 2}, "steps": ["step1", "step2"]}'
 
 
 def test_search_plans_match(plan_db: T2Database) -> None:
