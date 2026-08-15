@@ -1318,12 +1318,14 @@ Carve-outs:
 ### nx t3 backfill-manifest
 
 ```
-nx t3 backfill-manifest [-c COLLECTION] [--no-dry-run] [-n N] [--resume]
+nx t3 backfill-manifest [-c COLLECTION] [--no-dry-run] [-n N] [--resume] [--only-gapped]
 ```
 
 Backfill the `document_chunks` manifest from T3 chunk metadata (RDR-108 D2). Reads each catalog document's T3 chunk metadata (`doc_id`, `chunk_index`, `chunk_text_hash`, span coordinates) and writes one manifest row per chunk, so the catalog can answer "what chunks compose this Document, in what order?" without consulting T3. Omitting `-c` processes every collection registered in the catalog; `-n` caps documents per collection.
 
 Idempotent: re-running overwrites the manifest with the same content (DELETE + INSERT in one transaction per document). Progress goes to stderr; SIGINT flushes a state file (`$NEXUS_BACKFILL_STATE_FILE`) so `--resume` skips collections already marked done. Same carve-outs as `reidentify`: `taxonomy__*` skipped, pre-RDR-053 chunks without `chunk_text_hash` error out.
+
+`--only-gapped` (nexus-3n7pr) restricts the run to documents that currently have ZERO manifest rows — a batched pre-pass over the target collection's doc_ids determines the gapped set before any T3 read or write, so a document that already has a manifest is never rewritten. Use this for a targeted repair pass over a large, mostly-healthy collection (the default, unset behavior processes and rewrites every document `-c`/the full catalog selects, which is correct for a first-time backfill but not for repairing a small damaged subset). Honored under `--dry-run` too — the dry run is the sizing instrument, so it reports the same skip/process partition a real run would touch. Skipped docs are counted separately from the other skip classes (`no T3 collection`, `zero chunk matches`, `phase3 no chunk_index`) in both the per-collection and summary output. Under `--only-gapped`, `-n N` bounds the GAPPED set (at most N zero-manifest documents are processed; healthy documents are still counted as skipped), so a canary such as `-n 25 --only-gapped` always exercises the write path when any gapped document exists. Without `--only-gapped`, `-n N` bounds the raw tumbler-ordered document list as before.
 
 ---
 

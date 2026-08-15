@@ -603,11 +603,24 @@ def gc_cmd(
         "from scratch (per-doc idempotency comes from write_manifest)."
     ),
 )
+@click.option(
+    "--only-gapped/--no-only-gapped",
+    default=False,
+    help=(
+        "Touch ONLY documents with zero manifest rows (nexus-3n7pr). "
+        "Skips any document that already has >=1 manifest row via a "
+        "batched pre-pass, before any T3 read or write -- use this for a "
+        "targeted repair pass so healthy manifests are never rewritten. "
+        "Default off (unchanged pre-existing behavior: every document in "
+        "the collection is processed)."
+    ),
+)
 def backfill_manifest_cmd(
     collection: str,
     dry_run: bool,
     limit: int,
     resume: bool,
+    only_gapped: bool,
 ) -> None:
     """Backfill document_chunks manifest from T3 chunk metadata (RDR-108 D2).
 
@@ -640,6 +653,7 @@ def backfill_manifest_cmd(
       nx t3 backfill-manifest --no-dry-run                      # all collections
       nx t3 backfill-manifest --no-dry-run -n 100               # first 100 docs
       nx t3 backfill-manifest --no-dry-run --resume             # continue after Ctrl-C
+      nx t3 backfill-manifest --no-dry-run --only-gapped        # repair pass: zero-manifest docs only
     """
     from nexus.catalog.manifest_backfill import (  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.manifest_backfill)
         MissingChunkHashError,
@@ -698,6 +712,8 @@ def backfill_manifest_cmd(
     total_chunks = 0
     total_skipped_no_t3 = 0
     total_skipped_zero_chunks = 0
+    total_skipped_phase3_no_index = 0
+    total_skipped_has_manifest = 0
     skipped_taxonomy = 0
     errors: list[str] = []
     docs_processed_overall = 0
@@ -718,7 +734,8 @@ def backfill_manifest_cmd(
 
         try:
             result = backfill_manifest_for_collection(
-                cat, t3_db, coll_name, dry_run=dry_run, limit=limit
+                cat, t3_db, coll_name, dry_run=dry_run, limit=limit,
+                only_gapped=only_gapped,
             )
         except MissingChunkHashError as exc:
             click.echo(
@@ -755,10 +772,25 @@ def backfill_manifest_cmd(
             if result.docs_skipped_zero_chunks
             else ""
         )
+        # nexus-3n7pr G2: docs_skipped_phase3_no_index was counted but never
+        # printed -- the dry run IS the sizing instrument for a remediation
+        # pass, so an unhealable class that isn't printed under-reports it.
+        phase3_no_index_part = (
+            f" ({result.docs_skipped_phase3_no_index} skipped: phase3_no_index)"
+            if result.docs_skipped_phase3_no_index
+            else ""
+        )
+        # nexus-3n7pr G1: --only-gapped skips surfaced the same way as the
+        # other skip classes -- never silent.
+        has_manifest_part = (
+            f" ({result.docs_skipped_has_manifest} skipped: has_manifest)"
+            if result.docs_skipped_has_manifest
+            else ""
+        )
         print(
             f"[{idx}/{total}] {coll_name}: processed {result.docs_processed} "
             f"doc(s), {verb} {result.chunks_written} chunk manifest row(s)"
-            f"{skipped_part}{zero_chunks_part}",
+            f"{skipped_part}{zero_chunks_part}{phase3_no_index_part}{has_manifest_part}",
             file=sys.stderr,
         )
 
@@ -776,12 +808,24 @@ def backfill_manifest_cmd(
                 if result.docs_skipped_zero_chunks
                 else ""
             )
+            + (
+                f" ({result.docs_skipped_phase3_no_index} skipped: phase3 no chunk_index)"
+                if result.docs_skipped_phase3_no_index
+                else ""
+            )
+            + (
+                f" ({result.docs_skipped_has_manifest} skipped: already has manifest)"
+                if result.docs_skipped_has_manifest
+                else ""
+            )
         )
 
         total_docs += result.docs_processed
         total_chunks += result.chunks_written
         total_skipped_no_t3 += result.docs_skipped_no_t3
         total_skipped_zero_chunks += result.docs_skipped_zero_chunks
+        total_skipped_phase3_no_index += result.docs_skipped_phase3_no_index
+        total_skipped_has_manifest += result.docs_skipped_has_manifest
         docs_processed_overall += result.docs_processed
 
         # SIG-6: periodic progress every _PROGRESS_INTERVAL docs.
@@ -807,11 +851,25 @@ def backfill_manifest_cmd(
         if total_skipped_zero_chunks
         else ""
     )
+    # nexus-3n7pr G2: print in the summary too -- was counted, never surfaced.
+    skipped_phase3_no_index_part = (
+        f", {total_skipped_phase3_no_index} doc(s) skipped (phase3 no chunk_index)"
+        if total_skipped_phase3_no_index
+        else ""
+    )
+    # nexus-3n7pr G1: --only-gapped skip total.
+    skipped_has_manifest_part = (
+        f", {total_skipped_has_manifest} doc(s) skipped (already has manifest)"
+        if total_skipped_has_manifest
+        else ""
+    )
     click.echo(
         f"\nSummary: processed {total_docs} doc(s), "
         f"{verb} {total_chunks} manifest row(s)"
         + skipped_no_t3_part
         + skipped_zero_chunks_part
+        + skipped_phase3_no_index_part
+        + skipped_has_manifest_part
         + (f", skipped {skipped_taxonomy} taxonomy collection(s)" if skipped_taxonomy else "")
         + (f", {len(errors)} error(s)" if errors else "")
     )

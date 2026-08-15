@@ -724,3 +724,244 @@ class TestChunkCountResync:
         assert after.chunk_count == 0
 
 
+# ── nexus-3n7pr G1: --only-gapped touches only zero-manifest documents ────
+
+
+class TestG1OnlyGappedFilter:
+    """G1: a repair pass over a mostly-healthy collection must touch ONLY
+    documents with zero manifest rows. ``only_gapped=True`` pre-passes with
+    ONE ``catalog.get_manifests(...)`` call and skips any doc already
+    present in the result -- BEFORE any T3 read or ``write_manifest`` call,
+    in both dry-run and real-run mode.
+    """
+
+    def _seed_healthy_and_gapped(
+        self, active_catalog: Any, t3_db: T3Database, coll: str,
+    ) -> tuple[str, str]:
+        """Register two docs; give ONE ("healthy") a real manifest row via a
+        direct ``write_manifest`` call (not a whole-collection backfill, so
+        the "gapped" doc is never touched during setup); leave the other
+        ("gapped") with a real T3 chunk but zero manifest rows.
+        """
+        healthy = _register_doc(active_catalog, coll)
+        gapped = _register_doc(active_catalog, coll)
+
+        _seed_chunk(
+            t3_db, collection=coll, chunk_id=f"h-{coll}",
+            content="healthy doc", doc_id=healthy, chunk_index=0,
+            chunk_text_hash="1" * 64,
+        )
+        _seed_chunk(
+            t3_db, collection=coll, chunk_id=f"g-{coll}",
+            content="gapped doc", doc_id=gapped, chunk_index=0,
+            chunk_text_hash="2" * 64,
+        )
+
+        # Direct manifest write for `healthy` only -- `gapped` is untouched.
+        active_catalog.write_manifest(
+            healthy,
+            [{
+                "chash": "1" * 64,
+                "position": 0,
+                "line_start": None,
+                "line_end": None,
+                "char_start": None,
+                "char_end": None,
+            }],
+            collection=coll,
+        )
+        before = active_catalog.get_manifest(healthy)
+        assert len(before) == 1
+
+        return healthy, gapped
+
+    def test_only_gapped_skips_healthy_processes_gapped(self, active_catalog, t3_db):
+        """--only-gapped skips the doc WITH a manifest, processes the one
+        WITHOUT, and never calls write_manifest for the healthy doc."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        healthy, gapped = self._seed_healthy_and_gapped(active_catalog, t3_db, coll)
+        healthy_manifest_before = active_catalog.get_manifest(healthy)
+
+        write_manifest_orig = active_catalog.write_manifest
+        with patch.object(
+            active_catalog, "write_manifest", wraps=write_manifest_orig,
+        ) as spy:
+            result = backfill_manifest_for_collection(
+                active_catalog, t3_db, coll, dry_run=False, only_gapped=True,
+            )
+
+        # The counter: exactly one doc skipped as already-has-manifest.
+        assert result.docs_skipped_has_manifest == 1
+        assert result.docs_processed == 1
+        assert result.chunks_written == 1
+
+        # write_manifest must never be called with the healthy doc_id --
+        # only the gapped one.
+        called_doc_ids = [call.args[0] for call in spy.call_args_list]
+        assert healthy not in called_doc_ids
+        assert gapped in called_doc_ids
+
+        # The healthy doc's manifest is byte-identical to before -- never
+        # rewritten (an --only-gapped bug would replace it with the same
+        # T3-derived content and this assertion would still pass, which is
+        # why the spy assertion above is the one that carries the proof; this is the
+        # end-state cross-check).
+        assert active_catalog.get_manifest(healthy) == healthy_manifest_before
+
+        # The gapped doc now has its manifest.
+        gapped_manifest = active_catalog.get_manifest(gapped)
+        assert len(gapped_manifest) == 1
+        assert gapped_manifest[0].chash == "2" * 64
+
+    def test_only_gapped_dry_run_reports_same_partition_without_writing(
+        self, active_catalog, t3_db,
+    ):
+        """A dry run under --only-gapped reports the identical
+        skip/process partition as a real run, and writes nothing."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        healthy, gapped = self._seed_healthy_and_gapped(active_catalog, t3_db, coll)
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=True, only_gapped=True,
+        )
+
+        assert result.docs_skipped_has_manifest == 1
+        assert result.docs_processed == 1
+        assert result.chunks_written == 0  # dry run: nothing written
+
+        # No manifest materialized for the gapped doc -- dry run never wrote.
+        assert active_catalog.get_manifest(gapped) == []
+
+    def test_only_gapped_limit_bounds_the_gapped_set_not_the_raw_list(
+        self, active_catalog, t3_db,
+    ):
+        """``limit`` under --only-gapped bounds the GAPPED set (critique
+        T2 [22623]): the seed registers the healthy doc FIRST, so a limit
+        applied to the raw tumbler-ordered list would select only the
+        healthy doc and process zero gapped ones -- the plan's canary
+        (``-n 25 --only-gapped``) would exit clean without exercising the
+        write path. With the fix, limit=1 still processes the one gapped
+        doc and the healthy doc is counted as skipped."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        healthy, gapped = self._seed_healthy_and_gapped(active_catalog, t3_db, coll)
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False, only_gapped=True, limit=1,
+        )
+
+        assert result.docs_processed == 1
+        assert result.docs_skipped_has_manifest == 1
+        assert len(active_catalog.get_manifest(gapped)) == 1
+
+    def test_only_gapped_default_off_processes_every_doc(self, active_catalog, t3_db):
+        """Default (only_gapped unset/False) behavior is unchanged: a
+        healthy doc is reprocessed too, not skipped."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        healthy, gapped = self._seed_healthy_and_gapped(active_catalog, t3_db, coll)
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False,
+        )
+
+        assert result.docs_skipped_has_manifest == 0
+        assert result.docs_processed == 2
+        assert result.chunks_written == 2
+
+
+# ── nexus-3n7pr G2/G1: CLI surfaces both new skip counters ────────────────
+
+
+class TestG1G2CliCounters:
+    """G2: ``docs_skipped_phase3_no_index`` was counted but never printed.
+    G1: ``docs_skipped_has_manifest`` (the --only-gapped skip) must also be
+    surfaced. Neither may be silent in the CLI's per-collection or summary
+    output.
+    """
+
+    def test_phase3_no_index_surfaced_in_cli_output(self, active_catalog, t3_db, runner):
+        """A multi-chunk doc with no chunk_index metadata anywhere trips
+        Phase3ChunkIndexMissingError; the CLI must print the count."""
+        from tests._catalog_fixture_ops import seed_manifest_chunks
+
+        coll = _unique_coll()
+        tumbler = _register_doc(active_catalog, coll)
+        col = t3_db._client.get_or_create_collection(coll)
+        col.add(
+            ids=[f"p1-{coll}", f"p2-{coll}"],
+            documents=["chunk one", "chunk two"],
+            metadatas=[
+                {"doc_id": tumbler, "chunk_text_hash": "3" * 64},
+                {"doc_id": tumbler, "chunk_text_hash": "4" * 64},
+            ],
+        )
+        seed_manifest_chunks(coll, ["3" * 64, "4" * 64])
+
+        with (
+            patch("nexus.commands.t3._make_catalog", return_value=active_catalog),
+            patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
+        ):
+            result = runner.invoke(
+                main,
+                ["t3", "backfill-manifest", "--collection", coll, "--no-dry-run"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "phase3 no chunk_index" in result.output, result.output
+
+    def test_only_gapped_skip_surfaced_in_cli_output(self, active_catalog, t3_db, runner):
+        """--only-gapped's has_manifest skip count must be printed too."""
+        coll = _unique_coll()
+        healthy = _register_doc(active_catalog, coll)
+        gapped = _register_doc(active_catalog, coll)
+        _seed_chunk(
+            t3_db, collection=coll, chunk_id=f"h-{coll}",
+            content="healthy", doc_id=healthy, chunk_index=0,
+            chunk_text_hash="5" * 64,
+        )
+        _seed_chunk(
+            t3_db, collection=coll, chunk_id=f"g-{coll}",
+            content="gapped", doc_id=gapped, chunk_index=0,
+            chunk_text_hash="6" * 64,
+        )
+        active_catalog.write_manifest(
+            healthy,
+            [{
+                "chash": "5" * 64,
+                "position": 0,
+                "line_start": None,
+                "line_end": None,
+                "char_start": None,
+                "char_end": None,
+            }],
+            collection=coll,
+        )
+
+        with (
+            patch("nexus.commands.t3._make_catalog", return_value=active_catalog),
+            patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "t3", "backfill-manifest", "--collection", coll,
+                    "--no-dry-run", "--only-gapped",
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "already has manifest" in result.output, result.output
+        # The gapped doc healed; the healthy one untouched.
+        assert len(active_catalog.get_manifest(gapped)) == 1
+        assert len(active_catalog.get_manifest(healthy)) == 1
+
+

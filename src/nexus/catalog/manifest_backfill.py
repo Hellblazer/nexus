@@ -41,6 +41,19 @@ Edge-case contracts:
     ``atomic_manifest_replace`` + resync pairing) — otherwise the row stays
     at whatever stale ``chunk_count`` it had (often 0) and every gap
     detector re-flags the doc forever.
+  - ``only_gapped=True`` (nexus-3n7pr G1): a repair pass over a large,
+    mostly-healthy collection must touch ONLY documents that currently have
+    ZERO manifest rows. Without this, ``backfill_manifest_for_collection``
+    processes every document ``list_by_collection`` returns and, for each,
+    calls the atomic DELETE+INSERT ``write_manifest`` — rewriting every
+    healthy manifest in the collection for the sake of repairing a small
+    damaged subset. The pre-pass batches ONE ``catalog.get_manifests(...)``
+    call over the whole collection's doc_ids (paginated server-side, not a
+    per-doc round trip) and skips any doc already present in the result,
+    counted in ``BackfillResult.docs_skipped_has_manifest``. The filter is
+    applied BEFORE the T3 lookup/write for each doc, and before the
+    ``dry_run`` branch, so a dry run reports the same partition a real run
+    would touch. Default is ``False`` — unset, behavior is unchanged.
 """
 from __future__ import annotations
 
@@ -128,6 +141,11 @@ class BackfillResult:
     # contract. Non-vacuity: a caller pointing backfill at a collection
     # with key-mismatched chunks must SEE this count rise, not a silent 0.
     docs_skipped_zero_chunks: int = 0
+    # nexus-3n7pr G1: count docs skipped by --only-gapped because they
+    # already have >=1 manifest row. Non-vacuity: a caller pointing
+    # --only-gapped at a fully-healthy collection must SEE this count equal
+    # docs_processed's would-be value, not a silent 0.
+    docs_skipped_has_manifest: int = 0
     skipped_taxonomy: bool = False
 
 
@@ -236,6 +254,7 @@ def backfill_manifest_for_collection(
     *,
     dry_run: bool = True,
     limit: int = 0,
+    only_gapped: bool = False,
 ) -> BackfillResult:
     """Backfill the document_chunks manifest for one T3 collection.
 
@@ -252,6 +271,13 @@ def backfill_manifest_for_collection(
         collection_name: Name of the T3 collection to backfill.
         dry_run: If True, compute but do not write manifest rows.
         limit: If > 0, process at most this many documents.
+        only_gapped: If True (nexus-3n7pr G1), skip any document that
+            already has >=1 manifest row -- determined via ONE batched
+            ``catalog.get_manifests(...)`` pre-pass over the collection's
+            doc_ids, never a per-doc lookup. Skipped docs are counted in
+            ``BackfillResult.docs_skipped_has_manifest`` and never reach
+            the T3 read or the ``write_manifest`` call, in either dry-run
+            or real-run mode.
 
     Returns:
         BackfillResult with counts.
@@ -282,11 +308,54 @@ def backfill_manifest_for_collection(
 
     # Get docs from catalog for this collection.
     docs = catalog.list_by_collection(collection_name)
-    if limit > 0:
+
+    # nexus-3n7pr G1: pre-pass, BEFORE any T3 read or write, so a repair
+    # run touches only zero-manifest docs. ONE batched get_manifests() call
+    # over the whole collection's doc_ids -- get_manifests keys its result
+    # dict only for doc_ids that have >=1 manifest row ("missing doc_ids
+    # are absent from the result, not keyed to empty list" -- see its
+    # docstring), so absence from the returned dict IS the gapped signal.
+    gapped_doc_ids: set[str] | None = None
+    if only_gapped and docs:
+        candidate_ids = [str(doc.tumbler) for doc in docs]
+        existing_manifests = catalog.get_manifests(candidate_ids)
+        gapped_doc_ids = {
+            doc_id for doc_id in candidate_ids if doc_id not in existing_manifests
+        }
+        # ``limit`` bounds the GAPPED set under --only-gapped (critique of the
+        # 3n7pr plan, T2 [22623]): applying it to the raw tumbler-ordered list
+        # first could pick N healthy docs and process zero gapped ones, so a
+        # canary run would exit 0 without ever exercising the write path.
+        # Healthy docs outside the limited window are still counted as
+        # skipped-has-manifest so the partition stays visible.
+        if limit > 0:
+            kept: list = []
+            gapped_kept = 0
+            for doc in docs:
+                if str(doc.tumbler) in gapped_doc_ids:
+                    if gapped_kept < limit:
+                        kept.append(doc)
+                        gapped_kept += 1
+                else:
+                    kept.append(doc)
+            docs = kept
+    elif limit > 0:
         docs = docs[:limit]
 
     for doc in docs:
         doc_id = str(doc.tumbler)
+
+        if gapped_doc_ids is not None and doc_id not in gapped_doc_ids:
+            # Already has >=1 manifest row -- --only-gapped skips it before
+            # touching T3 or calling the atomic DELETE+INSERT write_manifest.
+            result.docs_skipped_has_manifest += 1
+            _log.debug(
+                "manifest_backfill_doc_skipped_has_manifest",
+                collection=collection_name,
+                doc_id=doc_id,
+            )
+            continue
+
         if col is None:
             # S-2: collection absent in T3 — count as skipped, not processed.
             result.docs_skipped_no_t3 += 1
