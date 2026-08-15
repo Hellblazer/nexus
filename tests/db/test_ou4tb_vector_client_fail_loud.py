@@ -111,12 +111,17 @@ class TestTheContractIsUniformAcrossTheClass:
 class TestCallerLoopsIsolatePerItem:
     """Grep-level pins on the sites audited for nexus-ou4tb (b).
 
-    Originally seven; now five live entries — nexus-tbkk1 retired the
+    Originally seven; now four live entries — nexus-tbkk1 retired the
     doc_indexer.py entry when its guarded prune was deleted as dead code
     (see the SITES list comment below), the same shape as RDR-155 P4b's
     earlier retirement of the migration/collision_audit.py entry.
     nexus-afudo (2026-08-05) retired the indexer.py legacy-prune entry
-    the same way — see below.
+    the same way — see below. RDR-191 Phase 6 (nexus-o8dil.33, 2026-08-15)
+    retired the indexer.py GC-sweep-read entry the same way: the guarded
+    region (``_prune_deleted_files``'s client-side fetch-diff-copy-delete
+    fallback) is deleted outright — the manifest-chunk FK makes the
+    completeness apparatus it existed to prove correct unreachable by
+    construction — so there is no longer a degraded read here to isolate.
 
     Deliberately structural rather than behavioural: driving a real degraded
     service through each of these paths needs a different fixture per site,
@@ -142,7 +147,13 @@ class TestCallerLoopsIsolatePerItem:
         # nexus.indexer_utils.StalenessCache's docstring and
         # test_indexer.py::test_prune_misclassified_source_path_
         # fallback_deleted_as_dead_code.)
-        ("src/nexus/indexer.py", "gc_sweep_read_failed_skipping_collection"),
+        # (RDR-191 Phase 6, nexus-o8dil.33: indexer.py's
+        # "gc_sweep_read_failed_skipping_collection" guarded region —
+        # _prune_deleted_files' client-side fetch-diff-copy-delete
+        # fallback sweep — was DELETED outright; the manifest-chunk FK
+        # makes the completeness apparatus it existed to prove correct
+        # unreachable by construction. There is no longer a degraded read
+        # here to isolate. See indexer.py's _prune_deleted_files docstring.)
         ("src/nexus/exporter.py", "skip_existing_probe_failed_importing_batch"),
         # (nexus-tbkk1: doc_indexer.py's "stale_chunk_prune_failed_
         # registration_still_running" guarded region — index_pdf's

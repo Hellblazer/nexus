@@ -529,10 +529,11 @@ smoke_request POST /v1/catalog/index-run/begin \
 [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/index-run/begin"
 smoke_check "POST /v1/catalog/index-run/begin -> ok" "d.get('ok') is True"
 
-smoke_request GET "/v1/catalog/manifest/verify?doc_id=$SMOKE_DOC_TUMBLER"
-[ "$SMOKE_CODE" = "200" ] || smoke_fail "GET /v1/catalog/manifest/verify"
-smoke_check "GET /v1/catalog/manifest/verify -> referenced=0 missing=0 (no chunks written)" \
-  "d.get('referenced')==0 and d.get('missing')==0"
+# GET /v1/catalog/manifest/verify smoke check REMOVED (RDR-191 Phase 6,
+# nexus-o8dil.33) — the route is retired; the manifest-chunk FK makes the
+# dangling state it diagnosed unreachable. completeIndexRun's internal use
+# of the same underlying SQL function is exercised by the /complete calls
+# elsewhere in this script, not by this now-gone read-only route.
 
 smoke_request POST /v1/catalog/index-run/fail \
   "$(python3 -c "import json;print(json.dumps({'doc_id':'$SMOKE_DOC_TUMBLER','error':'gate-smoke synthetic failure'}))")"

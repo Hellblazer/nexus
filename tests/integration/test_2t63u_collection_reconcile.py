@@ -91,6 +91,41 @@ from nexus.errors import IndexRunVerifyRefused, SourceUriCollectionMismatchError
 pytestmark = [pytest.mark.integration]
 
 
+def _manifest_verify_via_client_reads(reader, doc_id: str) -> dict:
+    """RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: replaces the retired
+    ``HttpCatalogClient.manifest_verify`` for this test file's verification
+    use — that client method (and the GET /manifest/verify route it wrapped)
+    is retired; the manifest-chunk FK makes the dangling state it diagnosed
+    unreachable. ``nexus.manifest_verify(text)``, the underlying SQL
+    function, is NOT dropped — ``CatalogRepository.completeIndexRun``
+    depends on it internally — there is simply no client route onto it any
+    more.
+
+    Reconstructs the same ``{referenced, present, missing}`` shape
+    client-side via ``get_manifest`` (still live) + T3 ``existing_ids``, the
+    same idiom ``integrity.py``'s ``_verify_scoped`` (the only
+    damage-detection surface left in the ``nx`` CLI) uses. Rows are grouped
+    by their OWN stamped ``collection`` (nexus-kzso5 field), not the owning
+    document's ``physical_collection`` — matching engine semantics exactly.
+    """
+    from nexus.db import make_t3
+
+    rows = reader.get_manifest(doc_id)
+    referenced = len(rows)
+    if not rows:
+        return {"referenced": 0, "present": 0, "missing": 0}
+    by_collection: dict[str, list[str]] = {}
+    for r in rows:
+        by_collection.setdefault(r.collection or "", []).append(r.chash)
+    t3 = make_t3()
+    present = 0
+    for coll, chashes in by_collection.items():
+        if not coll:
+            continue
+        present += len(t3.existing_ids(coll, chashes))
+    return {"referenced": referenced, "present": present, "missing": referenced - present}
+
+
 def _extraction_result(page_count: int = 1):
     from nexus.pdf_extractor import ExtractionResult
 
@@ -268,7 +303,7 @@ class TestReconcileOnCollectionRetarget:
             f"{entry_b.index_state!r}"
         )
 
-        verify = reader.manifest_verify(doc_id)
+        verify = _manifest_verify_via_client_reads(reader, doc_id)
         assert verify["referenced"] == verify["present"] == 4, verify
         assert verify["missing"] == 0, (
             f"manifest_verify must be clean once physical_collection is "
@@ -378,7 +413,7 @@ class TestReconcileOnCollectionRetarget:
             "nexus-2t63u wedge's root cause."
         )
 
-        verify = reader.manifest_verify(doc_id)
+        verify = _manifest_verify_via_client_reads(reader, doc_id)
         assert verify["referenced"] == verify["present"] == 4, verify
         assert verify["missing"] == 0, (
             "manifest_verify must be clean without any reconciliation — the "
@@ -419,7 +454,7 @@ class TestReconcileOnCollectionRetarget:
                 doc_id, [{"position": 99, "chash": absent_chash}],
                 collection=collection_b,
             )
-            verify_dirty = reader.manifest_verify(doc_id)
+            verify_dirty = _manifest_verify_via_client_reads(reader, doc_id)
             assert verify_dirty["missing"] == 1, (
                 "the control chunk is not registering as missing, so the "
                 f"refusal below would prove nothing. Got {verify_dirty}"
@@ -637,7 +672,7 @@ class TestReconcileWriteFailureIsolated:
             f"({collection_b!r}) even with the document still stamped "
             f"{collection_a!r}. Got {sorted(stamped)!r}"
         )
-        verify = reader.manifest_verify(doc_id)
+        verify = _manifest_verify_via_client_reads(reader, doc_id)
         assert verify["missing"] == 0, verify
 
 

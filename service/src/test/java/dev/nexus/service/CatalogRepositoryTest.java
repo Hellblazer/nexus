@@ -190,12 +190,10 @@ class CatalogRepositoryTest {
             // Grant sequence for catalog_links BIGSERIAL
             su.createStatement().execute(
                 "GRANT USAGE ON SEQUENCE nexus.catalog_links_id_seq TO " + SVC_ROLE);
-            // RDR-159 P-1b: manifest functions (catalog-004) + nexus.chunks read so the
-            // svc role can invoke manifestBackfill/manifestOrphans (SECURITY INVOKER).
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.manifest_backfill() TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.manifest_orphans(int) TO " + SVC_ROLE);
+            // RDR-159 P-1b GRANTs for manifest_backfill()/manifest_orphans(int) REMOVED
+            // here (RDR-191 Phase 6, nexus-o8dil.33) -- both functions are DROPPED
+            // (catalog-030-retire-manifest-verify.xml); granting EXECUTE on a
+            // nonexistent function fails the fixture outright.
             // RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into ONE
             // nexus.chunks -- a single GRANT now covers what three did.
             su.createStatement().execute(
@@ -3071,146 +3069,6 @@ class CatalogRepositoryTest {
         long countA = repo.countDocuments(TENANT_A);
         assertThat(countB).isGreaterThanOrEqualTo(2);
         assertThat(countA).isGreaterThan(countB); // TENANT_A has more rows
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // RDR-159 P-1b (nexus-avjdd): manifest backfill + orphans callables
-    // ══════════════════════════════════════════════════════════════════════════
-
-    // Dedicated tenant so counts are EXACT (== N): no other test writes here.
-    private static final String TENANT_MIG = "mig-tenant-iso";
-    private static final String MIG_COLLECTION_384 =
-        "knowledge__mig-owner__minilm-l6-v2-384__v1";
-
-    @Test @Order(200)
-    void migration_manifestBackfill_stamps_null_collection_then_orphans_detected() {
-        // A 384-model doc with ONE manifest row whose collection is NULL and
-        // NO chunk row (RDR-191: nexus.chunks, embedding_384). nexus-x6kdz: writeManifest now stamps
-        // collection AT WRITE TIME, so the legacy NULL shape backfill exists
-        // for must be seeded directly (the pre-fix writer's output).
-        repo.upsertDocument(TENANT_MIG, Map.of(
-            "tumbler", "mforph.1",
-            "title", "Orphan Source",
-            "content_type", "knowledge",
-            "corpus", "knowledge",
-            "physical_collection", MIG_COLLECTION_384
-        ));
-
-        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk makes this
-        // test's ORIGINAL "orphan" premise -- a manifest row naming a chash
-        // with NO nexus.chunks row -- categorically unrepresentable now, the
-        // identical class of change nexus-7nrvr's Judgment Call 1 already
-        // applied to the NULL-collection premise below. Assert the refusal
-        // directly instead of silently stubbing a matching chunk (which would
-        // falsify the very population manifestOrphanReport exists to find).
-        assertThatThrownBy(() -> repo.writeManifest(TENANT_MIG, "mforph.1", MIG_COLLECTION_384, List.of(
-                Map.<String, Object>of("position", 0, "chash", ch("f00d"), "chunk_index", 0))))
-            .as("a manifest row naming a chash absent from nexus.chunks must be refused by "
-                + "fk_catalog_chunks_chunk -- the orphan population manifestOrphanReport exists "
-                + "to detect can no longer be created via the normal write path")
-            .hasMessageContaining("fk_catalog_chunks_chunk");
-
-        // A REAL (stubbed-chunk-backed) manifest row for the rest of this test's
-        // NULL-collection and manifestBackfill coverage, which is orthogonal to
-        // the now-unrepresentable orphan axis above.
-        writeManifestSeeded(TENANT_MIG, "mforph.1", MIG_COLLECTION_384, List.of(
-            Map.<String, Object>of(
-                "position", 0, "chash", ch("f00d-real"),
-                "chunk_index", 0)
-        ));
-        // The write-time stamp is the new contract:
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT collection FROM nexus.catalog_document_chunks "
-                + "WHERE tenant_id = '" + TENANT_MIG + "' AND doc_id = 'mforph.1'");
-            rs.next();
-            assertThat(rs.getString(1))
-                .as("nexus-x6kdz: writer stamps collection at write time")
-                .isEqualTo(MIG_COLLECTION_384);
-
-            // nexus-7nrvr Judgment Call 1 (coordinator ruling 2026-08-12): this
-            // test's ORIGINAL premise — reset the row to "the legacy NULL shape
-            // the pre-nexus-x6kdz writer would have left, so manifestBackfill
-            // has real work" — is now categorically IMPOSSIBLE to construct.
-            // catalog_document_chunks.collection is NOT NULL with no sentinel
-            // and no DEFAULT (catalog-025-collection-not-null.xml), so this
-            // exact UPDATE is precisely the state manifestBackfill exists to
-            // repair, made unrepresentable. Converting the test to assert
-            // THAT — a live guard on the constraint — is more valuable than
-            // the dead scenario it replaces, which can no longer happen
-            // anywhere outside the one-time RDR-191 migration changeset.
-            assertThatThrownBy(() -> st.execute(
-                    "UPDATE nexus.catalog_document_chunks SET collection = NULL "
-                    + "WHERE tenant_id = '" + TENANT_MIG + "' AND doc_id = 'mforph.1'"))
-                .as("the legacy NULL-collection shape manifestBackfill was written to "
-                    + "repair must be UNREPRESENTABLE now, not merely absent from this fixture")
-                .isInstanceOf(PSQLException.class)
-                .hasMessageContaining("null value in column \"collection\"")
-                .hasMessageContaining("violates not-null constraint");
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-
-        // The rejected UPDATE means the row's collection is UNCHANGED — still
-        // real, never NULL. manifestBackfill must honestly report ZERO rows
-        // to repair: the population it exists to stamp can no longer exist,
-        // so "nothing to do" is the only truthful answer left for it to give.
-        assertThat(repo.manifestBackfill(TENANT_MIG))
-            .as("no NULL-collection row can exist any more — manifestBackfill must find none")
-            .isEqualTo(0L);
-
-        // RDR-191 Phase 5 (nexus-o8dil.29): orphan detection's premise died with
-        // the NULL-collection premise above -- fk_catalog_chunks_chunk makes a
-        // dangling (chash-with-no-chunk) manifest row unrepresentable via the
-        // normal write path, so manifestOrphanReport/manifestOrphanCount must
-        // now honestly report ZERO for this tenant's real (stubbed-chunk-backed)
-        // manifest row. This is the live-guard coverage replacing the dead
-        // "genuine orphan" scenario, mirroring the NULL-collection rewrite above.
-        var report = repo.manifestOrphanReport(TENANT_MIG, 384, 100);
-        assertThat(report.get("count"))
-            .as("orphans are structurally unreachable now that fk_catalog_chunks_chunk "
-                + "enforces every manifest row's chash")
-            .isEqualTo(0L);
-        @SuppressWarnings("unchecked")
-        var orphans = (List<Map<String, Object>>) report.get("orphans");
-        assertThat(orphans).isEmpty();
-
-        // count-only gate form agrees with the report.
-        assertThat(repo.manifestOrphanCount(TENANT_MIG, 384)).isEqualTo(0L);
-    }
-
-    @Test @Order(201)
-    void migration_manifestOrphans_tenant_isolated_via_rls() {
-        // The orphan seeded for TENANT_MIG must be INVISIBLE to another tenant:
-        // SECURITY INVOKER + FORCE RLS scopes the function to the GUC tenant
-        // (refutes the 'cross-tenant scan' reading — the tenant arg is real).
-        var report = repo.manifestOrphanReport(TENANT_B, 384, 100);
-        assertThat(report.get("count")).isEqualTo(0L);
-        assertThat(repo.manifestOrphanCount(TENANT_B, 384)).isEqualTo(0L);
-    }
-
-    @Test @Order(202)
-    void migration_manifestOrphans_rejects_unsupported_dim_and_bad_limit() {
-        // dim + limit validated in the repo (clean error, not a PL/pgSQL RAISE)
-        org.assertj.core.api.Assertions.assertThatThrownBy(
-            () -> repo.manifestOrphanReport(TENANT_MIG, 999, 100)
-        ).isInstanceOf(IllegalArgumentException.class)
-         .hasMessageContaining("unsupported dim");
-        org.assertj.core.api.Assertions.assertThatThrownBy(
-            () -> repo.manifestOrphanCount(TENANT_MIG, 512)
-        ).isInstanceOf(IllegalArgumentException.class);
-        org.assertj.core.api.Assertions.assertThatThrownBy(
-            () -> repo.manifestOrphanReport(TENANT_MIG, 384, 0)
-        ).isInstanceOf(IllegalArgumentException.class)
-         .hasMessageContaining("limit");
-    }
-
-    @Test @Order(203)
-    void migration_manifestBackfill_is_idempotent() {
-        // Second backfill stamps nothing new — the function's WHERE collection
-        // IS NULL guard never re-stamps an already-stamped row.
-        long second = repo.manifestBackfill(TENANT_MIG);
-        assertThat(second).isEqualTo(0L);
     }
 
     // ══════════════════════════════════════════════════════════════════════════

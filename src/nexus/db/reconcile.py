@@ -191,9 +191,12 @@ def dim_for_model_token(token: str) -> int | None:
 
     THE canonical model-segment -> pgvector-table-dimension routing table,
     mirroring the Java authority ``PgVectorRepository.MODEL_DIMS`` (and, by
-    construction, ``nexus.manifest_orphans(dim)``'s per-dim ``split_part``
-    IN-lists — rdr180-002-hex-boundary-functions.xml). Returns ``None`` for
-    an unrecognized token rather than guessing.
+    construction, the per-dim ``split_part`` IN-lists used throughout
+    rdr180-002-hex-boundary-functions.xml — formerly also
+    ``nexus.manifest_orphans(dim)``'s, retired RDR-191 Phase 6
+    nexus-o8dil.33; ``chash_conformance_report(dim)`` uses the same
+    routing today). Returns ``None`` for an unrecognized token rather than
+    guessing.
 
     Deliberately NOT the same registry as ``nexus.corpus.
     CANONICAL_EMBEDDING_MODELS``/``LOCAL_EMBEDDING_MODELS`` (consulted by
@@ -206,9 +209,9 @@ def dim_for_model_token(token: str) -> int | None:
     an EXISTING collection's data live in) and must include every token
     the engine could have routed a live collection to — ``voyage-3``
     included. Use this one for anything that talks to
-    ``nexus.manifest_orphans``/``manifest_verify_all`` or the
-    ``chunks_<dim>`` tables directly; use the corpus.py pair for
-    collection-name minting/validation.
+    ``nexus.chash_conformance_report(dim)`` or the ``embedding_<dim>``
+    columns of the unified ``nexus.chunks`` table directly; use the
+    corpus.py pair for collection-name minting/validation.
     """
     return _MODEL_DIMS.get(token)
 

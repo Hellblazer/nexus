@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-191 Phase 6 (bead nexus-o8dil.33) — THE SUBTRACTION: DROP what the
+    manifest-chunk FK (catalog-029-manifest-chunk-fk.xml, VALIDATEd and
+    DEPLOYED — engine-service-v0.1.76, both FKs convalidated=true, dangling=0
+    all tenants, 2026-08-15) makes unreachable. Decision item 4:
+
+        "Retire what the constraint makes unreachable: manifest_orphans,
+        manifest_verify/manifest_verify_all, manifest_backfill and its call
+        protocol, _check_dangling_manifests, and the completeness apparatus
+        around _prune_deleted_files."
+
+    THREE of the four named SQL functions are DROPPED here:
+
+      - nexus.manifest_orphans(dim int)   (catalog-004, re-created vectors-005-10)
+      - nexus.manifest_verify_all()        (catalog-020, re-created vectors-005-9)
+      - nexus.manifest_backfill()          (catalog-004)
+
+    manifest_orphans(dim) and manifest_verify_all() answer exactly the
+    question the FK now enforces at write time (a manifest row whose chash
+    has no matching nexus.chunks row, or a delete of a still-referenced
+    chunk) — REJECTED outright, per Gap 1's verified pgvector 0.8.2 behaviour.
+    manifest_backfill()'s only remaining reason to exist — pre-backfill
+    NULL-collection rows blocking manifest_orphans/manifest_verify_all's
+    WHERE c.collection IS NOT NULL guard — dies with those two functions;
+    Phase 7's NOT NULL promotion (catalog-025-collection-not-null.xml,
+    nexus-71gw2) also means no NEW rows can ever need this stamp again.
+
+    manifest_verify(text) — the FOURTH function named in the Decision list —
+    is DELIBERATELY NOT DROPPED HERE. It is NOT retired-unreachable: it is
+    the SAME primitive CatalogRepository.completeIndexRun (POST
+    /v1/catalog/index-run/complete, the load-bearing fail-closed
+    verify-then-stamp on EVERY index run's completion) and
+    stampCompleteIfVerified call through manifestVerifyCtx, under a
+    DIFFERENT transaction (same-run, same-tenant, checking `referenced ==
+    the caller's claimed chunk_count`) — a completeness question the FK does
+    NOT answer (the FK guarantees every EXISTING manifest row references a
+    real chunk; it says nothing about whether all N expected manifest rows
+    for THIS run actually got written). Dropping the function would break
+    every index completion in production. See CatalogRepository.java's
+    manifestVerifyCtx javadoc ("shared by #manifestVerify, #completeIndexRun,
+    and writeManifestMany's complete-map stamp") and T2
+    nexus/rdr-191-p6-subtraction-o8dil33-2026-08-15 for the full trace. Only
+    the READ-ONLY GET /v1/catalog/manifest/verify route (CatalogHandler
+    .handleManifestVerify), CatalogRepository's PUBLIC manifestVerify(tenant,
+    docId) wrapper (its one caller), the Python client method, and the `nx
+    catalog manifest-verify` CLI are retired in this phase — the private
+    manifestVerifyCtx helper, the ManifestVerifyCounts record, and the SQL
+    function itself all stay.
+
+    ORDINARY RUN-ONCE (no runAlways), placed at the changelog tail per F11a's
+    established ordering discipline (declared order, zero <includeAll>) —
+    after vectors-006-null-distance-guards.xml, before the always-run grants
+    files. Comment edits only; no frozen changeSet body touched.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-030-1-drop-manifest-orphans" author="nexus-o8dil.33">
+        <comment>DROP nexus.manifest_orphans(dim int) — the manifest-chunk FK (catalog-029) now rejects the dangling state this function detected; the detection apparatus is unreachable by construction.</comment>
+        <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.manifest_orphans(int);
+        </sql>
+        <rollback/>
+        <!-- No rollback: re-creating this function correctly would require
+             re-deriving the dim-routing IF/ELSIF body from a prior
+             changelog; the FK it was superseded by is not itself rolled
+             back by dropping this diagnostic. Matches this repo's existing
+             no-op-rollback precedent for retired diagnostic apparatus
+             (rdr187-2-drop-chash-index). -->
+    </changeSet>
+
+    <changeSet id="catalog-030-2-drop-manifest-verify-all" author="nexus-o8dil.33">
+        <comment>DROP nexus.manifest_verify_all() — the corpus-wide grouped variant behind `_check_dangling_manifests` (nx doctor). manifest_verify(text) — the single-document variant — is KEPT: CatalogRepository.completeIndexRun/stampCompleteIfVerified depend on it via manifestVerifyCtx (see file header).</comment>
+        <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.manifest_verify_all();
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <changeSet id="catalog-030-3-drop-manifest-backfill" author="nexus-o8dil.33">
+        <comment>DROP nexus.manifest_backfill() — its only consumers (manifest_orphans/manifest_verify_all's `collection IS NOT NULL` pre-backfill exclusion) are gone, and catalog-025's NOT NULL promotion means no future row can ever need this stamp. _check_manifest_null_collection's census (EXPLICITLY NOT RETIRED, Decision item 4's own carve-out) stays as read-only visibility into the permanently-unenforced legacy population; it never called this function (READ-ONLY by design) and does not depend on it existing.</comment>
+        <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.manifest_backfill();
+        </sql>
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>

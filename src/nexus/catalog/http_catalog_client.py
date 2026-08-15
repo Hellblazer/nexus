@@ -694,59 +694,16 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         result = self._post("/docs/chunk-counts", {"doc_ids": doc_ids})
         return {k: int(v) for k, v in (result or {}).items() if v is not None}
 
-    def manifest_backfill(self) -> int:
-        """Stamp manifest collection from the owning doc where NULL; return
-        the number of rows stamped (RDR-159 P-1b).
+    # RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: manifest_backfill() and
+    # manifest_orphans(dim) are RETIRED here — both engine routes are
+    # retired and both underlying SQL functions are DROPPED
+    # (catalog-030-retire-manifest-verify.xml); the manifest-chunk FK makes
+    # the dangling state they detected/fixed unreachable by construction.
+    # ``_MANIFEST_DIMS`` (384, 768, 1024) is redeclared where still needed
+    # (chash_conformance_report below).
 
-        Wraps the ``nexus.manifest_backfill()`` stored function via the
-        service (RDR-152: no direct Python PG connection). MUST be called
-        before :meth:`manifest_orphans` — pre-backfill NULL-collection rows
-        would otherwise read as false orphans.
-        """
-        result = self._post("/manifest/backfill", {})
-        return int((result or {}).get("stamped", 0))
-
-    #: dims the ``chunks_<dim>`` tables (and the stored function) accept.
+    #: dims the ``chash_conformance_report`` stored function accepts.
     _MANIFEST_DIMS = (384, 768, 1024)
-
-    def manifest_orphans(self, dim: int, *, limit: int = 100) -> dict:
-        """Manifest rows with no chunk row in ``chunks_<dim>`` (RDR-159 P-1b).
-
-        Returns ``{"dim": d, "count": n, "orphans": [...]}`` where ``count``
-        is the exact orphan count (the non-vacuous migration-validation
-        signal — zero is clean) and ``orphans`` is a diagnostic sample capped
-        at ``limit`` (must be > 0; the count is the gate, not the sample
-        length). count and sample are computed server-side in one transaction
-        so they agree.
-
-        The result is tenant-scoped: the stored function is SECURITY INVOKER
-        and the service counts under the request tenant's RLS GUC. ``dim``
-        must be one of 384/768/1024. Call :meth:`manifest_backfill` FIRST —
-        pre-backfill (NULL-collection) rows are excluded by the function, so
-        an orphan check on an un-backfilled manifest reads a false-clean zero.
-        """
-        if dim not in self._MANIFEST_DIMS:
-            raise ValueError(
-                f"dim must be one of {self._MANIFEST_DIMS}, got {dim!r}"
-            )
-        if limit <= 0:
-            raise ValueError(f"limit must be > 0, got {limit!r}")
-        result = self._get("/manifest/orphans", dim=dim, limit=limit)
-        result = result or {}
-        if "count" not in result:
-            # nexus-znwc2: `count` feeds the migration P3 validation gate
-            # (manifest_check) — a stripped field defaulting to 0 would be a
-            # vacuous PASS. Fail closed, matching relation_counts' model.
-            raise RuntimeError(
-                "manifest/orphans response carried no `count` field — cannot "
-                "verify orphan state; refusing a false-clean zero "
-                f"(response keys: {sorted(result)})"
-            )
-        return {
-            "dim": int(result.get("dim", dim)),
-            "count": int(result["count"]),
-            "orphans": result.get("orphans", []),
-        }
 
     def manifest_null_collection_report(self) -> dict:
         """Read-only census of the manifest population :meth:`manifest_orphans`
@@ -988,45 +945,19 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 return
             raise
 
-    def manifest_verify(self, doc_id: str) -> dict:
-        """GET /v1/catalog/manifest/verify?doc_id=X — one-document
-        ``{referenced, present, missing}`` (memo §3.2's SQL primitive,
-        narrowed to a single document).
-
-        This is a READ: unlike begin/complete/fail above, a 404 or any
-        other transport failure PROPAGATES — callers that need to
-        distinguish "the engine doesn't support this route yet" from "the
-        engine says the document is clean" (the doctor sweep, `nx catalog
-        verify`) must be able to tell the two apart. The ONE caller that
-        must fail open on ANY failure here
-        (:func:`nexus.doc_indexer._manifest_is_fully_present`) implements
-        that fail-open+WARNING contract itself, around this call.
-
-        CALLER TRAP: an empty *doc_id* is silently DROPPED by ``_get``'s
-        falsy-param filter (``{k: v for k, v in params.items() if v is not
-        None and v != ""}``) — the request goes out with NO ``doc_id`` query
-        param at all, which the engine's ``doc_id.isBlank()`` guard answers
-        with a 400, not a per-document result. This method does not guard
-        against it; callers must pass a non-empty *doc_id* (the only current
-        caller, ``_manifest_is_fully_present``, already short-circuits on an
-        empty ``doc_id`` before ever reaching here).
-        """
-        result = self._get("/manifest/verify", doc_id=doc_id)
-        return result or {}
-
-    def manifest_verify_all(self) -> dict:
-        """GET /v1/catalog/manifest/verify_all — every live document in the
-        tenant, grouped by collection: ``{"collections": [...], "count": n}``
-        (nexus-ac4id part 2 — the doctor sweep primitive; supersedes the
-        client-side per-collection T3 paging that check used to do).
-
-        A READ; propagates on failure like :meth:`manifest_verify` — the
-        doctor's own non-vacuity discipline (``checked == 0`` renders
-        SKIPPED, never a false-clean pass) needs to see a 404 as a real
-        error, not a silently-empty "0 collections checked."
-        """
-        result = self._get("/manifest/verify_all")
-        return result or {}
+    # RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: manifest_verify(doc_id)
+    # and manifest_verify_all() are RETIRED here — both GET routes are
+    # retired server-side (CatalogHandler) and nexus.manifest_verify_all()
+    # is DROPPED outright (catalog-030-retire-manifest-verify.xml); the
+    # manifest-chunk FK makes the dangling state they diagnosed unreachable.
+    # nexus.manifest_verify(text) itself is KEPT server-side — completeIndexRun
+    # depends on it internally — but this client no longer has a route to
+    # reach it, since the ONE prior caller of this method
+    # (doc_indexer._manifest_is_fully_present) is now a structural no-op:
+    # the FK guarantees any manifest row that exists already references a
+    # real chunk, so the "missing" question this method answered is
+    # provably always 0 for any row that could reach this call. See
+    # doc_indexer.py's _manifest_is_fully_present for the full trace.
 
     def relation_counts(self, relations: list[str]) -> dict[str, int]:
         """Tenant-scoped row counts for migration-verify relations.

@@ -98,7 +98,15 @@ class JooqRecordReflectionFeatureTest {
     // type per table, so this is -6 record types for the retired shards
     // +2 for their unified replacements = a net -4. This is the
     // deliberate bump (downward, for once) the assertion message demands.
-    private static final int EXPECTED_RECORD_TYPES = 65;
+    // 65 -> 63: RDR-191 Phase 6 (nexus-o8dil.33, catalog-030-retire-manifest-
+    // verify.xml) DROPPED nexus.manifest_orphans(int) and
+    // nexus.manifest_verify_all() — both RETURNS TABLE, one generated Record
+    // type each (-2). nexus.manifest_backfill(), also dropped by the same
+    // changeset, RETURNS bigint (a scalar routine, no Record type, same
+    // shape as gc_restore_rereferenced above) — no further delta.
+    // nexus.manifest_verify(text) is DELIBERATELY KEPT (completeIndexRun
+    // depends on it), so its Record type is unaffected.
+    private static final int EXPECTED_RECORD_TYPES = 63;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

@@ -107,33 +107,28 @@ def test_fail_index_run_404_is_swallowed(pre_fence_client, caplog) -> None:
     assert any(r.msg == "index_run_fail_engine_floor" for r in caplog.records)
 
 
-# ── manifest_verify: a READ, 404 PROPAGATES; the staleness gate's OWN ──────
-# ── fail-open+WARNING contract is what absorbs it (memo §6, §3.4) ─────────
+# RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: manifest_verify/
+# manifest_verify_all's client methods are RETIRED — the manifest-chunk FK
+# makes the dangling state they diagnosed unreachable. test_manifest_verify_
+# 404_propagates and test_manifest_verify_all_404_propagates DELETED
+# (both called the now-removed methods directly).
 
 
-def test_manifest_verify_404_propagates(pre_fence_client) -> None:
-    """manifest_verify itself must NOT swallow the 404 — doctor / `nx catalog
-    verify` (future consumers) need to tell "engine doesn't support this
-    route" apart from "engine says the document is clean", which a silently
-    empty {} would collapse into a false-clean 'zero missing'."""
-    with pytest.raises(httpx.HTTPStatusError):
-        pre_fence_client.manifest_verify("1.1.1")
-
-
-def test_manifest_verify_all_404_propagates(pre_fence_client) -> None:
-    with pytest.raises(httpx.HTTPStatusError):
-        pre_fence_client.manifest_verify_all()
-
-
-def test_staleness_gate_falls_through_and_fails_open_on_404(
-    pre_fence_client, monkeypatch, caplog,
+def test_staleness_gate_returns_true_without_any_engine_call(
+    pre_fence_client, monkeypatch,
 ) -> None:
-    """The client-half ship order (memo §6): a 404 on /index-run/begin (or an
-    absent fence field, same 'unknown' bucket) means the staleness gate falls
-    through to manifest_verify; when THAT also 404s (pre-fence engine has
-    neither route), _manifest_is_fully_present's own fail-open+WARNING
-    contract absorbs it — the document is treated as fresh (today's
-    pre-RUNFENCE behaviour), not as a crash."""
+    """RDR-191 Phase 6 rebase: the staleness gate's fallback,
+    ``_manifest_is_fully_present``, no longer calls ``manifest_verify`` at
+    all — the manifest-chunk FK makes the ``missing`` question it asked
+    provably always False for any manifest row that exists, so the function
+    is a bare ``return True`` now (see its own docstring for the full FK
+    argument). This test pins that: even against a server that 404s EVERY
+    route (the pre-fence emulator this module's other tests use for a
+    genuinely different purpose — 404 SWALLOWING on the advisory
+    begin/complete/fail writes), the staleness gate returns True WITHOUT
+    ever making a request that could 404, and logs nothing (the old
+    fail-open+WARNING contract had a real failure path to warn about; this
+    one has none)."""
     _configure_structlog_to_stdlib()
     monkeypatch.setattr(
         "nexus.catalog.factory.make_catalog_reader",
@@ -141,9 +136,4 @@ def test_staleness_gate_falls_through_and_fails_open_on_404(
     )
     from nexus.doc_indexer import _manifest_is_fully_present
 
-    with caplog.at_level(logging.WARNING, logger="nexus.doc_indexer"):
-        assert _manifest_is_fully_present(object(), "1.1.1") is True
-    assert any(
-        r.msg == "index_manifest_presence_check_failed" and r.levelname == "WARNING"
-        for r in caplog.records
-    )
+    assert _manifest_is_fully_present(object(), "1.1.1") is True

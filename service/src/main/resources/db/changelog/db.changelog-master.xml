@@ -532,19 +532,24 @@
          contiguous. -->
     <include file="db/changelog/vectors-006-null-distance-guards.xml"/>
 
-    <!-- RDR-191 Phase 7 fold (bead nexus-o8dil.37, amendment xii) — RETRACTED
-         2026-08-15: a dedicated catalog-030 changeset was drafted and then
-         DROPPED under the standing convergence directive once its own
-         drafting proved it structurally vestigial — catalog-025-collection-
-         not-null.xml (nexus-71gw2) already closes the entire NULL-collection
-         population and promotes SET NOT NULL for catalog_document_chunks
-         .collection, strictly EARLIER in this file's own include order, on
-         every real deployment. Amendment (xii)'s premise (the column was
-         still nullable) was itself stale relative to nexus-71gw2, which
-         shipped two days before the amendment. Phase 7 / bead nexus-o8dil.37
-         is closed on catalog-025's own evidence — no further changelog is
-         needed. See catalog-025-collection-not-null.xml's own header for the
-         live NOT NULL promotion. -->
+    <!-- RDR-191 Phase 7 fold (nexus-o8dil.37) — RETRACTED 2026-08-15, closed
+         on catalog-025-collection-not-null.xml's own evidence (nexus-71gw2,
+         which predates it); the drafted catalog-030 never shipped under
+         that name, so Phase 6 below reuses it without collision. -->
+
+    <!-- RDR-191 Phase 6 (bead nexus-o8dil.33) — THE SUBTRACTION: DROP the
+         three SQL functions the manifest-chunk FK (catalog-029, VALIDATEd
+         and deployed, engine-service-v0.1.76) makes unreachable —
+         manifest_orphans(dim), manifest_verify_all(), manifest_backfill().
+         manifest_verify(text) is DELIBERATELY KEPT — CatalogRepository
+         .completeIndexRun's fail-closed verify-then-stamp depends on it via
+         manifestVerifyCtx. Must come after catalog-029-manifest-chunk-fk.xml
+         (FK must be VALIDATEd — deployed on every install this release
+         supports — before its detection apparatus is removed) and after
+         vectors-005/006 (the CREATE OR REPLACE bodies being dropped here).
+         See catalog-030-retire-manifest-verify.xml's own header for the
+         full trace. -->
+    <include file="db/changelog/catalog-030-retire-manifest-verify.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

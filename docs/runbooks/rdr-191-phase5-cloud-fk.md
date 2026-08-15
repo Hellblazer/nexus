@@ -1,5 +1,20 @@
 # RDR-191 Phase 5 Cloud FK — Operator Runbook
 
+**HISTORICAL — Phase 5 EXECUTED (deployed engine-service-v0.1.76, both FKs
+convalidated=true, dangling=0 all tenants) and RDR-191 Phase 6 (bead
+nexus-o8dil.33, THE SUBTRACTION, 2026-08-15) has since RETIRED the
+`manifest-verify` apparatus this runbook's verify instrument
+(`collections_checked` / `nx catalog manifest-verify_all`) depended on —
+`nexus.manifest_orphans(dim)`, `nexus.manifest_verify_all()`, and
+`nexus.manifest_backfill()` are DROPPED (`catalog-030-retire-manifest-
+verify.xml`); the `_manifest_verify_list` CLI (`nx catalog manifest-verify
+--list`) referenced below no longer exists. This document is preserved
+AS-IS for the historical record of the executed deploy — do not follow its
+verify-instrument steps against a current install. `nexus.manifest_
+verify(text)` (the single-document, non-corpus-wide form) is the ONE
+function this runbook references that was NOT dropped — it remains live
+server-side for `CatalogRepository.completeIndexRun`'s internal use only.**
+
 Status: **PREP, not yet executable.** Drafted 2026-08-14 against bead
 `nexus-o8dil.31` ("RDR-191 P5: add the FK on CLOUD"). This bead cannot close
 until `nexus-o8dil.29` (the local FK changeset) lands and GATE-5-CLOUD

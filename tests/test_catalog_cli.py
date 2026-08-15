@@ -1268,8 +1268,10 @@ class TestVerifyCommand:
 
     def _patch_t3(self, monkeypatch, present_ids_by_collection, t3_collections=None):
         """Patch _make_t3 in commands.catalog: existing_ids returns the seeded
-        set (scoped-mode Class-B-per-doc probe), list_collections returns the
-        given (or inferred) collection names (full-mode Class-A probe)."""
+        set (scoped-mode per-doc damage probe — the ONLY damage detection
+        left in this command since Class B's retirement, RDR-191 Phase 6
+        nexus-o8dil.33), list_collections returns the given (or inferred)
+        collection names (full-mode Class-A probe)."""
         from unittest.mock import MagicMock
 
         # Module-wide cloud_mode fixture forces is_local_mode() False, so
@@ -1313,28 +1315,13 @@ class TestVerifyCommand:
         assert result.exit_code == 0, result.output
         assert "All good." in result.output
 
-    def test_verify_flags_damaged(self, catalog_env, monkeypatch):
-        """Class B: a manifest referencing a T3-missing chash → damaged
-        collection finding, exit 1. Flips the pre-fix bug (rc 0 at 89.6%
-        ghost rate)."""
-        entries = [_FakeEntry("1.1.1", "Doc", physical_collection="knowledge__thing", chunk_count=2)]
-        cat = _FakeFullCat(
-            entries=entries,
-            doc_counts={"knowledge__thing": 1},
-            mv_all={"collections": [
-                {"collection": "knowledge__thing", "referenced": 2, "present": 1, "missing": 1},
-            ], "count": 1},
-            manifests={"1.1.1": [object(), object()]},  # len == chunk_count: not "lost"
-        )
-        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
-        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__thing"})
-
-        runner = CliRunner()
-        result = runner.invoke(main, ["catalog", "verify"])
-
-        assert result.exit_code == 1, result.output
-        assert "damaged" in result.output.lower()
-        assert "knowledge__thing" in result.output
+    # test_verify_flags_damaged DELETED (RDR-191 Phase 6, nexus-o8dil.33):
+    # tested Class B (a manifest_verify_all "missing" row -> damaged
+    # collection finding). Class B is retired — the manifest-chunk FK makes
+    # the dangling state it detected unreachable, so `damaged` in full mode
+    # is now always []. --collection scoped mode's own damage detection
+    # (client-side, unaffected) is covered by test_verify_scoped_json_output
+    # and siblings.
 
     def test_verify_missing_collection_is_vanished(self, catalog_env, monkeypatch):
         """Class A: collection absent from T3 entirely (deleted/renamed) →
@@ -1415,45 +1402,32 @@ class TestVerifyCommand:
         assert data["summary"]["lost_docs"] == 0
         assert data["summary"]["exit"] == 0
 
-    def test_verify_manifest_verify_all_zero_collections_is_incomplete(
-        self, catalog_env, monkeypatch,
-    ):
-        """Non-vacuity (mirrors health.py's _check_dangling_manifests): 0
-        collections checked while real docs exist is INCOMPLETE, never a
-        clean pass."""
-        entries = [_FakeEntry("1.1.1", "A", physical_collection="knowledge__thing", chunk_count=1)]
-        cat = _FakeFullCat(
-            entries=entries,
-            doc_counts={"knowledge__thing": 1},
-            mv_all={"collections": [], "count": 0},
-            manifests={"1.1.1": [object()]},
-        )
-        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
-        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__thing"})
-
-        runner = CliRunner()
-        result = runner.invoke(main, ["catalog", "verify"])
-
-        assert result.exit_code != 0
-        assert "INCOMPLETE" in result.output
+    # test_verify_manifest_verify_all_zero_collections_is_incomplete DELETED
+    # (RDR-191 Phase 6, nexus-o8dil.33): tested Class B's non-vacuity guard
+    # (0 collections checked -> INCOMPLETE). Class B and its manifest_verify_all
+    # call are retired entirely.
 
     def test_verify_json_output(self, catalog_env, monkeypatch):
         """--json emits the new CI-contract shape (deliberately breaks the
         retired {collection: [{tumbler, title, doc_id}]} shape).
 
-        nexus-sj4a3 critique SIG-3: full mode's damaged rows are
+        nexus-sj4a3 critique SIG-3: full mode's damaged rows were
         COLLECTION-granular (one manifest_verify_all round trip; no
-        per-doc count), so the summary key is ``damaged_collections`` here
-        — distinct from scoped mode's per-document ``damaged_docs``
+        per-doc count) — Class B is RETIRED (RDR-191 Phase 6,
+        nexus-o8dil.33; the manifest-chunk FK makes the dangling state it
+        detected unreachable), so ``damaged``/``damaged_collections`` are
+        now always empty/0 in full mode. This test exercises the SAME
+        JSON-contract-shape assertion via Class C (``lost``) instead, the
+        summary key distinct from scoped mode's per-document ``damaged_docs``
         (see test_verify_scoped_json_output)."""
-        entries = [_FakeEntry("1.1.1", "Ghost", physical_collection="knowledge__x", chunk_count=1)]
+        entries = [_FakeEntry("1.1.1", "Partial", physical_collection="knowledge__x", chunk_count=2)]
         cat = _FakeFullCat(
             entries=entries,
             doc_counts={"knowledge__x": 1},
             mv_all={"collections": [
-                {"collection": "knowledge__x", "referenced": 1, "present": 0, "missing": 1},
+                {"collection": "knowledge__x", "referenced": 1, "present": 1, "missing": 0},
             ], "count": 1},
-            manifests={"1.1.1": [object()]},
+            manifests={"1.1.1": [object()]},  # 1 row, chunk_count=2 -> Class C "lost"
         )
         monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
         self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__x"})
@@ -1464,10 +1438,10 @@ class TestVerifyCommand:
         assert result.exit_code == 1, result.output
         data = json.loads(result.stdout)
         assert data["summary"]["exit"] == 1
-        assert data["summary"]["damaged_collections"] == 1
-        assert len(data["damaged"]) == 1
-        assert data["damaged"][0]["collection"] == "knowledge__x"
-        assert data["damaged"][0]["missing"] == 1
+        assert data["summary"]["damaged_collections"] == 0
+        assert data["damaged"] == []
+        assert len(data["lost"]) == 1
+        assert data["lost"][0]["tumbler"] == "1.1.1"
 
     def test_verify_covers_docs_without_legacy_doc_id(self, catalog_env, monkeypatch):
         """nexus-sj4a3: the retired meta.doc_id filter used to silently skip
@@ -1655,49 +1629,18 @@ class TestVerifyCommand:
             "code__1-20" not in result.output.split("legitimate by design")[0]
         )
 
-    # ── critique CRIT-2: NULL-collection manifest rows the anti-join drops ──
-
-    def test_verify_unbackfilled_manifest_rows_reported_unverifiable(
-        self, catalog_env, monkeypatch,
-    ):
-        """nexus-sj4a3 substantive critique CRIT-2: manifest_verify_all's
-        SQL excludes document_chunks rows with collection IS NULL
-        (pre-backfill state) from 'referenced' entirely — such rows read
-        clean in every class. A per-collection delta between the client's
-        manifest-row total (get_manifests has no such filter) and the
-        engine's referenced count surfaces the un-backfilled population as
-        unverifiable/incomplete, never as a clean pass."""
-        entries = [
-            _FakeEntry(
-                "1.1.1", "Partially backfilled", physical_collection="knowledge__partial",
-                chunk_count=1,
-            ),
-        ]
-        cat = _FakeFullCat(
-            entries=entries,
-            doc_counts={"knowledge__partial": 1},
-            mv_all={"collections": [
-                {"collection": "knowledge__partial", "referenced": 1, "present": 1, "missing": 0},
-            ], "count": 1},
-            # 3 manifest rows client-side; the engine only counted 1 as
-            # "referenced" — 2 rows are pre-backfill (collection IS NULL)
-            # and invisible to manifest_verify_all.
-            manifests={"1.1.1": [object(), object(), object()]},
-        )
-        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
-        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__partial"})
-
-        runner = CliRunner()
-        result = runner.invoke(main, ["catalog", "verify", "--json"])
-
-        assert result.exit_code != 0, result.output
-        data = json.loads(result.stdout)
-        assert data["unverifiable_rows"] == [
-            {"collection": "knowledge__partial", "unverifiable_rows": 2},
-        ]
-        assert any("unbackfilled:knowledge__partial" in u for u in data["unreadable"])
-
     # ── nexus-bo2d1: ghost-doc manifest rows must never key a phantom "" ───
+    #
+    # RDR-191 Phase 6 (nexus-o8dil.33): the CLI-level twin tests
+    # (test_verify_unbackfilled_manifest_rows_reported_unverifiable,
+    # test_verify_ghost_doc_contamination_reported_incomplete_not_phantom,
+    # test_verify_ghost_doc_contamination_resolved_when_engine_reports_row_collection)
+    # were DELETED — all three exercised _class_c_unverifiable_rows'
+    # cross-check of Class C's manifest_row_totals against Class B's
+    # referenced_by_collection, retired alongside manifest_verify_all. This
+    # direct-helper test is UNAFFECTED — it calls
+    # _census_lost_and_never_chunked (Class C's own core census, kept)
+    # directly and asserts nothing about Class B.
 
     def test_class_c_census_never_keys_a_ghost_doc_under_empty_collection(self):
         """nexus-bo2d1 (substantive-critic round 3, 2026-08-12): under the
@@ -1734,146 +1677,6 @@ class TestVerifyCommand:
             "a ghost doc's manifest rows must never be bucketed under a "
             f"phantom empty-collection key: {manifest_row_totals}"
         )
-
-    def test_verify_ghost_doc_contamination_reported_incomplete_not_phantom(
-        self, catalog_env, monkeypatch,
-    ):
-        """nexus-bo2d1, CLI-level twin of the direct-helper test above.
-
-        This pins the PRE-nexus-kzso5 wire shape: manifest rows carry no
-        ``.collection`` of their own (plain ``object()`` placeholders below,
-        same as a pre-field engine), so ``_census_lost_and_never_chunked``'s
-        ``getattr(row, "collection", None)`` falls back to ``e.
-        physical_collection`` for attribution -- the ghost's own
-        ``physical_collection`` is ``""`` (falsy), so its rows are still
-        excluded from ``manifest_row_totals`` even though nexus-kzso5 now
-        fetches the ghost's manifest too (``_verify_full`` merges
-        ``ghost_entries`` into the census purely so a FIELD-AWARE engine can
-        attribute them -- see ``test_verify_ghost_doc_contamination_resolved_
-        when_engine_reports_row_collection`` below for that case). The
-        ghost's rows still count toward the engine's
-        ``referenced_by_collection`` (Class B, a global anti-join
-        independent of which docs this census walked) while NEVER counting
-        toward the client's ``manifest_row_totals`` under this pre-field
-        shape -- so a real, healthy collection's client-side total can
-        legitimately fall BELOW the engine's authoritative referenced count
-        with no bug on that collection's own docs at all.
-
-        Pre-fix, ``_class_c_unverifiable_rows`` only handled ``delta > 0``
-        -- a negative delta was silently dropped, reporting a false "All
-        good." over a collection whose own client-side accounting the
-        census KNOWS is incomplete. Post-fix, that impossible-under-the-
-        model negative delta is proof-of-incompleteness and folds into
-        ``unreadable`` (INCOMPLETE) -- the same "cannot verify, refuse to
-        claim clean" idiom already used by ``_class_a_vanished_collections``
-        and ``_class_b_damaged_collections`` in this file. Non-vacuous:
-        removing the ``elif delta < 0`` branch makes this test fail (exit
-        0 / "All good." over the contaminated collection)."""
-        entries = [
-            _FakeEntry("1.1.1", "Clean doc", physical_collection="code__clean", chunk_count=1),
-            _FakeEntry(
-                "1.1.2", "Doc sharing a collection with a ghost",
-                physical_collection="code__ghosted", chunk_count=1,
-            ),
-            _FakeEntry("1.1.3", "Ghost doc", physical_collection="", chunk_count=0),
-        ]
-        cat = _FakeFullCat(
-            entries=entries,
-            doc_counts={"code__clean": 1, "code__ghosted": 1},
-            mv_all={"collections": [
-                {"collection": "code__clean", "referenced": 1, "present": 1, "missing": 0},
-                # 4 = 1.1.2's own row + 3 rows the ghost (1.1.3) stamped into
-                # this SAME real collection -- the engine attributes all 4
-                # here regardless of which docs this census walked.
-                {"collection": "code__ghosted", "referenced": 4, "present": 4, "missing": 0},
-            ], "count": 2},
-            manifests={
-                "1.1.1": [object()],
-                "1.1.2": [object()],
-                # nexus-kzso5: 1.1.3 (the ghost) IS now fetched -- _verify_full
-                # merges ghost_entries into the census -- but these plain
-                # object() rows carry no .collection attribute (the pre-field
-                # wire shape), so getattr(...) falls back to e.physical_
-                # collection (""), and the rows are STILL excluded from
-                # manifest_row_totals. Outcome is unchanged from pre-kzso5.
-                "1.1.3": [object(), object(), object()],
-            },
-        )
-        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
-        self._patch_t3(monkeypatch, {}, t3_collections={"code__clean", "code__ghosted"})
-
-        runner = CliRunner()
-        result = runner.invoke(main, ["catalog", "verify", "--json"])
-
-        assert result.exit_code != 0, result.output
-        data = json.loads(result.stdout)
-
-        assert data.get("unverifiable_rows", []) == [], (
-            "a ghost's excluded rows must never surface as a false "
-            f"un-backfilled finding, phantom or otherwise: {data.get('unverifiable_rows')}"
-        )
-        assert any("code__ghosted" in u for u in data["unreadable"]), data["unreadable"]
-        assert not any("code__clean" in u for u in data["unreadable"]), data["unreadable"]
-
-    def test_verify_ghost_doc_contamination_resolved_when_engine_reports_row_collection(
-        self, catalog_env, monkeypatch,
-    ):
-        """nexus-kzso5 (RDR-191 follow-up to nexus-bo2d1): once the engine's
-        wire response carries each manifest row's OWN stamped ``collection``
-        (engine floor >= v0.1.74), the ghost-doc INCOMPLETE hedge from the
-        test above DISAPPEARS -- the ghost's rows now attribute correctly
-        to their real collection (``code__ghosted``) instead of being
-        invisible to the client-side census, so ``client_total`` reconciles
-        exactly with the engine's ``referenced`` count and the collection
-        reads clean. Same fixture shape as the test above, but manifest
-        rows are real ``ManifestRow`` instances carrying ``collection``
-        (the RDR-191 field this bead adds), not bare ``object()``
-        placeholders."""
-        from nexus.catalog.types import ManifestRow
-
-        entries = [
-            _FakeEntry("1.1.1", "Clean doc", physical_collection="code__clean", chunk_count=1),
-            _FakeEntry(
-                "1.1.2", "Doc sharing a collection with a ghost",
-                physical_collection="code__ghosted", chunk_count=1,
-            ),
-            _FakeEntry("1.1.3", "Ghost doc", physical_collection="", chunk_count=0),
-        ]
-        cat = _FakeFullCat(
-            entries=entries,
-            doc_counts={"code__clean": 1, "code__ghosted": 1},
-            mv_all={"collections": [
-                {"collection": "code__clean", "referenced": 1, "present": 1, "missing": 0},
-                # 4 = 1.1.2's own row + 3 rows the ghost (1.1.3) stamped into
-                # this SAME real collection.
-                {"collection": "code__ghosted", "referenced": 4, "present": 4, "missing": 0},
-            ], "count": 2},
-            manifests={
-                "1.1.1": [ManifestRow(position=0, chash="a" * 64, collection="code__clean")],
-                "1.1.2": [ManifestRow(position=0, chash="b" * 64, collection="code__ghosted")],
-                # The ghost's rows carry their OWN stamped collection --
-                # this is what nexus-kzso5 adds and what resolves the hedge.
-                "1.1.3": [
-                    ManifestRow(position=0, chash="c" * 64, collection="code__ghosted"),
-                    ManifestRow(position=1, chash="d" * 64, collection="code__ghosted"),
-                    ManifestRow(position=2, chash="e" * 64, collection="code__ghosted"),
-                ],
-            },
-        )
-        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
-        self._patch_t3(monkeypatch, {}, t3_collections={"code__clean", "code__ghosted"})
-
-        runner = CliRunner()
-        result = runner.invoke(main, ["catalog", "verify", "--json"])
-
-        assert result.exit_code == 0, result.output
-        data = json.loads(result.stdout)
-        assert data.get("unverifiable_rows", []) == [], (
-            "row-collection attribution must resolve the ghost contamination "
-            f"entirely, not still report it unverifiable: {data.get('unverifiable_rows')}"
-        )
-        assert not any("code__ghosted" in u for u in data["unreadable"]), data["unreadable"]
-        assert not any("code__clean" in u for u in data["unreadable"]), data["unreadable"]
 
     # ── code-review IMPORTANT: engine reads must be exception-isolated ─────
 
@@ -1925,41 +1728,14 @@ class TestVerifyCommand:
         assert result.exit_code != 0, result.output
         assert "INCOMPLETE" in result.output
 
-    # ── critique SIG-4: Class A/B double-report ─────────────────────────────
-
-    def test_verify_vanished_collection_not_also_reported_damaged(
-        self, catalog_env, monkeypatch,
-    ):
-        """nexus-sj4a3 substantive critique SIG-4: manifest_verify_all
-        derives its collection list independently of T3, so a genuinely
-        vanished collection's chashes all fail presence — it must surface
-        once, under vanished_collections, never ALSO under damaged."""
-        entries = [
-            _FakeEntry("1.1.1", "Ghost Collection Doc", physical_collection="knowledge__gone", chunk_count=1),
-            _FakeEntry("1.1.2", "Clean Doc", physical_collection="knowledge__other", chunk_count=1),
-        ]
-        cat = _FakeFullCat(
-            entries=entries,
-            doc_counts={"knowledge__gone": 1, "knowledge__other": 1},
-            mv_all={"collections": [
-                {"collection": "knowledge__gone", "referenced": 1, "present": 0, "missing": 1},
-                {"collection": "knowledge__other", "referenced": 1, "present": 1, "missing": 0},
-            ], "count": 2},
-            manifests={"1.1.1": [object()], "1.1.2": [object()]},
-        )
-        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
-        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__other"})
-
-        runner = CliRunner()
-        result = runner.invoke(main, ["catalog", "verify", "--json"])
-
-        assert result.exit_code == 1, result.output
-        data = json.loads(result.stdout)
-        assert len(data["vanished_collections"]) == 1
-        assert data["vanished_collections"][0]["physical_collection"] == "knowledge__gone"
-        assert data["damaged"] == [], (
-            "vanished collection must not ALSO appear in the damaged list"
-        )
+    # test_verify_vanished_collection_not_also_reported_damaged DELETED
+    # (RDR-191 Phase 6, nexus-o8dil.33): the critique SIG-4 double-report
+    # concern it pinned (a vanished collection surfacing under BOTH
+    # vanished_collections and damaged) is now structurally impossible —
+    # full mode's `damaged` is always [] since Class B is retired — which
+    # would make the assertion `data["damaged"] == []` vacuously true
+    # regardless of the vanished-collection fixture, not a real test of
+    # the double-report guard it was written to pin.
 
     # ── --collection scoped mode (real ActiveCatalog + mocked T3) ──────────
 

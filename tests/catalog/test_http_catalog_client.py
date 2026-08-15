@@ -178,11 +178,9 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     #: not just the client-side kwarg.
     last_show_follow_alias: "bool | None" = None
 
-    #: nexus-5xn3k.3: /manifest/verify response body — override per-test to
-    #: exercise the missing>0 branch. Default mirrors a clean document.
-    manifest_verify_response: dict[str, Any] = {"referenced": 0, "present": 0, "missing": 0}
-    #: last doc_id query param /manifest/verify actually received.
-    last_manifest_verify_doc_id: str = ""
+    # manifest_verify_response/last_manifest_verify_doc_id REMOVED (RDR-191
+    # Phase 6, nexus-o8dil.33) alongside the client's manifest_verify method
+    # and its only test consumer.
     #: nexus-5xn3k.3: /index-run/complete response — override to exercise the
     #: 409 IndexRunVerifyRefused branch (set complete_index_run_conflict=True).
     complete_index_run_conflict: bool = False
@@ -207,8 +205,6 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         cls.descendants_count = 2
         cls.show_alias_map = {}
         cls.last_show_follow_alias = None
-        cls.manifest_verify_response = {"referenced": 0, "present": 0, "missing": 0}
-        cls.last_manifest_verify_doc_id = ""
         cls.complete_index_run_conflict = False
         cls.last_begin_index_run_body = {}
         cls.last_begin_index_run_many_body = {}
@@ -392,19 +388,6 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             # chashes (truncation defence, v0.1.55+); the client reconciles
             # len(chashes) == count and fails loud on deviation.
             self._send_json({"chashes": [CHASH_A, CHASH_B], "count": 2})
-        elif op == "/manifest/orphans":
-            params = self._query_params()
-            dim = int(params.get("dim", "0"))
-            self._send_json({
-                "dim": dim,
-                "count": 2,
-                "orphans": [
-                    {"doc_id": "1.1.1", "position": 0, "chash": CHASH_A,
-                     "collection": "knowledge__o__minilm-l6-v2-384__v1"},
-                    {"doc_id": "1.1.1", "position": 1, "chash": CHASH_B,
-                     "collection": "knowledge__o__minilm-l6-v2-384__v1"},
-                ],
-            })
         elif op == "/manifest/null_collection":
             # T2 nexus/chroma-residue-plan-2026-08-10 §C2: GET
             # /manifest/null_collection -> {total, backfillable} — mirrors
@@ -424,24 +407,12 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                      "non_conformant": 0, "sample_chashes": []},
                 ],
             })
-        elif op == "/manifest/verify":
-            # nexus-5xn3k.3: mirrors CatalogRepository.manifestVerify's
-            # {referenced, present, missing} shape. Default clean (0/0/0);
-            # tests override via FakeCatalogHandler.manifest_verify_response.
-            params = self._query_params()
-            resp = dict(FakeCatalogHandler.manifest_verify_response)
-            FakeCatalogHandler.last_manifest_verify_doc_id = params.get("doc_id", "")
-            self._send_json(resp)
-        elif op == "/manifest/verify_all":
-            # nexus-ac4id part 2: mirrors CatalogRepository.manifestVerifyAll's
-            # {"collections": [...], "count": n} shape.
-            self._send_json({
-                "collections": [
-                    {"collection": "docs__o__voyage-context-3__v1",
-                     "referenced": 5, "present": 5, "missing": 0},
-                ],
-                "count": 1,
-            })
+        # /manifest/verify and /manifest/verify_all route branches REMOVED
+        # (RDR-191 Phase 6, nexus-o8dil.33) alongside the client's
+        # manifest_verify/manifest_verify_all methods and their only test
+        # consumers. (nexus.manifest_verify(text) itself is kept server-side
+        # for completeIndexRun — see /index-run/complete below — but this
+        # fake never needed a route for that internal call.)
         elif op == "/collections/list":
             # nexus-8y1tm: full CatalogRepository.collRow() shape (10 keys) —
             # owner_id added so collections_by_owner's client-side filter
@@ -682,8 +653,9 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             # since v0.1.61 (nexus-ocf52).
             tumblers = ["1.1.1"]
             self._send_json({"tumblers": tumblers, "count": len(tumblers)})
-        elif op == "/manifest/backfill":
-            self._send_json({"stamped": 7})
+        # /manifest/backfill route branch REMOVED (RDR-191 Phase 6,
+        # nexus-o8dil.33) alongside the client's manifest_backfill method
+        # and its only test consumer.
         elif op == "/index-run/begin":
             # nexus-5xn3k.3: mirrors CatalogHandler.handleIndexRunBegin.
             FakeCatalogHandler.last_begin_index_run_body = body
@@ -1533,36 +1505,13 @@ class TestHttpCatalogClientRoundTrip:
 
         assert client.relation_counts([]) == {}
 
-    def test_manifest_backfill_and_verify_journey(
-        self, client: HttpCatalogClient,
-    ) -> None:
-        # RDR-159 P-1b: POST /manifest/backfill → {"stamped": n}
-        assert client.manifest_backfill() == 7
-
-        # RUNFENCE (nexus-5xn3k.3) round trips.
-        FakeCatalogHandler.reset_log()
-        FakeCatalogHandler.manifest_verify_response = {"referenced": 3, "present": 1, "missing": 2}
-        result = client.manifest_verify("1.1.1")
-        assert result == {"referenced": 3, "present": 1, "missing": 2}
-        assert FakeCatalogHandler.last_manifest_verify_doc_id == "1.1.1"
-
-        result_all = client.manifest_verify_all()
-        assert result_all["count"] == 1
-        assert result_all["collections"][0]["referenced"] == 5
-
-    def test_manifest_orphans_journey(self, client: HttpCatalogClient) -> None:
-        # RDR-159 P-1b: GET /manifest/orphans?dim= → {dim, count, orphans}
-        result = client.manifest_orphans(384, limit=100)
-        assert result["dim"] == 384
-        assert result["count"] == 2
-        assert len(result["orphans"]) == 2
-        assert result["orphans"][0]["doc_id"] == "1.1.1"
-
-        with pytest.raises(ValueError, match="dim must be one of"):
-            client.manifest_orphans(512)
-
-        with pytest.raises(ValueError, match="limit must be > 0"):
-            client.manifest_orphans(384, limit=0)
+    # test_manifest_backfill_and_verify_journey and test_manifest_orphans_journey
+    # DELETED (RDR-191 Phase 6, nexus-o8dil.33): manifest_backfill,
+    # manifest_verify, manifest_verify_all, and manifest_orphans client
+    # methods are all retired — the manifest-chunk FK makes the dangling
+    # state they detected/fixed unreachable. FakeCatalogHandler's route
+    # branches for these are removed alongside these tests, its only
+    # consumers.
 
     def test_chash_conformance_report_returns_per_table_counts(
         self, client: HttpCatalogClient,

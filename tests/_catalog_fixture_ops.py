@@ -220,10 +220,14 @@ def bypass_fk_seed_chunk(
     T3 client (e.g. ``test_catalog_cli.py::TestVerifyCommand``, where the
     "damaged" signal comes from a patched ``existing_ids``, never a real
     query against this table). For a test whose SUBJECT is the real
-    ``nexus.chunks``/``chunks_<dim>`` presence itself (e.g.
-    ``manifest_verify_all()``/``manifest_orphans(dim)`` — a real INSERT
-    here would flip "missing" to "present" and invert the fixture's own
-    premise), use :func:`fk_dropped_for_dangling_seed` instead.
+    ``nexus.chunks`` presence itself — a genuinely DANGLING manifest row,
+    e.g. ``test_c2_manifest_null_collection_engine.py``'s ghost-document
+    fixtures (a real INSERT here would flip "missing" to "present" and
+    invert the fixture's own premise; RDR-191 Phase 6, nexus-o8dil.33,
+    2026-08-15 retired the engine-side ``manifest_verify_all()``/
+    ``manifest_orphans(dim)`` functions this docstring originally named as
+    the motivating example, but the seeding idiom itself is unchanged and
+    still exercised) — use :func:`fk_dropped_for_dangling_seed` instead.
 
     nexus-dbzxb round 2 (RDR-191 Phase 5, sibling bead nexus-o8dil.49):
     ``nexus.chunks`` now ALSO carries ``chunks_collection_fk`` (fk-004,

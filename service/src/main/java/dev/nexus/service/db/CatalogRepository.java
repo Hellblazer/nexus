@@ -21,9 +21,7 @@ import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
 import static dev.nexus.service.jooq.nexus.Tables.LINKS_BY_TYPE_COUNTS;
-import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_ORPHANS;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_VERIFY;
-import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_VERIFY_ALL;
 import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
@@ -2700,118 +2698,53 @@ public final class CatalogRepository {
         });
     }
 
-    /** RDR-159 dim → chunks_&lt;dim&gt; routing; the stored functions accept only these. */
+    /** RDR-159 dim → chunks_&lt;dim&gt; routing; {@link #requireSupportedDim} accepts only these. */
     private static final Set<Integer> MANIFEST_DIMS = Set.of(384, 768, 1024);
 
-    /**
-     * RDR-159 P-1b (nexus-avjdd): idempotent collection-stamping backfill.
-     *
-     * <p>Invokes the {@code nexus.manifest_backfill()} stored function
-     * (catalog-004) under the request tenant's RLS GUC, stamping
-     * {@code catalog_document_chunks.collection} from the owning doc's
-     * {@code physical_collection} where NULL. Returns the number of rows
-     * stamped. MUST run BEFORE {@link #manifestOrphans} — rows with a NULL
-     * collection are pre-backfill state, not orphans.
-     */
-    public long manifestBackfill(String tenant) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            Long count = dev.nexus.service.jooq.nexus.Routines.manifestBackfill(ctx.configuration());
-            return count != null ? count : 0L;
-        });
-    }
+    // RDR-191 Phase 6 (nexus-o8dil.33): manifestBackfill/manifestOrphanReport/
+    // manifestOrphanCount, and the nexus.manifest_backfill()/manifest_orphans(dim)
+    // SQL functions they wrapped, are RETIRED here — the manifest-chunk FK
+    // (catalog-029, VALIDATEd, deployed engine-service-v0.1.76) makes the
+    // dangling state they detected unreachable (a dangling INSERT or a DELETE
+    // of a still-referenced chunk is now rejected at the source). See
+    // catalog-030-retire-manifest-verify.xml's header for the full trace.
 
     /**
-     * RDR-159 P-1b (nexus-avjdd): manifest rows with NO corresponding chunk row
-     * in {@code chunks_<dim>} — the exact count PLUS a capped sample, computed in
-     * ONE transaction (one RLS-stamped snapshot) so the count and the sample are
-     * mutually consistent (CRITICAL: a two-call count-then-sample could diverge
-     * under a concurrent write).
-     *
-     * <p>Invokes the {@code nexus.manifest_orphans(dim)} stored function
-     * (catalog-004) under the request tenant's RLS GUC. Because the function is
-     * SECURITY INVOKER and the service role is NOBYPASSRLS, FORCE RLS on the
-     * base tables (catalog_document_chunks / catalog_documents / chunks_&lt;dim&gt;)
-     * scopes the result to the request tenant — the {@code tenant} argument is
-     * load-bearing, not advisory. Tombstone-aware (excludes soft-deleted docs).
-     *
-     * <p>Returns {@code {"count": <long>, "orphans": <List<Map>>}}. {@code count}
-     * is exact; {@code orphans} is capped at {@code limit} (> 0). {@code dim}
-     * must be 384/768/1024 (validated here so an unsupported dim is a clean
-     * IllegalArgumentException → 400, not a PL/pgSQL RAISE → 500).
-     *
-     * <p>Call protocol: run {@link #manifestBackfill} FIRST — pre-backfill rows
-     * (collection IS NULL) are silently excluded by the function, so an orphan
-     * check on an un-backfilled manifest reads a false-clean zero.
-     */
-    public Map<String, Object> manifestOrphanReport(String tenant, int dim, int limit) {
-        requireSupportedDim(dim);
-        if (limit <= 0) {
-            throw new IllegalArgumentException(
-                "limit must be > 0 (the sample is bounded; use count for the gate)");
-        }
-        return tenantScope.withTenant(tenant, ctx -> {
-            long count = ctx.fetchCount(MANIFEST_ORPHANS.call(dim));
-            var sample = ctx.selectFrom(MANIFEST_ORPHANS.call(dim))
-                             .limit(limit)
-                             .fetch()
-                             .map(org.jooq.Record::intoMap);
-            Map<String, Object> out = new LinkedHashMap<>();
-            out.put("count", count);
-            out.put("orphans", sample);
-            return out;
-        });
-    }
-
-    /**
-     * RDR-159 P-1b (nexus-avjdd): exact count of manifest orphans for the given
-     * dim — the cheap count-only form for the migration validation gate (zero
-     * orphans is the clean signal). Tenant-scoped via the RLS GUC (see
-     * {@link #manifestOrphanReport} for the scoping rationale).
-     */
-    public long manifestOrphanCount(String tenant, int dim) {
-        requireSupportedDim(dim);
-        return tenantScope.withTenant(tenant, ctx ->
-            (long) ctx.fetchCount(MANIFEST_ORPHANS.call(dim)));
-    }
-
-    /**
-     * Read-only census of the population {@code manifest_orphans}/{@code
-     * manifest_verify_all} structurally cannot see (T2 nexus/chroma-residue-
-     * plan-2026-08-10 §C2): manifest rows with {@code collection IS NULL}.
-     * Both functions filter {@code collection IS NOT NULL} before doing
-     * anything else (catalog-004-manifest-functions.xml's {@code
-     * manifest_orphans}; catalog-020-index-run-fence.xml's {@code
-     * manifest_verify}/{@code manifest_verify_all}) — a NULL-collection row
-     * is invisible to every one of them, not counted as an orphan and not
-     * counted as damaged. Without this report a caller reading a clean zero
-     * from those checks cannot tell "verified clean" from "never looked at."
+     * Read-only census of the population the (now-retired) {@code
+     * manifest_orphans}/{@code manifest_verify_all} functions structurally
+     * could never see (T2 nexus/chroma-residue-plan-2026-08-10 §C2): manifest
+     * rows with {@code collection IS NULL}. EXPLICITLY NOT RETIRED alongside
+     * them (RDR-191 Decision item 4's own carve-out) — the manifest-chunk FK
+     * does not cover this population either (PostgreSQL {@code MATCH SIMPLE}
+     * exempts any row with a NULL key column from enforcement entirely), so
+     * this census remains the ONLY visibility into a population that is
+     * permanently unenforced by any mechanism, schema or code.
      *
      * <p>Splits the total into:
      * <ul>
      *   <li>{@code total} — every live-document manifest row with {@code
      *       collection IS NULL}.
      *   <li>{@code backfillable} — the subset whose owning document HAS a
-     *       {@code physical_collection}. {@link #manifestBackfill} stamps
-     *       exactly this subset (its WHERE clause, catalog-004-manifest-
-     *       functions.xml changeset 2, is {@code physical_collection IS NOT
-     *       NULL AND != ''}) — after backfill runs, these rows become
-     *       visible to the orphan/verify checks.
+     *       {@code physical_collection}. The now-retired {@code
+     *       nexus.manifest_backfill()} used to stamp exactly this subset
+     *       (its WHERE clause, catalog-004-manifest-functions.xml changeset
+     *       2, was {@code physical_collection IS NOT NULL AND != ''}); with
+     *       that function gone and catalog-025's {@code collection NOT NULL}
+     *       promotion in place, no NEW row can ever land in this bucket
+     *       again — {@code backfillable} on a post-Phase-7 install measures a
+     *       structurally-empty population, not a live remedy path.
      * </ul>
-     * {@code total - backfillable} is the population backfill can NEVER
-     * reach: ghost/sourceless documents (physical_collection NULL or
-     * empty — see {@code CatalogRepository#register}'s ghost-element
-     * contract). catalog-014-manifest-collection-stamp.xml's changeset
-     * comment states this in so many words: "ghost docs (physical_collection
-     * empty) ... are skipped, matching manifest_backfill()'s semantics." A
-     * caller must not promise running backfill will cover that remainder —
-     * it is permanently excluded from every orphan/verify check, backfill
-     * or no backfill.
+     * {@code total - backfillable} is the population backfill could NEVER
+     * reach even when it existed: ghost/sourceless documents
+     * (physical_collection NULL or empty — see {@code
+     * CatalogRepository#register}'s ghost-element contract).
+     * catalog-014-manifest-collection-stamp.xml's changeset comment states
+     * this in so many words: "ghost docs (physical_collection empty) ... are
+     * skipped, matching manifest_backfill()'s semantics."
      *
-     * <p>Tombstone-aware ({@code d.deleted_at IS NULL}), matching {@code
-     * manifest_verify_all}'s own filter, so the population this report
-     * describes lines up with the checks it explains the blind spot of.
-     * Both counts are read in the SAME tenant-scoped transaction so they
-     * are mutually consistent. NEVER mutates.
+     * <p>Tombstone-aware ({@code d.deleted_at IS NULL}). Both counts are read
+     * in the SAME tenant-scoped transaction so they are mutually consistent.
+     * NEVER mutates.
      */
     public Map<String, Long> manifestNullCollectionReport(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -5278,27 +5211,17 @@ public final class CatalogRepository {
                     tenant, docId);
     }
 
-    /** GET /v1/catalog/manifest/verify?doc_id=X primitive — per-document referenced/present/missing. */
-    public ManifestVerifyCounts manifestVerify(String tenant, String docId) {
-        return tenantScope.withTenant(tenant, ctx -> manifestVerifyCtx(ctx, docId));
-    }
-
-    /**
-     * GET /v1/catalog/manifest/verify_all primitive — every live document in the
-     * tenant, grouped by collection (nexus-ac4id part 2: replaces client-side
-     * per-collection T3 paging with one engine-side anti-join).
-     */
-    public List<Map<String, Object>> manifestVerifyAll(String tenant) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.selectFrom(MANIFEST_VERIFY_ALL.call()).fetch().map(r -> {
-                Map<String, Object> m = new LinkedHashMap<>();
-                m.put("collection", r.get(MANIFEST_VERIFY_ALL.COLLECTION));
-                m.put("referenced", r.get(MANIFEST_VERIFY_ALL.REFERENCED));
-                m.put("present",    r.get(MANIFEST_VERIFY_ALL.PRESENT));
-                m.put("missing",    r.get(MANIFEST_VERIFY_ALL.MISSING));
-                return m;
-            }));
-    }
+    // RDR-191 Phase 6 (nexus-o8dil.33): the PUBLIC manifestVerify(tenant, docId)
+    // (backed the retired GET /manifest/verify route) and manifestVerifyAll
+    // (backed the retired GET /manifest/verify_all route, and nexus.manifest_
+    // verify_all() itself is DROPPED — catalog-030) are removed here. The
+    // PRIVATE manifestVerifyCtx helper a few lines up, and the underlying
+    // nexus.manifest_verify(text) SQL function it calls, are NOT removed:
+    // completeIndexRun and stampCompleteIfVerified below still depend on both
+    // for the write-path fail-closed verify-then-stamp — a different
+    // completeness question (referenced == the caller's claimed chunk_count)
+    // the manifest-chunk FK does not answer. See catalog-030-retire-manifest-
+    // verify.xml's header for the full trace.
 
     /**
      * POST /v1/catalog/index-run/begin — idempotent. Stamps

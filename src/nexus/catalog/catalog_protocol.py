@@ -104,11 +104,11 @@ class CatalogReader(Protocol):
     def get_manifest(self, doc_id) -> object:  # canonical
         ...
 
-    def manifest_verify(self, doc_id) -> object:  # canonical (RUNFENCE, nexus-5xn3k.3)
-        ...
-
-    def manifest_verify_all(self) -> object:  # canonical (RUNFENCE, nexus-5xn3k.3)
-        ...
+    # manifest_verify/manifest_verify_all RETIRED (RDR-191 Phase 6,
+    # nexus-o8dil.33) — both routes are retired server-side; the
+    # manifest-chunk FK makes the dangling state they diagnosed
+    # unreachable. Removed from the caller-facing Protocol along with
+    # HttpCatalogClient's methods.
 
     def get_manifests(self, doc_ids) -> object:  # canonical
         ...

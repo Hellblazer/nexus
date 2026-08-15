@@ -49,6 +49,16 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * assign_from_chashes_384/768/1024) is therefore CALLED at least once
  * below, not merely proven to compile.
  *
+ * <p><strong>RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15:</strong> {@code
+ * manifest_verify_all} and {@code manifest_orphans} coverage below was
+ * DELETED — both functions are DROPPED (catalog-030-retire-manifest-
+ * verify.xml), which {@link SchemaMigrator#migrate} applies to HEAD before
+ * {@link #applyFullBatch} re-chains vectors-004/taxonomy-007/vectors-005 as
+ * a (now-no-op, already-recorded) standalone sequence — so by the time this
+ * file's assertions run, both functions are already gone from the fixture
+ * database. {@code manifest_verify} coverage is KEPT — that function is
+ * NOT dropped (completeIndexRun depends on it).
+ *
  * <p><strong>Statement-level coverage (2026-08-13 round 2, substantive-critic
  * finding, T2 nexus/rdr-191-repoint-batch-step-a-critique-2026-08-13
  * [22454]):</strong> a CALLED function is not the same as an EXECUTED
@@ -298,8 +308,11 @@ class VectorsRepointFunctionsIntegrationTest {
                         "search_metadata_scoped_384", "search_metadata_scoped_768", "search_metadata_scoped_1024",
                         "search_topic_scoped_384", "search_topic_scoped_768", "search_topic_scoped_1024",
                         "search_graph_hop_384", "search_graph_hop_768", "search_graph_hop_1024",
-                        "document_text", "remap_membership", "manifest_verify", "manifest_verify_all",
-                        "manifest_orphans", "chash_conformance_report",
+                        // manifest_verify_all/manifest_orphans REMOVED here (RDR-191
+                        // Phase 6, nexus-o8dil.33) — both dropped by catalog-030,
+                        // already applied to HEAD by SchemaMigrator.migrate above.
+                        "document_text", "remap_membership", "manifest_verify",
+                        "chash_conformance_report",
                         "gc_quarantine_orphans", "gc_restore_rereferenced", "gc_expire_quarantine",
                         "purge_trash",
                         "assign_from_chashes_384", "assign_from_chashes_768", "assign_from_chashes_1024"}) {
@@ -399,9 +412,63 @@ class VectorsRepointFunctionsIntegrationTest {
         }
     }
 
-    // ── Test 3: document_text / remap_membership / manifest_verify family /
-    //    manifest_orphans / chash_conformance_report -- the "dim collapses
-    //    to one reference" and "dim stays branched for routing" buckets. ────
+    // ── Test 2b: the nine combined-query functions still number NINE ────────
+    //
+    // RDR-191 Phase 6 (nexus-o8dil.33) mechanical-exclusion pin, Decision
+    // item 4 / F7 risk 4: "the 9 combined-query stored functions do not
+    // disappear... write a TEST asserting they still number 9." Distinct
+    // from nineTypedFacades_eachCallableAgainstSeededData above (which calls
+    // each by NAME and would not itself notice a 10th appearing or one of
+    // the nine vanishing) — this counts pg_proc rows matching the naming
+    // pattern directly, on the SAME post-catalog-030 HEAD schema (Class B/
+    // manifest_orphans/manifest_verify_all/manifest_backfill are dropped by
+    // that changeset; these nine are explicitly NOT).
+
+    @Test
+    void combinedQueryFunctions_stillNumberNine() throws Exception {
+        Rig rig = newRig("ninecount");
+        try {
+            SchemaMigrator.migrate(rig.adminDs());
+            applyFullBatch(rig.adminDs());
+
+            try (Connection conn = rig.pg().createConnection("")) {
+                try (var rs = conn.createStatement().executeQuery(
+                        "SELECT p.proname FROM pg_proc p "
+                            + "JOIN pg_namespace n ON n.oid = p.pronamespace "
+                            + "WHERE n.nspname = 'nexus' AND ("
+                            + "p.proname LIKE 'search_metadata_scoped_%' "
+                            + "OR p.proname LIKE 'search_topic_scoped_%' "
+                            + "OR p.proname LIKE 'search_graph_hop_%') "
+                            + "ORDER BY p.proname")) {
+                    var names = new java.util.ArrayList<String>();
+                    while (rs.next()) names.add(rs.getString("proname"));
+                    assertThat(names)
+                        .as("the 9 combined-query facades (3 verbs x 3 dims) must "
+                            + "still number 9 post-RDR-191-Phase-6 — the dim "
+                            + "COUNT does not collapse (F7 risk 4), only "
+                            + "manifest_orphans/manifest_verify_all/"
+                            + "manifest_backfill are dropped by catalog-030: %s",
+                            names)
+                        .hasSize(9)
+                        .containsExactlyInAnyOrder(
+                            "search_metadata_scoped_384", "search_metadata_scoped_768",
+                            "search_metadata_scoped_1024",
+                            "search_topic_scoped_384", "search_topic_scoped_768",
+                            "search_topic_scoped_1024",
+                            "search_graph_hop_384", "search_graph_hop_768",
+                            "search_graph_hop_1024");
+                }
+            }
+        } finally {
+            rig.close();
+        }
+    }
+
+    // ── Test 3: document_text / remap_membership / manifest_verify /
+    //    chash_conformance_report -- the "dim collapses to one reference"
+    //    and "dim stays branched for routing" buckets. (manifest_orphans
+    //    coverage DELETED, RDR-191 Phase 6 nexus-o8dil.33 — function
+    //    dropped.) ──────────────────────────────────────────────────────
 
     @Test
     void collapsedAndBranchedReaders_eachCallableAgainstSeededData() throws Exception {
@@ -434,11 +501,8 @@ class VectorsRepointFunctionsIntegrationTest {
                     assertThat(rs.getLong("missing")).isEqualTo(0L);
                 }
 
-                // manifest_verify_all: same fixture, grouped by collection.
-                try (var rs = conn.createStatement().executeQuery(
-                        "SELECT * FROM nexus.manifest_verify_all()")) {
-                    assertThat(rs.next()).as("manifest_verify_all must return a row for the seeded collection").isTrue();
-                }
+                // manifest_verify_all coverage DELETED (RDR-191 Phase 6,
+                // nexus-o8dil.33) — the function is dropped.
 
                 // remap_membership: no chash_remap facts seeded -> mapped_total=0,
                 // present_count=0. The point is that it does not throw (the
@@ -452,27 +516,8 @@ class VectorsRepointFunctionsIntegrationTest {
                     assertThat(rs.getLong("mapped_total")).isEqualTo(0L);
                 }
 
-                // manifest_orphans(384): seeded chunk IS referenced, so it must
-                // NOT appear as an orphan for dim 384.
-                try (PreparedStatement ps = conn.prepareStatement(
-                        "SELECT * FROM nexus.manifest_orphans(384)")) {
-                    var rs = ps.executeQuery();
-                    boolean sawFixtureChash = false;
-                    while (rs.next()) {
-                        if (fx.chashHex().equals(rs.getString("chash"))) sawFixtureChash = true;
-                    }
-                    assertThat(sawFixtureChash)
-                        .as("the seeded, manifest-and-chunk-present chash must NOT be reported as an orphan")
-                        .isFalse();
-                }
-                for (int dim : new int[] {768, 1024}) {
-                    try (PreparedStatement ps = conn.prepareStatement(
-                            "SELECT * FROM nexus.manifest_orphans(?)")) {
-                        ps.setInt(1, dim);
-                        assertThatCode(ps::executeQuery).as("manifest_orphans(%d) must not throw", dim)
-                            .doesNotThrowAnyException();
-                    }
-                }
+                // manifest_orphans coverage DELETED (RDR-191 Phase 6,
+                // nexus-o8dil.33) — the function is dropped.
 
                 // chash_conformance_report(384): the seeded chunk's chash is a
                 // real 32-byte sha256 digest, so non_conformant must be 0 for the

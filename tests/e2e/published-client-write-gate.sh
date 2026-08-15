@@ -52,15 +52,21 @@
 #      http_catalog_client.py honor these unconditionally, independent of
 #      which client version issued the request).
 #   4. Asserts ENGINE-CATALOG REGISTRATION on the CANDIDATE ENGINE'S OWN
-#      ground truth — GET /v1/catalog/manifest/verify?doc_id=<tumbler>,
-#      which reports the actual manifest ROW COUNT (`referenced`), not a
-#      cached counter — for exactly ONE store-put fixture and ONE index-md
-#      fixture. NON-VACUOUS BY CONSTRUCTION: both fixtures are deliberately
-#      tiny (well under any chunking threshold) so each produces EXACTLY ONE
-#      chunk; the gate asserts `referenced == 1 and missing == 0`, never
-#      merely "the CLI exited 0" (the 7.6.1 outage was exactly a case where
-#      the CLI's own reported success/200 was not proof — content landed,
-#      registration silently did not).
+#      ground truth — GET /v1/catalog/manifest/get?doc_id=<tumbler>, which
+#      reports the actual manifest ROW COUNT (`count`) read directly from
+#      nexus.catalog_document_chunks, not a cached counter — for exactly ONE
+#      store-put fixture and ONE index-md fixture. NON-VACUOUS BY
+#      CONSTRUCTION: both fixtures are deliberately tiny (well under any
+#      chunking threshold) so each produces EXACTLY ONE chunk; the gate
+#      asserts `count == 1`, never merely "the CLI exited 0" (the 7.6.1
+#      outage was exactly a case where the CLI's own reported success/200
+#      was not proof — content landed, registration silently did not).
+#      (RDR-191 Phase 6, nexus-o8dil.33: this gate originally read GET
+#      /v1/catalog/manifest/verify's `referenced`/`missing` pair — that
+#      route is retired, the manifest-chunk FK makes the dangling state it
+#      diagnosed unreachable. /manifest/get's `count` is the same class of
+#      ground truth, in fact more direct for this specific check: pure
+#      manifest presence, no T3 chunk cross-check needed.)
 #
 # ISOLATION (per house memory project_home_does_not_isolate_launchd.md,
 # nexus-d5yu5): a swapped HOME/NEXUS_CONFIG_DIR does NOT isolate an
@@ -305,10 +311,18 @@ _provisioner_nx() {
   NX_LOCAL=1 NEXUS_CONFIG_DIR="$ENGINE_HOME" uv run nx "$@"
 }
 
-_manifest_verify() {
+# RDR-191 Phase 6 (nexus-o8dil.33): GET /v1/catalog/manifest/verify is
+# retired (the manifest-chunk FK makes the dangling state it diagnosed
+# unreachable). GET /v1/catalog/manifest/get?doc_id=X's `count` field is the
+# SAME class of ground truth this gate needs — the actual manifest ROW COUNT
+# read directly from nexus.catalog_document_chunks, not a cached counter —
+# and is in fact a MORE direct read for the specific outage class this gate
+# defends against ("content landed, registration silently did not"): it
+# reports manifest presence without needing a T3 chunk cross-check at all.
+_manifest_get_count() {
   local doc_id="$1"
   curl -sS -H "Authorization: Bearer $SERVICE_TOKEN" \
-    "http://127.0.0.1:$SERVICE_PORT/v1/catalog/manifest/verify?doc_id=$doc_id"
+    "http://127.0.0.1:$SERVICE_PORT/v1/catalog/manifest/get?doc_id=$doc_id"
 }
 
 RUN_ID="$$-$(date +%s)"
@@ -329,14 +343,13 @@ else
   STORE_TUMBLER=""
 fi
 if [ -n "$STORE_TUMBLER" ]; then
-  STORE_VERIFY_JSON="$(_manifest_verify "$STORE_TUMBLER")"
-  STORE_REFERENCED="$(printf '%s' "$STORE_VERIFY_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin).get('referenced',-1))" 2>/dev/null || echo -1)"
-  STORE_MISSING="$(printf '%s' "$STORE_VERIFY_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin).get('missing',-1))" 2>/dev/null || echo -1)"
-  if [ "$STORE_REFERENCED" = "1" ] && [ "$STORE_MISSING" = "0" ]; then
+  STORE_GET_JSON="$(_manifest_get_count "$STORE_TUMBLER")"
+  STORE_COUNT="$(printf '%s' "$STORE_GET_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin).get('count',-1))" 2>/dev/null || echo -1)"
+  if [ "$STORE_COUNT" = "1" ]; then
     STORE_OK=1
-    echo "[gate] store put OK: tumbler=$STORE_TUMBLER referenced=1 missing=0 (exact expected count)"
+    echo "[gate] store put OK: tumbler=$STORE_TUMBLER manifest count=1 (exact expected count)"
   else
-    FAIL_REASONS+=("store put: catalog registration incomplete (tumbler=$STORE_TUMBLER referenced=$STORE_REFERENCED missing=$STORE_MISSING, expected referenced=1 missing=0)")
+    FAIL_REASONS+=("store put: catalog registration incomplete (tumbler=$STORE_TUMBLER manifest count=$STORE_COUNT, expected 1)")
   fi
 else
   FAIL_REASONS+=("store put: no catalog document registered for title '$STORE_TITLE' — content may have landed in T3 while registration was lost (the exact nexus-sh9v2 shape)")
@@ -362,14 +375,13 @@ else
   MD_TUMBLER=""
 fi
 if [ -n "$MD_TUMBLER" ]; then
-  MD_VERIFY_JSON="$(_manifest_verify "$MD_TUMBLER")"
-  MD_REFERENCED="$(printf '%s' "$MD_VERIFY_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin).get('referenced',-1))" 2>/dev/null || echo -1)"
-  MD_MISSING="$(printf '%s' "$MD_VERIFY_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin).get('missing',-1))" 2>/dev/null || echo -1)"
-  if [ "$MD_REFERENCED" = "1" ] && [ "$MD_MISSING" = "0" ]; then
+  MD_GET_JSON="$(_manifest_get_count "$MD_TUMBLER")"
+  MD_COUNT="$(printf '%s' "$MD_GET_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin).get('count',-1))" 2>/dev/null || echo -1)"
+  if [ "$MD_COUNT" = "1" ]; then
     MD_OK=1
-    echo "[gate] index md OK: tumbler=$MD_TUMBLER referenced=1 missing=0 (exact expected count)"
+    echo "[gate] index md OK: tumbler=$MD_TUMBLER manifest count=1 (exact expected count)"
   else
-    FAIL_REASONS+=("index md: catalog registration incomplete (tumbler=$MD_TUMBLER referenced=$MD_REFERENCED missing=$MD_MISSING, expected referenced=1 missing=0)")
+    FAIL_REASONS+=("index md: catalog registration incomplete (tumbler=$MD_TUMBLER manifest count=$MD_COUNT, expected 1)")
   fi
 else
   FAIL_REASONS+=("index md: no catalog document registered for title '$MD_TITLE' — content may have landed in T3 while registration was lost (the exact nexus-sh9v2 shape)")

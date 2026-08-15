@@ -254,6 +254,24 @@ safe value across all owners in one call.
 
 ### Dangling manifest row: the definition of record
 
+**RDR-191 Phase 6 update (bead nexus-o8dil.33), 2026-08-15.** The
+manifest-chunk FK this section originally described as "planned" is
+SHIPPED and VALIDATEd (`catalog-029-manifest-chunk-fk.xml`, deployed
+engine-service-v0.1.76) — shape **(a)** below (the real defect class) is
+now REJECTED by the database at write time, not merely detected. The
+detection apparatus this section names —
+`nexus.manifest_verify(doc_id)`/`manifest_verify_all()`,
+`nexus.manifest_orphans(dim)`, and `health._check_dangling_manifests()` —
+is RETIRED as a consequence (`catalog-030-retire-manifest-verify.xml`
+drops `manifest_verify_all()`/`manifest_orphans(dim)`/`manifest_backfill()`
+outright). `nexus.manifest_verify(text)` itself is the ONE exception: it
+stays, because `CatalogRepository.completeIndexRun` depends on it
+internally for a *different* completeness question (referenced == the
+caller's claimed chunk_count) the FK does not answer. The three-shape
+taxonomy below remains the correct conceptual model of the row — it is
+retained for that reason — but the specific instruments named throughout
+this section are historical except where noted.
+
 "Dangling manifest row" has three distinct shapes, only one of which is a
 defect. A `catalog_document_chunks` row `c` is examined against its owning
 document `d` (`d.tenant_id = c.tenant_id AND d.tumbler = c.doc_id`) and
@@ -461,13 +479,17 @@ rides the existing flush-grain manifest write, at zero extra round trips:
   (`manifest_complete_claim_on_continuation_slice`), never silently
   accepted.
 
-**Reads.** `HttpCatalogClient.manifest_verify(doc_id)` (one document — also
+**Reads — RETIRED, RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15.**
+`HttpCatalogClient.manifest_verify(doc_id)` (one document — formerly also
 `nx catalog manifest-verify`) and `manifest_verify_all()` (every live
-document, grouped by collection — the `nx doctor` sweep primitive) are
-plain reads that PROPAGATE on failure, unlike the advisory begin/fail
-calls above; the one caller that must fail open on any verify failure
-(`doc_indexer._manifest_is_fully_present`) implements that fail-open
-contract itself, around the call.
+document, grouped by collection — the former `nx doctor` sweep primitive)
+are both retired: the manifest-chunk FK makes the dangling state they
+diagnosed unreachable. `doc_indexer._manifest_is_fully_present` is now an
+unconditional `return True` (the FK makes its underlying question
+provably always-false) — see that function's own docstring for the full
+argument, including why `CatalogRepository.completeIndexRun`'s still-live
+write-path use of the SAME underlying `nexus.manifest_verify(text)` SQL
+function answers a *different* question the FK does not.
 
 **Doctor axis.** `nx doctor` separately flags documents stranded in
 `index_state='indexing'` past a threshold (`health.py
@@ -477,10 +499,12 @@ a rolling engine deploy that straddles one multi-batch run's begin/complete
 pair, stranding the document in `'indexing'` until a future full re-index
 happens to route both calls through upgraded pods).
 
-**CLI.** `nx catalog manifest-verify TUMBLER_OR_TITLE` reports one
-document's `referenced`/`present`/`missing` chunk counts plus its fence
-state without a full corpus scan; see
-[cli-reference.md § nx catalog manifest-verify](cli-reference.md#nx-catalog-manifest-verify).
+**CLI — RETIRED, RDR-191 Phase 6 (nexus-o8dil.33).** `nx catalog
+manifest-verify TUMBLER_OR_TITLE` used to report one document's
+`referenced`/`present`/`missing` chunk counts plus its fence state without
+a full corpus scan; see
+[cli-reference.md § nx catalog manifest-verify — retired](cli-reference.md#nx-catalog-manifest-verify--retired)
+for the current remedy (`nx catalog show TUMBLER_OR_TITLE`'s `index_state`).
 
 ### Catalog manifest and migration
 

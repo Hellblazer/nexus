@@ -25,7 +25,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * nexus-5xn3k.1 (RUNFENCE E1) — TDD suite for {@code nexus.manifest_verify(text)}
- * and {@code nexus.manifest_verify_all()} (catalog-020-index-run-fence.xml).
+ * (catalog-020-index-run-fence.xml).
+ *
+ * <p><strong>RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15:</strong> {@code
+ * nexus.manifest_verify_all()} coverage was DELETED here — that function is
+ * DROPPED (catalog-030-retire-manifest-verify.xml); the manifest-chunk FK
+ * (catalog-029) makes the dangling state {@code _check_dangling_manifests}
+ * used it to detect unreachable. {@code nexus.manifest_verify(text)} is
+ * DELIBERATELY KEPT and remains this file's scope —
+ * {@code CatalogRepository.completeIndexRun}/{@code stampCompleteIfVerified}
+ * depend on it via {@code manifestVerifyCtx} for a write-path completeness
+ * question (referenced == the caller's claimed chunk_count) the FK does not
+ * answer.
  *
  * <p>Design of record: T2 nexus memory {@code 5xn3k-design-2026-08-02} §3.2.
  * Structurally these are {@code nexus.manifest_orphans(dim)}
@@ -450,51 +461,13 @@ class ManifestVerifyTest {
     // GROUP 6 — manifest_verify_all: per-collection aggregates match per-doc sums
     // ══════════════════════════════════════════════════════════════════════════
 
-    @Test
-    void manifestVerifyAll_aggregatesMatchPerDocSums() throws Exception {
-        // Own collection, distinct from every other test's fixtures: manifest_verify_all()
-        // aggregates over EVERY document in the tenant for a collection, so reusing the
-        // shared COLLECTION constant here would fold in every other test's rows sharing
-        // the same (tenant, collection) and break the exact-sum assertion below.
-        String collection = "knowledge__mvf-owner__voyage-context-3__vagg";
-        String docA = "mvf-agg-doc-a";
-        String docB = "mvf-agg-doc-b";
-        String aOk       = chash("mvf-agg-a-ok");
-        String aMissing  = chash("mvf-agg-a-missing");
-        String bOk1      = chash("mvf-agg-b-ok1");
-        String bOk2      = chash("mvf-agg-b-ok2");
-
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            insertCollection(su, TENANT, collection);
-            insertDoc(su, TENANT, docA);
-            insertDoc(su, TENANT, docB);
-            // docA: 2 referenced, 1 present, 1 missing.
-            insertManifestRow(su, TENANT, docA, 0, aOk, collection);
-            insertManifestRow(su, TENANT, docA, 1, aMissing, collection);
-            insertChunk1024(su, TENANT, collection, aOk);
-            // docB: 2 referenced, 2 present, 0 missing.
-            insertManifestRow(su, TENANT, docB, 0, bOk1, collection);
-            insertManifestRow(su, TENANT, docB, 1, bOk2, collection);
-            insertChunk1024(su, TENANT, collection, bOk1);
-            insertChunk1024(su, TENANT, collection, bOk2);
-        }
-
-        long[] a = verify(docA);
-        long[] b = verify(docB);
-        long expectedReferenced = a[0] + b[0];
-        long expectedPresent    = a[1] + b[1];
-        long expectedMissing    = a[2] + b[2];
-
-        long[] agg = verifyAllForCollection(collection);
-        assertThat(agg[0])
-            .as("manifest_verify_all's referenced for " + collection + " must equal the " +
-                "sum of manifest_verify(docA) + manifest_verify(docB)")
-            .isEqualTo(expectedReferenced)
-            .isEqualTo(4L);
-        assertThat(agg[1]).isEqualTo(expectedPresent).isEqualTo(3L);
-        assertThat(agg[2]).isEqualTo(expectedMissing).isEqualTo(1L);
-    }
+    // RDR-191 Phase 6 (nexus-o8dil.33): manifestVerifyAll_aggregatesMatchPerDocSums
+    // (which exercised nexus.manifest_verify_all()) was DELETED here — that
+    // function is DROPPED (catalog-030-retire-manifest-verify.xml); the
+    // manifest-chunk FK makes the dangling state _check_dangling_manifests
+    // used it to detect unreachable. nexus.manifest_verify(text) — this
+    // file's remaining scope — is NOT dropped: CatalogRepository
+    // .completeIndexRun/stampCompleteIfVerified depend on it.
 
     // ══════════════════════════════════════════════════════════════════════════
     // GROUP 7 — reader contract: missing GUC returns the empty/zero answer,
@@ -523,19 +496,8 @@ class ManifestVerifyTest {
         }
     }
 
-    @Test
-    void manifestVerifyAll_missingGuc_returnsEmptySet() throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute("RESET nexus.tenant");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.manifest_verify_all()");
-            rs.next();
-            assertThat(rs.getLong(1))
-                .as("manifest_verify_all is a GROUP BY query: no GUC means no rows matched " +
-                    "the manifest CTE, so there are zero groups (not one zeroed row)")
-                .isEqualTo(0L);
-        }
-    }
+    // manifestVerifyAll_missingGuc_returnsEmptySet DELETED (RDR-191 Phase 6,
+    // nexus-o8dil.33) alongside nexus.manifest_verify_all() itself.
 
     // ══════════════════════════════════════════════════════════════════════════
     // GROUP 8 — RLS isolation: tenant A's call must not see tenant B's manifest
@@ -569,32 +531,32 @@ class ManifestVerifyTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test
-    void bothFunctions_areSecurityInvoker() throws Exception {
+    void manifestVerify_isSecurityInvoker() throws Exception {
+        // RDR-191 Phase 6 (nexus-o8dil.33): narrowed from bothFunctions_areSecurityInvoker
+        // to manifest_verify(text) only — manifest_verify_all() is dropped.
         try (Connection su = pg.createConnection("")) {
-            for (String fn : new String[]{"manifest_verify", "manifest_verify_all"}) {
-                ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT prosecdef FROM pg_proc p " +
-                    "JOIN pg_namespace n ON n.oid = p.pronamespace " +
-                    "WHERE n.nspname = 'nexus' AND p.proname = '" + fn + "' LIMIT 1");
-                assertThat(rs.next()).as("nexus." + fn + " must exist").isTrue();
-                assertThat(rs.getBoolean("prosecdef"))
-                    .as("nexus." + fn + " must be SECURITY INVOKER (prosecdef=false)")
-                    .isFalse();
-            }
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT prosecdef FROM pg_proc p " +
+                "JOIN pg_namespace n ON n.oid = p.pronamespace " +
+                "WHERE n.nspname = 'nexus' AND p.proname = 'manifest_verify' LIMIT 1");
+            assertThat(rs.next()).as("nexus.manifest_verify must exist").isTrue();
+            assertThat(rs.getBoolean("prosecdef"))
+                .as("nexus.manifest_verify must be SECURITY INVOKER (prosecdef=false)")
+                .isFalse();
         }
     }
 
     @Test
-    void nexusSvc_hasExecuteGrantOnBothFunctions() throws Exception {
+    void nexusSvc_hasExecuteGrantOnManifestVerify() throws Exception {
+        // RDR-191 Phase 6 (nexus-o8dil.33): narrowed from
+        // nexusSvc_hasExecuteGrantOnBothFunctions — manifest_verify_all() is dropped.
         try (Connection su = pg.createConnection("")) {
-            for (String sig : new String[]{"manifest_verify(text)", "manifest_verify_all()"}) {
-                ResultSet rs = su.createStatement().executeQuery(
-                    "SELECT has_function_privilege('nexus_svc', 'nexus." + sig + "', 'EXECUTE')");
-                rs.next();
-                assertThat(rs.getBoolean(1))
-                    .as("nexus_svc must have EXECUTE on nexus." + sig + " (catalog-020-5 grants)")
-                    .isTrue();
-            }
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT has_function_privilege('nexus_svc', 'nexus.manifest_verify(text)', 'EXECUTE')");
+            rs.next();
+            assertThat(rs.getBoolean(1))
+                .as("nexus_svc must have EXECUTE on nexus.manifest_verify(text) (catalog-020-5 grants)")
+                .isTrue();
         }
     }
 
@@ -608,22 +570,6 @@ class ManifestVerifyTest {
             var row = ctx.fetchOne(
                 "SELECT referenced, present, missing FROM nexus.manifest_verify(?)", docId);
             assertThat(row).as("manifest_verify must return exactly one row").isNotNull();
-            return new long[]{
-                row.get("referenced", Long.class),
-                row.get("present", Long.class),
-                row.get("missing", Long.class)};
-        });
-    }
-
-    /** Call manifest_verify_all() under the TENANT GUC and pick out one collection's row. */
-    private long[] verifyAllForCollection(String collection) {
-        return tenantScope.withTenant(TENANT, ctx -> {
-            var row = ctx.fetchOne(
-                "SELECT referenced, present, missing FROM nexus.manifest_verify_all() " +
-                "WHERE collection = ?", collection);
-            assertThat(row)
-                .as("manifest_verify_all must return a row for " + collection)
-                .isNotNull();
             return new long[]{
                 row.get("referenced", Long.class),
                 row.get("present", Long.class),

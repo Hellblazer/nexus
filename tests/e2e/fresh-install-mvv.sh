@@ -415,9 +415,18 @@ fi
 # format_health_for_cli warn=True render, which contains no literal
 # "warning" text and was invisible to the structlog grep alone).
 #
-# nexus-ac4id CLOSED by nexus-5xn3k.6: the dangling-manifests check is
+# nexus-ac4id CLOSED by nexus-5xn3k.6: the dangling-manifests check was
 # re-armed on manifest_verify_all() (one engine call, no client-side T3
-# enumeration) and no longer carries a deliberate DISABLED off-switch.
+# enumeration) and no longer carried a deliberate DISABLED off-switch.
+#
+# RETIRED ENTIRELY, RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: `nx
+# doctor`'s `_check_dangling_manifests` (and its manifest_verify_all() call)
+# no longer runs at all — the manifest-chunk FK makes the dangling state it
+# detected unreachable by construction. The HISTORY paragraph below
+# describes a check that existed at the time; it does not run on this
+# checkout's doctor any more, so there is nothing here to allowlist for it
+# regardless of engine floor. `_check_manifest_null_collection` (the
+# EXPLICITLY-NOT-RETIRED census below) is unaffected and still runs.
 #
 # HISTORY: from nexus-5xn3k.6 (2026-08-02) until the nexus-koms3 floor bump
 # (also 2026-08-02) this allowlist carried a scoped entry for the "engine
@@ -431,9 +440,12 @@ fi
 # it reds the moment REQUIRED_ENGINE_VERSION names a tag containing
 # 3cf64d48 (v0.1.62+) unless the entry is already gone — it is, as of this
 # floor bump, because a virgin box's bundled engine is now fence-aware and
-# the check reads clean. (The 404 fail-open path itself stays exercised
-# forever in tests/test_health_service_checks.py; only this journey's
-# allowlist entry for it was ever temporary.)
+# the check reads clean. (The 404 fail-open path itself stayed exercised in
+# tests/test_health_service_checks.py's TestCheckDanglingManifests through
+# RDR-191 Phase 5 — that class, and _check_dangling_manifests itself, are
+# DELETED as of RDR-191 Phase 6 nexus-o8dil.33, so neither the check nor its
+# test coverage exist any more; this journey's allowlist entry for it was
+# temporary independent of that later removal.)
 #
 # CURRENT SCOPED ENTRIES: none. The nexus-796zn entries (chash-conformance
 # route [du2dw engine half] + the vw594 engine-half-inert stale-fence

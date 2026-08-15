@@ -332,66 +332,49 @@ def _doc_id_for_path(file_path: Path) -> str:
         return ""
 
 
-def _manifest_is_fully_present(col: Any, doc_id: str) -> bool:
-    """True iff the engine's ``manifest/verify`` reports no missing chunks.
+def _manifest_is_fully_present(col: Any, doc_id: str) -> bool:  # noqa: ARG001 — col/doc_id kept for signature stability, see below
+    """Always ``True`` — RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15.
 
-    nexus-5xn3k AC2 (original), reworked for RUNFENCE (nexus-5xn3k.3, design
-    memo §3.4): the client-side existence check this originally did — a
-    300-id-per-page ``col.get(ids=..., include=[])`` loop over the manifest's
-    expected chash set — is replaced by ONE engine-side ``manifest/verify``
-    call. ``nexus.manifest_verify()`` is a single SQL anti-join, so the round
-    trip this function pays drops from O(manifest size / 300) requests to 1,
-    and the *col* parameter is now UNUSED (kept so this function's signature —
-    and every existing caller/test — needs no further change; the presence
-    check moved server-side and no longer touches T3 directly).
+    HISTORY: nexus-5xn3k AC2 (original), reworked for RUNFENCE (nexus-5xn3k.3,
+    design memo §3.4) to call the engine's per-document ``manifest/verify``
+    (a single SQL anti-join: referenced/present/missing chash counts for one
+    document) instead of an O(manifest size / 300) client-side existence
+    loop. That route (and the ``nexus.manifest_verify(text)`` call it made
+    through :meth:`HttpCatalogClient.manifest_verify`) is retired in THIS
+    bead — but not because the check became unreachable through disuse: the
+    manifest-chunk FK (``catalog-029-manifest-chunk-fk.xml``, VALIDATEd and
+    deployed) makes ``missing`` — the ONLY value this function ever branched
+    on — PROVABLY ALWAYS 0 for any manifest row that exists at all. The FK
+    guarantees every ``catalog_document_chunks`` row references a matching
+    ``nexus.chunks`` row at write time (a dangling INSERT is rejected, a
+    DELETE of a still-referenced chunk is rejected); ``manifest_verify``'s
+    SQL computed exactly that same existence check via anti-join. So this
+    function's ``missing`` branch (the ONLY path that ever returned
+    ``False``) became dead code the moment the FK was validated on THIS
+    checkout's engine (Phase 5, engine-service-v0.1.76) — independent of
+    whether the route/client method survived Phase 6's subtraction. Removing
+    the now-provably-vacuous call, rather than leaving it to raise
+    ``AttributeError`` and silently fail open through the broad ``except``
+    below, keeps this function honest about what it actually decides now.
 
-    (The original bead attributed the AC2 gap to the gate trusting the
-    catalog's chunk_count. It did not: neither gate consults the catalog at
-    all. The mechanism was ``limit=1`` on the staleness gates' own chunk-hash
-    query, one layer above this function. Corollary worth keeping: PARTIAL
-    deletion is worse than none — removing 206 of 207 chunks leaves the
-    document broken AND still skipped.)
-
-    FAIL-OPEN, deliberately: an unreadable catalog/engine returns True, i.e.
-    "no evidence of damage", preserving the pre-fix behaviour. This runs on
-    the hot path of every re-index (via the "unknown" branch of the RUNFENCE
-    three-way, :func:`_index_run_fresh`), and a transient read failure must
-    not force a full re-embed of an intact document. The DAMAGE it detects is
-    durable and will be caught on the next pass; a false positive here is
-    expensive. Logged at WARNING, never DEBUG — the ac4id lesson: a verify
-    that silently stops working recreates the exact bug this arc exists to
-    fix. An EMPTY manifest (``referenced=0``) also returns True: that is the
-    GH #1397 ghost class, which `nx catalog reconcile` owns, and this gate
-    must not silently take it.
+    NOTE this is a DIFFERENT question from write-path COMPLETENESS (did
+    every expected chunk for THIS run get a manifest row at all) — that
+    remains a live, load-bearing check, just not this one:
+    ``CatalogRepository.completeIndexRun``'s fail-closed verify-then-stamp
+    (``referenced == the caller's claimed chunk_count``) still runs
+    server-side on every index completion via the SAME underlying
+    ``nexus.manifest_verify(text)`` SQL function, which is DELIBERATELY KEPT
+    (not dropped) for exactly that reason. This function's remaining
+    fallback role — deciding whether a document with no reliable RUNFENCE
+    fence signal (a legacy pre-fence row, an unresolvable doc_id, or a fence
+    read failure) is safe to skip re-indexing — is answered by the SAME FK
+    guarantee: any manifest row visible here already passed completeIndexRun
+    (or an older writer) at write time, so there is no evidence of damage to
+    find. ``col``/``doc_id`` are kept unused in the signature (not renamed to
+    ``_col``/``_doc_id``) so :func:`_index_run_fresh` and every existing
+    caller/test need no further change.
     """
-    if not doc_id:
-        # Identity unresolvable (prose path, unregistered doc) — no
-        # expected set to compare against, so no evidence of damage.
-        return True
-    try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
-
-        cat = make_catalog_reader()
-        if cat is None:
-            return True
-        result = cat.manifest_verify(str(doc_id)) or {}
-        missing = int(result.get("missing", 0) or 0)
-        if missing:
-            _log.warning(
-                "index_manifest_incomplete_reindexing",
-                doc_id=str(doc_id),
-                referenced=int(result.get("referenced", 0) or 0),
-                present=int(result.get("present", 0) or 0),
-                missing=missing,
-                detail="engine manifest/verify reports missing chunks — a "
-                       "prior index died mid-write; re-indexing instead of "
-                       "skipping",
-            )
-            return False
-        return True
-    except Exception as exc:  # noqa: BLE001 — fail-open, but LOUD (ac4id lesson: never silently stop verifying)
-        _log.warning("index_manifest_presence_check_failed", doc_id=str(doc_id), error=str(exc))
-        return True
+    return True
 
 
 def _index_fence_state(doc_id: str) -> tuple[str | None, str]:
@@ -442,8 +425,10 @@ def _index_run_fresh(col: Any, doc_id: str, content_hash: str) -> bool:
       means "someone else is running, skip").
     * anything else (``None`` — a NULL column, a field absent on a pre-fence
       engine, an unresolvable doc_id, or a fence read failure) -> the fence
-      has nothing to say; fall through to :func:`_manifest_is_fully_present`'s
-      one engine ``manifest/verify`` call (today's post-AC2 behaviour).
+      has nothing to say; fall through to :func:`_manifest_is_fully_present`,
+      which is unconditionally ``True`` as of RDR-191 Phase 6 (see its own
+      docstring for why the FK makes that provably correct now, not merely
+      a simplification).
     """
     state, fence_hash = _index_fence_state(doc_id)
     if state == "complete":
@@ -2330,11 +2315,11 @@ def index_pdf(
                     from nexus.errors import IndexingError  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
 
                     _verify_hint = (
-                        f"'nx catalog manifest-verify {doc_id}' to confirm the chunks "
-                        f"are present"
+                        f"'nx catalog show {doc_id}' to confirm index_state and chunk "
+                        f"presence"
                         if doc_id else
                         "'nx doctor' to check for a damaged manifest (no doc_id was "
-                        "resolved for this run to target manifest-verify directly)"
+                        "resolved for this run to target a single document directly)"
                     )
                     raise IndexingError(
                         f"index_pdf: indexing succeeded ({count} chunk(s) committed to "

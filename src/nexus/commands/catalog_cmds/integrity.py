@@ -511,9 +511,9 @@ def _class_a_vanished_collections(
     traceback out of ``verify``.
 
     Returns ``(vanished, vanished_names)`` — the report rows and the bare
-    name set (so callers can exclude these docs from the Class C census,
-    and these collections from the Class B damaged list, without
-    double-reporting them).
+    name set (so callers can exclude these docs from the Class C census
+    without double-reporting them; Class B, formerly excluded the same way,
+    is retired — RDR-191 Phase 6, nexus-o8dil.33).
     """
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
@@ -557,53 +557,21 @@ def _class_a_vanished_collections(
     return vanished, vanished_names
 
 
-def _class_b_damaged_collections(
-    cat: "CatalogReader", unreadable: list[str],
-) -> tuple[list[dict], dict[str, int]]:
-    """Class B: per-collection manifest damage via the engine-side anti-join.
-
-    One round trip (``manifest_verify_all``) instead of N per-collection
-    probes. Non-vacuity (nexus-sj4a3, mirrors ``health.py``'s
-    ``_check_dangling_manifests``, doctor.py:3271-3277): a response naming
-    ZERO collections checked is not a clean bill of health — it means the
-    call could not actually compare anything — so it is folded into
-    *unreadable* (INCOMPLETE) rather than reported as "0 damaged".
-
-    Returns ``(damaged, referenced_by_collection)``. The second value is
-    the FULL per-collection ``referenced`` count from the raw response —
-    not just the damaged rows — so callers can detect the engine SQL's
-    NULL-``collection`` exclusion (nexus-sj4a3 critique CRIT-2; see
-    ``_class_c_unverifiable_rows``).
-    """
-    try:
-        result = cat.manifest_verify_all() or {}
-    except Exception as exc:  # noqa: BLE001 — isolated: reported, not swallowed
-        unreadable.append("catalog:manifest_verify_all")
-        _log.warning("catalog_verify_manifest_verify_all_failed", error=str(exc))
-        return [], {}
-
-    rows = result.get("collections") or []
-    if not rows:
-        unreadable.append("catalog:manifest_verify_all:0-collections")
-        return [], {}
-
-    damaged: list[dict] = []
-    referenced_by_collection: dict[str, int] = {}
-    for row in rows:
-        coll = row.get("collection", "?")
-        referenced = int(row.get("referenced", 0) or 0)
-        referenced_by_collection[coll] = referenced_by_collection.get(coll, 0) + referenced
-        missing = int(row.get("missing", 0) or 0)
-        if missing <= 0:
-            continue
-        present = row.get("present")
-        damaged.append({
-            "collection": coll,
-            "referenced": referenced,
-            "present": int(present) if present is not None else max(referenced - missing, 0),
-            "missing": missing,
-        })
-    return damaged, referenced_by_collection
+    # RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: Class B (per-collection
+    # manifest damage via manifest_verify_all's engine-side anti-join) is
+    # RETIRED here. This was NOT on Decision item 4's explicit list — it is
+    # a separate consumer of manifest_verify_all discovered while retiring
+    # that function for health.py's _check_dangling_manifests — but the
+    # underlying defect class is identical: the manifest-chunk FK now
+    # guarantees any manifest row that exists already references a real
+    # chunk, so manifest_verify_all's `missing` is provably always 0 and
+    # Class B could never find damage again even if left in place.
+    # _class_c_unverifiable_rows (below) is retired in the SAME change: its
+    # entire purpose was cross-checking Class C's client-side manifest-row
+    # totals against Class B's engine-side `referenced` counts, which no
+    # longer exist. Full-mode `damaged` is now always `[]`; --collection
+    # scoped mode (_verify_scoped) is UNAFFECTED — it computes damage via
+    # get_manifests + t3.existing_ids directly, never manifest_verify_all.
 
 
 def _classify_never_chunked(e: object) -> str:
@@ -764,79 +732,11 @@ def _census_lost_and_never_chunked(
     return lost, _never_chunked_breakdown(never_chunked_entries), manifest_row_totals
 
 
-def _class_c_unverifiable_rows(
-    manifest_row_totals: dict[str, int],
-    referenced_by_collection: dict[str, int],
-    unreadable: list[str],
-) -> list[dict]:
-    """Detect pre-backfill (NULL-``collection``) manifest rows the engine's
-    anti-join silently excludes (nexus-sj4a3 substantive critique CRIT-2).
-
-    ``manifest_verify_all``'s SQL (``catalog-020-index-run-fence.xml``
-    changesets 3/4) excludes ``document_chunks`` rows with ``collection IS
-    NULL`` from "referenced" entirely — pre-backfill state, per the
-    changeset's own comment ("an un-backfilled document never reads as
-    damaged"). Such a row never surfaces as damaged, in either Class B or
-    Class C, no matter how genuinely missing the underlying chunk is.
-
-    Grouping-key correction (nexus-bo2d1, substantive-critic round 3,
-    2026-08-12): the design memo's original claim — "``document_chunks.
-    collection`` is stamped from the owning doc's ``physical_collection`` at
-    write time, so grouping the client-side manifest-row total by ``e.
-    physical_collection`` matches the key the engine groups by" — is FALSE
-    under the shipped RDR-191 contract. ``CatalogRepository.java``
-    ~3530-3547: writers now take an explicit, required ``collection``
-    parameter and the engine stamps it VERBATIM on every row, with ZERO
-    relationship to the target document's own ``physical_collection``
-    field. ``_census_lost_and_never_chunked`` now excludes ghost entries
-    (no ``physical_collection`` at all) from ``manifest_row_totals``
-    entirely rather than keying them under a phantom ``""`` — but a ghost
-    can still write manifest rows into a REAL collection that a normal doc
-    in this same census also uses. Those rows count toward the engine's
-    ``referenced`` (a global anti-join over ALL rows, independent of which
-    docs this census walked) but never toward that collection's
-    ``client_total`` (built only from docs this census actually fetched
-    manifests for) — so ``client_total`` can legitimately fall BELOW
-    ``referenced`` for a real, otherwise-healthy collection.
-
-    Under the correct model ``client_total`` (unfiltered) can only be ``>=
-    referenced`` (NULL-collection-excluded) for a collection this census
-    actually walked in full — a negative delta is therefore PROOF this
-    collection's own client-side total is incomplete (some of its rows are
-    attributed to docs outside this census's ``entries``), not evidence of
-    a clean pass. It folds into *unreadable* (INCOMPLETE) exactly like a
-    positive delta, rather than being silently dropped — the false-clean
-    ``if delta > 0`` alone produced pre-fix.
-
-    Folds affected collections into *unreadable* (the collection's true
-    damage state cannot be determined) rather than reporting a finding —
-    this is an INCOMPLETE signal, distinct from vanished/damaged/lost.
-
-    Resolution (nexus-kzso5, RDR-191 follow-up): this function itself takes
-    the already-aggregated ``manifest_row_totals`` dict and never re-derives
-    a key, so it needed no code change — the fix lives entirely upstream in
-    :func:`_census_lost_and_never_chunked`, which now keys each row by its
-    OWN stamped ``collection`` (the wire field the engine floor ``>=
-    v0.1.74`` carries) instead of the owning doc's ``physical_collection``.
-    On a field-aware engine a ghost's rows attribute correctly to their
-    real collection and ``client_total`` naturally reconciles with
-    ``referenced`` — the negative-delta INCOMPLETE hedge this docstring
-    describes no longer fires for that reason. It still fires, exactly as
-    designed, on a pre-field engine (row collection absent, ghosts
-    invisible to the client-side total by construction) or for any other
-    genuine census-incompleteness this function cannot distinguish from
-    real damage — the fold-to-INCOMPLETE safety net is unchanged.
-    """
-    unverifiable: list[dict] = []
-    for coll, client_total in sorted(manifest_row_totals.items()):
-        referenced = referenced_by_collection.get(coll, 0)
-        delta = client_total - referenced
-        if delta > 0:
-            unverifiable.append({"collection": coll, "unverifiable_rows": delta})
-            unreadable.append(f"catalog:manifest_verify_all:unbackfilled:{coll}")
-        elif delta < 0:
-            unreadable.append(f"catalog:manifest_verify_all:census_incomplete:{coll}")
-    return unverifiable
+    # _class_c_unverifiable_rows RETIRED (RDR-191 Phase 6, nexus-o8dil.33) —
+    # its entire purpose was cross-checking Class C's client-side
+    # manifest-row totals against Class B's engine-side `referenced` counts
+    # (manifest_verify_all), which no longer exist. See the Class B removal
+    # note above _classify_never_chunked for the full rationale.
 
 
 def _emit_verify_report(
@@ -862,10 +762,12 @@ def _emit_verify_report(
 
     ``mode`` (``"full"`` | ``"scoped"``) drives two mode-specific
     semantics (nexus-sj4a3 substantive critique SIG-3). Full mode's
-    ``damaged`` rows are COLLECTION-granular (one ``manifest_verify_all``
-    round trip; no per-doc count exists), scoped mode's are per-DOCUMENT —
-    reusing one summary key (``damaged_docs``) for two different units was
-    the bug, so full mode's key is ``damaged_collections`` instead. The
+    ``damaged`` rows were COLLECTION-granular (one ``manifest_verify_all``
+    round trip; no per-doc count existed) — RETIRED RDR-191 Phase 6
+    (nexus-o8dil.33): full mode's ``damaged`` is now always ``[]``. Scoped
+    mode's are per-DOCUMENT, unaffected — reusing one summary key
+    (``damaged_docs``) for two different units was the original bug, so
+    full mode's key is still ``damaged_collections`` (permanently 0). The
     clean-percent calculation follows the same split: scoped mode can
     safely subtract damaged docs (a real per-doc count); full mode cannot
     (there is no per-doc count to subtract) and prints an explicit caveat
@@ -989,14 +891,12 @@ def _emit_verify_report(
             f"{len(lost)} lost doc(s), {never_chunked['total']} "
             "never-chunked (report-only)."
         )
-        if mode == "full" and damaged:
-            click.echo(
-                "Note: damaged-manifest counts above are COLLECTION-granular "
-                "in full mode (one manifest_verify_all round trip has no "
-                "per-document count) and are excluded from the clean-"
-                "percentage above; use --collection <name> for per-document "
-                "detail."
-            )
+        # The full-mode "damaged is COLLECTION-granular" caveat (formerly
+        # printed here) is unreachable dead code now (RDR-191 Phase 6,
+        # nexus-o8dil.33): full mode's `damaged` is always [] since Class B
+        # (manifest_verify_all) is retired — removed rather than left as a
+        # branch that can never fire. --collection scoped mode still gives
+        # real per-document damage detail, unaffected.
         if not exit_dirty and not unreadable:
             click.echo("All good.")
 
@@ -1008,20 +908,24 @@ def _emit_verify_report(
 def _verify_full(cat: "CatalogReader", *, json_out: bool) -> None:
     """Full-catalog default mode: cheap, CI-gateable (nexus-sj4a3).
 
-    Class A (vanished collections) + Class B (damaged manifests, one
-    engine-side round trip) + Class C (chunk_count vs manifest census) —
-    see module docstring / design memo (T1 scratch 7afd8b6f) for the full
-    rationale. Docs whose ``physical_collection`` is a Class-A vanished
-    collection are counted under Class A only, never double-reported as
-    Class B ``damaged`` or Class C ``lost`` (critique SIG-4:
-    ``manifest_verify_all`` derives its collection list independently of
-    T3, so a genuinely-vanished collection's chashes all fail presence and
-    would otherwise ALSO surface as 100% damaged).
+    Class A (vanished collections) + Class C (chunk_count vs manifest
+    census) — see module docstring / design memo (T1 scratch 7afd8b6f) for
+    the full rationale. Docs whose ``physical_collection`` is a Class-A
+    vanished collection are counted under Class A only, never
+    double-reported as Class C ``lost``.
 
-    Also runs Class C's ``manifest_row_totals`` against Class B's
-    ``referenced_by_collection`` (critique CRIT-2) to detect pre-backfill
-    manifest rows the engine's anti-join silently excludes — skipped when
-    Class B itself already failed/returned nothing to compare against.
+    RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: Class B (damaged
+    manifests via one ``manifest_verify_all`` engine-side round trip) and
+    its cross-check against Class C's ``manifest_row_totals`` (critique
+    CRIT-2, pre-backfill rows the engine's anti-join silently excluded) are
+    RETIRED — both functions ``_class_b_damaged_collections`` and
+    ``_class_c_unverifiable_rows`` deleted. The manifest-chunk FK makes the
+    dangling state Class B detected unreachable by construction; the
+    cross-check's entire input (Class B's ``referenced_by_collection``) no
+    longer exists. Full mode's ``damaged``/``unverifiable_rows`` are now
+    always ``[]``. ``manifest_row_totals`` is still computed by
+    ``_census_lost_and_never_chunked`` (Class C's own core census) but is
+    otherwise unconsumed.
 
     nexus-kzso5 (RDR-191 follow-up to nexus-bo2d1): ghost/sourceless docs
     (``physical_collection == ""``) are still excluded from ``all_entries``
@@ -1052,28 +956,22 @@ def _verify_full(cat: "CatalogReader", *, json_out: bool) -> None:
     if all_entries:
         t3 = _cat_cmd._make_t3()
         vanished_collections, vanished_names = _class_a_vanished_collections(cat, t3, unreadable)
-        damaged, referenced_by_collection = _class_b_damaged_collections(cat, unreadable)
-        damaged = [d for d in damaged if d.get("collection") not in vanished_names]
+        # Class B (damaged, via manifest_verify_all) RETIRED here (RDR-191
+        # Phase 6, nexus-o8dil.33) — see the removal note above
+        # _classify_never_chunked. `damaged` stays [] permanently in full
+        # mode; --collection scoped mode still computes real per-document
+        # damage independently (_verify_scoped, unaffected).
         census_entries = [
             e for e in all_entries if e.physical_collection not in vanished_names
         ]
         # nexus-kzso5: ghosts ride along for row-collection attribution
         # only (see docstring) — _census_lost_and_never_chunked still
-        # excludes them from lost/never_chunked.
-        lost, never_chunked, manifest_row_totals = _census_lost_and_never_chunked(
+        # excludes them from lost/never_chunked. `manifest_row_totals` is
+        # otherwise unconsumed now that _class_c_unverifiable_rows (its
+        # only consumer) is retired alongside Class B.
+        lost, never_chunked, _manifest_row_totals = _census_lost_and_never_chunked(
             cat, census_entries + ghost_entries, unreadable,
         )
-        mv_all_incomplete = any(
-            u in (
-                "catalog:manifest_verify_all",
-                "catalog:manifest_verify_all:0-collections",
-            )
-            for u in unreadable
-        )
-        if not mv_all_incomplete:
-            unverifiable_rows = _class_c_unverifiable_rows(
-                manifest_row_totals, referenced_by_collection, unreadable,
-            )
 
     exit_dirty = bool(vanished_collections or damaged or lost)
     _emit_verify_report(
@@ -1096,9 +994,13 @@ def _verify_scoped(cat: "CatalogReader", collection: str, *, heal: bool, json_ou
     Per doc: manifest via ``get_manifests``, T3 presence via
     ``existing_ids`` (batched — the ou4tb fail-loud probe; never
     ``HttpVectorCollection.get`` with its default ``limit=10``, nexus-hdx2u).
-    ``damaged`` = manifest-referenced chashes missing from T3 (per-doc, the
-    detail full mode's Class B cannot give); ``lost``/``never_chunked`` are
-    the same chunk_count-vs-manifest census as full mode, scoped to this
+    ``damaged`` = manifest-referenced chashes missing from T3 (per-doc
+    detail; full mode has no per-doc damage detection at all since Class B
+    was retired, RDR-191 Phase 6 nexus-o8dil.33 — this scoped path is now
+    the ONLY damage-detection surface remaining in this command, computed
+    entirely client-side via ``get_manifests``/``existing_ids``, independent
+    of ``manifest_verify``/``manifest_verify_all``); ``lost``/``never_chunked``
+    are the same chunk_count-vs-manifest census as full mode, scoped to this
     collection.
 
     ``cat.get_manifests`` is exception-isolated (code-review IMPORTANT):

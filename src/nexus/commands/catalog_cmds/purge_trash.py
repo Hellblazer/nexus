@@ -54,24 +54,24 @@ Pre-fix engine degradation: a 404 from ``POST /v1/catalog/purge-trash``
 clear ``ClickException`` naming the required engine release — never a
 silent no-op, never a swallowed exception.
 
-POPULATION (nexus-heizf part 3 — read this before comparing this verb's
-stranded-chunk count against `nx doctor`'s "dangling manifest chashes"
-warn or ``nx catalog manifest-verify --list``; they are DISJOINT
-populations, not two views of the same rows):
+POPULATION (nexus-heizf part 3 — historical context for the disjointness
+caveat this verb used to print in its output, RETIRED alongside its
+counterpart, RDR-191 Phase 6 nexus-o8dil.33):
 
 * THIS verb's stranded-chunk count (``nexus.purge_trash``'s orphan
   predicate): EXISTING ``chunks_<dim>`` rows that ARE manifest-backed but
   have NO LIVE parent document (every manifest row referencing the chash
-  belongs to a TOMBSTONED document). Direction: chunk -> parent.
-* Doctor's dangling-manifest census / ``manifest-verify --list``: manifest
-  rows of LIVE documents whose chash has NO backing chunk row at all.
-  Direction: manifest -> chunk.
-
-A chash cannot be in both at once (this verb requires the opposite of a
-live parent; the other requires one). Zero stranded chunks here says
-NOTHING about the other instrument's count, and vice versa — the
-2026-08-04 nexus-55l58 shakedown mistook this verb's zero for evidence
-against a nonzero dangling-manifest count on the SAME store.
+  belongs to a TOMBSTONED document). Direction: chunk -> parent. UNCHANGED
+  by RDR-191 — still a live, real population this verb sweeps.
+* Doctor's former dangling-manifest census / the former ``manifest-verify
+  --list`` (both RETIRED): manifest rows of LIVE documents whose chash had
+  NO backing chunk row at all, direction manifest -> chunk. The
+  manifest-chunk FK (catalog-029, VALIDATEd) now REJECTS that state at
+  write time, making it structurally unreachable — there is no longer a
+  second population this verb's stranded-chunk count could be confused
+  with, so the disjointness caveat that used to print alongside every
+  invocation (the nexus-55l58 shakedown's mixed-instrument mistake it
+  existed to prevent) no longer has a live counterpart to warn against.
 """
 from __future__ import annotations
 
@@ -83,18 +83,18 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-#: nexus-heizf / nexus-h1zu0 code-review fix round (2026-08-05): the
-#: disjointness caveat vs `nx doctor`'s dangling-manifest census / `nx
-#: catalog manifest-verify --list`, in the LIVE OUTPUT this command
-#: actually prints (text AND --json), not docstring/help only — mirrors
-#: `nexus.health._DANGLING_MANIFEST_POPULATION_NOTE`. The 2026-08-04
-#: nexus-55l58 shakedown was misled by a docstring nobody reads mid-
-#: incident; the numeric output itself must carry the warning.
+#: nexus-heizf / nexus-h1zu0 code-review fix round (2026-08-05): originally
+#: the disjointness caveat vs `nx doctor`'s dangling-manifest census / `nx
+#: catalog manifest-verify --list`, printed in the LIVE OUTPUT this command
+#: actually prints (text AND --json), not docstring/help only. RDR-191
+#: Phase 6 (nexus-o8dil.33), 2026-08-15: both counterparts are RETIRED (the
+#: manifest-chunk FK makes the population they diagnosed unreachable), so
+#: the disjointness they warned against no longer has a live second
+#: instrument to be confused with — this note now simply names the
+#: population this verb sweeps, without the (now-moot) comparison.
 _POPULATION_NOTE = (
-    "population: tombstoned-doc chunks with no live parent — disjoint "
-    "from `nx doctor`'s dangling-manifest census / `nx catalog "
-    "manifest-verify --list` (live-doc manifest rows missing a chunk); "
-    "one reading clean says nothing about the other"
+    "population: tombstoned-doc chunks with no live parent (chunk -> "
+    "parent direction)"
 )
 
 
@@ -205,12 +205,13 @@ def purge_trash_cmd(older_than_days: int, dry_run: bool, confirm: bool, json_out
     here (deviates from reconcile-stale's lazy-writer pattern) and for
     the pre-nexus-3ck2g engine-floor refusal.
 
-    POPULATION NOTE (nexus-heizf): the stranded-chunk count above is a
-    DIFFERENT, disjoint population from `nx doctor`'s "dangling manifest
-    chashes" warn / `nx catalog manifest-verify --list` (chunk -> parent
-    here; manifest -> chunk there). See the module docstring's POPULATION
-    section — do not read one instrument's zero as evidence about the
-    other's count.
+    POPULATION NOTE (nexus-heizf): the stranded-chunk count above is
+    tombstoned-doc chunks with no live parent (chunk -> parent direction).
+    See the module docstring's POPULATION section — RDR-191 Phase 6
+    (nexus-o8dil.33) retired the counterpart population (`nx doctor`'s
+    former "dangling manifest chashes" warn / the former `nx catalog
+    manifest-verify --list`) this note used to disambiguate against; the
+    manifest-chunk FK makes that population unreachable.
     """
     if json_out and not dry_run:
         raise click.ClickException(

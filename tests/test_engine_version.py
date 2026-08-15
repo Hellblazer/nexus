@@ -499,11 +499,16 @@ class TestMvvAllowlistDoesNotOutliveItsTrigger:
     has already been deleted from ``fresh-install-mvv.sh`` in the SAME
     change that bumps the floor.
 
-    GREP-LEVEL PARITY (comment both sides): the matching comment lives at
+    GREP-LEVEL PARITY (comment both sides): the matching comment lived at
     ``tests/e2e/fresh-install-mvv.sh``'s ``ALLOWLIST_REGEX`` definition and
-    at ``health.py::_check_dangling_manifests``'s ``status == 404`` branch
-    — all three must name each other so an edit to any one is legible
-    against the others.
+    at ``health.py::_check_dangling_manifests``'s ``status == 404`` branch.
+    RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: ``_check_dangling_manifests``
+    itself is DELETED (the manifest-chunk FK makes the dangling state it
+    detected unreachable) — this test's assertion (the allowlist entry stays
+    absent) is now permanently true independent of that removal, since the
+    entry was already gone at the v0.1.62 floor bump this class pins. Kept
+    as a historical regression guard, not because the parity it names still
+    has three live sides.
     """
 
     def test_floor_below_fence_or_allowlist_entry_removed(self) -> None:

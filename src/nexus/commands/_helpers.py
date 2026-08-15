@@ -339,7 +339,7 @@ def raise_identity_drop_exception(*, subject: str = "document") -> None:
     The message names ONLY the cause(s) that actually fired this run and
     the matching remedy for each — nexus-39upx round 2 (substantive-
     critique, T2 21515): the ORIGINAL wording named all three write-class
-    causes and the ``nx catalog manifest-verify`` remedy UNCONDITIONALLY,
+    causes and the ``nx catalog show``/re-index remedy UNCONDITIONALLY,
     which was accurate for the three write-class collectors this
     function was written for but became misleading once a fourth,
     housekeeping-only trigger (a sweep that could not verify orphan/note
@@ -382,8 +382,8 @@ def raise_identity_drop_exception(*, subject: str = "document") -> None:
         raise click.ClickException(
             f"one or more {subject}s had manifest write failures, "
             f"identity drops, or completion refusals this run — see "
-            f"the WARNING lines above. Run 'nx catalog manifest-verify "
-            f"<tumbler>' to inspect a specific {subject}, or re-index "
+            f"the WARNING lines above. Run 'nx catalog show <tumbler>' to "
+            f"inspect a specific {subject}'s index_state, or re-index "
             f"with --force."
         )
 
@@ -404,8 +404,8 @@ def raise_identity_drop_exception(*, subject: str = "document") -> None:
     remedies = []
     if any_write_class:
         remedies.append(
-            f"Run 'nx catalog manifest-verify <tumbler>' to inspect a "
-            f"specific {subject}, or re-index with --force"
+            f"Run 'nx catalog show <tumbler>' to inspect a specific "
+            f"{subject}'s index_state, or re-index with --force"
         )
     if sweep_skipped:
         remedies.append(

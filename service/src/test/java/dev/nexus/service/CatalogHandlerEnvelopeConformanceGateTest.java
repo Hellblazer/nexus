@@ -142,8 +142,9 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         + "at 20 by the nexus.chash_conformance_report stored function) is nested inside "
         + "each row alongside `non_conformant`, which is the EXACT total count (not the "
         + "sample length) -- the same exact-count-plus-capped-sample idiom this gate "
-        + "enforces at the top level (see manifest_orphans' count+orphans), applied one "
-        + "level down. There is no truncatable top-level list to reconcile a count against";
+        + "enforces at the top level (formerly also demonstrated by manifest_orphans' "
+        + "count+orphans, retired RDR-191 Phase 6 nexus-o8dil.33), applied one level "
+        + "down. There is no truncatable top-level list to reconcile a count against";
 
     private static final String GRAPH_TRUNCATION_GENUINE_GAP =
         "GENUINE GAP, deliberately left exempt rather than silently masked: graphBFS "
@@ -183,10 +184,15 @@ class CatalogHandlerEnvelopeConformanceGateTest {
     }
 
     /** Enumerated honestly from the live switch (see {@link #everySwitchRouteIsClassified}),
-     * post {@code by_doc_id}-removal. 69 routes on the final tree (65 + {@code
-     * /purge-trash}, nexus-3ck2g E3; + {@code /chash/conformance}, nexus-du2dw;
-     * + {@code /manifest/chashes_many}, nexus-eslkl; + {@code /descendants},
-     * T2 nexus/chroma-residue-plan-2026-08-10 §C1). */
+     * post {@code by_doc_id}-removal. 69 routes on the tree as of nexus-du2dw
+     * (65 + {@code /purge-trash}, nexus-3ck2g E3; + {@code /chash/conformance},
+     * nexus-du2dw; + {@code /manifest/chashes_many}, nexus-eslkl; + {@code
+     * /descendants}, T2 nexus/chroma-residue-plan-2026-08-10 §C1). RDR-191
+     * Phase 6 (nexus-o8dil.33) retired FOUR: {@code /manifest/backfill},
+     * {@code /manifest/orphans}, {@code /manifest/verify}, {@code
+     * /manifest/verify_all} — 65 routes on the tree as of that bead. This
+     * count is descriptive prose only; {@link #everySwitchRouteIsClassified}
+     * self-verifies against the live switch, not this comment. */
     private static final List<RouteSpec> ROUTES = List.of(
         // ── Documents ─────────────────────────────────────────────────────
         neither("/register", "handleRegister"),
@@ -234,8 +240,10 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         collectionOk("/manifest/chashes", "handleManifestChashes"),
         both("/manifest/docs_for_chashes", "handleDocsForChashes", null),
         neither("/manifest/resync", "handleManifestResync"),
-        neither("/manifest/backfill", "handleManifestBackfill"),
-        collectionOk("/manifest/orphans", "handleManifestOrphans"),
+        // RDR-191 Phase 6 (nexus-o8dil.33): /manifest/backfill
+        // (handleManifestBackfill) and /manifest/orphans (handleManifestOrphans)
+        // are RETIRED here — the manifest-chunk FK makes the dangling state
+        // they detected unreachable.
         // T2 nexus/chroma-residue-plan-2026-08-10 §C2: scalar {total,
         // backfillable} counts, not a JSON array -- not collectionReturning.
         neither("/manifest/null_collection", "handleManifestNullCollection"),
@@ -245,8 +253,13 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         collectionExempt("/chash/conformance", "handleChashConformance", NESTED_EXACT_COUNT_CAPPED_SAMPLE),
 
         // ── Index run fence (RUNFENCE, nexus-5xn3k.2) ──────────────────────
-        neither("/manifest/verify", "handleManifestVerify"),
-        collectionOk("/manifest/verify_all", "handleManifestVerifyAll"),
+        // RDR-191 Phase 6 (nexus-o8dil.33): /manifest/verify (handleManifestVerify)
+        // and /manifest/verify_all (handleManifestVerifyAll) are RETIRED here —
+        // same reason as /manifest/backfill and /manifest/orphans above.
+        // completeIndexRun below still depends on nexus.manifest_verify(text)
+        // internally (via manifestVerifyCtx) for a different, write-path
+        // completeness question the FK does not answer — that function and
+        // call path are NOT removed, only these two READ-ONLY diagnostic routes.
         neither("/index-run/begin", "handleIndexRunBegin"),
         // idListOk (nexus-vw594 F1): same shape as /manifest/write_many
         // above — a list of FULL {doc_id, content_hash, run_id} objects,

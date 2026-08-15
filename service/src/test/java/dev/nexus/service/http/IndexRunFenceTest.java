@@ -57,12 +57,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>Hermetic: Testcontainers PG, full master changelog, the real
  * {@code nexus_svc} role (mirrors {@link ManifestVerifyTest} — the grants
- * this bead depends on, including catalog-020-5's EXECUTE on
- * {@code manifest_verify}/{@code manifest_verify_all}, are already wired to
- * that role by the master changelog rather than a hand-rolled test role).
- * Drives {@link CatalogHandler#handle} and {@link VectorHandler#handle}
- * directly via a capturing {@link HttpExchange} (same pattern as
- * {@code CatalogHandlerUpdateManyDeleteManyTest}).
+ * this bead depends on, including catalog-020-5's EXECUTE on {@code
+ * manifest_verify}, are already wired to that role by the master changelog
+ * rather than a hand-rolled test role). Drives {@link CatalogHandler#handle}
+ * and {@link VectorHandler#handle} directly via a capturing {@link
+ * HttpExchange} (same pattern as {@code CatalogHandlerUpdateManyDeleteManyTest}).
+ *
+ * <p>RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: {@code
+ * manifest_verify_all()} is DROPPED (catalog-030) and its GET
+ * /manifest/verify_all route retired; the two HTTP-layer route smoke tests
+ * for it and for the also-retired GET /manifest/verify route were removed
+ * from this file. {@code nexus.manifest_verify(text)} itself is KEPT —
+ * {@code completeIndexRun}, exercised throughout this file, depends on it.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class IndexRunFenceTest {
@@ -512,34 +518,13 @@ class IndexRunFenceTest {
         }
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // manifest/verify + manifest/verify_all route wiring (logic already covered
-    // by ManifestVerifyTest — this is the HTTP-layer smoke test)
-    // ══════════════════════════════════════════════════════════════════════════
-
-    @Test
-    void manifestVerify_httpRoute_returnsCounts() throws Exception {
-        String docId = "irf-verify-route-doc-1";
-        registerDoc(docId);
-        writeOneRowManifestWithMatchingChunk(docId, "irf-verify-route-chash");
-
-        var ex = getCatalog("/v1/catalog/manifest/verify?doc_id=" + docId);
-        handleCatalog(ex);
-        assertThat(ex.status).as(ex.bodyString()).isEqualTo(200);
-        assertThat(ex.bodyString()).contains("\"referenced\":1").contains("\"missing\":0");
-    }
-
-    @Test
-    void manifestVerifyAll_httpRoute_returnsPerCollectionAggregates() throws Exception {
-        String docId = "irf-verifyall-route-doc-1";
-        registerDoc(docId);
-        writeOneRowManifestWithMatchingChunk(docId, "irf-verifyall-route-chash");
-
-        var ex = getCatalog("/v1/catalog/manifest/verify_all");
-        handleCatalog(ex);
-        assertThat(ex.status).as(ex.bodyString()).isEqualTo(200);
-        assertThat(ex.bodyString()).contains("\"collection\"");
-    }
+    // RDR-191 Phase 6 (nexus-o8dil.33): manifestVerify_httpRoute_returnsCounts
+    // and manifestVerifyAll_httpRoute_returnsPerCollectionAggregates (the
+    // GET /manifest/verify and GET /manifest/verify_all route smoke tests)
+    // were DELETED here — both routes are retired; the manifest-chunk FK
+    // makes the dangling state they diagnosed unreachable. completeIndexRun's
+    // own use of nexus.manifest_verify(text), exercised throughout this
+    // file's other tests, is untouched.
 
     // ══════════════════════════════════════════════════════════════════════════
     // write_manifest_many's optional "complete" map

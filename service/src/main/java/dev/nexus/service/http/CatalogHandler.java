@@ -173,18 +173,26 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/chashes"      -> handleManifestChashes(exchange, tenant, method);
                 case "/manifest/docs_for_chashes" -> handleDocsForChashes(exchange, tenant, method);
                 case "/manifest/resync"       -> handleManifestResync(exchange, tenant, method);
-                case "/manifest/backfill"     -> handleManifestBackfill(exchange, tenant, method);
-                case "/manifest/orphans"      -> handleManifestOrphans(exchange, tenant, method);
                 case "/manifest/null_collection" -> handleManifestNullCollection(exchange, tenant, method);
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
-                // nexus-ysrwi: the third sibling. /manifest/orphans and
-                // /docs/orphaned already existed; links had no equivalent,
-                // which is why the client could not build a doctor check.
+                // nexus-ysrwi: the third sibling. /docs/orphaned already
+                // existed; links had no equivalent, which is why the client
+                // could not build a doctor check. (/manifest/orphans, its
+                // other named sibling, was retired RDR-191 Phase 6,
+                // nexus-o8dil.33 — the manifest-chunk FK makes the dangling
+                // state it detected unreachable.)
                 case "/links/orphaned"        -> handleLinksOrphaned(exchange, tenant, method);
 
                 // ── Index run fence (RUNFENCE, nexus-5xn3k.2) ─────────────────
-                case "/manifest/verify"       -> handleManifestVerify(exchange, tenant, method);
-                case "/manifest/verify_all"   -> handleManifestVerifyAll(exchange, tenant, method);
+                // RDR-191 Phase 6 (nexus-o8dil.33): the READ-ONLY diagnostic
+                // routes /manifest/verify and /manifest/verify_all are
+                // retired — the manifest-chunk FK (catalog-029) makes the
+                // dangling state they detected unreachable. The underlying
+                // nexus.manifest_verify(text) SQL function and its
+                // manifestVerifyCtx call site are NOT removed:
+                // completeIndexRun below still depends on them for the
+                // write-path fail-closed verify-then-stamp (a DIFFERENT
+                // completeness question the FK does not answer).
                 case "/index-run/begin"       -> handleIndexRunBegin(exchange, tenant, method);
                 case "/index-run/begin-many"  -> handleIndexRunBeginMany(exchange, tenant, method);
                 case "/index-run/complete"    -> handleIndexRunComplete(exchange, tenant, method);
@@ -2159,65 +2167,24 @@ public final class CatalogHandler implements HttpHandler {
     }
 
     /**
-     * POST /v1/catalog/manifest/backfill — stamp manifest collection from the
-     * owning doc's physical_collection where NULL (RDR-159 P-1b).
-     *
-     * <p>Response: {@code {"stamped": <n>}}. MUST run before the orphan check.
-     */
-    private void handleManifestBackfill(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        long stamped = repo.manifestBackfill(tenant);
-        HttpUtil.send(exchange, 200, "{\"stamped\":" + stamped + "}");
-    }
-
-    /**
-     * GET /v1/catalog/manifest/orphans?dim=384&limit=100 — manifest rows with no
-     * chunk row in chunks_&lt;dim&gt; (RDR-159 P-1b non-vacuous validation).
-     *
-     * <p>Response: {@code {"dim": <d>, "count": <n>, "orphans": [...]}}, count and
-     * sample computed in one transaction so they agree. {@code count} is exact;
-     * {@code orphans} is a sample capped at {@code limit} (default 100, must be
-     * &gt; 0 — the count is the gate, the sample is diagnostic). An unsupported
-     * dim or a non-positive limit is a 400.
-     */
-    private void handleManifestOrphans(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        String dimRaw = queryParam(exchange, "dim");
-        if (dimRaw == null || dimRaw.isBlank()) {
-            HttpUtil.send(exchange, 400, "{\"error\":\"dim query param required (384|768|1024)\"}"); return;
-        }
-        int dim;
-        try {
-            dim = Integer.parseInt(dimRaw);
-        } catch (NumberFormatException e) {
-            HttpUtil.send(exchange, 400, "{\"error\":\"dim must be an integer (384|768|1024)\"}"); return;
-        }
-        int limit = intParam(exchange, "limit", 100);
-        if (limit <= 0) {
-            HttpUtil.send(exchange, 400, "{\"error\":\"limit must be > 0 (bounded sample; the count field is the gate)\"}"); return;
-        }
-        // count + sample in ONE transaction so they are mutually consistent.
-        var report = repo.manifestOrphanReport(tenant, dim, limit);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
-            Map.of("dim", dim,
-                   "count", report.get("count"),
-                   "orphans", report.get("orphans"))));
-    }
-
-    /**
      * GET /v1/catalog/manifest/null_collection — read-only census of the
-     * manifest population {@code manifest_orphans}/{@code
-     * manifest_verify_all} structurally cannot see: rows with {@code
-     * collection IS NULL} (T2 nexus/chroma-residue-plan-2026-08-10 §C2).
+     * manifest population the (now-retired, RDR-191 Phase 6, nexus-o8dil.33)
+     * {@code manifest_orphans}/{@code manifest_verify_all} functions
+     * structurally could never see: rows with {@code collection IS NULL}
+     * (T2 nexus/chroma-residue-plan-2026-08-10 §C2). EXPLICITLY NOT RETIRED
+     * alongside them — the manifest-chunk FK does not cover NULL-collection
+     * rows (MATCH SIMPLE exempts them), so this census remains the ONLY
+     * visibility into that permanently-unenforced population.
      *
      * <p>Response: {@code {"total": <n>, "backfillable": <m>}}. {@code
      * total} is every live-document manifest row with a NULL collection;
-     * {@code backfillable} is the subset {@link CatalogRepository
-     * #manifestBackfill} would stamp (the owning document HAS a
-     * physical_collection). {@code total - backfillable} is PERMANENTLY
-     * excluded (ghost/sourceless documents) — see {@link
-     * CatalogRepository#manifestNullCollectionReport}'s javadoc. NEVER
-     * mutates.
+     * {@code backfillable} named the subset the now-retired {@code
+     * nexus.manifest_backfill()} would have stamped (the owning document HAS
+     * a physical_collection) — historical framing, since that stamping
+     * function no longer exists; the field itself is unchanged. {@code
+     * total - backfillable} is PERMANENTLY excluded (ghost/sourceless
+     * documents) — see {@link CatalogRepository#manifestNullCollectionReport}'s
+     * javadoc. NEVER mutates.
      */
     private void handleManifestNullCollection(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -2252,8 +2219,7 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"dim must be an integer (384|768|1024)\"}"); return;
         }
         // requireSupportedDim inside the repo throws IllegalArgumentException for an
-        // unsupported dim — caught by the outer dispatch-level handler (→ 400), same
-        // convention as handleManifestOrphans.
+        // unsupported dim — caught by the outer dispatch-level handler (→ 400).
         List<Map<String, Object>> tables = repo.chashConformanceReport(tenant, dim);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
             Map.of("dim", dim, "tables", tables)));
@@ -2261,32 +2227,16 @@ public final class CatalogHandler implements HttpHandler {
 
     // ══════════════════════════════════════════════════════════════════════════
     // INDEX RUN FENCE (RUNFENCE, nexus-5xn3k.2) — memo §3.3
+    //
+    // RDR-191 Phase 6 (nexus-o8dil.33): the read-only diagnostic handlers
+    // handleManifestVerify (GET /manifest/verify) and handleManifestVerifyAll
+    // (GET /manifest/verify_all) were retired here — the manifest-chunk FK
+    // (catalog-029) makes the dangling state they detected unreachable.
+    // completeIndexRun below still calls through manifestVerifyCtx to the
+    // SAME underlying nexus.manifest_verify(text) SQL function for its own,
+    // different, write-path completeness question — that function and call
+    // path are NOT removed.
     // ══════════════════════════════════════════════════════════════════════════
-
-    /** GET /v1/catalog/manifest/verify?doc_id=X — referenced/present/missing for one document. */
-    private void handleManifestVerify(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        String docId = queryParam(exchange, "doc_id");
-        if (docId == null || docId.isBlank()) {
-            HttpUtil.send(exchange, 400, "{\"error\":\"doc_id query param required\"}"); return;
-        }
-        var counts = repo.manifestVerify(tenant, docId);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of(
-            "referenced", counts.referenced(),
-            "present",    counts.present(),
-            "missing",    counts.missing())));
-    }
-
-    /**
-     * GET /v1/catalog/manifest/verify_all — the doctor sweep primitive
-     * (nexus-ac4id part 2): every live document in the tenant, grouped by
-     * collection, in ONE engine-side anti-join.
-     */
-    private void handleManifestVerifyAll(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        var rows = repo.manifestVerifyAll(tenant);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("collections", rows, "count", rows.size())));
-    }
 
     /**
      * POST /v1/catalog/index-run/begin  {doc_id, content_hash, run_id, collection}
