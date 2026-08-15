@@ -120,7 +120,7 @@ test sharing the same bug.
 Class breakdown (in-scope rows only): `fk_enforced` 39, `no_plausible_target`
 59, `fk_able_now` 12 (**all 12 are the generic surrogate `id` bigint column
 colliding with every other table's `id` PK under the name-equality
-heuristic** — `n_candidate_targets` 13-14 in every case; there is no other
+heuristic**, `n_candidate_targets` 13-14 in every case; there is no other
 table's `id` a given `id` plausibly means, so **none of the 12 is a real
 FK-able edge**; this is the heuristic's own honesty signal, not a hand
 filter applied after the fact), `needs_design` 1 (`t1.scratch.id`, TEXT vs
@@ -129,9 +129,9 @@ the same bigint-`id` noise, so also spurious).
 **A limitation of the name-equality heuristic that decides the census output, found by running
 it:** it can only find a candidate target when the column name and the
 target's PK/UNIQUE column name are IDENTICAL. Every column the Problem
-Statement names as a *known* unenforced edge — `topic_assignments.doc_id`,
+Statement names as a *known* unenforced edge, `topic_assignments.doc_id`,
 `hook_failures.doc_id`, `frecency.chunk_id`, `relevance_log.chunk_id`,
-`pdf_chunks.chunk_id`, `chash_remap.old_id`/`new_chash` — targets a column
+`pdf_chunks.chunk_id`, `chash_remap.old_id`/`new_chash`, targets a column
 with a DIFFERENT name (`catalog_documents.tumbler`, `chunks.chash`), so the
 census classifies every one of them `no_plausible_target` rather than
 `needs_design`. **The census's mechanical class column under-classifies
@@ -151,14 +151,13 @@ REFERENCES nexus.chunks (tenant_id, collection, chash) ... NOT VALID`
 validated by a bare `ALTER TABLE ... VALIDATE CONSTRAINT
 fk_catalog_chunks_chunk` at line 236 of the same file (changeset
 `catalog-029-2`). Live: `pg_constraint.convalidated = t`. This also
-resolves the "FK posture correction" T2 note's open question —
-`catalog_document_chunks.collection -> catalog_collections` is now covered
+resolves the "FK posture correction" T2 note's open question, `catalog_document_chunks.collection -> catalog_collections` is now covered
 transitively through this same composite FK (census row: `collection`
 column, `existing_fk_name=fk_catalog_chunks_chunk`), not a separate
 omission needing its own FK.
 
 ### Finding (Q1 facts): `topic_assignments.doc_id` is a chunk chash by
-### deliberate, previously-reverted design — not the tumbler its own
+### deliberate, previously-reverted design, not the tumbler its own
 ### column comment claims
 
 - Schema: `nexus.topic_assignments` (`taxonomy-001-baseline.xml:101-110`)
@@ -167,15 +166,15 @@ omission needing its own FK.
   "tumblers".
 - Writer: `taxonomy-006-assign-from-chashes.xml` inserts
   `(tenant_id, doc_id, topic_id, ...)` from HDBSCAN cluster output
-  (lines 122, 152, 203, 233, 284, 314 — five near-identical INSERT/ON
+  (lines 122, 152, 203, 233, 284, 314, five near-identical INSERT/ON
   CONFLICT blocks across dim variants).
 - **Direct evidence an FK was tried and removed on purpose:**
   `service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java:1215-1219`
   (`importAssignment`, the fidelity-ETL import path):
   > "doc_id is a CHUNK content-hash (the HDBSCAN taxonomy clusters chunk
   > embeddings), not a document tumbler. fk_ta_catalog_doc was dropped
-  > (nexus-sa14p) because it referenced catalog_documents(tumbler) — a
-  > different identity space — and could never be satisfied for
+  > (nexus-sa14p) because it referenced catalog_documents(tumbler), a
+  > different identity space, and could never be satisfied for
   > chash-keyed rows."
 - Readers (all treat `doc_id` as an opaque string key, none assume tumbler
   shape): `TaxonomyRepository.java` lines 703 (`getTopicDocs`), 714/723
@@ -188,7 +187,7 @@ omission needing its own FK.
   claim (tumbler) instead. A post-RDR-191 FK to `chunks(chash)` is
   dim-agnostic now that `chunks` is unified (RDR-191); it requires
   converting `doc_id` from hex TEXT to `bytea` first (this table's `doc_id`
-  is `text`, confirmed live — census result set 2, row
+  is `text`, confirmed live, census result set 2, row
   `nexus|topic_assignments|doc_id|text`). The column *comment* is stale
   and should be corrected regardless of which FK direction is chosen.
 
@@ -198,28 +197,28 @@ omission needing its own FK.
 `CatalogRepository.java:5957-6029` (`deleteCollectionTxn`), the only
 production hard-delete of document rows:
 - Step 6 (line 6024): `ctx.deleteFrom(CATALOG_DOCUMENTS)
-  .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute()` — the
+  .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute()`, the
   comment above it (lines 6017-6023) enumerates what "fk-001 cascades": the
   four FK children (`catalog_document_chunks`, `document_aspects`,
   `document_highlights`, `aspect_extraction_queue`), explicitly noting
   `topic_assignments` is handled separately because it "has no doc-rooted
-  FK". **`catalog_links` is named nowhere in this method** — confirmed by
+  FK". **`catalog_links` is named nowhere in this method**, confirmed by
   `grep -n catalog_links CatalogRepository.java` returning zero hits inside
   `deleteCollectionTxn`'s body.
 - Contrast: step 3 (line 5995) explicitly deletes
   `topic_assignments WHERE source_collection = name` BEFORE the document
-  cascade — i.e., the codebase already has the pattern (explicit
+  cascade, i.e., the codebase already has the pattern (explicit
   collection-scoped cleanup for a table with no doc-rooted FK) that
   `catalog_links` would need, applied to a sibling table, just not to
   `catalog_links`.
 - Live schema: `nexus.catalog_links` (`catalog-001-baseline.xml:127-159`)
   has `from_tumbler TEXT NOT NULL`, `to_tumbler TEXT NOT NULL`, no FK on
-  either (confirmed both by the census — `no_plausible_target`, expected
-  per the name-mismatch limitation above — and directly by
+  either (confirmed both by the census, `no_plausible_target`, expected
+  per the name-mismatch limitation above, and directly by
   `pg_constraint`, per `test_ground_truth_catalog_links_tumbler_columns_have_no_fk`).
 - Prior measurement (nexus-ysrwi, cited in Problem Statement and the bead):
   277 dangling `catalog_links` rows on the live cloud store as of
-  2026-07-25 (engine v0.1.56). This RDR does not re-run that count — the
+  2026-07-25 (engine v0.1.56). This RDR does not re-run that count, the
   substrate this research ran against is a fresh local schema with zero
   rows, so a re-count here would prove nothing about the live store's
   current drift. **CLOUD COUNT NEEDED** (re-verify before Decision, the
@@ -252,10 +251,10 @@ production hard-delete of document rows:
 
 - Schema: `chash_remap-001-baseline` created it; `rdr180-001-bytea-chash.xml:231-232`
   widened `new_chash`'s CHECK to `length(new_chash) = ANY (ARRAY[32,64])`
-  instead of converting the column to `bytea` — confirmed live (census
+  instead of converting the column to `bytea`, confirmed live (census
   result set 2: `nexus|chash_remap|new_chash|text` with that exact CHECK
   text). PK is `(tenant_id, source_collection, old_id)`
-  (`old_id` is also TEXT, unconstrained — census: `no_plausible_target`).
+  (`old_id` is also TEXT, unconstrained, census: `no_plausible_target`).
 - Live usage (NOT vestigial): `service/src/main/java/dev/nexus/service/db/RemapRepository.java`
   and `service/src/main/java/dev/nexus/service/http/RemapHandler.java`
   implement the remap membership function and HTTP surface;
@@ -264,20 +263,19 @@ production hard-delete of document rows:
   references it (join surface for chash-aware reads). Python:
   `src/nexus/health.py` and `src/nexus/engine_version.py` reference remap
   in doctor/health-check plumbing. **None of these are marked deprecated or
-  scheduled for removal** — this is a currently-served capability, not a
+  scheduled for removal**, this is a currently-served capability, not a
   stub.
 - `remap-002-membership-function.xml` exists as a dedicated changelog file
   for `chash_remap` (a membership/lookup function), further evidence of
   active design investment, not abandonment.
 - **Q3 answer-facts:** the T2 research inventory's framing ("retire the
-  table if RDR-180's rekey has converged fleet-wide") does not hold —
-  the table is a standing membership index the remap HTTP surface serves
+  table if RDR-180's rekey has converged fleet-wide") does not hold, the table is a standing membership index the remap HTTP surface serves
   live traffic through, not a one-time migration scratch table. Converting
   `new_chash` to `bytea` (dropping the 32-or-64 CHECK in favor of a fixed
   32-byte width, matching every other post-RDR-180 chash column) is
   possible in principle but requires auditing every 64-hex-char row
   (the CHECK's `ANY (ARRAY[32,64])` exists because SOME live rows are still
-  64-char hex, not 32-byte-equivalent) — **CLOUD COUNT NEEDED**:
+  64-char hex, not 32-byte-equivalent), **CLOUD COUNT NEEDED**:
   ```sql
   SELECT length(new_chash), count(*) FROM nexus.chash_remap GROUP BY 1;
   ```
@@ -288,8 +286,7 @@ production hard-delete of document rows:
 
 ### Finding (Q4 facts): tenant-in-PK census (result set 4)
 
-Full table (44 rows; `has_tenant_id_column=true` filter already applied —
-every row below carries a `tenant_id` column):
+Full table (44 rows; `has_tenant_id_column=true` filter already applied, every row below carries a `tenant_id` column):
 
 **Composite PK includes `tenant_id`, no separate UNIQUE needed (18 tables):**
 `catalog_collections`, `catalog_document_chunks`, `catalog_documents`,
@@ -299,11 +296,10 @@ every row below carries a `tenant_id` column):
 `taxonomy_meta`, `topic_assignments`, `topic_links` (+ 7 `staging` mirrors,
 exempt).
 
-**`tenant_id` in PK AND redundantly in a UNIQUE (2 — `catalog_links`,
+**`tenant_id` in PK AND redundantly in a UNIQUE (2, `catalog_links`,
 `catalog_owners`):** `catalog_links` PK is `(tenant_id, id)` (a surrogate
 `id` composite with `tenant_id`) plus the pre-existing
-`catalog_links_unique (tenant_id, from_tumbler, to_tumbler, link_type)` —
-belt-and-suspenders, not a gap.
+`catalog_links_unique (tenant_id, from_tumbler, to_tumbler, link_type)`, belt-and-suspenders, not a gap.
 
 **Surrogate PK (`id`/`token_hash`/`session_token_hash`), `tenant_id` NOT in
 PK (16 tables):** `aspect_extraction_queue`, `aspect_promotion_log`,
@@ -313,17 +309,17 @@ PK (16 tables):** `aspect_extraction_queue`, `aspect_promotion_log`,
 `service_tokens`, `session_tokens`, `tier_writes`, `topics`. Of these,
 `tenant_in_some_unique=true` for 4 (`aspect_extraction_queue`,
 `document_aspects`, `document_highlights`, `memory`, `plans`,
-`session_tokens` — 6 actually, see raw census output) — those have a
+`session_tokens`, 6 actually, see raw census output), those have a
 tenant-scoped UNIQUE elsewhere even though the PK itself is bare `id`.
 **`migration_jobs`, `nx_answer_runs`, `gc_audit`, `hook_failures`,
 `relevance_log`, `tier_writes`, `topics`, `aspect_promotion_log`,
 `claude_assisted_remediation_consents` have NEITHER tenant-in-PK NOR any
-tenant-scoped UNIQUE constraint** — RLS is the only tenant-isolation
+tenant-scoped UNIQUE constraint**, RLS is the only tenant-isolation
 mechanism for these 9 tables. `migration_jobs` additionally has a *partial*
 UNIQUE INDEX (`idx_migration_jobs_active_dedup ON (tenant_id,
 collections_key) WHERE state IN ('queued','running')`,
 `migration-001-baseline.xml:91-93`) which IS tenant-scoped but does not
-show up in `pg_constraint` (partial indexes aren't constraints) — the
+show up in `pg_constraint` (partial indexes aren't constraints), the
 census's `tenant_in_some_unique` column is a `pg_constraint`-only check and
 undercounts partial-index protection; this is a second documented
 limitation of the mechanical census (the schema-parity story for
@@ -332,72 +328,68 @@ still RLS-only for any row NOT in `('queued','running')`, i.e. every
 finished job).
 - **RLS coverage:** every in-scope table except `service_tokens` and
   `session_tokens` has `rls_enabled=t, rls_forced=t, n_policies=1`.
-  `service_tokens`/`session_tokens` have `rls_enabled=f` (0 policies) —
-  worth a separate look but outside this RDR's named scope (auth-token
+  `service_tokens`/`session_tokens` have `rls_enabled=f` (0 policies), worth a separate look but outside this RDR's named scope (auth-token
   tables, not catalog/knowledge data).
 - **Q4 answer-facts:** the census makes the "9 tables, RLS-only, no
   tenant-scoped uniqueness at all" set precise (list above) rather than
-  the Problem Statement's "sharpest: migration_jobs" single example — the
+  the Problem Statement's "sharpest: migration_jobs" single example, the
   decision (composite PK vs tenant-scoped UNIQUE-plus-RLS per table) needs
   to be made once and applied to all 9, or a documented reason given per
   table for why RLS-only is sufficient there.
 
-### Finding (Q5 facts): TTL census (result set 5) — two names, two null-semantics, confirmed live
+### Finding (Q5 facts): TTL census (result set 5), two names, two null-semantics, confirmed live
 
 | table | column | type | live semantics (code-verified) |
 |---|---|---|---|
 | `nexus.frecency` | `ttl_days` | `integer NOT NULL DEFAULT 0` | `0` = **permanent**; `src/nexus/db/t3.py:750-752,1123-1124`: "`ttl_days` = 0 means permanent. Expiry is computed Python-side from `indexed_at + ttl_days`"; query-side pre-filter `{"ttl_days": {"$ne": 0}}` (`http_vector_client.py:2830`, comment at 2787-2801 explicitly documents the sentinel and a prior CRITICAL bug, nexus-o8dil.5, where `ttl_days` wrongly gated catalog registration). |
-| `nexus.plans` | `ttl` | `integer NULLABLE` | not traced to a single doc comment in this pass — needs the `PlanRepository`/plan-library write path read explicitly before Decision (not yet done; flagged, not verified). |
-| `nexus.memory` (T2) | `ttl` | `integer NULLABLE` (Java: `MemoryRepository.java` `Integer ttlDays` param, column `MEMORY.TTL`) | **`NULL` = permanent**; the MCP tool layer (`src/nexus/mcp/core.py:3967`, `ttl=ttl if ttl > 0 else None`) coerces caller `ttl=0` to `NULL` before the HTTP call — this is an MCP-LAYER shim, not a store-level guarantee. `memory_put`'s own tool docstring (visible in this agent's own tool schema) states literally: "PERMANENT AT THE STORE IS NULL... a caller that bypasses MCP and writes ttl=0 directly (the store API, or POST /v1/memory/put) gets effective_ttl = 0 and the row is deleted on the next expire() sweep." So `memory.ttl` has the OPPOSITE null-semantics from `frecency.ttl_days` at the store level (`0`=expire-now vs `0`=permanent) with the trap papered over by ONE caller (the MCP tool), not by the schema. |
+| `nexus.plans` | `ttl` | `integer NULLABLE` | not traced to a single doc comment in this pass, needs the `PlanRepository`/plan-library write path read explicitly before Decision (not yet done; flagged, not verified). |
+| `nexus.memory` (T2) | `ttl` | `integer NULLABLE` (Java: `MemoryRepository.java` `Integer ttlDays` param, column `MEMORY.TTL`) | **`NULL` = permanent**; the MCP tool layer (`src/nexus/mcp/core.py:3967`, `ttl=ttl if ttl > 0 else None`) coerces caller `ttl=0` to `NULL` before the HTTP call, this is an MCP-LAYER shim, not a store-level guarantee. `memory_put`'s own tool docstring (visible in this agent's own tool schema) states literally: "PERMANENT AT THE STORE IS NULL... a caller that bypasses MCP and writes ttl=0 directly (the store API, or POST /v1/memory/put) gets effective_ttl = 0 and the row is deleted on the next expire() sweep." So `memory.ttl` has the OPPOSITE null-semantics from `frecency.ttl_days` at the store level (`0`=expire-now vs `0`=permanent) with the trap papered over by ONE caller (the MCP tool), not by the schema. |
 | `staging.frecency` | `ttl_days` | same as `nexus.frecency` | exempt (staging). |
 
 - **Q5 answer-facts:** unifying to one name AND one null-semantics means
   picking a direction for TWO independent axes. Name: `ttl_days` (2 tables)
-  vs `ttl` (2 tables) — no majority. Null-semantics: `frecency`'s `0`=
+  vs `ttl` (2 tables), no majority. Null-semantics: `frecency`'s `0`=
   permanent is store-level and has ecosystem-wide callers already coded
-  around it (`http_vector_client.py`'s `$ne` filter, `t3.py`'s docstring)
-  — changing frecency's semantics touches every T3 TTL reader. `memory`'s
+  around it (`http_vector_client.py`'s `$ne` filter, `t3.py`'s docstring), changing frecency's semantics touches every T3 TTL reader. `memory`'s
   `NULL`=permanent is ALSO store-level but is undermined by allowing
   `ttl=0` to reach the store at all (the MCP shim is the only thing
   preventing the trap, and it's bypassable exactly as the tool's own
   docstring warns). The lower-risk normalization is likely NULL=permanent
   everywhere (matches SQL convention, matches `memory`'s store-level
   contract already) with `frecency.ttl_days`'s existing rows migrated
-  `0 -> NULL` and every `$ne`/`$gt` T3 reader updated to `IS NOT NULL` —
-  but this is a decision, not a fact this section should make. `plans.ttl`
+  `0 -> NULL` and every `$ne`/`$gt` T3 reader updated to `IS NOT NULL`, but this is a decision, not a fact this section should make. `plans.ttl`
   needs its write path traced before it can be classified either way.
 
 ### Finding: `hook_failures.doc_id` unconstrained, confirmed live (Problem Statement item 2, unconstrained bucket)
 
-Schema: `telemetry-001-baseline.xml`; live: `nexus|hook_failures|doc_id|text|NO|''::text` (census result set 1 — note the `''` empty-string default, itself an instance of Problem Statement item 6). Writers:
+Schema: `telemetry-001-baseline.xml`; live: `nexus|hook_failures|doc_id|text|NO|''::text` (census result set 1, note the `''` empty-string default, itself an instance of Problem Statement item 6). Writers:
 `TelemetryRepository.java:1030,1064` (`.set(HOOK_FAILURES.DOC_ID, str(docId))`);
 readers: line 470 (select list), 1246 (grouping), 1371
-(`HOOK_FAILURES.DOC_ID.eq(ks(key, 0))` — used as an opaque dedup key, not
+(`HOOK_FAILURES.DOC_ID.eq(ks(key, 0))`, used as an opaque dedup key, not
 parsed as tumbler or chash). No code site inspected treats this column as
 anything but an opaque string; no evidence found of what identity space
 `doc_id` is drawn from here (unlike `topic_assignments`, no in-tree
-comment states an intent) — **this is itself a fact worth carrying into
+comment states an intent), **this is itself a fact worth carrying into
 Decision**: `hook_failures.doc_id` may need its own investigation
 (what callers pass into it) before Q1's `topic_assignments` answer can be
 assumed to generalize to it.
 
 ### Finding (Q6 facts): NOT VALID constraint census
 
-Live `pg_constraint.convalidated = f` count in this fresh schema: **zero**
-— every FK in `fk-002`/`fk-003` has already been validated by its paired
+Live `pg_constraint.convalidated = f` count in this fresh schema: **zero**, every FK in `fk-002`/`fk-003` has already been validated by its paired
 `fk-00N-validate.xml` changeset (confirmed: `fk-002-validate.xml`,
 `fk-003-validate.xml` both exist and run `VALIDATE CONSTRAINT` per-FK,
 guarded per the project's "every bare VALIDATE CONSTRAINT is guarded"
 tripwire per `fk-004-chunks-collection-registry.xml:34-35`). **This means
 Q6, as posed ("which fk-002/003 NOT VALID constraints can now VALIDATE"),
-has already been answered by prior work — there is nothing NOT VALID left
+has already been answered by prior work, there is nothing NOT VALID left
 in the schema baseline this RDR would need to validate.** Any NOT VALID
 constraint this RDR itself adds (P1-P3, following the `catalog-029`
 three-step shape named in Phasing) is new work with its own validate step,
 not a stale backlog item. Re-verify against the LIVE cloud schema before
 Decision (a local fresh-Liquibase run proves the migration chain is
 internally consistent, not that the cloud install has actually run every
-changeset up to the current HEAD) — **CLOUD COUNT NEEDED**:
+changeset up to the current HEAD), **CLOUD COUNT NEEDED**:
 ```sql
 SELECT n.nspname, c.relname, con.conname
 FROM pg_constraint con
@@ -641,6 +633,8 @@ must land WITH the FK that makes the leg impossible, never before it. C1's
 the titles claim disproved above, so it retires with the leg rather than being
 tightened first.
 
+Consequence recorded: with this FK ON DELETE CASCADE, any deletion of a `nexus.chunks` row (`purge_trash`'s orphan-chunk sweep, RDR-192-class superseded-chunk reaping, collection deletion) now also removes that chunk's `topic_assignments` rows. That is the intended semantics (an assignment for a chunk that no longer exists is exactly a dangling leg the ChashCensus reports today) and it is what retires census leg C1; it is called out here so no later reader mistakes the cascade for data loss.
+
 ### D2 (Q2). `catalog_links`: FK with ON DELETE CASCADE on both tumbler columns
 
 **Decision.** Add two FKs on `nexus.catalog_links`,
@@ -681,7 +675,7 @@ requires only that the row EXIST. So after this change `allow_dangling=True`
 still writes an edge to a TOMBSTONED document (`deleted_at IS NOT NULL`) and
 no longer writes an edge to a tumbler with no row at all. That residual case
 must fail loud with the code the client already understands: `upsertLink`
-maps SQLSTATE 23503 on this constraint to the existing
+WILL map SQLSTATE 23503 on this constraint (new work in P1, not present today) to the existing
 `400 {"code":"dangling_endpoint"}` payload, so the client's own translation
 to `ValueError` (`http_catalog_client.py:2044-2049`) keeps working unchanged.
 No production caller passes `allow_dangling=True`; the only in-tree caller is
@@ -697,6 +691,8 @@ first: cloud-count-1, below.
 `src/nexus/commands/doctor.py:832` and its flag at `:1402-1417`) retires in
 the same commit as this VALIDATE, and not before (D0.10). It is a separate
 mechanism from `ChashCensus`, which has no doctor flag at all.
+
+Stated plainly: the pre-flight remediation DELETES the dangling `catalog_links` rows (edges whose endpoint document no longer exists). Those rows have no restore path once removed; the count is recorded in T2 before the delete and the deleted rows are exported to the run's log first, so the loss is bounded, visible, and auditable, never silent.
 
 ### D3 (Q3). `chash_remap.new_chash`: convert to bytea; the table stays
 
@@ -1447,13 +1443,12 @@ script's own logic). Full evidence, code citations, and per-Q1-Q6
 answer-facts are in `## Constraints and Verified Facts` above (kept there
 per that section's own citation discipline); this section is the index.
 
-1. **[VERIFIED]** `fk_catalog_chunks_chunk` is `fk_enforced`+VALIDATED —
-   the census's own positive control passed.
+1. **[VERIFIED]** `fk_catalog_chunks_chunk` is `fk_enforced`+VALIDATED, the census's own positive control passed.
 2. **[VERIFIED]** Headline: 136 census rows (99 in-scope, 37 staging-exempt);
    39 `fk_enforced`, 59 `no_plausible_target`, 12 `fk_able_now` (all 12 are
-   generic-`id` heuristic noise — zero genuine new single-column FK-able
+   generic-`id` heuristic noise, zero genuine new single-column FK-able
    edges exist in the current schema by this method alone).
-3. **[VERIFIED — limitation, not a schema fact]** The name-equality
+3. **[VERIFIED, limitation, not a schema fact]** The name-equality
    heuristic cannot see `doc_id -> tumbler` or `chunk_id/chash -> chash`
    shaped candidates (different column names); every Problem-Statement-
    named unenforced column falls into `no_plausible_target` for this
@@ -1469,11 +1464,11 @@ per that section's own citation discipline); this section is the index.
    case (no doc-rooted FK) already gets an explicit collection-scoped
    DELETE in the same method, establishing the pattern `catalog_links`
    lacks. Live dangling count (277, nexus-ysrwi 2026-07-25) is 3 weeks
-   stale — CLOUD COUNT NEEDED before Decision (query in Constraints
+   stale, CLOUD COUNT NEEDED before Decision (query in Constraints
    section).
 6. **[VERIFIED, Q3]** `chash_remap` is a live, actively-served rekey
    membership index (`RemapRepository`/`RemapHandler`/`ChashCensus`), not
-   a retired migration leg — the "retire if converged" framing in the T2
+   a retired migration leg, the "retire if converged" framing in the T2
    inventory does not hold. CLOUD COUNT NEEDED for the 32-vs-64-char
    split before deciding on a bytea conversion.
 7. **[VERIFIED, Q4]** 9 tables have neither `tenant_id` in the PK nor any
@@ -1487,15 +1482,14 @@ per that section's own citation discipline); this section is the index.
    `memory.ttl` (`NULL`=permanent, `0`=expire-on-next-sweep) have
    opposite null-semantics at the STORE level; the MCP tool layer papers
    over `memory`'s trap for one caller only. `plans.ttl`'s write path is
-   UNVERIFIED — flagged, not traced, in this pass.
+   UNVERIFIED, flagged, not traced, in this pass.
 9. **[VERIFIED, Q6]** Zero `NOT VALID` FK constraints exist in the current
-   schema baseline — `fk-002-validate.xml`/`fk-003-validate.xml` already
+   schema baseline, `fk-002-validate.xml`/`fk-003-validate.xml` already
    validated everything from the fk-002/003 families. Q6 as posed against
    the CURRENT baseline is already answered; re-verify against the live
    cloud install before Decision (CLOUD COUNT NEEDED, query in
    Constraints) since a local fresh-Liquibase run proves changelog
    consistency, not that the cloud install is caught up to HEAD.
 10. **[VERIFIED]** `hook_failures.doc_id` is unconstrained with no in-tree
-    comment stating its identity space (unlike `topic_assignments`) —
-    flagged for its own investigation before assuming Q1's answer
+    comment stating its identity space (unlike `topic_assignments`), flagged for its own investigation before assuming Q1's answer
     generalizes to it.
