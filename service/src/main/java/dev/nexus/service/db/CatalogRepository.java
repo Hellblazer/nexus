@@ -267,7 +267,6 @@ public final class CatalogRepository {
     private static final Field<String>  EX_COL_EMBD   = DSL.field("EXCLUDED.embedding_model", String.class);
     private static final Field<String>  EX_COL_MVER   = DSL.field("EXCLUDED.model_version", String.class);
     private static final Field<String>  EX_COL_DNAME  = DSL.field("EXCLUDED.display_name", String.class);
-    private static final Field<Integer> EX_COL_LEGCY  = DSL.field("EXCLUDED.legacy_grandfathered", Integer.class);
     private static final Field<String>  EX_COL_SUPBY  = DSL.field("EXCLUDED.superseded_by",  String.class);
     private static final Field<String>  EX_COL_SUPAT  = DSL.field("EXCLUDED.superseded_at",  String.class);
     private static final Field<String>  EX_COL_CRTAT  = DSL.field("EXCLUDED.created_at",     String.class);
