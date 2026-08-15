@@ -134,6 +134,29 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * extensions it does not own. That is the argument for execution over shape
  * checking, as evidence rather than as reasoning.
  *
+ * <p><strong>A window between two full-depth rollbacks (nexus-lelhx, found by
+ * {@link #typeHygieneRollback_restoresExactDataAndRoundTripsForward}'s stage
+ * 2).</strong> {@code rdr180-3/4/5-convert-chunks-*} (in {@code
+ * rdr180-001-bytea-chash.xml}) used to carry an EMPTY {@code <rollback/>} for
+ * {@code chunks_384/768/1024.chash} — safe only when paired with a rollback
+ * deep enough to later drop those tables outright ({@code
+ * vectors-001-baseline}'s own rollback, which a full rollback-to-zero always
+ * reaches). {@code vectors-004-unify-chunks.xml}'s rollback recreates those
+ * same three tables with {@code chash BYTEA} (correct for its own immediate
+ * pre-drop state). A rollback deep enough to undo {@code vectors-004} but not
+ * deep enough to undo {@code vectors-001-baseline} — the window {@code
+ * catalog-002-1-temporal-typing} sits in — used to leave {@code chash}
+ * permanently {@code BYTEA}, so a full forward re-apply failed re-executing
+ * {@code catalog-006-4} (written for {@code TEXT chash}) with "operator does
+ * not exist: text = bytea." Fixed by giving {@code rdr180-3/4/5} a real,
+ * guarded rollback (restores {@code TEXT} via the changeset's own
+ * reversibility lemma — see that changeset's inline comment). So the claim
+ * this class's title makes — every prefix of the full rollback-to-zero
+ * sequence is itself safe to roll back to AND forward-reapply from — is true
+ * again for every changeset except the three declared-irreversible ones named
+ * above ({@code catalog-016-0}, {@code vectors-001-1}, {@code role-001-1}),
+ * which are irreversible by declaration, not by omission.
+ *
  * <p><strong>Assertions are on SCHEMA SHAPE, never on DATABASECHANGELOG row
  * equality.</strong> {@code runAlways} makes the round trip a non-identity at
  * the bookkeeping level by construction — those five rows legitimately carry new
@@ -145,7 +168,12 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * the changeset md5sum (measured: staging-4 kept
  * {@code 9:84da10127f33beb3b1602f9cb0b30163} across its fix), so exercising and
  * editing rollbacks needs no {@code validCheckSum} ceremony and does not disturb
- * any deployed cluster.
+ * any deployed cluster. Independently re-verified for this codebase's Liquibase
+ * 4.29.0 as part of nexus-lelhx: a throwaway probe applied the full changelog,
+ * recorded {@code rdr180-3-convert-chunks-384}'s {@code MD5SUM}, edited only its
+ * {@code <rollback>} in a scratch copy of the changelog tree, and re-ran {@code
+ * update()} against that scratch tree — the {@code MD5SUM} was unchanged and no
+ * {@code ValidationFailedException} was raised.
  *
  * <p><strong>CI placement, stated at its real cost.</strong> {@code service-ci.yml}
  * is path-gated on {@code service/**} — NOT on the changelog subtree — so this
@@ -644,35 +672,42 @@ class SchemaRollbackRoundTripIntegrationTest {
                 // RDR-156 template the arc copies — far earlier in master order than
                 // catalog-031) and asserts its 2 columns.
                 //
-                // KNOWN GAP, discovered by this test, NOT fixed here (out of scope for
-                // nexus-cck6z; touching the changesets below is off-limits per this bead's
-                // constraints — reported as a finding instead, filed as nexus-lelhx):
-                // rdr180-3/4/5-convert-chunks-* (in rdr180-001-bytea-chash.xml) carry an
-                // EMPTY <rollback/> for the three per-dimension chunk tables' chash
-                // columns (irreversible by design — safe ONLY when paired with a deeper
-                // rollback that later drops those tables entirely, e.g. vectors-001-
-                // baseline's own rollback, which a FULL rollback to zero always reaches).
-                // vectors-004-unify-chunks.xml's rollback (later, master position ~497)
-                // RECREATES those same three tables with chash BYTEA (correct for ITS OWN
-                // immediate pre-drop state). A rollback deep enough to undo vectors-004
-                // (position ~497) but NOT deep enough to undo vectors-001-baseline
-                // (position ~82) — exactly the window catalog-002, position ~139, sits
-                // in — leaves that chash column permanently BYTEA with no further
-                // rollback ever converting it back, because rdr180-3's rollback is a
-                // no-op. A FULL forward re-apply from that state then fails re-executing
-                // catalog-006-4 (position ~167, checksum-frozen, written for TEXT chash)
-                // with "operator does not exist: text = bytea" — confirmed by running
-                // exactly that and capturing the error; not fixed by this bead. So,
-                // UNLIKE stage 1, this stage does NOT call
-                // {@code SchemaMigrator.migrate(ds)} (which always walks the FULL
-                // remaining chain to HEAD, straight through that gap). Instead it
-                // reapplies FORWARD BY COUNT (Liquibase {@code update(int,...)},
-                // {@link #reapplyForward}) for EXACTLY the one changeset this stage rolled
-                // back to reach — catalog-002-1-temporal-typing is the lowest-numbered
-                // missing entry after this rollback, so count=1 applies precisely that
-                // changeset and stops, never reaching catalog-006-4's territory. This
-                // proves catalog-002's OWN forward re-apply cleanly and exactly, without
-                // being blocked by the unrelated gap above.
+                // FORMERLY-BROKEN WINDOW, FIXED by nexus-lelhx (was: KNOWN GAP, discovered by
+                // this test, filed rather than fixed under nexus-cck6z's own narrower scope).
+                // rdr180-3/4/5-convert-chunks-* (in rdr180-001-bytea-chash.xml) used to carry
+                // an EMPTY <rollback/> for the three per-dimension chunk tables' chash columns
+                // — safe ONLY when paired with a deeper rollback that later drops those tables
+                // entirely (e.g. vectors-001-baseline's own rollback, which a FULL rollback to
+                // zero always reaches). vectors-004-unify-chunks.xml's rollback (later, master
+                // position ~497) RECREATES those same three tables with chash BYTEA (correct
+                // for ITS OWN immediate pre-drop state). A rollback deep enough to undo
+                // vectors-004 (position ~497) but NOT deep enough to undo vectors-001-baseline
+                // (position ~82) — exactly the window catalog-002, position ~139, sits in —
+                // used to leave that chash column permanently BYTEA, because rdr180-3's
+                // rollback was a no-op. A FULL forward re-apply from that state then failed
+                // re-executing catalog-006-4 (position ~167, checksum-frozen, written for TEXT
+                // chash) with "operator does not exist: text = bytea" — confirmed by running
+                // exactly that and capturing the error (nexus-lelhx's own reproduction).
+                //
+                // THE FIX: rdr180-3/4/5 now carry a real, guarded rollback — ALTER TABLE IF
+                // EXISTS ... TYPE TEXT USING the changeset's own file-header reversibility
+                // lemma (octet_length=16 -> encode(...,'hex'), else convert_from(...,'UTF8'),
+                // the same CASE idiom as ChashSqlIdioms.OLD_REF_LEMMA) — restoring the exact
+                // pre-conversion TEXT shape so a subsequent forward re-apply of catalog-006-4
+                // sees chash genuinely TEXT again, same as a fresh install would at that master
+                // position. Checksum-safe per this class's own javadoc (Liquibase excludes
+                // <rollback> from the changeset md5sum) — independently re-verified for THIS
+                // codebase's Liquibase 4.29.0 as part of nexus-lelhx (before/after MD5SUM
+                // identical, no ValidationFailedException on reapply against the edited
+                // changelog).
+                //
+                // So, UNLIKE the pre-fix version of this test, this stage no longer stops at a
+                // targeted count=1 reapply to dodge catalog-006-4's territory — it keeps that
+                // targeted reapply (still a valid, independent proof that catalog-002-1's OWN
+                // forward re-apply is exact) AND THEN continues with a FULL {@code
+                // SchemaMigrator.migrate(ds)} to walk the rest of the chain — including
+                // catalog-006-4 and rdr180-3/4/5 — all the way back to HEAD. That full-migrate
+                // call is nexus-lelhx's exact reproduction, now green.
                 int depthToTemplate;
                 try (Connection c = ds.getConnection()) {
                     depthToTemplate = rollbackDepthThrough(c, "catalog-002-1-temporal-typing");
@@ -695,10 +730,50 @@ class SchemaRollbackRoundTripIntegrationTest {
                 assertThatCode(() -> reapplyForward(ds, 1))
                     .as("catalog-002-1-temporal-typing (the single lowest-numbered missing "
                         + "changeset after the rollback above) must re-apply cleanly on its own — "
-                        + "a targeted count=1 update, deliberately never walking as far as "
-                        + "catalog-006-4's territory (see the KNOWN GAP note above)")
+                        + "a targeted count=1 update, independent of and strictly weaker than the "
+                        + "full-migrate proof that follows below")
                     .doesNotThrowAnyException();
 
+                try (Connection su = pg.createConnection("")) {
+                    assertCatalog002ForwardRoundTrip(su);
+                }
+
+                // nexus-lelhx's exact reproduction, now green: continue forward from here —
+                // still rolled back everywhere past catalog-002-1-temporal-typing — with a
+                // FULL SchemaMigrator.migrate(ds) rather than another targeted count. This
+                // walks straight through catalog-006-4 (position ~167) and rdr180-3/4/5
+                // (position ~276-278), the exact sequence that used to raise "operator does
+                // not exist: text = bytea" when rdr180-3/4/5's rollback was empty.
+                assertThatCode(() -> SchemaMigrator.migrate(ds))
+                    .as("the REMAINDER of the chain (catalog-006-4 through HEAD, including "
+                        + "rdr180-3/4/5 and vectors-004-unify-chunks.xml) must re-apply cleanly "
+                        + "from here — before nexus-lelhx's fix, chunks_384/768/1024.chash was "
+                        + "stuck BYTEA after the rollback above (vectors-004's rollback recreates "
+                        + "it BYTEA; rdr180-3/4/5's rollback was a no-op), and catalog-006-4's "
+                        + "TEXT-chash function body failed to (re)create with \"operator does not "
+                        + "exist: text = bytea\" when Liquibase replayed it forward at its master "
+                        + "position")
+                    .doesNotThrowAnyException();
+
+                // Re-check catalog-002's own 2 columns again here (not
+                // assertForwardRoundTrip's full 14-column arc check): this
+                // rollback depth also passes through catalog-020-1
+                // (catalog-020-index-run-fence.xml), whose rollback is an
+                // UNCONDITIONAL `DROP COLUMN IF EXISTS index_started_at` —
+                // by design, not a data restore (see this test's own
+                // comment above stage 1's depthToArc, and stage 2's opening
+                // comment on why stage 1/2 are kept separate). A full
+                // migrate() from here legitimately CANNOT bring
+                // index_started_at's seeded value back (catalog-020-1
+                // forward re-ADDs the column NULL, no data), so re-running
+                // assertForwardRoundTrip here would fail on a known,
+                // already-documented, unrelated data-loss-by-design fact —
+                // not a regression. catalog-002's own columns carry no such
+                // hazard (nothing between catalog-002-1 and HEAD drops or
+                // re-adds catalog_collections.created_at/superseded_at), so
+                // re-asserting them here is a genuine, stronger proof that
+                // catalog-002-1's fidelity survives the FULL remaining
+                // chain, not just the targeted count=1 update above.
                 try (Connection su = pg.createConnection("")) {
                     assertCatalog002ForwardRoundTrip(su);
                 }

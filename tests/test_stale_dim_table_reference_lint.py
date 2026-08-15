@@ -586,6 +586,18 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "narration of why that changeset's additive reconcile always finds "
         "zero unregistered rows in this fixture, not a live reference."
     ),
+    "service/src/test/java/dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java": (
+        2,
+        "nexus-lelhx (2026-08-15): two new comment references, both "
+        "historical narration of the pre-RDR-191 per-dim shape — the "
+        "changeset that gave rdr180-3-convert-chunks-384 a real rollback "
+        "operates on the RETIRED chunks_384/768/1024 tables by construction "
+        "(they only exist again during a rollback deep enough to undo "
+        "vectors-004-unify-chunks.xml), so the class javadoc and the test's "
+        "own rollback-reproduction comment must name them to explain the "
+        "bug and its fix. Not a live query against the unified nexus.chunks "
+        "table."
+    ),
     # ── straddle-era FK test, Phase 5 LANDED (nexus-o8dil.49) ────────────────
     "service/src/test/java/dev/nexus/service/CollectionRegistryFkTest.java": (
         13,
