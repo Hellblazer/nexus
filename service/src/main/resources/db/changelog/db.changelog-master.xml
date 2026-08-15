@@ -88,7 +88,17 @@
     <!-- Collection-registry FKs (bead nexus-70r3c.2, RDR-156 P0.2):
          NOT VALID FKs from chunks_384/768/1024, chash_index, and topic_assignments to
          catalog_collections(tenant_id, name). Includes backfill-stubs changeset.
-         Must come after vectors-001, chash-001, taxonomy-001, and catalog-001. -->
+         Must come after vectors-001, chash-001, taxonomy-001, and catalog-001.
+         STALE-PROSE CORRECTION (nexus-o8dil.49, RDR-191 Phase 5): the three
+         chunks_384/768/1024_collection_fk constraints added here DIED
+         automatically (DROP TABLE ... CASCADE, vectors-004-unify-chunks.xml)
+         when the three per-dim chunks tables were unified into nexus.chunks —
+         a constraint cannot outlive its table. chash_index_collection_fk also
+         died earlier (RDR-187/nexus-piwya.9, table dropped). Only
+         topic_assignments_collection_fk survives from this file's original
+         five. The unified table's own collection FK (chunks_collection_fk) is
+         a NEW constraint added by fk-004-chunks-collection-registry.xml, later
+         in this file — not a revival of any of these three. -->
     <include file="db/changelog/fk-002-collection-registry.xml"/>
 
     <!-- RDR-156 P0.3 (bead nexus-70r3c.3): gap-window stub-register reconcile +
@@ -96,7 +106,18 @@
          (chunks_384/768/1024, chash_index, topic_assignments). World-block lifted
          2026-06-21 (RDR-153 migrate-all total_failed==0). Separate changelog so
          VALIDATE stays off the P0.2 critical path and runs only after the reconcile.
-         Must come after fk-002-collection-registry. -->
+         Must come after fk-002-collection-registry.
+         STALE-PROSE CORRECTION (nexus-o8dil.49, RDR-191 Phase 5): fk-002-7/8/9
+         (VALIDATE for the three now-dead chunks_<dim>_collection_fk
+         constraints) permanently MARK_RAN-skip on every box from this release
+         forward — their <preConditions> sqlCheck finds zero matching
+         pg_constraint rows (the constraints are gone with their tables) and,
+         per nexus-4m6i0.13's MARK_RAN freeze semantics, this is a harmless,
+         one-time, non-retrying skip, never a crash-loop. fk-002-10/11
+         (chash_index_collection_fk, topic_assignments_collection_fk) are
+         unaffected by RDR-191 and remain fully live. No new-id VALIDATE
+         supersedes fk-002-7/8/9 — there is nothing left to validate for a
+         constraint that no longer exists. -->
     <include file="db/changelog/fk-002-validate.xml"/>
 
     <!-- Collection-registry FKs, second wave (bead nexus-dcqml, RDR-164 P1a):
@@ -486,6 +507,44 @@
          order) and after the Phase 4 repoint batch immediately above, since
          nexus.chunks, the FK's referenced table, does not exist before it. -->
     <include file="db/changelog/catalog-029-manifest-chunk-fk.xml"/>
+
+    <!-- RDR-191 Phase 5 (bead nexus-o8dil.49): the UNIFIED chunks->
+         catalog_collections collection FK (chunks_collection_fk) — the
+         successor of fk-002's three per-dim collection FKs, which died
+         automatically with vectors-004-unify-chunks.xml's DROP TABLE ...
+         CASCADE. Same ADD-NOT-VALID -> additive-reconcile -> VALIDATE shape
+         as fk-004-chunks-collection-registry.xml's own header documents.
+         Must come after catalog-029-manifest-chunk-fk.xml (file-order
+         convention for this Phase 5 batch; nexus.chunks must exist, which
+         is transitively guaranteed by fk-002-validate.xml already gating
+         catalog-029 above). -->
+    <include file="db/changelog/fk-004-chunks-collection-registry.xml"/>
+
+    <!-- RDR-191 Phase 5 (bead nexus-gjwhu): NULL-distance guards for the
+         nine combined-query SQL functions (search_metadata_scoped_<dim>,
+         search_graph_hop_<dim>, search_topic_scoped_<dim>) — CREATE OR
+         REPLACE layering an `embedding_<dim> IS NOT NULL` predicate onto
+         each, mirroring nexus-74zvm's Java raw-SQL guard. Behaviour-neutral
+         today (conexus measured zero mixed-dim collections, T2 [22554]);
+         contract completion, not a bug fix. Ordering is not load-bearing
+         for this changeset (no DDL, depends only on tables that exist well
+         before this point) — placed here to keep the Phase 5 batch
+         contiguous. -->
+    <include file="db/changelog/vectors-006-null-distance-guards.xml"/>
+
+    <!-- RDR-191 Phase 7 fold (bead nexus-o8dil.37, amendment xii) — RETRACTED
+         2026-08-15: a dedicated catalog-030 changeset was drafted and then
+         DROPPED under the standing convergence directive once its own
+         drafting proved it structurally vestigial — catalog-025-collection-
+         not-null.xml (nexus-71gw2) already closes the entire NULL-collection
+         population and promotes SET NOT NULL for catalog_document_chunks
+         .collection, strictly EARLIER in this file's own include order, on
+         every real deployment. Amendment (xii)'s premise (the column was
+         still nullable) was itself stale relative to nexus-71gw2, which
+         shipped two days before the amendment. Phase 7 / bead nexus-o8dil.37
+         is closed on catalog-025's own evidence — no further changelog is
+         needed. See catalog-025-collection-not-null.xml's own header for the
+         live NOT NULL promotion. -->
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

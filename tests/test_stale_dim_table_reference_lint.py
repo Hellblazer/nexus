@@ -514,11 +514,16 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "route to chunks_768 pre-unify; historical only."
     ),
     "tests/test_rehearsal_seed_coverage_lint.py": (
-        7,
+        8,
         "Comments narrating which straddle-era per-dim content "
         "(chunks_384/768/1024, taxonomy_centroids_384/768/1024) the "
         "rehearsal seed must cover; historical/explanatory, matches "
-        "seed_legacy.py's own allowlist reason."
+        "seed_legacy.py's own allowlist reason. +1 (7->8, nexus-o8dil.49, "
+        "RDR-191 Phase 5 batch 2026-08-15): the DECLARED_SEED_COVERAGE "
+        "fk-004-1-reconcile entry's comment narrates the same fk-002-"
+        "already-enforces-registration fact as the Java SEED-COVERAGE "
+        "block's sibling comment — historical narration, not a live "
+        "reference."
     ),
     "tests/test_o8dil7_prune_misclassified_manifest_antijoin_engine.py": (
         1,
@@ -559,38 +564,38 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "own caution about SchemaMigratorIntegrationTest."
     ),
     "service/src/test/java/dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java": (
-        35,
+        37,
         "nexus-4m6i0.6 upgrade-rehearsal suite: injects a pre-unify schema "
         "divergence and upgrades it to HEAD across the vectors-004/"
         "taxonomy-007 changesets, then asserts the per-dim tables are GONE "
         "at HEAD (a completeness proof, not a live reference) plus straddle-"
         "window content-preservation checks that must name the source "
-        "per-dim tables by construction."
+        "per-dim tables by construction. +2 (35->37, nexus-o8dil.49/nexus-"
+        "o8dil.37, RDR-191 Phase 5+7 batch 2026-08-15): the fk-004-1-"
+        "reconcile seed-coverage leg's explanatory comment narrates that "
+        "fk-002 (already applied at OLD_TAG) enforces registration on every "
+        "chunks_384/768/1024 write before this hop starts — historical "
+        "narration of why that changeset's additive reconcile always finds "
+        "zero unregistered rows in this fixture, not a live reference."
     ),
-    # ── straddle-era FK test with forward-looking @Disabled bodies pending
-    #    Phase 5 (nexus-o8dil.49 — collection-FK family home; see file's own
-    #    class javadoc for the ownership-ambiguity flag) ────────────────────
+    # ── straddle-era FK test, Phase 5 LANDED (nexus-o8dil.49) ────────────────
     "service/src/test/java/dev/nexus/service/CollectionRegistryFkTest.java": (
-        38,
-        "RDR-156 nexus-70r3c.1 FK+hygiene suite. Per the class's own "
-        "top-of-file STATUS NOTE, the three chunks_<dim>_collection_fk "
-        "constraints die with their tables and are not re-added on the "
-        "unified nexus.chunks until Phase 5; every test method asserting "
-        "that FK's presence/behavior is @Disabled with an inline pointer "
-        "back to the note, and its dead-but-intentional SQL bodies "
-        "(INSERT INTO nexus.chunks_384/768/1024) are preserved verbatim so "
-        "they can be re-enabled unchanged at Phase 5. Deliberate, "
-        "documented, bounded — not an oversight. RETARGETED (nexus-a66gd "
-        "substantive-critic remediation, 2026-08-14): the re-enable pointer "
-        "originally named nexus-o8dil.29/.31, but those beads' description "
-        "scopes only the MANIFEST FK (catalog_document_chunks -> "
-        "nexus.chunks), not this COLLECTION FK (chunks -> "
-        "catalog_collections). The collection-FK family's actual bead home "
-        "is nexus-o8dil.49 — whose own title/description carry a flagged "
-        "ownership ambiguity, to be resolved at the o8dil.23 Phase-5 "
-        "planning pass. Pointer updated in both the .java file and here; "
-        "pin count unchanged (comment-only edit, no banned-token count "
-        "delta)."
+        12,
+        "RDR-156 nexus-70r3c.1 FK+hygiene suite. RDR-191 Phase 5 "
+        "(nexus-o8dil.49, fk-004-chunks-collection-registry.xml) landed the "
+        "unified chunks_collection_fk on 2026-08-15 — every test method that "
+        "was @Disabled pending Phase 5 (unregistered-collection reject, "
+        "ON DELETE RESTRICT, cross-tenant, gap-window reconcile) is now "
+        "RE-ENABLED and RETARGETED to nexus.chunks + DimTables helpers, "
+        "dropping the count from 38 to 12. The 12 remaining hits are the "
+        "STILL-@Disabled GROUP 7 CHECK-constraint tests "
+        "(chunks_<dim>_chash_len_check), disabled for an unrelated, "
+        "pre-existing reason unaffected by Phase 5: those constraint names "
+        "were already dropped by rdr180-2 before RDR-191 (nexus.chunks has "
+        "no length(text)=32 concept, only the octet family — T2/D5 lane "
+        "record). Their dead-but-intentional SQL bodies (INSERT INTO "
+        "nexus.chunks_384/768/1024) stay verbatim, same preservation "
+        "rationale as before, just for a narrower still-disabled group."
     ),
     # ── deliberate wire-compat label: chash_conformance_report(dim)'s
     #    table_name column, same pattern as the Python conformance-report

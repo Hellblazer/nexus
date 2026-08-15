@@ -25,6 +25,19 @@
     DO NOT add VALIDATE CONSTRAINT here.  That is bead nexus-70r3c.3, world-blocked
     on the RDR-153 data migration (a combined changeset would fail on any pre-RDR-153
     deployment that has old-format rows).
+
+    STALE-PROSE CORRECTION (nexus-o8dil.49, RDR-191 Phase 5, 2026-08):
+    chunks_384_collection_fk / chunks_768_collection_fk / chunks_1024_collection_fk
+    are DEAD — retired automatically when vectors-004-unify-chunks.xml's
+    DROP TABLE ... CASCADE removed chunks_384/768/1024 (a constraint cannot
+    outlive its table). chash_index_collection_fk is also dead (RDR-187/
+    nexus-piwya.9, table dropped earlier). Only topic_assignments_collection_fk,
+    of the five constraints this file adds, is still live. The changesets
+    below are frozen (already applied) and are NOT edited to remove the dead
+    three — this note records their fate for the next reader. The unified
+    nexus.chunks table's own collection FK (chunks_collection_fk) is a NEW
+    constraint, added by fk-004-chunks-collection-registry.xml, not a revival
+    of chunks_384_collection_fk et al.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"

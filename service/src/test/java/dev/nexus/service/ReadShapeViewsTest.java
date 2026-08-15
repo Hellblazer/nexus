@@ -401,6 +401,12 @@ class ReadShapeViewsTest {
         String c = (chash + "00000000000000000000000000000000").substring(0, 32);
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for every manifest write below.
+        // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now ALSO carries
+        // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+        // (tenant_id, name) — stub-register the collection first (idempotent,
+        // mirrors seedColl above) rather than relying on every call site to have
+        // already called it for this exact collection.
+        seedColl(su, tenant, collection);
         su.createStatement().execute(
             "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES ("
             + "'" + tenant + "', '" + collection + "', '" + c + "', 'stub', "

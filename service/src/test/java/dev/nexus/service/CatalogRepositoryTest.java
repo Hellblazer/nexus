@@ -85,11 +85,22 @@ class CatalogRepositoryTest {
         if (!chashHex.matches("(?i)^[0-9a-f]+$")) {
             return;
         }
-        tenantScope.withTenant(tenant, ctx -> ctx.execute(
-            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-            + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::vector) "
-            + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
-            tenant, collection, chashHex, STUB_VECTOR_384));
+        tenantScope.withTenant(tenant, ctx -> {
+            // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
+            // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+            // (tenant_id, name) — stub-register the collection first, mirroring
+            // PgVectorRepository#upsertChunks' own ensure-registered step.
+            ctx.execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
+                + "ON CONFLICT (tenant_id, name) DO NOTHING",
+                tenant, collection);
+            ctx.execute(
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
+                + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::vector) "
+                + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
+                tenant, collection, chashHex, STUB_VECTOR_384);
+            return null;
+        });
     }
 
     private void writeManifestSeeded(String tenant, String docId, String collection,

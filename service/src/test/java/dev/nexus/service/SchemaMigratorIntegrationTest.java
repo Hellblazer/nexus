@@ -1611,6 +1611,159 @@ class SchemaMigratorIntegrationTest {
         }
     }
 
+    // ── Test 15: nexus-o8dil.49 (RDR-191 Phase 5, Deliverable 1) — unified
+    //    chunks->catalog_collections FK: happy path boots and VALIDATEs ──────────
+
+    /**
+     * The happy-path half of nexus-o8dil.49's acceptance criterion: on the
+     * shared {@link #adminDs} fixture (already migrated end-to-end by
+     * {@code @Order(1)}), {@code chunks_collection_fk} exists and is VALIDATED —
+     * proving fk-004-0 (ADD ... NOT VALID), fk-004-1-reconcile (additive
+     * stub-register), and fk-004-2 (VALIDATE) all ran successfully in sequence
+     * against the fresh, empty-population schema every other test in this file
+     * already relies on.
+     */
+    @Test
+    @Order(15)
+    void chunksCollectionFk_existsAndValidated() throws Exception {
+        try (Connection conn = adminDs.getConnection()) {
+            assertThat(constraintValidated(conn, "chunks_collection_fk"))
+                .as("chunks_collection_fk must exist and be VALIDATED (pg_constraint.convalidated=true) "
+                    + "after the full migration walk (nexus-o8dil.49, RDR-191 Phase 5)")
+                .isTrue();
+        }
+    }
+
+    // ── Test 16: nexus-o8dil.49 — MUST-FAIL demonstration: VALIDATE without
+    //    fk-004-1-reconcile's additive stub-register fails loud on a genuinely
+    //    unregistered collection ───────────────────────────────────────────────
+
+    /**
+     * The MUST-FAIL half of nexus-o8dil.49's acceptance criterion ("A test
+     * proves the new VALIDATE changeset FAILS on a deliberately violating
+     * row"). Because fk-004-1-reconcile derives every stub-registered
+     * collection FROM nexus.chunks' own distinct values, the forward
+     * three-step changelog can never itself produce a row VALIDATE would
+     * reject — so this test constructs the violating scenario directly,
+     * mirroring {@link #bareValidateWithoutRemediation_againstDanglingPopulation_throws}'s
+     * shape: drop the FK, seed a chunks row under a collection with NO
+     * catalog_collections registration, re-add the FK NOT VALID (which does
+     * NOT retroactively check this pre-existing row), then VALIDATE ALONE
+     * (skipping the reconcile) and assert it fails loud, naming the
+     * constraint.
+     */
+    @Test
+    @Order(16)
+    void chunksCollectionFk_bareValidateWithoutReconcile_againstUnregisteredCollection_throws()
+            throws Exception {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
+        try {
+            final String role = "nexus_admin_o8dil49_neg_test";
+            final String pass = "nexus_admin_o8dil49_neg_test_pass";
+
+            try (Connection su = agedPg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
+                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
+                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
+                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
+                su.createStatement().execute(
+                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            }
+
+            var cfg = new com.zaxxer.hikari.HikariConfig();
+            cfg.setJdbcUrl(agedPg.getJdbcUrl());
+            cfg.setUsername(role);
+            cfg.setPassword(pass);
+            cfg.setMaximumPoolSize(2);
+            cfg.setPoolName("nexus-admin-o8dil49-neg-test");
+
+            try (var agedDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+                // Full migration first (simplest reliable way to reach a schema with
+                // nexus.chunks + chunks_collection_fk already VALIDATED) -- then
+                // reproduce the violating scenario directly against it, the same
+                // "self-contained per test: drop + re-create the FK" idiom
+                // CollectionRegistryFkTest#assertReconcileLoadBearing uses.
+                SchemaMigrator.migrate(agedDs);
+
+                final String tenant = "o8dil49-neg-tenant";
+                final String unregCollection = "knowledge__o8dil49-neg__voyage-context-3__v1";
+                final String chash = "d".repeat(64);
+                try (Connection su = agedPg.createConnection("")) {
+                    su.setAutoCommit(true);
+                    su.createStatement().execute(
+                        "ALTER TABLE nexus.chunks DROP CONSTRAINT IF EXISTS chunks_collection_fk");
+                    // Legal here: the FK is absent. A genuinely unregistered
+                    // collection -- no catalog_collections row for (tenant, name).
+                    su.createStatement().execute(
+                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024) "
+                        + "VALUES ('" + tenant + "', '" + unregCollection + "', decode('" + chash + "', 'hex'), "
+                        + "'neg text', ('[" + "0.1,".repeat(1023) + "0.1]')::vector)");
+                    su.createStatement().execute(
+                        "ALTER TABLE nexus.chunks "
+                        + "ADD CONSTRAINT chunks_collection_fk "
+                        + "FOREIGN KEY (tenant_id, collection) REFERENCES nexus.catalog_collections (tenant_id, name) "
+                        + "ON DELETE RESTRICT NOT VALID");
+
+                    // The naive shape: VALIDATE alone, skipping fk-004-1-reconcile's
+                    // additive stub-register. Must throw against the unregistered row.
+                    assertThatThrownBy(() -> su.createStatement().execute(
+                            "ALTER TABLE nexus.chunks VALIDATE CONSTRAINT chunks_collection_fk"))
+                        .as("VALIDATE CONSTRAINT alone, without fk-004-1-reconcile's additive "
+                            + "stub-register, must fail loud against a genuinely unregistered "
+                            + "collection -- proves the VALIDATE changeset actually enforces the "
+                            + "invariant rather than trivially passing (nexus-o8dil.49)")
+                        .isInstanceOf(PSQLException.class)
+                        .hasMessageContaining("chunks_collection_fk");
+                }
+            }
+        } finally {
+            agedPg.stop();
+        }
+    }
+
+    // ── Test 17: nexus-71gw2 (RDR-191 Decision item 6) — catalog_document_chunks
+    //    .collection is NOT NULL at HEAD ─────────────────────────────────────────
+
+    /**
+     * A cheap, standing pin that {@code catalog_document_chunks.collection}
+     * carries {@code pg_attribute.attnotnull = true} on the shared,
+     * fully-migrated {@link #adminDs} fixture — the invariant
+     * catalog-025-collection-not-null.xml (bead nexus-71gw2) establishes.
+     * RDR-191 Phase 7 (bead nexus-o8dil.37, Decision item 6) is CLOSED on this
+     * evidence: a dedicated catalog-030 changeset was drafted, found
+     * structurally vestigial (catalog-025-0 always closes the NULL-collection
+     * population first, on every real deployment — see catalog-025-collection-
+     * not-null.xml's own header), and DROPPED under the standing convergence
+     * directive (2026-08-15) rather than shipped as permanent maintenance
+     * surface for an invariant already proven elsewhere. This test remains as
+     * the standing pin.
+     */
+    @Test
+    @Order(17)
+    void catalogDocumentChunksCollection_isNotNull_atHead() throws Exception {
+        try (Connection conn = adminDs.getConnection()) {
+            ResultSet rs = conn.createStatement().executeQuery(
+                "SELECT a.attnotnull FROM pg_attribute a "
+                + "JOIN pg_class c ON c.oid = a.attrelid "
+                + "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                + "WHERE n.nspname = 'nexus' AND c.relname = 'catalog_document_chunks' "
+                + "  AND a.attname = 'collection'");
+            assertThat(rs.next())
+                .as("catalog_document_chunks.collection column must exist")
+                .isTrue();
+            assertThat(rs.getBoolean("attnotnull"))
+                .as("catalog_document_chunks.collection must be NOT NULL at HEAD "
+                    + "(RDR-191 Decision item 6, Phase 7 fold, nexus-o8dil.37)")
+                .isTrue();
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private int rows(Connection conn, String sql) throws Exception {

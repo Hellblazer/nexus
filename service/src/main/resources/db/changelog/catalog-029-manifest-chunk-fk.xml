@@ -1,5 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
+    KNOWN ACCEPTED RESIDUAL (o8dil.32 code review, 2026-08-14): vectors-005's
+    gc_restore_rereferenced and gc_expire_quarantine DELETE FROM nexus.chunks
+    under a quarantine collection WITHOUT deferring fk_catalog_chunks_chunk,
+    relying on the invariant that manifest rows never reference a
+    quarantine-collection tuple. Unreachable via any documented write path
+    (the FK itself now rejects manifest writes naming quarantine-only
+    chashes — nexus-zlv38, closed by directive). If a GC delete ever trips
+    the FK in the wild, the remedy is operational: restore or purge the
+    referencing manifest row and re-run the sweep; do not add a third
+    deferred-constraint site without reading the SET CONSTRAINTS
+    search_path note on purge_trash below.
+
     RDR-191 Phase 5 (bead nexus-o8dil.29) — the manifest FK:
     nexus.catalog_document_chunks (tenant_id, collection, chash) -> nexus.chunks
     (tenant_id, collection, chash).

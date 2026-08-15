@@ -185,6 +185,24 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # KEEP-arm survival (1.1.100's two content-backed rows still present)
         # plus fk_catalog_chunks_chunk existing and VALIDATED at HEAD.
         ("catalog-029-1", "nexus-o8dil.29"),
+        # nexus-o8dil.49 (RDR-191 Phase 5): fk-004-1-reconcile's additive
+        # stub-register, same NO FORCE/FORCE toggle-wrap shape as
+        # catalog-029-1. Structurally always finds zero unregistered rows in
+        # this hop (fk-002, already applied at OLD_TAG, enforces collection
+        # registration on every chunks_384/768/1024 write before this hop
+        # even starts, and vectors-004-1 only copies already-FK-compliant
+        # rows into nexus.chunks) -- effect-asserted via chunks_collection_fk
+        # existing+VALIDATED at HEAD plus FORCE ROW LEVEL SECURITY restored
+        # on both nexus.chunks and nexus.catalog_collections.
+        ("fk-004-1-reconcile", "nexus-o8dil.49"),
+        # nexus-o8dil.37 (RDR-191 Phase 7): NO changeset here -- a dedicated
+        # catalog-030 changeset was drafted and DROPPED (2026-08-15, standing
+        # convergence directive) once found structurally vestigial:
+        # catalog-025-collection-not-null.xml (nexus-71gw2) already closes the
+        # entire NULL-collection population and promotes SET NOT NULL,
+        # strictly earlier in db.changelog-master.xml's include order, on
+        # every real deployment. Phase 7 is closed on catalog-025's own
+        # evidence.
     }
 )
 

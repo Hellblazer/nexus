@@ -327,6 +327,17 @@ class CatalogHandlerManifestFkTest {
         // and the missing GRANT alike for this fixture-only insert.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
+            // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+            // (tenant_id, name) — stub-register the collection first, mirroring
+            // PgVectorRepository#upsertChunks' own ensure-registered step.
+            try (var regPs = su.prepareStatement(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
+                    + "ON CONFLICT (tenant_id, name) DO NOTHING")) {
+                regPs.setString(1, TENANT);
+                regPs.setString(2, collection);
+                regPs.execute();
+            }
             try (var ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
                     + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::vector) "

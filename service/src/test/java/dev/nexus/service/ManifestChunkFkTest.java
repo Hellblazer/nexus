@@ -203,6 +203,18 @@ class ManifestChunkFkTest {
         // collection, chash) triple's middle component, part of the FK's key).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now ALSO carries
+            // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+            // (tenant_id, name), NOT ON UPDATE CASCADE (a collection rename is
+            // re-homed explicitly via CatalogRepository#renameCollection's coherent
+            // sequence in production, never a bare UPDATE -- see that FK's own file
+            // header). This test's raw UPDATE below bypasses that coherent path to
+            // isolate catalog-029's manifest-FK CASCADE in isolation, so it must
+            // register the target collection itself first, exactly as the coherent
+            // rename path always does before touching any chunk row.
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES "
+                + "('" + TENANT + "', '" + newCollection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
             int updated = su.createStatement().executeUpdate(
                 "UPDATE nexus.chunks SET collection = '" + newCollection + "' "
                 + "WHERE tenant_id = '" + TENANT + "' AND collection = '" + oldCollection + "' "
@@ -217,6 +229,42 @@ class ManifestChunkFkTest {
                 .as("ON UPDATE CASCADE must propagate the chunk's collection rename to the manifest row "
                     + "(F10a: chunks is the FK's parent)")
                 .isEqualTo(newCollection);
+        }
+    }
+
+    @Test
+    @Order(31)
+    void chunkDelete_whileManifestRowReferencesIt_isRejectedUndeferred() throws Exception {
+        // o8dil.29 acceptance (o8dil.32 critique Significant #1): the FK's
+        // delete side is DEFERRABLE INITIALLY IMMEDIATE — outside an explicit
+        // SET CONSTRAINTS ... DEFERRED window, deleting a still-referenced
+        // parent chunk must be REJECTED at statement time, not silently
+        // orphan the manifest row.
+        String doc = "fk-del-reject-doc";
+        String chash = Chash.ofText("fk-del-reject-chunk").toHex();
+        catalogRepo.upsertDocument(TENANT, Map.of(
+            "tumbler", doc, "title", "FK delete-reject doc", "content_type", "paper",
+            "corpus", "knowledge", "physical_collection", COLLECTION));
+        vecRepo.upsertChunks(TENANT, COLLECTION, List.of(chash), List.of("del-reject text"), List.of(Map.of()));
+        catalogRepo.writeManifest(TENANT, doc, COLLECTION,
+            List.of(Map.of("position", 0, "chash", chash)));
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            assertThatThrownBy(() -> su.createStatement().executeUpdate(
+                    "DELETE FROM nexus.chunks WHERE tenant_id = '" + TENANT + "' "
+                    + "AND collection = '" + COLLECTION + "' "
+                    + "AND chash = decode('" + chash + "', 'hex')"))
+                .as("an undeferred DELETE of a chunk still referenced by a manifest row "
+                    + "must be rejected by " + FK_NAME + " at statement time")
+                .hasMessageContaining(FK_NAME);
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT count(*) AS n FROM nexus.catalog_document_chunks "
+                + "WHERE tenant_id = '" + TENANT + "' AND doc_id = '" + doc + "'");
+            rs.next();
+            assertThat(rs.getInt("n"))
+                .as("the manifest row must survive the rejected delete intact")
+                .isEqualTo(1);
         }
     }
 

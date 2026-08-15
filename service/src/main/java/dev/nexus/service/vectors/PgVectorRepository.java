@@ -354,23 +354,22 @@ public final class PgVectorRepository {
      * dim-agnostic list call and a SUBSET back from the dim-guarded getEmbeddings call —
      * the alignment guard on that length mismatch is load-bearing, not a leftover.
      *
-     * <p><strong>RESIDUAL DISCLOSURE (substantive-critic, nexus-74zvm/nexus-3rprg batch
-     * review, T2 {@code nexus/critique-nexus-74zvm-3rprg-w84ho-dim-guard-batch}
-     * [22550]) — this contract is NOT yet closed everywhere.</strong> The Java raw-SQL
-     * embedding-read sites in THIS class ({@link #getEmbeddings}, {@link
+     * <p><strong>RESIDUAL DISCLOSURE, CLOSED (nexus-gjwhu, RDR-191 Phase 5).</strong> The
+     * Java raw-SQL embedding-read sites in THIS class ({@link #getEmbeddings}, {@link
      * #searchWithTokens}, {@link #hybridSearch}) are guarded as of nexus-74zvm. The NINE
      * combined-query SQL functions this class delegates to ({@code
      * search_metadata_scoped_<dim>}, {@code search_graph_hop_<dim>}, {@code
-     * search_topic_scoped_<dim>} — {@code vectors-005-repoint-functions-views.xml}, called
-     * from {@link #searchMetadataScoped}/{@link #searchGraphHop}/{@link
-     * #searchTopicScoped} and their token-aware siblings) carry the SAME NULL-distance
-     * defect this class's own raw SQL had before nexus-74zvm: no {@code embedding_<dim> IS
-     * NOT NULL} predicate on their distance ORDER BY. They are NOT fixed by this batch —
-     * tracked as bead nexus-gjwhu (P2). Fixing them needs a NEW Liquibase changeset (the
-     * applied function bodies are checksum-frozen; RDR-191/Liquibase discipline forbids
-     * editing a shipped changeset in place) and rides the next engine cut, not an
-     * in-place edit here. Do not read "dim scoping is guarded" above as covering these
-     * nine functions until nexus-gjwhu closes.
+     * search_topic_scoped_<dim>} — originally {@code
+     * vectors-005-repoint-functions-views.xml}, called from {@link #searchMetadataScoped}/
+     * {@link #searchGraphHop}/{@link #searchTopicScoped} and their token-aware siblings)
+     * carried the SAME NULL-distance defect this class's own raw SQL had before
+     * nexus-74zvm: no {@code embedding_<dim> IS NOT NULL} predicate on their distance
+     * ORDER BY. Closed by {@code vectors-006-null-distance-guards.xml} (bead nexus-gjwhu,
+     * a NEW Liquibase changeset layering the same guard onto each function via
+     * {@code CREATE OR REPLACE FUNCTION} — the applied vectors-005 bodies are
+     * checksum-frozen and were never edited in place). The dim-scoping contract above now
+     * covers these nine functions too, end to end across every embedding-read surface in
+     * this class's own SQL and its delegated functions.
      *
      * @param collection four-segment conformant collection name
      *                   ({@code <content_type>__<owner>__<model>__v<n>})

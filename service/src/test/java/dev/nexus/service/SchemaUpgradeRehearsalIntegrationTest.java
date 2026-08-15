@@ -365,6 +365,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   vectors-004-1 nexus-o8dil.12
                 //   taxonomy-007-1 nexus-jv3ue
                 //   catalog-029-1 nexus-o8dil.29
+                //   fk-004-1-reconcile nexus-o8dil.49
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -716,6 +717,40 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("the two content-backed 1.1.100 manifest rows must still exist at HEAD -- "
                             + "a broken catalog-029-1 toggle (FORCE never turned off) would see zero "
                             + "nexus.chunks rows and wrongly delete these two as false-dangling")
+                        .isEqualTo(2);
+
+                    // fk-004-1-reconcile leg (nexus-o8dil.49, RDR-191 Phase 5, seed-coverage
+                    // lint follow-up): fk-002 (already applied at OLD_TAG -- the "FK parents"
+                    // registerCollection calls above exist BECAUSE of this) enforces
+                    // collection registration on every chunks_384/768/1024 write from before
+                    // this hop even starts, and vectors-004-1 only COPIES already-FK-compliant
+                    // rows into nexus.chunks. So by construction NO row this hop can produce
+                    // ever has an unregistered collection -- fk-004-1-reconcile's additive
+                    // INSERT...SELECT...ON CONFLICT DO NOTHING therefore always registers ZERO
+                    // new rows here (there is nothing left for it to find), the honest
+                    // structural fact fk-004-chunks-collection-registry.xml's own file header
+                    // and this bead's T2 write-back both record -- an observation-count
+                    // assertion on it would prove nothing (a broken toggle would ALSO see zero
+                    // inserts, indistinguishably). What IS observable and load-bearing: (a) the
+                    // chunks_collection_fk VALIDATE (fk-004-2) actually succeeds at HEAD, which
+                    // requires fk-004-1-reconcile to have run without throwing under its own
+                    // RLS toggle; (b) that toggle correctly RESTORES FORCE ROW LEVEL SECURITY on
+                    // both nexus.chunks and nexus.catalog_collections before it ends, rather
+                    // than leaving either NO FORCE (the nexus-1wjmq/nexus-php10 failure class) --
+                    // proven the same way as the catalog-029-1 leg above proves it for its own
+                    // two tables.
+                    assertThat(constraintExists(su, "chunks_collection_fk"))
+                        .as("chunks_collection_fk must exist at HEAD (fk-004-0)")
+                        .isTrue();
+                    assertThat(constraintValidated(su, "chunks_collection_fk"))
+                        .as("chunks_collection_fk must be VALIDATED at HEAD -- fk-004-2's VALIDATE "
+                            + "only succeeds if fk-004-1-reconcile ran to completion under its own "
+                            + "RLS toggle without erroring")
+                        .isTrue();
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.chunks'::regclass, 'nexus.catalog_collections'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables fk-004-1-reconcile toggled")
                         .isEqualTo(2);
                 }
             }

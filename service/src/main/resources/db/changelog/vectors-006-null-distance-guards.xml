@@ -1,0 +1,827 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-191 Phase 5 (bead nexus-gjwhu) — NULL-distance guards for the nine
+    combined-query SQL functions vectors-005-repoint-functions-views.xml
+    shipped (search_metadata_scoped_384/768/1024, search_graph_hop_384/768/
+    1024, search_topic_scoped_384/768/1024).
+
+    nexus-74zvm added an `embedding_<dim> IS NOT NULL` predicate to
+    PgVectorRepository's two Java raw-SQL rank queries (searchWithTokens,
+    both hybridSearch branches) to prevent a foreign-dim row (a mixed-dim
+    collection, RDR-191 D1 hazard) from surfacing with distance=NULL under
+    LIMIT/NULLS LAST. Substantive-critic review of that batch (T2
+    nexus/critique-nexus-74zvm-3rprg-w84ho-dim-guard-batch [22550]) found the
+    SAME defect class, unguarded, in these nine functions — they carry the
+    identical `ORDER BY embedding_<dim> <=> p_query` shape with no
+    `embedding_<dim> IS NOT NULL` predicate. Filed as nexus-gjwhu; conexus
+    ACK'd (T2 [22554]) that no in-place fix was wanted on their side —
+    their MCP tools keep pre-existing behaviour until this changeset lands,
+    confirming the ride-Phase-5 plan.
+
+    conexus also measured ZERO mixed-dim collections in production ([22554]),
+    so this changeset is BEHAVIOUR-NEUTRAL today — the guard is contract
+    completion (closing the gap PgVectorRepository#dimForCollection's own
+    DECISION javadoc discloses as open), not a fix for an observed bug.
+
+    Each function body below is byte-identical to its vectors-005 original
+    EXCEPT for the added `AND c.embedding_<dim> IS NOT NULL` predicate —
+    same clause text nexus-74zvm used in the Java raw SQL
+    (DimTables.embeddingColumn(dim) + " IS NOT NULL"). No other drive-by
+    edits: signatures, RETURNS TABLE shapes, SECURITY INVOKER/STABLE
+    modifiers, JOIN shapes (including catalog-019's tombstone-relay guard on
+    search_graph_hop's recursive CTE), and the search_topic_scoped
+    live-chunks OR-EXISTS predicate are all preserved verbatim.
+
+    Predicate placement: appended to each function's WHERE clause (or, for
+    search_graph_hop, the outer SELECT's WHERE clause — the recursive
+    `reach` CTE itself is untouched, since its own rows carry no
+    embedding_<dim> column at all). This is index-safe: pgvector's HNSW
+    index structurally never contains a NULL-valued row (there is no vector
+    to place in the graph), so the predicate is redundant at the index and
+    free — proven for a representative function by
+    PgVectorRepositoryRawSqlPlanShapeTest's sibling EXPLAIN methodology (see
+    that test class for the full plan-shape proof this changeset's guard
+    does not defeat the FULL idx_chunks_embedding_<dim> HNSW bind).
+
+    Layered CREATE OR REPLACE on top of vectors-005-3/4/5 (already shipped,
+    checksum-immutable — never edited in place, matching the
+    catalog-024-on-023 / catalog-026-on-catalog-003-5 / catalog-029-3-on-
+    vectors-005-15 discipline this codebase already uses repeatedly for this
+    exact situation). GRANT EXECUTE is NOT re-issued here: CREATE OR REPLACE
+    FUNCTION does not reset existing grants on an already-granted object
+    (unlike vectors-005-6's situation, which followed a CASCADE-drop-then-
+    CREATE that genuinely lost the prior grant) — the nexus_svc EXECUTE
+    grant vectors-005-6 issued survives this layering untouched.
+
+    Must come after fk-004-chunks-collection-registry.xml (ordering is not
+    load-bearing for this changeset's own correctness — it touches no table
+    DDL and depends only on nexus.chunks/catalog_document_chunks/
+    catalog_documents/catalog_links/topic_assignments/topics, all of which
+    exist well before this point in the chain — but keeping the Phase 5
+    batch's new files in one contiguous block matches the project's
+    append-at-tail convention).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-006-1" author="nexus-gjwhu">
+        <comment>search_metadata_scoped_384/768/1024: add embedding_&lt;dim&gt; IS NOT NULL to the WHERE clause (nexus-74zvm's NULL-distance guard, applied to the SQL-function family). Bodies otherwise byte-identical to vectors-005-3.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_384(
+    p_query        vector(384),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @> p_where)
+       AND c.embedding_384 IS NOT NULL
+     ORDER BY c.embedding_384 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_768(
+    p_query        vector(768),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @> p_where)
+       AND c.embedding_768 IS NOT NULL
+     ORDER BY c.embedding_768 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_1024(
+    p_query        vector(1024),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @> p_where)
+       AND c.embedding_1024 IS NOT NULL
+     ORDER BY c.embedding_1024 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- CREATE OR REPLACE layered on an already-shipped, still-live
+                 function (vectors-005-3): rollback restores that PRIOR body
+                 verbatim (unguarded), not a DROP — this changeset did not
+                 bring the function from absent to present. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_384(
+    p_query        vector(384),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @> p_where)
+     ORDER BY c.embedding_384 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_768(
+    p_query        vector(768),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @> p_where)
+     ORDER BY c.embedding_768 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_1024(
+    p_query        vector(1024),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @> p_where)
+     ORDER BY c.embedding_1024 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-006-2" author="nexus-gjwhu">
+        <comment>search_graph_hop_384/768/1024: add embedding_&lt;dim&gt; IS NOT NULL to the outer SELECT's WHERE clause. The recursive `reach` CTE (including catalog-019's tombstone-relay fd/td guard) is untouched -- its rows carry no embedding column. Bodies otherwise byte-identical to vectors-005-4.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_384(
+    p_query       vector(384),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND c.embedding_384 IS NOT NULL
+     ORDER BY c.embedding_384 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_768(
+    p_query       vector(768),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND c.embedding_768 IS NOT NULL
+     ORDER BY c.embedding_768 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_1024(
+    p_query       vector(1024),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND c.embedding_1024 IS NOT NULL
+     ORDER BY c.embedding_1024 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_384(
+    p_query       vector(384),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @> p_where)
+     ORDER BY c.embedding_384 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_768(
+    p_query       vector(768),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @> p_where)
+     ORDER BY c.embedding_768 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_1024(
+    p_query       vector(1024),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d &lt; p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @> p_where)
+     ORDER BY c.embedding_1024 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-006-3" author="nexus-gjwhu">
+        <comment>search_topic_scoped_384/768/1024: add embedding_&lt;dim&gt; IS NOT NULL to the WHERE clause. Bodies otherwise byte-identical to vectors-005-5.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_384(
+    p_query       vector(384),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 &lt;=&gt; p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex')
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_384 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_384 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_768(
+    p_query       vector(768),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 &lt;=&gt; p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex')
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_768 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_768 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_1024(
+    p_query       vector(1024),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 &lt;=&gt; p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex')
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_1024 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_1024 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_384(
+    p_query       vector(384),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 &lt;=&gt; p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex')
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_384 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_768(
+    p_query       vector(768),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 &lt;=&gt; p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex')
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_768 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_1024(
+    p_query       vector(1024),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 &lt;=&gt; p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex')
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_1024 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

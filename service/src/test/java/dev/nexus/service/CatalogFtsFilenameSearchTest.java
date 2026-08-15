@@ -164,6 +164,13 @@ class CatalogFtsFilenameSearchTest {
     private void stubChunk(String chashHex) {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
+            // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+            // (tenant_id, name) — stub-register the collection first, mirroring
+            // PgVectorRepository#upsertChunks' own ensure-registered step.
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES "
+                + "('" + TENANT + "', '" + COLLECTION + "') ON CONFLICT (tenant_id, name) DO NOTHING");
             su.createStatement().execute(
                 "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES ("
                 + "'" + TENANT + "', '" + COLLECTION + "', decode('" + chashHex + "', 'hex'), 'stub', "

@@ -480,6 +480,14 @@ class VectorsUnifyChunksIntegrationTest {
             try (Connection su = rig.pg().createConnection("")) {
                 su.setAutoCommit(true);
 
+                // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
+                // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+                // (tenant_id, name) -- register 't1'/'c' first so the CHECK-constraint
+                // rejections below actually reach exactly_one_embedding, not the FK.
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('t1', 'c') "
+                    + "ON CONFLICT (tenant_id, name) DO NOTHING");
+
                 // Zero embeddings -> rejected.
                 assertThatThrownBy(() -> {
                     try (var ps = su.prepareStatement(

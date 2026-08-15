@@ -786,6 +786,12 @@ class VectorsRepointFunctionsIntegrationTest {
 
             try (Connection su = rig.pg().createConnection("")) {
                 su.setAutoCommit(true);
+                // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
+                // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+                // (tenant_id, name) — register the quarantine target first.
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                    + TENANT + "', '" + quarantineShared + "') ON CONFLICT (tenant_id, name) DO NOTHING");
                 // Pre-existing quarantined row under dim 768, at the SHARED
                 // quarantine target, same chash.
                 try (PreparedStatement ps = su.prepareStatement(
@@ -866,6 +872,12 @@ class VectorsRepointFunctionsIntegrationTest {
 
             try (Connection su = rig.pg().createConnection("")) {
                 su.setAutoCommit(true);
+                // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
+                // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+                // (tenant_id, name) — register the quarantine target first.
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                    + TENANT + "', '" + quarantineCollection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
                 // Pre-existing row ALREADY at the origin collection, under a
                 // DIFFERENT dim (1024) than the row being restored (384).
                 try (PreparedStatement ps = su.prepareStatement(
@@ -962,6 +974,12 @@ class VectorsRepointFunctionsIntegrationTest {
 
             try (Connection su = rig.pg().createConnection("")) {
                 su.setAutoCommit(true);
+                // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
+                // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+                // (tenant_id, name) — register the collection first.
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                    + TENANT + "', '" + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
                 for (var doc : new Object[][] {{"relay-a", chashA}, {"relay-b", chashB}, {"relay-c", chashC}}) {
                     String tumbler = (String) doc[0];
                     byte[] chash = (byte[]) doc[1];
