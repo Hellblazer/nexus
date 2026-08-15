@@ -565,6 +565,19 @@
          trace and the collection_health_meta view-landmine handling. -->
     <include file="db/changelog/catalog-031-type-hygiene.xml"/>
 
+    <!-- Schema type-hygiene pass, Tier A + Tier B, P2 (epic nexus-cefa1, bead
+         nexus-cefa1.3): retires hook_failures.is_batch (INTEGER -> boolean)
+         and hook_failures.batch_doc_ids (TEXT -> jsonb NULL). Ordinary DDL,
+         no runAlways. Placed after catalog-031-type-hygiene.xml (P1) and
+         before the grants-nexus-svc.xml runAlways block — NOT back in the
+         telemetry-00N family's own section above (Store 3), matching the
+         established convention (every RDR-156+ changeset appends near the
+         current tail rather than splicing back into its family's original
+         block; see catalog-031's own <include> comment for the identical
+         reasoning). See telemetry-004-type-hygiene.xml's own header for the
+         full data-safety trace and consumer audit. -->
+    <include file="db/changelog/telemetry-004-type-hygiene.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

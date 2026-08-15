@@ -4,9 +4,13 @@
 --
 -- PRE-MIGRATION PROBE, PER COLUMN — ERRORS BY DESIGN FOR ANY COLUMN WHOSE
 -- OWN PHASE HAS SHIPPED ON THIS CLUSTER. Unlike Tier A (one changeset
--- converts all four columns together), Tier B's six columns land across
+-- converts all four columns together), Tier B's SIX columns land across
 -- FOUR SEPARATE, INDEPENDENT phases:
---   P2 (hook_failures.batch_doc_ids)
+--   P2 (hook_failures.batch_doc_ids) — SHIPPED (telemetry-004-type-hygiene.xml,
+--       nexus-cefa1.3). Its branch was SPLIT OUT of this file into
+--       schema_type_hygiene_preflight_tier_b_hook_failures.sql the moment it
+--       converted — exactly as this header always said the first conversion
+--       would require. This file now audits the remaining FIVE columns only.
 --   P3 (document_aspects.extras, document_aspects.salient_sentences)
 --   P4 (plans.plan_json, plans.default_bindings)
 --   P5 (topic_links.link_types)
@@ -21,15 +25,16 @@
 -- tests/db/test_schema_type_hygiene_preflight.py, the canonical caller,
 -- which classifies each column as still-TEXT (audit) or already-converted
 -- (assert the new type) and only ever runs this file's UNION ALL as a whole
--- while EVERY column in it is still TEXT. The FIRST column here to convert
--- (P2's hook_failures.batch_doc_ids) breaks whole-file execution — at that
--- point this file must be split further (drop that column's branch into
--- its own UNION ALL, mirroring how catalog-031 already split Tier A out of
--- the original combined probe) rather than patched with dynamic SQL.
+-- while EVERY column remaining in it is still TEXT. The NEXT column here to
+-- convert (P3's document_aspects.extras / .salient_sentences) breaks
+-- whole-file execution again — at that point split it out the same way this
+-- file split hook_failures.batch_doc_ids, rather than patching with dynamic
+-- SQL.
 --
 -- Audits: plans.plan_json, plans.default_bindings, topic_links.link_types,
--- document_aspects.extras, document_aspects.salient_sentences,
--- hook_failures.batch_doc_ids (all -> jsonb).
+-- document_aspects.extras, document_aspects.salient_sentences (all -> jsonb).
+-- hook_failures.batch_doc_ids moved to
+-- schema_type_hygiene_preflight_tier_b_hook_failures.sql (P2 shipped).
 --
 -- COLUMNS EMITTED (one row per audited column):
 --   tier                  'B'.
@@ -166,16 +171,5 @@ FROM (
            count(*) FILTER (WHERE salient_sentences IS NOT NULL AND salient_sentences <> ''
                              AND NOT pg_input_is_valid(salient_sentences, 'jsonb'))
     FROM nexus.document_aspects
-
-    UNION ALL
-    -- ── column: hook_failures.batch_doc_ids ─────────────────────────────
-    SELECT 'B', 'hook_failures', 'batch_doc_ids',
-           count(*),
-           count(*) FILTER (WHERE batch_doc_ids IS NULL),
-           count(*) FILTER (WHERE batch_doc_ids = ''),
-           NULL::bigint,
-           count(*) FILTER (WHERE batch_doc_ids IS NOT NULL AND batch_doc_ids <> ''
-                             AND NOT pg_input_is_valid(batch_doc_ids, 'jsonb'))
-    FROM nexus.hook_failures
 ) t
 ORDER BY tier, table_name, column_name;

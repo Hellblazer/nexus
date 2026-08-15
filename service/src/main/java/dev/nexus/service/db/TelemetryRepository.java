@@ -3,6 +3,7 @@ package dev.nexus.service.db;
 import dev.nexus.service.jooq.nexus.tables.records.FrecencyRecord;
 import dev.nexus.service.jooq.nexus.tables.records.RelevanceLogRecord;
 import org.jooq.DSLContext;
+import org.jooq.JSONB;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -105,6 +106,17 @@ public final class TelemetryRepository {
     /** Normalise null/blank string to empty string. */
     private static String str(String v) {
         return v != null ? v : "";
+    }
+
+    /**
+     * nexus-cefa1.3 — hook_failures.batch_doc_ids TEXT -> jsonb. Mirrors the
+     * changeset's own USING NULLIF(batch_doc_ids, '')::jsonb: null/blank
+     * input writes a real SQL NULL rather than an invalid empty-string
+     * jsonb literal (''::jsonb raises "invalid input syntax for type
+     * json").
+     */
+    private static JSONB jsonbOrNull(String v) {
+        return (v == null || v.isBlank()) ? null : JSONB.valueOf(v);
     }
 
     // ── relevance_log ──────────────────────────────────────────────────────────
@@ -483,8 +495,14 @@ public final class TelemetryRepository {
                     m.put("hook_name",     r.value4());
                     m.put("error",         str(r.value5()));
                     m.put("occurred_at",   utcIso(r.value6()));
-                    m.put("batch_doc_ids", str(r.value7()));
-                    m.put("is_batch",      r.value8() != null && r.value8() != 0);
+                    // nexus-cefa1.3: batch_doc_ids is jsonb now — .data() renders the raw
+                    // JSON text on the wire (unchanged shape: a JSON-encoded array string,
+                    // or "" when NULL, matching str()'s prior null->"" convention).
+                    m.put("batch_doc_ids", r.value7() != null ? r.value7().data() : "");
+                    // is_batch is boolean now (catalog-031-style hygiene pass); NOT NULL
+                    // DEFAULT false is preserved automatically, but stay defensive to match
+                    // CatalogRepository's legacy_grandfathered convention.
+                    m.put("is_batch",      r.value8() != null ? r.value8() : Boolean.FALSE);
                     m.put("chain",         str(r.value9()));
                     return m;
                 });
@@ -1021,8 +1039,8 @@ public final class TelemetryRepository {
                 .set(HOOK_FAILURES.HOOK_NAME, hookName)
                 .set(HOOK_FAILURES.ERROR, str(error))
                 .set(HOOK_FAILURES.OCCURRED_AT, occurredAt)
-                .set(HOOK_FAILURES.BATCH_DOC_IDS, batchDocIds)
-                .set(HOOK_FAILURES.IS_BATCH, isBatch ? 1 : 0)
+                .set(HOOK_FAILURES.BATCH_DOC_IDS, jsonbOrNull(batchDocIds))
+                .set(HOOK_FAILURES.IS_BATCH, isBatch)
                 .set(HOOK_FAILURES.CHAIN, str(chain).isBlank() ? "single" : str(chain))
                 .onConflictDoNothing()
                 .execute();
@@ -1055,8 +1073,8 @@ public final class TelemetryRepository {
                 .set(HOOK_FAILURES.HOOK_NAME, hookName)
                 .set(HOOK_FAILURES.ERROR, str(error))
                 .set(HOOK_FAILURES.OCCURRED_AT, occurredAt)
-                .set(HOOK_FAILURES.BATCH_DOC_IDS, batchDocIds)
-                .set(HOOK_FAILURES.IS_BATCH, isBatch ? 1 : 0)
+                .set(HOOK_FAILURES.BATCH_DOC_IDS, jsonbOrNull(batchDocIds))
+                .set(HOOK_FAILURES.IS_BATCH, isBatch)
                 .set(HOOK_FAILURES.CHAIN, str(chain).isBlank() ? "single" : str(chain))
                 .onConflictDoNothing()
                 .execute();
@@ -1239,7 +1257,7 @@ public final class TelemetryRepository {
                 String chain = str(optS(r, "chain"));
                 insert = insert.values(tenant, str(optS(r, "doc_id")), str(optS(r, "collection")),
                         reqS(r, "hook_name"), str(optS(r, "error")), parseTsStrict(reqS(r, "occurred_at")),
-                        optS(r, "batch_doc_ids"), Boolean.TRUE.equals(r.get("is_batch")) ? 1 : 0,
+                        jsonbOrNull(optS(r, "batch_doc_ids")), Boolean.TRUE.equals(r.get("is_batch")),
                         chain.isBlank() ? "single" : chain);
             }
             insert.onConflictDoNothing().execute();

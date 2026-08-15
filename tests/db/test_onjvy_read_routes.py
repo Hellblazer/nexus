@@ -153,17 +153,22 @@ def test_hook_failure_round_trips_with_its_fields(db: T2Database) -> None:
 def test_hook_failure_batch_variant_carries_its_doc_ids(db: T2Database) -> None:
     """The batch chain's payload survives — `nx taxonomy status` counts docs
     affected from it, so losing it silently under-reports the blast radius."""
+    # nexus-cefa1.3: hook_failures.batch_doc_ids is jsonb now — must be valid
+    # JSON (this was always the real production shape: hook_registry.py writes
+    # json.dumps(doc_ids)). A raw comma-joined string is no longer valid input.
     db.telemetry.record_hook_failure(
         doc_id="onjvy-batch-doc", collection="knowledge__onjvy",
         hook_name="onjvy_batch_hook", error="batch boom", chain="batch",
-        batch_doc_ids="d1,d2,d3", is_batch=True,
+        batch_doc_ids='["d1", "d2", "d3"]', is_batch=True,
     )
 
     rows = db.telemetry.list_hook_failures(days=1, limit=50)["rows"]
 
     row = next(r for r in rows if r["doc_id"] == "onjvy-batch-doc")
     assert row["is_batch"] is True
-    assert row["batch_doc_ids"] == "d1,d2,d3"
+    # PG's jsonb canonical text output matches json.dumps' default separators
+    # (space after each comma), so the real writer round-trips byte-identical.
+    assert row["batch_doc_ids"] == '["d1", "d2", "d3"]'
     assert row["chain"] == "batch"
 
 

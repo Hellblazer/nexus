@@ -599,8 +599,12 @@ class TelemetryRepositoryTest {
         String midTs = OffsetDateTime.now(ZoneOffset.UTC).minusDays(2).toString();
         repo.importHookFailureRow(tenant, "hr-1", "code__nexus", "hook_a",
             "boom-a", PAST_TS, null, false, "single");
+        // nexus-cefa1.3: batch_doc_ids is jsonb now — must be valid JSON (this was
+        // always the real production shape: hook_registry.py writes
+        // json.dumps(doc_ids)). "d1,d2" was an opaque-string stand-in that predates
+        // the column's real type and is no longer valid input.
         repo.importHookFailureRow(tenant, "hr-2", "code__nexus", "hook_b",
-            "boom-b", midTs, "d1,d2", true, "batch");
+            "boom-b", midTs, "[\"d1\", \"d2\"]", true, "batch");
         repo.importHookFailureRow(tenant, "hr-3", "code__nexus", "hook_a",
             "boom-c", nowTs, null, false, "single");
 
@@ -618,7 +622,10 @@ class TelemetryRepositoryTest {
         var batchRow = rows.stream()
             .filter(r -> "hr-2".equals(r.get("doc_id"))).findFirst().orElseThrow();
         assertThat(batchRow.get("is_batch")).isEqualTo(true);
-        assertThat(batchRow.get("batch_doc_ids")).isEqualTo("d1,d2");
+        // PG's jsonb canonical text output inserts a space after each array-element
+        // comma, matching Python's json.dumps default separators exactly — the real
+        // production writer (hook_registry.py) round-trips byte-identical.
+        assertThat(batchRow.get("batch_doc_ids")).isEqualTo("[\"d1\", \"d2\"]");
         assertThat(batchRow.get("chain")).isEqualTo("batch");
         assertThat(batchRow.get("hook_name")).isEqualTo("hook_b");
         assertThat(batchRow.get("error")).isEqualTo("boom-b");
@@ -672,6 +679,78 @@ class TelemetryRepositoryTest {
         assertThat(out.get("total")).isEqualTo(1);
         assertThat((List<Map<String, Object>>) out.get("rows"))
             .extracting(r -> r.get("doc_id")).containsExactly("m-1");
+    }
+
+    // ── hook_failures type-hygiene (nexus-cefa1.3) ────────────────────────────
+
+    @Test @Order(44)
+    @SuppressWarnings("unchecked")
+    void hookFailures_isBatch_wireRoundTrip_booleanIdentityPreserved() {
+        // nexus-cefa1.3: is_batch INTEGER -> boolean. The wire was already a JSON
+        // boolean (TelemetryHandler ~352/~504); this pins that the LIVE write path
+        // (recordHookFailure — what handleHookFailureRecord calls) still round-trips
+        // true/false as real Java Booleans, not truthy ints/strings, through the read
+        // path (getHookFailures — what handleHookFailureList calls).
+        final String tenant = "tel-hooks-isbatch-" + System.nanoTime();
+        repo.recordHookFailure(tenant, "ib-true", "code__nexus", "hook_true",
+            "boom", null, null, true, "batch");
+        repo.recordHookFailure(tenant, "ib-false", "code__nexus", "hook_false",
+            "boom", null, null, false, "single");
+
+        var rows = (List<Map<String, Object>>) repo.getHookFailures(tenant, 0, List.of(), 100).get("rows");
+
+        var trueRow = rows.stream().filter(r -> "ib-true".equals(r.get("doc_id"))).findFirst().orElseThrow();
+        var falseRow = rows.stream().filter(r -> "ib-false".equals(r.get("doc_id"))).findFirst().orElseThrow();
+        assertThat(trueRow.get("is_batch")).isInstanceOf(Boolean.class).isEqualTo(Boolean.TRUE);
+        assertThat(falseRow.get("is_batch")).isInstanceOf(Boolean.class).isEqualTo(Boolean.FALSE);
+    }
+
+    @Test @Order(45)
+    @SuppressWarnings("unchecked")
+    void hookFailures_batchDocIds_wireRoundTrip_preservesJsonArrayShape() {
+        // nexus-cefa1.3: batch_doc_ids TEXT -> jsonb. Real write path
+        // (recordHookFailure) with the real production shape — a JSON-encoded array
+        // string, exactly what hook_registry.py's json.dumps(doc_ids) emits — must
+        // read back as something taxonomy_cmd.py's json.loads(...) can still parse
+        // into the identical list, which is the only thing any consumer actually
+        // depends on (not byte-identical text).
+        final String tenant = "tel-hooks-batchids-" + System.nanoTime();
+        repo.recordHookFailure(tenant, "bd-1", "code__nexus", "hook_batch",
+            "boom", null, "[\"doc-a\", \"doc-b\", \"doc-c\"]", true, "batch");
+
+        var rows = (List<Map<String, Object>>) repo.getHookFailures(tenant, 0, List.of(), 100).get("rows");
+        var row = rows.stream().filter(r -> "bd-1".equals(r.get("doc_id"))).findFirst().orElseThrow();
+
+        Object raw = row.get("batch_doc_ids");
+        assertThat(raw).isInstanceOf(String.class);
+        try {
+            var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            List<String> parsed = mapper.readValue((String) raw,
+                mapper.getTypeFactory().constructCollectionType(List.class, String.class));
+            assertThat(parsed).containsExactly("doc-a", "doc-b", "doc-c");
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AssertionError("batch_doc_ids must remain parseable JSON after the wire round trip: " + raw, e);
+        }
+    }
+
+    @Test @Order(46)
+    void hookFailures_batchDocIds_nullAndBlank_bothRoundTripAsNull() {
+        // The migration's own USING NULLIF(batch_doc_ids, '')::jsonb clause maps ''
+        // to NULL; the live write path must keep doing that going forward too (a
+        // blank string is not valid jsonb input).
+        final String tenant = "tel-hooks-blank-" + System.nanoTime();
+        repo.recordHookFailure(tenant, "bd-null", "code__nexus", "hook_null",
+            "boom", null, null, false, "single");
+        repo.recordHookFailure(tenant, "bd-blank", "code__nexus", "hook_blank",
+            "boom", null, "", false, "single");
+
+        @SuppressWarnings("unchecked")
+        var rows = (List<Map<String, Object>>) repo.getHookFailures(tenant, 0, List.of(), 100).get("rows");
+
+        var nullRow = rows.stream().filter(r -> "bd-null".equals(r.get("doc_id"))).findFirst().orElseThrow();
+        var blankRow = rows.stream().filter(r -> "bd-blank".equals(r.get("doc_id"))).findFirst().orElseThrow();
+        assertThat(nullRow.get("batch_doc_ids")).isEqualTo("");
+        assertThat(blankRow.get("batch_doc_ids")).isEqualTo("");
     }
 
     // ── frecency ───────────────────────────────────────────────────────────────
