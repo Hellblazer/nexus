@@ -667,7 +667,7 @@ public final class PgVectorRepository {
             if (vec.length != dim) {
                 throw new IllegalArgumentException(
                     "embedder produced a " + vec.length + "-dim vector for collection '"
-                    + collection + "' which dispatches to chunks_" + dim);
+                    + collection + "' which dispatches to embedding_" + dim);
             }
         }
 
@@ -909,7 +909,7 @@ public final class PgVectorRepository {
         if (embedding.length != dim) {
             throw new IllegalArgumentException(
                 "upsertReferenceOnlyChunk: " + embedding.length + "-dim vector for collection '"
-                + collection + "' which dispatches to chunks_" + dim
+                + collection + "' which dispatches to embedding_" + dim
                 + " (dim mismatch — no silent truncation)");
         }
 
@@ -2112,7 +2112,7 @@ public final class PgVectorRepository {
         if (queryVec.length != dim) {
             throw new IllegalArgumentException(
                 "query embedder produced a " + queryVec.length
-                + "-dim vector but the collection dispatches to chunks_" + dim);
+                + "-dim vector but the collection dispatches to embedding_" + dim);
         }
         return result;
     }

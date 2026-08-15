@@ -204,7 +204,7 @@ public final class CombinedWriteService {
             if (vec.length != dim) {
                 throw new IllegalArgumentException(
                     "embedder produced a " + vec.length + "-dim vector for collection '"
-                    + collection + "' which dispatches to chunks_" + dim);
+                    + collection + "' which dispatches to embedding_" + dim);
             }
         }
 

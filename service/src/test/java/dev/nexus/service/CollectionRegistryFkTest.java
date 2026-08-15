@@ -551,9 +551,13 @@ class CollectionRegistryFkTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(70)
-    @Disabled("Pre-existing, unrelated to RDR-191: chunks_384_chash_len_check was already "
-        + "dropped by rdr180-2 before RDR-191 -- nexus.chunks has no length(text)=32 concept, "
-        + "only the octet family (D5 lane record, T2 nexus/rdr-191-batch-D5-2026-08-13).")
+    @Disabled("Pre-existing, unrelated to RDR-191 FK retargeting: this test's own assertion "
+        + "targets the OCTET family (CHK_384_CHASH = chunks_384_chash_octet_check), not the "
+        + "LEN family -- but nexus.chunks_384 was DROPPED CASCADE by "
+        + "vectors-004-unify-chunks.xml, so the INSERT below fails on an undefined relation "
+        + "before any CHECK constraint is reached; the unified nexus.chunks table carries only "
+        + "a single unqualified chunks_chash_octet_check (D5 lane record, T2 "
+        + "nexus/rdr-191-batch-D5-2026-08-13).")
     void chunks384_chashLenCheck_rejects31() throws Exception {
         // RED until P0.2 adds chunks_384_chash_len_check.
         try (Connection su = pg.createConnection("")) {
@@ -573,8 +577,9 @@ class CollectionRegistryFkTest {
     }
 
     @Test @Order(71)
-    @Disabled("Pre-existing, unrelated to RDR-191: chunks_384_chash_len_check was already "
-        + "dropped by rdr180-2 before RDR-191 -- see chunks384_chashLenCheck_rejects31.")
+    @Disabled("Pre-existing, unrelated to RDR-191 FK retargeting: same OCTET-family target "
+        + "(CHK_384_CHASH) and same undefined-relation cause -- see "
+        + "chunks384_chashLenCheck_rejects31.")
     void chunks384_chashLenCheck_rejects33() throws Exception {
         // RED until P0.2 adds chunks_384_chash_len_check.
         try (Connection su = pg.createConnection("")) {
@@ -613,8 +618,9 @@ class CollectionRegistryFkTest {
     }
 
     @Test @Order(73)
-    @Disabled("Pre-existing, unrelated to RDR-191: chunks_768_chash_len_check was already "
-        + "dropped by rdr180-2 before RDR-191 -- see chunks384_chashLenCheck_rejects31.")
+    @Disabled("Pre-existing, unrelated to RDR-191 FK retargeting: same OCTET-family target "
+        + "(CHK_768_CHASH) and same undefined-relation cause -- see "
+        + "chunks384_chashLenCheck_rejects31.")
     void chunks768_chashLenCheck_rejects31() throws Exception {
         // RED until P0.2 adds chunks_768_chash_len_check.
         try (Connection su = pg.createConnection("")) {
@@ -634,8 +640,9 @@ class CollectionRegistryFkTest {
     }
 
     @Test @Order(74)
-    @Disabled("Pre-existing, unrelated to RDR-191: chunks_768_chash_len_check was already "
-        + "dropped by rdr180-2 before RDR-191 -- see chunks384_chashLenCheck_rejects31.")
+    @Disabled("Pre-existing, unrelated to RDR-191 FK retargeting: same OCTET-family target "
+        + "(CHK_768_CHASH) and same undefined-relation cause -- see "
+        + "chunks384_chashLenCheck_rejects31.")
     void chunks768_chashLenCheck_rejects33() throws Exception {
         // RED until P0.2 adds chunks_768_chash_len_check.
         try (Connection su = pg.createConnection("")) {
@@ -655,8 +662,9 @@ class CollectionRegistryFkTest {
     }
 
     @Test @Order(75)
-    @Disabled("Pre-existing, unrelated to RDR-191: chunks_1024_chash_len_check was already "
-        + "dropped by rdr180-2 before RDR-191 -- see chunks384_chashLenCheck_rejects31.")
+    @Disabled("Pre-existing, unrelated to RDR-191 FK retargeting: same OCTET-family target "
+        + "(CHK_1024_CHASH) and same undefined-relation cause -- see "
+        + "chunks384_chashLenCheck_rejects31.")
     void chunks1024_chashLenCheck_rejects31() throws Exception {
         // RED until P0.2 adds chunks_1024_chash_len_check.
         try (Connection su = pg.createConnection("")) {
@@ -676,8 +684,9 @@ class CollectionRegistryFkTest {
     }
 
     @Test @Order(76)
-    @Disabled("Pre-existing, unrelated to RDR-191: chunks_1024_chash_len_check was already "
-        + "dropped by rdr180-2 before RDR-191 -- see chunks384_chashLenCheck_rejects31.")
+    @Disabled("Pre-existing, unrelated to RDR-191 FK retargeting: same OCTET-family target "
+        + "(CHK_1024_CHASH) and same undefined-relation cause -- see "
+        + "chunks384_chashLenCheck_rejects31.")
     void chunks1024_chashLenCheck_rejects33() throws Exception {
         // RED until P0.2 adds chunks_1024_chash_len_check.
         try (Connection su = pg.createConnection("")) {

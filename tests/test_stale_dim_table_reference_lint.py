@@ -281,26 +281,27 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     ),
     # ── src/nexus: pure historical prose (javadoc/docstring/comment only,
     #    no live per-dim SQL target remains in the file) ──────────────────
-    "src/nexus/search_engine.py": (
-        1,
-        "Comment narrating the pre-unify per-dim dispatch PgVectorRepository "
-        "used to do; no live per-dim reference remains here."
-    ),
+    # nexus-ifgxr (2026-08-15): src/nexus/search_engine.py's sole hit
+    # ("collections dispatch to chunks_384") was fixed to "embedding_384"
+    # (matches the unified DimTables.embeddingColumn naming already used
+    # throughout the Java test comments); live count is now 0, entry
+    # removed per test_allowlists_are_not_stale's "pin of 0 is not a real
+    # exemption" rule.
     "src/nexus/catalog/http_catalog_client.py": (
         2,
         "Docstrings narrating 'chunks — the RDR-191 unified relation, was "
         "chunks_384/768/1024' for reader context; historical only."
     ),
-    "src/nexus/db/http_vector_client.py": (
-        3,
-        "Docstring narrating the pre-unify per-collection UNION query shape "
-        "over chunks_384/768/1024; historical only."
-    ),
-    "src/nexus/db/collection_state.py": (
-        3,
-        "Comment narrating which physical rows a state transition touches, "
-        "phrased against the pre-unify per-dim table names; historical only."
-    ),
+    # nexus-ifgxr (2026-08-15): src/nexus/db/http_vector_client.py's 3 hits
+    # (the pre-unify per-collection UNION query shape over
+    # chunks_384/768/1024) were fixed to describe the unified nexus.chunks
+    # table's single-scan shape; live count is now 0, entry removed per
+    # test_allowlists_are_not_stale's "pin of 0 is not a real exemption"
+    # rule.
+    # nexus-ifgxr (2026-08-15): src/nexus/db/collection_state.py's 3 hits
+    # (physical rows phrased against the pre-unify per-dim table names)
+    # were fixed to name nexus.chunks; live count is now 0, entry removed
+    # for the same reason.
     "src/nexus/db/t2/http_taxonomy_store.py": (
         1,
         "Comment narrating which legacy centroid table a bge-768/voyage-1024 "
@@ -311,14 +312,13 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "Docstring narrating the pre-unify centroid persistence target; "
         "historical only."
     ),
-    "src/nexus/remediation/sql_lint.py": (
-        1,
-        "Comment citing 'SELECT content FROM chunks_768' as the worked "
-        "example the fail-closed unqualified-target rule was written "
-        "against (mirrors tests/remediation/test_sql_lint.py's own "
-        "unqualified-target fixtures); the actual guard is generic and "
-        "targets no specific table."
-    ),
+    # nexus-ifgxr (2026-08-15): src/nexus/remediation/sql_lint.py's sole
+    # hit ("SELECT content FROM chunks_768" as the worked example) was
+    # fixed to "SELECT content FROM chunks" (the guard is generic and
+    # targets no specific table, so the unified name reads just as well
+    # as an example); live count is now 0, entry removed per
+    # test_allowlists_are_not_stale's "pin of 0 is not a real exemption"
+    # rule.
     # ── service/src/main/java: straddle-era functional (constraint-name
     #    mapping used to validate a pre-unify install's own constraints) ──
     "service/src/main/java/dev/nexus/service/db/SchemaMigrator.java": (
@@ -436,10 +436,12 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "chash_rekey.py's allowlist reason."
     ),
     "tests/e2e/migration-rehearsal/seed_legacy.py": (
-        3,
+        2,
         "A LEGACY store-state seeding script by name and purpose: seeds a "
         "pre-unify per-dim database for upgrade-ladder rehearsal, so it "
-        "must dispatch rows to chunks_384/768/1024 by construction."
+        "must dispatch rows to chunks_384/768/1024 by construction. 3->2 at "
+        "nexus-ifgxr: the docstring quoting the retired 'dispatches to "
+        "chunks_1024' exception text now quotes the embedding_ wording."
     ),
     "tests/e2e/migration-rehearsal/rehearse_chash_window.sh": (
         11,
@@ -586,22 +588,29 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     ),
     # ── straddle-era FK test, Phase 5 LANDED (nexus-o8dil.49) ────────────────
     "service/src/test/java/dev/nexus/service/CollectionRegistryFkTest.java": (
-        12,
+        13,
         "RDR-156 nexus-70r3c.1 FK+hygiene suite. RDR-191 Phase 5 "
         "(nexus-o8dil.49, fk-004-chunks-collection-registry.xml) landed the "
         "unified chunks_collection_fk on 2026-08-15 — every test method that "
         "was @Disabled pending Phase 5 (unregistered-collection reject, "
         "ON DELETE RESTRICT, cross-tenant, gap-window reconcile) is now "
         "RE-ENABLED and RETARGETED to nexus.chunks + DimTables helpers, "
-        "dropping the count from 38 to 12. The 12 remaining hits are the "
-        "STILL-@Disabled GROUP 7 CHECK-constraint tests "
-        "(chunks_<dim>_chash_len_check), disabled for an unrelated, "
-        "pre-existing reason unaffected by Phase 5: those constraint names "
-        "were already dropped by rdr180-2 before RDR-191 (nexus.chunks has "
-        "no length(text)=32 concept, only the octet family — T2/D5 lane "
-        "record). Their dead-but-intentional SQL bodies (INSERT INTO "
-        "nexus.chunks_384/768/1024) stay verbatim, same preservation "
-        "rationale as before, just for a narrower still-disabled group."
+        "dropping the count from 38 to 12. The remaining hits are the "
+        "STILL-@Disabled GROUP 7 CHECK-constraint tests. nexus-ifgxr "
+        "(2026-08-15) corrected their @Disabled reason strings, which had "
+        "cited the wrong constraint family: each test's own assertion "
+        "targets the OCTET family (CHK_384/768/1024_CHASH = "
+        "chunks_<dim>_chash_octet_check), not chunks_<dim>_chash_len_check "
+        "as the old reason claimed. The real, now-stated cause is that "
+        "nexus.chunks_384/768/1024 were DROPPED CASCADE by "
+        "vectors-004-unify-chunks.xml, so the INSERT bodies fail on an "
+        "undefined relation before any CHECK constraint is reached, the "
+        "unified nexus.chunks table carries only a single unqualified "
+        "chunks_chash_octet_check. That correction's one spelled-out "
+        "'nexus.chunks_384 was DROPPED CASCADE' phrase adds one literal "
+        "hit, moving the count from 12 to 13. Their dead-but-intentional "
+        "SQL bodies (INSERT INTO nexus.chunks_384/768/1024) stay verbatim, "
+        "same preservation rationale as before."
     ),
     # ── deliberate wire-compat label: chash_conformance_report(dim)'s
     #    table_name column, same pattern as the Python conformance-report

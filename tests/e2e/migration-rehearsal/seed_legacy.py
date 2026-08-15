@@ -795,7 +795,7 @@ def _seed(
     SAME-MODEL voyage passthrough is different: it COPIES the stored vector
     byte-for-byte into chunks_1024, so its source vectors must be the real
     dimension (1024) or the service's RDR-156 schema guard rejects the upsert
-    ("embedder produced a 2-dim vector ... dispatches to chunks_1024"). Values are
+    ("embedder produced a 2-dim vector ... dispatches to embedding_1024"). Values are
     irrelevant (parity asserts COUNT, not similarity) — only the dim matters.
 
     ``id_len`` (nexus-itme7 / RDR-180): 16 seeds pre-RDR-108 16-char chunk

@@ -26,12 +26,11 @@ nexus-70r3c.13):
 
 Only :class:`~nexus.db.http_vector_client.HttpVectorClient` has this gap.
 Tombstoning (catalog-003) sets ``catalog_documents.deleted_at`` -- it never
-touches the physical ``chunks_384``/``chunks_768``/``chunks_1024`` rows
-(purge is a separate, later, explicit step), so the raw
-``GET /v1/vectors/collections`` listing (a bare ``SELECT DISTINCT
-collection`` union over those tables) still names a tombstoned collection
-even though ``collection_vector_stats`` -- built on the tombstone-filtered
-``live_chunks`` view -- does not. ``T3Database`` (Chroma / InMemoryVectorClient)
+touches the physical ``nexus.chunks`` rows (purge is a separate, later,
+explicit step), so the raw ``GET /v1/vectors/collections`` listing (a bare
+``SELECT DISTINCT collection`` scan over that unified table) still names a
+tombstoned collection even though ``collection_vector_stats`` -- built on
+the tombstone-filtered ``live_chunks`` view -- does not. ``T3Database`` (Chroma / InMemoryVectorClient)
 has no such split: its ``collection_exists()`` is already a raw physical
 check with zero tombstone concept, so it is a true two-state PRESENT/ABSENT
 backend and is exempt from this ambiguity by construction.
