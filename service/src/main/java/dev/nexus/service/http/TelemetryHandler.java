@@ -351,6 +351,11 @@ public final class TelemetryHandler implements HttpHandler {
         String batchDocIds = optStrNull(body, "batch_doc_ids");
         boolean isBatch    = Boolean.TRUE.equals(body.get("is_batch"));
         String chain       = optStr(body, "chain");
+        // nexus-nydpr: batch_doc_ids writes into a jsonb column now
+        // (telemetry-004-type-hygiene.xml) — a non-blank value that fails
+        // Jackson#readTree is not valid JSON and 400s here, same shared helper
+        // AspectHandler/PlanHandler/TaxonomyHandler use.
+        HttpUtil.rejectMalformedJson(MAPPER, "batch_doc_ids", batchDocIds);
         repo.recordHookFailure(tenant, docId, collection, hookName, error, occurredAt,
             batchDocIds, isBatch, chain);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
@@ -494,13 +499,16 @@ public final class TelemetryHandler implements HttpHandler {
                     requireString(body, "created_at"));
             }
             case "hook_failures" -> {
+                String batchDocIds = optStrNull(body, "batch_doc_ids");
+                // nexus-nydpr: see handleHookFailureRecord's identical comment above.
+                HttpUtil.rejectMalformedJson(MAPPER, "batch_doc_ids", batchDocIds);
                 repo.importHookFailureRow(tenant,
                     optStr(body, "doc_id"),
                     optStr(body, "collection"),
                     requireString(body, "hook_name"),
                     optStr(body, "error"),
                     requireString(body, "occurred_at"),
-                    optStrNull(body, "batch_doc_ids"),
+                    batchDocIds,
                     Boolean.TRUE.equals(body.get("is_batch")),
                     optStr(body, "chain"));
             }
@@ -537,13 +545,31 @@ public final class TelemetryHandler implements HttpHandler {
             throw new IllegalArgumentException("field 'rows' must be a JSON array");
         }
         List<Map<String, Object>> rows = new ArrayList<>(rawRows.size());
+        int rowIndex = 0;
         for (Object o : rawRows) {
             if (!(o instanceof Map<?, ?> rm)) {
                 throw new IllegalArgumentException("each element of 'rows' must be an object");
             }
             @SuppressWarnings("unchecked")
             Map<String, Object> row = (Map<String, Object>) rm;
+            // nexus-nydpr: the "hook_failures" table's batch_doc_ids field writes into
+            // a jsonb column now (telemetry-004-type-hygiene.xml) — validate it
+            // here too, same as the single-row /import path, naming the failing row
+            // (mirrors TaxonomyHandler.handleImportBatch's rows[i] convention). The
+            // value is coerced through optStrNull first, exactly as the single-row
+            // /hook_failures/record and /import paths do, so a non-string
+            // batch_doc_ids (a native JSON array/object) is validated as its string
+            // form rather than skipping the gate (rejectMalformedJson only inspects
+            // Strings).
+            if ("hook_failures".equals(table)) {
+                try {
+                    HttpUtil.rejectMalformedJson(MAPPER, "batch_doc_ids", optStrNull(row, "batch_doc_ids"));
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException("rows[" + rowIndex + "]: " + e.getMessage(), e);
+                }
+            }
             rows.add(row);
+            rowIndex++;
         }
         int imported = repo.importBatch(tenant, table, rows);
         HttpUtil.send(ex, 200, json(Map.of("imported", imported)));
