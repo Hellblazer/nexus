@@ -919,6 +919,20 @@ since been WITHDRAWN by F13; numbering retained so cross-references hold):
   Phase 5+7 batch review. Decision of record: T2
   `nexus/rdr-191-phase7-fold-decision`.
 
+  **CORRECTION to amendment (xii), same day (2026-08-14, implementation
+  discovery, verified not assumed):** Phase 7's substance had ALREADY
+  SHIPPED before the fold was decided — `catalog-025-collection-not-null`
+  (bead nexus-71gw2, landed 2026-08-12) closed the NULL-collection
+  population and promoted `SET NOT NULL`, strictly earlier in the
+  changelog's include order, on every real deployment. The fold decision
+  was made against a stale bead board (.35/.36/.37 open while the work
+  was done — the same stale-open class as .21/.22). The drafted
+  `catalog-030` reinforcement changeset was therefore structurally
+  vestigial and was DROPPED rather than shipped; a standing test pin
+  asserts the column is NOT NULL post-walk against catalog-025's
+  constraint. Phase 7 is COMPLETE via catalog-025; nothing further ships
+  for it in the Phase 5 cut.
+
 ## Research Findings
 
 - **F18 (DECIDED, 2026-08-11): the migration shape is ALWAYS-COPY, not
