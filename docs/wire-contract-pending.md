@@ -41,7 +41,7 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
-(none)
+- `3b2901141627c98a4ad1c182bf021b44703d6d33` -- bead nexus-o8dil.33 -- engine tag `UNCUT (rides the next engine-service tag after v0.1.76; catalog-030)` -- RDR-191 Phase 6 subtraction: retires the client-side manifest-integrity apparatus; engine half drops manifest_orphans/manifest_verify_all/manifest_backfill SQL at catalog-030 — before deploying the engine tag that carries it, confirm whether the currently published client (v7.7.0) still calls any endpoint backed by those functions (that check is what this entry exists to force; see RDR-191 post-mortem)
 
 ## Shipped
 
