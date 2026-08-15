@@ -171,6 +171,50 @@ class ReadShapeViewsTest {
         }
     }
 
+    /**
+     * nexus-cefa1.2: collection_health_meta PARITY test for catalog-031-1-documents-
+     * temporal's DROP/CREATE (regex-guard + to_char lexicographic hacks retired to plain
+     * timestamptz comparisons). Asserts the view's MAX(indexed_at)/last_indexed and
+     * orphan_count semantics are UNCHANGED against the same shape of fixture the
+     * pre-migration view handled: an undated (NULL indexed_at) document must be excluded
+     * from both last_indexed and the stale_source_ratio denominator — mirroring the old
+     * regex guard's exclusion of a non-ISO-prefixed indexed_at — while still counting
+     * toward orphan_count (orphan-ness is independent of indexed_at entirely).
+     */
+    @Test @Order(41)
+    void collectionHealthMeta_parity_maxIndexedAtAndUndatedDocExclusion() throws Exception {
+        final String col = "c_chm_parity";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            seedDocIndexed(su, TENANT_A, "chmp.1", col, "2026-01-01T08:00:00Z");
+            seedDocIndexed(su, TENANT_A, "chmp.2", col, "2026-06-01T12:00:00Z");
+            seedDocIndexed(su, TENANT_A, "chmp.3", col, "2026-03-15T00:00:00Z");
+            // Undated doc (NULL indexed_at, the '' -> NULL post-migration shape) — must
+            // NOT win the MAX and must NOT count toward the stale_source_ratio denominator.
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
+                + "VALUES ('" + TENANT_A + "', 'chmp.4', 'T', '" + col + "')");
+
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT last_indexed, orphan_count, stale_source_ratio FROM nexus.collection_health_meta "
+                + "WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + col + "'");
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getTimestamp("last_indexed").toInstant())
+                .as("MAX(indexed_at) over {01-01, 06-01, 03-15, NULL} must be 06-01, "
+                    + "the NULL undated doc must not participate")
+                .isEqualTo(java.time.Instant.parse("2026-06-01T12:00:00Z"));
+            assertThat(rs.getLong("orphan_count"))
+                .as("all 4 docs (dated and undated alike) have no inbound link — orphan-ness "
+                    + "does not depend on indexed_at")
+                .isEqualTo(4L);
+            // 3 dated docs, all far in the past relative to any real test-run clock — all
+            // stale; the undated 4th doc excluded from BOTH numerator and denominator.
+            assertThat(rs.getDouble("stale_source_ratio"))
+                .as("3/3 dated docs are stale; the undated 4th doc must not water down the ratio")
+                .isEqualTo(1.0d);
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // TOMBSTONE AUDIT 2026-08-01 (nexus-se9r3, nexus-l1nre, nexus-cah9n)
     // ══════════════════════════════════════════════════════════════════════════

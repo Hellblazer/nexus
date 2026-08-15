@@ -1012,7 +1012,15 @@ class TestManifestWritesRefreshIndexedAt:
     --force backfill repaired chunk_count=0 ghosts while leaving indexed_at
     frozen at the original ghost registration date."""
 
-    _FROZEN = "2026-07-09T17:42:10+00:00"
+    # nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
+    # — CatalogRepository.utcIso reads it back in the catalog's micros+offset
+    # convention (INDEXED_AT_FMT, kept per Hal directive 2026-08-15 so a client-
+    # written stamp round-trips byte-identical). This literal already carries
+    # microseconds (.000000) so it round-trips exactly; a value without them would
+    # gain the accepted ".000000" residual on read (Python's own isoformat() omits
+    # the fraction when microsecond==0, the one shape this formatter does not echo
+    # byte-for-byte — see CatalogRepository.utcIso's javadoc).
+    _FROZEN = "2026-07-09T17:42:10.000000+00:00"
     # nexus-dbzxb (RDR-191 Phase 5 Python collateral): was
     # "rdr__x__voyage-context-3__v1". fk_catalog_chunks_chunk now requires a
     # REAL nexus.chunks row backing every manifest chash, so this collection

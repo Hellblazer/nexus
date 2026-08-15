@@ -434,19 +434,60 @@ class Catalog016SourceUriUniqueTest {
         assertTrue(dedupSql.contains("NO FORCE ROW LEVEL SECURITY"),
             "016-0 must carry the catalog-013-1b FORCE-RLS toggle");
 
+        // nexus-cefa1.2: 016-0 is a run-once, ALREADY-SHIPPED changeset — its
+        // <sql> body must NEVER be edited, and on every real migration chain
+        // (fresh install or upgrade) it executes BEFORE catalog-031-1-
+        // documents-temporal, while indexed_at is still TEXT, so the shipped
+        // NULLIF(indexed_at,'') is correct there and stays untouched in the
+        // changelog. This TEST, though, replays that text verbatim against a
+        // schema where catalog-031 has ALREADY run earlier in the SAME chain
+        // (Liquibase applies changesets in file order, and 016 precedes 031),
+        // so indexed_at is timestamptz by the time this test's own DROP
+        // INDEX / replay runs — NULLIF(timestamptz, unknown) fails to bind
+        // the '' literal at all ("invalid input syntax for type timestamp
+        // with time zone: \"\""). Apply the type-adjusted equivalent ONLY to
+        // this test's in-memory copy of the SQL text: bare `indexed_at`
+        // (NULL still sorts last under "ASC NULLS LAST", identical ordering
+        // outcome to NULLIF('','')=NULL on the pre-migration TEXT column).
+        // Asserted below so a future rewrite of 016-0's shipped text fails
+        // this test LOUDLY instead of silently replaying an unsubstituted
+        // (and now wrong) expression.
+        String legacyNullSentinelExpr = "NULLIF(indexed_at, '')";
+        assertTrue(dedupSql.contains(legacyNullSentinelExpr),
+            "016-0's shipped <sql> no longer contains " + legacyNullSentinelExpr
+            + " verbatim — the type-adjusted replay substitution below is stale; "
+            + "re-derive it against the current changeset text before trusting this test");
+        dedupSql = dedupSql.replace(legacyNullSentinelExpr, "indexed_at");
+
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DROP INDEX nexus.ux_catalog_documents_live_source_uri");
             try {
                 runDedupAndAssert(su, dedupSql);
-            } finally {
+            } catch (Exception primary) {
                 // Review (78n33): the index is SHARED suite state — an
                 // assertion failure above must not leave it dropped for
-                // every later test in this PER_CLASS container.
-                for (String stmt : indexSql.split(";")) {
-                    if (!stmt.isBlank()) su.createStatement().execute(stmt);
+                // every later test in this PER_CLASS container. But a
+                // recreate failure (e.g. duplicate rows survived because the
+                // dedup itself failed) must not MASK the primary exception —
+                // that masking is exactly what turned a clear "invalid input
+                // syntax" root cause into an opaque "no unique or exclusion
+                // constraint matching the ON CONFLICT" report one layer up.
+                // Attach as suppressed instead of letting it propagate.
+                try {
+                    for (String stmt : indexSql.split(";")) {
+                        if (!stmt.isBlank()) su.createStatement().execute(stmt);
+                    }
+                } catch (Exception recreateFailure) {
+                    primary.addSuppressed(recreateFailure);
                 }
+                throw primary;
+            }
+            // Success path: recreate the index normally — a genuine failure
+            // here (not masking anything) surfaces as itself.
+            for (String stmt : indexSql.split(";")) {
+                if (!stmt.isBlank()) su.createStatement().execute(stmt);
             }
         }
     }
@@ -454,11 +495,15 @@ class Catalog016SourceUriUniqueTest {
     private void runDedupAndAssert(Connection su, String dedupSql) throws Exception {
         {
             String uri = "file:///legacy/dup.md";
+            // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
+            // — 16.3's undated row uses NULL (the '' -> NULL post-migration shape), not the
+            // legacy '' sentinel the pre-migration NULLIF(indexed_at,'') dedup ORDER BY was
+            // written to tolerate; NULL still sorts last under "ASC NULLS LAST".
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri, chunk_count, indexed_at) VALUES "
                 + "('" + TENANT + "', '16.1', 'loser-few-chunks',  '" + uri + "', 2, '2026-01-01T00:00:00Z'),"
                 + "('" + TENANT + "', '16.2', 'winner-most-chunks','" + uri + "', 9, '2026-01-02T00:00:00Z'),"
-                + "('" + TENANT + "', '16.3', 'loser-no-chunks',   '" + uri + "', 0, '')");
+                + "('" + TENANT + "', '16.3', 'loser-no-chunks',   '" + uri + "', 0, NULL)");
             for (String stmt : dedupSql.split(";")) {
                 if (!stmt.isBlank()) su.createStatement().execute(stmt);
             }

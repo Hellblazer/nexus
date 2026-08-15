@@ -1517,6 +1517,29 @@ class CatalogRepositoryTest {
         assertThat(coll).isNotNull();
         assertThat(coll.get("content_type")).isEqualTo("code");
         assertThat(coll.get("embedding_model")).isEqualTo("voyage-code-3");
+        // nexus-cefa1.2: legacy_grandfathered is boolean now (catalog-031-3-collections-
+        // legacy-bool); the DEFAULT false round-trips as a real Boolean, not 0.
+        assertThat(coll.get("legacy_grandfathered")).isEqualTo(Boolean.FALSE);
+    }
+
+    /**
+     * nexus-cefa1.2: legacy_grandfathered=true (a real JSON boolean, matching the
+     * only shape Python clients send — nexus-cecqy) round-trips through
+     * catalog_collections.legacy_grandfathered's boolean column exactly.
+     */
+    @Test @Order(60)
+    void collection_legacyGrandfathered_trueRoundTrips() {
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", "legacy__nexus__voyage-code-3__v1",
+            "content_type", "code",
+            "owner_id", "nexus-1-1",
+            "embedding_model", "voyage-code-3",
+            "model_version", "v1",
+            "legacy_grandfathered", true
+        ));
+        var coll = repo.getCollection(TENANT_A, "legacy__nexus__voyage-code-3__v1");
+        assertThat(coll).isNotNull();
+        assertThat(coll.get("legacy_grandfathered")).isEqualTo(Boolean.TRUE);
     }
 
     @Test @Order(61)
@@ -2368,8 +2391,15 @@ class CatalogRepositoryTest {
 
         var meta = repo.collectionHealthMeta(chmTenant, chmColl);
 
-        // last_indexed = MAX("2026-01-01", "2026-06-01", "2026-03-15") = "2026-06-01..."
-        assertThat(meta.get("last_indexed")).isEqualTo("2026-06-01T12:00:00");
+        // last_indexed = MAX("2026-01-01", "2026-06-01", "2026-03-15") = "2026-06-01...".
+        // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal);
+        // the wire value is CatalogRepository.utcIso's micros+offset rendering
+        // (INDEXED_AT_FMT, the catalog convention — kept, not the coarser "...Z" shape, so a
+        // stamp written by the published client round-trips byte-identical). The seed value
+        // above has no microsecond/offset component, so it gains the accepted
+        // ".000000+00:00" residual on read (see utcIso's javadoc) rather than echoing verbatim
+        // the way the pre-migration TEXT column did.
+        assertThat(meta.get("last_indexed")).isEqualTo("2026-06-01T12:00:00.000000+00:00");
         // orphan_count = 2 (chm.1 and chm.3 have no incoming links)
         assertThat(meta.get("orphan_count")).isEqualTo(2L);
     }
@@ -2401,14 +2431,15 @@ class CatalogRepositoryTest {
             "indexed_at", "2026-06-07T10:00:00"
         ));
 
-        // TENANT_X must see only its own rows: last_indexed="2026-05-01T00:00:00", orphan_count=2
+        // TENANT_X must see only its own rows: last_indexed, orphan_count=2
+        // (nexus-cefa1.2: micros+offset — see collectionHealthMeta_exactValues comment above.)
         var metaX = repo.collectionHealthMeta(tenantX, sharedColl);
-        assertThat(metaX.get("last_indexed")).isEqualTo("2026-05-01T00:00:00");
+        assertThat(metaX.get("last_indexed")).isEqualTo("2026-05-01T00:00:00.000000+00:00");
         assertThat(metaX.get("orphan_count")).isEqualTo(2L);
 
-        // TENANT_Y must see only its own rows: last_indexed="2026-06-07T10:00:00", orphan_count=1
+        // TENANT_Y must see only its own rows: last_indexed, orphan_count=1
         var metaY = repo.collectionHealthMeta(tenantY, sharedColl);
-        assertThat(metaY.get("last_indexed")).isEqualTo("2026-06-07T10:00:00");
+        assertThat(metaY.get("last_indexed")).isEqualTo("2026-06-07T10:00:00.000000+00:00");
         assertThat(metaY.get("orphan_count")).isEqualTo(1L);
     }
 

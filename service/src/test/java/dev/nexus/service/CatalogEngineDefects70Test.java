@@ -555,6 +555,10 @@ class CatalogEngineDefects70Test {
             "source_uri", "file:///defects70/idxatchanged/doc.md"));
         repo.updateDocument(TENANT, t, Map.of("indexed_at", "2020-01-01T00:00:00.000000+00:00"));
         String original = (String) repo.getDocument(TENANT, t).get("indexed_at");
+        // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal) —
+        // the wire read is CatalogRepository.utcIso's micros+offset rendering (INDEXED_AT_FMT,
+        // kept as the catalog convention). The written value above already carries
+        // microseconds + an explicit offset, so it round-trips byte-identical.
         assertThat(original)
             .as("precondition: a known, controlled original value")
             .isEqualTo("2020-01-01T00:00:00.000000+00:00");
@@ -599,6 +603,8 @@ class CatalogEngineDefects70Test {
         repo.updateDocument(TENANT, t, Map.of(
             "head_hash", "rev-explicit", "indexed_at", "2021-06-01T00:00:00.000000+00:00"));
 
+        // nexus-cefa1.2: see mo927_updateStampsIndexedAtWhenHeadHashChanges's comment —
+        // micros+offset round-trips byte-identical since the written value already carries both.
         assertThat(repo.getDocument(TENANT, t).get("indexed_at"))
             .isEqualTo("2021-06-01T00:00:00.000000+00:00");
     }
@@ -646,12 +652,22 @@ class CatalogEngineDefects70Test {
             .isEqualTo("2020-01-01T00:00:00.000000+00:00");
     }
 
-    /** Raw read of indexed_at bypassing RLS/tombstone filtering (nexus-eldyi). */
+    /**
+     * Raw read of indexed_at bypassing RLS/tombstone filtering (nexus-eldyi).
+     *
+     * <p>nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
+     * — a bare {@code getString()} on a timestamptz column returns the JDBC driver's own
+     * default rendering (space-separated, offset without a colon), not the ISO string
+     * this test wrote. Render explicitly via the SAME fixed-width-micros to_char shape
+     * catalog-031's rollback USING clause uses, so this raw-SQL probe stays byte-exact
+     * against the ISO strings this file writes through updateDocument.
+     */
     private String rawIndexedAt(String tumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             try (var ps = su.prepareStatement(
-                "SELECT indexed_at FROM nexus.catalog_documents WHERE tenant_id = ? AND tumbler = ?")) {
+                "SELECT to_char(indexed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"+00:00\"') "
+                + "FROM nexus.catalog_documents WHERE tenant_id = ? AND tumbler = ?")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, tumbler);
                 try (var rs = ps.executeQuery()) {
@@ -1206,7 +1222,11 @@ class CatalogEngineDefects70Test {
                 "INSERT INTO nexus.catalog_documents "
                 + "(tenant_id, tumbler, title, content_type, physical_collection, "
                 + " chunk_count, metadata, file_path, corpus, head_hash, indexed_at, source_uri) "
-                + "VALUES (?, ?, ?, 'code', ?, ?, CAST(? AS jsonb), '', '', '', '', ?)")) {
+                // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
+                // — '' is invalid input for that type (PSQLException); NULL is the correct
+                // "unset" representation. file_path/corpus/head_hash stay TEXT NOT NULL
+                // DEFAULT '' (untouched by this migration), so '' remains correct for those.
+                + "VALUES (?, ?, ?, 'code', ?, ?, CAST(? AS jsonb), '', '', '', NULL, ?)")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, tumbler);
                 ps.setString(3, "damaged-" + tumbler);
@@ -1457,15 +1477,22 @@ class CatalogEngineDefects70Test {
             "from_tumbler", p[0], "to_tumbler", p[1], "link_type", "cites",
             "created_by", "j80w-test", "created_at", explicit));
 
+        // nexus-cefa1.2: created_at is timestamptz now (catalog-031-2-links-created-at) —
+        // CatalogRepository.utcIso's micros+offset rendering (the catalog convention, kept)
+        // round-trips this caller-supplied value byte-identical since it already carries
+        // both microseconds and an explicit offset.
         assertThat(onlyEdge(p[0], p[1], "cites").get("created_at")).isEqualTo(explicit);
     }
 
     @Test
     void j80w_emptyCreatedAtRowIsUnmatchableByBeforeFilter() {
         var p = linkPair("j80w-empty-unmatchable");
-        // importLink is the ETL leg — out of scope for this fix — and still
-        // writes '' when the caller supplies no created_at, giving a realistic
-        // pre-fix-shaped row to probe the guard against.
+        // importLink is the ETL leg and, since catalog-031 (nexus-cefa1.2), writes
+        // NULL created_at when the caller supplies none (tsOrNull; the pre-031
+        // '' sentinel rows became NULL under NULLIF in the migration). This is the
+        // undated-row shape nexus-4j80w requires to be UNMATCHABLE by a before-
+        // filter — now by natural SQL NULL semantics (NULL < ts is NULL), with the
+        // old CREATED_AT.ne("") guards deleted.
         repo.importLink(TENANT, Map.of(
             "from_tumbler", p[0], "to_tumbler", p[1], "link_type", "cites",
             "created_by", "j80w-test"));
@@ -1473,7 +1500,7 @@ class CatalogEngineDefects70Test {
         var results = repo.queryLinks(TENANT, p[0], null, null, null,
             "9999-12-31T00:00:00+00:00", 100, 0, "both", null);
         assertThat(results)
-            .as("a '' created_at row must be UNMATCHABLE by a before-filter (fail-safe)")
+            .as("a NULL created_at row must be UNMATCHABLE by a before-filter (fail-safe)")
             .isEmpty();
 
         int deleted = repo.bulkDeleteLinks(TENANT, p[0], null, null, null, "9999-12-31T00:00:00+00:00");
@@ -1493,6 +1520,31 @@ class CatalogEngineDefects70Test {
         assertThat(results)
             .as("a link with a real timestamp before the cutoff must still match")
             .hasSize(1);
+    }
+
+    /**
+     * nexus-cefa1.2: created_at is timestamptz now (catalog-031-2-links-created-at) —
+     * a caller-supplied createdAtBefore filter that fails to parse must 400 (via
+     * CatalogRepository.parseCreatedAtBeforeStrict -> IllegalArgumentException ->
+     * CatalogHandler's generic 400 ladder), not silently fall back to a raw TEXT
+     * comparison the pre-migration TEXT column tolerated regardless of shape.
+     */
+    @Test
+    void j80w_garbageCreatedAtBeforeIsRejected() {
+        var p = linkPair("j80w-garbage-before");
+        repo.upsertLink(TENANT, Map.of(
+            "from_tumbler", p[0], "to_tumbler", p[1], "link_type", "cites",
+            "created_by", "j80w-test"));
+
+        assertThatThrownBy(() -> repo.queryLinks(TENANT, p[0], null, null, null,
+            "not-a-timestamp-at-all", 100, 0, "both", null))
+            .isInstanceOf(IllegalArgumentException.class);
+
+        assertThatThrownBy(() -> repo.bulkDeleteLinks(TENANT, p[0], null, null, null, "not-a-timestamp-at-all"))
+            .isInstanceOf(IllegalArgumentException.class);
+
+        // the link must survive both rejected calls — a 400 must not have partially applied.
+        assertThat(repo.linksFrom(TENANT, p[0], List.of("cites"))).hasSize(1);
     }
 
     @Test

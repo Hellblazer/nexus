@@ -182,11 +182,16 @@ class CatalogFtsFilenameSearchTest {
 
     @Test
     void manifest_append_refreshes_indexed_at() {
+        // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal) —
+        // the wire read is CatalogRepository.utcIso's micros+offset rendering (INDEXED_AT_FMT,
+        // the catalog convention, kept). The written value below carries an explicit offset
+        // but no microseconds, so it gains the accepted ".000000" residual on read (see
+        // utcIso's javadoc) rather than echoing verbatim.
         String doc = repo.registerDocument(TENANT, "9.3", Map.of(
             "title", "ghost.md", "content_type", "rdr",
             "file_path", "docs/ghost.md",
             "indexed_at", "2026-07-09T17:42:10+00:00"));
-        assertThat(indexedAtOf(doc)).isEqualTo("2026-07-09T17:42:10+00:00");
+        assertThat(indexedAtOf(doc)).isEqualTo("2026-07-09T17:42:10.000000+00:00");
 
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for the manifest write below.
@@ -197,12 +202,13 @@ class CatalogFtsFilenameSearchTest {
         String after = indexedAtOf(doc);
         assertThat(after)
             .as("--force backfill (appendManifestChunks) must stamp repair time")
-            .isNotEqualTo("2026-07-09T17:42:10+00:00");
+            .isNotEqualTo("2026-07-09T17:42:10.000000+00:00");
         assertThat(after).isNotBlank();
     }
 
     @Test
     void manifest_replace_refreshes_indexed_at_but_empty_replace_does_not() {
+        // nexus-cefa1.2: see manifest_append_refreshes_indexed_at's comment above.
         String doc = repo.registerDocument(TENANT, "9.3", Map.of(
             "title", "ghost2.md", "content_type", "rdr",
             "file_path", "docs/ghost2.md",
@@ -210,7 +216,7 @@ class CatalogFtsFilenameSearchTest {
 
         // Empty REPLACE (a clear) is not an indexing event — no stamp.
         repo.writeManifest(TENANT, doc, COLLECTION, List.of());
-        assertThat(indexedAtOf(doc)).isEqualTo("2026-07-09T17:42:10+00:00");
+        assertThat(indexedAtOf(doc)).isEqualTo("2026-07-09T17:42:10.000000+00:00");
 
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for the manifest write below.
@@ -218,6 +224,6 @@ class CatalogFtsFilenameSearchTest {
         repo.writeManifest(TENANT, doc, COLLECTION, List.of(Map.of(
             "position", 0, "chash", "d".repeat(64), "chunk_index", 0,
             "line_start", 1, "line_end", 5, "char_start", 0, "char_end", 50)));
-        assertThat(indexedAtOf(doc)).isNotEqualTo("2026-07-09T17:42:10+00:00");
+        assertThat(indexedAtOf(doc)).isNotEqualTo("2026-07-09T17:42:10.000000+00:00");
     }
 }

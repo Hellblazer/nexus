@@ -551,6 +551,20 @@
          full trace. -->
     <include file="db/changelog/catalog-030-retire-manifest-verify.xml"/>
 
+    <!-- Schema type-hygiene pass, Tier A, P1 (epic nexus-cefa1, bead
+         nexus-cefa1.2; plan of record T2
+         nexus/plan-schema-type-hygiene-2026-08-12 [22360]): retires the
+         RDR-152 SQLite-port TEXT columns catalog_documents.indexed_at /
+         .bib_enriched_at / .index_started_at and catalog_links.created_at
+         to timestamptz, and catalog_collections.legacy_grandfathered to
+         boolean. Ordinary DDL, no runAlways. Placed after catalog-030 (the
+         current tail of the catalog-0NN family) and before the
+         grants-nexus-svc.xml runAlways block, matching every other
+         catalog-0NN file's convention of landing before grants. See
+         catalog-031-type-hygiene.xml's own header for the full data-safety
+         trace and the collection_health_meta view-landmine handling. -->
+    <include file="db/changelog/catalog-031-type-hygiene.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
