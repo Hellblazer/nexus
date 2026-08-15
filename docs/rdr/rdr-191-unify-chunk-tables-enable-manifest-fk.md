@@ -2,7 +2,8 @@
 title: "Unify the Dim-Sharded Chunk Tables into One nexus.chunks with Nullable Typed Embedding Columns: Make the Manifest FK Expressible and Retire the Client-Side Integrity Apparatus"
 id: RDR-191
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-08-15
 accepted_date: 2026-08-10
 amended: 2026-08-11
 priority: high
