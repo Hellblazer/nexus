@@ -541,11 +541,17 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     #    subject under test, not debris. Canonical LEGITIMATE per the bead's
     #    own caution. ──────────────────────────────────────────────────────
     "service/src/test/java/dev/nexus/service/VectorsUnifyChunksIntegrationTest.java": (
-        30,
+        36,
         "RDR-191 Phase 4 core: the ALWAYS-COPY migration test collapsing "
         "nexus.chunks_384/768/1024 into ONE nexus.chunks (vectors-004-unify-"
         "chunks.xml). The per-dim names are this changeset's own subject "
-        "under test, not stale debris."
+        "under test, not stale debris. +6 (30->36, nexus-4rbud, RDR-191 "
+        "Phase 5 residual batch 2026-08-15): two new single-shard-distribution "
+        "matrix tests (all-in-1024, all-in-768) each assert the OTHER two "
+        "per-dim tables are gone post-migration via a "
+        "{chunks_384,chunks_768,chunks_1024} literal array -- the same "
+        "post-state completeness idiom the existing tests in this file "
+        "already use, just two more call sites of it."
     ),
     "service/src/test/java/dev/nexus/service/VectorsUnifyCentroidsIntegrationTest.java": (
         19,

@@ -195,6 +195,22 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # existing+VALIDATED at HEAD plus FORCE ROW LEVEL SECURITY restored
         # on both nexus.chunks and nexus.catalog_collections.
         ("fk-004-1-reconcile", "nexus-o8dil.49"),
+        # nexus-iq0qr (RDR-191 Phase 5 follow-up): fk-004-0-reconcile-precount
+        # is a READ-ONLY audit changeset, positioned in FILE ORDER immediately
+        # BEFORE fk-004-1-reconcile, that RAISE NOTICEs the anti-join
+        # pre-count of unregistered (tenant_id, collection) pairs
+        # fk-004-1-reconcile is about to insert (adding the auditability
+        # fk-004-1-reconcile's own frozen body can never carry, conexus
+        # deploy receipt [22579]). It carries no INSERT/UPDATE/DELETE, but
+        # its own NO FORCE/FORCE toggle (needed so the SELECT can see real
+        # rows under FORCE RLS, the identical trap fk-004-1-reconcile's own
+        # header documents for its INSERT...SELECT) trips this lint's rule
+        # (b) regardless. By the identical structural reasoning as
+        # fk-004-1-reconcile's own entry immediately above, the pre-count is
+        # ALWAYS zero in this hop -- effect-asserted the same way (changeset
+        # EXECUTES; FORCE restored on both toggled tables), no new seed data
+        # needed.
+        ("fk-004-0-reconcile-precount", "nexus-iq0qr"),
         # nexus-o8dil.37 (RDR-191 Phase 7): NO changeset here -- a dedicated
         # catalog-030 changeset was drafted and DROPPED (2026-08-15, standing
         # convergence directive) once found structurally vestigial:

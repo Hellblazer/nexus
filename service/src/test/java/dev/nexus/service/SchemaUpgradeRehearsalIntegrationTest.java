@@ -365,6 +365,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   vectors-004-1 nexus-o8dil.12
                 //   taxonomy-007-1 nexus-jv3ue
                 //   catalog-029-1 nexus-o8dil.29
+                //   fk-004-0-reconcile-precount nexus-iq0qr
                 //   fk-004-1-reconcile nexus-o8dil.49
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
@@ -717,6 +718,37 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("the two content-backed 1.1.100 manifest rows must still exist at HEAD -- "
                             + "a broken catalog-029-1 toggle (FORCE never turned off) would see zero "
                             + "nexus.chunks rows and wrongly delete these two as false-dangling")
+                        .isEqualTo(2);
+
+                    // fk-004-0-reconcile-precount leg (nexus-iq0qr, RDR-191 Phase 5
+                    // follow-up, seed-coverage lint follow-up): this READ-ONLY audit
+                    // changeset runs BEFORE fk-004-1-reconcile in file order, in this
+                    // SAME walk, and RAISE NOTICEs the anti-join pre-count of
+                    // unregistered (tenant_id, collection) pairs fk-004-1-reconcile is
+                    // about to insert. By the identical structural reasoning as the
+                    // fk-004-1-reconcile leg immediately below (fk-002, already applied
+                    // at OLD_TAG, enforces collection registration on every per-dim
+                    // chunk write from before this hop even starts, and vectors-004-1
+                    // only COPIES already-FK-compliant rows into nexus.chunks) this
+                    // pre-count is ALWAYS zero in this hop too -- an
+                    // observation-count assertion on it would prove nothing (a broken
+                    // toggle would ALSO see zero, indistinguishably -- the exact reason
+                    // this pre-count changeset's own header rejects a POST-count re-run:
+                    // that shape can NEVER observe a nonzero count on ANY install,
+                    // structurally, not merely in this hop's fixture). What IS
+                    // observable and load-bearing here: (a) the changeset EXECUTES
+                    // cleanly under its own RLS toggle; (b) that toggle correctly
+                    // RESTORES FORCE ROW LEVEL SECURITY on both nexus.chunks and
+                    // nexus.catalog_collections before it ends, proven the same way as
+                    // the catalog-029-1 leg above proves it for its own two tables.
+                    assertThat(changesetExecType(su, "fk-004-0-reconcile-precount", "nexus-iq0qr"))
+                        .as("fk-004-0-reconcile-precount must EXECUTE at HEAD")
+                        .isEqualTo("EXECUTED");
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.chunks'::regclass, 'nexus.catalog_collections'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables "
+                            + "fk-004-0-reconcile-precount toggled")
                         .isEqualTo(2);
 
                     // fk-004-1-reconcile leg (nexus-o8dil.49, RDR-191 Phase 5, seed-coverage

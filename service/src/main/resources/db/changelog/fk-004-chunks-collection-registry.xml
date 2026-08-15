@@ -139,6 +139,75 @@ ALTER TABLE nexus.chunks
         </rollback>
     </changeSet>
 
+    <!-- ── Changeset fk-004-0-reconcile-precount: audit pre-count (nexus-iq0qr) ── -->
+    <changeSet id="fk-004-0-reconcile-precount" author="nexus-iq0qr">
+        <comment>
+            RDR-191 Phase 5 follow-up (bead nexus-iq0qr). conexus's v0.1.76 deploy
+            receipt ([22579]) found fk-004-1-reconcile's boot log unauditable: it
+            logs only "Custom SQL executed / ran successfully in 64ms", no INSERT
+            count, unlike catalog-029-1 (this same file's manifest-FK sibling)
+            which RAISE NOTICEs its deleted count. fk-004-1-reconcile's own
+            changeset body is checksum-frozen -- already applied in production
+            (cloud gate-xr789: 116,490 unregistered chunk rows to 0) -- so it
+            cannot be edited to add the NOTICE itself.
+            THIS changeset is a NEW, READ-ONLY audit step positioned in FILE
+            ORDER immediately BEFORE fk-004-1-reconcile: it counts the SAME
+            anti-join fk-004-1-reconcile's INSERT ... ON CONFLICT DO NOTHING
+            would insert, and RAISE NOTICEs that pre-count, without touching any
+            row. A POST-count re-run (tried first, then rejected on review) would
+            have run AFTER fk-004-1-reconcile in every walk on every install --
+            fresh or already-reconciled -- and so could never observe anything
+            but zero, an overclaim by construction. Positioned BEFORE the
+            reconcile instead: on a box that has NOT yet run fk-004-1-reconcile
+            this changeset runs before it, in the SAME walk, and logs the real
+            unregistered-pair count fk-004-1-reconcile is about to fix. That
+            count is nonzero only for an UPGRADING box carrying pre-fk-002-era
+            legacy debt (the gate-xr789 shape: 116,490 rows); an empty fresh
+            install has no chunks yet and logs 0. On an ALREADY-reconciled store (every box that has run
+            fk-004-1-reconcile in a prior release, including cloud at v0.1.76 and
+            beyond) Liquibase skips the already-applied fk-004-1-reconcile
+            entirely, so this changeset -- new to that box -- runs once, reads
+            the CURRENT (already-reconciled) state, and truthfully logs 0. Either
+            way the number logged is what is actually true at the moment this
+            changeset executes, never a structurally-guaranteed zero.
+            RLS toggle-wrapped (nexus-1wjmq shape), identical to
+            fk-004-1-reconcile and catalog-029-1: a read, not just a write, needs
+            it -- under FORCE RLS with no nexus.tenant GUC set at migration time,
+            an untoggled SELECT from either table sees ZERO rows (fk-004-1-
+            reconcile's own header documents the identical trap for its INSERT
+            ... SELECT), which would make this pre-count silently and always 0,
+            the exact overclaim this changeset exists to avoid.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chunks NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_collections NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_precount BIGINT;
+BEGIN
+    SELECT count(*) INTO v_precount
+    FROM (
+        SELECT DISTINCT c.tenant_id, c.collection
+        FROM nexus.chunks c
+        WHERE NOT EXISTS (
+            SELECT 1 FROM nexus.catalog_collections r
+             WHERE r.tenant_id = c.tenant_id
+               AND r.name      = c.collection
+        )
+    ) s;
+    RAISE NOTICE 'RDR-191 Phase 5 fk-004 reconcile pre-count (nexus-iq0qr): % unregistered chunk (tenant_id, collection) pair(s) about to be inserted by fk-004-1-reconcile', v_precount;
+END $$;
+
+ALTER TABLE nexus.catalog_collections FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks FORCE ROW LEVEL SECURITY;
+        </sql>
+        <rollback>
+            <!-- No rollback: this changeset only reads and RAISE NOTICEs a count,
+                 never writing a row, so there is nothing to undo. -->
+        </rollback>
+    </changeSet>
+
     <!-- ── Changeset fk-004-1-reconcile: additive parent-stub reconcile ─────── -->
     <changeSet id="fk-004-1-reconcile" author="nexus-o8dil.49">
         <comment>

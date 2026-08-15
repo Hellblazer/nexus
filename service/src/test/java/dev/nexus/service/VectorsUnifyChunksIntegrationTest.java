@@ -66,6 +66,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *   <li>{@link #allThreeHnswIndexes_areFull_noPartialPredicate()} — F13/C4,
  *       queried against the LIVE database per the plan-audit finding on bead
  *       .12 (not a grep of the changelog XML).</li>
+ *   <li>{@link #chunksChashOctetCheck_rejectsBadWidth_acceptsThirtyTwo()} —
+ *       nexus-ss6tk, the substantive-critic positive-enforcement gap (T2
+ *       [22481]): proves the NOT VALID octet CHECK actually REJECTS a bad-
+ *       width chash on a NEW row write, not merely that it exists.</li>
+ *   <li>{@link #allRowsInSingleDim1024Distribution_migratesToRealHeadCleanly()}
+ *       / {@link #allRowsInSingleDim768Distribution_migratesToRealHeadCleanly()}
+ *       — nexus-4rbud matrix cases 1/2 (the measured cloud and local/bge-768
+ *       shapes), resumed all the way to real HEAD so the downstream fk-004/
+ *       catalog-029 FKs are also asserted intact.</li>
  * </ul>
  *
  * <p><strong>NOT covered here:</strong> the grants-nexus-svc.xml boot-brick
@@ -716,6 +725,206 @@ class VectorsUnifyChunksIntegrationTest {
                     .as("re-applying after rollback must succeed cleanly")
                     .doesNotThrowAnyException();
                 assertThat(rowCount(conn, "nexus.chunks")).isEqualTo(3L);
+            }
+        } finally {
+            rig.close();
+        }
+    }
+
+    // ── Test 9: chunks_chash_octet_check positive enforcement (nexus-ss6tk) ──
+
+    /**
+     * Positive-enforcement proof: the substantive-critic gap (T2 [22481]) noted
+     * that {@link #freshInstall_replaySafe_unifiesStructureCorrectly()} only
+     * proves the CHECK EXISTS and stays NOT VALID -- nothing proved it actually
+     * REJECTS a bad-width chash write. Because the CHECK is NOT VALID by design
+     * (F14b), only a NEW row write is fully enforced -- a pre-existing row is
+     * exempt until the constraint VALIDATEs -- so this test inserts FRESH rows
+     * rather than validating existing ones.
+     *
+     * <p>Falsifiable: dropping {@code chunks_chash_octet_check} from
+     * {@code vectors-004-unify-chunks.xml}'s changeset {@code vectors-004-1}
+     * (the {@code CHECK (octet_length(chash) = 32) NOT VALID} clause, source
+     * line ~313) turns the 31/33-byte assertions below red — both inserts
+     * would then succeed instead of throwing.
+     */
+    @Test
+    void chunksChashOctetCheck_rejectsBadWidth_acceptsThirtyTwo() throws Exception {
+        Rig rig = newRig("octetenforce");
+        try {
+            SchemaMigrator.migrate(rig.adminDs());
+            applyUnifyChangeset(rig.adminDs());
+
+            try (Connection su = rig.pg().createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('t1', 'c') "
+                    + "ON CONFLICT (tenant_id, name) DO NOTHING");
+
+                // 31-byte chash -> rejected.
+                assertThatThrownBy(() -> {
+                    try (var ps = su.prepareStatement(
+                            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
+                                + "VALUES ('t1', 'c', ?, 'x', ?::vector)")) {
+                        ps.setBytes(1, new byte[31]);
+                        ps.setString(2, "[" + "0.01,".repeat(383) + "0.01]");
+                        ps.executeUpdate();
+                    }
+                }).as("31-byte chash must violate chunks_chash_octet_check on a NEW row write -- "
+                      + "the CHECK is NOT VALID (exempts only PRE-EXISTING rows), so a fresh "
+                      + "INSERT is fully enforced")
+                  .isInstanceOfSatisfying(java.sql.SQLException.class, ex ->
+                      assertThat(ex.getSQLState())
+                          .as("PostgreSQL check_violation SQLSTATE")
+                          .isEqualTo("23514"))
+                  .hasMessageContaining("chunks_chash_octet_check");
+
+                // 33-byte chash -> rejected.
+                assertThatThrownBy(() -> {
+                    try (var ps = su.prepareStatement(
+                            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
+                                + "VALUES ('t1', 'c', ?, 'x', ?::vector)")) {
+                        ps.setBytes(1, new byte[33]);
+                        ps.setString(2, "[" + "0.01,".repeat(383) + "0.01]");
+                        ps.executeUpdate();
+                    }
+                }).as("33-byte chash must violate chunks_chash_octet_check on a NEW row write")
+                  .isInstanceOfSatisfying(java.sql.SQLException.class, ex ->
+                      assertThat(ex.getSQLState())
+                          .as("PostgreSQL check_violation SQLSTATE")
+                          .isEqualTo("23514"))
+                  .hasMessageContaining("chunks_chash_octet_check");
+
+                // 32-byte chash -> accepted (CONTROL).
+                try (var ps = su.prepareStatement(
+                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
+                            + "VALUES ('t1', 'c', ?, 'x', ?::vector)")) {
+                    ps.setBytes(1, chash32(40));
+                    ps.setString(2, "[" + "0.01,".repeat(383) + "0.01]");
+                    assertThatCode(ps::executeUpdate)
+                        .as("32-byte chash must be accepted")
+                        .doesNotThrowAnyException();
+                }
+            }
+        } finally {
+            rig.close();
+        }
+    }
+
+    // ── Test 10: all rows in one shard, dim 1024 (nexus-4rbud matrix case 1) ──
+
+    /**
+     * nexus-4rbud matrix case 1: EVERY row lives in the 1024-dim shard, the
+     * other two are completely empty — the measured cloud distribution (T2
+     * {@code nexus/rdr-191-cloud-measurements}). Resumes to REAL head via
+     * {@link SchemaMigrator#migrate}, not the standalone changeset (mirroring
+     * {@link #unRekeyedLegacyChash_bootSurvives_octetCheckStaysNotValid()}'s
+     * stop-early-then-resume idiom), so the post-state assertions cover the
+     * downstream fk-004 / catalog-029 changesets too — "manifest FK intact"
+     * per the bead's ask, not just the unify changeset's own output.
+     */
+    @Test
+    void allRowsInSingleDim1024Distribution_migratesToRealHeadCleanly() throws Exception {
+        Rig rig = newRig("all1024");
+        try {
+            // Stop BEFORE vectors-004-1 -- the per-dim tables must still exist
+            // to seed pre-unify (Step G).
+            migrateUpTo(rig.adminDs(), "vectors-004-1");
+            seedChunk(rig.pg(), 1024, "t1", "knowledge__demo__voyage__v1", chash32(60), "one");
+            seedChunk(rig.pg(), 1024, "t1", "knowledge__demo__voyage__v1", chash32(61), "two");
+            seedChunk(rig.pg(), 1024, "t1", "knowledge__demo__voyage__v1", chash32(62), "three");
+            // The other two shards stay EMPTY -- this test's whole point.
+
+            assertThatCode(() -> SchemaMigrator.migrate(rig.adminDs()))
+                .as("single-shard distribution must migrate to real head without throwing")
+                .doesNotThrowAnyException();
+
+            try (Connection conn = rig.pg().createConnection("")) {
+                for (String dim : new String[] {"chunks_384", "chunks_768", "chunks_1024"}) {
+                    assertThat(tableExists(conn, "nexus", dim)).as("%s must be gone post-migration", dim).isFalse();
+                }
+                // Non-vacuity: the migration actually moved the seeded rows.
+                assertThat(rowCount(conn, "nexus.chunks")).isEqualTo(3L);
+                try (var ps = conn.prepareStatement(
+                        "SELECT COUNT(*) FROM nexus.chunks WHERE embedding_1024 IS NOT NULL "
+                            + "AND embedding_384 IS NULL AND embedding_768 IS NULL")) {
+                    var rs = ps.executeQuery();
+                    assertThat(rs.next()).isTrue();
+                    assertThat(rs.getLong(1))
+                        .as("every row must land with ONLY the 1024-dim embedding populated -- "
+                            + "no NULL-everywhere rows")
+                        .isEqualTo(3L);
+                }
+                assertThat(constraintExists(conn, "chunks_chash_octet_check")).isTrue();
+                assertThat(constraintValidated(conn, "chunks_chash_octet_check"))
+                    .as("octet CHECK inherited from vectors-004-1, stays NOT VALID at boot")
+                    .isFalse();
+                assertThat(constraintExists(conn, "chunks_collection_fk"))
+                    .as("fk-004's unified collection FK must exist post-migration")
+                    .isTrue();
+                assertThat(constraintValidated(conn, "chunks_collection_fk"))
+                    .as("fk-004-2 VALIDATEs the collection FK in the same release")
+                    .isTrue();
+                assertThat(constraintExists(conn, "fk_catalog_chunks_chunk"))
+                    .as("catalog-029's manifest FK (catalog_document_chunks -> chunks) must be intact")
+                    .isTrue();
+                assertThat(constraintValidated(conn, "fk_catalog_chunks_chunk"))
+                    .as("catalog-029-2 VALIDATEs the manifest FK in the same release")
+                    .isTrue();
+            }
+        } finally {
+            rig.close();
+        }
+    }
+
+    // ── Test 11: all rows in one shard, dim 768 (nexus-4rbud matrix case 2) ──
+
+    /**
+     * nexus-4rbud matrix case 2: EVERY row lives in the 768-dim shard, the
+     * other two are completely empty — the local/bge-768 shape (a local
+     * install embeds every collection with bge-768,
+     * {@code src/nexus/health.py:405}). Same real-head-resume idiom as
+     * {@link #allRowsInSingleDim1024Distribution_migratesToRealHeadCleanly()}.
+     */
+    @Test
+    void allRowsInSingleDim768Distribution_migratesToRealHeadCleanly() throws Exception {
+        Rig rig = newRig("all768");
+        try {
+            // Stop BEFORE vectors-004-1 -- the per-dim tables must still exist
+            // to seed pre-unify (Step G).
+            migrateUpTo(rig.adminDs(), "vectors-004-1");
+            seedChunk(rig.pg(), 768, "t1", "docs__demo__bge__v1", chash32(70), "one");
+            seedChunk(rig.pg(), 768, "t1", "docs__demo__bge__v1", chash32(71), "two");
+            // The other two shards stay EMPTY -- this test's whole point.
+
+            assertThatCode(() -> SchemaMigrator.migrate(rig.adminDs()))
+                .as("single-shard distribution must migrate to real head without throwing")
+                .doesNotThrowAnyException();
+
+            try (Connection conn = rig.pg().createConnection("")) {
+                for (String dim : new String[] {"chunks_384", "chunks_768", "chunks_1024"}) {
+                    assertThat(tableExists(conn, "nexus", dim)).as("%s must be gone post-migration", dim).isFalse();
+                }
+                assertThat(rowCount(conn, "nexus.chunks")).isEqualTo(2L);
+                try (var ps = conn.prepareStatement(
+                        "SELECT COUNT(*) FROM nexus.chunks WHERE embedding_768 IS NOT NULL "
+                            + "AND embedding_384 IS NULL AND embedding_1024 IS NULL")) {
+                    var rs = ps.executeQuery();
+                    assertThat(rs.next()).isTrue();
+                    assertThat(rs.getLong(1))
+                        .as("every row must land with ONLY the 768-dim embedding populated -- "
+                            + "no NULL-everywhere rows")
+                        .isEqualTo(2L);
+                }
+                assertThat(constraintValidated(conn, "chunks_chash_octet_check"))
+                    .as("octet CHECK inherited from vectors-004-1, stays NOT VALID at boot")
+                    .isFalse();
+                assertThat(constraintValidated(conn, "chunks_collection_fk"))
+                    .as("fk-004-2 VALIDATEs the collection FK in the same release")
+                    .isTrue();
+                assertThat(constraintValidated(conn, "fk_catalog_chunks_chunk"))
+                    .as("catalog-029-2 VALIDATEs the manifest FK in the same release")
+                    .isTrue();
             }
         } finally {
             rig.close();
