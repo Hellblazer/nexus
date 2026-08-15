@@ -32,6 +32,11 @@ from nexus.catalog.tumbler import Tumbler
 
 _log = structlog.get_logger(__name__)
 
+# nexus-xeux8: bounded sample of ghost-document tumblers in the census
+# section (below) — mirrors reconcile_stale.py's _CAP_ACTION/_CAP_INFO
+# convention of never dumping an unbounded list into --json output.
+_CAP_GHOST_SAMPLE = 20
+
 if TYPE_CHECKING:
     from nexus.catalog.catalog_protocol import CatalogReader  # noqa: F401 — used in _heal_ghosts annotation (PEP 563 deferred)
 
@@ -610,6 +615,23 @@ def _classify_never_chunked(e: object) -> str:
     return "unclassified"
 
 
+# nexus-0y0gk critique fix-round (observation item, integrity.py side):
+# rdr145_exempt is "legitimate by design", not "definitely unrepairable" —
+# chunk_count is a CACHED value (see zero_count_recount in
+# catalog_cmds.reconcile_stale, whose whole existence is proof this cache
+# can be stale), so an rdr145_exempt doc's T3 chunk state cannot be read
+# off this classification alone. This note names the actual authority
+# without claiming FK-safety here or touching verify's exit code.
+_RDR145_EXEMPT_NOTE = (
+    "Legitimate store_put note by design (RDR-145) -- NOT a claim that "
+    "these are unrepairable. chunk_count is a cached value and can be "
+    "stale; `nx t3 backfill-manifest --dry-run --only-gapped` is the "
+    "authority for whether a given doc in this population is actually a "
+    "manifest-only backfill candidate. This note does not change verify's "
+    "exit code."
+)
+
+
 def _never_chunked_breakdown(entries: list) -> dict:
     """Per-collection breakdown of never-chunked docs (nexus-sj4a3 CRIT-1).
 
@@ -637,7 +659,11 @@ def _never_chunked_breakdown(entries: list) -> dict:
     unclassified_total = sum(unclassified_counts.values())
     return {
         "total": rdr145_total + unclassified_total,
-        "rdr145_exempt": {"total": rdr145_total, "by_collection": _rows(rdr145_counts)},
+        "rdr145_exempt": {
+            "total": rdr145_total,
+            "by_collection": _rows(rdr145_counts),
+            "note": _RDR145_EXEMPT_NOTE,
+        },
         "unclassified": {"total": unclassified_total, "by_collection": _rows(unclassified_counts)},
     }
 
@@ -739,6 +765,71 @@ def _census_lost_and_never_chunked(
     # note above _classify_never_chunked for the full rationale.
 
 
+def _census_ghosts(ghost_entries: list) -> dict:
+    """Read-only census of ghost documents (nexus-xeux8).
+
+    Ghost documents — blank/NULL ``physical_collection`` — are excluded
+    from BOTH this command's own health classification
+    (``_census_lost_and_never_chunked`` skips them: no owning-collection
+    identity for a chunk_count-vs-manifest comparison to be meaningful
+    against) AND ``nx catalog reconcile-stale``'s candidate filter
+    (``not e.alias_of and e.physical_collection``) — so nothing sizes this
+    population today. This section is a pure READ-ONLY count; it changes
+    nothing about what ``verify``/``reconcile-stale`` repair. A ghost has
+    no collection to write a manifest into or re-chunk against, so it is
+    UNREPAIRABLE without a manual ``physical_collection`` assignment (see
+    the nexus-3n7pr remediation plan, Phase 1b/6).
+
+    Computed from the SAME ``all_documents`` sweep ``_verify_full``
+    already performs for Class A/C — deliberately NOT a second engine
+    round trip. Membership is decided purely from an already-in-memory
+    field (``physical_collection``); no manifest or chunk read is needed
+    to count a ghost, so this stays cheap even when the surrounding
+    ``get_manifests`` sweep is already minutes-scale over ~300k rows.
+
+    ``by_owner`` buckets by the tumbler's 2-segment owner address
+    (``Tumbler.parse(str(e.tumbler)).owner_address()``, best-effort — a
+    malformed tumbler is counted under an ``"<unparseable>"`` bucket
+    rather than raising). Tenant is NOT broken out: this client's reads
+    are already scoped to one tenant by the request's own credentials
+    (RLS), and ``CatalogEntry`` carries no per-row ``tenant_id`` to group
+    by even if it were — a cross-tenant breakdown would need
+    BYPASSRLS/server-side access this client does not have.
+    """
+    by_owner: dict[str, int] = {}
+    for e in ghost_entries:
+        try:
+            owner = str(Tumbler.parse(str(e.tumbler)).owner_address())
+        except Exception:  # noqa: BLE001 — best-effort bucketing only
+            owner = "<unparseable>"
+        by_owner[owner] = by_owner.get(owner, 0) + 1
+
+    sample = sorted(str(e.tumbler) for e in ghost_entries)[:_CAP_GHOST_SAMPLE]
+
+    return {
+        "count": len(ghost_entries),
+        "by_owner": [
+            {"owner": o, "count": n}
+            for o, n in sorted(by_owner.items(), key=lambda kv: (-kv[1], kv[0]))
+        ],
+        "by_tenant": {
+            "available": False,
+            "reason": (
+                "catalog client reads are single-tenant scoped via RLS; "
+                "CatalogEntry carries no per-row tenant_id to break out by"
+            ),
+        },
+        "sample_tumblers": sample,
+        "sample_truncated": len(ghost_entries) > _CAP_GHOST_SAMPLE,
+        "note": (
+            "Docs with blank/NULL physical_collection. Unrepairable without "
+            "a manual physical_collection assignment; excluded from both "
+            "verify's health classification and reconcile-stale's candidate "
+            "set by design. Read-only census, not a repair candidate list."
+        ),
+    }
+
+
 def _emit_verify_report(
     *,
     total_docs: int,
@@ -751,6 +842,7 @@ def _emit_verify_report(
     exit_dirty: bool,
     mode: str,
     unverifiable_rows: list[dict] | None = None,
+    ghosts: dict | None = None,
     raise_on_dirty: bool = True,
 ) -> None:
     """Shared renderer for full-catalog and ``--collection``-scoped verify.
@@ -786,6 +878,11 @@ def _emit_verify_report(
     }
     if unverifiable_rows:
         summary["unverifiable_collections"] = len(unverifiable_rows)
+    if ghosts is not None:
+        # nexus-xeux8: count-only in the summary — never rolled into
+        # `exit` or any clean-percent math (see the docstring above and
+        # _census_ghosts): a ghost is a census entry, never a finding.
+        summary["ghost_docs"] = ghosts["count"]
 
     if json_out:
         payload = {
@@ -798,6 +895,8 @@ def _emit_verify_report(
         }
         if unverifiable_rows:
             payload["unverifiable_rows"] = unverifiable_rows
+        if ghosts is not None:
+            payload["ghosts"] = ghosts
         click.echo(json.dumps(payload, indent=2))
     else:
         click.echo(f"Verified {total_docs} catalog document(s).")
@@ -858,6 +957,23 @@ def _emit_verify_report(
                 click.echo(
                     f"  {u['collection']}: {u['unverifiable_rows']} "
                     "un-backfilled manifest row(s)"
+                )
+        if ghosts is not None and ghosts["count"]:
+            click.echo(
+                f"\nGhost documents ({ghosts['count']} — blank/NULL "
+                "physical_collection; read-only census, UNREPAIRABLE "
+                "without a manual collection assignment; never a finding, "
+                "never affects exit code):"
+            )
+            click.echo("  By owner:")
+            for row in ghosts["by_owner"][:_CAP_GHOST_SAMPLE]:
+                click.echo(f"    {row['count']:5d}  {row['owner']}")
+            click.echo("  Sample tumblers:")
+            for t in ghosts["sample_tumblers"]:
+                click.echo(f"    {t}")
+            if ghosts["sample_truncated"]:
+                click.echo(
+                    f"    ... and {ghosts['count'] - len(ghosts['sample_tumblers'])} more"
                 )
         if unreadable:
             # nexus-ou4tb: a verify that could not read part of the store must
@@ -973,6 +1089,11 @@ def _verify_full(cat: "CatalogReader", *, json_out: bool) -> None:
             cat, census_entries + ghost_entries, unreadable,
         )
 
+    # nexus-xeux8: ghost census — from the all_documents() sweep already
+    # fetched above, no additional engine round trip. Never affects
+    # exit_dirty; see _census_ghosts docstring.
+    ghosts = _census_ghosts(ghost_entries)
+
     exit_dirty = bool(vanished_collections or damaged or lost)
     _emit_verify_report(
         total_docs=total_docs,
@@ -985,6 +1106,7 @@ def _verify_full(cat: "CatalogReader", *, json_out: bool) -> None:
         exit_dirty=exit_dirty,
         mode="full",
         unverifiable_rows=unverifiable_rows,
+        ghosts=ghosts,
     )
 
 
@@ -1158,6 +1280,14 @@ def verify_cmd(heal: bool, collection: str, json_out: bool) -> None:
                              (everything else — candidate data loss, see
                              nexus-cdypx). Report-only, never a finding,
                              never affects the exit code either way.
+      ghosts (full mode only)  read-only CENSUS of docs with blank/NULL
+                             physical_collection (nexus-xeux8) — a
+                             population BOTH this command's own health
+                             classification and ``nx catalog
+                             reconcile-stale`` exclude outright, so
+                             nothing else sizes it. UNREPAIRABLE without
+                             a manual collection assignment; never a
+                             finding, never affects the exit code.
 
     Exit code: 0 when clean (never-chunked alone still exits 0); 1 when any
     vanished/damaged/lost finding exists. A check or collection that could
@@ -1169,9 +1299,12 @@ def verify_cmd(heal: bool, collection: str, json_out: bool) -> None:
     ``--json`` is the CI contract: ``{"summary": {...}, "vanished_collections":
     [...], "damaged": [...], "lost": [...], "never_chunked": {...},
     "unreadable": [...]}`` (plus ``"unverifiable_rows": [...]`` when
-    present). Full-catalog mode is cheap and meant to gate CI;
-    ``--collection`` mode trades that cheapness for per-document detail
-    (needed for ``--heal``). ``--heal`` cannot be combined with ``--json``.
+    present, and ``"ghosts": {...}`` in full-catalog mode — see the
+    ``ghosts`` entry above; absent in ``--collection`` scoped mode, since
+    a ghost by definition belongs to no collection to scope into).
+    Full-catalog mode is cheap and meant to gate CI; ``--collection``
+    mode trades that cheapness for per-document detail (needed for
+    ``--heal``). ``--heal`` cannot be combined with ``--json``.
 
     \b
     Examples:

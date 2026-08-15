@@ -1498,6 +1498,153 @@ class TestVerifyCommand:
         data = json.loads(result.stdout)
         assert data["summary"]["docs"] == 2, "alias row excluded, both real docs counted"
 
+    # ── ghost census (nexus-xeux8) ──────────────────────────────────────
+
+    def test_verify_full_mode_reports_ghost_census(self, catalog_env, monkeypatch):
+        """nexus-xeux8: docs with blank/NULL physical_collection are
+        dropped by BOTH verify's health classification (_verify_full's
+        own all_entries filter) and reconcile-stale's candidate filter --
+        nothing sizes them today. Full-mode --json must carry a
+        read-only `ghosts` census: count + by-owner + a bounded sample,
+        and it must never affect docs/exit."""
+        entries = [
+            _FakeEntry("1.1.1", "Real Doc", physical_collection="knowledge__thing", chunk_count=1),
+            _FakeEntry("1.2.1", "Ghost One", physical_collection=""),
+            _FakeEntry("1.2.2", "Ghost Two", physical_collection=""),
+            _FakeEntry("1.3.1", "Ghost Three", physical_collection=""),
+        ]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__thing": 1},
+            mv_all={"collections": [
+                {"collection": "knowledge__thing", "referenced": 1, "present": 1, "missing": 0},
+            ], "count": 1},
+            manifests={"1.1.1": [object()]},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__thing"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["summary"]["ghost_docs"] == 3
+        assert data["summary"]["docs"] == 1, "ghosts must not be counted toward health-classification docs"
+        assert data["summary"]["exit"] == 0, "ghosts are a census, never a finding"
+
+        ghosts = data["ghosts"]
+        assert ghosts["count"] == 3
+        assert set(ghosts["sample_tumblers"]) == {"1.2.1", "1.2.2", "1.3.1"}
+        assert ghosts["sample_truncated"] is False
+        assert ghosts["by_owner"] == [
+            {"owner": "1.2", "count": 2},
+            {"owner": "1.3", "count": 1},
+        ]
+        assert ghosts["by_tenant"]["available"] is False
+        assert "unrepairable" in ghosts["note"].lower()
+
+    def test_verify_full_mode_ghost_sample_truncated_above_cap(self, catalog_env, monkeypatch):
+        """nexus-xeux8 critique fix-round (SIGNIFICANT): the sample is
+        capped at 20 tumblers -- pin the truncation signal itself (not
+        just the untruncated case above) so `sample_truncated` and `count`
+        stay correct when the ghost population exceeds the cap."""
+        real = [_FakeEntry("1.1.1", "Real Doc", physical_collection="knowledge__thing", chunk_count=1)]
+        ghosts_n = 25  # > the 20-row _CAP_GHOST_SAMPLE
+        ghost_entries = [
+            _FakeEntry(f"1.{200 + i}.1", f"Ghost {i}", physical_collection="")
+            for i in range(ghosts_n)
+        ]
+        cat = _FakeFullCat(
+            entries=real + ghost_entries,
+            doc_counts={"knowledge__thing": 1},
+            mv_all={"collections": [
+                {"collection": "knowledge__thing", "referenced": 1, "present": 1, "missing": 0},
+            ], "count": 1},
+            manifests={"1.1.1": [object()]},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__thing"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["summary"]["ghost_docs"] == ghosts_n
+
+        ghosts = data["ghosts"]
+        assert ghosts["count"] == ghosts_n, "the COUNT is never truncated, only the sample"
+        assert len(ghosts["sample_tumblers"]) == 20
+        assert ghosts["sample_truncated"] is True
+        # sample is the lexicographically-sorted-first 20 tumblers (see
+        # _census_ghosts), so it is a deterministic, reproducible subset.
+        expected_sample = sorted(str(e.tumbler) for e in ghost_entries)[:20]
+        assert ghosts["sample_tumblers"] == expected_sample
+
+    def test_verify_full_mode_human_report_prints_ghost_section(self, catalog_env, monkeypatch):
+        entries = [
+            _FakeEntry("1.1.1", "Real Doc", physical_collection="knowledge__thing", chunk_count=1),
+            _FakeEntry("1.2.1", "Ghost One", physical_collection=""),
+        ]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__thing": 1},
+            mv_all={"collections": [
+                {"collection": "knowledge__thing", "referenced": 1, "present": 1, "missing": 0},
+            ], "count": 1},
+            manifests={"1.1.1": [object()]},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__thing"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify"])
+
+        assert result.exit_code == 0, result.output
+        assert "Ghost documents (1" in result.output
+        assert "unrepairable" in result.output.lower()
+        assert "1.2.1" in result.output
+
+    def test_verify_full_mode_zero_ghosts_omits_section_but_keeps_summary_key(
+        self, catalog_env, monkeypatch,
+    ):
+        entries = [_FakeEntry("1.1.1", "Real Doc", physical_collection="knowledge__thing", chunk_count=1)]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"knowledge__thing": 1},
+            mv_all={"collections": [
+                {"collection": "knowledge__thing", "referenced": 1, "present": 1, "missing": 0},
+            ], "count": 1},
+            manifests={"1.1.1": [object()]},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"knowledge__thing"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["summary"]["ghost_docs"] == 0
+        assert data["ghosts"]["count"] == 0
+
+        human = runner.invoke(main, ["catalog", "verify"])
+        assert "Ghost documents" not in human.output
+
+    def test_verify_scoped_mode_has_no_ghosts_key(self, initialized_catalog, catalog_env, monkeypatch):
+        """Ghosts are a whole-catalog census (they have no collection to
+        scope into by definition) -- `--collection` scoped mode must not
+        claim to carry the section."""
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["catalog", "verify", "--collection", "knowledge__thing", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert "ghosts" not in data
+        assert "ghost_docs" not in data["summary"]
+
     def test_verify_full_mode_heal_refused(self, initialized_catalog, catalog_env):
         """--heal without --collection is refused — full mode has no
         per-document detail to heal from."""
@@ -1621,6 +1768,11 @@ class TestVerifyCommand:
         assert nc["rdr145_exempt"]["by_collection"] == [
             {"physical_collection": "knowledge__notes", "count": 1},
         ]
+        # nexus-0y0gk critique fix-round (observation item): rdr145_exempt
+        # is "legitimate by design", not "definitely unrepairable" -- the
+        # note names the actual repairability authority without changing
+        # verify's exit code.
+        assert "backfill-manifest" in nc["rdr145_exempt"]["note"]
         assert nc["unclassified"]["total"] == 1
         assert nc["unclassified"]["by_collection"] == [
             {"physical_collection": "code__1-20", "count": 1},

@@ -71,13 +71,9 @@ Classes, mirroring the design memo (T1 scratch 80500d58):
                          ``skipped_no_root`` refusal; ``malformed_tumbler``
                          — the tumbler has no owner-address component;
                          ``source_uri_only`` — empty file_path but a
-                         non-``file://`` source_uri (RDR-096 P3.1 schemes:
-                         ``x-devonthink-item://``, ``nx-orphan-backfill://``,
-                         ``nx-scratch://``; since nexus-sdp0u this also
-                         covers a zero-chunk-count knowledge__ store_put doc
-                         carrying its synthesized ``chroma://`` source_uri —
-                         see the ``rdr145_exempt`` entry above for why that
-                         coupling is deliberate, not a classifier gap);
+                         non-``file://``, non-``chroma://`` source_uri
+                         (RDR-096 P3.1 schemes: ``x-devonthink-item://``,
+                         ``nx-orphan-backfill://``, ``nx-scratch://``);
                          ``no_provenance`` — empty
                          file_path AND empty source_uri on a non-
                          ``knowledge__`` collection, the ``code__``
@@ -87,6 +83,23 @@ Classes, mirroring the design memo (T1 scratch 80500d58):
                          only — absence of evidence is not evidence of
                          absence; never delete-eligible, mirroring the
                          ``dishonest`` bucket below.
+                         store_put_origin -> nexus-0y0gk critique fix-round:
+                         a zero-chunk-count knowledge__ store_put doc
+                         carrying its nexus-sdp0u synthesized
+                         ``chroma://<collection>/<title>`` source_uri.
+                         Formerly folded into ``unresolvable_provenance``/
+                         ``source_uri_only`` (see the ``rdr145_exempt``
+                         entry above for the pre-sdp0u/post-sdp0u split this
+                         predicate mirrors) — pulled into its own bucket
+                         because it is a RECOGNIZABLE population, not a
+                         genuinely-unknown one, even though (chunk_count==0
+                         here) it still needs a content re-write, not a
+                         manifest-only backfill; see ``dishonest``'s
+                         ``store_put_origin`` below for the FK-safe sibling
+                         population. ``reason`` is always ``chroma_uri``
+                         here (the ``knowledge_single_chunk_no_path``
+                         sub-reason requires chunk_count==1, unreachable at
+                         chunk_count==0).
   dishonest              chunk_count > 0 but the manifest is empty (the
                          wq1e4 "5 dishonest" population, e.g. tumblers
                          1.10.4386, 1.11.227-230). Diagnosis only;
@@ -97,6 +110,31 @@ Classes, mirroring the design memo (T1 scratch 80500d58):
                          damaged/dangling-manifest population, out of this
                          verb's scope; see ``nx catalog verify``'s
                          ``damaged`` class).
+                         nexus-0y0gk: each row now also carries an
+                         ``origin`` (plus, where applicable, ``reason``/
+                         ``resolved_path``/``file_path``) — FOUR values,
+                         checked in this order: ``store_put_origin`` (the
+                         nexus-sdp0u store_put signature — ``reason``
+                         ``chroma_uri`` for a synthesized ``chroma://``
+                         source_uri, or ``knowledge_single_chunk_no_path``
+                         for a knowledge__ doc with chunk_count==1 and
+                         NEITHER file_path nor source_uri — store_put docs
+                         are single-chunk by construction, so a live T3
+                         chunk very likely still exists and this class is
+                         an FK-safe ``nx t3 backfill-manifest --only-gapped``
+                         candidate, NOT "cannot confirm, leave it"; critique
+                         fix-round, 2026-08-15: 4 of the 5 live dishonest
+                         docs at the time carried exactly this signature and
+                         were being lumped into ``unresolvable_provenance``);
+                         then the SAME ``_resolve_provenance`` split the
+                         ``zero_count_*`` buckets use — ``reindex_candidate``
+                         (a concrete on-disk location resolves and exists),
+                         ``orphaned_path`` (confirmed absent), or
+                         ``unresolvable_provenance`` (absence could never be
+                         confirmed) — so the 3n7pr triage (file-backed
+                         re-index vs. store_put-origin backfill vs.
+                         genuinely unknown) is mechanical instead of a
+                         hand-run SQL query.
 
 Mutation arms (``--execute {recount,tombstone-vanished,tombstone-orphaned}``)
 follow the ``--dry-run/--no-dry-run`` + ``--confirm`` gate nexus-tnz3
@@ -154,6 +192,8 @@ _PROGRESS_EVERY = 100
 
 _ORPHANED_REASONS = ("file_missing", "owner_root_gone")
 _UNRESOLVABLE_REASONS = ("no_repo_root", "malformed_tumbler", "source_uri_only", "no_provenance")
+_STORE_PUT_ORIGIN_REASONS = ("chroma_uri", "knowledge_single_chunk_no_path")
+_STORE_PUT_URI_PREFIX = "chroma://"
 
 # nexus-wq1e4: paths under a Claude Code worktree, or shaped like a system
 # temp directory, are the "confirmed-safe" population an operator asked to
@@ -239,6 +279,59 @@ def _resolve_provenance(entry: object, owner_roots: dict[str, str]) -> tuple[Pat
     return None, "no_provenance"
 
 
+def _store_put_signature_reason(entry: object) -> str | None:
+    """Return the store_put-origin sub-reason when *entry* matches the
+    nexus-sdp0u store_put signature, else ``None`` (nexus-0y0gk critique
+    fix-round).
+
+    ``_resolve_provenance``'s catch-all ``unresolvable_provenance``/
+    ``no_provenance`` outcome was lumping genuinely-dead docs together with
+    a RECOGNIZABLE, likely-backfillable sub-population — 4 of the 5 live
+    ``dishonest`` docs (chunk_count > 0, manifest empty) at critique time
+    carried exactly this signature and are FK-safe
+    ``nx t3 backfill-manifest --only-gapped`` candidates (store_put docs are
+    single-chunk by construction: ``doc_id == chunk_text_hash ==
+    content_hash``, so a live T3 chunk very likely still exists), not
+    "cannot confirm, leave it".
+
+    Two disjoint sub-signatures:
+
+      chroma_uri                      source_uri is the nexus-sdp0u
+                                       synthesized ``chroma://<collection>/
+                                       <title>`` identity written at
+                                       store_put time, regardless of
+                                       chunk_count. Reachable from both the
+                                       ``dishonest`` bucket and the
+                                       zero_count_* triage.
+      knowledge_single_chunk_no_path  chunk_count == 1, physical_collection
+                                       is ``knowledge__*``, and BOTH
+                                       file_path/source_uri are empty. Only
+                                       reachable from the ``dishonest``
+                                       bucket (chunk_count > 0) — a
+                                       chunk_count==0 doc with this exact
+                                       empty-path/empty-uri shape is already
+                                       routed to ``rdr145_exempt`` upstream
+                                       (pre-sdp0u legacy note) before
+                                       reaching this function at all.
+
+    A non-empty ``file_path`` always wins as ``reindex_candidate`` instead
+    — this function returns ``None`` immediately when one is present, so a
+    file-backed doc is never silently reclassified as store_put-origin.
+    """
+    if entry.file_path:
+        return None
+    source_uri = getattr(entry, "source_uri", "") or ""
+    if source_uri.startswith(_STORE_PUT_URI_PREFIX):
+        return "chroma_uri"
+    if (
+        not source_uri
+        and entry.physical_collection.startswith("knowledge__")
+        and entry.chunk_count == 1
+    ):
+        return "knowledge_single_chunk_no_path"
+    return None
+
+
 def _breakdown_by_collection(rows: list[dict]) -> list[dict]:
     counts: dict[str, int] = {}
     for row in rows:
@@ -247,12 +340,59 @@ def _breakdown_by_collection(rows: list[dict]) -> list[dict]:
     return [{"collection": c, "count": n} for c, n in sorted(counts.items())]
 
 
-def _count_by_reason(rows: list[dict]) -> dict[str, int]:
+def _count_by_key(rows: list[dict], key: str) -> dict[str, int]:
     counts: dict[str, int] = {}
     for row in rows:
-        reason = row.get("reason", "")
-        counts[reason] = counts.get(reason, 0) + 1
+        val = row.get(key, "")
+        counts[val] = counts.get(val, 0) + 1
     return counts
+
+
+def _count_by_reason(rows: list[dict]) -> dict[str, int]:
+    return _count_by_key(rows, "reason")
+
+
+def _resolve_dishonest_origin(entry: object, owner_roots: dict[str, str]) -> dict:
+    """Provenance split for the ``dishonest`` population (chunk_count > 0,
+    manifest empty) so its triage is mechanical instead of requiring a
+    hand-run SQL query against the engine.
+
+    Returns a dict merged into the row: ``origin`` is one of FOUR values —
+    ``store_put_origin`` (checked FIRST, via :func:`_store_put_signature_reason`
+    — the nexus-sdp0u store_put signature; critique fix-round, nexus-0y0gk:
+    this is a RECOGNIZABLE, FK-safe-backfillable sub-population that must
+    not be lumped into ``unresolvable_provenance``), or one of the SAME
+    three ``_resolve_provenance`` outcomes the ``zero_count_*`` buckets use
+    — ``reindex_candidate`` (a concrete on-disk location resolves and
+    exists), ``orphaned_path`` (confirmed absent), or
+    ``unresolvable_provenance`` (absence could never be confirmed). The
+    latter three are the same bucket names, without the ``zero_count_``
+    prefix, since this is a different source population, not a fourth
+    bucket of the zero-count triage. Field shape (``resolved_path``,
+    ``file_path``, ``reason``) matches the corresponding ``zero_count_*``
+    rows exactly — see ``_classify``'s zero-count branch for the origin.
+    """
+    store_put_reason = _store_put_signature_reason(entry)
+    if store_put_reason is not None:
+        return {"origin": "store_put_origin", "reason": store_put_reason}
+    resolved, reason = _resolve_provenance(entry, owner_roots)
+    if reason in _UNRESOLVABLE_REASONS:
+        return {"origin": "unresolvable_provenance", "reason": reason}
+    if reason == "owner_root_gone":
+        return {
+            "origin": "orphaned_path",
+            "file_path": entry.file_path or "",
+            "resolved_path": str(resolved),
+            "reason": "owner_root_gone",
+        }
+    if resolved is not None and resolved.exists():
+        return {"origin": "reindex_candidate", "resolved_path": str(resolved)}
+    return {
+        "origin": "orphaned_path",
+        "file_path": entry.file_path or "",
+        "resolved_path": str(resolved),
+        "reason": "file_missing",
+    }
 
 
 def _format_reason_counts(counts: dict[str, int]) -> str:
@@ -282,6 +422,7 @@ def _classify(cat: "CatalogReader", t3: object) -> tuple[dict, list[str]]:
         "zero_count_reindex_candidate": [],
         "zero_count_orphaned_path": [],
         "zero_count_unresolvable_provenance": [],
+        "zero_count_store_put_origin": [],
         "dishonest": [],
     }
     unreadable: list[str] = []
@@ -325,6 +466,14 @@ def _classify(cat: "CatalogReader", t3: object) -> tuple[dict, list[str]]:
                 report["zero_count_recount"].append(row)
             elif _classify_never_chunked(e) == "rdr145_exempt":
                 report["zero_count_rdr145_exempt"].append(row)
+            elif (store_put_reason := _store_put_signature_reason(e)) is not None:
+                # nexus-0y0gk critique fix-round: the same store_put
+                # signature check the dishonest bucket uses, applied here
+                # so a post-sdp0u store_put doc that is STILL
+                # chunk_count==0 (module docstring: "anomalous, investigate")
+                # is labelled distinctly from a genuinely-unknown doc
+                # instead of collapsing into unresolvable_provenance.
+                report["zero_count_store_put_origin"].append({**row, "reason": store_put_reason})
             else:
                 resolved, reason = _resolve_provenance(e, owner_roots)
                 if reason in _UNRESOLVABLE_REASONS:
@@ -348,7 +497,7 @@ def _classify(cat: "CatalogReader", t3: object) -> tuple[dict, list[str]]:
             continue
 
         if manifest_len == 0:
-            report["dishonest"].append(row)
+            report["dishonest"].append({**row, **_resolve_dishonest_origin(e, owner_roots)})
 
     return report, unreadable
 
@@ -389,7 +538,12 @@ def _label_zero_count(row: dict) -> str:
 
 
 def _label_dishonest(row: dict) -> str:
-    return f"{row['tumbler']:<14} [{row['physical_collection']}]  chunk_count={row['chunk_count']}  {row['title']}"
+    origin = f"  origin={row['origin']}" if "origin" in row else ""
+    reason = f"  ({row['reason']})" if "reason" in row else ""
+    return (
+        f"{row['tumbler']:<14} [{row['physical_collection']}]  "
+        f"chunk_count={row['chunk_count']}  {row['title']}{origin}{reason}"
+    )
 
 
 def _echo_human_report(report: dict, unreadable: list[str]) -> None:
@@ -417,11 +571,13 @@ def _echo_human_report(report: dict, unreadable: list[str]) -> None:
     zc_reindex = report["zero_count_reindex_candidate"]
     zc_orphaned = report["zero_count_orphaned_path"]
     zc_unresolvable = report["zero_count_unresolvable_provenance"]
-    if zc_recount or zc_exempt or zc_reindex or zc_orphaned or zc_unresolvable:
+    zc_store_put = report["zero_count_store_put_origin"]
+    if zc_recount or zc_exempt or zc_reindex or zc_orphaned or zc_unresolvable or zc_store_put:
         click.echo(
             f"\nZero-count live documents ({len(zc_recount)} recount, "
             f"{len(zc_exempt)} RDR-145 exempt, {len(zc_reindex)} reindex candidate(s), "
-            f"{len(zc_orphaned)} orphaned path, {len(zc_unresolvable)} unresolvable provenance):"
+            f"{len(zc_orphaned)} orphaned path, {len(zc_store_put)} store_put origin, "
+            f"{len(zc_unresolvable)} unresolvable provenance):"
         )
         if zc_recount:
             click.echo("  Recount candidates (manifest non-empty; resync):")
@@ -441,18 +597,29 @@ def _echo_human_report(report: dict, unreadable: list[str]) -> None:
                 "paths (nexus-wq1e4 confirmed-safe signal)."
             )
             click.echo(f"    by reason: {_format_reason_counts(_count_by_reason(zc_orphaned))}")
+        if zc_store_put:
+            click.echo(
+                "  Store_put origin (nexus-sdp0u signature; recognizable, "
+                "NOT genuinely-unknown provenance — see `nx t3 backfill-manifest "
+                "--dry-run --only-gapped`):"
+            )
+            _echo_sample(zc_store_put, _CAP_ACTION, _label_zero_count)
+            click.echo(f"    by reason: {_format_reason_counts(_count_by_reason(zc_store_put))}")
         if zc_unresolvable:
             click.echo("  Unresolvable provenance (cannot confirm absence; diagnosis only, NEVER tombstoned):")
             _echo_sample(zc_unresolvable, _CAP_INFO, _label_zero_count)
             click.echo(f"    by reason: {_format_reason_counts(_count_by_reason(zc_unresolvable))}")
         click.echo("  By collection:")
-        for row in _breakdown_by_collection(zc_recount + zc_exempt + zc_reindex + zc_orphaned + zc_unresolvable):
+        for row in _breakdown_by_collection(
+            zc_recount + zc_exempt + zc_reindex + zc_orphaned + zc_store_put + zc_unresolvable
+        ):
             click.echo(f"    {row['count']:5d}  {row['collection']}")
 
     dishonest = report["dishonest"]
     if dishonest:
         click.echo(f"\nDishonest documents ({len(dishonest)} — chunk_count > 0, manifest empty; diagnosis only, never auto-acted):")
         _echo_sample(dishonest, _CAP_INFO, _label_dishonest)
+        click.echo(f"    by origin: {_format_reason_counts(_count_by_key(dishonest, 'origin'))}")
 
     click.echo("\nProposed actions:")
     click.echo(
@@ -479,6 +646,7 @@ def _echo_human_report(report: dict, unreadable: list[str]) -> None:
 def _json_payload(report: dict, unreadable: list[str]) -> dict:
     zc_orphaned = report["zero_count_orphaned_path"]
     zc_unresolvable = report["zero_count_unresolvable_provenance"]
+    zc_store_put = report["zero_count_store_put_origin"]
     return {
         "summary": {
             "total_docs": report["total_docs"],
@@ -488,6 +656,7 @@ def _json_payload(report: dict, unreadable: list[str]) -> dict:
             "zero_count_rdr145_exempt": len(report["zero_count_rdr145_exempt"]),
             "zero_count_reindex_candidate": len(report["zero_count_reindex_candidate"]),
             "zero_count_orphaned_path": len(zc_orphaned),
+            "zero_count_store_put_origin": len(zc_store_put),
             "zero_count_unresolvable_provenance": len(zc_unresolvable),
             "dishonest": len(report["dishonest"]),
         },
@@ -505,10 +674,13 @@ def _json_payload(report: dict, unreadable: list[str]) -> dict:
             "orphaned_path_worktree_count": sum(
                 1 for r in zc_orphaned if _is_worktree_or_tempdir_path(r.get("resolved_path", ""))
             ),
+            "store_put_origin": zc_store_put,
+            "store_put_origin_by_reason": _count_by_reason(zc_store_put),
             "unresolvable_provenance": zc_unresolvable,
             "unresolvable_provenance_by_reason": _count_by_reason(zc_unresolvable),
         },
         "dishonest": report["dishonest"],
+        "dishonest_by_origin": _count_by_key(report["dishonest"], "origin"),
         "incomplete": unreadable,
     }
 
