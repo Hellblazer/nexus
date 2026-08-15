@@ -1575,4 +1575,110 @@ class StagingPromoteOpsIntegrationTest {
     void orphanSynthesize_dim1024_populatesChunks1024AndResolvesManifest() {
         assertOrphanSynthesizesIntoDim(1024, 31);
     }
+
+    // ── Order 32/33: nexus-cefa1.4 — document_aspects.extras promote cast ────
+    //
+    // finalizeTenant's document_aspects promote (Class-D, anti-join on
+    // (collection, source_path)) selects the staged, still-TEXT extras column
+    // into the now-jsonb DOCUMENT_ASPECTS.EXTRAS column via
+    // StagingPromoteOps.parseStagedJson. No prior test in this file exercised
+    // this leg at all (grepped: no staging.document_aspects INSERT anywhere
+    // else in this file) — these two tests are the FIRST coverage of it.
+
+    private static final String ASPECTS_PROMOTE_COLL = "aspects-promote-json-coll";
+
+    @Test
+    @Order(32)
+    void finalizeTenant_documentAspectsPromote_castsStagedExtrasToJsonb() {
+        // The staged column stays TEXT (staging is deliberately typeless) --
+        // finalizeTenant's document_aspects promote must cast it explicitly
+        // (StagingPromoteOps.parseStagedJson) or this INSERT ... SELECT fails
+        // outright against the jsonb target column.
+        //
+        // doc_id must be a REGISTERED tumbler, not the staging column's own
+        // NOT NULL DEFAULT '': nexus.document_aspects.doc_id carries a
+        // (tenant_id, doc_id) FK to catalog_documents (fk-001), and unlike the
+        // live write path (AspectRepository.nullIfBlank), this promote SELECT
+        // passes the staged doc_id straight through with no blank-to-NULL
+        // normalization -- an unregistered '' violates the FK. That gap is a
+        // pre-existing Class-D promote behavior, out of scope for nexus-cefa1.4
+        // (extras/salient_sentences only); route around it with a real tumbler.
+        String doc = "aspects-promote-json-doc";
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
+                + "ON CONFLICT (tenant_id, name) DO NOTHING", T1, ASPECTS_PROMOTE_COLL);
+            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES (?, ?, ?) "
+                + "ON CONFLICT (tenant_id, tumbler) DO NOTHING", T1, doc, "aspects-promote-json fixture");
+            ctx.execute("INSERT INTO staging.document_aspects "
+                + "(tenant_id, doc_id, collection, source_path, extracted_at, model_version, "
+                + "extractor_name, extras) VALUES (?, ?, ?, ?, '', 'v1', 'ex', ?)",
+                T1, doc, ASPECTS_PROMOTE_COLL, "aspects-promote-json.pdf",
+                "{\"venue\": \"VLDB\", \"year\": \"2023\"}");
+            return null;
+        });
+
+        Map<String, Object> fin = ops.finalizeTenant(T1, false);
+        assertThat(fin.get("document_aspects_promoted"))
+            .as("the staged document_aspects row must promote (anti-join sees a new row)")
+            .isEqualTo(1);
+
+        String extrasText = scope.withTenant(T1, ctx -> ctx.fetchOne(
+            "SELECT extras::text FROM nexus.document_aspects "
+            + "WHERE tenant_id = ? AND collection = ? AND source_path = ?",
+            T1, ASPECTS_PROMOTE_COLL, "aspects-promote-json.pdf").get(0, String.class));
+        try {
+            var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            @SuppressWarnings("unchecked")
+            Map<String, Object> parsed = mapper.readValue(extrasText, Map.class);
+            assertThat(parsed).containsEntry("venue", "VLDB").containsEntry("year", "2023");
+        } catch (Exception e) {
+            throw new AssertionError("promoted extras must remain parseable JSON: " + extrasText, e);
+        }
+    }
+
+    @Test
+    @Order(33)
+    void finalizeTenant_documentAspectsPromote_malformedStagedExtras_failsLoud() {
+        // The documented outcome (StagingPromoteOps.parseStagedJson's own javadoc,
+        // and aspects-003-type-hygiene.xml's header): staging stays typeless by
+        // design, so a malformed staged value fails LOUD at promote time rather
+        // than landing silently -- the whole finalizeTenant transaction aborts,
+        // and the malformed row never reaches nexus.document_aspects.
+        String coll = ASPECTS_PROMOTE_COLL + "-malformed";
+        // A REGISTERED doc_id, exactly like Order 32: this test must isolate the
+        // JSON-cast failure from the blank-doc_id FK gap (nexus-5enca) -- with
+        // doc_id='' both would raise and isInstanceOf(RuntimeException) could not
+        // tell them apart (critique finding, cefa1.4).
+        String doc = "aspects-promote-malformed-doc";
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
+                + "ON CONFLICT (tenant_id, name) DO NOTHING", T1, coll);
+            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES (?, ?, ?) "
+                + "ON CONFLICT (tenant_id, tumbler) DO NOTHING", T1, doc, "aspects-promote-malformed fixture");
+            ctx.execute("INSERT INTO staging.document_aspects "
+                + "(tenant_id, doc_id, collection, source_path, extracted_at, model_version, "
+                + "extractor_name, extras) VALUES (?, ?, ?, ?, '', 'v1', 'ex', ?)",
+                T1, doc, coll, "aspects-promote-malformed.pdf", "not-json-at-all");
+            return null;
+        });
+
+        assertThatThrownBy(() -> ops.finalizeTenant(T1, false))
+            .as("malformed staged extras must fail the promote loud, not land silently")
+            .isInstanceOf(RuntimeException.class)
+            .hasMessageContaining("json");
+
+        int landed = count("SELECT count(*) FROM nexus.document_aspects "
+            + "WHERE collection = '" + coll + "' AND source_path = 'aspects-promote-malformed.pdf'");
+        assertThat(landed).as("the malformed row must NOT have landed in nexus.document_aspects")
+            .isEqualTo(0);
+
+        // Cleanup: this is the LAST test in the class, but stay consistent with
+        // this file's own convention (Order 3/4) of cleaning up a fail-loud
+        // scenario's staged row so no later finalize run would keep re-attempting
+        // (and re-failing on) it.
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("DELETE FROM staging.document_aspects WHERE collection = ?", coll);
+            return null;
+        });
+    }
 }

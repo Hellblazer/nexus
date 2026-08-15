@@ -130,13 +130,15 @@ class UpdatedAtTriggerTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT + "', 'c') "
                 + "ON CONFLICT (tenant_id, name) DO NOTHING");
+            // nexus-cefa1.4: salient_sentences is jsonb now — bare 'before'/'after'
+            // TEXT literals are no longer valid input; use quoted JSON strings.
             su.createStatement().execute(
                 "INSERT INTO nexus.document_aspects "
                 + "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, salient_sentences, updated_at) "
-                + "VALUES ('" + TENANT + "', 'c', 'p1', now(), 'v1', 'ex', 'before', '" + OLD_TS + "')");
+                + "VALUES ('" + TENANT + "', 'c', 'p1', now(), 'v1', 'ex', '\"before\"', '" + OLD_TS + "')");
             // Partial UPDATE to salient_sentences (the path that bypasses extracted_at).
             su.createStatement().execute(
-                "UPDATE nexus.document_aspects SET salient_sentences = 'after' "
+                "UPDATE nexus.document_aspects SET salient_sentences = '\"after\"' "
                 + "WHERE tenant_id = '" + TENANT + "' AND collection = 'c' AND source_path = 'p1'");
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT updated_at FROM nexus.document_aspects "

@@ -10,8 +10,12 @@
 --       nexus-cefa1.3). Its branch was SPLIT OUT of this file into
 --       schema_type_hygiene_preflight_tier_b_hook_failures.sql the moment it
 --       converted — exactly as this header always said the first conversion
---       would require. This file now audits the remaining FIVE columns only.
---   P3 (document_aspects.extras, document_aspects.salient_sentences)
+--       would require.
+--   P3 (document_aspects.extras, document_aspects.salient_sentences) —
+--       SHIPPED (aspects-003-type-hygiene.xml, nexus-cefa1.4). Its branch
+--       was likewise SPLIT OUT into
+--       schema_type_hygiene_preflight_tier_b_document_aspects.sql. This file
+--       now audits the remaining THREE columns only.
 --   P4 (plans.plan_json, plans.default_bindings)
 --   P5 (topic_links.link_types)
 -- So this file can be in a PARTIALLY migrated state — some columns still
@@ -26,15 +30,16 @@
 -- which classifies each column as still-TEXT (audit) or already-converted
 -- (assert the new type) and only ever runs this file's UNION ALL as a whole
 -- while EVERY column remaining in it is still TEXT. The NEXT column here to
--- convert (P3's document_aspects.extras / .salient_sentences) breaks
--- whole-file execution again — at that point split it out the same way this
--- file split hook_failures.batch_doc_ids, rather than patching with dynamic
--- SQL.
+-- convert (P4's plans.plan_json / .default_bindings) breaks whole-file
+-- execution again — at that point split it out the same way this file
+-- split hook_failures.batch_doc_ids and document_aspects.extras/
+-- .salient_sentences, rather than patching with dynamic SQL.
 --
--- Audits: plans.plan_json, plans.default_bindings, topic_links.link_types,
--- document_aspects.extras, document_aspects.salient_sentences (all -> jsonb).
--- hook_failures.batch_doc_ids moved to
+-- Audits: plans.plan_json, plans.default_bindings, topic_links.link_types
+-- (all -> jsonb). hook_failures.batch_doc_ids moved to
 -- schema_type_hygiene_preflight_tier_b_hook_failures.sql (P2 shipped).
+-- document_aspects.extras / .salient_sentences moved to
+-- schema_type_hygiene_preflight_tier_b_document_aspects.sql (P3 shipped).
 --
 -- COLUMNS EMITTED (one row per audited column):
 --   tier                  'B'.
@@ -43,10 +48,12 @@
 --   null_count             col IS NULL.
 --   empty_string_count      col = ''. Reported separately from
 --                          invalid_cast_count on purpose: for
---                          default_bindings/extras/salient_sentences/
---                          batch_doc_ids the eventual USING clause is
+--                          default_bindings the eventual USING clause is
 --                          NULLIF(col,'')::jsonb, so '' becomes NULL and
---                          never reaches the cast — benign. But
+--                          never reaches the cast — benign (same shape as
+--                          the already-shipped batch_doc_ids/extras/
+--                          salient_sentences columns, now audited by their
+--                          own split files). But
 --                          plans.plan_json (NOT NULL, kept NOT NULL per the
 --                          plan of record) and topic_links.link_types (NOT
 --                          NULL DEFAULT '[]') have NO NULLIF step:
@@ -79,8 +86,8 @@
 -- All source tables are ENABLE + FORCE ROW LEVEL SECURITY with the standard
 -- `tenant_isolation` policy (`tenant_id = current_setting('nexus.tenant',
 -- true)`) — verified against plans-001-baseline.xml, taxonomy-001-
--- baseline.xml, aspects-001-baseline.xml, telemetry-001-baseline.xml. A
--- plain tenant-scoped application connection sees ONE tenant's rows and
+-- baseline.xml. A plain tenant-scoped application connection sees ONE
+-- tenant's rows and
 -- silently UNDERCOUNTS every column here (nexus-vounk: demonstrated 0-vs-9
 -- on exactly this failure shape) — a false-clean, not a legitimately empty
 -- store. Run this file through ONE of:
@@ -149,27 +156,5 @@ FROM (
            count(*) FILTER (WHERE link_types IS NOT NULL AND link_types <> ''
                              AND NOT pg_input_is_valid(link_types, 'jsonb'))
     FROM nexus.topic_links
-
-    UNION ALL
-    -- ── column: document_aspects.extras ─────────────────────────────────
-    SELECT 'B', 'document_aspects', 'extras',
-           count(*),
-           count(*) FILTER (WHERE extras IS NULL),
-           count(*) FILTER (WHERE extras = ''),
-           NULL::bigint,
-           count(*) FILTER (WHERE extras IS NOT NULL AND extras <> ''
-                             AND NOT pg_input_is_valid(extras, 'jsonb'))
-    FROM nexus.document_aspects
-
-    UNION ALL
-    -- ── column: document_aspects.salient_sentences ──────────────────────
-    SELECT 'B', 'document_aspects', 'salient_sentences',
-           count(*),
-           count(*) FILTER (WHERE salient_sentences IS NULL),
-           count(*) FILTER (WHERE salient_sentences = ''),
-           NULL::bigint,
-           count(*) FILTER (WHERE salient_sentences IS NOT NULL AND salient_sentences <> ''
-                             AND NOT pg_input_is_valid(salient_sentences, 'jsonb'))
-    FROM nexus.document_aspects
 ) t
 ORDER BY tier, table_name, column_name;

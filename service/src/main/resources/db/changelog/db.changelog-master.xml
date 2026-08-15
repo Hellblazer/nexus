@@ -578,6 +578,20 @@
          full data-safety trace and consumer audit. -->
     <include file="db/changelog/telemetry-004-type-hygiene.xml"/>
 
+    <!-- Schema type-hygiene pass, Tier A + Tier B, P3 (epic nexus-cefa1, bead
+         nexus-cefa1.4): retires document_aspects.extras / .salient_sentences
+         (TEXT -> jsonb NULL) and aspect_promotion_log.column_added / .pruned
+         (INTEGER -> boolean). Ordinary DDL, no runAlways. Placed after
+         telemetry-004-type-hygiene.xml (P2) and before the grants-nexus-
+         svc.xml runAlways block — NOT back in the aspects-00N family's own
+         section above, matching the established convention (every RDR-156+
+         changeset appends near the current tail rather than splicing back
+         into its family's original block; see catalog-031's and
+         telemetry-004's own <include> comments for the identical reasoning).
+         See aspects-003-type-hygiene.xml's own header for the full
+         data-safety trace and consumer audit. -->
+    <include file="db/changelog/aspects-003-type-hygiene.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

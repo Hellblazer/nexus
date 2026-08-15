@@ -185,6 +185,29 @@ public final class StagingPromoteOps {
     }
 
     /**
+     * {@code nullif(raw, '')::jsonb} — the staged-TEXT-to-jsonb parse idiom
+     * for columns converted by the schema type-hygiene arc (epic
+     * nexus-cefa1; {@code document_aspects.extras} is the first user,
+     * nexus-cefa1.4 / P3). Sibling of {@link #parseStagedTimestamp} /
+     * {@link #parseStagedTimestampNullable}: same {@code NULLIF(raw,'')}
+     * shape, cast to {@code jsonb} instead of {@code timestamptz}, no
+     * {@code now()}-style fallback (there is no meaningful default JSON
+     * value to substitute).
+     *
+     * <p>Staging stays typeless by design (the staged column itself is
+     * still TEXT — this cast only happens at promote time). A malformed
+     * staged value therefore fails LOUD at promote time (PostgreSQL raises
+     * "invalid input syntax for type json" for the whole transactional
+     * {@code finalizeTenant} promote), rather than landing silently — the
+     * same fail-loud posture this class already applies via {@link
+     * PromoteConflictException} / {@link PromotePreconditionException}, not
+     * a new behavior.
+     */
+    private static Field<JSONB> parseStagedJson(Field<String> raw) {
+        return DSL.nullif(raw, "").cast(JSONB.class);
+    }
+
+    /**
      * Content-table accessor for {@link #promoteCollection}'s content
      * INSERT (nexus-4okz4 increment 3, RDR-191 repoint nexus-o8dil.17).
      *
@@ -1120,7 +1143,11 @@ public final class StagingPromoteOps {
                 .select(ctx.select(
                         currentTenantSetting(), sdaCollection, sdaSourcePath,
                         sdaProblemFormulation, sdaProposedMethod, sdaExperimentalDatasets,
-                        sdaExperimentalBaselines, sdaExperimentalResults, sdaExtras, sdaConfidence,
+                        sdaExperimentalBaselines, sdaExperimentalResults,
+                        // nexus-cefa1.4: DOCUMENT_ASPECTS.EXTRAS is jsonb now — staging.
+                        // document_aspects.extras stays TEXT (typeless by design), so the
+                        // promote SELECT needs the explicit staged-TEXT-to-jsonb cast.
+                        parseStagedJson(sdaExtras), sdaConfidence,
                         parseStagedTimestamp(sdaExtractedAt),
                         sdaModelVersion, sdaExtractorName, sdaSourceUri, sdaDocId)
                     .from(sda)

@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cefa1.4 — schema type-hygiene pass, Tier B, P3 (epic nexus-cefa1;
+    plan of record T2 nexus/plan-schema-type-hygiene-2026-08-12 [22360]).
+    Template: telemetry-004-type-hygiene.xml (nexus-cefa1.3, P2) — the
+    closest sibling (same one-ALTER-per-table shape, same jsonbOrNull /
+    JSONB.data() wire-preservation pattern, same rollback style).
+
+    Retires four RDR-152 SQLite-port columns across TWO tables, in TWO
+    changesets (one per table — document_aspects and aspect_promotion_log
+    are different tables, so this mirrors telemetry-004's "one ALTER per
+    table" shape rather than folding both tables into a single ALTER):
+
+    Changeset 1 — nexus.document_aspects (Tier B, TEXT -> jsonb):
+    - extras (nullable, no default per aspects-001-baseline.xml:66) -> jsonb
+      NULL, via TYPE jsonb USING NULLIF(extras, '')::jsonb.
+    - salient_sentences (nullable, no default per aspects-001-
+      baseline.xml:72) -> jsonb NULL, via the identical USING clause.
+      Neither column carries a DEFAULT or NOT NULL to DROP/restore — unlike
+      telemetry-004's is_batch (NOT NULL DEFAULT 0) or catalog-031's
+      legacy_grandfathered, this changeset is a bare TYPE ... USING with no
+      DROP DEFAULT / SET DEFAULT bracketing, because there is nothing to
+      drop or re-set.
+
+    Changeset 2 — nexus.aspect_promotion_log (Tier A, INTEGER -> boolean):
+    - column_added: INTEGER NOT NULL DEFAULT 0 -> boolean NOT NULL DEFAULT
+      false, via DROP DEFAULT -> TYPE boolean USING (column_added <> 0) ->
+      SET DEFAULT false. Same shape as telemetry-004's is_batch / catalog-
+      031-3's legacy_grandfathered.
+    - pruned: INTEGER NOT NULL DEFAULT 0 -> boolean NOT NULL DEFAULT false,
+      identical shape.
+    - rows_pruned stays INTEGER, untouched — it is a COUNT (rows affected
+      by a prune), not a duplicate of the pruned FLAG; conflating the two
+      was considered and rejected at plan time (T2 nexus/plan-schema-type-
+      hygiene-2026-08-12: "aspect_promotion_log.rows_pruned vs .pruned —
+      NOT duplicates: count vs flag ... Both stay; pruned -> boolean.").
+    NOT NULL is preserved automatically across ALTER COLUMN TYPE on both
+    columns (never touched); only DEFAULT is dropped and re-set because a
+    numeric DEFAULT 0 is not valid input for a boolean column.
+
+    ALTER COLUMN TYPE is ordinary DDL (an ACCESS EXCLUSIVE table rewrite),
+    not RLS-filtered DML — no FORCE RLS toggle needed for either changeset,
+    and neither touches a row via INSERT/UPDATE/DELETE.
+
+    Data-safety evidence:
+    - document_aspects.extras / .salient_sentences: T2 nexus/schema-hygiene-
+      p0-preflight-2026-08-15 [22588] (nexus-cefa1.1), cloud (the only
+      populated deployment; this box's local substrate is a fresh hermetic
+      pytest engine with no seeded data): total_rows=1030 for BOTH columns,
+      null_count=0, empty_string_count=0, invalid_cast_count=0 for BOTH —
+      every row already holds valid, non-empty JSON. The NULLIF(...,'')
+      ::jsonb USING clause above therefore has nothing to convert on either
+      column and is confirmed safe.
+    - aspect_promotion_log.column_added / .pruned: NOT part of the P0 probe
+      (Tier A boolean columns, not Tier B jsonb — the P0 probe audits Tier
+      B jsonb-target columns plus the four Tier-A timestamp columns; this
+      table's two INTEGER flag columns were never in either probe's scope).
+      Their live value domain was instead verified by reading BOTH writers:
+      - Java: AspectRepository.recordPromotion / .importPromotionRow /
+        .importPromotionBatch each derive column_added and pruned as
+        `Boolean.TRUE.equals(body.get(...)) ? 1 : 0` before every INSERT —
+        the column's value domain is mechanically {0, 1}, never any other
+        integer.
+      - Python: aspect_promotion.py's own changeset-template docstring (the
+        canonical "how to promote a field" recipe every real promotion
+        follows, since the runtime promotion verb itself is retired per
+        nexus-70x7y) writes literal `1` / `0` for column_added / pruned in
+        its INSERT ... SELECT sample.
+      `USING (column_added <> 0)` / `USING (pruned <> 0)` are therefore
+      exhaustive and safe by construction, independent of any live-data
+      probe — same reasoning telemetry-004 applied to hook_failures.is_batch.
+
+    Consumer audit (nexus-cefa1.4, mirroring nexus-cefa1.2/.3's sweeps):
+    - extras / salient_sentences: the wire is ALREADY a JSON string/dict/
+      list end to end. AspectHandler.serializeAspectBody already
+      JSON-serializes List/Map values for both fields before they reach the
+      repository (Python clients send dicts/lists; Jackson deserializes
+      them as ArrayList/LinkedHashMap); a caller-supplied pre-serialized
+      String passes through unchanged. This changeset does not change that
+      wire shape, only the storage column's own type — AspectRepository's
+      write sites wrap the incoming JSON string in JSONB.valueOf via the
+      shared JsonbSupport.jsonbOrNull helper (extracted from
+      TelemetryRepository, nexus-cefa1.3, rather than copy-pasted a second
+      time), and read sites (recordToMap, getSalientSentences) unwrap via
+      JSONB.data() so the wire stays exactly the JSON text it always was.
+      AspectRepository's operator-fast-path SQL
+      (filterBySourceUris/groupByField's `COALESCE(extras,'{}')::json#>>
+      '{key}'` expression, RDR-089 bead nexus-l9hd8) is UNCHANGED and
+      verified to keep working: COALESCE coerces the untyped '{}' literal
+      to jsonb to match the (now-native) jsonb `extras` column, `::json`
+      remains a legal jsonb->json cast, and `#>>` operates on json exactly
+      as before — this is a raw SQL string built by fieldExpression(), not
+      tied to jOOQ's generated column type, so it is unaffected by the
+      column's underlying storage type either way.
+    - column_added / pruned: the wire is ALSO already boolean end to end —
+      AspectRepositoryTest's existing recordPromotion/listPromotions round-
+      trip tests already write/read Java Booleans on the body Map (`body.
+      put("column_added", true)`, asserted via `Boolean.TRUE.equals(...)`),
+      and Python's enrich.py CLI reader (`e["pruned"]` used in a truthy
+      `if`) is compatible with either a JSON int or a JSON boolean. This
+      changeset retires the `? 1 : 0` / `!= 0` integer shims in
+      AspectRepository.recordPromotion / .listPromotions /
+      .importPromotionRow / .importPromotionBatch — the wire shape itself
+      does not change.
+    - StagingPromoteOps.finalizeTenant's document_aspects promote (Class-D,
+      anti-join on (collection, source_path)) selects staged `extras` into
+      the now-jsonb DOCUMENT_ASPECTS.EXTRAS column — the staged column
+      itself stays TEXT (staging is deliberately typeless), so the promote
+      SELECT needs an explicit cast. See StagingPromoteOps.parseStagedJson
+      (new, sibling of parseStagedTimestamp/parseStagedTimestampNullable)
+      and its call site. salient_sentences is NOT part of that INSERT's
+      column list (verified: the promote's document_aspects column list
+      omits it), so no staging-side change is needed for that column.
+    - No text-equality or hash consumer of extras/salient_sentences was
+      found (plan-of-record fact 6 audit): grepped src/nexus and
+      service/src/main for aspect dedup / match_text derivation touching
+      these two fields — none exists. AspectRepository's own conflict key
+      is (tenant_id, collection, source_path), never extras' content.
+
+    ANALYZE after each rewrite (BUG-0148 invariant, rdr180-16-analyze-
+    rewritten-tables precedent, mechanically enforced by
+    tests/test_changelog_analyze_lint.py) — each ALTER COLUMN ... TYPE
+    above resets its table's planner statistics.
+
+    Rollback: document_aspects mirrors telemetry-004's batch_doc_ids
+    rollback exactly (nullable, no-default TEXT columns pre-migration —
+    TYPE TEXT USING col::text casts a jsonb NULL back to a TEXT NULL for
+    free, no COALESCE-to-'' needed). aspect_promotion_log mirrors
+    telemetry-004's is_batch / catalog-031-3's legacy_grandfathered exactly
+    (TYPE INTEGER USING (CASE WHEN col THEN 1 ELSE 0 END), DEFAULT 0
+    restored) for both column_added and pruned.
+
+    Ordering: registered after telemetry-004-type-hygiene.xml (P2) and
+    before the grants-nexus-svc.xml runAlways block, NOT back in the
+    aspects-00N family's own section near the top of the changelog. This
+    matches the master changelog's established convention for every new
+    changeset since RDR-156 (catalog-031, telemetry-004, etc. all append
+    near the current tail rather than splicing back into their family's
+    original block) — see db.changelog-master.xml's own header on the
+    telemetry-004 <include> for the identical reasoning applied there.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset aspects-003-1-document-aspects-type-hygiene ──────────────── -->
+    <changeSet id="aspects-003-1-document-aspects-type-hygiene" author="nexus-cefa1.4">
+        <comment>
+            document_aspects.extras TEXT -> jsonb NULL; document_aspects.salient_sentences
+            TEXT -> jsonb NULL (ONE ALTER TABLE, one rewrite).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.document_aspects
+    ALTER COLUMN extras TYPE jsonb USING NULLIF(extras, '')::jsonb,
+    ALTER COLUMN salient_sentences TYPE jsonb USING NULLIF(salient_sentences, '')::jsonb;
+
+-- BUG-0148 invariant (rdr180-16-analyze-rewritten-tables precedent, mechanically
+-- enforced by tests/test_changelog_analyze_lint.py): the ALTER COLUMN ... TYPE
+-- above rewrites document_aspects and resets its planner statistics.
+ANALYZE nexus.document_aspects;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+ALTER TABLE nexus.document_aspects
+    ALTER COLUMN extras TYPE TEXT USING extras::text,
+    ALTER COLUMN salient_sentences TYPE TEXT USING salient_sentences::text;
+
+ANALYZE nexus.document_aspects;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset aspects-003-2-promotion-log-type-hygiene ─────────────────── -->
+    <changeSet id="aspects-003-2-promotion-log-type-hygiene" author="nexus-cefa1.4">
+        <comment>
+            aspect_promotion_log.column_added INTEGER -> boolean; aspect_promotion_log.pruned
+            INTEGER -> boolean (ONE ALTER TABLE, one rewrite). rows_pruned (a COUNT) is
+            untouched -- not a duplicate of the pruned flag.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.aspect_promotion_log
+    ALTER COLUMN column_added DROP DEFAULT,
+    ALTER COLUMN column_added TYPE boolean USING (column_added &lt;&gt; 0),
+    ALTER COLUMN column_added SET DEFAULT false,
+    ALTER COLUMN pruned DROP DEFAULT,
+    ALTER COLUMN pruned TYPE boolean USING (pruned &lt;&gt; 0),
+    ALTER COLUMN pruned SET DEFAULT false;
+
+-- BUG-0148 invariant: the ALTER COLUMN ... TYPE above rewrites
+-- aspect_promotion_log and resets its planner statistics.
+ANALYZE nexus.aspect_promotion_log;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+ALTER TABLE nexus.aspect_promotion_log
+    ALTER COLUMN column_added DROP DEFAULT,
+    ALTER COLUMN column_added TYPE INTEGER USING (CASE WHEN column_added THEN 1 ELSE 0 END),
+    ALTER COLUMN column_added SET DEFAULT 0,
+    ALTER COLUMN pruned DROP DEFAULT,
+    ALTER COLUMN pruned TYPE INTEGER USING (CASE WHEN pruned THEN 1 ELSE 0 END),
+    ALTER COLUMN pruned SET DEFAULT 0;
+
+ANALYZE nexus.aspect_promotion_log;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

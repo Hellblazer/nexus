@@ -3,7 +3,6 @@ package dev.nexus.service.db;
 import dev.nexus.service.jooq.nexus.tables.records.FrecencyRecord;
 import dev.nexus.service.jooq.nexus.tables.records.RelevanceLogRecord;
 import org.jooq.DSLContext;
-import org.jooq.JSONB;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static dev.nexus.service.db.JsonbSupport.jsonbOrNull;
 import static dev.nexus.service.jooq.nexus.Tables.*;
 import static org.jooq.impl.DSL.*;
 
@@ -108,16 +108,9 @@ public final class TelemetryRepository {
         return v != null ? v : "";
     }
 
-    /**
-     * nexus-cefa1.3 — hook_failures.batch_doc_ids TEXT -> jsonb. Mirrors the
-     * changeset's own USING NULLIF(batch_doc_ids, '')::jsonb: null/blank
-     * input writes a real SQL NULL rather than an invalid empty-string
-     * jsonb literal (''::jsonb raises "invalid input syntax for type
-     * json").
-     */
-    private static JSONB jsonbOrNull(String v) {
-        return (v == null || v.isBlank()) ? null : JSONB.valueOf(v);
-    }
+    // nexus-cefa1.4: jsonbOrNull moved to the shared JsonbSupport (same
+    // package) when AspectRepository needed the identical helper a second
+    // time — statically imported above rather than copy-pasted again.
 
     // ── relevance_log ──────────────────────────────────────────────────────────
 
