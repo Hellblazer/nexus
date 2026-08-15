@@ -1368,7 +1368,17 @@ taken BEFORE anything converts.
   USING `decode(doc_id,'hex')`, ANALYZE (PK plus four indexes rebuild). Java:
   jOOQ regeneration for the repository half, hand edits at the seven
   `TaxonomyHandler` sites the compiler will not flag. Test fixtures fixed in
-  this commit. `EXPECT_NEW_CHANGESETS=1`.
+  this commit. SQL functions (plan audit 2026-08-15, HIGH): six live functions
+  bind `doc_id` as hex TEXT and would fail at first call after the ALTER with
+  no Liquibase error, since nothing depends on them as a view: the writers
+  `nexus.assign_from_chashes_{384,768,1024}` (vectors-005:2412/2574/2736,
+  `encode(c.chash,'hex') AS m_chash`) and the readers
+  `nexus.search_topic_scoped_{384,768,1024}` (`ta.doc_id = c.chash` join).
+  The same file carries CREATE OR REPLACE for all six binding `doc_id` as
+  bytea (`c.chash` directly, no encode/decode), and a post-migration
+  round-trip test writes through `assign_from_chashes` and reads through
+  `search_topic_scoped` against `nexus.chunks` rows.
+  `EXPECT_NEW_CHANGESETS=1+6` (re-pinned to the file as authored).
 - **P3d FK.** `taxonomy-012-doc-id-chunk-fk.xml`: the three-step shape.
   Retire `ChashCensus` leg C1 and its "either era" shape filter in this same
   commit. `EXPECT_NEW_CHANGESETS=3`.
