@@ -261,8 +261,10 @@ def _engine_error_detail(exc: httpx.HTTPStatusError) -> str:
 def _coerce_legacy_grandfathered(d: dict) -> dict:
     """Coerce a collection row's ``legacy_grandfathered`` to ``bool`` (nexus-u26b4).
 
-    ``CatalogRepository.collRow()``'s ``legacy_grandfathered`` column is a boxed
-    Integer on the wire (serializes as a JSON number, 0/1); local
+    ``CatalogRepository.collRow()``'s ``legacy_grandfathered`` was a boxed
+    Integer on the wire (JSON number, 0/1) until catalog-031-type-hygiene
+    (nexus-cefa1.2) made the column boolean; engines from that changeset on
+    send JSON true/false, and ``bool()`` accepts both shapes. Local
     ``Catalog.list_collections()`` (via ``_row_to_collection_dict``) already casts
     it to a real Python ``bool``. Mirrors that cast here so raw dict-returning
     callers (``get_collection``/``list_collections``/``collections_by_owner``) get

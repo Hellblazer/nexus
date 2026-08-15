@@ -418,15 +418,15 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             # owner_id added so collections_by_owner's client-side filter
             # (c.get("owner_id") == owner_id) has something to match ("1.1" is
             # the tumbler_prefix every fixture owner in this file uses).
-            # legacy_grandfathered is an int (0/1) on the wire (collRow's
-            # ``legcy`` param is a boxed Integer column, not a boolean) —
-            # deliberately NOT coerced to a Python bool here (see
-            # nexus-8y1tm KNOWN DRIFT note on get_collection/list_collections).
+            # legacy_grandfathered is a JSON boolean on the wire since
+            # catalog-031-type-hygiene (nexus-cefa1.2): collRow puts a real
+            # Java Boolean. Engines older than that sent 0/1; the client's
+            # _coerce_legacy_grandfathered bool() cast accepts both.
             self._send_json({"collections": [{
                 "name": "code__test__voyage-code-3__v1", "content_type": "code",
                 "owner_id": "1.1", "embedding_model": "voyage-code-3",
                 "model_version": "1", "display_name": "code__test__voyage-code-3__v1",
-                "legacy_grandfathered": 0, "superseded_by": "", "superseded_at": "",
+                "legacy_grandfathered": False, "superseded_by": "", "superseded_at": "",
                 "created_at": "2026-07-01T00:00:00+00:00",
             }]})
         elif op == "/collections/get":
@@ -443,10 +443,10 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     "embedding_model": "voyage-code-3",
                     "model_version": "1",
                     "display_name": name,
-                    # legacy_grandfathered: int (0/1) on the wire, matching
-                    # CatalogRepository.collRow's boxed-Integer column — see
-                    # the KNOWN DRIFT note where this is registered/excluded.
-                    "legacy_grandfathered": 0 if "__" in name else 1,
+                    # legacy_grandfathered: JSON boolean on the wire since
+                    # catalog-031 (collRow's column is boolean now); derived
+                    # from name conformance the way the live server does.
+                    "legacy_grandfathered": "__" not in name,
                     "superseded_by": "", "superseded_at": "",
                     "created_at": "2026-07-01T00:00:00+00:00",
                 })
