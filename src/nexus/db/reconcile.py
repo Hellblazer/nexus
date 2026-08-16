@@ -661,6 +661,15 @@ def _verify_fill_one(
                         missing_vectors=missing_vecs, provenance_mismatch=mis_prov,
                     )
 
+            # nexus-cy9u7 round-3 CRITICAL C2: retry=False — this call is
+            # already wrapped in _etl_batch_with_breaker -> _etl_with_retry
+            # (this module's own retry/breaker stack). upsert_chunks's OWN
+            # internal _vector_with_retry wrap must be skipped here, or a
+            # single failure gets retried by THREE nested layers (this
+            # breaker, upsert_chunks's wrapper, and _request's inner gateway
+            # retry) and can trip/escalate the shared rate-limit brake
+            # independently at two of them. See upsert_chunks's docstring
+            # for the ``retry`` kwarg contract — this is its ONE consumer.
             _etl_batch_with_breaker(
                 vector_client.upsert_chunks,
                 target,
@@ -669,6 +678,7 @@ def _verify_fill_one(
                 [c["metadata"] for c in missing_batch],
                 breaker=breaker,
                 embeddings=embeddings,
+                retry=False,
             )
             filled_count += len(missing_batch)
     except Exception as exc:  # noqa: BLE001 — report and continue with the next collection

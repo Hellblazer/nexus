@@ -1414,6 +1414,7 @@ class HttpVectorClient:
         force_re_embed: bool | None = None,
         embeddings: list[list[float]] | None = None,
         skip_existing: bool | None = None,
+        retry: bool = True,
     ) -> None:
         """Embed + write via the Java service.
 
@@ -1449,6 +1450,24 @@ class HttpVectorClient:
         batch — the whole batch is always sent — and only triggers a
         one-time deprecation log line (see
         :func:`_warn_skip_existing_deprecated`).
+
+        ``retry`` (nexus-cy9u7 round-3 CRITICAL C2): defaults True — every
+        page's POST is wrapped in :func:`nexus.retry._vector_with_retry`,
+        the client-boundary retry every OTHER caller of this method relies
+        on (indexers: code/prose/doc indexers, pipeline_stages, the
+        ChunkBatcher). Pass ``retry=False`` for a caller that ALREADY owns
+        its own retry/backoff stack and would otherwise get THREE nested
+        retry layers on the same failure: ``db/reconcile.py``'s verify-fill
+        path wraps this call in ``_etl_batch_with_breaker`` ->
+        ``_etl_with_retry``, which — stacked on this method's own
+        ``_vector_with_retry`` PLUS ``_request``'s inner gateway retry — put
+        worst-case latency far beyond any documented ceiling and tripped/
+        escalated the shared rate-limit brake independently at two layers
+        for one failure. ``retry=False`` skips ONLY this method's own
+        wrapper (single-attempt POST per page); the caller's own retry
+        stack still runs, and ``_request``'s inner gateway retry is
+        untouched either way (it lives below both layers). This keeps
+        exactly ONE retry owner per call site.
 
         ``force_re_embed`` (RDR-181, bead nexus-f0r8p.3; or the deprecated
         env escape ``NX_UPSERT_SKIP_EXISTING=0``): tells the SERVER to bypass
@@ -1525,9 +1544,33 @@ class HttpVectorClient:
                 distinct_chash_count=len(set(page_ids)),
                 force_re_embed=force_re_embed,
             )
-            result = _post(
-                "/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600,
-            )
+            # nexus-cy9u7 CRITICAL-1: this is "the ONE choke point" (see the
+            # method docstring above) — every production write call site
+            # (code_indexer.py, prose_indexer.py, pipeline_stages.py, and
+            # doc_indexer.py's PDF path, none of which route through
+            # ChunkBatcher) reaches this same POST via
+            # upsert_chunks/upsert_chunks_with_embeddings, so wrapping it
+            # HERE covers every caller without touching any call site.
+            # Pre-fix this POST had no retry wrapper at all; a 429/502/503/
+            # 504 propagated raw on the first attempt (never even reaching
+            # the shared rate-limit brake), which is the 2026-08-15
+            # incident's literal failure mode on this path.
+            #
+            # nexus-cy9u7 round-3 CRITICAL C2: this wrap is skipped when
+            # ``retry=False`` (see the method docstring's ``retry`` param) —
+            # db/reconcile.py's verify-fill path opts out because it already
+            # owns its own retry/breaker stack; wrapping here TOO gave that
+            # call site three nested retry layers on one failure.
+            if retry:
+                from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred import: avoids a module-load-time httpx dependency for this otherwise-urllib-only module (matches the deferred-import convention every other _vector_with_retry caller uses)
+
+                result = _vector_with_retry(
+                    _post, "/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600,
+                )
+            else:
+                result = _post(
+                    "/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600,
+                )
             # nexus-znwc2 / nexus-ir6eh: the engine echoes ids.length as
             # `upserted` unconditionally (VectorHandler), so any deviation —
             # missing field or wrong count — means something interposed on

@@ -2,7 +2,10 @@
 """Transient-error retry helpers for ChromaDB Cloud, Voyage AI, and the
 migration ETLs.
 
-Leaf module — no nexus.* imports.  Only stdlib + httpx + structlog + soft voyageai.error.
+Leaf module — no other nexus.* imports beyond ``nexus.rate_brake``, which
+is itself a leaf module (stdlib + structlog only, no imports back into
+this module or anything heavier). Otherwise: stdlib + httpx + structlog +
+soft voyageai.error.
 """
 from __future__ import annotations
 
@@ -18,7 +21,114 @@ import sqlite3
 import httpx
 import structlog
 
+from nexus.rate_brake import get_brake, parse_retry_after, reset_brake
+
 _log = structlog.get_logger(__name__)
+
+#: nexus-cy9u7: a 429-with-Retry-After (or 503-with-Retry-After) can
+#: legitimately need more attempts than a wrapper's default budget to
+#: survive a sustained per-project rate-limit window — each attempt's own
+#: sleep is now floored by the shared brake's delay (see
+#: ``_rate_limit_signal`` below), so the default attempt count could
+#: otherwise exhaust before the brake's pause elapses. Only applied when a
+#: rate-limit signal is actually seen (a NARROW 429, or 503 with a
+#: parseable Retry-After); every other retryable transient error keeps its
+#: wrapper's own default attempt budget — CRITICAL-2 (2026-08-16) widened
+#: BRAKE-TRIPPING to every retryable failure, but deliberately left this
+#: attempt-budget widening narrowly scoped, so a genuinely dead endpoint
+#: still fails in the same bounded number of attempts as before (each one
+#: now also paying the shared brake's floor, per-wrapper docstrings for
+#: the resulting worst-case numbers).
+_RATE_LIMIT_MAX_ATTEMPTS: int = 8
+
+
+def _find_chained_exc(
+    exc: BaseException, types: tuple[type, ...],
+) -> BaseException | None:
+    """Direct match, then ``__context__``, then ``__cause__`` — the fixed
+    one-level lookup order every status classifier in this module uses
+    (nexus-cy9u7 CRITICAL-1: was ``_chained_http_status_error``, httpx-only;
+    generalised so the same walk serves both HTTP-error families this
+    codebase raises)."""
+    if isinstance(exc, types):
+        return exc
+    ctx = exc.__context__
+    if isinstance(ctx, types):
+        return ctx
+    cause = exc.__cause__
+    if isinstance(cause, types):
+        return cause
+    return None
+
+
+def _extract_status_and_retry_after(exc: BaseException) -> tuple[int, float | None] | None:
+    """Authoritative ``(status_code, retry_after)`` for a chained/direct
+    HTTP error of EITHER family this codebase raises, or ``None`` if *exc*
+    carries no such signal.
+
+    nexus-cy9u7 CRITICAL-1 fix: the classifier previously only recognised
+    ``httpx.HTTPStatusError`` (the manifest/catalog write path,
+    ``http_catalog_client.py``), so it never tripped for the production T3
+    vector client (``http_vector_client.py``), which is urllib-based and
+    surfaces every failure as ``VectorServiceError(msg, code=e.code) from
+    e``. Recognises, in order:
+
+    1. ``httpx.HTTPStatusError`` — direct or chained.
+    2. ``urllib.error.HTTPError`` — direct or chained. ``VectorServiceError``
+       is neither type itself, but ``raise VectorServiceError(...) from e``
+       inside an ``except urllib.error.HTTPError as e:`` block sets BOTH
+       ``__cause__`` and ``__context__`` to the original ``e`` (Python's
+       implicit exception chaining applies regardless of the explicit
+       ``from`` clause) — so the chain-walk finds the original HTTPError,
+       headers included, without ``VectorServiceError`` needing to carry
+       any duplicate state.
+    3. A duck-typed ``.code`` int (mirrors ``_is_retryable_etl_error``'s
+       existing precedent) — a fallback for a caller whose exception was
+       constructed without an intact chain (e.g. a hand-built test double).
+       This fallback cannot recover Retry-After (no headers available), so
+       it only ever contributes ``retry_after=None``.
+    """
+    err = _find_chained_exc(exc, (httpx.HTTPStatusError, urllib.error.HTTPError))
+    if err is not None:
+        if isinstance(err, httpx.HTTPStatusError):
+            return err.response.status_code, parse_retry_after(err.response.headers)
+        return err.code, parse_retry_after(getattr(err, "headers", None))
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return code, None
+    return None
+
+
+class _RateLimitSignal:
+    """Normalised ``(code, retry_after)`` for a rate-limit-shaped failure.
+    See :func:`_rate_limit_signal`."""
+
+    __slots__ = ("code", "retry_after")
+
+    def __init__(self, code: int, retry_after: float | None) -> None:
+        self.code = code
+        self.retry_after = retry_after
+
+
+def _rate_limit_signal(exc: BaseException) -> _RateLimitSignal | None:
+    """Return a normalised rate-limit signal if *exc* carries a Retry-After
+    worth THREADING THROUGH to the shared
+    :class:`~nexus.rate_brake.RateLimitBrake` for: a 429, or a 503 that
+    carries a (parseable) Retry-After header. A 503 with no resolvable
+    Retry-After is still retried (see the wrapper functions below, which
+    now trip the brake on every retryable failure regardless of this
+    function's verdict — nexus-cy9u7 CRITICAL-2), it just contributes no
+    server-authoritative delay, so the brake falls back to its own
+    escalating default."""
+    found = _extract_status_and_retry_after(exc)
+    if found is None:
+        return None
+    code, retry_after = found
+    if code == 429:
+        return _RateLimitSignal(code, retry_after)
+    if code == 503 and retry_after is not None:
+        return _RateLimitSignal(code, retry_after)
+    return None
 
 
 # ── Retry accumulator (nexus-vatx Gap 4) ─────────────────────────────────────
@@ -60,9 +170,17 @@ def get_retry_stats() -> dict[str, float | int]:
 
     Returned keys: ``voyage_seconds``, ``voyage_count``, ``vector_seconds``
     (pre-P0d ``chroma_seconds``), ``vector_count``, ``etl_seconds``,
-    ``etl_count``, ``total_seconds``, ``total_count``. Resetting the counters is the caller's responsibility via
+    ``etl_count``, ``total_seconds``, ``total_count``, plus (nexus-cy9u7)
+    ``brake_trips`` and ``brake_seconds`` — the process-wide shared
+    rate-limit brake's cumulative trip count and seconds paused (see
+    ``nexus.rate_brake``). Brake pauses are NOT folded into
+    ``total_seconds``/``total_count``: those two remain the pre-existing
+    per-wrapper backoff sums, and the brake counters are a distinct signal
+    ("how much of this was a SHARED pause vs. per-attempt backoff").
+    Resetting the counters is the caller's responsibility via
     :func:`reset_retry_stats`.
     """
+    brake = get_brake()
     with _retry_lock:
         return {
             "voyage_seconds": _voyage_retry_seconds,
@@ -73,13 +191,20 @@ def get_retry_stats() -> dict[str, float | int]:
             "etl_count": _etl_retry_count,
             "total_seconds": _voyage_retry_seconds + _vector_retry_seconds + _etl_retry_seconds,
             "total_count": _voyage_retry_count + _vector_retry_count + _etl_retry_count,
+            "brake_trips": brake.trips,
+            "brake_seconds": brake.seconds_paused,
         }
 
 
 def reset_retry_stats() -> None:
     """Zero the process-local retry counters. CLI callers invoke this at
     the start of an indexing run so the end-of-run summary reflects only
-    that run's backoffs."""
+    that run's backoffs.
+
+    nexus-cy9u7: also resets the shared :class:`~nexus.rate_brake.RateLimitBrake`
+    (via :func:`nexus.rate_brake.reset_brake`) so a prior run's rate-limit
+    escalation/pause state never leaks into the next one.
+    """
     global _voyage_retry_seconds, _voyage_retry_count
     global _vector_retry_seconds, _vector_retry_count
     global _etl_retry_seconds, _etl_retry_count
@@ -90,6 +215,7 @@ def reset_retry_stats() -> None:
         _vector_retry_count = 0
         _etl_retry_seconds = 0.0
         _etl_retry_count = 0
+    reset_brake()
 
 
 # ── ChromaDB transient-error retry ───────────────────────────────────────────
@@ -113,7 +239,35 @@ def _is_retryable_vector_error(exc: BaseException) -> bool:
        PersistentClient contention leg; dead code once the migration
        read legs delete at P2 (remove WITH them, not before).
     2. Transport-level errors (ConnectError, ReadTimeout, RemoteProtocolError) — always retry.
-    3. Chained httpx.HTTPStatusError — authoritative integer status code check.
+    3. Chained httpx.HTTPStatusError OR urllib.error.HTTPError (direct,
+       chained, or wrapped in VectorServiceError) — authoritative integer
+       status code check via :func:`_extract_status_and_retry_after`
+       (nexus-cy9u7 CRITICAL-1: this used to be httpx-only, so the
+       production T3 vector client's VectorServiceError failures fell
+       through to the string-fallback below, which happened to work only
+       because the status digits appear literally in the error message —
+       fragile, and silently wrong for a status like 500 that shares no
+       digits with a retryable one).
+    3b. Bare urllib connectivity errors — no HTTP response at all (nexus-cy9u7
+        round-3 CRITICAL C1): step 2 above only recognises httpx's transport
+        errors, but the production HttpVectorClient path is urllib-based
+        (``http_vector_client._post``) and a connectivity blip surfaces as a
+        raw ``urllib.error.URLError``/``TimeoutError``/``ConnectionError``
+        (the local/lease topology re-raises these untouched — see ``_post``'s
+        ``except (urllib.error.URLError, ConnectionError, TimeoutError)``
+        branch), or as ``VectorServiceError(code=None)`` chained ``from e``
+        (the managed-endpoint topology, when ``_managed_remedy()`` reframes
+        it). Neither shape was covered before this fix — step 2 doesn't see
+        urllib types, and step 3 finds no status code to check (``code`` is
+        ``None``), so a connectivity blip fell through to the fragment
+        fallback in step 4, which never matches (no status digits in a
+        socket-level error message). Placed AFTER step 3 deliberately:
+        ``urllib.error.HTTPError`` IS a ``URLError`` subclass, so this check
+        must never see a real HTTPError — step 3 already matched (and
+        returned) on any HTTPError, direct or chained, so a URLError
+        instance reaching this line is genuinely connectivity, not a real
+        HTTP status. Mirrors ``_is_retryable_etl_error``'s already-correct
+        equivalent logic below.
     4. String fallback — plain Exception message body (gateway HTML or service JSON).
     """
     # 1. Chroma PersistentClient concurrent write contention (dies at P2).
@@ -122,10 +276,16 @@ def _is_retryable_vector_error(exc: BaseException) -> bool:
     # 2. Transport-level errors — no HTTP response, but clearly transient.
     if isinstance(exc, httpx.TransportError):
         return True
-    # 3. ChromaDB wraps HTTPStatusError as Exception(resp.text); original is __context__.
-    ctx = exc.__context__
-    if isinstance(ctx, httpx.HTTPStatusError):
-        return ctx.response.status_code in _RETRYABLE_HTTP_STATUSES
+    # 3. Authoritative status-code check across both HTTP-error families.
+    found = _extract_status_and_retry_after(exc)
+    if found is not None:
+        return found[0] in _RETRYABLE_HTTP_STATUSES
+    # 3b. Bare urllib connectivity errors, direct or chained (see docstring).
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError)):
+        return True
+    cause = exc.__cause__ or exc.__context__
+    if isinstance(cause, (urllib.error.URLError, TimeoutError, ConnectionError)):
+        return True
     # 4. Fallback: scan the message body for retryable status tokens.
     msg = str(exc).lower()
     return any(fragment in msg for fragment in _RETRYABLE_FRAGMENTS)
@@ -142,27 +302,95 @@ def _vector_with_retry(
     Renamed from ``_chroma_with_retry`` at RDR-155 P4b P0d. Retries up to
     *max_attempts* times (default 5).  Backoff starts at 2 s, doubles each
     attempt, capped at 30 s.  Non-retryable errors raise immediately.
+
+    nexus-cy9u7: every attempt first calls the process-wide
+    :class:`~nexus.rate_brake.RateLimitBrake`'s ``wait()`` — a no-op unless
+    some OTHER worker already tripped it — so concurrent callers converge
+    on one shared resume point instead of each backing off independently
+    and re-firing Voyage's per-project RPM limit.
+
+    CRITICAL-2 fix (2026-08-16): EVERY retryable failure now trips the
+    brake, not just a narrow 429/503+Retry-After signal — N workers
+    hammering a struggling upstream is the same class of problem
+    regardless of which transient status (429/502/503/504) or transport
+    error (connect refused, read timeout, ...) is reported; a 502 from an
+    overloaded edge with no Retry-After is exactly the 2026-08-15 incident
+    shape this brake exists for (the engine internally retrying Voyage,
+    the edge's own 30s timeout surfacing as a 502/504 with no
+    Retry-After — see ``nexus-99r7y``: that engine-side fix SHARPENS this
+    signal but is NOT required for the brake to engage). A real
+    Retry-After (429, or 503 that carries one) floors the pause at that
+    value; every other retryable failure floors it at the brake's own
+    escalating default (2s, doubling per consecutive process-wide trip,
+    capped at 60s — see ``nexus.rate_brake``). Sleeps
+    ``max(local_backoff, brake_delay)`` so a worker never retries before
+    the shared resume time. Only a narrow 429/503+Retry-After signal
+    widens the effective attempt budget to ``_RATE_LIMIT_MAX_ATTEMPTS``
+    (8) — a SERVER-CHARACTERISED rate-limit window can legitimately
+    outlast *max_attempts*; a generic transient error keeps its original
+    attempt budget (this wrapper's default: 5) so a genuinely dead
+    upstream still fails in bounded time, just with each of those
+    attempts now paying the shared brake's floor too. A successful call
+    releases the brake's escalation state.
+
+    Worst-case per call (S2, corrected — nexus-cy9u7 round-3 SIGNIFICANT):
+    non-rate-limited retryable errors stay at *max_attempts* (default 5, 4
+    sleeps) each floored by the brake's CURRENT escalation level — which is
+    process-GLOBAL, so a call arriving mid-incident can see the 60s cap on
+    its very first attempt. The prior number here (4 x 60s = 240s) omitted
+    ``http_vector_client._request``'s OWN inner gateway retry
+    (``_GATEWAY_RETRY_SLEEPS``: 2s + 5s + 10s = 17s), which fires for the
+    SAME statuses (502/503/504) at a layer BELOW this wrapper, before this
+    wrapper's caller (``_post``) ever raises — so each of this wrapper's 4
+    attempts can itself already have paid up to 17s there: 4 x (60s + 17s)
+    = 308s, call it about 5 minutes. A 429/503+Retry-After signal widens to
+    8 attempts (7 sleeps), each floored at either the escalating default
+    (cap 60s, worst case 7 x 60s = 420s, or 7 x 77s = 539s including the
+    inner gateway retry when the widening status is 503) or the server's
+    own Retry-After (clamped to 300s, worst case 7 x 300s = 2100s if every
+    attempt reports a large one — the inner gateway retry never applies to
+    a 429, which is not in ``_GATEWAY_RETRY_CODES``).
     """
+    brake = get_brake()
     delay = 2.0
-    for attempt in range(1, max_attempts + 1):
+    attempt = 1
+    while True:
+        brake.wait()
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
         except Exception as exc:
-            if attempt == max_attempts or not _is_retryable_vector_error(exc):
+            if not _is_retryable_vector_error(exc):
                 raise
-            _log.warning(
-                "vector_transient_error_retry",
-                attempt=attempt,
-                delay=delay,
-                error=str(exc)[:120],
+            rate_limit_err = _rate_limit_signal(exc)
+            effective_max_attempts = (
+                max(max_attempts, _RATE_LIMIT_MAX_ATTEMPTS)
+                if rate_limit_err is not None else max_attempts
             )
+            if attempt >= effective_max_attempts:
+                raise
             # nexus-8g79.32: jittered sleep so multiple concurrent
             # workers retrying after a shared rate-limit do not all wake
             # at the same instant and re-fire the limit. ±20% of delay.
             jittered = delay * (1.0 + (random.random() - 0.5) * 0.4)
-            _add_vector_retry(jittered)
-            time.sleep(jittered)
+            retry_after = rate_limit_err.retry_after if rate_limit_err is not None else None
+            # nexus-cy9u7 CRITICAL-2: unconditional — every retryable
+            # failure trips the shared brake, not only a narrow signal.
+            brake_delay = brake.trip(retry_after, source="vector")
+            sleep_for = max(jittered, brake_delay)
+            _log.warning(
+                "vector_transient_error_retry",
+                attempt=attempt,
+                delay=sleep_for,
+                error=str(exc)[:120],
+                rate_limited=rate_limit_err is not None,
+            )
+            _add_vector_retry(sleep_for)
+            time.sleep(sleep_for)
             delay = min(delay * 2, 30.0)
+            attempt += 1
+        else:
+            brake.release()
+            return result
 
 
 # ── Voyage AI transient-error retry ──────────────────────────────────────────
@@ -356,13 +584,39 @@ def _etl_with_retry(
 
     Safe because every migration write is idempotent (upsert / ON CONFLICT), so
     re-sending a batch that may have partially landed is a no-op on the dupes.
+
+    nexus-cy9u7: same shared-brake wiring as ``_vector_with_retry`` — every
+    attempt calls the process-wide brake's ``wait()`` first. CRITICAL-2 fix
+    (2026-08-16): EVERY retryable failure now trips the brake (403,
+    connection drops, plain 502/503/504 included — not only a narrow
+    429/503+Retry-After signal), floored at either the server's
+    Retry-After (when a 429/503 supplies one) or the brake's own
+    escalating default otherwise. Only the narrow 429/503+Retry-After
+    signal widens the effective attempt budget to
+    ``_RATE_LIMIT_MAX_ATTEMPTS``; every other retryable failure keeps this
+    wrapper's own default (3, 2 sleeps) so a genuinely dead endpoint still
+    fails in bounded time. A successful call releases the brake's
+    escalation state. Worst case per call: 2 sleeps at the brake's current
+    escalation level (process-global, cap 60s) = 120s without a
+    Retry-After signal; widened to 7 sleeps (rate-limited) at up to the
+    300s Retry-After clamp = 2100s worst case.
     """
+    brake = get_brake()
     delay = 1.0
-    for attempt in range(1, max_attempts + 1):
+    attempt = 1
+    while True:
+        brake.wait()
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
         except Exception as exc:
-            if attempt == max_attempts or not _is_retryable_etl_error(exc):
+            if not _is_retryable_etl_error(exc):
+                raise
+            rate_limit_err = _rate_limit_signal(exc)
+            effective_max_attempts = (
+                max(max_attempts, _RATE_LIMIT_MAX_ATTEMPTS)
+                if rate_limit_err is not None else max_attempts
+            )
+            if attempt >= effective_max_attempts:
                 raise
             _log.warning(
                 "etl_transient_error_retry",
@@ -371,11 +625,20 @@ def _etl_with_retry(
                 error_type=type(exc).__name__,
                 error=str(exc)[:120],
                 persistent_if_all_fail=True,
+                rate_limited=rate_limit_err is not None,
             )
             jittered = delay * (1.0 + (random.random() - 0.5) * 0.4)
-            _add_etl_retry(jittered)
-            time.sleep(jittered)
+            retry_after = rate_limit_err.retry_after if rate_limit_err is not None else None
+            # nexus-cy9u7 CRITICAL-2: unconditional trip.
+            brake_delay = brake.trip(retry_after, source="etl")
+            sleep_for = max(jittered, brake_delay)
+            _add_etl_retry(sleep_for)
+            time.sleep(sleep_for)
             delay = min(delay * 2, 10.0)
+            attempt += 1
+        else:
+            brake.release()
+            return result
 
 
 # ── ETL circuit breaker (RDR-178 Gap 3, nexus-ob4vc) ─────────────────────────
@@ -590,22 +853,69 @@ def _manifest_write_with_retry(
     retry emits a WARN structlog line (``manifest_write_transient_error_
     retry``) so a flapping catalog connection is visible in production
     logs instead of surfacing only as the hook's swallowed WARNING.
+
+    nexus-cy9u7 addendum: a 429 (or 503 with a Retry-After header) is ALSO
+    retried now, in addition to the connection-level errors above — the
+    manifest write lands on the same engine that embeds server-side, so it
+    can be paced by the identical per-project rate limit. This is the one
+    exception to "connection errors only": a rate-limit signal is not a
+    data-correctness failure, so retrying it does not risk masking a real
+    4xx (a genuine 400/404/422 is still classified as neither connectivity
+    nor rate-limited, and still raises on the first attempt).
+
+    CRITICAL-2 fix (2026-08-16): every attempt first calls the shared
+    :class:`~nexus.rate_brake.RateLimitBrake`'s ``wait()``, and EVERY
+    retried failure (connectivity OR rate-limit) now trips the brake too —
+    not only a narrow 429/503+Retry-After signal — floored at either the
+    server's Retry-After or the brake's own escalating default. Only the
+    narrow rate-limit signal widens the effective attempt budget to
+    ``_RATE_LIMIT_MAX_ATTEMPTS`` (a real rate-limit window can outlast the
+    connectivity-only 4-attempt default's 0.5+1+2=3.5s); a plain
+    connectivity error keeps the 4-attempt default (3 sleeps), each now
+    also floored by the brake's current escalation level. Worst case per
+    call: 3 sleeps at the brake's cap (60s, process-global — a call
+    arriving mid-incident can see it on its first attempt) = 180s without
+    a Retry-After signal; widened to 7 sleeps at up to the 300s
+    Retry-After clamp = 2100s worst case when rate-limited. A successful
+    call releases the brake's escalation state.
     """
-    for attempt in range(1, len(_MANIFEST_WRITE_RETRY_DELAYS) + 2):
+    brake = get_brake()
+    max_connectivity_attempts = len(_MANIFEST_WRITE_RETRY_DELAYS) + 1
+    attempt = 1
+    while True:
+        brake.wait()
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
         except Exception as exc:
-            if (
-                attempt > len(_MANIFEST_WRITE_RETRY_DELAYS)
-                or not _is_connectivity_error(exc)
-            ):
+            rate_limit_err = _rate_limit_signal(exc)
+            is_connectivity = _is_connectivity_error(exc)
+            if rate_limit_err is None and not is_connectivity:
                 raise
-            delay = _MANIFEST_WRITE_RETRY_DELAYS[attempt - 1]
+            effective_max_attempts = (
+                max(max_connectivity_attempts, _RATE_LIMIT_MAX_ATTEMPTS)
+                if rate_limit_err is not None else max_connectivity_attempts
+            )
+            if attempt >= effective_max_attempts:
+                raise
+            base_delay = (
+                _MANIFEST_WRITE_RETRY_DELAYS[attempt - 1]
+                if attempt <= len(_MANIFEST_WRITE_RETRY_DELAYS)
+                else _MANIFEST_WRITE_RETRY_DELAYS[-1]
+            )
+            retry_after = rate_limit_err.retry_after if rate_limit_err is not None else None
+            # nexus-cy9u7 CRITICAL-2: unconditional trip (connectivity too).
+            brake_delay = brake.trip(retry_after, source="manifest")
+            delay = max(base_delay, brake_delay)
             _log.warning(
                 "manifest_write_transient_error_retry",
                 attempt=attempt,
                 delay=delay,
                 error_type=type(exc).__name__,
                 error=str(exc)[:120],
+                rate_limited=rate_limit_err is not None,
             )
             time.sleep(delay)
+            attempt += 1
+        else:
+            brake.release()
+            return result

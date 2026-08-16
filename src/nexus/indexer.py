@@ -1933,15 +1933,22 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
 # 1. Existing tests that import and call _index_code_file/_index_prose_file
 #    directly continue to work unchanged.
 # 2. Tests that patch nexus.indexer._index_code_file or _index_prose_file
-#: Transient upsert HTTP statuses (gateway timeout / pool exhaustion) where a
-#: per-file DIRECT upsert (prose/PDF — code files are contained by the
-#: ChunkBatcher's file-atomic failure handling) should DEFER the file to the next
-#: run's staleness retry instead of propagating. Propagating instead (a) fails
-#: the whole run on one transient blip and (b) under concurrency wedges the run
-#: for up to the upsert timeout while run_file_loop waits on the sibling in-flight
-#: worker (nexus-7yfe6). Idempotent ON CONFLICT upsert → the deferred file
-#: re-uploads cleanly next run.
-_TRANSIENT_UPSERT_CODES = frozenset({502, 503, 504})
+#: Transient upsert HTTP statuses (gateway timeout / pool exhaustion / rate
+#: limit) where a per-file DIRECT upsert (prose/PDF — code files are
+#: contained by the ChunkBatcher's file-atomic failure handling) should
+#: DEFER the file to the next run's staleness retry instead of propagating.
+#: Propagating instead (a) fails the whole run on one transient blip and
+#: (b) under concurrency wedges the run for up to the upsert timeout while
+#: run_file_loop waits on the sibling in-flight worker (nexus-7yfe6).
+#: Idempotent ON CONFLICT upsert → the deferred file re-uploads cleanly
+#: next run. 429 added at nexus-cy9u7 CRITICAL-1: this is retried
+#: internally first (HttpVectorClient.upsert_chunks now routes through
+#: ``_vector_with_retry`` + the shared rate-limit brake), so a request only
+#: reaches here once that retry budget is exhausted — a sustained 429
+#: window must still defer, not abort the whole ``nx index repo`` run (the
+#: literal 2026-08-15 incident symptom: run_file_loop's first-exception-
+#: cancels-all contract turned one file's 429 into a full-run abort).
+_TRANSIENT_UPSERT_CODES = frozenset({429, 502, 503, 504})
 
 
 def _contain_extraction_quality_gate(

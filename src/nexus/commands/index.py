@@ -595,7 +595,7 @@ def index_repo_cmd(
 
         # nexus-vatx Gap 4: zero the retry accumulators so the end-of-run
         # summary reflects only this run's backoffs.
-        from nexus.retry import get_retry_stats, reset_retry_stats  # noqa: PLC0415 — deliberate function-local import (per-run retry accumulator reset)
+        from nexus.retry import reset_retry_stats  # noqa: PLC0415 — deliberate function-local import (per-run retry accumulator reset)
         reset_retry_stats()
         # GH #1371 + GH #1397 + nexus-5xn3k.6: zero the manifest-write-
         # failure / identity-drop / completion-refusal collectors so the
@@ -705,31 +705,17 @@ def index_repo_cmd(
             click.echo(f"  [post] {msg}", err=True)
             phase_heartbeat.arm(msg)
 
-        def _emit_retry_summary() -> None:
-            # Review remediation (Reviewer A/I-2): emit the retry-time summary
-            # regardless of whether index_repository succeeded. A run that
-            # crashed after repeated rate-limit backoffs is exactly the case
-            # where the summary matters most — it tells the operator "you
-            # weren't slow, you were throttled." Silent on zero retries.
-            retry_stats = get_retry_stats()
-            if not retry_stats["total_count"]:
-                return
-            parts: list[str] = []
-            if retry_stats["voyage_count"]:
-                parts.append(
-                    f"voyage {retry_stats['voyage_seconds']:.1f}s over "
-                    f"{retry_stats['voyage_count']} retries"
-                )
-            if retry_stats["vector_count"]:
-                parts.append(
-                    f"chroma {retry_stats['vector_seconds']:.1f}s over "
-                    f"{retry_stats['vector_count']} retries"
-                )
-            click.echo(
-                f"  Transient-error backoff: {retry_stats['total_seconds']:.1f}s total "
-                f"({', '.join(parts)})",
-                err=True,
-            )
+        # Review remediation (Reviewer A/I-2): emit the retry-time summary
+        # regardless of whether index_repository succeeded. A run that
+        # crashed after repeated rate-limit backoffs is exactly the case
+        # where the summary matters most — it tells the operator "you
+        # weren't slow, you were throttled." Silent on zero retries.
+        #
+        # nexus-cy9u7 S3: extracted into the shared
+        # ``commands._helpers.emit_retry_summary`` so `nx index pdf`/`nx
+        # index md` (which never wired this in at all pre-fix) get the same
+        # summary for free instead of a third/fourth hand-copy.
+        from nexus.commands._helpers import emit_retry_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only reached in the finally block)
 
         # nexus-tp8yk D2b: refusals / manifest-write failures / identity
         # drops used to be stderr WARNING-only — an operator (or a script
@@ -824,7 +810,7 @@ def index_repo_cmd(
             phase_heartbeat.disarm()
             if bar:
                 bar.close()
-            _emit_retry_summary()
+            emit_retry_summary()
             _emit_manifest_write_failure_summary()
             _emit_ephemeral_skip_summary()
             _emit_debug_timing()
@@ -912,7 +898,7 @@ def index_repo_cmd(
                 _log.debug("hook_detection_failed", error=str(exc))  # Don't let hook detection break indexing
 
         # Retry summary now emitted from the `finally` block around
-        # index_repository (see `_emit_retry_summary`) so it fires on both
+        # index_repository (see `emit_retry_summary`) so it fires on both
         # success and exception paths — Reviewer A/I-2.
         click.echo("Done.")
 
@@ -1748,6 +1734,15 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                     "(slower). Start with: nx mineru start"
                 )
 
+        # nexus-cy9u7 S3: reset ONCE for the whole batch (not per-file, unlike
+        # the identity-drop collectors below) — the retry/brake counters are
+        # process-global, and a per-file reset would only ever let the
+        # end-of-batch summary see the LAST file's contribution (same
+        # accumulation problem ``reconciled_total`` already works around
+        # above).
+        from nexus.retry import reset_retry_stats  # noqa: PLC0415 — deliberate function-local import (per-batch retry accumulator reset)
+        reset_retry_stats()
+
         batch_start = _time.monotonic()
 
         # nexus-7f5qj: same collector-swallow gap as the single-file
@@ -1833,6 +1828,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                 f"WARNINGs above"
             )
         click.echo(summary_line)
+        from nexus.commands._helpers import emit_retry_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only when a retry/brake fired)
+        emit_retry_summary()
         if failures:
             click.echo(f"  {len(failures)} failure(s):")
             for fp, err in failures:
@@ -1978,6 +1975,11 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     # this process is never misattributed to this run.
     from nexus.commands._helpers import reset_identity_drop_collectors  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
     reset_identity_drop_collectors()
+    # nexus-cy9u7 S3: single-file `nx index pdf` never wired in the retry/
+    # brake summary pre-fix — same reset-before/emit-after shape as the
+    # identity-drop collector above.
+    from nexus.retry import reset_retry_stats  # noqa: PLC0415 — deliberate function-local import (per-run retry accumulator reset)
+    reset_retry_stats()
 
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
@@ -2043,8 +2045,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     # the summary lines a successful run would still print (n==0 skip is
     # never a drop candidate: a fresh-skip never reaches doc_indexer's
     # write path, so the collector stays empty).
-    from nexus.commands._helpers import emit_identity_drop_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only on drop)
+    from nexus.commands._helpers import emit_identity_drop_summary, emit_retry_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only on drop / retry)
     identity_drop_problems = emit_identity_drop_summary(indexed_count=n)
+    emit_retry_summary()
 
     result_label = "Force re-indexed" if force else "Indexed"
     # nexus-5xn3k.6 AC4: n==0 without --force is the staleness gate's skip
@@ -2150,6 +2153,9 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
     # earlier call in this process is never misattributed to this run.
     from nexus.commands._helpers import reset_identity_drop_collectors  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
     reset_identity_drop_collectors()
+    # nexus-cy9u7 S3: see index_pdf_cmd's identical comment.
+    from nexus.retry import reset_retry_stats  # noqa: PLC0415 — deliberate function-local import (per-run retry accumulator reset)
+    reset_retry_stats()
 
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
@@ -2197,8 +2203,9 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
     # nexus-7f5qj: see the identical ordering rationale on index_pdf_cmd —
     # checked right after the write, before the rest of this run's
     # summary; the ClickException fires last, below.
-    from nexus.commands._helpers import emit_identity_drop_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only on drop)
+    from nexus.commands._helpers import emit_identity_drop_summary, emit_retry_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only on drop / retry)
     identity_drop_problems = emit_identity_drop_summary(indexed_count=n)
+    emit_retry_summary()
 
     result_label = "Force re-indexed" if force else "Indexed"
     # nexus-5xn3k.6 AC4: see the identical rationale on the pdf command.

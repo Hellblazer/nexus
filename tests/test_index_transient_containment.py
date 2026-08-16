@@ -21,8 +21,12 @@ def test_success_returns_value() -> None:
     assert _contain_transient_upsert(lambda: 7, _FILE) == 7
 
 
-@pytest.mark.parametrize("code", [502, 503, 504])
+@pytest.mark.parametrize("code", [429, 502, 503, 504])
 def test_transient_5xx_deferred_returns_zero(code: int) -> None:
+    # nexus-cy9u7 CRITICAL-1(c): 429 added — the 2026-08-15 incident's
+    # literal symptom was a 429 on this fallback path aborting the whole
+    # `nx index repo` run via run_file_loop's first-exception-cancels-all
+    # contract, instead of deferring like the 5xx siblings already did.
     def boom() -> int:
         raise VectorServiceError(f"gateway said {code}", code=code)
 

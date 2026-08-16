@@ -23,6 +23,7 @@ from nexus import config as _config
 __all__ = [
     "default_db_path",
     "emit_identity_drop_summary",
+    "emit_retry_summary",
     "raise_identity_drop_exception",
     "raise_identity_drop_exception_for_file",
     "reset_identity_drop_collectors",
@@ -152,6 +153,72 @@ def reset_identity_drop_collectors() -> None:
     # nexus-2t63u round 2: same shape again, for physical_collection
     # reconciliation visibility.
     reset_reconciled_collections_count()
+
+
+def emit_retry_summary() -> None:
+    """Echo the end-of-run transient-error-backoff + rate-limit-brake
+    summary (stderr). Silent when nothing retried and the shared brake was
+    never tripped.
+
+    nexus-cy9u7 S3 (extracted from ``index_repo_cmd``'s inline
+    ``_emit_retry_summary``, which was the only wired-in caller pre-fix —
+    `nx index pdf` and `nx index md` reset nothing and printed nothing,
+    so a run throttled entirely on those paths gave the operator zero
+    signal that it was slow because it was throttled, not because it was
+    slow). Call :func:`nexus.retry.reset_retry_stats` once at the start of
+    a run/batch, then this once at the end, so the summary reflects only
+    that run's backoffs — same reset-before/emit-after shape as
+    :func:`reset_identity_drop_collectors` / :func:`emit_identity_drop_summary`.
+
+    The brake-trip check is SEPARATE from ``total_count`` because a
+    manifest-write rate-limit trip can pause the shared brake without
+    incrementing any of the three per-wrapper retry counters (the
+    manifest-write path has never had its own accumulator) — without the
+    separate check, a run throttled ONLY on the manifest-write leg would
+    print nothing at all.
+    """
+    import click  # noqa: PLC0415 — deferred: CLI-only dependency, avoids import cost for non-CLI callers of this module
+    import structlog  # noqa: PLC0415 — deferred: command-local logger binding
+
+    from nexus.retry import get_retry_stats  # noqa: PLC0415 — deferred: avoids a hard nexus.retry dependency at CLI startup
+
+    _log = structlog.get_logger(__name__)
+
+    retry_stats = get_retry_stats()
+    if not retry_stats["total_count"] and not retry_stats["brake_trips"]:
+        return
+    if retry_stats["total_count"]:
+        parts: list[str] = []
+        if retry_stats["voyage_count"]:
+            parts.append(
+                f"voyage {retry_stats['voyage_seconds']:.1f}s over "
+                f"{retry_stats['voyage_count']} retries"
+            )
+        if retry_stats["vector_count"]:
+            parts.append(
+                f"chroma {retry_stats['vector_seconds']:.1f}s over "
+                f"{retry_stats['vector_count']} retries"
+            )
+        click.echo(
+            f"  Transient-error backoff: {retry_stats['total_seconds']:.1f}s total "
+            f"({', '.join(parts)})",
+            err=True,
+        )
+    if retry_stats["brake_trips"]:
+        # nexus-cy9u7: the shared rate-limit brake paused every writer in
+        # this process at least once — distinct from the per-attempt
+        # backoff above (which counts local retries, not the shared pause
+        # other workers may have also paid).
+        _log.info(
+            "rate_brake_run_summary",
+            trips=retry_stats["brake_trips"],
+            seconds_paused=retry_stats["brake_seconds"],
+        )
+        click.echo(
+            f"  Rate-limit brake: {retry_stats['brake_trips']} pauses, "
+            f"{retry_stats['brake_seconds']:.1f}s",
+            err=True,
+        )
 
 
 def _emit_write_failed_warning() -> bool:

@@ -401,7 +401,23 @@ class T3Database:
         )
 
     def _write_sem(self, name: str) -> threading.BoundedSemaphore:
-        """Return the per-collection write semaphore, lazily initialised."""
+        """Return the per-collection write semaphore, lazily initialised.
+
+        nexus-cy9u7 (review S4): ``_write_batch``/``_delete_batch`` hold
+        this semaphore for the duration of every ``_vector_with_retry``
+        call inside their loop, including any shared
+        ``RateLimitBrake`` pause a retry triggers — a worker paused by the
+        brake keeps its write-slot reserved rather than releasing it back
+        to the pool. This is INTENTIONAL, not a missed release: the
+        semaphore bounds how many writes are actually in flight against
+        the collection, and a worker mid-retry (even while paused) still
+        has a write it intends to complete — releasing the slot would let
+        another worker start a NEW write while this one is still pending,
+        which is exactly the in-flight-ceiling the semaphore exists to
+        enforce. No deadlock risk: the brake always resolves on its own
+        (bounded pause, no cross-lock wait), and ``MAX_CONCURRENT_WRITES``
+        governs concurrency, not deadlock-prone lock ordering.
+        """
         with self._sems_lock:
             if name not in self._write_sems:
                 self._write_sems[name] = threading.BoundedSemaphore(QUOTAS.MAX_CONCURRENT_WRITES)
