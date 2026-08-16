@@ -244,12 +244,17 @@ def diag_conformance_view_ddl() -> str:
     fire the install gate.
 
     DEBT LEGS ARE ANTI-JOINS (RDR-180 .6 amendment 1): the debt columns
-    stay TEXT (mixed identity space — chunk chashes AND memory-note titles
-    in ``topic_assignments.doc_id``), so a width predicate mismeasures them
-    across eras (64-hex text = 64 octets; titles always flagged). The
-    honest, era-independent debt definition is SEMANTIC: a hex-shaped
-    reference that misses its chunk-table join. Titles and other non-hex
-    identities are excluded by the hex guard — they are not chash debt.
+    stay TEXT, so a width predicate mismeasures them across eras (64-hex
+    text = 64 octets; a legacy 32-hex value would be flagged even though it
+    is resolvable through ``chash_alias``). CORRECTED (RDR-194 D1,
+    nexus-tk070.p3a, nexus-yo9mi): ``topic_assignments.doc_id`` is NOT a
+    mixed identity space and does NOT hold memory-note titles: every live
+    writer emits a chunk chash (RDR-180 Item6/Item6a; the one real
+    memory-note-clustering path died with the SQLite store at commit
+    ``f24bdb853``). The honest, era-independent debt definition is SEMANTIC:
+    a hex-shaped reference that misses its chunk-table join. Non-hex-shaped
+    values are excluded by the hex guard as ETL-era external ids, not
+    titles.
     NOTE: the debt legs decode() against the bytea chunk keys, so this view
     only CREATEs against a post-rdr180 (bytea) engine schema — on an older
     text-era store the CREATE fails and provisioning's best-effort catch

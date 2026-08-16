@@ -78,9 +78,9 @@ import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
  *       placement, recorded in the bead close): staged manifest rows insert
  *       through the alias join (or a direct 64-hex decode), canonical at
  *       INSERT.</li>
- *   <li>Pointer stores: topic_assignments (alias-repointed where
- *       chash-shaped, verbatim where a memory title — the mixed identity
- *       space stays TEXT debt), frecency (GREATEST-merge, staging-sourced
+ *   <li>Pointer stores: topic_assignments (alias-repointed; doc_id is a
+ *       chunk chash end to end — RDR-180 Item6/Item6a, never a memory-note
+ *       title and not a mixed identity space), frecency (GREATEST-merge, staging-sourced
  *       twin of the RekeyOps aggregate), relevance_log (anti-join dedupe —
  *       BIGSERIAL target has no natural key), document_aspects +
  *       aspect_extraction_queue (anti-join on (collection, source_path)).</li>
@@ -951,8 +951,12 @@ public final class StagingPromoteOps {
                 .fetch(CATALOG_DOCUMENTS.TITLE);
             counts.put("unresolved_knowledge_titles", unresolvedKnowledgeTitles);
 
-            // (3) topic_assignments: alias-repoint chash-shaped doc_ids,
-            //     verbatim pass-through for memory titles (mixed identity).
+            // (3) topic_assignments: alias-repoint chash-shaped doc_ids.
+            //     doc_id is a chunk chash end to end (RDR-180 Item6 :80,
+            //     Item6a :82; RDR-194 D1, nexus-tk070.p3a, nexus-yo9mi):
+            //     NOT a mixed identity space, and never a memory-note title
+            //     (that JOIN lived only in the deleted SQLite store, commit
+            //     f24bdb853; nothing replaced it).
             //     RESOLVABLE-ONLY (census discipline, nexus-jxizy.10.5): a
             //     legacy-shaped doc_id with NO alias yet stays STAGED — a
             //     later finalize converges it once its content collection
@@ -966,11 +970,34 @@ public final class StagingPromoteOps {
             // doc_id has no alias yet stays STAGED for a later finalize.
             // jOOQ DSL rendering (nexus-4okz4 increment 3): staging.
             // topic_assignments accessors via the house pattern;
-            // Field.notLikeRegex renders PostgreSQL's `!~`.
+            // Field.likeRegex renders PostgreSQL's `~`.
             var sta = DSL.table(DSL.name("staging", "topic_assignments")).as("s");
             Field<String> staDocId = DSL.field(DSL.name("s", "doc_id"), String.class);
             Field<String> staTopicLabel = DSL.field(DSL.name("s", "topic_label"), String.class);
             Field<String> staTopicCollection = DSL.field(DSL.name("s", "topic_collection"), String.class);
+            // NON-CONFORMANT REJECT (RDR-194 D0.9, nexus-tk070.p3a): a
+            // staged doc_id that is neither alias-resolvable NOR already a
+            // conformant 64-hex chash NOR a legacy 16/32-hex shape awaiting
+            // a future alias (that third case stays STAGED, excluded below,
+            // per RESOLVABLE-ONLY) is arbitrary text this column can no
+            // longer hold once D1's bytea conversion lands (P3c). Fail
+            // loud here, naming the offending value(s), rather than pass
+            // it through to nexus.topic_assignments.doc_id.
+            List<String> nonConformantDocIds = ctx.selectDistinct(staDocId)
+                .from(sta)
+                .leftJoin(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(staDocId))
+                .where(CHASH_ALIAS.NEW_CHASH.isNull())
+                .and(DSL.not(staDocId.likeRegex("^[0-9a-f]{64}$")))
+                .and(DSL.not(staDocId.likeRegex("^([0-9a-f]{16}|[0-9a-f]{32})$")))
+                .limit(10)
+                .fetch(staDocId);
+            if (!nonConformantDocIds.isEmpty()) {
+                throw new IllegalStateException(
+                    "finalize found non-conformant staged topic_assignments.doc_id "
+                    + "value(s) that are neither alias-resolvable nor a valid 64-hex "
+                    + "chash: " + nonConformantDocIds + " -- refusing to write "
+                    + "arbitrary text to a chash-typed column (RDR-194 D0.9)");
+            }
             counts.put("topic_assignments_promoted", ctx.insertInto(TOPIC_ASSIGNMENTS,
                     TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
                 .select(ctx.selectDistinct(
@@ -982,7 +1009,7 @@ public final class StagingPromoteOps {
                         .and(TOPICS.COLLECTION.eq(staTopicCollection)))
                     .leftJoin(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(staDocId))
                     .where(CHASH_ALIAS.NEW_CHASH.isNotNull()
-                        .or(staDocId.notLikeRegex("^([0-9a-f]{16}|[0-9a-f]{32})$"))))
+                        .or(staDocId.likeRegex("^[0-9a-f]{64}$"))))
                 .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
                 .doNothing()
                 .execute());

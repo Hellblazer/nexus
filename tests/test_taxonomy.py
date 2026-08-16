@@ -2365,6 +2365,13 @@ class TestManualOpsCLI:
                 return fn(db)
         return _router
 
+    # RDR-194 D1 (nexus-tk070.p3a): topic_assignments.doc_id is a chunk
+    # chash end to end (RDR-180 Item6/Item6a) -- assign_cmd now validates
+    # 64-hex at the CLI boundary, so fixtures below use a conformant hex
+    # value rather than a free-form string ("a fixture that could not be
+    # written after the change is the point of the change, not collateral").
+    _MANUAL_DOC_ID = "a" * 64
+
     def test_assign_cli(self, tmp_path: Path) -> None:
         """nx taxonomy assign sets assigned_by='manual'."""
         import nexus.mcp_infra as _mi
@@ -2387,7 +2394,7 @@ class TestManualOpsCLI:
         ):
             result = runner.invoke(
                 taxonomy,
-                ["assign", "my-doc-id", "target-topic", "--collection", "proj"],
+                ["assign", self._MANUAL_DOC_ID, "target-topic", "--collection", "proj"],
             )
 
         assert result.exit_code == 0, result.output
@@ -2395,11 +2402,11 @@ class TestManualOpsCLI:
             # The assignment landed on the topic; 'manual' provenance is
             # only readable on the raw twin (assigned_by='manual' rows are
             # exactly the manual_assignments slice of the rebuild state).
-            assert db.taxonomy.get_assignments_for_docs(["my-doc-id"]) == {
-                "my-doc-id": topic_id,
+            assert db.taxonomy.get_assignments_for_docs([self._MANUAL_DOC_ID]) == {
+                self._MANUAL_DOC_ID: topic_id,
             }
             state = db.taxonomy.read_rebuild_old_state("proj")
-            assert state["manual_assignments"].get("my-doc-id") == topic_id
+            assert state["manual_assignments"].get(self._MANUAL_DOC_ID) == topic_id
 
     def test_assign_cli_unknown_label(self, tmp_path: Path) -> None:
         """nx taxonomy assign with unknown label prints error."""
@@ -2418,7 +2425,7 @@ class TestManualOpsCLI:
             "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
         ):
             result = runner.invoke(
-                taxonomy, ["assign", "doc-x", "nonexistent"],
+                taxonomy, ["assign", self._MANUAL_DOC_ID, "nonexistent"],
             )
 
         assert result.exit_code == 0

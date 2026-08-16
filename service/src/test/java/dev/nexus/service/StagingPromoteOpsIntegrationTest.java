@@ -65,6 +65,12 @@ class StagingPromoteOpsIntegrationTest {
     // only counts -- which would otherwise get swept up the first time
     // ANY test on the same tenant calls finalizeTenant(tenant, true)).
     private static final String T_DIM = "t-promote-dim";
+    // RDR-194 D0.9 (nexus-tk070.p3a): dedicated tenant for the
+    // non-conformant topic_assignments.doc_id reject test, isolated from
+    // T1's ordered sequence for the same reason T_DIM is (a fresh tenant
+    // means an exact assertion instead of a delta against whatever earlier
+    // @Order tests left staged).
+    private static final String T_REJECT = "t-promote-reject";
 
     private static final String COLL_A = "knowledge__ka__bge-base-en-v15-768__v1";
     private static final String COLL_B = "knowledge__kb__bge-base-en-v15-768__v1";
@@ -1672,7 +1678,7 @@ class StagingPromoteOpsIntegrationTest {
         assertThat(landed).as("the malformed row must NOT have landed in nexus.document_aspects")
             .isEqualTo(0);
 
-        // Cleanup: this is the LAST test in the class, but stay consistent with
+        // Cleanup: T1's ordered sequence ends here, but stay consistent with
         // this file's own convention (Order 3/4) of cleaning up a fail-loud
         // scenario's staged row so no later finalize run would keep re-attempting
         // (and re-failing on) it.
@@ -1680,5 +1686,42 @@ class StagingPromoteOpsIntegrationTest {
             ctx.execute("DELETE FROM staging.document_aspects WHERE collection = ?", coll);
             return null;
         });
+    }
+
+    // ── Order 34: RDR-194 D0.9 (nexus-tk070.p3a), non-conformant doc_id reject ──
+
+    @Test
+    @Order(34)
+    void finalizeTenant_nonConformantTopicAssignmentDocId_rejectsByName() {
+        // A staged doc_id that is neither alias-resolvable, nor already a
+        // conformant 64-hex chash, nor a legacy 16/32-hex shape awaiting a
+        // future alias (that third case stays silently STAGED, Order 6's
+        // "topic-never-landed" scenario covers it) is arbitrary text: a
+        // memory-note title, a historic tumbler, anything an ETL-era row
+        // could have carried. D0.9 requires finalize to fail loud, naming
+        // the offending value, rather than pass it through to a column
+        // that can no longer hold it once D1's bytea conversion lands.
+        String badDocId = "some-memory-note-title-not-a-chash";
+        scope.withTenant(T_REJECT, ctx -> {
+            ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                + "VALUES (?, ?) ON CONFLICT (tenant_id, name) DO NOTHING", T_REJECT, COLL_A);
+            ctx.execute("INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
+                + "VALUES (?, 'reject-topic', ?, now())", T_REJECT, COLL_A);
+            ctx.execute("INSERT INTO staging.topic_assignments "
+                + "(tenant_id, doc_id, topic_id, topic_label, topic_collection) "
+                + "VALUES (?, ?, 999999, 'reject-topic', ?) ON CONFLICT DO NOTHING",
+                T_REJECT, badDocId, COLL_A);
+            return null;
+        });
+
+        assertThatThrownBy(() -> ops.finalizeTenant(T_REJECT, false))
+            .as("a non-conformant staged doc_id must abort finalize loud, naming the value")
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining(badDocId);
+
+        assertThat(countAs(T_REJECT, "SELECT count(*) FROM nexus.topic_assignments "
+            + "WHERE tenant_id = '" + T_REJECT + "'"))
+            .as("the rejected row must never reach nexus.topic_assignments")
+            .isEqualTo(0);
     }
 }

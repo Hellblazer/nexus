@@ -52,10 +52,16 @@ class the original vehicle still carried.
    design), not a serving chash column, so converting it would have been width theatre.
 3. **Legacy-debt TEXT columns stayed TEXT** (`topic_assignments.doc_id`,
    `frecency`/`relevance_log.chunk_id`). Consistent with the RDR's inventory intent (they
-   are *remap* targets, repointed via cascade — not *conversion* targets), but worth naming:
-   `topic_assignments.doc_id` is a genuinely mixed identity space (chunk chashes AND memory
-   note titles), so a bytea conversion would have made 16-byte values ambiguous. Retiring
-   these to FK-anchored identity is a filed RDR candidate.
+   are *remap* targets, repointed via cascade — not *conversion* targets). ~~`topic_assignments.doc_id`
+   is a genuinely mixed identity space (chunk chashes AND memory note titles), so a bytea
+   conversion would have made 16-byte values ambiguous.~~ **Correction (RDR-194 D1,
+   nexus-tk070.p3a, nexus-yo9mi, 2026-08):** that identity-space claim was wrong.
+   `topic_assignments.doc_id` is a chunk chash end to end (RDR-180 Item6/Item6a, this same
+   RDR); the "mixed identity" inference traced to a DELETE predicate's parameter NAME, not to
+   any INSERT, and the one real memory-note-clustering path died with the SQLite store before
+   this post-mortem was written. Retiring `doc_id` to FK-anchored identity was the filed RDR
+   candidate named below: it is RDR-194, now decided (D1: `bytea` + composite FK to
+   `chunks`), not merely filed.
 
 ## What the process caught, and what only production caught
 

@@ -250,10 +250,19 @@ public final class ChashCensus {
      * alias entry is therefore resolvable and not counted; one without is
      * genuine debt and is.
      *
-     * <p>The TEXT columns keep a shape filter, but widened to "a chash of
-     * EITHER era" (32- or 64-hex): {@code topic_assignments.doc_id} is a mixed
-     * identity space that also holds memory-note titles (RDR-180 Item2), and
-     * dropping the filter entirely would flag every title as dangling.
+     * <p>The TEXT columns keep a shape filter, widened to "a chash of EITHER
+     * era" (32- or 64-hex). CORRECTED (RDR-194 D1, nexus-tk070.p3a,
+     * nexus-yo9mi): {@code topic_assignments.doc_id} is NOT a mixed identity
+     * space and does NOT hold memory-note titles: every live writer emits a
+     * chunk chash (RDR-180 Item6 / Item6a, {@code
+     * docs/rdr/rdr-180-content-address-chash-binary-32byte.md:80,82,135}; the
+     * one real memory-note-clustering path died with the SQLite store at
+     * commit {@code f24bdb853}). The shape filter itself stays; it exists to
+     * accommodate the two ETL-era admitting paths ({@link
+     * dev.nexus.service.db.StagingPromoteOps}'s legacy passthrough and the
+     * {@code nx taxonomy assign} CLI argument) rather than any title
+     * population, and retires with this leg (C1) at RDR-194 P3d, in the
+     * same commit as the {@code doc_id} FK VALIDATE (D0.10).
      */
     private static Map<String, Integer> danglingPointers(DSLContext ctx) {
         Map<String, Integer> out = new LinkedHashMap<>();

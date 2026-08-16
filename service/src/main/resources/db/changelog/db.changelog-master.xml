@@ -658,6 +658,20 @@
          derivation. -->
     <include file="db/changelog/remap-003-new-chash-bytea.xml"/>
 
+    <!-- RDR-194 Phase P3a (Decision D1, bead nexus-tk070.p3a): layered
+         CREATE OR REPLACE of assign_from_chashes_{384,768,1024} persisting
+         source_collection on the centroid branch (prerequisite for D1's
+         composite FK, P3d). Placed after remap-003-new-chash-bytea.xml
+         (current tail) and before the grants-nexus-svc.xml runAlways block,
+         matching the established late-append convention (D0.1; see
+         catalog-031's / telemetry-004's / aspects-003's / plans-002's /
+         taxonomy-008's / catalog-032's / remap-003's own <include> comments
+         for the identical reasoning). No data change: pure function-body
+         layering, no ALTER COLUMN, no DML against existing rows. See
+         taxonomy-009-assign-source-collection.xml's own header for the full
+         D1 trace. -->
+    <include file="db/changelog/taxonomy-009-assign-source-collection.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

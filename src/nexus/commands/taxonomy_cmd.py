@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -880,6 +881,13 @@ def review_cmd(
 # ── Manual operations (RDR-070, nexus-c3w) ──────────────────────────────────
 
 
+# RDR-194 D1 (nexus-tk070.p3a): topic_assignments.doc_id is a chunk chash
+# end to end (RDR-180 Item6/Item6a). The CLI boundary validates the shape
+# so a malformed DOC_ID gets a named error here instead of an opaque
+# Postgres decode failure once D1's bytea conversion lands (P3c).
+_DOC_ID_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
 @taxonomy.command("assign")
 @click.argument("doc_id")
 @click.argument("topic_label")
@@ -887,6 +895,13 @@ def review_cmd(
 def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
     """Assign a document to a topic by label."""
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
+    if not _DOC_ID_HEX_RE.match(doc_id):
+        raise click.UsageError(
+            f"DOC_ID {doc_id!r} is not a valid chunk chash: expected 64 lowercase "
+            "hex characters (RDR-194 D1). topic_assignments.doc_id is a chunk "
+            "chash, not a free-form identifier; pass the chash reported by "
+            "`nx search` / `nx query`, not a title or tumbler."
+        )
     with _T2Database(_default_db_path()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:

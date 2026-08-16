@@ -39,6 +39,24 @@
     This whole engine generation deploys only inside the RDR-180 freeze
     window (nx upgrade rung locally; operator choreography in the cloud).
 
+    STALE-PROSE CORRECTION (RDR-194 D1, nexus-tk070.p3a, nexus-yo9mi,
+    2026-08): the "MIXED identity space" claim above (WHAT DOES NOT convert,
+    `topic_assignments.doc_id`) is corrected. `topic_assignments.doc_id` is
+    NOT a mixed identity space and does NOT hold memory-note titles. Every
+    live writer emits a chunk chash (RDR-180 Item6 `:80`, Item6a `:82`,
+    Failure Modes `:135`, the same RDR this file implements says the
+    opposite of this header, three times); the "title" the claim traces to
+    is `TaxonomyRepository.purgeAssignmentsForDoc`'s parameter NAME, a DELETE
+    predicate, not evidence of what any INSERT writes
+    (`http_taxonomy_store.py:438-452` returns `{"doc_id": d, "title": d}`,
+    the "title" IS the doc_id). The one real memory-note-clustering path
+    (`catalog_taxonomy.py`'s `LEFT JOIN memory m ON m.title = ta.doc_id`)
+    died with the SQLite store at commit `f24bdb853` and nothing replaced it.
+    The column still stayed TEXT here, and the CONVERSION EXPRESSION and
+    REVERSIBILITY LEMMA above remain accurate for the mid-migration window;
+    only the identity-space characterization is wrong. `topic_assignments.
+    doc_id` converts to `bytea` with a composite FK at RDR-194 D1 (P3a-P3d).
+
     NO DML IN THIS FILE by design: Liquibase runs as nexus_admin, a
     policy-subject role under FORCE RLS whose DML silently sees zero rows
     (recorded trap: T2 force-rls-migration-dml-noop). ALTER TABLE is DDL
