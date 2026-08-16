@@ -245,8 +245,10 @@ def diag_conformance_view_ddl() -> str:
 
     DEBT LEGS ARE ANTI-JOINS (RDR-180 .6 amendment 1): the debt columns
     stay TEXT, so a width predicate mismeasures them across eras (64-hex
-    text = 64 octets; a legacy 32-hex value would be flagged even though it
-    is resolvable through ``chash_alias``). CORRECTED (RDR-194 D1,
+    text = 64 octets; historically a legacy 32-hex value would be flagged
+    even when resolvable — the ``chash_alias`` route itself was dropped at
+    nexus-lgdel.l1, but anti-joins remain the correct measurement either
+    way). CORRECTED (RDR-194 D1,
     nexus-tk070.p3a, nexus-yo9mi): ``topic_assignments.doc_id`` is NOT a
     mixed identity space and does NOT hold memory-note titles: every live
     writer emits a chunk chash (RDR-180 Item6/Item6a; the one real

@@ -105,8 +105,10 @@ def _manifest_row_from_dict(d: dict) -> ManifestRow:
     """
     return ManifestRow(
         position=int(d.get("position", 0)),
-        # RDR-180: the wire value is authoritative — full 64-hex for rekeyed
-        # rows, 32-hex for not-yet-rekeyed legacy rows. Never truncate.
+        # RDR-180: the wire value is authoritative — always the full 64-hex
+        # chash (the engine's octet_length=32 CHECK rejects any other width
+        # on write; the not-yet-rekeyed 32-hex population is gone, RDR-194
+        # P2 cloud-count-2 = zero). Never truncate.
         chash=d.get("chash") or "",
         chunk_index=d.get("chunk_index"),
         line_start=d.get("line_start"),
