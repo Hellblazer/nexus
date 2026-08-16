@@ -31,4 +31,18 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release (pinned: v7.7.0)
 
-(none)
+- `conexus/hooks/scripts/t2_prefix_scan.py` — nexus-8fvp2: T2 context injection repointed from the dead SQLite memory.db to the engine's T2 HTTP endpoint (stdlib-only; env > config.yml > lease precedence; two-arm loud freshness assert; per-namespace isolation, 5-namespace cap, 8s budget). Until the next release ships, installed sessions still run the frozen SQLite scan.
+- `conexus/agents/_shared/CONTEXT_PROTOCOL.md` — nexus-j9lbk: store_put calling convention gains `agent="<role>"` attribution (mirrors memory_put).
+- `conexus/agents/architect-planner.md` — nexus-j9lbk store_put attribution convention.
+- `conexus/agents/code-review-expert.md` — nexus-j9lbk store_put attribution convention.
+- `conexus/agents/codebase-deep-analyzer.md` — nexus-j9lbk store_put attribution convention.
+- `conexus/agents/debugger.md` — nexus-j9lbk store_put attribution convention.
+- `conexus/agents/deep-analyst.md` — nexus-j9lbk store_put attribution convention.
+- `conexus/agents/deep-research-synthesizer.md` — nexus-j9lbk store_put attribution convention.
+- `conexus/agents/developer.md` — nexus-j9lbk store_put attribution convention.
+- `conexus/agents/strategic-planner.md` — nexus-j9lbk store_put attribution convention.
+- `conexus/agents/substantive-critic.md` — nexus-j9lbk store_put attribution convention.
+- `conexus/agents/test-validator.md` — nexus-j9lbk store_put attribution convention.
+- `conexus/skills/catalog/SKILL.md` — nexus-j9lbk store_put attribution convention.
+- `conexus/skills/nexus/SKILL.md` — nexus-j9lbk store_put attribution convention.
+- `conexus/skills/nexus/reference.md` — nexus-j9lbk store_put attribution convention.

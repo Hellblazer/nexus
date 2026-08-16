@@ -221,7 +221,7 @@ All agents should:
 ### Storage Tools
 ```
 # Store a document
-mcp__plugin_conexus_nexus__store_put( content="content", collection="knowledge", title="research-topic-date", tags="category"
+mcp__plugin_conexus_nexus__store_put( content="content", collection="knowledge", title="research-topic-date", tags="category", agent="<your-role>"
 
 # Search stored knowledge
 mcp__plugin_conexus_nexus__search( query="query", corpus="knowledge", limit=5
@@ -231,7 +231,7 @@ mcp__plugin_conexus_nexus__store_list( collection="knowledge"
 ```
 
 ### Metadata
-store_put uses `tags` parameter for categorization (comma-separated strings).
+store_put uses `tags` parameter for categorization (comma-separated strings). Always pass `agent="<your-role>"` (mirrors `memory_put`'s attribution, nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback marker, which defeats `_flag_contradictions`'s agent-diversity precondition for every anonymous MCP writer.
 
 ## nx Memory Organization
 

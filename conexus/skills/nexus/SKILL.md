@@ -59,7 +59,7 @@ mcp__plugin_conexus_nexus__memory_get(project="{repo}", title="file.md"       # 
 mcp__plugin_conexus_nexus__memory_search(query="query", project="{repo}"
 
 # Knowledge (T3)
-mcp__plugin_conexus_nexus__store_put(content="content", collection="knowledge", title="title", tags="tag"
+mcp__plugin_conexus_nexus__store_put(content="content", collection="knowledge", title="title", tags="tag", agent="<your-role>"
 mcp__plugin_conexus_nexus__store_list(collection="knowledge"
 
 # Scratch (T1)

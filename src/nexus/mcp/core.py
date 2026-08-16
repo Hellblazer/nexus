@@ -3276,6 +3276,8 @@ def store_put(
     tags: str = "",
     category: str = "",
     ttl: str = "permanent",
+    agent: str = "",
+    session: str = "",
 ) -> str:
     """Store content in the T3 permanent knowledge store.
 
@@ -3302,12 +3304,35 @@ def store_put(
             can filter via ``where={"category": "<value>"}`` without
             isolating the documents in their own collection.
         ttl: Time-to-live: Nd (days), Nw (weeks), or "permanent"
+        agent: Optional subagent / role attribution (e.g. "developer",
+            "architect-planner"), mirroring ``memory_put``'s parameter.
+            When empty, falls back to ``NX_AGENT`` env; when that is ALSO
+            empty, lands the distinct ``"mcp"`` marker rather than an
+            empty string or the T3 write path's own "nexus-indexer"
+            indexer default (nexus-4ftd7) — an unmarked MCP write must
+            never collapse onto either value, since
+            ``search_engine._flag_contradictions``'s ``agent_a !=
+            agent_b`` precondition (RDR-057 Phase 3a) can only ever fire
+            between two DIFFERENT non-empty ``source_agent`` values, and
+            a shared constant (or both blank) makes it permanently dead
+            on the MCP-written population.
+        session: Optional explicit session_id override, mirroring
+            ``memory_put``'s parameter. When empty, falls back to
+            ``NX_SESSION_ID`` env (subagents carry this via
+            ``claude_dispatch``, RDR-094).
     """
     try:
         if not content:
             return "Error: content is required"
         days = parse_ttl(ttl)
         ttl_days = days if days is not None else 0
+        # nexus-4ftd7: resolve actor attribution HERE (mirrors memory_put's
+        # own inline resolution) rather than leaving it to T3Database.put,
+        # which — unlike HttpMemoryStore.put's resolve_attribution — has no
+        # env-fallback chain of its own and would otherwise persist a bare
+        # empty string for every MCP write with no explicit agent.
+        agent_arg = agent.strip() or _os.environ.get("NX_AGENT", "").strip() or "mcp"
+        session_arg = session.strip() or _os.environ.get("NX_SESSION_ID", "").strip()
         t3 = _get_t3()
         # nexus-hmxi: pass t3 so the resolver grandfathers an existing
         # legacy 2-segment collection ahead of the auto-promoted
@@ -3375,6 +3400,8 @@ def store_put(
                 title=title,
                 tags=tags,
                 category=category,
+                session_id=session_arg,
+                source_agent=agent_arg,
                 ttl_days=ttl_days,
                 catalog_doc_id=catalog_doc_id,
             )
