@@ -438,7 +438,7 @@ for pid in "${FANOUT_PIDS[@]}"; do
     wait "$pid" || FANOUT_FAILURES=$((FANOUT_FAILURES + 1))
 done
 [ "$FANOUT_FAILURES" -eq 0 ] \
-    || _fail "$FANOUT_FAILURES of $FANOUT_N concurrent nx invocations failed — flock-guarded mint-on-miss did not converge the fan-out (nexus-nnr26 regression)"
+    || _fail "$FANOUT_FAILURES of $FANOUT_N concurrent invocations of the CLI failed — flock-guarded mint-on-miss did not converge the fan-out (nexus-nnr26 regression)"
 
 # Non-vacuity (bead requirement): each leg's own log must exist, be
 # non-empty, and actually carry the round-trip's result — a fan-out that
