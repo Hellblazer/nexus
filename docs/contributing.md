@@ -403,6 +403,26 @@ Every step below is **required**. Missing any one of them has caused problems in
    explicit `SHAKEDOWN PASSED`/`SHAKEDOWN FAILED` verdict line. Halt on
    any failure.
 
+7d. **Data-token CLI gate** (optional, ~5-15 min; not part of the
+   standard battery above — run it once before flipping `mint_token` on
+   for real, or after touching `src/nexus/db/data_token.py`,
+   `commands/config_cmd.py`, `commands/service_cmd.py`'s token group, or
+   `health.py`'s `_check_mint_token`)
+   ```bash
+   ./tests/e2e/data-token-cli-gate.sh
+   ```
+   RDR-005 2a self-minting (nexus-rftfs / nexus-wrwb7 / nexus-ssqk9): the
+   sandboxed-HOME, real-`nx`-subprocess journey for client-side
+   data-token self-minting — issues a `scope=mint-locked` credential
+   against a throwaway local engine, `nx config set mint_token`/
+   `mint_tenant`, a `store put`/`search` round trip that can only
+   succeed via the self-minted token, `nx doctor`'s mint check, and a
+   wrong-`mint_tenant` negative arm. Complements
+   `tests/db/test_data_token_manager_e2e.py` (which proves the
+   `DataTokenManager` seam in-process) by proving the CLI/config.yml/
+   doctor wiring only a real subprocess exercises. Must end
+   `DATA-TOKEN CLI GATE PASSED`.
+
 8. **Commit on a release branch and PR to `main`** (branch protection requires a PR; do NOT direct-push).
    Base the release branch on **develop**, not main — a release PROMOTES develop's accumulated
    state to main (§ Git Workflow above); branching off main would release main's stale tree with

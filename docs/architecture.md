@@ -757,10 +757,21 @@ the transient gateway/rate-limit statuses `{429, 502, 503, 504}` —
 the shared `nexus.rate_brake` brake (that brake coordinates bulk-write
 workers; a mint is a single infrequent auth round trip). `nx doctor`'s
 mint_token check routes through `DataTokenManager`'s process-wide singleton
-(never a throwaway instance) so repeated `nx doctor` runs REUSE a live
-cached token rather than minting a fresh one every invocation, and its
-success line reports both which happened (minted vs. reused) and the
-granted TTL.
+(never a throwaway instance), and its success line reports both which
+happened (minted vs. reused) and the granted TTL. The cache is
+PER-PROCESS ONLY — there is no cross-process persistence, so every `nx`
+subprocess (each CLI invocation, doctor included) mints its own token and
+reports "minted", never "reused"; "reused" appears only within one
+long-lived process (the MCP server, or repeated calls inside a single
+command). Consequences of that scope, measured at nexus-rftfs: CLI-heavy
+usage produces one short-TTL `scope=data` row per invocation on the
+engine (the nexus-lgiqw residue class until its reaper ships), and the
+engine's `MintRateLimiter` default burst (5 per credential+tenant per
+minute) bounds how many back-to-back `nx` invocations can mint before
+failing loud — acceptable for interactive use and the single-read canary,
+NOT yet for always-on `mint_token` under scripted bulk CLI loops (the
+cross-process cache / rate-headroom follow-up is tracked on the
+nexus-rftfs bead thread).
 
 ### Concurrency Model ([RDR-063](rdr/rdr-063-t2-domain-split.md) Phase 2) — HISTORICAL
 
