@@ -39,12 +39,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       {@code {"rows":[{"collection","created_at"}],"chash"}} with
  *       second-precision UTC timestamps; registered_chashes / distinct
  *       collections / count / is_empty keep their keys</li>
- *   <li>RETIRED writes (upsert, upsert_many, import, delete_stale) answer
- *       410 Gone with a body naming the RDR-187 retirement, and perform
- *       ZERO database work (nexus-piwya.11 — the no-op deprecation window
- *       closed with the nexus-piwya.9 DROP)</li>
- *   <li>delete_collection stays a deprecated no-op and specifically does
- *       NOT destroy chunk content</li>
+ *   <li>RETIRED writes (upsert, upsert_many, import, delete_stale,
+ *       delete_collection) answer 410 Gone with a body naming the
+ *       retirement, and perform ZERO database work (nexus-piwya.11 — the
+ *       no-op deprecation window closed with the nexus-piwya.9 DROP for the
+ *       first four; delete_collection joined them at nexus-lgdel.l2, an
+ *       orphan sweep finding zero production callers)</li>
  *   <li>validation still fails loud on the live routes: missing params 400,
  *       wrong method 405</li>
  *   <li>rename_collection stays REAL (re-homes chunks; Q3)</li>
@@ -232,15 +232,19 @@ class ChashHandlerRerouteTest {
     }
 
     @Test
-    void deleteCollection_noOps_andDoesNotDestroyChunkContent() throws Exception {
+    void deleteCollection_isGone() throws Exception {
+        // nexus-lgdel.l2: delete_collection joins the retired-writes group —
+        // an orphan sweep found zero production callers (the old client's
+        // wrapper is deleted too). It was already a deprecated no-op that
+        // never touched chunk content; the load-bearing assertion (content
+        // survives) carries over unchanged, now against a 410 instead of a
+        // 200 no-op body.
         long before = chunkRowCount();
         var resp = post("/v1/chash/delete_collection",
             "{\"collection\":\"" + COLL_768 + "\"}");
-        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.statusCode()).isEqualTo(410);
         Map<String, Object> body = mapper.readValue(resp.body(), MAP_T);
-        assertThat(body).containsOnlyKeys("deleted", "deprecated");
-        assertThat(body.get("deleted")).isEqualTo(0);
-        assertThat(body.get("deprecated")).isEqualTo(true);
+        assertThat((String) body.get("error")).contains("delete_collection");
         assertThat(chunkRowCount())
             .as("the chash surface must NEVER escalate 'drop routing rows' into 'drop content'")
             .isEqualTo(before);
@@ -301,8 +305,10 @@ class ChashHandlerRerouteTest {
         assertThat(post("/v1/chash/import",
             "{\"rows\":[{\"chash\":\"beef\",\"collection\":\"c\"}]}").statusCode()).isEqualTo(410);
         assertThat(get("/v1/chash/upsert").statusCode()).isEqualTo(410);
+        // delete_collection joined the retired group at nexus-lgdel.l2 — 410
+        // regardless of payload shape, same as its siblings above.
+        assertThat(post("/v1/chash/delete_collection", "{}").statusCode()).isEqualTo(410);
         // Live routes still validate loud.
-        assertThat(post("/v1/chash/delete_collection", "{}").statusCode()).isEqualTo(400);
         assertThat(get("/v1/chash/lookup").statusCode()).isEqualTo(400);
         assertThat(post("/v1/chash/lookup", "{}").statusCode()).isEqualTo(405);
     }

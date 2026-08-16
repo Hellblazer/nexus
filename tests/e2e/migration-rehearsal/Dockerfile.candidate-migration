@@ -2,26 +2,22 @@
 # nexus-z0ylb — CANDIDATE-MIGRATION rehearsal box: the locally-built
 # CANDIDATE engine's full Liquibase walk over a POPULATED store.
 #
-# From the nexus-eo3qv critique of the --chash-window redesign: no leg in
-# this harness exercised a locally-built candidate's changeset walk against
-# genuinely populated data. --chash-window drives the PUBLISHED floor
-# engine's walk over a populated store (never the candidate); --shakeout
-# drives the candidate, but only on a FRESH install with no pre-existing
-# data. This box closes that gap: provision the PUBLISHED FLOOR engine for
-# real, populate a store through it (content + catalog manifests +
-# taxonomy — the leg's soul), then hand-swap in the CANDIDATE binary and
-# boot it against that same populated store.
+# No leg in this harness exercised a locally-built candidate's changeset
+# walk against genuinely populated data. --shakeout drives the candidate,
+# but only on a FRESH install with no pre-existing data. This box closes
+# that gap: provision the PUBLISHED FLOOR engine for real, populate a
+# store through it (content + catalog manifests + taxonomy — the leg's
+# soul), then hand-swap in the CANDIDATE binary and boot it against that
+# same populated store.
 #
-# Same quarantine posture as Dockerfile.chash-window / Dockerfile.era-hop
-# (no system PostgreSQL, no engine pre-staged at the well-known config
-# location) PLUS the candidate-staging shape of the default Dockerfile /
-# Dockerfile (--shakeout): the locally-built native binary travels in
-# under /opt/nexus-service-native, positioned by the driver only at
-# Stage 4 (the hand-swap), never before. The FLOOR engine is acquired at
-# RUNTIME by the product's own code (`nx daemon service install-binary`) —
-# same runtime-acquisition posture as Dockerfile.chash-window for its own
-# floor download, just triggered explicitly here instead of via
-# converge_engine's auto-transition (this leg never swaps client
+# Same quarantine posture as Dockerfile.era-hop (no system PostgreSQL, no
+# engine pre-staged at the well-known config location) PLUS the
+# candidate-staging shape of the default Dockerfile (--shakeout): the
+# locally-built native binary travels in under /opt/nexus-service-native,
+# positioned by the driver only at Stage 4 (the hand-swap), never before.
+# The FLOOR engine is acquired at RUNTIME by the product's own code
+# (`nx daemon service install-binary`), triggered explicitly here rather
+# than via converge_engine's auto-transition (this leg never swaps client
 # packages, so there is no version transition to trigger it).
 #
 # NO pre-installed conexus. The driver `uv tool install`s the WORKING-TREE
@@ -29,8 +25,7 @@
 # delta, not a client upgrade axis) into a `uv tool install` venv (not a
 # plain pip venv) purely for staging-convention parity with the other
 # runtime-acquisition legs; nothing here actually depends on the
-# tool-install/venv distinction the way --chash-window's
-# running_from_tool_install() gate does.
+# tool-install/venv distinction.
 FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \

@@ -407,10 +407,10 @@ class ManifestVerifyTest {
     // reads PRESENT here — the shipped function cannot tell "wrong dim" apart
     // from "right dim".
     //
-    // This is the SAME tradeoff nexus.remap_membership() makes deliberately
-    // (RDR-186 nexus-146xx.5 — see RemapMembershipFunctionTest.dimAgnostic_
-    // claimInChunks384_counted, whose own comment reads "membership must probe
-    // ALL chunk dims ... without being told which"). nexus.manifest_orphans(dim)
+    // This was the SAME tradeoff nexus.remap_membership() made deliberately
+    // (RDR-186 nexus-146xx.5 — "membership must probe ALL chunk dims ...
+    // without being told which"); that function and its dim-agnostic-probe
+    // test are DELETED at nexus-lgdel.l2 (orphaned read surface). nexus.manifest_orphans(dim)
     // (catalog-004-manifest-functions.xml) is the STRICTER tool when dim
     // fidelity matters: it routes via split_part(collection,'__',3) to the ONE
     // dim (embedding column) the collection name declares, so a wrong-dim chash

@@ -14,7 +14,6 @@ import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_REMAP;
-import static dev.nexus.service.jooq.nexus.Tables.REMAP_MEMBERSHIP;
 
 /**
  * RDR-186 bead nexus-146xx.4 — jOOQ-based chash_remap repository.
@@ -27,9 +26,12 @@ import static dev.nexus.service.jooq.nexus.Tables.REMAP_MEMBERSHIP;
  * and enforced by FORCE RLS.
  *
  * <p><strong>RF-186-1:</strong> this repository exposes raw-fact operations
- * only — record, clear, and the live membership counts. There is no verdict
- * read or write surface, and none may ever be added (Gap-4 pin; see the
- * remap-001 changelog header).
+ * only — record and clear. There is no verdict read or write surface, and
+ * none may ever be added (Gap-4 pin; see the remap-001 changelog header).
+ * The live-membership read ({@code membership(...)} / {@code
+ * nexus.remap_membership()}) was itself DELETED at nexus-lgdel.l2 — an
+ * orphaned surface with zero production callers, not a verdict surface
+ * (RF-186-1 was never about it), but gone all the same.
  *
  * <p>Batch semantics mirror the SQLite store: {@link #recordBatch} is ONE
  * transaction (the RDR-185 r2 ordering unit — the map batch commits
@@ -180,27 +182,6 @@ public final class RemapRepository {
         log.info("event=remap_clear_leg tenant={} source={} target={} deleted={}",
                 tenant, sourceCollection, targetCollection, deleted);
         return deleted;
-    }
-
-    /**
-     * The LIVE leg membership counts — delegates to
-     * {@code nexus.remap_membership()} (remap-002, bead .5). Computed fresh on
-     * every call; never cached, never persisted (RF-186-1).
-     *
-     * @return {@code [mapped_total, present_count]}; converged iff equal
-     *         (including 0 == 0 — nothing owed)
-     */
-    public long[] membership(String tenant, String sourceCollection, String targetCollection) {
-        requireNonBlank(sourceCollection, "source_collection");
-        requireNonBlank(targetCollection, "target_collection");
-        return tenantScope.withTenant(tenant, ctx -> {
-            var row = ctx.selectFrom(REMAP_MEMBERSHIP.call(sourceCollection, targetCollection))
-                         .fetchOne();
-            if (row == null) {
-                throw new IllegalStateException("remap_membership returned no row");
-            }
-            return new long[]{row.getMappedTotal(), row.getPresentCount()};
-        });
     }
 
     /**

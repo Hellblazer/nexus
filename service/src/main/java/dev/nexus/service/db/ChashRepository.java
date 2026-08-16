@@ -39,8 +39,10 @@ import java.util.Set;
  *
  * <p>WRITES ARE GONE: the router was the only thing written. The chunks
  * tables are written by the vector ingest paths ({@code PgVectorRepository});
- * {@code ChashHandler} accepts the old write shapes as deprecated no-ops for
- * one release (mixed-version window, RDR-187 finding 3). The exception:
+ * {@code ChashHandler} answers the old write shapes with 410 Gone (the
+ * one-release deprecated-no-op mixed-version window, RDR-187 finding 3,
+ * closed at nexus-piwya.11; {@code delete_collection} joined the 410 group
+ * separately at nexus-lgdel.l2, an orphan with zero callers). The exception:
  * {@link #renameCollection} stays REAL (rerouted to re-home
  * {@code chunks_<dim>.collection}; idempotent when the RDR-164 catalog
  * cascade already did the work). {@code resolveLegacyRef}, which read the

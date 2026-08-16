@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-lgdel.l2 (epic nexus-lgdel, T2 nexus/plan-legacy-retirement-2026-08-16)
+    — DROP the orphaned nexus.remap_membership(text, text) read surface.
+
+    ORPHAN CENSUS (bead nexus-lgdel.l2, item 2): live SQL and Java, ZERO
+    production Python/CLI callers. The old client's membership-reading rung
+    was deleted at 88d91bd58; the surviving upgrade-ladder rung calls only
+    POST /v1/remap/rekey. This is the largest remaining orphan the L2 sweep
+    found — and it is exactly the function L1's legacy-001-4 changeset spent
+    a changeset simplifying (removing the chash_alias LEFT JOIN) one commit
+    before it turns out to have no callers at all.
+
+    RELAY ASK (Hal-relayed, non-blocking, per the plan of record): "does any
+    managed or external deployment call GET /v1/remap/membership?" The
+    default disposition is DELETE regardless of the answer — under the
+    epic's directive of record the canary-class gates are the backstop for
+    an undiscovered caller, not a blocking census. RemapHandler's own class
+    javadoc already notes its edge carries no path allowlist, so this is the
+    accepted risk, not an oversight.
+
+    NOT IN SCOPE (PERMANENT BY DESIGN, RDR-194 D3, unchanged by this file):
+    nexus.chash_remap the TABLE, and RemapHandler's record_batch/clear_leg
+    WRITE surface. Only the read (membership) is deleted here.
+
+    ONE CHANGESET: DROP FUNCTION nexus.remap_membership(text, text).
+    Rollback restores the exact L1-generation body (legacy-001-4's forward
+    body — the alias-join-free form; chash_alias itself does not exist by
+    the time ANY of this file's forward or rollback SQL runs, so restoring
+    the pre-L1 alias-joined body here would be a straight typecheck failure,
+    not merely dishonest like legacy-001-5's EMPTY-table recreation). Safe
+    unconditionally: the function references only nexus.chash_remap and
+    nexus.chunks, both of which exist for the lifetime of this changeset in
+    both directions.
+
+    Tail-appended after legacy-001-drop-chash-alias.xml (current tail) and
+    before the grants-nexus-svc.xml runAlways block, matching the
+    established late-append convention (D0.1; see catalog-031's /
+    telemetry-004's / aspects-003's / plans-002's / taxonomy-008's /
+    catalog-032's / remap-003's / taxonomy-009's / legacy-001's own
+    <include> comments for the identical reasoning).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: DROP FUNCTION nexus.remap_membership(text, text) ──── -->
+    <changeSet id="legacy-002-1" author="nexus-lgdel.l2">
+        <comment>
+            DROP the orphaned nexus.remap_membership(text, text) read
+            surface — zero production Python/CLI callers (the old client's
+            membership-reading rung was deleted at 88d91bd58; the surviving
+            rung calls only POST /v1/remap/rekey). Java-side deletion
+            (RemapHandler.handleMembership, the GET /v1/remap/membership
+            route, RemapRepository.membership) lands in the same commit
+            family. nexus.chash_remap the TABLE and the record_batch/
+            clear_leg write surface are UNTOUCHED (RDR-194 D3, permanent
+            by design).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+DROP FUNCTION nexus.remap_membership(text, text);
+        </sql>
+        <rollback>
+            <!-- Restores the exact L1-generation body (legacy-001-4's
+                 forward body — the alias-join-free form). This is the
+                 correct restoration target, NOT the pre-L1 alias-joined
+                 form: nexus.chash_alias does not exist at this changeset's
+                 position in the reverse walk (legacy-001-5's own rollback,
+                 which recreates it, runs LATER in reverse order — legacy-001
+                 is entirely BEFORE legacy-002 in forward order, so its
+                 rollback entirely FOLLOWS legacy-002's in reverse order) —
+                 restoring an alias-joined body here would reference a
+                 table that does not exist yet, a straight typecheck
+                 failure. Signature and return contract (RETURNS TABLE
+                 (mapped_total bigint, present_count bigint), SECURITY
+                 INVOKER, STABLE) unchanged from L1's. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.remap_membership(
+    p_source_collection text,
+    p_target_collection text
+) RETURNS TABLE(mapped_total bigint, present_count bigint)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $fn$
+    SELECT
+        count(*)::bigint AS mapped_total,
+        count(*) FILTER (WHERE
+            EXISTS (SELECT 1 FROM nexus.chunks c
+                     WHERE c.collection = p_target_collection
+                       AND c.chash = r.new_chash)
+        )::bigint AS present_count
+    FROM nexus.chash_remap r
+    WHERE r.source_collection = p_source_collection
+      AND r.target_collection = p_target_collection
+$fn$;
+GRANT EXECUTE ON FUNCTION nexus.remap_membership(text, text) TO nexus_svc;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

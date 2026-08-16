@@ -111,10 +111,14 @@ class JooqRecordReflectionFeatureTest {
     // nexus.chash_old_bytes(text), also dropped by the same changelog,
     // RETURNS bytea (a scalar routine, no Record type, same shape as
     // gc_restore_rereferenced above) — no further delta. The layered
-    // CREATE OR REPLACE on nexus.remap_membership(text,text) changes its
-    // body only, not its RETURNS TABLE signature — its existing Record
-    // type is unaffected.
-    private static final int EXPECTED_RECORD_TYPES = 62;
+    // CREATE OR REPLACE on nexus.remap_membership(text,text) (that
+    // changelog's own changeset 4) changed its body only, not its
+    // RETURNS TABLE signature — its Record type was unaffected THEN.
+    // 62 -> 61: nexus-lgdel.l2 (legacy-002-drop-remap-membership.xml)
+    // DROPPED nexus.remap_membership(text,text) outright — the orphaned
+    // GET /v1/remap/membership read surface had zero production callers.
+    // RETURNS TABLE, one generated Record type (-1).
+    private static final int EXPECTED_RECORD_TYPES = 61;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

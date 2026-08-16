@@ -51,7 +51,7 @@ RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
 # The seeder runs under the PIN release's own venv (installed by the driver
 # as its first step), so it writes the legacy Chroma + T2 + catalog through
 # THAT release's own libraries — the faithful pre-cutover on-disk state.
-# Same seeder era-hop/chash-window/fullstack already use (nexus-8nlj4
+# Same seeder era-hop/fullstack already use (nexus-8nlj4
 # 2026-08-08: confirmed live raw material, not retired debt).
 COPY seed_legacy.py /home/nexus/seed_legacy.py
 COPY rehearse_stranded.sh /home/nexus/rehearse_stranded.sh

@@ -317,9 +317,10 @@ class CombinedQueryParityTest {
             COLL_EXPLAIN + "' FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         // RDR-180: chash is bytea(32) now — the lpad'd decimal string is still valid
         // hex (digits 0-9 only), padded to the full 64-hex canonical width and
-        // decoded at the seam. topic_assignments.doc_id stays TEXT (mixed identity
-        // space) but is padded to the SAME 64-hex width so it matches
-        // encode(c.chash,'hex') at topic-scoped join time.
+        // decoded at the seam. topic_assignments.doc_id stays TEXT but is a chunk
+        // chash end to end (RDR-180 Item6/Item6a, never a memory-note title and not
+        // a mixed identity space — nexus-79box correction), padded to the SAME
+        // 64-hex width so it matches encode(c.chash,'hex') at topic-scoped join time.
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
         // nexus.chunks row before the manifest row below -- chunk insert first.
         // Embedding: 2-D direction (g%100/100, 1) padded to 1024 — varied enough that

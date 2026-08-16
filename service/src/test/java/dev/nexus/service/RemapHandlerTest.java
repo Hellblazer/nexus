@@ -31,8 +31,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>The bead's TDD contract, end to end over HTTP:
  * <ol>
- *   <li>record_batch writes facts; the live-membership function REFLECTS them</li>
- *   <li>clear_leg removes the leg's rows; membership reads nothing owed (0/0)</li>
+ *   <li>record_batch writes facts; a chash_remap+chunks join REFLECTS them
+ *       (formerly the live-membership function/endpoint — DELETED at
+ *       nexus-lgdel.l2, orphaned read surface, zero production callers; the
+ *       {@code membership()} test helper below now computes the same thing
+ *       directly)</li>
+ *   <li>clear_leg removes the leg's rows; the same join reads nothing owed (0/0)</li>
  *   <li>batch bound: &gt;300 entries → 400 (chroma_quotas heritage cap)</li>
  *   <li>RLS through the HTTP layer: another tenant's facts are invisible</li>
  *   <li>upsert: re-recording the same old_id replaces the fact (idempotent resume)</li>
@@ -97,8 +101,6 @@ class RemapHandlerTest {
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chash_remap TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);  // RDR-191 Phase 4: unified
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.remap_membership(text, text) TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT ON nexus.service_tokens, nexus.session_tokens TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -550,9 +552,12 @@ class RemapHandlerTest {
 
     @Test
     void noAuth_rejected401() throws Exception {
+        // nexus-lgdel.l2: retargeted off the deleted /v1/remap/membership
+        // route onto a surviving read endpoint — this test's subject is the
+        // AuthFilter's blanket 401 enforcement, not any one specific route.
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort()
-                + "/v1/remap/membership?source_collection=a&target_collection=b"))
+                + "/v1/remap/count"))
             .header("X-Nexus-Tenant", TENANT)
             .GET().build();
         var resp = http.send(req, HttpResponse.BodyHandlers.ofString());
@@ -561,12 +566,41 @@ class RemapHandlerTest {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
+    /**
+     * nexus-lgdel.l2: {@code GET /v1/remap/membership} and {@code
+     * nexus.remap_membership()} are DELETED — an orphaned read surface with
+     * zero production callers (the old client was deleted at {@code 88d91bd58};
+     * the surviving rung calls only {@code POST /v1/remap/rekey}). This helper
+     * computes the SAME {@code mapped_total}/{@code present_count} directly
+     * against {@code chash_remap} + the unified chunks table, mirroring the
+     * deleted function's join exactly, so record_batch/clear_leg/RLS coverage
+     * below is unaffected by the read surface's removal. Uses a SUPERUSER
+     * connection (no RLS enforcement via session GUC), so both the map-fact
+     * scope and the chunks-presence scope are filtered by {@code tenant}
+     * explicitly here — the function relied on RLS to do this implicitly.
+     */
     private Map<String, Object> membership(String token, String tenant,
                                            String src, String tgt) throws Exception {
-        var resp = get("/v1/remap/membership?source_collection=" + src
-            + "&target_collection=" + tgt, token, tenant);
-        assertThat(resp.statusCode()).isEqualTo(200);
-        return mapper.readValue(resp.body(), MAP_T);
+        try (Connection su = pg.createConnection("")) {
+            var ps = su.prepareStatement(
+                "SELECT count(*)::bigint AS mapped_total, "
+                + "count(*) FILTER (WHERE EXISTS (SELECT 1 FROM " + DimTables.CHUNKS_TABLE_NAME + " c "
+                + "WHERE c.tenant_id = ? AND c.collection = ? AND c.chash = r.new_chash))::bigint AS present_count "
+                + "FROM nexus.chash_remap r "
+                + "WHERE r.tenant_id = ? AND r.source_collection = ? AND r.target_collection = ?");
+            ps.setString(1, tenant);
+            ps.setString(2, tgt);
+            ps.setString(3, tenant);
+            ps.setString(4, src);
+            ps.setString(5, tgt);
+            var rs = ps.executeQuery();
+            assertThat(rs.next()).isTrue();
+            // int, not long: matches what the deleted HTTP endpoint's Jackson
+            // deserialization produced (small counts decode as Integer), which
+            // every call site below asserts against with bare int literals.
+            return Map.of("mapped_total", (int) rs.getLong("mapped_total"),
+                          "present_count", (int) rs.getLong("present_count"));
+        }
     }
 
     /** Seed target chunk rows (superuser) so membership can find the claims. */

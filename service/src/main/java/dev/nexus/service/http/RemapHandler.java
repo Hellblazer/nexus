@@ -40,9 +40,6 @@ import java.util.Map;
  *                                 required — a leg is the (source, target) pair
  *                                 (co-residency: a wide clear would delete a
  *                                 sibling leg's claims)
- *   GET  /v1/remap/membership     live leg-convergence counts (bead .5 function):
- *                                 ?source_collection=&amp;target_collection=
- *                                 → {mapped_total, present_count}
  *   GET  /v1/remap/entries        one source collection's facts (bead .6/.8 read
  *                                 shape): ?source_collection= → {entries:
  *                                 [{old_id, new_chash, target_collection}]}
@@ -56,10 +53,12 @@ import java.util.Map;
  *                                 short-circuit + paged-read reconcile input
  * </pre>
  *
- * <p>RF-186-1: raw facts and live counts only — no verdict surface exists and
- * none may be added. The membership response is a pair of counts the CLIENT
- * rung interprets (converged iff equal, including 0 == 0), computed fresh by
- * {@code nexus.remap_membership()} on every call.
+ * <p>RF-186-1: raw facts only — no verdict surface exists and none may be
+ * added. {@code GET /v1/remap/membership} (the live leg-convergence counts
+ * read, backed by {@code nexus.remap_membership()}) was DELETED at
+ * nexus-lgdel.l2 — an orphaned read surface with zero production callers
+ * (the old client was deleted at {@code 88d91bd58}; the surviving rung
+ * calls only {@code POST /v1/remap/rekey}).
  *
  * <p>Batch bound: {@link RemapRepository#MAX_BATCH} (300) entries per
  * record_batch call — the chroma_quotas MAX_RECORDS_PER_WRITE heritage cap;
@@ -67,9 +66,10 @@ import java.util.Map;
  *
  * <p>new_chash validation (RDR-180, nexus-jxizy.7): the FULL 64-hex digest
  * is the canonical fact form, parsed through {@code Chash.requireCanonical}
- * — nothing is truncated; any other width is rejected 400. Pre-flip 32-hex
- * era facts already persisted stay readable (widened DB CHECK + the
- * remap_membership alias chain).
+ * — nothing is truncated; any other width is rejected 400. The pre-flip
+ * 32-hex tolerance retired with RDR-194 P2 (nexus-tk070.p2 — {@code
+ * chash_remap.new_chash} is bytea now, CHECKed octet_length=32) and
+ * {@code nexus.chash_alias} (nexus-lgdel.l1).
  *
  * <p>All endpoints require {@code Authorization: Bearer} (enforced by
  * {@link AuthFilter}) and {@code X-Nexus-Tenant}.
@@ -105,7 +105,6 @@ public final class RemapHandler implements HttpHandler {
             switch (op) {
                 case "/record_batch"       -> handleRecordBatch(exchange, tenant, method);
                 case "/clear_leg"          -> handleClearLeg(exchange, tenant, method);
-                case "/membership"         -> handleMembership(exchange, tenant, method);
                 case "/entries"            -> handleEntries(exchange, tenant, method);
                 case "/pairs"              -> handlePairs(exchange, tenant, method);
                 case "/source_collections" -> handleSourceCollections(exchange, tenant, method);
@@ -175,23 +174,6 @@ public final class RemapHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, "{\"deleted\":" + deleted + "}");
     }
 
-    // ── GET /v1/remap/membership ─────────────────────────────────────────────
-
-    private void handleMembership(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        String sourceCollection = queryParam(exchange, "source_collection");
-        String targetCollection = queryParam(exchange, "target_collection");
-        if (sourceCollection == null || sourceCollection.isBlank()
-                || targetCollection == null || targetCollection.isBlank()) {
-            throw new IllegalArgumentException(
-                "'source_collection' and 'target_collection' query params are required");
-        }
-
-        long[] m = repo.membership(tenant, sourceCollection, targetCollection);
-        HttpUtil.send(exchange, 200,
-                "{\"mapped_total\":" + m[0] + ",\"present_count\":" + m[1] + "}");
-    }
-
     // ── GET /v1/remap/entries ────────────────────────────────────────────────
 
     private void handleEntries(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -252,9 +234,11 @@ public final class RemapHandler implements HttpHandler {
      * 64->32 truncation is retired with the [:32] era. The legacy 32-hex
      * tolerance is RETIRED with RDR-194 P2 (nexus-tk070.p2): the column is
      * bytea with an octet_length=32 CHECK (remap-003-new-chash-bytea.xml),
-     * the widened CHECK and remap_membership's hex/UTF8 CASE fallback are
-     * both deleted, and cloud-count-2 measured ZERO legacy rows before the
-     * conversion (T2 rdr194-cloud-count-2-2026-08-15) — a 32-hex fact is
+     * the widened CHECK and the then-remap_membership's hex/UTF8 CASE
+     * fallback (remap_membership itself is DROPPED entirely at
+     * nexus-lgdel.l2 — an unrelated, later removal) are both gone, and
+     * cloud-count-2 measured ZERO legacy rows before the P2 conversion
+     * (T2 rdr194-cloud-count-2-2026-08-15) — a 32-hex fact is
      * now rejected here AND at the repository guard, with re-indexing the
      * source or POST /v1/remap/clear_leg as the operator remedies (the
      * chash_alias legacy-ref resolution route was retired at nexus-lgdel.l1).

@@ -30,7 +30,8 @@ import java.util.Map;
  *   POST   /v1/chash/upsert               410 Gone (router retired, RDR-187 / nexus-piwya.11)
  *   POST   /v1/chash/upsert_many          410 Gone
  *   GET    /v1/chash/lookup               lookup(chash=) -> [{collection, created_at}] over chunks
- *   POST   /v1/chash/delete_collection    DEPRECATED no-op (vector/catalog delete owns content)
+ *   POST   /v1/chash/delete_collection    410 Gone (was a DEPRECATED no-op; retired nexus-lgdel.l2 —
+ *                                         zero callers, vector/catalog delete owns content)
  *   GET    /v1/chash/distinct_collections   distinct chunk-bearing collection names
  *   POST   /v1/chash/rename_collection    REAL: re-homes chunks_<dim>.collection (Q3; idempotent
  *                                         when the RDR-164 catalog cascade already re-homed)
@@ -45,6 +46,10 @@ import java.util.Map;
  * 410 Gone (nexus-piwya.11): the one-release no-op deprecation window (RDR-187
  * finding 3) closed with nexus-piwya.9's DROP of the router table. The 410
  * body names the retirement so a stale client's failure is self-diagnosing.
+ * {@code delete_collection} joined them at nexus-lgdel.l2 — it was the one
+ * remaining no-op (vector/catalog delete had always owned content deletion;
+ * this route never had anything to route to), and the marker sweep found
+ * zero production or test-only-excepted callers.
  *
  * <p>All endpoints require {@code Authorization: Bearer <token>} (enforced by
  * {@link AuthFilter}) and {@code X-Nexus-Tenant} header.
@@ -84,10 +89,9 @@ public final class ChashHandler implements HttpHandler {
 
         try {
             switch (op) {
-                case "/upsert", "/upsert_many", "/delete_stale", "/import"
+                case "/upsert", "/upsert_many", "/delete_stale", "/import", "/delete_collection"
                                              -> sendGone(exchange, op, tenant);
                 case "/lookup"               -> handleLookup(exchange, tenant, method);
-                case "/delete_collection"    -> handleDeleteCollection(exchange, tenant, method);
                 case "/distinct_collections" -> handleDistinctCollections(exchange, tenant, method);
                 case "/rename_collection"    -> handleRenameCollection(exchange, tenant, method);
                 case "/is_empty"             -> handleIsEmpty(exchange, tenant, method);
@@ -108,20 +112,26 @@ public final class ChashHandler implements HttpHandler {
         }
     }
 
-    // ── retired write endpoints: 410 Gone (nexus-piwya.11) ────────────────────
+    // ── retired write endpoints: 410 Gone ────────────────────────────────────
 
     /**
      * The chash router (nexus.chash_index) was deleted at RDR-187 /
-     * nexus-piwya.9; the one-release no-op window for the write endpoints
-     * closed with it. Chunk ingest is the write path; there is nothing for
-     * these routes to write to, so they answer 410 Gone with a
+     * nexus-piwya.9; the one-release no-op window for upsert/upsert_many/
+     * delete_stale/import closed with it — chunk ingest is the write path,
+     * there is nothing for those routes to write to. {@code
+     * delete_collection} joined this list at nexus-lgdel.l2: it was a
+     * DIFFERENT deprecated no-op (vector/catalog delete always owned content
+     * deletion; this route never routed to anything), found to have zero
+     * callers by the marker sweep. All five answer 410 Gone with a
      * self-diagnosing body regardless of method.
      */
     private static void sendGone(HttpExchange exchange, String op, String tenant) throws IOException {
-        log.debug("event=chash_write_gone op={} tenant={} rdr=187", op, tenant);
+        log.debug("event=chash_write_gone op={} tenant={}", op, tenant);
         HttpUtil.send(exchange, 410,
             "{\"error\":\"gone: /v1/chash" + op
-            + " retired (RDR-187 chash-router retirement) — chunk ingest is the write path\"}");
+            + " retired (RDR-187 chash-router retirement; delete_collection retired separately"
+            + " at nexus-lgdel.l2) — chunk ingest is the write path, vector/catalog delete owns"
+            + " content deletion\"}");
     }
 
     /**
@@ -157,25 +167,6 @@ public final class ChashHandler implements HttpHandler {
         var rows = repo.lookup(tenant, chash);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
             Map.of("rows", rows, "chash", chash.toHex())));
-    }
-
-    // ── POST /v1/chash/delete_collection (DEPRECATED no-op) ───────────────────
-
-    private void handleDeleteCollection(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        Map<String, Object> body = readBody(exchange);
-        String collection = (String) body.get("collection");
-        if (collection == null || collection.isBlank()) {
-            HttpUtil.send(exchange, 400, "{\"error\":\"'collection' required\"}");
-            return;
-        }
-        // RDR-187: content deletion is the vector/catalog API's job; there is
-        // no router copy left to drop. Rerouting this to DELETE chunk rows
-        // would silently escalate "drop routing rows" into "drop content" —
-        // deliberately not done. deleted:0 matches what callers already see
-        // today after the RDR-164 cascade has run.
-        logDeprecatedWrite("delete_collection", tenant);
-        HttpUtil.send(exchange, 200, "{\"deleted\":0,\"deprecated\":true}");
     }
 
     // ── GET /v1/chash/distinct_collections ───────────────────────────────────
@@ -246,15 +237,6 @@ public final class ChashHandler implements HttpHandler {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    /**
-     * One structured line per deprecated-write call (delete_collection is the
-     * remaining no-op window), debug level to keep the forensic trail without
-     * log spam.
-     */
-    private static void logDeprecatedWrite(String op, String tenant) {
-        log.debug("event=chash_write_deprecated op={} tenant={} rdr=187", op, tenant);
-    }
 
     private Map<String, Object> readBody(HttpExchange exchange) throws IOException {
         try (InputStream in = exchange.getRequestBody()) {

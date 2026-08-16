@@ -311,7 +311,9 @@ class VectorsRepointFunctionsIntegrationTest {
                         // manifest_verify_all/manifest_orphans REMOVED here (RDR-191
                         // Phase 6, nexus-o8dil.33) — both dropped by catalog-030,
                         // already applied to HEAD by SchemaMigrator.migrate above.
-                        "document_text", "remap_membership", "manifest_verify",
+                        // remap_membership REMOVED here (nexus-lgdel.l2) — dropped by
+                        // legacy-002-drop-remap-membership.xml, same reason.
+                        "document_text", "manifest_verify",
                         "chash_conformance_report",
                         "gc_quarantine_orphans", "gc_restore_rereferenced", "gc_expire_quarantine",
                         "purge_trash",
@@ -464,11 +466,12 @@ class VectorsRepointFunctionsIntegrationTest {
         }
     }
 
-    // ── Test 3: document_text / remap_membership / manifest_verify /
+    // ── Test 3: document_text / manifest_verify /
     //    chash_conformance_report -- the "dim collapses to one reference"
     //    and "dim stays branched for routing" buckets. (manifest_orphans
     //    coverage DELETED, RDR-191 Phase 6 nexus-o8dil.33 — function
-    //    dropped.) ──────────────────────────────────────────────────────
+    //    dropped. remap_membership coverage DELETED, nexus-lgdel.l2 — function
+    //    dropped, legacy-002-drop-remap-membership.xml.) ─────────────────
 
     @Test
     void collapsedAndBranchedReaders_eachCallableAgainstSeededData() throws Exception {
@@ -504,17 +507,10 @@ class VectorsRepointFunctionsIntegrationTest {
                 // manifest_verify_all coverage DELETED (RDR-191 Phase 6,
                 // nexus-o8dil.33) — the function is dropped.
 
-                // remap_membership: no chash_remap facts seeded -> mapped_total=0,
-                // present_count=0. The point is that it does not throw (the
-                // three-EXISTS-collapses-to-one rewrite) not the row content.
-                try (PreparedStatement ps = conn.prepareStatement(
-                        "SELECT * FROM nexus.remap_membership(?, ?)")) {
-                    ps.setString(1, "some-source-collection");
-                    ps.setString(2, fx.collection());
-                    var rs = ps.executeQuery();
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getLong("mapped_total")).isEqualTo(0L);
-                }
+                // remap_membership coverage DELETED (nexus-lgdel.l2) — the
+                // function is dropped (legacy-002-drop-remap-membership.xml);
+                // the orphaned GET /v1/remap/membership read surface is gone
+                // with it.
 
                 // manifest_orphans coverage DELETED (RDR-191 Phase 6,
                 // nexus-o8dil.33) — the function is dropped.

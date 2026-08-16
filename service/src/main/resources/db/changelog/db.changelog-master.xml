@@ -688,6 +688,22 @@
          ORDERING derivation. -->
     <include file="db/changelog/legacy-001-drop-chash-alias.xml"/>
 
+    <!-- nexus-lgdel.l2 (epic nexus-lgdel, T2 nexus/plan-legacy-retirement-
+         2026-08-16) — DROP the orphaned nexus.remap_membership(text, text)
+         read surface: zero production Python/CLI callers (the old client's
+         membership-reading rung was deleted at 88d91bd58; the surviving
+         rung calls only POST /v1/remap/rekey). nexus.chash_remap the TABLE
+         and the record_batch/clear_leg write surface are UNTOUCHED (RDR-194
+         D3, permanent by design). Placed after legacy-001-drop-chash-
+         alias.xml (current tail) and before the grants-nexus-svc.xml
+         runAlways block, matching the established late-append convention
+         (D0.1; see catalog-031's / telemetry-004's / aspects-003's /
+         plans-002's / taxonomy-008's / catalog-032's / remap-003's /
+         taxonomy-009's / legacy-001's own <include> comments for the
+         identical reasoning). See legacy-002-drop-remap-membership.xml's
+         own header for the full rollback-ordering derivation. -->
+    <include file="db/changelog/legacy-002-drop-remap-membership.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

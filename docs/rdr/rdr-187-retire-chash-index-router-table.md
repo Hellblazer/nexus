@@ -17,6 +17,21 @@ related: [RDR-108, RDR-152, RDR-155, RDR-156, RDR-158, RDR-180, RDR-186]
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
 
+> **STALE-PROSE CORRECTION (nexus-lgdel.l1/.l2, epic `nexus-lgdel`,
+> 2026-08-16):** the "Decision" section below states `chash_alias` "is NOT
+> in scope and stays permanent (RDR-180 decision: legacy references
+> resolvable forever)." That premise is superseded — RDR-180's promised
+> beneficiary population reached zero (RDR-194 cc2, BYPASSRLS-verified),
+> and under Hal's directive of record ("I do not want a campaign to
+> preserve every last malformed disaster") `chash_alias` itself was
+> DROPPED at `nexus-lgdel.l1`, with `nexus.remap_membership()` — the one
+> remaining read surface layered on top of it — DROPPED separately at
+> `nexus-lgdel.l2` as an orphan with zero callers. A legacy 32-hex
+> reference is no longer resolvable at all; re-index the source to mint a
+> canonical 64-hex chash. Per D0.2 discipline this is a header correction
+> only — the Decision text below is left as originally accepted, a record
+> of what was true and decided at the time.
+
 ## Problem Statement
 
 `nexus.chash_index` is the router half of the retired split-store

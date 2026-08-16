@@ -42,23 +42,11 @@ The Java CI (`service-ci.yml`) is **advisory** — it does not block auto-merge 
 > migrate all`, so `--guided`, `--cold` and `--hole-punch` now refuse at the
 > arg loop with a RETIRED message and exit 2. This step named `--guided` for
 > one cut after the retirement and would have failed the next engine cut at the
-> gate. Surviving journeys: `--era-hop`, `--package-upgrade`, `--shakeout`,
-> `--fullstack`, `--chash-window` (LIVE again post-nexus-eo3qv: run.sh now
-> pins CHASH_OLD_RELEASE/CHASH_OLD_ENGINE_TAG as a HISTORICAL PIN at the
-> last genuinely pre-cohort pair — 6.13.1 / engine-service-v0.1.47, frozen
-> forever, never rotating with the floor — instead of requiring old-tag ==
-> floor. COVERAGE, stated plainly (substantive-critic finding, 2026-08-14,
-> T2 nexus/critique-nexus-eo3qv-chash-window-redesign-2026-08-14): (i) this
-> leg exercises the PUBLISHED floor engine's changeset walk (rdr180-001
-> bytea + the RDR-191 vectors-004 unify) against a genuinely populated
-> pre-cohort store, plus the client's window UX; (ii) `--shakeout` drives
-> the LOCALLY-BUILT candidate binary, but only on a FRESH install with no
-> pre-cohort data — it carries zero chash/rdr180/cohort logic; (iii) a
-> CANDIDATE's new migration changesets running against POPULATED data are
-> now covered by `--candidate-migration` (nexus-z0ylb, see below) — do not
-> read `--chash-window` + `--shakeout` together as closing that gap on
-> their own, they don't; `--candidate-migration` is the leg that does),
-> `--stranded`
+> gate. `--chash-window` is ALSO RETIRED (nexus-lgdel.l2, 2026-08-16): its
+> entire subject was the pre-cutover legacy 32-hex chash window (RDR-180),
+> a capability deleted along with `nexus.chash_alias`; the leg, its
+> Dockerfile, and its rehearsal script are gone. Surviving journeys:
+> `--era-hop`, `--package-upgrade`, `--shakeout`, `--fullstack`, `--stranded`
 > (nexus-8nlj4: two-hop
 > stranded-redirect — armed-detector refusal + pin-side migration; weekly
 > heartbeat via stranded-redirect-rehearsal.yml, dispatch it on demand when a

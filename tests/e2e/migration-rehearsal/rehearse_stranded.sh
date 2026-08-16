@@ -6,7 +6,7 @@
 #
 # HOP 1 (the detector fires): a box carrying real pre-PG artifacts (written
 # by seed_legacy.py under the PIN release's own libraries, exactly as
-# era-hop/chash-window/fullstack already do — nexus-8nlj4 2026-08-08:
+# era-hop/fullstack already do — nexus-8nlj4 2026-08-08:
 # confirmed live raw material) package-upgrades straight to the working
 # tree. The FIRST invocation of the upgraded CLI must refuse LOUD with the
 # exact two-hop message (`nexus.stranded_install.StrandedInstall.message`)

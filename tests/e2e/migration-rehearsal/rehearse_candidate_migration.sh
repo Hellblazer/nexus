@@ -2,15 +2,10 @@
 # nexus-z0ylb — the CANDIDATE-MIGRATION rehearsal. Runs INSIDE the
 # container.
 #
-# From the nexus-eo3qv critique of the --chash-window redesign
-# (substantive-critic, 2026-08-14, T2
-# nexus/critique-nexus-eo3qv-chash-window-redesign-2026-08-14): no leg in
-# this harness exercised a locally-built CANDIDATE engine's Liquibase walk
-# against a genuinely POPULATED store. --chash-window drives the
-# PUBLISHED floor engine's changeset walk over a populated store (never
-# the candidate); --shakeout drives the candidate, but only on a FRESH
-# install with zero pre-existing data — it carries no chash/rdr180/cohort
-# migration logic at all. A CANDIDATE engine carrying a NEW migration
+# No leg in this harness exercised a locally-built CANDIDATE engine's
+# Liquibase walk against a genuinely POPULATED store. --shakeout drives
+# the candidate, but only on a FRESH install with zero pre-existing data.
+# A CANDIDATE engine carrying a NEW migration
 # changeset (the exact class vectors-004 was: ALWAYS-COPY over 385k
 # populated rows, RDR-191) reached the tag gate with zero pre-tag
 # rehearsal against a populated store. This leg closes that gap.
