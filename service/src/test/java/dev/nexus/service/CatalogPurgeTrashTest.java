@@ -177,6 +177,16 @@ class CatalogPurgeTrashTest {
                 + "('" + TENANT + "', '" + DOC_LIVE + "', 'Live', '" + COLLECTION + "'), "
                 + "('" + TENANT + "', '" + DOC_FRESH_TOMB + "', 'Fresh Tomb', '" + COLLECTION + "'), "
                 + "('" + TENANT + "', '" + DOC_AGED_TOMB + "', 'Aged Tomb', '" + COLLECTION + "')");
+            // nexus-tk070.p1 (RDR-194 § D2): one catalog_links row per tombstone
+            // class, DOC_LIVE as the FROM side, so purge_trash's Step 4 physical
+            // delete of DOC_AGED_TOMB exercises fk_catalog_links_to_document's
+            // cascade (execute_... below), while DOC_FRESH_TOMB's link — still
+            // inside the grace window, never physically deleted by this fixture —
+            // stays a live pin that the link never disappears out from under.
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by, created_at) VALUES "
+                + "('" + TENANT + "', '" + DOC_LIVE + "', '" + DOC_AGED_TOMB + "', 'relates', 'test', NOW()), "
+                + "('" + TENANT + "', '" + DOC_LIVE + "', '" + DOC_FRESH_TOMB + "', 'relates', 'test', NOW())");
         }
 
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
@@ -284,6 +294,20 @@ class CatalogPurgeTrashTest {
         }
     }
 
+    /** nexus-tk070.p1 (RDR-194 § D2): does a catalog_links row naming {@code toTumbler}
+     *  as its to_tumbler still exist for TENANT? Used to pin that purge_trash Step 4's
+     *  hard delete of catalog_documents cascades catalog_links via
+     *  fk_catalog_links_to_document, with no explicit Java or plpgsql step required. */
+    private boolean linkToExists(String toTumbler) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var ps = su.prepareStatement(
+                "SELECT 1 FROM nexus.catalog_links WHERE tenant_id = ? AND to_tumbler = ?");
+            ps.setString(1, TENANT);
+            ps.setString(2, toTumbler);
+            return ps.executeQuery().next();
+        }
+    }
+
     /** Server-captured {@code NOW()} (nexus-ff85q precedent: pin against a SQL-side
      *  instant, never a Java-clock read) — the reference point the boundary test
      *  backdates {@code deleted_at} relative to. */
@@ -361,6 +385,12 @@ class CatalogPurgeTrashTest {
         // chunk swept. All three go together (nexus-5da44).
         assertThat(documentExists(DOC_AGED_TOMB)).as("aged tombstone physically purged").isFalse();
         assertThat(chunks384Count(CHASH_AGED)).as("aged doc's chunk swept").isEqualTo(0L);
+        // nexus-tk070.p1 (RDR-194 § D2): purge_trash Step 4's hard delete cascades
+        // catalog_links too now, via fk_catalog_links_to_document — a FIFTH cascade
+        // child at zero code cost, exactly as D2 designed it.
+        assertThat(linkToExists(DOC_AGED_TOMB))
+            .as("catalog_links row pointing at the purged doc cascaded off purge_trash's own hard delete")
+            .isFalse();
 
         // FRESH: still inside the grace window — nexus-5da44 protects its chunk exactly
         // as its document row was always protected. See Order(21) for the explicit pin.
@@ -368,6 +398,9 @@ class CatalogPurgeTrashTest {
         assertThat(chunks384Count(CHASH_FRESH))
             .as("fresh (in-window) tombstone's chunk must survive alongside its document row")
             .isEqualTo(1L);
+        assertThat(linkToExists(DOC_FRESH_TOMB))
+            .as("fresh (in-window) tombstone's document row is not yet purged, so its link survives too")
+            .isTrue();
 
         // LIVE and its chunk: untouched.
         assertThat(documentExists(DOC_LIVE)).isTrue();

@@ -31,7 +31,7 @@ def _run() -> tuple[str, str]:
     """Run ``_run_check_schema`` under a CliRunner isolation context so
     ``click.echo(..., err=True)`` is captured reliably — mirrors the
     established pattern for ``_run_check_*`` functions that can raise
-    ``click.exceptions.Exit`` (tests/test_doctor_dangling_links.py)."""
+    ``click.exceptions.Exit`` (tests/test_false_clean_diagnostics_service_mode.py)."""
     runner = CliRunner()
     with runner.isolation() as (out, err, _):
         exit_code: int | None = None

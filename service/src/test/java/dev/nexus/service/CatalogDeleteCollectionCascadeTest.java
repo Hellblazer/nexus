@@ -232,6 +232,76 @@ class CatalogDeleteCollectionCascadeTest {
         }
     }
 
+    // ── catalog_links cascade via the PRODUCTION call path (nexus-tk070.p1 ──
+    // review fix 2, RDR-194 § D2, critic S2): existing cascade coverage
+    // above deletes via raw superuser SQL (bypassing the tenantScope
+    // GUC/RLS context deleteCollectionTxn runs under); this seeds and reads
+    // through the repository API instead, and drives the delete through
+    // repo.deleteCollection -- the SAME production call path deleteCollectionTxn
+    // is invoked from -- so the fk_catalog_links_from_document/_to_document
+    // cascade is exercised under real RLS, not just raw SQL.
+
+    private static final String TENANT_LINK = "del-casc-links";
+    private static final String COLL_LINK_HOME  = "knowledge__del-casc-links-home__voyage-context-3__v1";
+    private static final String COLL_LINK_OTHER = "knowledge__del-casc-links-other__voyage-context-3__v1";
+
+    @Test @Order(50)
+    void deleteCollection_cascadesCatalogLinks_viaProductionCallPath() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                + "VALUES ('" + TENANT_LINK + "', '" + COLL_LINK_HOME + "')");
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                + "VALUES ('" + TENANT_LINK + "', '" + COLL_LINK_OTHER + "')");
+        }
+
+        // dl-src is homed in the collection about to be deleted; dl-dst and
+        // dl-survivor2 are homed elsewhere and must survive.
+        repo.upsertDocument(TENANT_LINK, Map.of(
+            "tumbler", "dl-src", "title", "src", "content_type", "paper",
+            "corpus", "knowledge", "physical_collection", COLL_LINK_HOME));
+        repo.upsertDocument(TENANT_LINK, Map.of(
+            "tumbler", "dl-dst", "title", "dst", "content_type", "paper",
+            "corpus", "knowledge", "physical_collection", COLL_LINK_OTHER));
+        repo.upsertDocument(TENANT_LINK, Map.of(
+            "tumbler", "dl-survivor2", "title", "survivor2", "content_type", "paper",
+            "corpus", "knowledge", "physical_collection", COLL_LINK_OTHER));
+
+        // One link FROM the doomed doc, one link TO it (both directions of the
+        // FK exercised), and one link entirely OUTSIDE the deleted collection
+        // that must survive.
+        assertThat(repo.upsertLink(TENANT_LINK, Map.of(
+            "from_tumbler", "dl-src", "to_tumbler", "dl-dst",
+            "link_type", "cites", "created_by", "test"))).isTrue();
+        assertThat(repo.upsertLink(TENANT_LINK, Map.of(
+            "from_tumbler", "dl-dst", "to_tumbler", "dl-src",
+            "link_type", "relates", "created_by", "test"))).isTrue();
+        assertThat(repo.upsertLink(TENANT_LINK, Map.of(
+            "from_tumbler", "dl-dst", "to_tumbler", "dl-survivor2",
+            "link_type", "cites", "created_by", "test"))).isTrue();
+
+        // Non-vacuous: confirm there is actually something to cascade before
+        // the delete runs.
+        assertThat(repo.linksFrom(TENANT_LINK, "dl-src", (List<String>) null))
+            .as("pre-delete: link FROM the doomed doc exists").hasSize(1);
+        assertThat(repo.linksTo(TENANT_LINK, "dl-src", (List<String>) null))
+            .as("pre-delete: link TO the doomed doc exists").hasSize(1);
+        assertThat(repo.linksFrom(TENANT_LINK, "dl-dst", (List<String>) null))
+            .as("pre-delete: both of dl-dst's links (to the doomed doc, and to a "
+                + "surviving doc) exist").hasSize(2);
+
+        // The production call path: deleteCollection -> deleteCollectionTxn.
+        repo.deleteCollection(TENANT_LINK, COLL_LINK_HOME);
+
+        assertThat(repo.linksFrom(TENANT_LINK, "dl-src", (List<String>) null))
+            .as("link FROM the deleted doc cascaded via fk_catalog_links_from_document").isEmpty();
+        assertThat(repo.linksTo(TENANT_LINK, "dl-src", (List<String>) null))
+            .as("link TO the deleted doc cascaded via fk_catalog_links_to_document").isEmpty();
+        assertThat(repo.linksFrom(TENANT_LINK, "dl-dst", (List<String>) null))
+            .as("the link between the two SURVIVING documents (both outside the "
+                + "deleted collection) remains").hasSize(1);
+    }
+
     // ── fixture ──────────────────────────────────────────────────────────────
 
     /** Seed one full collection (all lifecycle tables) for {@code tenant}. Superuser; bypasses RLS. */

@@ -21,6 +21,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -2440,6 +2441,39 @@ class TestResolvePathOwnerCache:
 
 
 # ── nexus-ai41v / nexus-9ssih: link audit + dangling-endpoint translation ─────
+
+
+class TestOrphanedLinksWireShapeIsNotTrusted:
+    """``HttpCatalogClient.orphaned_links()`` parsing (nexus-ysrwi review,
+    2026-07-25). Moved here from the retired ``tests/test_doctor_dangling_links.py``
+    (nexus-tk070.p1, RDR-194 § D2: the ``nx doctor --check-dangling-links``
+    CLI flag retired one-for-one with catalog-032's VALIDATE, but the client
+    method and its ``GET /v1/catalog/links/orphaned`` HTTP surface did NOT —
+    CatalogRepository#orphanedLinks's own updated javadoc explains why: it
+    stays useful post-FK for the TOMBSTONED-endpoint case an FK deliberately
+    does not cover). These two tests exercise the client's own defensive
+    parsing, independent of doctor.py, so they survive the CLI retirement
+    unchanged.
+    """
+
+    def test_a_non_dict_response_raises_the_type_doctor_handles(self) -> None:
+        """A bare JSON array would make `.get()` raise AttributeError, which a
+        caller's `except (httpx.HTTPError, RuntimeError)` would NOT catch --
+        so the caller would crash with a raw traceback instead of a clean,
+        typed failure."""
+        client = HttpCatalogClient.__new__(HttpCatalogClient)
+        with patch.object(HttpCatalogClient, "_get", return_value=[1, 2, 3]):
+            with pytest.raises(RuntimeError) as exc:
+                client.orphaned_links()
+        assert "wire shape" in str(exc.value).lower()
+        assert "list" in str(exc.value), "the error must name what actually arrived"
+
+    def test_an_empty_response_is_still_an_empty_list_not_an_error(self) -> None:
+        """Non-regression: no orphans is a legitimate, common answer."""
+        client = HttpCatalogClient.__new__(HttpCatalogClient)
+        for empty in ({}, {"links": []}, None):
+            with patch.object(HttpCatalogClient, "_get", return_value=empty):
+                assert client.orphaned_links() == []
 
 
 class TestLinkAuditIsNoLongerAStub:

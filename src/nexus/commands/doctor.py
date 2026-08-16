@@ -410,7 +410,7 @@ def _run_check_plan_library() -> None:
         # the client resolves the endpoint, and an unresolvable one raises
         # ServiceEndpointUnresolvableError, a RuntimeError subclass that is
         # NOT an httpx.HTTPError (same trap documented on
-        # _report_aspect_queue_service / _report_dangling_links_service).
+        # _report_aspect_queue_service).
         click.echo(
             f"Plan library check: service backend unreachable ({exc}). "
             "Counts UNKNOWN — not reporting pass or fail.",
@@ -723,126 +723,6 @@ def _run_check_t3_legacy_metadata(*, strict: bool = False) -> None:
             "\nAll collections are Phase-3 clean (no doc_id/source_path "
             "chunk metadata)."
         )
-
-
-# ── --check-dangling-links (nexus-ysrwi, GH #1419 issue 7) ──────────────────
-
-
-def _require(row: dict, field: str) -> str:
-    """Return *field* from a dangling-link row, or a LOUD marker if absent.
-
-    The endpoints are the whole content of a dangling-link report; a row
-    missing one means the engine's wire shape drifted, and printing None for
-    it would read as a successful check (nexus-ysrwi review, 2026-07-25).
-    """
-    value = row.get(field)
-    if value is None or value == "":
-        return f"<MISSING:{field}>"
-    return str(value)
-
-
-def _report_dangling_links_service(*, strict: bool) -> None:
-    """Dangling catalog_links from the LIVE PG, over HTTP (nexus-ysrwi).
-
-    ``catalog_links`` carries a PK and a UNIQUE constraint but NO foreign
-    key to ``catalog_documents`` (catalog-001-baseline.xml), so a link whose
-    endpoint's document was hard-deleted accumulates silently. The engine's
-    ``GET /v1/catalog/links/orphaned`` (v0.1.55, ``CatalogRepository
-    .orphanedLinks``) is the sole live-truth source in service mode.
-
-    Fails LOUD on a transport error rather than reporting a clean zero: an
-    unreachable service must never read identically to "zero dangling
-    links found" — the exact false-clean class nexus-ingey / nexus-k0luu
-    removed at three other doctor call sites (aspect queue, trim-telemetry,
-    T3 legacy metadata). ``HttpCatalogClient.link_audit()`` is a service-mode
-    stub returning ``{}``; that is why this check calls the dedicated
-    ``orphaned_links()`` method rather than the generic audit.
-
-    Exit-2 on unreachable (via ``click.exceptions.Exit``, the same idiom
-    ``_run_trim_telemetry`` / ``_run_check_storage_boundary`` use for
-    "could not check") rather than a bare warn-and-return: a scripted
-    caller must not be able to mistake "service down" for "zero dangling
-    links found".
-
-    Goes through :func:`nexus.catalog.factory.make_catalog_reader` rather
-    than constructing ``HttpCatalogClient`` directly — the factory seam
-    ``tests/catalog/test_http_catalog_client.py::TestFactorySeam
-    .test_no_production_bypass_of_factory`` greps ``src/`` and fails on any
-    bare construction outside ``factory.py``/``http_catalog_client.py``, and
-    the factory shares one process-lifetime client (nexus-5en9j) rather than
-    opening a fresh connection per doctor invocation.
-    """
-    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
-
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    try:
-        reader = make_catalog_reader()
-        links = reader.orphaned_links()
-    except (httpx.HTTPError, RuntimeError) as exc:
-        # RuntimeError is not redundant with httpx.HTTPError: constructing
-        # the client resolves the endpoint, and an unresolvable one raises
-        # ServiceEndpointUnresolvableError, a RuntimeError subclass that is
-        # NOT an httpx.HTTPError (same trap documented on
-        # _report_aspect_queue_service above).
-        click.echo(
-            f"dangling catalog_links check: service backend unreachable "
-            f"({exc}). Dangling-link count UNKNOWN — not reporting a count.",
-            err=True,
-        )
-        raise click.exceptions.Exit(2)
-
-    count = len(links)
-    if count == 0:
-        click.echo(
-            "dangling catalog_links: 0 found (service backend) — clean."
-        )
-        return
-
-    click.echo(
-        f"dangling catalog_links: {count} link(s) point at a tumbler with "
-        "no document (service backend)."
-    )
-    click.echo(f"\nSample (showing up to {min(count, 20)}):")
-    for row in links[:20]:
-        click.echo(
-            # NOT silent .get() defaults. With them, a drifted engine shape
-            # degrades to "[?] None --None--> None" -- a check that looks like
-            # it ran and found nothing wrong, which is the precise failure mode
-            # this whole family of doctor checks was rewritten to remove
-            # (nexus-ingey / k0luu, 2026-07-25). Missing endpoints are a
-            # CONTRACT break, so name them.
-            f"  [{row.get('side') or '?'}] {_require(row, 'from_tumbler')} "
-            f"--{_require(row, 'link_type')}--> {_require(row, 'to_tumbler')} "
-            f"(created_by={row.get('created_by') or '?'})"
-        )
-    click.echo(
-        "\nNot write-time preventable client-side: catalog_links has no FK "
-        "to catalog_documents, and the only production hard-delete of "
-        "document rows (CatalogRepository.deleteCollectionTxn, a per-"
-        "collection cascade) is engine-side. Closing the write-time gap "
-        "needs an engine change + tag (nexus-ysrwi)."
-    )
-    if strict:
-        import sys as _sys  # noqa: PLC0415 — deferred to keep CLI startup fast
-
-        _sys.exit(1)
-
-
-def _run_check_dangling_links(*, strict: bool = False) -> None:
-    """Report catalog_links rows whose from_tumbler or to_tumbler resolves
-    to no document (nexus-ysrwi, GH #1419 issue 7 / Steve postmortem).
-
-    Steve Harris's backup held 5 of 52 links pointing at tumblers with no
-    document anywhere in the same pg_dump — orphans left by document
-    deletion without link cleanup. This is the DETECTION half; enforcement
-    (an FK with ON DELETE, or delete-time cleanup) is nexus-tk070's
-    Hal-gated FK-census decision.
-
-    Service-only since nexus-i711w: the sqlite branch died with the local
-    catalog — the catalog is service-backed in every mode.
-    """
-    _report_dangling_links_service(strict=strict)
 
 
 # ── --check-tier-discipline (nexus-a52i) ─────────────────────────────────────
@@ -1399,25 +1279,6 @@ def _run_check_mineru() -> None:
          "collection still carries legacy metadata (default: warn only).",
 )
 @click.option(
-    "--check-dangling-links",
-    "check_dangling_links",
-    is_flag=True,
-    default=False,
-    help="Report catalog_links rows whose from_tumbler or to_tumbler "
-         "resolves to no document (GH #1419 issue 7). Service-mode aware: "
-         "calls the engine's GET /v1/catalog/links/orphaned in service "
-         "mode, runs a real local link_audit() in sqlite mode. "
-         "nexus-ysrwi.",
-)
-@click.option(
-    "--strict-dangling-links",
-    "strict_dangling_links",
-    is_flag=True,
-    default=False,
-    help="Make --check-dangling-links exit non-zero when any dangling "
-         "link is found (default: warn only).",
-)
-@click.option(
     "--days",
     "days",
     default=30,
@@ -1440,8 +1301,6 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_wal_retention: bool,
                check_t3_legacy_metadata: bool,
                strict_legacy_metadata: bool,
-               check_dangling_links: bool,
-               strict_dangling_links: bool,
                check_tier_discipline: bool,
                check_storage_boundary: bool,
                fail_on_violation: bool,
@@ -1500,10 +1359,6 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_t3_legacy_metadata:
         _run_check_t3_legacy_metadata(strict=strict_legacy_metadata)
-        return
-
-    if check_dangling_links:
-        _run_check_dangling_links(strict=strict_dangling_links)
         return
 
     if check_t1:

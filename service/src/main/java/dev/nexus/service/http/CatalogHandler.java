@@ -1860,7 +1860,22 @@ public final class CatalogHandler implements HttpHandler {
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
-        repo.importLinksBatch(tenant, rows);
+        try {
+            repo.importLinksBatch(tenant, rows);
+        } catch (CatalogRepository.DanglingEndpointException e) {
+            // nexus-tk070.p1 review fix 1 (RDR-194 § D2): SAME wire shape as
+            // handleLink's dangling_endpoint 400 — without this local catch
+            // the exception (an IllegalArgumentException) would still reach
+            // the outer dispatch ladder's generic `catch (IllegalArgumentException)`
+            // and produce a 400, but WITHOUT the machine-readable `code`/`missing`
+            // fields ETL callers key on.
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("error", e.getMessage());
+            payload.put("code", "dangling_endpoint");
+            payload.put("missing", e.missing());
+            HttpUtil.send(exchange, 400, MAPPER.writeValueAsString(payload));
+            return;
+        }
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
     }
 

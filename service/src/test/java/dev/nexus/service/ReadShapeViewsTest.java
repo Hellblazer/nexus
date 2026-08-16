@@ -87,8 +87,18 @@ class ReadShapeViewsTest {
             // Fixtures chosen so EVERY catalog_stats scalar differs A vs B (non-vacuous
             // per-subquery RLS scoping) AND every grouped view has rows for both
             // tenants. TENANT_A: 2 docs, 1 link, 2 owners, 2 collections, 2 chunks,
-            // 1 topic. TENANT_B: 1 doc, 2 links (dangling tumblers, links are not
-            // FK-enforced), 1 owner, 1 collection, 1 chunk, 1 topic.
+            // 1 topic. TENANT_B: 1 doc, 2 links, 1 owner, 1 collection, 1 chunk, 1 topic.
+            //
+            // nexus-tk070.p1 (RDR-194 § D2): TENANT_B's two links used to point at
+            // "dangling tumblers" (b.x1/b.x2, never registered as documents) on the
+            // strength of the pre-FK comment "links are not FK-enforced" — that is no
+            // longer true (fk_catalog_links_from_document/_to_document), so a link to a
+            // nonexistent tumbler is a hard INSERT failure now, even via raw SQL. Fixed
+            // by self-linking b.1 -> b.1 under two different link_types (the unique key
+            // is (tenant_id, from_tumbler, to_tumbler, link_type), so two rows are still
+            // distinct) rather than registering b.x1/b.x2 as real documents, which would
+            // have inflated TENANT_B's doc_count from 1 to 3 and broken
+            // catalogStats_scopesScalarCountsToGucTenant's GUC=B doc_count==1 pin below.
             seedDoc(su, TENANT_A, "a.1", "paper", "c_a");
             seedDoc(su, TENANT_A, "a.2", "code",  "c_a");
             su.createStatement().execute(
@@ -105,8 +115,8 @@ class ReadShapeViewsTest {
             seedDoc(su, TENANT_B, "b.1", "paper", "c_b");
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by) "
-                + "VALUES ('" + TENANT_B + "', 'b.1', 'b.x1', 'cites', 'test'), "
-                + "       ('" + TENANT_B + "', 'b.1', 'b.x2', 'cites', 'test')");
+                + "VALUES ('" + TENANT_B + "', 'b.1', 'b.1', 'cites', 'test'), "
+                + "       ('" + TENANT_B + "', 'b.1', 'b.1', 'relates', 'test')");
             seedTopic(su, TENANT_B, "topic-b", "c_b");
             seedOwner(su, TENANT_B, "b-own-1");
             seedColl(su, TENANT_B, "c_b");

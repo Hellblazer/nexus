@@ -864,9 +864,17 @@ class CatalogRepositoryTest {
         // pointing at tumblers with no document anywhere in the same pg_dump.
         // catalog_links has a PK and a UNIQUE but NO foreign key to
         // catalog_documents (catalog-001-baseline.xml), so nothing structurally
-        // prevents this — detection has to exist regardless of whether tk070
-        // later adds enforcement, because an FK does not retroactively clean
-        // rows that are already orphaned.
+        // prevented this at the time — nexus-tk070.p1 (RDR-194 § D2) closed
+        // exactly that gap with fk_catalog_links_from_document /
+        // fk_catalog_links_to_document, so this test's damage-seed no longer
+        // fits: a link to a tumbler with NO catalog_documents row at all now
+        // 400s (SQLSTATE 23503 mapped to dangling_endpoint), even under
+        // allow_dangling=true. orphanedLinks() itself is unchanged and its
+        // remaining, narrower job — per its own updated javadoc — is exactly
+        // the TOMBSTONED-endpoint case the FK deliberately does not cover
+        // (soft delete does not fire ON DELETE CASCADE), so the seed below
+        // creates real documents and TOMBSTONES them (repo.deleteDocument)
+        // rather than pointing at tumblers that never existed.
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "orph.live", "title", "Live",
             "content_type", "paper", "corpus", "knowledge"));
 
@@ -879,11 +887,19 @@ class CatalogRepositoryTest {
             "link_type", "relates", "from_span", "", "to_span", "",
             "created_by", "user", "created_at", "2026-06-01T00:00:00Z"));
 
-        // nexus-9ssih: upsertLink now REFUSES dangling endpoints by default, so
-        // seeding the damage this detector exists to find is exactly the
-        // allow_dangling case. The flag is on the SEED only — orphanedLinks
-        // itself is unchanged, and the three shapes below are still written
-        // into the table byte-for-byte as before.
+        // Endpoints that WILL be tombstoned (row exists, satisfies the FK;
+        // deleted_at set, so orphanedLinks' LIVE-only predicate still flags
+        // them). allow_dangling=true is still required — requireLiveEndpoints
+        // rejects a tombstoned target the same as a missing one.
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "orph.gone", "title", "Will be tombstoned (target)",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "orph.vanished", "title", "Will be tombstoned (source)",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "orph.x", "title", "Will be tombstoned (both x)",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "orph.y", "title", "Will be tombstoned (both y)",
+            "content_type", "paper", "corpus", "knowledge"));
+
         // Dangling TARGET (the document-deletion shape Steve hit).
         repo.upsertLink(TENANT_A, Map.of("from_tumbler", "orph.live", "to_tumbler", "orph.gone",
             "link_type", "cites", "from_span", "", "to_span", "",
@@ -894,11 +910,20 @@ class CatalogRepositoryTest {
             "link_type", "cites", "from_span", "", "to_span", "",
             "created_by", "user", "created_at", "2026-06-01T00:00:00Z",
             "allow_dangling", true));
-        // BOTH endpoints gone.
+        // BOTH endpoints eventually gone.
         repo.upsertLink(TENANT_A, Map.of("from_tumbler", "orph.x", "to_tumbler", "orph.y",
             "link_type", "cites", "from_span", "", "to_span", "",
             "created_by", "user", "created_at", "2026-06-01T00:00:00Z",
             "allow_dangling", true));
+
+        // Tombstone the four endpoints AFTER the links are written (the FK
+        // only needs the row to exist at write time; ON DELETE CASCADE does
+        // not fire for a soft delete, so the links survive pointing at now-
+        // tombstoned documents — exactly the case orphanedLinks still reports).
+        repo.deleteDocument(TENANT_A, "orph.gone");
+        repo.deleteDocument(TENANT_A, "orph.vanished");
+        repo.deleteDocument(TENANT_A, "orph.x");
+        repo.deleteDocument(TENANT_A, "orph.y");
 
         var orphans = repo.orphanedLinks(TENANT_A);
 
@@ -1072,26 +1097,40 @@ class CatalogRepositoryTest {
 
     /**
      * nexus-t7m8e leg (a): structural invariant — every edge's endpoints must
-     * appear in the returned node set. A dangling reference (an edge naming a
-     * tumbler that was never registered at all, not merely tombstoned) is the
-     * other half of the same defect class the tombstone-relay test covers.
+     * appear in the returned node set. A dangling reference used to mean "an
+     * edge naming a tumbler that was never registered at all" (the other half
+     * of the same defect class the tombstone-relay test covers), reachable
+     * via the {@code import}/ETL family or legacy pre-9ssih data even after
+     * {@code upsertLink} started rejecting it at write time.
      *
-     * <p>{@code upsertLink} itself now rejects a dangling endpoint at write
-     * time (nexus-9ssih) unless {@code allow_dangling=true} is passed — the
-     * import/ETL family and legacy pre-9ssih data are exactly the paths that
-     * can still leave one in the table, so graphBFS must defend independently
-     * rather than relying on the write-time guard alone. {@code allow_dangling}
-     * here exercises that defense-in-depth, not a live production write path.
+     * <p><strong>nexus-tk070.p1 (RDR-194 § D2) narrows what this test can even
+     * seed.</strong> {@code fk_catalog_links_from_document}/{@code
+     * _to_document} now make "an edge naming a tumbler with no
+     * catalog_documents row at all" physically impossible in Postgres,
+     * through EVERY write path (upsertLink, import*, raw SQL) — there is no
+     * longer a way to construct that state to test against. What survives is
+     * the TOMBSTONED case (D2: a row exists, so the FK is satisfied, but it
+     * is not LIVE), which this test now seeds instead — {@link #graphBFS}'s
+     * {@code deleted_at IS NULL} INNER JOIN on both endpoints (leg a/b,
+     * comment at the join site) excludes a tombstoned-endpoint edge exactly
+     * the same way it excluded the now-unreachable fully-missing case, so
+     * the structural invariant below is still exercised against a real state.
      */
     @Test
     void graphBFS_everyEdgeEndpoint_appearsInNodes() {
         String tenant = "bfs-dangle-" + System.nanoTime();
         String live = "dg.live";
+        String tombstoned = "dg.ghost";
         repo.upsertDocument(tenant, Map.of("tumbler", live,
             "title", "Live", "content_type", "paper", "corpus", "knowledge"));
-        // "dg.ghost" is never registered as a document — a dangling reference.
-        repo.upsertLink(tenant, Map.of("from_tumbler", live, "to_tumbler", "dg.ghost",
-            "link_type", "cites", "created_by", "test", "allow_dangling", true));
+        repo.upsertDocument(tenant, Map.of("tumbler", tombstoned,
+            "title", "Will be tombstoned", "content_type", "paper", "corpus", "knowledge"));
+        repo.upsertLink(tenant, Map.of("from_tumbler", live, "to_tumbler", tombstoned,
+            "link_type", "cites", "created_by", "test"));
+        // Tombstone AFTER the write — the FK only needs the row to exist at
+        // write time; soft delete does not cascade (D2), so the link survives
+        // pointing at a now-tombstoned document.
+        assertThat(repo.deleteDocument(tenant, tombstoned)).isEqualTo(1);
 
         var result = repo.graphBFS(tenant, List.of(live), List.of("cites"), "out", 1);
         @SuppressWarnings("unchecked")

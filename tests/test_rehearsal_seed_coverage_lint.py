@@ -139,6 +139,8 @@ _SEED_COVERAGE_LINE_RE = re.compile(r"//\s+(\S+)\s+(\S+)\s*$", re.MULTILINE)
 #:   vectors-004-1 / taxonomy-007-1 — RDR-191 Phase 4 unify: straddling
 #:                                     per-dim chunks_384/768/1024 and
 #:                                     taxonomy_centroids_384/768/1024 content
+#:   catalog-032-1                  — RDR-194 P1 (D2): catalog_links dangling
+#:                                     tumbler-endpoint anti-join DELETE
 DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
     {
         ("catalog-013-0", "nexus-e0hd2"),
@@ -211,6 +213,24 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # EXECUTES; FORCE restored on both toggled tables), no new seed data
         # needed.
         ("fk-004-0-reconcile-precount", "nexus-iq0qr"),
+        # nexus-tk070.p1 (RDR-194 Phase P1, Decision D2): catalog-032-1's
+        # anti-join DELETE on nexus.catalog_links, the SAME NO FORCE/FORCE
+        # toggle-wrap shape as catalog-013-1b/catalog-014-0/catalog-025-0/
+        # catalog-029-1. UNLIKE catalog-029-1 (which could reuse the 1.1.100
+        # KEEP-arm fixture because any row exercising its DELETE arm was
+        # ALREADY dead via catalog-025-0's identical anti-join earlier in the
+        # hop), catalog_links carries NO prior FK-backed remediation anywhere
+        # in this hop -- catalog-032-1 is the FIRST FK ever added to this
+        # table -- so a fresh dangling-row seed is required to exercise the
+        # DELETE arm at all. Seeded as two catalog_links rows sharing
+        # from_tumbler=1.1.100 (already registered above): one to 1.1.101 (a
+        # real, already-seeded document -- the KEEP arm) and one to
+        # 1.1.999-ghost (never registered -- the DELETE arm, modeling the
+        # real aged-fleet population, 277 rows, nexus-ysrwi 2026-07-25);
+        # effect-asserted (the ghost-endpoint row is gone, the real edge
+        # survives, both FKs exist+VALIDATED at HEAD, FORCE restored on both
+        # toggled tables).
+        ("catalog-032-1", "nexus-tk070.p1"),
         # nexus-o8dil.37 (RDR-191 Phase 7): NO changeset here -- a dedicated
         # catalog-030 changeset was drafted and DROPPED (2026-08-15, standing
         # convergence directive) once found structurally vestigial:

@@ -367,6 +367,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   catalog-029-1 nexus-o8dil.29
                 //   fk-004-0-reconcile-precount nexus-iq0qr
                 //   fk-004-1-reconcile nexus-o8dil.49
+                //   catalog-032-1 nexus-tk070.p1
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -466,6 +467,19 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     seedTaxonomyCentroidLegacyContent(su, 768, "t1", "code__y", 901L, "centroid-768");
                     seedTaxonomyCentroidLegacyContent(su, 1024, "t2", "code__z", 902L, "centroid-1024");
 
+                    // catalog-032-1 (nexus-tk070.p1, RDR-194 § D2): catalog_links carries
+                    // NO FK on the old leg's tree, so both rows below write freely.
+                    // KEEP arm -- a real edge between two documents that both exist and
+                    // survive the whole hop (1.1.100/1.1.101 are already seeded above for
+                    // catalog-014-0/catalog-025-0; catalog-025-0's dangling-row cleanup
+                    // only removes 1.1.101's MANIFEST row, never its catalog_documents
+                    // row, so it remains a valid link target throughout).
+                    seedLink(su, "t1", "1.1.100", "1.1.101", "cites");
+                    // DELETE arm -- an edge whose to_tumbler was NEVER registered as a
+                    // document, modeling the real aged-fleet population (277 rows,
+                    // nexus-ysrwi, 2026-07-25) catalog-032-1's anti-join must clean up.
+                    seedLink(su, "t1", "1.1.100", "1.1.999-ghost", "cites");
+
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("superuser ground truth after seeding").isEqualTo(5);
                     assertThat(count(su,
@@ -490,6 +504,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     assertThat(count(admin, "SELECT count(*) FROM nexus.catalog_documents"))
                         .as("FORCE RLS must hide the seeded document from the non-BYPASSRLS owner "
                             + "— the join side of catalog-014-0's stamp, the both-tables lesson")
+                        .isEqualTo(0);
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.catalog_links"))
+                        .as("FORCE RLS must hide both seeded catalog_links rows from the "
+                            + "non-BYPASSRLS owner — catalog-032-1's own toggle-wrap target")
                         .isEqualTo(0);
                 }
 
@@ -783,6 +801,49 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
                         + "'nexus.chunks'::regclass, 'nexus.catalog_collections'::regclass)"))
                         .as("FORCE ROW LEVEL SECURITY restored on both tables fk-004-1-reconcile toggled")
+                        .isEqualTo(2);
+
+                    // catalog-032-1 leg (nexus-tk070.p1, RDR-194 § D2, seed-coverage lint
+                    // follow-up): the anti-join DELETE removes the dangling seed row
+                    // (from=1.1.100, to=1.1.999-ghost — never a registered document) and
+                    // leaves the KEEP-arm row (from=1.1.100, to=1.1.101, both real
+                    // documents) intact. A broken toggle (FORCE never turned off) would
+                    // see zero nexus.catalog_documents rows and WRONGLY delete BOTH seeded
+                    // links as false-dangling — either failure mode is caught below,
+                    // mirroring the catalog-029-1 leg's KEEP/DELETE dual-arm shape.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.catalog_links "
+                        + "WHERE tenant_id = 't1' AND to_tumbler = '1.1.999-ghost'"))
+                        .as("catalog-032-1's anti-join DELETE must actually remove the "
+                            + "never-registered-endpoint link under FORCE-RLS, proving the "
+                            + "DELETE arm fires, not just the KEEP arm")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.catalog_links "
+                        + "WHERE tenant_id = 't1' AND from_tumbler = '1.1.100' AND to_tumbler = '1.1.101'"))
+                        .as("the real edge between two live documents must survive catalog-032-1's "
+                            + "remediation — a broken toggle would wrongly delete this too")
+                        .isEqualTo(1);
+                    assertThat(constraintExists(su, "fk_catalog_links_from_document"))
+                        .as("fk_catalog_links_from_document must exist at HEAD (catalog-032-0)")
+                        .isTrue();
+                    assertThat(constraintExists(su, "fk_catalog_links_to_document"))
+                        .as("fk_catalog_links_to_document must exist at HEAD (catalog-032-0)")
+                        .isTrue();
+                    assertThat(constraintValidated(su, "fk_catalog_links_from_document"))
+                        .as("fk_catalog_links_from_document must be VALIDATED at HEAD — catalog-032-2's "
+                            + "VALIDATE only succeeds if the anti-join DELETE actually ran and left no "
+                            + "dangling from_tumbler behind")
+                        .isTrue();
+                    assertThat(constraintValidated(su, "fk_catalog_links_to_document"))
+                        .as("fk_catalog_links_to_document must be VALIDATED at HEAD — catalog-032-3's "
+                            + "VALIDATE only succeeds if the anti-join DELETE actually ran and left no "
+                            + "dangling to_tumbler behind")
+                        .isTrue();
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.catalog_links'::regclass, 'nexus.catalog_documents'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables catalog-032-1 toggled")
                         .isEqualTo(2);
                 }
             }
@@ -1146,6 +1207,25 @@ class SchemaUpgradeRehearsalIntegrationTest {
             ps.setString(2, docId);
             ps.setInt(3, position);
             ps.setString(4, chash);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A catalog_links row, written pre-catalog-032 (no FK exists on the old
+     * leg's tree) so {@code toTumbler} need not resolve to a
+     * catalog_documents row — the shape catalog-032-1's anti-join remediation
+     * (nexus-tk070.p1, RDR-194 § D2) must clean up on a real aged fleet box.
+     */
+    private static void seedLink(Connection c, String tenant, String fromTumbler,
+                                 String toTumbler, String linkType) throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by) "
+            + "VALUES (?, ?, ?, ?, 'rehearsal-seed')")) {
+            ps.setString(1, tenant);
+            ps.setString(2, fromTumbler);
+            ps.setString(3, toTumbler);
+            ps.setString(4, linkType);
             ps.executeUpdate();
         }
     }

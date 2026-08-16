@@ -110,9 +110,15 @@ class CatalogDocumentCascadeTest {
     void softDelete_tombstone_doesNotCascade() throws Exception {
         // The service's deleteDocument API is a soft tombstone (UPDATE deleted_at). It must
         // NOT fire fk-001 ON DELETE CASCADE — the doc-rooted children survive the tombstone.
+        // nexus-tk070.p1 (RDR-194 § D2): the same applies to catalog_links now that
+        // fk_catalog_links_from_document/_to_document exist — soft delete does not fire
+        // ON DELETE CASCADE, so a link naming a tombstoned endpoint survives (exactly the
+        // case CatalogRepository#orphanedLinks still reports).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             seedDocument(su, TENANT, "soft-doc-1");
+            seedDocument(su, TENANT, "soft-doc-2");
+            seedLink(su, TENANT, "soft-doc-1", "soft-doc-2");
         }
         int n = repo.deleteDocument(TENANT, "soft-doc-1");
         assertThat(n).as("soft delete tombstoned one row").isEqualTo(1);
@@ -122,6 +128,8 @@ class CatalogDocumentCascadeTest {
                 + TENANT + "' AND tumbler='soft-doc-1'")).as("row tombstoned, not removed").isEqualTo(1);
             // Children survive the tombstone (no cascade on UPDATE deleted_at).
             assertChildCounts(su, TENANT, "soft-doc-1", 1, 1, 1, 1);
+            assertThat(countLinks(su, TENANT, "soft-doc-1"))
+                .as("catalog_links survive a soft-delete (tombstone) of an endpoint").isEqualTo(1);
         }
     }
 
@@ -130,12 +138,18 @@ class CatalogDocumentCascadeTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             seedDocument(su, TENANT, "hard-doc-1");
+            seedDocument(su, TENANT, "hard-doc-2");
             // topic_assignment for the doc — it has NO document-rooted FK, so it must survive.
             seedTopicAssignment(su, TENANT, "hard-doc-1");
+            // nexus-tk070.p1 (RDR-194 § D2): one link with hard-doc-1 as the FROM
+            // endpoint, one with it as the TO endpoint — both sides of the FK.
+            seedLink(su, TENANT, "hard-doc-1", "hard-doc-2");
+            seedLink(su, TENANT, "hard-doc-2", "hard-doc-1");
         }
         // Sanity: children present before the hard delete.
         try (Connection su = pg.createConnection("")) {
             assertChildCounts(su, TENANT, "hard-doc-1", 1, 1, 1, 1);
+            assertThat(countLinks(su, TENANT, "hard-doc-1")).as("links present before delete").isEqualTo(2);
         }
 
         // HARD delete the catalog_documents row (the path deleteCollection takes); fk-001
@@ -155,6 +169,14 @@ class CatalogDocumentCascadeTest {
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.topic_assignments WHERE tenant_id='" + TENANT
                 + "' AND doc_id='hard-doc-1'"))
                 .as("topic_assignments NOT cascaded by document delete (no doc-rooted FK)").isEqualTo(1);
+            // nexus-tk070.p1 (RDR-194 § D2): fk_catalog_links_from_document/_to_document
+            // now cascade BOTH links (either endpoint = hard-doc-1) off this same hard delete.
+            assertThat(countLinks(su, TENANT, "hard-doc-1"))
+                .as("catalog_links cascaded on both sides by fk_catalog_links_from_document/_to_document")
+                .isEqualTo(0);
+            // hard-doc-2 itself (the surviving OTHER endpoint) is untouched.
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_documents WHERE tenant_id='" + TENANT
+                + "' AND tumbler='hard-doc-2'")).as("the other endpoint's document row survives").isEqualTo(1);
         }
     }
 
@@ -165,14 +187,24 @@ class CatalogDocumentCascadeTest {
         // must cascade ONLY tenant A's children — tenant B's identically-named document and its
         // children are untouched (the composite match requires the same tenant_id).
         final String shared = "xt-doc";
+        final String partner = "xt-doc-partner";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             seedDocument(su, TENANT, shared);
+            seedDocument(su, TENANT, partner);
             seedDocument(su, TENANT_B, shared);
+            seedDocument(su, TENANT_B, partner);
+            // nexus-tk070.p1 (RDR-194 § D2): the composite FK is (tenant_id, from|to_tumbler)
+            // -> (tenant_id, tumbler) — a link is per-tenant even though both tenants use the
+            // identical tumbler string.
+            seedLink(su, TENANT, shared, partner);
+            seedLink(su, TENANT_B, shared, partner);
         }
         try (Connection su = pg.createConnection("")) {
             assertChildCounts(su, TENANT, shared, 1, 1, 1, 1);
             assertChildCounts(su, TENANT_B, shared, 1, 1, 1, 1);
+            assertThat(countLinks(su, TENANT, shared)).isEqualTo(1);
+            assertThat(countLinks(su, TENANT_B, shared)).isEqualTo(1);
         }
 
         try (Connection su = pg.createConnection("")) {
@@ -184,6 +216,10 @@ class CatalogDocumentCascadeTest {
         try (Connection su = pg.createConnection("")) {
             assertChildCounts(su, TENANT, shared, 0, 0, 0, 0);       // tenant A cascaded
             assertChildCounts(su, TENANT_B, shared, 1, 1, 1, 1);     // tenant B untouched
+            assertThat(countLinks(su, TENANT, shared))
+                .as("tenant A's link cascaded").isEqualTo(0);
+            assertThat(countLinks(su, TENANT_B, shared))
+                .as("tenant B's identically-tumblered link untouched").isEqualTo(1);
         }
     }
 
@@ -239,6 +275,20 @@ class CatalogDocumentCascadeTest {
             + "VALUES (" + topicId + ", '" + tenant + "', 'topic-dc', '" + COLL + "', 0, NOW(), 'pending')");
         st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
             + "VALUES ('" + tenant + "', '" + docId + "', " + topicId + ", 'projection', '" + COLL + "', NOW())");
+    }
+
+    /** Seed one catalog_links row directly (raw SQL, bypassing the repository's
+     *  requireLiveEndpoints guard — both endpoints already exist via seedDocument). */
+    private static void seedLink(Connection su, String tenant, String fromTumbler, String toTumbler) throws Exception {
+        var st = su.createStatement();
+        st.execute("INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by, created_at) "
+            + "VALUES ('" + tenant + "', '" + fromTumbler + "', '" + toTumbler + "', 'relates', 'test', NOW())");
+    }
+
+    /** Count catalog_links rows naming {@code tumbler} on EITHER side for {@code tenant}. */
+    private static int countLinks(Connection su, String tenant, String tumbler) throws Exception {
+        return rows(su, "SELECT COUNT(*) FROM nexus.catalog_links WHERE tenant_id='" + tenant
+            + "' AND (from_tumbler='" + tumbler + "' OR to_tumbler='" + tumbler + "')");
     }
 
     private static String chash(String seed) {

@@ -3091,37 +3091,70 @@ public final class CatalogRepository {
             if (!allowDangling) {
                 requireLiveEndpoints(ctx, tenant, s(lnk, "from_tumbler"), s(lnk, "to_tumbler"));
             }
-            var rec = ctx.insertInto(CATALOG_LINKS,
-                    CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
-                    CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
-               .values(DSL.val(tenant),
-                       DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
-                       DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
-                       DSL.val(nne(s(lnk,"created_by"))), DSL.val(createdAtOrNow(s(lnk,"created_at"))),
-                       jsonbVal(metaJson))
-               .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
-               .doUpdate()
-               .set(CATALOG_LINKS.FROM_SPAN, EX_LNK_FSPAN)
-               .set(CATALOG_LINKS.TO_SPAN, EX_LNK_TSPAN)
-               // nexus-s4e1n: created_by is DELIBERATELY NOT SET on the merge
-               // path. A second creator of the same edge does not take over the
-               // attribution — it is folded into meta['co_discovered_by'] below.
-               .set(F_LNK_META,  LNK_META_FOLD)
-               // nexus-xtmtf: CATALOG_LINKS (generated) carries a real CatalogLinksRecord
-               // shape, unlike the old hand-built Table<?>. .returning(Field...) on a
-               // recognized table returns the table's OWN record shape with the extra
-               // expression appended, so position 0 is no longer our boolean expression
-               // (jOOQ logs "API misuse ... not present in table" and get(0,...) silently
-               // reads the wrong column). .returningResult(...) requests EXACTLY this
-               // field and nothing else, independent of the table's real column list.
-               .returningResult(DSL.field("(xmax = 0)", Boolean.class))
-               .fetchOne();
-            return rec != null && Boolean.TRUE.equals(rec.value1());
+            try {
+                var rec = ctx.insertInto(CATALOG_LINKS,
+                        CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
+                        CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
+                   .values(DSL.val(tenant),
+                           DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
+                           DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
+                           DSL.val(nne(s(lnk,"created_by"))), DSL.val(createdAtOrNow(s(lnk,"created_at"))),
+                           jsonbVal(metaJson))
+                   .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
+                   .doUpdate()
+                   .set(CATALOG_LINKS.FROM_SPAN, EX_LNK_FSPAN)
+                   .set(CATALOG_LINKS.TO_SPAN, EX_LNK_TSPAN)
+                   // nexus-s4e1n: created_by is DELIBERATELY NOT SET on the merge
+                   // path. A second creator of the same edge does not take over the
+                   // attribution — it is folded into meta['co_discovered_by'] below.
+                   .set(F_LNK_META,  LNK_META_FOLD)
+                   // nexus-xtmtf: CATALOG_LINKS (generated) carries a real CatalogLinksRecord
+                   // shape, unlike the old hand-built Table<?>. .returning(Field...) on a
+                   // recognized table returns the table's OWN record shape with the extra
+                   // expression appended, so position 0 is no longer our boolean expression
+                   // (jOOQ logs "API misuse ... not present in table" and get(0,...) silently
+                   // reads the wrong column). .returningResult(...) requests EXACTLY this
+                   // field and nothing else, independent of the table's real column list.
+                   .returningResult(DSL.field("(xmax = 0)", Boolean.class))
+                   .fetchOne();
+                return rec != null && Boolean.TRUE.equals(rec.value1());
+            } catch (org.jooq.exception.DataAccessException e) {
+                // nexus-tk070.p1 (RDR-194 § D2): allow_dangling=true skips
+                // requireLiveEndpoints above, but the row still has to satisfy
+                // fk_catalog_links_from_document / fk_catalog_links_to_document
+                // (catalog-032-links-tumbler-fk.xml) — a link to a TOMBSTONED
+                // document still writes (the row exists), a link to a tumbler
+                // with NO row at all now raises SQLSTATE 23503 here. Map it to
+                // the SAME DanglingEndpointException requireLiveEndpoints
+                // throws, so CatalogHandler's existing catch
+                // (400 {"code":"dangling_endpoint"}) covers both paths with no
+                // handler change, and http_catalog_client.py's translation to
+                // ValueError (:2044-2049) keeps working unchanged.
+                if (SqlConstraints.violatesAnyFk(e,
+                        "fk_catalog_links_from_document", "fk_catalog_links_to_document")) {
+                    String constraint = SqlConstraints.violated(e);
+                    List<String> missing = "fk_catalog_links_from_document".equals(constraint)
+                        ? List.of("from_tumbler") : List.of("to_tumbler");
+                    throw new DanglingEndpointException(missing,
+                        "dangling link endpoint: " + String.join(", ", missing)
+                        + " does not resolve to any catalog document"
+                        + " (from_tumbler=" + s(lnk, "from_tumbler")
+                        + " to_tumbler=" + s(lnk, "to_tumbler") + ").");
+                }
+                throw e;
+            }
         });
     }
 
     /**
      * nexus-9ssih — a link whose endpoint does not resolve to a LIVE document.
+     * Two sources, same exception type (nexus-tk070.p1, RDR-194 § D2 added
+     * the second): {@link #requireLiveEndpoints} throws it directly when
+     * {@code allow_dangling} is unset; {@link #upsertLink}'s catch throws it
+     * when {@code allow_dangling=true} bypassed that check but the write still
+     * violated {@code fk_catalog_links_from_document}/{@code _to_document} —
+     * a tumbler with NO {@code catalog_documents} row at all, as opposed to a
+     * TOMBSTONED one (which satisfies the FK and writes).
      *
      * <p>Extends {@link IllegalArgumentException} so the handler's existing
      * ladder already maps it to 400; {@link #missing()} lets the wire response
@@ -6020,7 +6053,14 @@ public final class CatalogRepository {
             // the four FK children; topic_assignments (no doc-rooted FK) is
             // cleaned explicitly by this method's collection-scoped taxonomy
             // delete — a per-DOC hard path would have to do its own purge
-            // (nexus-7n553 tripwire at deleteDocument).
+            // (nexus-7n553 tripwire at deleteDocument). RDR-194 § D2
+            // (nexus-tk070.p1): catalog_links also cascades off THIS delete now,
+            // via fk_catalog_links_from_document / fk_catalog_links_to_document
+            // (catalog-032-links-tumbler-fk.xml, ON DELETE CASCADE on both
+            // from_tumbler and to_tumbler) — no explicit step needed here, unlike
+            // topic_assignments above; the FK was chosen specifically because it
+            // ALSO covers nexus.purge_trash's plpgsql hard-delete path, which no
+            // Java step here could reach.
             counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute());
             // 7. registry row LAST (RESTRICT children are now gone).
             counts.put("catalog_collections", ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute());
@@ -6922,6 +6962,21 @@ public final class CatalogRepository {
      * <p>{@code side} names which endpoint dangles ({@code "from"}, {@code "to"},
      * or {@code "both"}) so an operator can tell a deleted target from a
      * deleted source without a second query.
+     *
+     * <p><strong>Post-nexus-tk070.p1 (RDR-194 § D2) semantics.</strong>
+     * {@code fromMissing}/{@code toMissing} above are LIVE-document checks
+     * ({@code DELETED_AT IS NULL}), not row-existence checks, and this method
+     * therefore stays useful after {@code fk_catalog_links_from_document} /
+     * {@code fk_catalog_links_to_document} land: a row with NO matching
+     * {@code catalog_documents} row at all is now impossible (the FK prevents
+     * it going forward and the P1 remediation deleted the pre-existing
+     * population), so this method's remaining output is exactly the
+     * TOMBSTONED-endpoint case, which the FK deliberately does not cover
+     * (soft delete via {@code document_trash} does not fire ON DELETE
+     * CASCADE). Enforcement therefore narrows this method's job rather than
+     * retiring it — only the {@code nx doctor --check-dangling-links} CLI
+     * detection retires (D0.10), not this repository method, its HTTP
+     * endpoint, or the Python client method that calls it.
      */
     public List<Map<String, Object>> orphanedLinks(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -7391,6 +7446,16 @@ public final class CatalogRepository {
      * once the link exists, so this is accepted for the initial migration.  Same
      * convergence gap as pre-nexus-9wz72 importChunk; revisit at final cutover if
      * stale link metadata surfaces in production.
+     *
+     * <p><b>Endpoint contract (nexus-tk070.p1 review fix 1, RDR-194 § D2):</b> a
+     * TOMBSTONED endpoint (a {@code catalog_documents} row that exists but is
+     * soft-deleted) still satisfies {@code fk_catalog_links_from_document} /
+     * {@code fk_catalog_links_to_document} and writes — this path legitimately
+     * writes edges for documents whose LIVE state it does not control. An
+     * ABSENT endpoint (no {@code catalog_documents} row at all) is rejected by
+     * the FK and surfaces as {@link DanglingEndpointException} (400 {@code
+     * dangling_endpoint}, the same shape {@link #upsertLink} produces): ETL
+     * callers must import documents before importing the links between them.
      */
     public void importLink(String tenant, Map<String, Object> lnk) {
         tenantScope.withTenant(tenant, ctx -> {
@@ -7405,6 +7470,28 @@ public final class CatalogRepository {
      * intra-statement conflicts against {@code DO NOTHING} are a documented
      * no-op (unlike {@code DO UPDATE}, which cannot affect the same row
      * twice).
+     *
+     * <p><b>Dangling endpoints (nexus-tk070.p1 review fix 1, RDR-194 § D2):</b>
+     * a single Postgres statement is all-or-nothing — if ANY row in a chunk
+     * violated {@code fk_catalog_links_from_document} /
+     * {@code fk_catalog_links_to_document} (an endpoint with NO {@code
+     * catalog_documents} row at all), the WHOLE chunk's INSERT would roll
+     * back, including rows that would otherwise have succeeded — a raw
+     * Postgres 23503 also poisons the surrounding transaction ("current
+     * transaction is aborted") for any statement after it, which rules out
+     * diagnosing the FAILED insert with a follow-up SELECT on the same
+     * connection. So this validates every row's endpoints EXIST (live or
+     * tombstoned — {@link #requireImportLinkEndpointsExist}) BEFORE issuing
+     * the chunk's INSERT: no per-row skipping, no partial success (no
+     * silent fallback — ETL must import documents before links), and the
+     * {@link DanglingEndpointException} names the first offending {@code
+     * (from_tumbler, to_tumbler, link_type)} row without ever touching the
+     * DB with a doomed INSERT. The FK itself remains a backstop for the
+     * (effectively unreachable within one request) race between the
+     * precheck and the INSERT — if it fires anyway, the {@code catch} below
+     * maps it to the same {@code DanglingEndpointException} type, without
+     * per-row detail (a fresh SELECT is not safe once the transaction has
+     * aborted).
      */
     public int importLinksBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
@@ -7412,6 +7499,7 @@ public final class CatalogRepository {
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 9);
             for (int start = 0; start < rows.size(); start += chunkSize) {
                 var batch = rows.subList(start, Math.min(start + chunkSize, rows.size()));
+                requireImportLinkEndpointsExist(ctx, tenant, batch);
                 var insert = ctx.insertInto(CATALOG_LINKS,
                         CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
                         CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META);
@@ -7423,27 +7511,97 @@ public final class CatalogRepository {
                             DSL.val(nne(s(lnk,"created_by"))), DSL.val(tsOrNull(s(lnk,"created_at"))),
                             jsonbVal(metaJson));
                 }
-                insert.onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
-                      .doNothing()
-                      .execute();
+                try {
+                    insert.onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
+                          .doNothing()
+                          .execute();
+                } catch (org.jooq.exception.DataAccessException e) {
+                    if (!SqlConstraints.violatesAnyFk(e,
+                            "fk_catalog_links_from_document", "fk_catalog_links_to_document")) {
+                        throw e;
+                    }
+                    String constraint = SqlConstraints.violated(e);
+                    List<String> missing = "fk_catalog_links_from_document".equals(constraint)
+                        ? List.of("from_tumbler") : List.of("to_tumbler");
+                    throw new DanglingEndpointException(missing,
+                        "dangling link endpoint in import batch (endpoint removed between "
+                        + "precheck and insert): " + String.join(", ", missing)
+                        + " does not resolve to any catalog document.");
+                }
             }
             return rows.size();
         });
     }
 
+    /**
+     * Reject the WHOLE chunk if any row's {@code from_tumbler} or {@code
+     * to_tumbler} resolves to NO {@code catalog_documents} row at all (live
+     * or tombstoned) — the exact condition {@code
+     * fk_catalog_links_from_document}/{@code fk_catalog_links_to_document}
+     * enforces (nexus-tk070.p1 review fix 1). Runs BEFORE the chunk's
+     * multi-row INSERT so a dangling row is named exactly, by its own
+     * identity, without ever provoking the real constraint violation (see
+     * {@link #importLinksBatch}'s javadoc for why a post-hoc diagnostic
+     * query is not safe here).
+     */
+    private static void requireImportLinkEndpointsExist(DSLContext ctx, String tenant, List<Map<String, Object>> batch) {
+        var referenced = new LinkedHashSet<String>();
+        for (var lnk : batch) {
+            referenced.add(s(lnk, "from_tumbler"));
+            referenced.add(s(lnk, "to_tumbler"));
+        }
+        var existing = new HashSet<>(ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.in(referenced)))
+            .fetch(CATALOG_DOCUMENTS.TUMBLER));
+        for (var lnk : batch) {
+            String fromT = s(lnk, "from_tumbler");
+            String toT = s(lnk, "to_tumbler");
+            List<String> missing = new ArrayList<>(2);
+            if (!existing.contains(fromT)) missing.add("from_tumbler");
+            if (!existing.contains(toT)) missing.add("to_tumbler");
+            if (!missing.isEmpty()) {
+                throw new DanglingEndpointException(missing,
+                    "dangling link endpoint in import batch: " + String.join(", ", missing)
+                    + " does not resolve to any catalog document"
+                    + " (from_tumbler=" + fromT + " to_tumbler=" + toT
+                    + " link_type=" + s(lnk, "link_type") + ").");
+            }
+        }
+    }
+
     private void doImportLink(DSLContext ctx, String tenant, Map<String, Object> lnk) {
         String metaJson = jsonOrNull(lnk.get("metadata"));
-        ctx.insertInto(CATALOG_LINKS,
-                CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
-                CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
-           .values(DSL.val(tenant),
-                   DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
-                   DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
-                   DSL.val(nne(s(lnk,"created_by"))), DSL.val(tsOrNull(s(lnk,"created_at"))),
-                   jsonbVal(metaJson))
-           .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
-           .doNothing()
-           .execute();
+        try {
+            ctx.insertInto(CATALOG_LINKS,
+                    CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
+                    CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
+               .values(DSL.val(tenant),
+                       DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
+                       DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
+                       DSL.val(nne(s(lnk,"created_by"))), DSL.val(tsOrNull(s(lnk,"created_at"))),
+                       jsonbVal(metaJson))
+               .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
+               .doNothing()
+               .execute();
+        } catch (org.jooq.exception.DataAccessException e) {
+            // nexus-tk070.p1 review fix 1 (RDR-194 § D2): map the FK
+            // violation the SAME way upsertLink's catch does — an absent
+            // endpoint (no catalog_documents row at all) is rejected; a
+            // TOMBSTONED endpoint still satisfies the FK and writes.
+            if (!SqlConstraints.violatesAnyFk(e,
+                    "fk_catalog_links_from_document", "fk_catalog_links_to_document")) {
+                throw e;
+            }
+            String constraint = SqlConstraints.violated(e);
+            List<String> missing = "fk_catalog_links_from_document".equals(constraint)
+                ? List.of("from_tumbler") : List.of("to_tumbler");
+            throw new DanglingEndpointException(missing,
+                "dangling link endpoint in import: " + String.join(", ", missing)
+                + " does not resolve to any catalog document"
+                + " (from_tumbler=" + s(lnk, "from_tumbler")
+                + " to_tumbler=" + s(lnk, "to_tumbler")
+                + " link_type=" + s(lnk, "link_type") + ").");
+        }
     }
 
     /**

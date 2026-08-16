@@ -924,14 +924,41 @@ class CatalogEngineDefects70Test {
     }
 
     @Test
-    void ssih_allowDanglingOptInStillWrites() {
+    void ssih_allowDanglingOptInWritesToTombstonedTarget() {
+        // nexus-tk070.p1 (RDR-194 § D2): allow_dangling=true still writes to a
+        // TOMBSTONED document — the row exists, so fk_catalog_links_to_document
+        // is satisfied even though requireLiveEndpoints would have refused it.
+        // This is the narrowed (not disappeared) half of allow_dangling's
+        // contract; see ssih_allowDanglingStillRejectsNonexistentTumbler below
+        // for the other half.
         var p = linkPair("dangle-allow");
-        String ghost = p[1] + "0999";
+        assertThat(repo.deleteDocument(TENANT, p[1])).isEqualTo(1);
         assertThat(repo.upsertLink(TENANT, Map.of(
-            "from_tumbler", p[0], "to_tumbler", ghost,
+            "from_tumbler", p[0], "to_tumbler", p[1],
             "link_type", "cites", "created_by", "importer",
             "allow_dangling", true))).isTrue();
         assertThat(repo.linksFrom(TENANT, p[0], List.of("cites"))).hasSize(1);
+    }
+
+    @Test
+    void ssih_allowDanglingStillRejectsNonexistentTumbler() {
+        // nexus-tk070.p1 (RDR-194 § D2): allow_dangling narrows rather than
+        // disappears now that fk_catalog_links_from_document /
+        // fk_catalog_links_to_document exist — a tumbler with NO
+        // catalog_documents row at ALL (never registered, unlike the
+        // tombstoned case above) provokes the REAL SQLSTATE 23503 from
+        // Postgres, which upsertLink maps to the SAME DanglingEndpointException
+        // requireLiveEndpoints throws, so CatalogHandler's existing 400
+        // {"code":"dangling_endpoint"} covers both paths with no handler change.
+        var p = linkPair("dangle-allow-ghost");
+        String ghost = p[1] + "0999";
+        var ex = assertThrows(CatalogRepository.DanglingEndpointException.class, () ->
+            repo.upsertLink(TENANT, Map.of(
+                "from_tumbler", p[0], "to_tumbler", ghost,
+                "link_type", "cites", "created_by", "importer",
+                "allow_dangling", true)));
+        assertThat(ex.missing()).containsExactly("to_tumbler");
+        assertThat(repo.linksFrom(TENANT, p[0], List.of("cites"))).isEmpty();
     }
 
     @Test
@@ -942,13 +969,27 @@ class CatalogEngineDefects70Test {
             "link_type", "cites", "created_by", "auto-linker"))).isTrue();
     }
 
-    /** The ETL/import leg must stay unguarded: it legitimately writes edges for
-     *  documents whose live state it does not yet control. */
+    /**
+     * The ETL/import leg must stay unguarded at the JAVA level: it legitimately
+     * writes edges for documents whose LIVE state it does not yet control (a
+     * tombstoned-but-still-registered target here). nexus-tk070.p1 (RDR-194 §
+     * D2): unlike {@code requireLiveEndpoints}, the real
+     * {@code fk_catalog_links_from_document}/{@code _to_document} FK applies
+     * to EVERY insert path — including {@code importLink} — regardless of any
+     * Java-level guard, so this test uses a tumbler that EXISTS (tombstoned,
+     * not deleted outright) rather than one that was never registered; a
+     * genuinely nonexistent tumbler through the import path now fails the FK
+     * exactly as it does through {@code upsertLink}'s allow_dangling path
+     * (see {@code ssih_allowDanglingStillRejectsNonexistentTumbler} above) —
+     * there was never a production caller relying on importing a link to a
+     * tumbler with no document row at all.
+     */
     @Test
     void ssih_importLinkPathIsExempt() {
         var p = linkPair("dangle-import");
+        assertThat(repo.deleteDocument(TENANT, p[1])).isEqualTo(1);
         repo.importLink(TENANT, Map.of(
-            "from_tumbler", p[0], "to_tumbler", p[1] + "0999",
+            "from_tumbler", p[0], "to_tumbler", p[1],
             "link_type", "cites", "created_by", "etl"));
         assertThat(repo.linksFrom(TENANT, p[0], List.of("cites"))).hasSize(1);
     }

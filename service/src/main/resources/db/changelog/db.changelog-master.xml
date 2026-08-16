@@ -629,6 +629,20 @@
          are converted. -->
     <include file="db/changelog/taxonomy-008-link-types-jsonb.xml"/>
 
+    <!-- RDR-194 Phase P1 (Decision D2, bead nexus-tk070.p1) — catalog_links
+         tumbler FKs: fk_catalog_links_from_document / fk_catalog_links_to_document,
+         ON DELETE CASCADE ON UPDATE CASCADE to nexus.catalog_documents
+         (tenant_id, tumbler), catalog-029 three-step shape (ADD NOT VALID ->
+         anti-join remediation -> VALIDATE per constraint). Placed after
+         taxonomy-008-link-types-jsonb.xml (current tail) and before the
+         grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention (D0.1; see catalog-031's / telemetry-004's /
+         aspects-003's / plans-002's / taxonomy-008's own <include> comments
+         for the identical reasoning). See
+         catalog-032-links-tumbler-fk.xml's own header for the full D2 trace,
+         the RLS toggle discipline, and the row-export-before-delete shape. -->
+    <include file="db/changelog/catalog-032-links-tumbler-fk.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
