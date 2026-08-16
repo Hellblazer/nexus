@@ -66,18 +66,48 @@ never fails the mint itself — the lease is an optimization, the mint is
 the source of truth. :meth:`invalidate` (the 401 self-heal path) removes
 the lease file alongside the in-process cache entry, best-effort.
 
-Concurrency (deliberately NOT flock/O_EXCL-guarded): two cold processes
-racing to fill an empty/stale cache slot may both mint and both publish —
-last writer wins on the file, and the loser's own in-process token is
-still perfectly valid (it just isn't the one on disk any more). This is
-ACCEPTABLE, not a bug to fix: the race window is bounded to once per
-TTL-refresh boundary per ``(base_url, tenant)``, `MintRateLimiter`'s
-burst=5 absorbs a handful of concurrent cold starts, and a real
-correctness hazard (not just an efficiency one) would be required to
-justify the complexity of cross-process locking here — none exists,
-since a double mint produces two independently valid tokens, not
-corruption. Do not add ``fcntl.flock`` without a documented correctness
-rationale (nexus-9c7t9 design of record, point 3).
+Concurrency, UPDATED (nexus-nnr26): the original design of record (nexus-
+9c7t9 point 3) left mint-on-miss deliberately unlocked — two cold processes
+racing to fill an empty/stale cache slot might both mint and both publish,
+last writer wins on the file, and the loser's own in-process token is still
+perfectly valid (it just isn't the one on disk any more). That reasoning is
+still correct for the SMALL, near-simultaneous race (bounded to ~2 wasted
+mints, well under `MintRateLimiter`'s burst=5) — a double mint there is an
+efficiency cost, not a correctness bug, and does not by itself justify
+``fcntl.flock``.
+
+What changed: a scripted fan-out of M>5 TRULY CONCURRENT cold processes
+(parallel ``&`` loops, parallel make, CI legs) is a DIFFERENT race class —
+every one of them misses the lease and mints, `MintRateLimiter`'s burst=5
+absorbs only the first five, and the excess M-5 hard-fail with
+:class:`DataTokenMintError`: the client's own mint retry (3 attempts,
+``Retry-After`` capped at :data:`_MINT_RETRY_AFTER_CAP_S`, ~30-60s total,
+see :meth:`DataTokenManager._mint`) is structurally incapable of bridging
+the server's 1/min refill window, so this is not a rare edge case that
+usually self-heals — it is a DETERMINISTIC hard-fail of user commands for
+any scripted fan-out wider than the burst. That crosses the correctness-
+only bar nexus-9c7t9 point 3 set: a CI gate or automation script reddening
+because 3 of 8 concurrent ``nx`` invocations raised
+:class:`DataTokenMintError` is a correctness problem for that script, even
+though no token data is ever corrupted.
+
+Fix: :meth:`DataTokenManager._mint_guarded`, a per-``(base_url, tenant)``
+NON-BLOCKING ``fcntl.flock`` around mint-on-miss ONLY — mirroring the
+shipped :func:`nexus.db.t1._lock_guarded_mint_or_borrow` precedent, but
+poll-then-re-read rather than block: a losing racer tries a non-blocking
+exclusive acquire; on failure it re-reads the lease file (the winner will
+have published while holding the lock) and returns the borrowed token the
+instant it appears, without ever itself acquiring the lock. Only the lock
+HOLDER mints. A bounded wait ceiling (:data:`_MINT_LOCK_WAIT_CEILING_S`,
+sized above the mint's own worst-case retry wall time) protects against a
+holder that never publishes (e.g. its own mint failed) — past the ceiling
+the waiter fails loud with :class:`DataTokenMintError` rather than hang
+indefinitely, mirroring the deadline-exceeded behavior of the t1
+precedent's own bounded-poll variant (nexus-by875). Reads stay entirely
+lock-free: the guard wraps ONLY the genuine cache-miss-with-no-fresh-lease
+path (see :meth:`DataTokenManager.bearer_for`) — an existing fresh lease is
+still borrowed without ever touching the lock file, so the reuse happy path
+carries zero lock-contention cost.
 
 Mint-body tenant resolution (nexus-ssqk9): every ``Http*Store`` defaults its
 own ``tenant`` constructor kwarg to ``DEFAULT_TENANT = "default"`` — but a
@@ -97,6 +127,7 @@ whenever the credential's bound tenant is not literally ``"default"``.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -152,6 +183,30 @@ _DATA_TOKEN_LEASE_PREFIX: str = "data_token_lease."
 #: mismatched format version is treated as absent (fail-safe), never
 #: partially trusted.
 _LEASE_FORMAT_VERSION: int = 1
+
+#: Cross-process mint-on-miss lock file (nexus-nnr26): filename prefix under
+#: ``nexus_config_dir()``, mirroring ``nexus.db.t1``'s
+#: ``t1_mint_<session_id>.lock`` naming convention. A SEPARATE file from the
+#: lease itself -- the lock guards only the miss-then-mint critical section,
+#: never a read.
+_MINT_LOCK_PREFIX: str = "data_token_mint_lock."
+
+#: Poll interval while a non-blocking flock acquire attempt is retried
+#: (nexus-nnr26) -- mirrors nexus.db.t1._lock_guarded_mint_or_borrow's
+#: bounded-poll variant's 0.05s interval exactly.
+_MINT_LOCK_POLL_INTERVAL_S: float = 0.05
+
+#: Hard ceiling on how long a losing racer waits for the lock holder to
+#: either publish a lease or release the lock (nexus-nnr26). Sized
+#: comfortably above the mint's own worst-case retry wall time (2 sleeps
+#: capped at _MINT_RETRY_AFTER_CAP_S=15s + 3 attempts' _MINT_TIMEOUT_S=10s
+#: transport timeouts ~= 60s, see DataTokenManager._mint's docstring) so a
+#: waiter never gives up while the holder is still within its own
+#: legitimate retry budget. Past this, the wait fails loud
+#: (DataTokenMintError) rather than block indefinitely -- mirrors
+#: nexus.db.t1._lock_guarded_mint_or_borrow's deadline-exceeded behavior
+#: (nexus-by875).
+_MINT_LOCK_WAIT_CEILING_S: float = 65.0
 
 #: Backoff between attempts when the server supplies no Retry-After header
 #: (design of record: "1s/2s"). Indexed by ``attempt - 1``.
@@ -212,6 +267,14 @@ def _lease_key(base_url: str, tenant: str) -> str:
 
 def _data_token_lease_path(base_url: str, tenant: str, config_dir: Path) -> Path:
     return config_dir / f"{_DATA_TOKEN_LEASE_PREFIX}{_lease_key(base_url, tenant)}"
+
+
+def _data_token_mint_lock_path(base_url: str, tenant: str, config_dir: Path) -> Path:
+    """Per-``(base_url, tenant)`` lock-file path guarding
+    :meth:`DataTokenManager._mint_guarded`'s mint-on-miss critical section
+    (nexus-nnr26). Distinct from :func:`_data_token_lease_path` -- the lock
+    file never holds a token, only a flock target."""
+    return config_dir / f"{_MINT_LOCK_PREFIX}{_lease_key(base_url, tenant)}"
 
 
 def _default_poster(
@@ -306,6 +369,16 @@ class DataTokenManager:
             DIFFERENT process with its own monotonic clock, so only
             wall-clock time is comparable across processes. Injectable
             for deterministic tests; defaults to ``time.time``.
+        lock_wait_ceiling_seconds: Hard ceiling on how long a losing racer
+            waits for the mint-on-miss lock holder to publish or release
+            (nexus-nnr26). Defaults to :data:`_MINT_LOCK_WAIT_CEILING_S`.
+            Injectable so a test can force the deadline-exceeded path
+            without a real ~65s wait. Deliberately measured against real
+            ``time.monotonic()`` inside :meth:`_mint_guarded`, never the
+            injectable ``clock`` above -- mirrors
+            ``nexus.db.t1._lock_guarded_mint_or_borrow``'s own deadline,
+            which stays wired to real time regardless of any test clock
+            injected for cache-TTL purposes.
     """
 
     def __init__(
@@ -319,6 +392,7 @@ class DataTokenManager:
         sleep: Callable[[float], None] = time.sleep,
         config_dir: Path | None = None,
         wall_clock: Callable[[], float] = time.time,
+        lock_wait_ceiling_seconds: float = _MINT_LOCK_WAIT_CEILING_S,
     ) -> None:
         self._clock = clock
         self._poster = poster
@@ -328,6 +402,7 @@ class DataTokenManager:
         self._sleep = sleep
         self._config_dir = config_dir
         self._wall_clock = wall_clock
+        self._lock_wait_ceiling_seconds = lock_wait_ceiling_seconds
         self._lock = threading.Lock()
         self._cache: dict[tuple[str, str], _CachedToken] = {}
 
@@ -372,6 +447,12 @@ class DataTokenManager:
         configured, mints (or reuses a cached, non-expiring-soon token) and
         returns the raw data-token string; a mint failure raises
         :class:`DataTokenMintError` — never a silent ``None`` in that case.
+
+        A genuine cache miss with no fresh cross-process lease is
+        flock-guarded (:meth:`_mint_guarded`, nexus-nnr26) so concurrent
+        cold-start callers converge on one mint instead of each minting
+        independently — see the module docstring's "Concurrency, UPDATED
+        (nexus-nnr26)" section.
         """
         credential = self._resolve_credential()
         if not credential:
@@ -394,11 +475,21 @@ class DataTokenManager:
                         "data_token_lease_reused", tenant=tenant, endpoint=_host(base_url),
                     )
                     return leased.token
+                # nexus-nnr26: genuine miss AND no fresh lease — serialize
+                # concurrent cold-start racers via a non-blocking flock so
+                # only the lock holder mints; every other racer borrows
+                # instead of independently minting a competing token. This
+                # is the ONLY path that ever touches the lock file — the
+                # lease-hit branch above stays entirely lock-free.
+                fresh = self._mint_guarded(base_url, tenant, credential)
+                self._cache[key] = fresh
+                return fresh.token
             fresh = self._mint(base_url, tenant, credential)
             self._cache[key] = fresh
             self._write_lease(base_url, tenant, fresh)
-            event = "data_token_minted" if first_mint else "data_token_refresh"
-            _log.info(event, tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_host(base_url))
+            _log.info(
+                "data_token_refresh", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_host(base_url),
+            )
             return fresh.token
 
     def invalidate(self, base_url: str, tenant: str) -> None:
@@ -582,6 +673,106 @@ class DataTokenManager:
             # _read_lease's own fail-safe rejection rather than deleting
             # blind; missing file is simply done.
             pass
+
+    # ── Flock-guarded mint-on-miss (nexus-nnr26) ────────────────────────────
+
+    def _mint_guarded(self, base_url: str, tenant: str, credential: str) -> _CachedToken:
+        """Non-blocking flock-guarded double-check-then-mint-or-borrow.
+
+        Serializes concurrent cold-start racers for the SAME
+        ``(base_url, tenant)`` so exactly one racer mints a fresh token
+        while every other racer borrows the winner's published lease
+        instead of independently minting a competing one — see the module
+        docstring's "Concurrency, UPDATED (nexus-nnr26)" section for why
+        this closes a genuine correctness gap (deterministic hard-fail of
+        M>5 truly concurrent cold processes), not just an efficiency one.
+
+        Mirrors :func:`nexus.db.t1._lock_guarded_mint_or_borrow`'s
+        double-check-under-lock shape, but the WAIT is non-blocking
+        poll-then-re-read rather than a blocking ``LOCK_EX`` acquire: a
+        losing racer tries a non-blocking exclusive lock; on failure it
+        re-reads the lease file (the holder will have published while
+        still holding the lock) and returns the instant it appears,
+        without ever itself blocking on the lock. Bounded by
+        ``self._lock_wait_ceiling_seconds`` (measured against real
+        ``time.monotonic()``, never the injectable ``self._clock`` —
+        mirrors the t1 precedent's own deadline, nexus-by875): past the
+        ceiling this fails loud with :class:`DataTokenMintError` rather
+        than waiting indefinitely for a holder that never publishes (e.g.
+        its own mint failed).
+
+        Only ever called from :meth:`bearer_for`'s genuine-miss branch —
+        an existing fresh lease is borrowed WITHOUT ever reaching this
+        method, so the reuse happy path never touches the lock file.
+
+        If the lock file itself cannot be created/opened (e.g. a
+        read-only config dir), degrades to a direct unguarded mint —
+        same best-effort stance as :meth:`_write_lease`: the lock is an
+        optimization, the mint (which the credential otherwise allows)
+        must never be blocked by it.
+        """
+        config_dir = self._resolve_config_dir()
+        try:
+            config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            lock_path = _data_token_mint_lock_path(base_url, tenant, config_dir)
+            lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+        except OSError as exc:
+            _log.warning(
+                "data_token_mint_lock_unavailable", tenant=tenant, endpoint=_host(base_url), error=str(exc),
+            )
+            fresh = self._mint(base_url, tenant, credential)
+            self._write_lease(base_url, tenant, fresh)
+            _log.info(
+                "data_token_minted", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_host(base_url),
+            )
+            return fresh
+
+        deadline = time.monotonic() + self._lock_wait_ceiling_seconds
+        try:
+            while True:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # lifecycle-gate-allow: non-blocking mint-on-miss mutex (nexus-nnr26), not a lifecycle election
+                except BlockingIOError:
+                    # A sibling holds the lock — check whether it has
+                    # already published before waiting further.
+                    leased = self._read_lease(base_url, tenant)
+                    if leased is not None:
+                        _log.info(
+                            "data_token_lease_reused", tenant=tenant, endpoint=_host(base_url),
+                        )
+                        return leased
+                    if time.monotonic() >= deadline:
+                        raise DataTokenMintError(
+                            f"data-token mint-on-miss lock wait exceeded "
+                            f"{self._lock_wait_ceiling_seconds:.0f}s for "
+                            f"{_host(base_url)} tenant={tenant!r} — a sibling "
+                            "process holds the mint lock without publishing "
+                            "a lease (its own mint likely failed or is "
+                            "stuck); giving up rather than waiting "
+                            "indefinitely"
+                        )
+                    self._sleep(_MINT_LOCK_POLL_INTERVAL_S)
+                    continue
+                try:
+                    # Double-check under the lock: a racer may have won
+                    # and published between our last poll and acquiring
+                    # the lock ourselves.
+                    leased = self._read_lease(base_url, tenant)
+                    if leased is not None:
+                        _log.info(
+                            "data_token_lease_reused", tenant=tenant, endpoint=_host(base_url),
+                        )
+                        return leased
+                    fresh = self._mint(base_url, tenant, credential)
+                    self._write_lease(base_url, tenant, fresh)
+                    _log.info(
+                        "data_token_minted", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_host(base_url),
+                    )
+                    return fresh
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)  # lifecycle-gate-allow: release the mint-on-miss mutex (nexus-nnr26)
+        finally:
+            os.close(lock_fd)
 
     def _mint(self, base_url: str, tenant: str, credential: str) -> _CachedToken:
         url = base_url.rstrip("/") + "/v1/data-tokens/mint"

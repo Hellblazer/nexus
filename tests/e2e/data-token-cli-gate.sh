@@ -63,7 +63,14 @@
 #   8. Negative arm: wrong mint_tenant -> loud typed 403, never a silent
 #      fallback, never a hang; restore + one more round trip proves
 #      recovery.
-#   9. Non-vacuity + explicit verdict line + trap-based teardown.
+#   9. Genuine concurrency (nexus-nnr26): an 8-way backgrounded `&`
+#      fan-out of cold `nx` subprocesses, lease file removed first so
+#      every one is a real cold start. Asserts 0 subprocess failures and
+#      a bounded total mint count (<= 2) across all 8 — the flock-guarded
+#      mint-on-miss fast-follow this leg exists to prove, since every
+#      other leg above drives subprocesses strictly SEQUENTIALLY and so
+#      cannot exercise the race at all.
+#  10. Non-vacuity + explicit verdict line + trap-based teardown.
 #
 # Cost: ~5-15 min (engine binary + PG bundle + bge ONNX download fresh
 # unless DATA_TOKEN_GATE_CACHE seeds the model cache — see fresh-install-
@@ -158,7 +165,7 @@ _nx_poisoned() {
         "$BIN_DIR/nx" "$@"
 }
 
-echo "── 1/9 Build the wheel under test + virgin venv install ──"
+echo "── 1/10 Build the wheel under test + virgin venv install ──"
 ( cd "$REPO_ROOT" && uv build --wheel -o "$WORK/dist" ) >"$LOGS/build.log" 2>&1 \
     || _fail "wheel build failed (see $LOGS/build.log)"
 WHEEL="$(ls "$WORK"/dist/conexus-*.whl)"
@@ -168,7 +175,7 @@ uv pip install -q --python "$VENV/bin/python" "$WHEEL"
 BIN_DIR="$VENV/bin"
 _nx --version
 
-echo "── 2/9 nx init (local mode, virgin HOME, scrubbed env) ──"
+echo "── 2/10 nx init (local mode, virgin HOME, scrubbed env) ──"
 _nx init -y --no-autostart 2>&1 | tee "$LOGS/init.log"
 grep -Eq "the service backend is serving" "$LOGS/init.log" \
     || _fail "init did not confirm a serving backend"
@@ -178,7 +185,7 @@ if [ -n "${DATA_TOKEN_GATE_CACHE:-}" ] && [ -d "$HOME_DIR/.cache/nexus" ]; then
     cp -R "$HOME_DIR/.cache/nexus" "$DATA_TOKEN_GATE_CACHE/nexus" 2>/dev/null || true
 fi
 
-echo "── 3/9 issue a scope=mint-locked credential bound to tenant 'gate-dtok' ──"
+echo "── 3/10 issue a scope=mint-locked credential bound to tenant 'gate-dtok' ──"
 # nexus-ssqk9 tenant-asymmetric shape: "gate-dtok" is deliberately NOT
 # "default" — every Http*Store the CLI constructs defaults its own tenant
 # kwarg to "default", so mint_tenant (leg 4) is what makes the mint BODY
@@ -203,7 +210,7 @@ grep -q "^Tenant: gate-dtok$" "$WORK/issue.out" \
 MINT_LOCKED_TOKEN="$(sed -n '/^Token (shown once/{n;p;}' "$WORK/issue.out")"
 [ -n "$MINT_LOCKED_TOKEN" ] || _fail "could not extract the issued mint-locked token"
 
-echo "── 4/9 nx config set mint_token / mint_tenant — masking assertions ──"
+echo "── 4/10 nx config set mint_token / mint_tenant — masking assertions ──"
 _nx config set mint_token "$MINT_LOCKED_TOKEN" >"$LOGS/config-set-token.log" 2>&1 \
     || _fail "config set mint_token failed"
 _nx config set mint_tenant gate-dtok >"$LOGS/config-set-tenant.log" 2>&1 \
@@ -227,7 +234,7 @@ grep -Eq "mint_token +.*\*\*\*" "$LOGS/config-list.log" \
 grep -Eq "mint_tenant +gate-dtok" "$LOGS/config-list.log" \
     || _fail "nx config list did not show mint_tenant unmasked as 'gate-dtok'"
 
-echo "── 5/9 store put + search round trip — self-minted data token ONLY ──"
+echo "── 5/10 store put + search round trip — self-minted data token ONLY ──"
 # NX_SERVICE_TOKEN is poisoned for these two calls (see _nx_poisoned()'s
 # header comment for why this is the strong proof, not the weak one). A
 # pass here is only possible via nexus.db.data_token.DataTokenManager
@@ -255,7 +262,7 @@ grep -q "data_token_minted" "$LOGS/store-put.stderr.log" \
 grep -q "data_token_mint_failed" "$LOGS/store-put.stderr.log" \
     && _fail "store put logged a data_token_mint_failed event despite the round trip reporting success — investigate before trusting this leg"
 
-echo "── 6/9 nx doctor: mint check green, live round trip + TTL ──"
+echo "── 6/10 nx doctor: mint check green, live round trip + TTL ──"
 # Runs UNPOISONED (_nx, not _nx_poisoned) — see _nx_poisoned()'s header
 # comment: _check_mint_token() never attempts the static/lease token at
 # all, so poisoning here would only risk failing doctor's UNRELATED
@@ -286,7 +293,7 @@ _DOCTOR_TTL_RE='data token via .+\(granted TTL [0-9.]+s\)'
 [[ "$DOCTOR_MINT_LINE" == *"✓"* ]] \
     || _fail "doctor's mint check line is not ok=True (got: $DOCTOR_MINT_LINE)"
 
-echo "── 7/9 cross-process lease reuse (nexus-9c7t9) ──"
+echo "── 7/10 cross-process lease reuse (nexus-9c7t9) ──"
 # Leg 5 (store put) minted and published the cross-process lease file for
 # (base_url, tenant="default"). Leg 6's `nx doctor` above is itself a
 # FRESH subprocess with an EMPTY in-process cache — its own mint check
@@ -324,7 +331,7 @@ fi
 grep -q "data_token_lease_reused" "$LOGS/second-search.stderr.log" \
     || _fail "second search's stderr shows no data_token_lease_reused event — the cross-process borrow was not exercised (see $LOGS/second-search.stderr.log)"
 
-echo "── 8/9 residue discipline (nexus-lgiqw) — at the CLI-subprocess granularity ──"
+echo "── 8/10 residue discipline (nexus-lgiqw) — at the CLI-subprocess granularity ──"
 # HISTORY, updated for nexus-9c7t9: before the cross-process lease-file
 # cache (leg 7, above), EVERY `nx <cmd>` invocation in this script minted
 # its OWN data token — store put, search, doctor, and every subsequent
@@ -361,7 +368,7 @@ STORE_PUT_REFRESH_COUNT="$(grep -c "data_token_refresh" "$LOGS/store-put.stderr.
 [ "$STORE_PUT_REFRESH_COUNT" = "0" ] \
     || _fail "store put logged $STORE_PUT_REFRESH_COUNT unexpected data_token_refresh event(s) — a fresh 3600s-TTL token should never need refreshing within one short-lived CLI process"
 
-echo "── 9/9 negative arm: wrong mint_tenant -> loud 403, then recovery ──"
+echo "── 9/10 negative arm: wrong mint_tenant -> loud 403, then recovery ──"
 # nexus-9c7t9: a FRESH, unexpired lease for (base_url, tenant="default")
 # already exists at this point (leg 7 proved it) — without removing it, a
 # poisoned search below would silently BORROW that valid lease instead of
@@ -400,13 +407,66 @@ _nx_poisoned search "self-minted data token round trip" \
 grep -q "dtok-gate-sentinel" "$LOGS/recovery.log" \
     || _fail "recovery round trip did not return the sentinel"
 
+echo "── 10/10 genuine concurrency: 8-way fan-out, bounded mint count (nexus-nnr26) ──"
+# nexus-nnr26: a scripted `&` fan-out of cold `nx` subprocesses previously
+# deterministically hard-failed the excess beyond MintRateLimiter's
+# burst=5 — the client's own mint retry (3 attempts, Retry-After capped
+# at 15s, ~30-60s total) cannot bridge the server's 1/min refill window.
+# The flock-guarded mint-on-miss (this bead,
+# nexus.db.data_token.DataTokenManager._mint_guarded) must converge
+# concurrent cold-start racers on ONE (or a small, bounded few) mint
+# instead of one hard-failure per excess process. Force a genuine cold
+# start for every subprocess: no lease file, no per-process cache (each
+# `nx` invocation is a fresh interpreter with an empty in-process cache
+# by construction — the real thing this leg needs to prove is that they
+# do not ALSO all miss the cross-process lease file simultaneously).
+rm -f "$HOME_DIR"/.config/nexus/data_token_lease.* \
+    || _fail "could not remove the lease file ahead of the concurrency leg"
+_nx config set mint_tenant gate-dtok >"$LOGS/config-set-concurrency.log" 2>&1 \
+    || _fail "config set mint_tenant gate-dtok (concurrency leg setup) failed"
+
+FANOUT_N=8
+FANOUT_PIDS=()
+for i in $(seq 1 "$FANOUT_N"); do
+    _nx_poisoned search "self-minted data token round trip" \
+        >"$LOGS/fanout-$i.log" 2>"$LOGS/fanout-$i.stderr.log" &
+    FANOUT_PIDS+=("$!")
+done
+
+FANOUT_FAILURES=0
+for pid in "${FANOUT_PIDS[@]}"; do
+    wait "$pid" || FANOUT_FAILURES=$((FANOUT_FAILURES + 1))
+done
+[ "$FANOUT_FAILURES" -eq 0 ] \
+    || _fail "$FANOUT_FAILURES of $FANOUT_N concurrent nx invocations failed — flock-guarded mint-on-miss did not converge the fan-out (nexus-nnr26 regression)"
+
+# Non-vacuity (bead requirement): each leg's own log must exist, be
+# non-empty, and actually carry the round-trip's result — a fan-out that
+# silently didn't launch (e.g. a shell scripting bug dropping the `&`)
+# would otherwise leave FANOUT_FAILURES=0 and FANOUT_MINT_COUNT=0 and
+# pass vacuously.
+FANOUT_MINT_COUNT=0
+for i in $(seq 1 "$FANOUT_N"); do
+    [ -s "$LOGS/fanout-$i.log" ] \
+        || _fail "fan-out leg $i's stdout log is empty or missing — the concurrent invocation may not have actually run"
+    grep -q "dtok-gate-sentinel" "$LOGS/fanout-$i.log" \
+        || _fail "fan-out leg $i did not return the sentinel (see $LOGS/fanout-$i.log)"
+    n="$(grep -c "data_token_minted" "$LOGS/fanout-$i.stderr.log" || true)"
+    FANOUT_MINT_COUNT=$((FANOUT_MINT_COUNT + n))
+done
+[ "$FANOUT_MINT_COUNT" -ge 1 ] \
+    || _fail "the 8-way concurrent fan-out logged ZERO data_token_minted events across all legs — the cold-start setup above (lease removal) likely did not take effect, proving nothing"
+[ "$FANOUT_MINT_COUNT" -le 2 ] \
+    || _fail "the 8-way concurrent fan-out minted $FANOUT_MINT_COUNT times (expected <= 2) — flock-guarded mint-on-miss is not converging concurrent cold-start racers (nexus-nnr26 regression)"
+echo "  fan-out: $FANOUT_N/$FANOUT_N succeeded, $FANOUT_MINT_COUNT total mint(s)"
+
 echo "── non-vacuity ──"
 # issue.log (stderr-only capture of `nx service token issue`) is
 # EXPECTED empty on success — it is not a useful non-vacuity signal for
 # that leg, which already has its own explicit assertion above (the
 # "^Tenant: gate-dtok$" grep against $WORK/issue.out). Check issue.out
 # here instead, from the directory it actually lands in.
-LEGS_TO_CHECK="build.log init.log config-set-token.log store-put.log store-put.stderr.log search.log doctor.log negative.combined.log recovery.log"
+LEGS_TO_CHECK="build.log init.log config-set-token.log store-put.log store-put.stderr.log search.log doctor.log negative.combined.log recovery.log fanout-1.log fanout-1.stderr.log"
 for f in $LEGS_TO_CHECK; do
     [ -s "$LOGS/$f" ] || _fail "leg log $f is empty — a journey leg silently skipped"
 done
