@@ -87,12 +87,9 @@ public final class NexusService {
     private final TokenStore tokenStore;
     private final TokenCache tokenCache;
 
-    /** nexus-b878d: async rekey jobs; its pool is shut down in {@link #stop()}. */
-    private final dev.nexus.service.http.RekeyJobs rekeyJobs;
-
     /**
      * nexus-tyxnh: owns the post-commit purge-trash VACUUM executor; shut down in
-     * {@link #stop()} alongside {@code sweepScheduler} and {@code rekeyJobs}.
+     * {@link #stop()} alongside {@code sweepScheduler}.
      */
     private final CatalogRepository catalogRepo;
 
@@ -315,15 +312,11 @@ public final class NexusService {
         chashCtx.getFilters().addAll(authFilter);
 
         // /v1/remap/* — chash_remap endpoints (RDR-186 nexus-146xx.4: wire re-id
-        // map write-through + per-leg clear + live membership counts) + the
-        // RDR-180 per-tenant full-digest rekey (nexus-jxizy.6)
-        // The rekey is submitted and polled rather than awaited (nexus-b878d):
-        // synchronously it outlived the tls sidecar's ~120s proxy_read_timeout
-        // and 504'd while its transaction went on to commit.
-        this.rekeyJobs = new dev.nexus.service.http.RekeyJobs(
-                new dev.nexus.service.db.RekeyOps(tenantScope)::rekey);
-        var remapCtx = server.createContext("/v1/remap",
-                new RemapHandler(remapRepo, rekeyJobs));
+        // map write-through + per-leg clear + live membership counts). The
+        // RDR-180 per-tenant full-digest rekey (nexus-jxizy.6/nexus-b878d) was
+        // RETIRED with nexus.chash_alias (nexus-lgdel.l1) — see RemapHandler's
+        // class javadoc.
+        var remapCtx = server.createContext("/v1/remap", new RemapHandler(remapRepo));
         remapCtx.getFilters().addAll(authFilter);
 
         // /v1/staging/* — RDR-180 land-then-transform (nexus-jxizy.10.4):
@@ -455,11 +448,10 @@ public final class NexusService {
         log.info("event=service_started port={}", getPort());
     }
 
-    /** Stop the HTTP server, TTL sweep scheduler, rekey job pool, and purge-trash
-     *  VACUUM executor immediately. */
+    /** Stop the HTTP server, TTL sweep scheduler, and purge-trash VACUUM
+     *  executor immediately. */
     public void stop() {
         sweepScheduler.shutdownNow();
-        rekeyJobs.close();
         catalogRepo.close();
         server.stop(0);
         log.info("event=service_stopped");

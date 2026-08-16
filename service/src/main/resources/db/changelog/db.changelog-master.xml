@@ -672,6 +672,22 @@
          D1 trace. -->
     <include file="db/changelog/taxonomy-009-assign-source-collection.xml"/>
 
+    <!-- nexus-lgdel.l1 (epic nexus-lgdel, T2 nexus/plan-legacy-retirement-
+         2026-08-16) — THE DELETE: nexus.chash_alias DROPPED, its two
+         remaining table dependents (nexus.frecency, nexus.relevance_log)
+         lose their legacy-width rows plus a structural CHECK preventing
+         regrowth, nexus.remap_membership loses its alias-chaining join, and
+         nexus.chash_old_bytes(text) is dropped. Placed after
+         taxonomy-009-assign-source-collection.xml (current tail) and before
+         the grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention (D0.1; see catalog-031's / telemetry-004's /
+         aspects-003's / plans-002's / taxonomy-008's / catalog-032's /
+         remap-003's / taxonomy-009's own <include> comments for the
+         identical reasoning). See legacy-001-drop-chash-alias.xml's own
+         header for the full seven-changeset trace and the ROLLBACK
+         ORDERING derivation. -->
+    <include file="db/changelog/legacy-001-drop-chash-alias.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

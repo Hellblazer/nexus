@@ -263,8 +263,9 @@ class PgVectorServingContractTest {
         // used to be exactly that shape). Post-flip ONE strict tier: the full
         // 64-hex digest IS the canonical id — proved accepted by
         // upsertChunks_servesFromPgvector above — and a bare 32-char value is
-        // a legacy reference that must resolve through chash_alias, never
-        // accepted fresh here. This is the NAMED regression gate for that
+        // a legacy reference with no resolution route left (nexus-lgdel.l1:
+        // chash_alias is retired) — never accepted fresh here. This is the
+        // NAMED regression gate for that
         // collapse (bead nexus-jxizy.7): it now proves the REJECTION of the
         // old tolerated shape.
         var resp = post("/v1/vectors/upsert-chunks", TOKEN_A, Map.of(
@@ -572,70 +573,12 @@ class PgVectorServingContractTest {
             .isEqualTo(503);
     }
 
-    @Test
-    @Order(90)
-    void search_legacyWindowRow_servedNotRejected() throws Exception {
-        // nexus-p78a0 rehearsal catch (run 3): in the auto-converge window —
-        // cohort engine booted (bytea conversion applied), chash-rekey rung
-        // NOT yet run — every pre-existing chunk carries a 16-byte legacy
-        // key. enrichSearchRows's hard 64-only guard 422'd the WHOLE search,
-        // making an un-rekeyed store unreadable. The window contract is
-        // degrade-per-row: the row is served with its legacy 32-hex id; the
-        // span still derives from metadata chunk_text_hash (full 64-hex in
-        // every era). Own collection so the ordered fixtures stay untouched.
-        String colLegacy   = "knowledge__p4alegacy__voyage-context-3__v1";
-        String legacyHex32 = "f2afdc6c0ebe5cf2fff0c99f6411ed36";
-        String fullHex64   = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        StringBuilder vecB = new StringBuilder("[1");
-        for (int i = 1; i < 1024; i++) vecB.append(",0");
-        vecB.append("]");
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            // A real converted store has its collection row (created by the
-            // pre-cohort engine) — the chunks (tenant, collection) FK needs it.
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name, content_type) "
-                + "VALUES ('" + TENANT_A + "', '" + colLegacy + "', 'knowledge') "
-                + "ON CONFLICT (tenant_id, name) DO NOTHING");
-            // NOT VALID checks still enforce NEW writes: seeding a
-            // legacy-shaped row requires drop → seed → re-add NOT VALID
-            // (the RekeyOpsIntegrationTest choreography).
-            // RDR-191 Phase 4: chunks_1024_chash_octet_check collapsed into ONE
-            // chunks_chash_octet_check on the unified nexus.chunks table.
-            su.createStatement().execute(
-                "ALTER TABLE " + DimTables.CHUNKS_TABLE_NAME + " DROP CONSTRAINT chunks_chash_octet_check");
-            try (var ps = su.prepareStatement(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " "
-                + "(tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ", metadata) "
-                + "VALUES (?, ?, decode(?, 'hex'), ?, ?::vector, ?::jsonb)")) {
-                ps.setString(1, TENANT_A);
-                ps.setString(2, colLegacy);
-                ps.setString(3, legacyHex32);
-                ps.setString(4, "the tenant isolation policy guards every row");
-                ps.setString(5, vecB.toString());
-                ps.setString(6, "{\"chunk_text_hash\": \"" + fullHex64 + "\"}");
-                ps.executeUpdate();
-            }
-            su.createStatement().execute(
-                "ALTER TABLE " + DimTables.CHUNKS_TABLE_NAME + " ADD CONSTRAINT chunks_chash_octet_check "
-                + "CHECK (octet_length(chash) = 32) NOT VALID");
-        }
-
-        var resp = post("/v1/vectors/search", TOKEN_A, Map.of(
-            "query", Q, "collections", List.of(colLegacy), "n_results", 5));
-        assertThat(resp.statusCode())
-            .as("a legacy-keyed (un-rekeyed window) row must be SERVED, not 422 "
-                + "the whole search (got: %s)", resp.body())
-            .isEqualTo(200);
-        List<Map<String, Object>> rows = MAPPER.readValue(resp.body(), List.class);
-        assertThat(rows.stream().map(r -> r.get("id")).toList())
-            .as("the legacy row surfaces under its 32-hex id")
-            .contains(legacyHex32);
-        Map<String, Object> legacyRow = rows.stream()
-            .filter(r -> legacyHex32.equals(r.get("id"))).findFirst().orElseThrow();
-        assertThat(legacyRow.get("chash")).isEqualTo(legacyHex32);
-        assertThat(legacyRow.get("span"))
-            .as("span still derives from metadata chunk_text_hash (64-hex in every era)")
-            .isEqualTo("chash:" + fullHex64);
-    }
+    // nexus-lgdel.l1: Order(90) (search_legacyWindowRow_servedNotRejected)
+    // DELETED — its subject was enrichSearchRows' auto-converge-window
+    // degrade-per-row tolerance for legacy 16-byte-key rows (nexus-p78a0),
+    // which is RETIRED along with PgVectorRepository.isLegacyHex32 and the
+    // chash-rekey rung/RekeyOps that window existed to bridge. A legacy-
+    // keyed row now correctly 500s (IllegalStateException) rather than
+    // being served — that window cannot occur once nothing ever writes a
+    // legacy-width row and nothing rekeys one.
 }

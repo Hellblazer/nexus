@@ -222,57 +222,19 @@ class RawSqlGateTest {
             // table/schema — no jOOQ DSL form exists (no bind params, no fixed column set).
             "fetchShowConfig", Map.of(
                 ".fetch(\"SHOW CONFIG\")", 1))),
-        // RekeyOps.java: REMOVED (nexus-4okz4 increment 5) — rekey() itself
-        // never calls ctx.execute/fetch with a raw literal or "sql"-prefixed
-        // variable; its two raw-SQL-touching delegates (ChashSqlIdioms.
-        // refreshAliasStats' ANALYZE + privilege probe, ChashSqlIdioms.
-        // contentCollapseDelete's ctid/array_agg keeper DELETE) are METHOD
-        // CALLS into ChashSqlIdioms — their OWN single true home, already
-        // separately registered below — not literal statements inside
-        // rekey() itself. Under the OLD method-granular gate this entry
-        // sanctioned a region containing ZERO matchable statements (verified
-        // empirically: the RAW_EXECUTE pattern finds nothing anywhere in
-        // RekeyOps.java at this commit); under the new statement-granular
-        // gate a zero-statement registration is structurally identical to no
-        // registration at all, so per the same dead-entry-avoidance
-        // discipline that removed StagingHandler.java/ChashCensus.java/
-        // StagingPromoteOps.java's entries in increments 3-4, this one is
-        // removed too rather than kept as a no-op. The bead's own increment-
-        // 2 comment anticipated exactly this ("the method-level sanction
-        // remains because RawSqlGateTest is method-granular ... that
-        // tightening is a later increment") — this IS that later increment.
-        Map.entry("ChashSqlIdioms.java", Map.of(
-            // SANCTIONED RAW (rdr180-17): refreshAliasStats EXECUTES twice —
-            // a privilege-probe fetchOne (system catalogs: pg_class,
-            // has_table_privilege — outside codegen) and the ANALYZE itself
-            // (maintenance DDL, no jOOQ DSL form at all). Must run inside
-            // the caller's transaction so the planner sees that
-            // transaction's own uncommitted alias rows (F2: 101min vs 461s
-            // — see the method's own javadoc). Never serving-path.
-            "refreshAliasStats", Map.of(
-                ".fetchOne( \"SELECT current_setting('server_version_num')::int >= 170000 \" "
-                + "+ \" AND (pg_catalog.has_table_privilege('nexus.chash_alias', \" "
-                + "+ \" CASE WHEN current_setting('server_version_num')::int >= 170000 \" "
-                + "+ \" THEN 'MAINTAIN' ELSE 'SELECT' END) \" "
-                + "+ \" OR pg_catalog.pg_get_userbyid(\" "
-                + "+ \" (SELECT relowner FROM pg_class \" "
-                + "+ \" WHERE oid = 'nexus.chash_alias'::regclass)) = current_user)\" )", 1,
-                ".execute(\"ANALYZE nexus.chash_alias\")", 1),
-            // contentCollapseDelete: the ctid/array_agg ORDER BY
-            // keeper-selection idiom (an array-subscript of an ordered
-            // array_agg) has no jOOQ DSL form — genuinely raw SQL TEXT, but
-            // this method only BUILDS and RETURNS that string (a plain
-            // string-concatenation return statement); it never itself calls
-            // execute()/fetch(). The actual execution happens at RekeyOps'
-            // one call site (`ctx.execute(ChashSqlIdioms.
-            // contentCollapseDelete(d.name()))`), whose argument is a
-            // METHOD CALL, not a literal/"sql"-prefixed variable — outside
-            // this regex's detection shape at BOTH ends (definer and
-            // caller), the same structural blind spot as ChashRepository.
-            // lookup's PROBE_SQL above. EMPTY statement multiset for the
-            // same reason: registered so a future literal execute()/fetch()
-            // accidentally added to this method is caught immediately.
-            "contentCollapseDelete", Map.of())),
+        // RekeyOps.java + ChashSqlIdioms.java's refreshAliasStats/
+        // contentCollapseDelete entries: REMOVED at nexus-lgdel.l1. RekeyOps
+        // is deleted outright (its only caller, the client chash_rekey
+        // upgrade rung, is deleted in the same commit family). refreshAliasStats
+        // and contentCollapseDelete are deleted from ChashSqlIdioms.java —
+        // both existed solely to serve RekeyOps.rekey() and
+        // StagingPromoteOps.promoteCollection's now-deleted alias-stats
+        // refresh call; nothing in the surviving codebase calls either.
+        // Per the dead-entry-avoidance discipline already established here
+        // (increments 3-4 removed StagingHandler.java/ChashCensus.java/
+        // StagingPromoteOps.java's entries the same way), a registration
+        // for a deleted method is removed outright rather than kept as a
+        // no-op.
         Map.entry("SchemaMigrator.java", Map.of(
             // nexus-c4143 root fix: pg_constraint is a Postgres SYSTEM CATALOG (jOOQ
             // codegen only covers the nexus/t1 application schemas, no generated table

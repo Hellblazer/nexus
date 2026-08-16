@@ -225,8 +225,6 @@ public final class StagingHandler implements HttpHandler {
                     default            -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
                 }
             }
-        } catch (StagingPromoteOps.PromoteConflictException e) {
-            HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (StagingPromoteOps.PromotePreconditionException | IllegalArgumentException e) {
             HttpUtil.send(exchange, 400, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (Exception e) {

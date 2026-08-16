@@ -16,7 +16,6 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -128,8 +127,8 @@ public final class ChashHandler implements HttpHandler {
     /**
      * Parse an incoming chash through the type — the sole enforcement point
      * (RDR-180 one-strict-tier). 64 lowercase hex or a labeled 400; a 32-hex
-     * legacy reference gets the self-diagnosing alias-resolution hint from
-     * {@link Chash#fromHex}.
+     * legacy reference gets the self-diagnosing re-index-the-source hint
+     * from {@link Chash#fromHex} (nexus-lgdel.l1: no resolution route left).
      */
     private static Chash parseChash(String value, String label) {
         try {
@@ -148,28 +147,14 @@ public final class ChashHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"chash query param required\"}");
             return;
         }
-        // RDR-180 Item3 read seam: the canonical 64-hex parses through the
-        // type; anything else is treated as a LEGACY REFERENCE (pre-flip
-        // 32-hex chunk id, ETL-era external id) and resolved through the
-        // permanent chash_alias map. An unmapped legacy ref answers empty
-        // rows — same contract as an unknown canonical chash (the alias map
-        // is the collision-free resolver; a miss is dangling, not an error).
-        Chash chash;
-        if (raw.length() == Chash.HEX_LENGTH) {
-            chash = parseChash(raw, "'chash'");
-        } else {
-            chash = repo.resolveLegacyRef(tenant, raw);
-            if (chash == null) {
-                HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
-                    Map.of("rows", List.of(), "legacy_ref_unresolved", true)));
-                return;
-            }
-        }
+        // nexus-lgdel.l1: the LEGACY-REFERENCE dispatch (pre-flip 32-hex
+        // chunk id, ETL-era external id, resolved through the permanent
+        // chash_alias map — RDR-180 Item3 read seam) is RETIRED with the
+        // table. Only the canonical 64-hex form is accepted now; anything
+        // else is a labeled 400 (Chash.fromHex's own teaching hint names
+        // the remedy — re-index the source).
+        Chash chash = parseChash(raw, "'chash'");
         var rows = repo.lookup(tenant, chash);
-        // The canonical 64-hex is echoed so a LEGACY-ref caller learns the
-        // resolved identity (the client citation resolver then fetches the
-        // chunk by ITS canonical hash — RDR-180 Failure Modes: resolvers
-        // accept 32-hex via alias lookup and 64-hex directly).
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
             Map.of("rows", rows, "chash", chash.toHex())));
     }

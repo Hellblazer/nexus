@@ -10,7 +10,6 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_STATS;
-import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_CONFORMANCE_REPORT;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_DOC_COUNTS;
@@ -4806,12 +4805,18 @@ public final class CatalogRepository {
      * will reference. Mirrors {@code StagingPromoteOps.finalizeTenant}'s
      * OWN chash resolution exactly — direct 64-hex admission
      * ({@code StagingPromoteOps.java} {@code manifestResolvable}'s
-     * {@code sChash.likeRegex("^[0-9a-f]{64}$")} arm) plus {@code
-     * chash_alias} mapping ({@code CHASH_ALIAS.OLD_REF} join) — so guard
-     * and promote cannot diverge (coextensive-by-construction, the same
+     * {@code sChash.likeRegex("^[0-9a-f]{64}$")} arm), so guard and
+     * promote cannot diverge (coextensive-by-construction, the same
      * discipline {@code StagingPromoteOps} already applies to its own
      * target-collection gating query). Keep this pair in lockstep with
      * that resolution expression if either ever changes.
+     *
+     * <p>nexus-lgdel.l1: the {@code chash_alias}-mapping arm ({@code
+     * CHASH_ALIAS.OLD_REF} join) is REMOVED with the table — both this
+     * guard and {@code StagingPromoteOps.manifestResolvable} reduce to the
+     * direct 64-hex admission arm alone, in the same commit. This is the
+     * fail-loud behaviour intended: a staged manifest row keyed by a
+     * legacy ref no longer promotes silently.
      *
      * <p>REV 1's shape (a single {@code LEFT JOIN staging.document_chunks}
      * + {@code COALESCE}, function applied to the STAGING side) is
@@ -4825,22 +4830,19 @@ public final class CatalogRepository {
      * the flush chunk cap), so with the accompanying Liquibase index on
      * {@code staging.document_chunks(chash)} it plans as a genuine Nested
      * Loop Anti Join / Index Scan — empirically ~600x faster on the same
-     * fixture. Two independent {@code NOT EXISTS} clauses, not one LEFT
-     * JOIN + COALESCE: direct-hex and chash_alias arms are each proven
-     * live independently in {@code CatalogManifestSweepRepositoryTest}
-     * (falsified by deleting each clause in turn).
+     * fixture.
      */
     private static Condition stagingGuardCondition(DSLContext ctx, String tenant, Field<byte[]> candidateChash) {
+        // nexus-lgdel.l1: the chash_alias-mapping arm (a second independent
+        // NOT EXISTS over CHASH_ALIAS.OLD_REF) is REMOVED with the table —
+        // this guard and StagingPromoteOps.manifestResolvable both reduce to
+        // the direct 64-hex admission arm alone, in the same commit. `tenant`
+        // is now unused by this method but kept in the signature (its sole
+        // caller passes it already, and removing it is a needless diff).
         var s = DSL.table(DSL.name("staging", "document_chunks")).as("s");
         Field<String> sChash = DSL.field(DSL.name("s", "chash"), String.class);
-        var s2 = DSL.table(DSL.name("staging", "document_chunks")).as("s2");
-        Field<String> s2Chash = DSL.field(DSL.name("s2", "chash"), String.class);
         Field<String> hexCandidate = DSL.function("encode", String.class, candidateChash, DSL.val("hex"));
-        return DSL.notExists(ctx.selectOne().from(s).where(sChash.eq(hexCandidate)))
-            .and(DSL.notExists(ctx.selectOne().from(CHASH_ALIAS)
-                .join(s2).on(s2Chash.eq(CHASH_ALIAS.OLD_REF))
-                .where(CHASH_ALIAS.TENANT_ID.eq(tenant))
-                .and(CHASH_ALIAS.NEW_CHASH.eq(candidateChash))));
+        return DSL.notExists(ctx.selectOne().from(s).where(sChash.eq(hexCandidate)));
     }
 
     /**

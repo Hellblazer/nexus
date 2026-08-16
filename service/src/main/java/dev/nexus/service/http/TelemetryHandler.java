@@ -135,7 +135,11 @@ public final class TelemetryHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         var body = readBody(ex);
         String query      = requireString(body, "query");
-        String chunkId    = requireString(body, "chunk_id");
+        // nexus-lgdel.l1: the regrowth gap — with chash_alias and its
+        // coalesce-to-hex UPDATE cascades deleted, nothing else normalizes
+        // a non-canonical chunk_id written through this endpoint.
+        String chunkId    = dev.nexus.service.db.Chash.requireCanonical(
+            requireString(body, "chunk_id"), "'chunk_id'");
         String action     = requireString(body, "action");
         String sessionId  = optStr(body, "session_id");
         String collection = optStr(body, "collection");
@@ -397,7 +401,9 @@ public final class TelemetryHandler implements HttpHandler {
     private void handleFrecencyUpsert(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         var body = readBody(ex);
-        String chunkId       = requireString(body, "chunk_id");
+        // nexus-lgdel.l1: see handleRelevanceLog's identical comment above.
+        String chunkId       = dev.nexus.service.db.Chash.requireCanonical(
+            requireString(body, "chunk_id"), "'chunk_id'");
         String embeddedAt    = optStr(body, "embedded_at");
         int ttlDays          = optInt(body, "ttl_days", 0);
         double frecencyScore = body.get("frecency_score") != null
@@ -450,7 +456,9 @@ public final class TelemetryHandler implements HttpHandler {
             case "relevance_log" -> {
                 repo.importRelevanceRow(tenant,
                     requireString(body, "query"),
-                    requireString(body, "chunk_id"),
+                    // nexus-lgdel.l1: see handleRelevanceLog's identical comment.
+                    dev.nexus.service.db.Chash.requireCanonical(
+                        requireString(body, "chunk_id"), "'chunk_id'"),
                     optStr(body, "collection"),
                     requireString(body, "action"),
                     optStr(body, "session_id"),
@@ -515,7 +523,9 @@ public final class TelemetryHandler implements HttpHandler {
             case "frecency" -> {
                 Double frecScore = optDoubleNull(body, "frecency_score");
                 repo.upsertFrecency(tenant,
-                    requireString(body, "chunk_id"),
+                    // nexus-lgdel.l1: see handleRelevanceLog's identical comment.
+                    dev.nexus.service.db.Chash.requireCanonical(
+                        requireString(body, "chunk_id"), "'chunk_id'"),
                     optStr(body, "embedded_at"),
                     optInt(body, "ttl_days", 0),
                     frecScore != null ? frecScore : 0.0,

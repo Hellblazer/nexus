@@ -24,7 +24,8 @@ import java.util.Map;
  * along — no {@code ?::vector} casts, no {@code vectorLiteral()} strings.
  *
  * <p>The raw-SQL channel (string-built statements in {@code PgVectorRepository}
- * / {@code TaxonomyCentroidRepository} / {@code RekeyOps} / etc.) cannot use
+ * / {@code TaxonomyCentroidRepository} / etc.; {@code RekeyOps} was a former
+ * member here, deleted at nexus-lgdel.l1) cannot use
  * these typed {@code Field}/{@code Table} objects directly, but MUST consult
  * {@link #CHUNKS_TABLE_NAME} / {@link #CENTROIDS_TABLE_NAME} /
  * {@link #embeddingColumn(int)} for its table- and column-name strings

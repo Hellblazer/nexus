@@ -283,9 +283,10 @@ public final class RemapRepository {
 
     /**
      * RDR-194 D3: reject anything that is not the canonical 64-lowercase-hex
-     * form, with a teaching message naming BOTH named remedies for a caller
-     * that somehow still holds a non-canonical value — resolve a legacy
-     * 32-hex reference through {@code nexus.chash_alias} (RDR-180 Item6), or
+     * form, with a teaching message naming the remedy for a caller that
+     * somehow still holds a non-canonical value — re-index the source to
+     * mint a canonical 64-hex chash (nexus-lgdel.l1: the former {@code
+     * nexus.chash_alias} legacy-reference resolution route is retired), or
      * clear the unresolvable leg via {@code POST /v1/remap/clear_leg} — this
      * repository never silently truncates, pads, or widens to admit either.
      */
@@ -294,7 +295,7 @@ public final class RemapRepository {
             Chash.requireCanonical(newChash, "'new_chash'");
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException(e.getMessage()
-                + " — resolve a legacy 32-hex value through nexus.chash_alias, "
+                + " — re-index the source to mint a canonical 64-hex chash, "
                 + "or clear the unresolvable leg via POST /v1/remap/clear_leg");
         }
     }

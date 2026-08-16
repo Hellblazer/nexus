@@ -190,8 +190,9 @@ class CatalogHandlerManifestFkTest {
     @Test
     void manifestWrite_legacy32CharChash_rejected400() throws Exception {
         // THE INVERSION: a bare 32-hex value was the canonical accept pre-flip;
-        // it is now a legacy reference that must resolve through chash_alias,
-        // never accepted fresh at this boundary.
+        // it is now a legacy reference with no resolution route left
+        // (nexus-lgdel.l1: chash_alias is retired) — never accepted fresh at
+        // this boundary.
         CapturingExchange ex = post("/v1/catalog/manifest/write",
             "{\"doc_id\":\"5.1\",\"collection\":\"knowledge__fk__v1\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + "a".repeat(32) + "\"}]}");

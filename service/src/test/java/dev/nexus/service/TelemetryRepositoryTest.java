@@ -132,21 +132,21 @@ class TelemetryRepositoryTest {
     @Test @Order(1)
     void relevanceLog_logAndQuery_roundTrip() {
         long id = repo.logRelevance(TENANT_A,
-            "rdr research query", "chunk-001", "store_put", "sess-1", "code__nexus");
+            "rdr research query", "5af88918c554526b628794508eec9b6f8f6cbdaeff3e3523418293427fe44af7", "store_put", "sess-1", "code__nexus");
         assertThat(id).as("logRelevance must return a positive id").isPositive();
 
         var rows = repo.getRelevanceLog(TENANT_A, "rdr research query", "", "", "", 10);
         assertThat(rows).isNotEmpty();
         assertThat(rows.get(0).get("query")).isEqualTo("rdr research query");
-        assertThat(rows.get(0).get("chunk_id")).isEqualTo("chunk-001");
+        assertThat(rows.get(0).get("chunk_id")).isEqualTo("5af88918c554526b628794508eec9b6f8f6cbdaeff3e3523418293427fe44af7");
         assertThat(rows.get(0).get("action")).isEqualTo("store_put");
     }
 
     @Test @Order(2)
     void relevanceLog_batch_insertsMultipleRows() {
         var rows = List.of(
-            List.of("batch-query", "chunk-b1", "code__nexus", "catalog_link", "sess-b"),
-            List.of("batch-query", "chunk-b2", "code__nexus", "catalog_link", "sess-b"));
+            List.of("batch-query", "d916ae7569b9f26fc4008321dd68b201af3baed00e435d3dc591b9cfd49780f4", "code__nexus", "catalog_link", "sess-b"),
+            List.of("batch-query", "e9f8ad4c948fdd586c7342916db53e7919a1af834b5f020767e20bceb4044488", "code__nexus", "catalog_link", "sess-b"));
         int count = repo.logRelevanceBatch(TENANT_A, rows);
         assertThat(count).as("batch insert should return rows attempted").isGreaterThanOrEqualTo(0);
 
@@ -158,7 +158,7 @@ class TelemetryRepositoryTest {
     void relevanceLog_expire_deletesOldRows() {
         // logRelevance with future-dated import row (old timestamp)
         repo.importRelevanceRow(TENANT_A,
-            "ancient-query", "chunk-old", "rdr__nexus", "store_put", "sess-x",
+            "ancient-query", "9d4d036d88c303323847a0a02cdc07b66af3cb00d27688e7b53cc2b3f833c213", "rdr__nexus", "store_put", "sess-x",
             "2020-01-01T00:00:00Z");
 
         // expire with 30-day window eliminates the 2020 row
@@ -175,10 +175,10 @@ class TelemetryRepositoryTest {
         // THE HEADLINE FIDELITY TEST: seed an event with a specific past event-time,
         // import, assert PG has that EXACT timestamp — NOT migration-time.
         repo.importRelevanceRow(TENANT_A,
-            "fidelity-ts-query", "chunk-fid", "knowledge__nexus", "store_put", "sess-fid",
+            "fidelity-ts-query", "8342c2c98f368846ee9b8b0f2527b0d679d00abeecb82ffa42f8b83d720c6f9a", "knowledge__nexus", "store_put", "sess-fid",
             PAST_TS);
 
-        var rows = repo.getRelevanceLog(TENANT_A, "fidelity-ts-query", "chunk-fid", "", "", 5);
+        var rows = repo.getRelevanceLog(TENANT_A, "fidelity-ts-query", "8342c2c98f368846ee9b8b0f2527b0d679d00abeecb82ffa42f8b83d720c6f9a", "", "", 5);
         assertThat(rows).as("imported row must be retrievable").hasSize(1);
 
         String storedTs = (String) rows.get(0).get("timestamp");
@@ -201,11 +201,11 @@ class TelemetryRepositoryTest {
         // Import the same row twice — second import must be DO NOTHING
         for (int i = 0; i < 2; i++) {
             repo.importRelevanceRow(TENANT_A,
-                "idem-query", "chunk-idem", "code__nexus", "store_put", "sess-idem",
+                "idem-query", "10ad1275c8dee6835a6c01e0fcee40d6209ec5db86d4f1a111057b49dbf86a8a", "code__nexus", "store_put", "sess-idem",
                 "2024-03-01T12:00:00Z");
         }
         // Must have exactly 1 row, not 2
-        var rows = repo.getRelevanceLog(TENANT_A, "idem-query", "chunk-idem", "", "", 10);
+        var rows = repo.getRelevanceLog(TENANT_A, "idem-query", "10ad1275c8dee6835a6c01e0fcee40d6209ec5db86d4f1a111057b49dbf86a8a", "", "", 10);
         assertThat(rows).as("re-import must produce exactly 1 row (DO NOTHING)").hasSize(1);
     }
 
@@ -757,12 +757,12 @@ class TelemetryRepositoryTest {
 
     @Test @Order(12)
     void frecency_getFrecency_roundTrip() {
-        repo.upsertFrecency(TENANT_A, "chunk-frec-001",
+        repo.upsertFrecency(TENANT_A, "56ac933d343160c61ded6e852ae5fd5d02576a722b2a76b11e27b661a856ed7d",
             "2024-06-01T00:00:00Z", 90, 0.75, 3, "2024-09-01T00:00:00Z");
 
-        Optional<Map<String, Object>> result = repo.getFrecency(TENANT_A, "chunk-frec-001");
+        Optional<Map<String, Object>> result = repo.getFrecency(TENANT_A, "56ac933d343160c61ded6e852ae5fd5d02576a722b2a76b11e27b661a856ed7d");
         assertThat(result).as("getFrecency must return the upserted record").isPresent();
-        assertThat(result.get().get("chunk_id")).isEqualTo("chunk-frec-001");
+        assertThat(result.get().get("chunk_id")).isEqualTo("56ac933d343160c61ded6e852ae5fd5d02576a722b2a76b11e27b661a856ed7d");
         assertThat(((Number) result.get().get("ttl_days")).intValue()).isEqualTo(90);
         assertThat(((Number) result.get().get("frecency_score")).doubleValue()).isEqualTo(0.75);
         assertThat(((Number) result.get().get("miss_count")).intValue()).isEqualTo(3);
@@ -771,20 +771,20 @@ class TelemetryRepositoryTest {
     @Test @Order(13)
     void frecency_greatestNoClober_reImportWithStaleSrcDoesNotRollBackLiveValues() {
         // Step 1: insert an initial frecency record with low counters (simulating source SQLite)
-        repo.upsertFrecency(TENANT_A, "chunk-frec-greatest",
+        repo.upsertFrecency(TENANT_A, "327a4a832e256cb155e4b6f03535960645648c1b15f2deb3760d29ba69583588",
             "2024-01-01T00:00:00Z", 30, 0.50, 5, "2024-06-01T00:00:00Z");
 
         // Step 2: simulate live PG advancement (higher values = fresher data)
         // by upserting with higher values first
-        repo.upsertFrecency(TENANT_A, "chunk-frec-greatest",
+        repo.upsertFrecency(TENANT_A, "327a4a832e256cb155e4b6f03535960645648c1b15f2deb3760d29ba69583588",
             "2024-01-01T00:00:00Z", 30, 0.95, 20, "2026-01-01T00:00:00Z");
 
         // Step 3: re-import with the STALE source values (lower counters)
         // GREATEST logic must preserve the live PG values, not clobber with stale source
-        repo.upsertFrecency(TENANT_A, "chunk-frec-greatest",
+        repo.upsertFrecency(TENANT_A, "327a4a832e256cb155e4b6f03535960645648c1b15f2deb3760d29ba69583588",
             "2024-01-01T00:00:00Z", 30, 0.50, 5, "2024-06-01T00:00:00Z");
 
-        Optional<Map<String, Object>> result = repo.getFrecency(TENANT_A, "chunk-frec-greatest");
+        Optional<Map<String, Object>> result = repo.getFrecency(TENANT_A, "327a4a832e256cb155e4b6f03535960645648c1b15f2deb3760d29ba69583588");
         assertThat(result).isPresent();
         // GREATEST(0.50, 0.95) = 0.95  — stale source must NOT clobber live value
         assertThat(((Number) result.get().get("frecency_score")).doubleValue())
@@ -799,17 +799,17 @@ class TelemetryRepositoryTest {
     @Test @Order(14)
     void frecency_embeddedAt_leastPreservesOldestEmbedTime() {
         // embedded_at should use LEAST to keep the oldest (first-seen) embed time
-        repo.upsertFrecency(TENANT_A, "chunk-frec-embed",
+        repo.upsertFrecency(TENANT_A, "3115d480cb3cef4722d35d5608cf43e4ae6dae56c3eedafccbb1efa83dec6efb",
             "2023-01-01T00:00:00Z", 30, 0.1, 0, "2023-01-01T00:00:00Z");
 
         // Re-import with a newer embedded_at (from a re-index) — should keep oldest
-        repo.upsertFrecency(TENANT_A, "chunk-frec-embed",
+        repo.upsertFrecency(TENANT_A, "3115d480cb3cef4722d35d5608cf43e4ae6dae56c3eedafccbb1efa83dec6efb",
             "2025-01-01T00:00:00Z", 30, 0.5, 1, "2025-01-01T00:00:00Z");
 
         try (Connection conn = pg.createConnection("")) {
             conn.createStatement().execute("SET nexus.tenant = '" + TENANT_A + "'");
             var rs = conn.createStatement().executeQuery(
-                "SELECT embedded_at FROM nexus.frecency WHERE chunk_id='chunk-frec-embed'");
+                "SELECT embedded_at FROM nexus.frecency WHERE chunk_id='3115d480cb3cef4722d35d5608cf43e4ae6dae56c3eedafccbb1efa83dec6efb'");
             assertThat(rs.next()).isTrue();
             var stored = rs.getTimestamp("embedded_at").toInstant();
             // embedded_at must be the OLDEST value (2023-01-01)
@@ -854,7 +854,7 @@ class TelemetryRepositoryTest {
     void importRelevanceRow_blankTimestamp_throwsIllegalArgument() {
         assertThatThrownBy(() ->
             repo.importRelevanceRow(TENANT_A,
-                "strict-ts-query", "chunk-strict", "", "store_put", "",
+                "strict-ts-query", "1136fa322f1a275da617c6166be93366422c643fd285110960b04a2ac9f4d1a9", "", "store_put", "",
                 "" /* blank timestamp */))
             .as("importRelevanceRow with blank timestamp must throw (not silently stamp now())")
             .isInstanceOf(IllegalArgumentException.class)
@@ -865,7 +865,7 @@ class TelemetryRepositoryTest {
     void importRelevanceRow_malformedTimestamp_throwsIllegalArgument() {
         assertThatThrownBy(() ->
             repo.importRelevanceRow(TENANT_A,
-                "strict-ts-bad-query", "chunk-strict-bad", "", "store_put", "",
+                "strict-ts-bad-query", "39fc4e4e013b7b551ba82a35113fafde1db4229d408aacc08ffe7cedfb7d5388", "", "store_put", "",
                 "not-a-timestamp"))
             .as("importRelevanceRow with malformed timestamp must throw (not silently stamp now())")
             .isInstanceOf(IllegalArgumentException.class)
@@ -920,7 +920,7 @@ class TelemetryRepositoryTest {
         String ts = OffsetDateTime.now(ZoneOffset.UTC).toString();
         // First: inserts. Second: hits DO NOTHING → must return 0L not NPE.
         long id1 = repo.logRelevance(TENANT_A,
-            "dup-query-npe-test", "chunk-dup", "store_put", "sess-dup", "code__nexus");
+            "dup-query-npe-test", "67d2d37e469c8b913d88d2402a80b64df633cba75e35e84c706d8fc18207da41", "store_put", "sess-dup", "code__nexus");
         assertThat(id1).as("first insert must return positive id").isPositive();
 
         // To force the dedup index conflict we import the SAME row with a fixed timestamp
@@ -928,16 +928,16 @@ class TelemetryRepositoryTest {
         // Import twice with the same timestamp — second must DO NOTHING, not NPE.
         String fixedTs = "2025-03-15T09:00:00Z";
         repo.importRelevanceRow(TENANT_A,
-            "dup-import-npe", "chunk-dup2", "", "store_put", "sess-dup2", fixedTs);
+            "dup-import-npe", "ab9d8951cdfbeec5f0a40962e29af7fdaeac5aee4648c142364fbf9a17377ee8", "", "store_put", "sess-dup2", fixedTs);
         // Second identical import — the dedup index fires; must not throw
         assertThatCode(() ->
             repo.importRelevanceRow(TENANT_A,
-                "dup-import-npe", "chunk-dup2", "", "store_put", "sess-dup2", fixedTs))
+                "dup-import-npe", "ab9d8951cdfbeec5f0a40962e29af7fdaeac5aee4648c142364fbf9a17377ee8", "", "store_put", "sess-dup2", fixedTs))
             .as("second identical import must not throw (DO NOTHING)")
             .doesNotThrowAnyException();
 
         // Exactly one row
-        var rows = repo.getRelevanceLog(TENANT_A, "dup-import-npe", "chunk-dup2", "", "", 10);
+        var rows = repo.getRelevanceLog(TENANT_A, "dup-import-npe", "ab9d8951cdfbeec5f0a40962e29af7fdaeac5aee4648c142364fbf9a17377ee8", "", "", 10);
         assertThat(rows).as("exactly one row after double import").hasSize(1);
     }
 
@@ -984,13 +984,13 @@ class TelemetryRepositoryTest {
     @Test @Order(26)
     void probeIds_relevanceLog_returnsPresentSubsetVerbatim() {
         repo.importRelevanceRow(TENANT_A,
-            "probe-query", "probe-chunk-1", "code__nexus", "store_put", "probe-sess",
+            "probe-query", "6fd174bc3360e133e6c3f3352f4046fd3067ca59bda00c47537acc31f6cec1e7", "code__nexus", "store_put", "probe-sess",
             "2025-05-01T00:00:00Z");
 
         var presentKey = List.<Object>of(
-            "probe-query", "probe-chunk-1", "store_put", "probe-sess", "2025-05-01T00:00:00Z");
+            "probe-query", "6fd174bc3360e133e6c3f3352f4046fd3067ca59bda00c47537acc31f6cec1e7", "store_put", "probe-sess", "2025-05-01T00:00:00Z");
         var missingKey = List.<Object>of(
-            "probe-query", "probe-chunk-NEVER", "store_put", "probe-sess", "2025-05-01T00:00:00Z");
+            "probe-query", "c09ad640db4ced088e63b76e3297dfbe4c087aa755a7fab60acfe14ac983d370", "store_put", "probe-sess", "2025-05-01T00:00:00Z");
 
         var present = repo.probeIds(TENANT_A, "relevance_log", List.of(presentKey, missingKey));
 
@@ -1056,10 +1056,10 @@ class TelemetryRepositoryTest {
     @Test @Order(33)
     void probeIds_frecency_returnsPresentSubset() {
         repo.upsertFrecency(TENANT_A,
-            "probe-chunk-frecency", "2025-05-06T00:00:00Z", 30, 1.5, 2, "2025-05-06T00:00:00Z");
+            "f6a5377eb8124396725a7c2146f6b3cc96f3a4bbda0157b2c26d366383e6ad24", "2025-05-06T00:00:00Z", 30, 1.5, 2, "2025-05-06T00:00:00Z");
 
-        var presentKey = List.<Object>of("probe-chunk-frecency");
-        var missingKey = List.<Object>of("probe-chunk-frecency-NEVER");
+        var presentKey = List.<Object>of("f6a5377eb8124396725a7c2146f6b3cc96f3a4bbda0157b2c26d366383e6ad24");
+        var missingKey = List.<Object>of("2a4bb2a4cf738d5be52f827a0f2bbe0a6afc9996cd7ca3004e5ce8bbfef05597");
 
         var present = repo.probeIds(TENANT_A, "frecency", List.of(presentKey, missingKey));
 
@@ -1069,11 +1069,11 @@ class TelemetryRepositoryTest {
     @Test @Order(34)
     void probeIds_tenantScoped_secondTenantSeesNothing() {
         repo.importRelevanceRow(TENANT_A,
-            "tenant-scoped-query", "tenant-scoped-chunk", "code__nexus", "store_put", "sess-scoped",
+            "tenant-scoped-query", "2303fef71cc64ce7c11e50020863a4be3b93b58ff8d800054deb61246ae74ef0", "code__nexus", "store_put", "sess-scoped",
             "2025-05-07T00:00:00Z");
 
         var key = List.<Object>of(
-            "tenant-scoped-query", "tenant-scoped-chunk", "store_put", "sess-scoped",
+            "tenant-scoped-query", "2303fef71cc64ce7c11e50020863a4be3b93b58ff8d800054deb61246ae74ef0", "store_put", "sess-scoped",
             "2025-05-07T00:00:00Z");
 
         var presentForOwner = repo.probeIds(TENANT_A, "relevance_log", List.of(key));
@@ -1096,11 +1096,11 @@ class TelemetryRepositoryTest {
         // is the CALLER's form, never the stored rendering). This is the
         // exact drift class the design exists to defuse; pin it.
         repo.importRelevanceRow(TENANT_A,
-            "instant-eq-query", "instant-eq-chunk", "code__nexus", "store_put", "sess-eq",
+            "instant-eq-query", "0c71a73c048a98d48a0f9aa8ba2ab246cf6babd522cb777120c22be1c2ff5695", "code__nexus", "store_put", "sess-eq",
             "2025-05-08T12:30:00Z");
 
         var offsetFormKey = List.<Object>of(
-            "instant-eq-query", "instant-eq-chunk", "store_put", "sess-eq",
+            "instant-eq-query", "0c71a73c048a98d48a0f9aa8ba2ab246cf6babd522cb777120c22be1c2ff5695", "store_put", "sess-eq",
             "2025-05-08T12:30:00+00:00");
 
         var present = repo.probeIds(TENANT_A, "relevance_log", List.of(offsetFormKey));
@@ -1161,19 +1161,19 @@ class TelemetryRepositoryTest {
     @Test @Order(40)
     void importBatch_relevanceLog_multiRow_insertsAll_doNothingOnReimport() {
         int n = repo.importBatch(TENANT_A, "relevance_log", List.of(
-            Map.of("query", "batch-rl-q0", "chunk_id", "batch-rl-c0", "collection", "knowledge__nexus",
+            Map.of("query", "batch-rl-q0", "chunk_id", "1d39101ad2293ca5be9ad805a05eee36c73683aade61ee5046cbfe1e76930457", "collection", "knowledge__nexus",
                    "action", "store_put", "session_id", "sess-0", "timestamp", PAST_TS),
-            Map.of("query", "batch-rl-q1", "chunk_id", "batch-rl-c1", "collection", "knowledge__nexus",
+            Map.of("query", "batch-rl-q1", "chunk_id", "42a0f8f6dc21be1ce7856086f5774dfe0182334bcac5e991418aefb31ecb4820", "collection", "knowledge__nexus",
                    "action", "store_put", "session_id", "sess-1", "timestamp", PAST_TS)));
         assertThat(n).isEqualTo(2);
-        assertThat(repo.getRelevanceLog(TENANT_A, "batch-rl-q0", "batch-rl-c0", "", "", 5)).hasSize(1);
-        assertThat(repo.getRelevanceLog(TENANT_A, "batch-rl-q1", "batch-rl-c1", "", "", 5)).hasSize(1);
+        assertThat(repo.getRelevanceLog(TENANT_A, "batch-rl-q0", "1d39101ad2293ca5be9ad805a05eee36c73683aade61ee5046cbfe1e76930457", "", "", 5)).hasSize(1);
+        assertThat(repo.getRelevanceLog(TENANT_A, "batch-rl-q1", "42a0f8f6dc21be1ce7856086f5774dfe0182334bcac5e991418aefb31ecb4820", "", "", 5)).hasSize(1);
 
         // Re-import (same rows) — DO NOTHING must not duplicate.
         repo.importBatch(TENANT_A, "relevance_log", List.of(
-            Map.of("query", "batch-rl-q0", "chunk_id", "batch-rl-c0", "collection", "knowledge__nexus",
+            Map.of("query", "batch-rl-q0", "chunk_id", "1d39101ad2293ca5be9ad805a05eee36c73683aade61ee5046cbfe1e76930457", "collection", "knowledge__nexus",
                    "action", "store_put", "session_id", "sess-0", "timestamp", PAST_TS)));
-        assertThat(repo.getRelevanceLog(TENANT_A, "batch-rl-q0", "batch-rl-c0", "", "", 5)).hasSize(1);
+        assertThat(repo.getRelevanceLog(TENANT_A, "batch-rl-q0", "1d39101ad2293ca5be9ad805a05eee36c73683aade61ee5046cbfe1e76930457", "", "", 5)).hasSize(1);
     }
 
     @Test @Order(41)
@@ -1182,25 +1182,25 @@ class TelemetryRepositoryTest {
         // since a single multi-row ON CONFLICT DO UPDATE cannot affect the same
         // row twice.
         int n = repo.importBatch(TENANT_A, "frecency", List.of(
-            Map.of("chunk_id", "batch-frec-1", "embedded_at", "2024-01-01T00:00:00Z",
+            Map.of("chunk_id", "9c4bcf15a73ec0b5a38f89c7fff6aba6c67e031f42ae51957a3399eb9e6e95e4", "embedded_at", "2024-01-01T00:00:00Z",
                    "ttl_days", 30, "frecency_score", 0.3, "miss_count", 2,
                    "last_hit_at", "2024-02-01T00:00:00Z"),
-            Map.of("chunk_id", "batch-frec-1", "embedded_at", "2024-01-01T00:00:00Z",
+            Map.of("chunk_id", "9c4bcf15a73ec0b5a38f89c7fff6aba6c67e031f42ae51957a3399eb9e6e95e4", "embedded_at", "2024-01-01T00:00:00Z",
                    "ttl_days", 30, "frecency_score", 0.8, "miss_count", 9,
                    "last_hit_at", "2024-03-01T00:00:00Z")));
         assertThat(n).as("rows submitted (contract unchanged), not rows landed").isEqualTo(2);
 
-        var got = repo.getFrecency(TENANT_A, "batch-frec-1");
+        var got = repo.getFrecency(TENANT_A, "9c4bcf15a73ec0b5a38f89c7fff6aba6c67e031f42ae51957a3399eb9e6e95e4");
         assertThat(got).isPresent();
         assertThat(((Number) got.get().get("frecency_score")).doubleValue()).isEqualTo(0.8);
         assertThat(((Number) got.get().get("miss_count")).intValue()).isEqualTo(9);
 
         // Re-import with STALE (lower) values — GREATEST must not roll back live values.
         repo.importBatch(TENANT_A, "frecency", List.of(
-            Map.of("chunk_id", "batch-frec-1", "embedded_at", "2024-01-01T00:00:00Z",
+            Map.of("chunk_id", "9c4bcf15a73ec0b5a38f89c7fff6aba6c67e031f42ae51957a3399eb9e6e95e4", "embedded_at", "2024-01-01T00:00:00Z",
                    "ttl_days", 30, "frecency_score", 0.1, "miss_count", 1,
                    "last_hit_at", "2024-01-15T00:00:00Z")));
-        var afterStale = repo.getFrecency(TENANT_A, "batch-frec-1");
+        var afterStale = repo.getFrecency(TENANT_A, "9c4bcf15a73ec0b5a38f89c7fff6aba6c67e031f42ae51957a3399eb9e6e95e4");
         assertThat(((Number) afterStale.get().get("frecency_score")).doubleValue())
             .as("GREATEST: must not roll back to stale 0.1").isEqualTo(0.8);
         assertThat(((Number) afterStale.get().get("miss_count")).intValue())
@@ -1236,11 +1236,11 @@ class TelemetryRepositoryTest {
     void expireRelevanceLog_bumpsCumulativeRetentionMarker() {
         String tenant = "ret-marker-" + System.nanoTime();
         // Two old rows (past any horizon) + one fresh row.
-        repo.importRelevanceRow(tenant, "q1", "c1", "knowledge__x", "click", "s",
+        repo.importRelevanceRow(tenant, "q1", "9f080d6cb0d587442a488f6d2a8d532d67e704e26f0340bf7f4fa1102ec20830", "knowledge__x", "click", "s",
             "2020-01-01T00:00:00Z");
-        repo.importRelevanceRow(tenant, "q2", "c2", "knowledge__x", "click", "s",
+        repo.importRelevanceRow(tenant, "q2", "acf420a9873c4555aa28ccb6fc5672b0f959a898e4dd403f36f3fe87ca8d975b", "knowledge__x", "click", "s",
             "2020-01-02T00:00:00Z");
-        repo.logRelevance(tenant, "q3", "c3", "click", "s", "knowledge__x");
+        repo.logRelevance(tenant, "q3", "a1a64503f17898123d9e06b42e63993a4c24ec4088d5997a443c94e0405c2db1", "click", "s", "knowledge__x");
 
         int deleted = repo.expireRelevanceLog(tenant, 90);
         org.assertj.core.api.Assertions.assertThat(deleted).isEqualTo(2);
@@ -1261,7 +1261,7 @@ class TelemetryRepositoryTest {
     void retentionMarkers_areTenantIsolated() {
         String a = "ret-iso-a-" + System.nanoTime();
         String b = "ret-iso-b-" + System.nanoTime();
-        repo.importRelevanceRow(a, "q", "c", "knowledge__x", "click", "s",
+        repo.importRelevanceRow(a, "q", "607b637b441b68381cc266868179525c9a1648148eecabd42dc70a29e6740257", "knowledge__x", "click", "s",
             "2020-01-01T00:00:00Z");
         repo.expireRelevanceLog(a, 90);
         org.assertj.core.api.Assertions.assertThat(

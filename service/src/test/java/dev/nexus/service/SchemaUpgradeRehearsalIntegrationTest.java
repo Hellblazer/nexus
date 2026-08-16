@@ -368,6 +368,8 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   fk-004-0-reconcile-precount nexus-iq0qr
                 //   fk-004-1-reconcile nexus-o8dil.49
                 //   catalog-032-1 nexus-tk070.p1
+                //   legacy-001-1 nexus-lgdel.l1
+                //   legacy-001-2 nexus-lgdel.l1
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -480,6 +482,20 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // nexus-ysrwi, 2026-07-25) catalog-032-1's anti-join must clean up.
                     seedLink(su, "t1", "1.1.100", "1.1.999-ghost", "cites");
 
+                    // legacy-001-1/legacy-001-2 (nexus-lgdel.l1, THE DELETE): a
+                    // legacy-width (non-64-hex) chunk_id row per table -- the DELETE
+                    // arm -- plus a canonical-width row -- the KEEP arm, proving the
+                    // shape-agnostic `!~ '^[0-9a-f]{64}$'` predicate is selective, not
+                    // a blanket wipe. "e" x32 / "9" x32 are legacy-width by construction
+                    // (32 hex chars, never matches ^[0-9a-f]{64}$); "d" x64 / "f" x64 are
+                    // canonical-width (64 hex chars, all valid hex digits) -- same
+                    // repeat-char-literal style this file already uses for chash_index's
+                    // seed values above.
+                    seedFrecencyRow(su, "t1", "e".repeat(32));
+                    seedFrecencyRow(su, "t1", "d".repeat(64));
+                    seedRelevanceLogRow(su, "t1", "9".repeat(32), "legacy-001-seed-query");
+                    seedRelevanceLogRow(su, "t1", "f".repeat(64), "legacy-001-seed-query");
+
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("superuser ground truth after seeding").isEqualTo(5);
                     assertThat(count(su,
@@ -508,6 +524,14 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     assertThat(count(admin, "SELECT count(*) FROM nexus.catalog_links"))
                         .as("FORCE RLS must hide both seeded catalog_links rows from the "
                             + "non-BYPASSRLS owner — catalog-032-1's own toggle-wrap target")
+                        .isEqualTo(0);
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.frecency"))
+                        .as("FORCE RLS must hide both seeded frecency rows from the "
+                            + "non-BYPASSRLS owner — legacy-001-1's own toggle-wrap target")
+                        .isEqualTo(0);
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.relevance_log"))
+                        .as("FORCE RLS must hide both seeded relevance_log rows from the "
+                            + "non-BYPASSRLS owner — legacy-001-2's own toggle-wrap target")
                         .isEqualTo(0);
                 }
 
@@ -845,6 +869,46 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         + "'nexus.catalog_links'::regclass, 'nexus.catalog_documents'::regclass)"))
                         .as("FORCE ROW LEVEL SECURITY restored on both tables catalog-032-1 toggled")
                         .isEqualTo(2);
+
+                    // legacy-001-1/legacy-001-2 leg (nexus-lgdel.l1, THE DELETE,
+                    // seed-coverage lint follow-up): the shape-agnostic DELETE removes
+                    // the legacy-width seed row from EACH table and leaves the
+                    // canonical-width row intact — the DELETE/KEEP dual-arm proof,
+                    // mirroring catalog-032-1's own shape immediately above. A CHECK
+                    // constraint (added in the SAME migration walk, legacy-001-3) then
+                    // makes the deleted shape unwritable going forward; VALIDATE-free
+                    // (a plain CHECK, not a VALIDATE CONSTRAINT), so no separate
+                    // constraint-existence assertion is needed the way catalog-032's
+                    // FK VALIDATEs required one — the row-level effect below is the
+                    // whole proof.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.frecency WHERE tenant_id = 't1' AND chunk_id = '"
+                        + "e".repeat(32) + "'"))
+                        .as("legacy-001-1's shape-agnostic DELETE must actually remove the "
+                            + "legacy-width frecency row under FORCE-RLS, proving the DELETE "
+                            + "arm fires, not just the KEEP arm")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.frecency WHERE tenant_id = 't1' AND chunk_id = '"
+                        + "d".repeat(64) + "'"))
+                        .as("the canonical-width frecency row must survive legacy-001-1's "
+                            + "remediation — a shape-agnostic-gone-wrong DELETE would wrongly "
+                            + "remove this too")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.relevance_log WHERE tenant_id = 't1' AND chunk_id = '"
+                        + "9".repeat(32) + "'"))
+                        .as("legacy-001-2's shape-agnostic DELETE must actually remove the "
+                            + "legacy-width relevance_log row under FORCE-RLS, proving the "
+                            + "DELETE arm fires, not just the KEEP arm")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.relevance_log WHERE tenant_id = 't1' AND chunk_id = '"
+                        + "f".repeat(64) + "'"))
+                        .as("the canonical-width relevance_log row must survive legacy-001-2's "
+                            + "remediation — a shape-agnostic-gone-wrong DELETE would wrongly "
+                            + "remove this too")
+                        .isEqualTo(1);
                 }
             }
         } finally {
@@ -1226,6 +1290,38 @@ class SchemaUpgradeRehearsalIntegrationTest {
             ps.setString(2, fromTumbler);
             ps.setString(3, toTumbler);
             ps.setString(4, linkType);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A legacy- or canonical-width {@code nexus.frecency} row (nexus-lgdel.l1,
+     * legacy-001-1). {@code chunkId} is passed through verbatim — the caller
+     * chooses legacy-width (a 32-hex string) or canonical (64-hex) to exercise
+     * either the DELETE or the KEEP arm of legacy-001-1's anti-shape DELETE.
+     */
+    private static void seedFrecencyRow(Connection c, String tenant, String chunkId) throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.frecency (tenant_id, chunk_id) VALUES (?, ?)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, chunkId);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A legacy- or canonical-width {@code nexus.relevance_log} row
+     * (nexus-lgdel.l1, legacy-001-2) — same DELETE/KEEP-arm choice as
+     * {@link #seedFrecencyRow}.
+     */
+    private static void seedRelevanceLogRow(Connection c, String tenant, String chunkId, String query)
+            throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, action, timestamp) "
+            + "VALUES (?, ?, ?, 'view', now())")) {
+            ps.setString(1, tenant);
+            ps.setString(2, query);
+            ps.setString(3, chunkId);
             ps.executeUpdate();
         }
     }

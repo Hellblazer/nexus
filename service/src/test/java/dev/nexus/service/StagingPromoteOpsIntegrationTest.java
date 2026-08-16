@@ -1,7 +1,6 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.StagingPromoteOps;
-import dev.nexus.service.db.StagingPromoteOps.PromoteConflictException;
 import dev.nexus.service.db.StagingPromoteOps.PromotePreconditionException;
 import dev.nexus.service.db.TenantScope;
 import liquibase.Contexts;
@@ -39,13 +38,19 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * RDR-180 LAND-THEN-TRANSFORM promote (nexus-jxizy.10.3) — integration.
  *
  * <p>The reconciliation's critical scenarios, each as a live PG test:
- * C1 (cross-collection alias contradiction fails loud against COMMITTED
- * state), C2 (finalize is idempotent + re-runnable; a LATE collection's
- * pointers promote on the next finalize), C4 (a reference-only row whose
- * content sibling lives in a DIFFERENT collection resolves, never drops),
- * M1 (collapse pair promotes deterministically to ONE row, both refs
- * aliased), H1 (staged dim disagreeing with the name-implied dim refuses),
+ * C2 (finalize is idempotent + re-runnable; a LATE collection's pointers
+ * promote on the next finalize), M1 (collapse pair promotes deterministically
+ * to ONE row), H1 (staged dim disagreeing with the name-implied dim refuses),
  * R5 (promote into a populated target converges; re-promote adds nothing).
+ *
+ * <p>nexus-lgdel.l1: C1 (cross-collection alias contradiction) and C4 (a
+ * reference-only row resolving through a cross-collection alias) were
+ * scenarios of the {@code nexus.chash_alias} legacy-reference resolution
+ * mechanism, RETIRED along with the table — content promotion is now
+ * purely digest-keyed and manifest/pointer-store promotion is direct-
+ * 64-hex-only, so neither scenario can occur any more. See the deleted
+ * Order(3)/(6)/(12)/(14)/(24) tests' retirement comments in this file for
+ * what they used to cover.
  *
  * <p>Staging accepts every legacy width VERBATIM — no constraint-drop
  * seeding dance (the land-then-transform win the in-store suite needs).
@@ -192,9 +197,17 @@ class StagingPromoteOpsIntegrationTest {
 
     @Test
     @Order(1)
-    void promote_allWidths_landAtDigests_aliasesBuilt() {
-        String legacy16 = "b46c7915c303245f";                       // pre-RDR-108
-        String legacy32 = legacy32(TEXT_1);                          // RDR-108 era
+    void promote_allWidths_landAtDigests() {
+        // nexus-lgdel.l1: legacy_ref is now PURELY an M1 deterministic-
+        // tiebreak input (staged content collapsing to the same digest
+        // picks the row whose legacy_ref already equals the digest hex,
+        // else the lexicographically-min ref) — it is no longer an
+        // identity that gets aliased. Content promotion is digest-keyed
+        // regardless of legacy_ref's own shape, so all three widths land
+        // identically; the former per-width "alias_rows" count and
+        // nexus.chash_alias assertions are RETIRED with the table.
+        String legacy16 = "b46c7915c303245f";                       // pre-RDR-108 shape
+        String legacy32 = legacy32(TEXT_1);                          // RDR-108-era shape
         String canonical = digestHex(TEXT_2);                        // already canonical
         landChunk(COLL_A, 768, legacy16, "sixteen char content", vec(768));
         landChunk(COLL_A, 768, legacy32, TEXT_1, vec(768));
@@ -202,19 +215,15 @@ class StagingPromoteOpsIntegrationTest {
 
         Map<String, Object> counts = ops.promoteCollection(T1, COLL_A, 768);
         assertThat(counts.get("promoted")).isEqualTo(3);
-        assertThat(counts.get("alias_rows"))
-            .as("only the two GENUINELY legacy refs alias; the canonical ref maps to itself")
-            .isEqualTo(2);
 
         assertThat(count("SELECT count(*) FROM nexus.chunks "
             + "WHERE collection = '" + COLL_A + "' AND octet_length(chash) = 32"))
             .isEqualTo(3);
-        // Both legacy refs resolve through the alias to their digests.
-        assertThat(count("SELECT count(*) FROM nexus.chash_alias "
-            + "WHERE old_ref = '" + legacy16 + "' AND encode(new_chash,'hex') = '"
+        assertThat(count("SELECT count(*) FROM nexus.chunks "
+            + "WHERE collection = '" + COLL_A + "' AND encode(chash,'hex') = '"
             + digestHex("sixteen char content") + "'")).isEqualTo(1);
-        assertThat(count("SELECT count(*) FROM nexus.chash_alias "
-            + "WHERE old_ref = '" + legacy32 + "' AND encode(new_chash,'hex') = '"
+        assertThat(count("SELECT count(*) FROM nexus.chunks "
+            + "WHERE collection = '" + COLL_A + "' AND encode(chash,'hex') = '"
             + digestHex(TEXT_1) + "'")).isEqualTo(1);
         // RDR-086 metadata parity (--guided gate run 3 catch, nexus-
         // jxizy.10.10): serving-path writes stamp chunk_text_hash into
@@ -235,40 +244,29 @@ class StagingPromoteOpsIntegrationTest {
 
     @Test
     @Order(2)
-    void promote_collapsePair_oneRowBothAliased_deterministicKeeper() {
+    void promote_collapsePair_oneRowDeterministicKeeper() {
+        // nexus-lgdel.l1: the "both collapse-pair refs alias to the shared
+        // digest" assertion is RETIRED with nexus.chash_alias — neither ref
+        // is aliased any more (see Order 1's identical note). The surviving
+        // capability this test proves is the M1 collapse itself: two staged
+        // rows with identical content land as ONE content row.
         String refX = "aaaa0000aaaa0000aaaa0000aaaa0000";
         String refY = "bbbb1111bbbb1111bbbb1111bbbb1111";
         landChunk(COLL_A, 768, refX, TEXT_DUP, vec(768));
         landChunk(COLL_A, 768, refY, TEXT_DUP, vec(768));
 
-        Map<String, Object> counts = ops.promoteCollection(T1, COLL_A, 768);
+        ops.promoteCollection(T1, COLL_A, 768);
         assertThat(count("SELECT count(*) FROM nexus.chunks "
             + "WHERE encode(chash,'hex') = '" + digestHex(TEXT_DUP) + "'"))
             .as("identical text collapses to ONE content row").isEqualTo(1);
-        for (String r : new String[] {refX, refY}) {
-            assertThat(count("SELECT count(*) FROM nexus.chash_alias WHERE old_ref = '" + r + "'"))
-                .as("both collapse-pair refs alias to the shared digest").isEqualTo(1);
-        }
     }
 
-    // ── Order 3: C1 — committed-alias contradiction fails loud ───────────────
-
-    @Test
-    @Order(3)
-    void promote_sameRefDifferentContentAcrossCollections_failsLoud() {
-        String sharedRef = legacy32(TEXT_1);   // already aliased to TEXT_1's digest (order 1)
-        landChunk(COLL_B, 768, sharedRef, "entirely different content", vec(768));
-
-        assertThatThrownBy(() -> ops.promoteCollection(T1, COLL_B, 768))
-            .isInstanceOf(PromoteConflictException.class)
-            .hasMessageContaining(sharedRef)
-            .hasMessageContaining("refusing to pick silently");
-        // Cleanup so later finalize runs see a consistent staging set.
-        scope.withTenant(T1, ctx -> {
-            ctx.execute("DELETE FROM staging.chunks WHERE collection = ?", COLL_B);
-            return null;
-        });
-    }
+    // nexus-lgdel.l1: Order 3 (promote_sameRefDifferentContentAcrossCollections_
+    // failsLoud) DELETED — its subject, the C1 committed-alias-contradiction
+    // guard, is retired: without a committed alias map to check a staged ref
+    // against, two collections landing the "same" legacy ref with different
+    // content simply promote each collection's own content independently
+    // (each keyed by its OWN digest) rather than conflicting.
 
     // ── Order 4: H1 — dim disagreement refuses ───────────────────────────────
 
@@ -300,111 +298,16 @@ class StagingPromoteOpsIntegrationTest {
         });
     }
 
-    // ── Order 6: finalize — manifest + pointers + Item8 cross-collection ─────
-
-    @Test
-    @Order(6)
-    void finalize_promotesPointers_resolvesCrossCollectionReference() {
-        String legacy32 = legacy32(TEXT_1);
-        // A reference-only row in COLL_B whose content sibling landed in
-        // COLL_A (order 1) — the C4 scenario: must RESOLVE, never drop.
-        landChunk(COLL_B, 768, legacy32, "", vec(768));
-        scope.withTenant(T1, ctx -> {
-            // The manifest FKs to catalog_documents (fk_catalog_chunks_
-            // catalog_doc — RDR-156 schema-enforced integrity): docs are
-            // tumbler-keyed, non-chash, and migrate via the EXISTING catalog
-            // ETL BEFORE finalize (a sequencer ordering fact for P2.2). The
-            // IT stands in for that leg here.
-            // nexus-7nrvr: real collection — ghost-ness was incidental
-            // (cross-collection reference resolution is the point). COLL_A
-            // is this doc's real home: that is where promoteCollection(T1,
-            // COLL_A, 768) below lands its promoted rows and where the
-            // topic-x assignment resolves.
-            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                + "VALUES (?, '1.1.1', 'promote-doc', ?) ON CONFLICT DO NOTHING", T1, COLL_A);
-            // Manifest rows: one legacy-ref pointer, one already-canonical.
-            ctx.execute("INSERT INTO staging.document_chunks "
-                + "(tenant_id, doc_id, position, chash) VALUES (?, '1.1.1', 0, ?) "
-                + "ON CONFLICT DO NOTHING", T1, legacy32);
-            ctx.execute("INSERT INTO staging.document_chunks "
-                + "(tenant_id, doc_id, position, chash) VALUES (?, '1.1.1', 1, ?) "
-                + "ON CONFLICT DO NOTHING", T1, digestHex(TEXT_2));
-            // (staging.chash_index seed removed — RDR-187/nexus-piwya.11:
-            // the dead-sink landing twin is dropped by rdr187-002; old
-            // clients' landing attempts now 400 at /v1/staging/load.)
-            // THE CROSS-ID-SPACE SCENARIO (critic-p1 Critical): the staged
-            // assignment carries a LEGACY integer id (424242 — some SQLite
-            // BIGSERIAL value that can never exist in nexus.topics) plus the
-            // (label, collection) identity; the target topic has its OWN
-            // serial id. Finalize must resolve by identity, never by the
-            // legacy integer.
-            ctx.execute("INSERT INTO nexus.topics "
-                + "(tenant_id, label, collection, created_at) VALUES (?, 'topic-x', ?, now())",
-                T1, COLL_A);
-            ctx.execute("INSERT INTO staging.topic_assignments "
-                + "(tenant_id, doc_id, topic_id, topic_label, topic_collection) "
-                + "VALUES (?, ?, 424242, 'topic-x', ?) ON CONFLICT DO NOTHING",
-                T1, legacy32, COLL_A);
-            // And one whose topic has NOT landed: stays staged, counted.
-            ctx.execute("INSERT INTO staging.topic_assignments "
-                + "(tenant_id, doc_id, topic_id, topic_label, topic_collection) "
-                + "VALUES (?, ?, 424243, 'topic-never-landed', ?) ON CONFLICT DO NOTHING",
-                T1, legacy32, COLL_A);
-            // Frecency + relevance keyed by the legacy ref.
-            ctx.execute("INSERT INTO staging.frecency (tenant_id, chunk_id, frecency_score) "
-                + "VALUES (?, ?, 7.5) ON CONFLICT DO NOTHING", T1, legacy32);
-            ctx.execute("INSERT INTO staging.relevance_log "
-                + "(tenant_id, id, query, chunk_id, action, ts) "
-                + "VALUES (?, 1, 'q1', ?, 'hit', '2026-07-01T00:00:00Z') ON CONFLICT DO NOTHING",
-                T1, legacy32);
-            return null;
-        });
-
-        // RDR-187 (nexus-piwya.7): the chash_index promote leg is retired —
-        // the per-collection promote must leave the landed rows unpromoted
-        // (asserted below).
-        ops.promoteCollection(T1, COLL_A, 768);
-        Map<String, Object> fin = ops.finalizeTenant(T1, false);
-
-        assertThat(fin.get("reference_only_resolved"))
-            .as("the COLL_B empty-text row's ref resolves through COLL_A's alias (C4)")
-            .isEqualTo(1);
-        assertThat(fin.get("orphans_dropped")).isEqualTo(0);
-        assertThat(fin.get("manifest_promoted")).isEqualTo(2);
-        assertThat(fin.get("residual_mismatched")).isEqualTo(0);
-        assertThat(fin.get("dangling_manifest")).isEqualTo(0);
-
-        String canon1 = digestHex(TEXT_1);
-        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
-            + "WHERE doc_id = '1.1.1' AND encode(chash,'hex') = '" + canon1 + "'"))
-            .as("the legacy manifest pointer promoted CANONICAL").isEqualTo(1);
-        assertThat(count("SELECT count(*) FROM information_schema.tables "
-            + "WHERE table_schema = 'nexus' AND table_name = 'chash_index'"))
-            .as("RDR-187 (nexus-piwya.7/.9): the staging chash promote leg is RETIRED "
-                + "and the router TABLE is dropped. The chunks promote (4) is the "
-                + "registration.")
-            .isZero();
-        assertThat(count("SELECT count(*) FROM information_schema.tables "
-            + "WHERE table_schema = 'staging' AND table_name = 'chash_index'"))
-            .as("RDR-187 (nexus-piwya.11): the staging landing twin is dropped "
-                + "by rdr187-002 — nothing can land, nothing can promote.")
-            .isZero();
-        assertThat(count("SELECT count(*) FROM nexus.topic_assignments ta "
-            + "JOIN nexus.topics t ON t.id = ta.topic_id "
-            + "WHERE ta.doc_id = '" + canon1 + "' AND t.label = 'topic-x'"))
-            .as("assignment repointed to the canonical hex AND resolved to the "
-                + "TARGET topic's own serial id via (label, collection) — never "
-                + "the legacy integer").isEqualTo(1);
-        assertThat(count("SELECT count(*) FROM nexus.topic_assignments WHERE topic_id = 424242"))
-            .as("the legacy integer id never enters nexus").isEqualTo(0);
-        assertThat(((Number) fin.get("topic_assignments_unresolved")).intValue())
-            .as("the not-yet-landed topic's assignment stays staged, counted")
-            .isEqualTo(1);
-        assertThat(count("SELECT count(*) FROM nexus.frecency WHERE chunk_id = '" + canon1 + "'"))
-            .isEqualTo(1);
-        assertThat(count("SELECT count(*) FROM nexus.relevance_log WHERE chunk_id = '" + canon1 + "'"))
-            .isEqualTo(1);
-    }
+    // nexus-lgdel.l1: Order 6 (finalize_promotesPointers_resolvesCrossCollection
+    // Reference) DELETED — its subject was legacy32-shaped manifest/topic_
+    // assignments/frecency/relevance_log pointers resolving to their
+    // canonical digest through nexus.chash_alias. That resolution route is
+    // retired with the table: manifestResolvable and the frecency/
+    // relevance_log promote predicates are now direct-64-hex-only, and
+    // finalizeTenant's non-conformant topic_assignments.doc_id reject
+    // (Order 34) now THROWS on a staged legacy32-shaped doc_id rather than
+    // leaving it silently staged — this scenario cannot run to completion
+    // under the new contract at all.
 
     // ── Order 7: idempotence — re-promote + re-finalize add NOTHING ──────────
 
@@ -412,7 +315,6 @@ class StagingPromoteOpsIntegrationTest {
     @Order(7)
     void rePromoteAndReFinalize_convergeNeverDuplicate() {
         int chunksBefore = count("SELECT count(*) FROM nexus.chunks");
-        int aliasBefore = count("SELECT count(*) FROM nexus.chash_alias");
         int manifestBefore = count("SELECT count(*) FROM nexus.catalog_document_chunks");
         int relevanceBefore = count("SELECT count(*) FROM nexus.relevance_log");
 
@@ -421,7 +323,6 @@ class StagingPromoteOpsIntegrationTest {
         ops.finalizeTenant(T1, false);
 
         assertThat(count("SELECT count(*) FROM nexus.chunks")).isEqualTo(chunksBefore);
-        assertThat(count("SELECT count(*) FROM nexus.chash_alias")).isEqualTo(aliasBefore);
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks")).isEqualTo(manifestBefore);
         assertThat(count("SELECT count(*) FROM nexus.relevance_log"))
             .as("the anti-join dedupe holds for the BIGSERIAL store").isEqualTo(relevanceBefore);
@@ -508,6 +409,16 @@ class StagingPromoteOpsIntegrationTest {
         // which collection value it carries. COLL_A is an arbitrary real,
         // already-registered collection in this fixture.
         String ghost = digestHex("pre-existing corruption ghost");
+        // nexus-lgdel.l1: doc_id '1.1.1' was implicitly registered by the
+        // now-deleted Order(6) test earlier in this ordered sequence; this
+        // test's raw INSERT into catalog_document_chunks also carries an FK
+        // to catalog_documents (fk_catalog_chunks_catalog_doc), so it must
+        // register its own stub now.
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
+                + "VALUES (?, '1.1.1', 'promote-doc', ?) ON CONFLICT DO NOTHING", T1, COLL_A);
+            return null;
+        });
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
         // a matching nexus.chunks row -- a genuinely-dangling row is exactly this
         // test's SUBJECT, so bypass the FK locally: drop the constraint, insert,
@@ -612,19 +523,26 @@ class StagingPromoteOpsIntegrationTest {
     @Test
     @Order(8)
     void lateCollection_afterFinalize_reFinalizePromotesItsPointers() {
-        String lateRef = "eeee4444eeee4444eeee4444eeee4444";
+        // nexus-lgdel.l1: the staged frecency pointer is now keyed by the
+        // CANONICAL digest directly — legacy_ref-keyed pointer resolution
+        // via chash_alias is retired (see Order 6's deletion note). This
+        // still proves the surviving C2 capability: a late-landing
+        // collection's pointer is unresolved (content not promoted yet) on
+        // the first finalize and promotes cleanly on the RE-run once the
+        // collection has promoted — "exactly once" is dead.
+        String lateRef = "eeee4444eeee4444eeee4444eeee4444";  // M1 tiebreak input only
         String lateText = "late landed content";
+        String lateCanon = digestHex(lateText);
         landChunk(COLL_LATE, 768, lateRef, lateText, vec(768));
         scope.withTenant(T1, ctx -> {
             ctx.execute("INSERT INTO staging.frecency (tenant_id, chunk_id, frecency_score) "
-                + "VALUES (?, ?, 3.25) ON CONFLICT DO NOTHING", T1, lateRef);
+                + "VALUES (?, ?, 3.25) ON CONFLICT DO NOTHING", T1, lateCanon);
             return null;
         });
 
         ops.promoteCollection(T1, COLL_LATE, 768);
         Map<String, Object> fin = ops.finalizeTenant(T1, false);
 
-        String lateCanon = digestHex(lateText);
         assertThat(count("SELECT count(*) FROM nexus.chunks "
             + "WHERE encode(chash,'hex') = '" + lateCanon + "'")).isEqualTo(1);
         assertThat(count("SELECT count(*) FROM nexus.frecency WHERE chunk_id = '" + lateCanon + "'"))
@@ -633,57 +551,12 @@ class StagingPromoteOpsIntegrationTest {
         assertThat(fin.get("residual_mismatched")).isEqualTo(0);
     }
 
-    // ── Order 12: MUTATION FALSIFICATION — alias-build is load-bearing at the
-    // WRITE path (critic-1010, nexus-jxizy.10.10 item 5). The rehearsal's
-    // Phase-5 falsification proves the READ path (citation resolution)
-    // depends on the alias map persisting; this proves the FINALIZE path
-    // depends on it at execution time: in the world where the alias-build
-    // statement never ran (its entire effect — the alias rows — removed),
-    // the resolvable-only manifest promote MUST leave the legacy pointer
-    // staged. Then the idempotent resume (re-promote rebuilds the facts,
-    // re-finalize converges) proves recovery.
-
-    @Test
-    @Order(12)
-    void finalizeWithAliasMapRemoved_cannotResolveLegacyPointers_resumeConverges() {
-        String collM = "knowledge__mutation__bge-base-en-v15-768__v1";
-        String text = "mutation falsification content";
-        String ref = legacy32(text);
-        landChunk(collM, 768, ref, text, vec(768));
-        ops.promoteCollection(T1, collM, 768);
-        scope.withTenant(T1, ctx -> {
-            // nexus-7nrvr: real collection — ghost-ness was incidental
-            // (alias-map mutation-falsification behaviour is the point).
-            // collM is this doc's real home: that is where the content it
-            // references was landed and promoted.
-            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                + "VALUES (?, '1.1.9', 'mutation-doc', ?) ON CONFLICT DO NOTHING", T1, collM);
-            ctx.execute("INSERT INTO staging.document_chunks "
-                + "(tenant_id, doc_id, position, chash) VALUES (?, '1.1.9', 0, ?) "
-                + "ON CONFLICT DO NOTHING", T1, ref);
-            // THE MUTATION: remove the alias-build's entire effect (RLS scopes
-            // this to the test tenant).
-            ctx.execute("DELETE FROM nexus.chash_alias");
-            return null;
-        });
-
-        Map<String, Object> fin = ops.finalizeTenant(T1, false);
-        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
-            + "WHERE doc_id = '1.1.9'"))
-            .as("with the alias map gone the legacy manifest pointer CANNOT promote "
-                + "(resolvable-only) — finalize is load-bearing on alias-build")
-            .isZero();
-        assertThat((int) fin.get("manifest_unresolved")).isGreaterThanOrEqualTo(1);
-
-        // Resume: re-promote rebuilds the alias facts from the retained
-        // staging rows; re-finalize converges the pointer.
-        ops.promoteCollection(T1, collM, 768);
-        ops.finalizeTenant(T1, false);
-        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
-            + "WHERE doc_id = '1.1.9' AND encode(chash,'hex') = '" + digestHex(text) + "'"))
-            .as("idempotent resume converges the pointer once the alias facts return")
-            .isEqualTo(1);
-    }
+    // nexus-lgdel.l1: Order 12 (finalizeWithAliasMapRemoved_
+    // cannotResolveLegacyPointers_resumeConverges) DELETED — its subject was
+    // a mutation-falsification proof that finalize depends on committed
+    // chash_alias rows (DELETE FROM nexus.chash_alias to simulate the
+    // alias-build never having run). The table itself no longer exists, so
+    // this scenario cannot be constructed at all.
 
     // ── nexus-kmd5b: the dangling census must see LEGACY-WIDTH pointers ──────
 
@@ -708,6 +581,14 @@ class StagingPromoteOpsIntegrationTest {
     @Test
     @Order(13)
     void census_seesDanglingPointersAtLegacyWidth() throws Exception {
+        // nexus-lgdel.l1: the relevance_log leg of this test is RETIRED —
+        // nexus.relevance_log now carries a CHECK (chunk_id ~
+        // '^[0-9a-f]{64}$'), so a legacy-width chunk_id can no longer be
+        // seeded at all (the CHECK constraint itself is the fix for exactly
+        // the class this leg used to prove needed a census). The
+        // topic_assignments leg SURVIVES unchanged (no CHECK yet — its own
+        // retirement belongs to nexus-tk070.p3d) and remains this test's
+        // subject.
         final String legacyHex = "b".repeat(32);   // 16 bytes decoded
         long topicId;
         try (Connection su = pg.createConnection("")) {
@@ -715,10 +596,6 @@ class StagingPromoteOpsIntegrationTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
                 + T1 + "', 'code__kmd5b') ON CONFLICT DO NOTHING");
-            // (nexus.chash_index seed removed — RDR-187/nexus-piwya.9: the
-            // router table is dropped; the doesNotContainKey pin below now
-            // guards against a resurrected LEG against a resurrected TABLE
-            // both, and the debt-column legs remain the live subjects.)
             try (ResultSet rs = su.createStatement().executeQuery(
                     "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
                     + "VALUES ('" + T1 + "', 'kmd5b', 'code__kmd5b', now()) RETURNING id")) {
@@ -728,9 +605,6 @@ class StagingPromoteOpsIntegrationTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by) "
                 + "VALUES ('" + T1 + "', '" + legacyHex + "', " + topicId + ", 'kmd5b')");
-            su.createStatement().execute(
-                "INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, action, timestamp) "
-                + "VALUES ('" + T1 + "', 'kmd5b', '" + legacyHex + "', 'view', now())");
         }
         try {
             Map<String, Integer> residue = scope.withTenant(T1, ctx ->
@@ -742,13 +616,14 @@ class StagingPromoteOpsIntegrationTest {
                     + "router dies. The seeded orphan row is deliberately still here: "
                     + "the census must NOT report it (a resurrected leg fails this). "
                     + "The 292,230-orphan population this leg once counted dies at the "
-                    + "DROP itself; the manifest + debt-column legs below remain the "
-                    + "census's surface.")
+                    + "DROP itself; the manifest + topic_assignments legs below remain "
+                    + "the census's surface.")
                 .doesNotContainKey("dangling.chash_index");
             assertThat(residue)
-                .as("the 32-hex debt columns are the same bug shape: a legacy-width "
-                    + "pointer the cascade missed is excluded by a 64-hex-only filter")
-                .containsKeys("dangling.topic_assignments", "dangling.relevance_log");
+                .as("the 32-hex-shaped topic_assignments.doc_id is the same bug shape: "
+                    + "a legacy-width pointer the cascade missed is excluded by a "
+                    + "64-hex-only filter")
+                .containsKeys("dangling.topic_assignments");
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
@@ -756,64 +631,14 @@ class StagingPromoteOpsIntegrationTest {
                     "DELETE FROM nexus.topic_assignments WHERE assigned_by = 'kmd5b'");
                 su.createStatement().execute(
                     "DELETE FROM nexus.topics WHERE label = 'kmd5b'");
-                su.createStatement().execute(
-                    "DELETE FROM nexus.relevance_log WHERE query = 'kmd5b'");
             }
         }
     }
 
-    /**
-     * The other half of the kmd5b contract: widening the legs must not turn
-     * every LEGACY-BUT-RESOLVABLE pointer into a false orphan. A legacy-width
-     * pointer WITH a chash_alias entry pointing at a live chunk resolves fine
-     * — that is exactly what the permanent alias map is for (RDR-180: legacy
-     * references stay resolvable forever) — so it must NOT be reported.
-     * Without this, the fix would trade a blind check for a screaming one and
-     * the census would flag the entire pre-rekey era.
-     */
-    @Test
-    @Order(14)
-    void census_doesNotFlagLegacyPointersTheAliasStillResolves() throws Exception {
-        final String legacyHex = "c".repeat(32);
-        final String text = "kmd5b alias-resolvable chunk";
-        final String liveHex = digestHex(text);
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
-                + T1 + "', 'code__kmd5b2') ON CONFLICT DO NOTHING");
-            su.createStatement().execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768) "
-                + "VALUES ('" + T1 + "', 'code__kmd5b2', decode('" + liveHex + "', 'hex'), '"
-                + text + "', '" + vec(768) + "'::vector)");
-            su.createStatement().execute(
-                "INSERT INTO nexus.chash_alias (tenant_id, old_ref, old_bytes, new_chash, source) "
-                + "VALUES ('" + T1 + "', '" + legacyHex + "', decode('" + legacyHex + "', 'hex'), "
-                + "decode('" + liveHex + "', 'hex'), 'kmd5b2')");
-            // (nexus.chash_index seed removed — RDR-187/nexus-piwya.9: the
-            // router is dropped; relevance_log carries the alias-resolvable
-            // not-flagged proof.)
-            su.createStatement().execute(
-                "INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, action, timestamp) "
-                + "VALUES ('" + T1 + "', 'kmd5b2', '" + legacyHex + "', 'view', now())");
-        }
-        try {
-            Map<String, Integer> residue = scope.withTenant(T1, ctx ->
-                dev.nexus.service.db.ChashCensus.scan(ctx));
-            assertThat(residue)
-                .as("a legacy pointer the alias map RESOLVES to a live chunk is not "
-                    + "dangling — widening the leg must not flag the whole legacy era")
-                .doesNotContainKeys("dangling.relevance_log");
-        } finally {
-            try (Connection su = pg.createConnection("")) {
-                su.setAutoCommit(true);
-                su.createStatement().execute("DELETE FROM nexus.relevance_log WHERE query = 'kmd5b2'");
-                su.createStatement().execute("DELETE FROM nexus.chash_alias WHERE source = 'kmd5b2'");
-                su.createStatement().execute(
-                    "DELETE FROM nexus.chunks WHERE collection = 'code__kmd5b2'");
-            }
-        }
-    }
+    // nexus-lgdel.l1: census_doesNotFlagLegacyPointersTheAliasStillResolves
+    // DELETED — its subject was a legacy-width pointer resolving through a
+    // seeded nexus.chash_alias row (INSERT INTO nexus.chash_alias ...). The
+    // table is dropped; this scenario cannot be constructed at all.
 
     // ── nexus-11gh6 post-review (T2 nexus/critique-11gh6-gate-impl-2026-08-08
     //    [21798] Critical finding): finalizeTenant's manifest INSERT is a
@@ -1086,91 +911,14 @@ class StagingPromoteOpsIntegrationTest {
             + "WHERE doc_id = 'multi-doc-b' AND encode(chash,'hex') = '" + chashB + "'")).isEqualTo(1);
     }
 
-    // ── nexus-4okz4 increment 1, critic ROUND 3 pin-sensitivity finding
-    //    (T2 critique-t76bp-rekey-gate-2026-08-08 [21807], "Site 3 ALIAS
-    //    branch is unpinned"): finalizeTenant's gate-target resolution
-    //    query (StagingPromoteOps.java site 3) has TWO candidate arms --
-    //    `COALESCE(a.new_chash, decode(s.chash, 'hex'))` -- the alias arm
-    //    (a.new_chash, taken when a LEGACY staged chash resolves through
-    //    chash_alias) and the direct-hex decode arm (taken when the staged
-    //    chash already IS the 64-hex canonical digest). Every gate-blocking
-    //    fixture through Order(23) stages a CANONICAL 64-hex chash
-    //    (`digestHex(text)`), so every one of them flows through the
-    //    decode arm only -- a rendering bug that silently emptied the
-    //    ALIAS arm (e.g. a wrong CHASH_ALIAS.OLD_REF join field, or an
-    //    inverted `.isNotNull()`) would under-gate a LEGACY-pointer
-    //    finalize and still pass all of Order(20)-(23). THIS test stages a
-    //    LEGACY (32-hex, non-canonical-width) ref instead, so
-    //    `s.chash ~ '^[0-9a-f]{64}$'` is false and the ONLY way the query
-    //    can resolve a target collection is through `a.new_chash`. ──
-
-    private static final String COLL_GATE4 = "knowledge__kgate4__bge-base-en-v15-768__v1";
-
-    @Test
-    @Order(24)
-    void finalizeTenant_aliasResolvedLegacyPointer_blocksOnExternalExclusiveGate_thenProceeds()
-            throws Exception {
-        String text = "alias-branch gate content " + System.nanoTime();
-        String legacyRef = legacy32(text);
-        String canonical = digestHex(text);
-        landChunk(COLL_GATE4, 768, legacyRef, text, vec(768));
-        // Promote builds the chash_alias fact (old_ref=legacyRef ->
-        // new_chash=canonical) AND lands the physical content row --
-        // finalize's manifest promote below relies on BOTH.
-        Map<String, Object> promoted = ops.promoteCollection(T1, COLL_GATE4, 768);
-        assertThat(promoted.get("promoted")).isEqualTo(1);
-        assertThat(promoted.get("alias_rows"))
-            .as("legacyRef is genuinely non-canonical -- it must alias").isEqualTo(1);
-
-        scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, physical_collection) "
-                + "VALUES (?, 'gate-doc-4', 'gate doc 4', ?) ON CONFLICT DO NOTHING",
-                T1, COLL_GATE4);
-            // The staged manifest pointer carries the LEGACY ref VERBATIM,
-            // not the canonical digest -- this is what forces the query
-            // through the alias arm (`a.new_chash IS NOT NULL`) rather than
-            // the direct-hex decode arm every earlier gate test exercises.
-            ctx.execute("INSERT INTO staging.document_chunks "
-                + "(tenant_id, doc_id, position, chash) VALUES (?, 'gate-doc-4', 0, ?) "
-                + "ON CONFLICT DO NOTHING", T1, legacyRef);
-            return null;
-        });
-
-        try (Connection external = dsConnection()) {
-            external.setAutoCommit(false);
-            try (var st = external.prepareStatement("SET nexus.tenant = '" + T1 + "'")) {
-                st.execute();
-            }
-            acquireGateExclusive(external, T1, COLL_GATE4, 60_000);
-
-            ExecutorService executor = Executors.newSingleThreadExecutor();
-            try {
-                Future<Map<String, Object>> future = executor.submit(() -> ops.finalizeTenant(T1, false));
-                assertThatThrownBy(() -> future.get(750, TimeUnit.MILLISECONDS))
-                    .as("finalizeTenant must BLOCK on COLL_GATE4's gate for an ALIAS-resolved "
-                        + "legacy pointer too, not just a direct-hex-canonical one -- a rendering "
-                        + "bug that emptied the alias arm would let this complete immediately "
-                        + "and this assertion would fail")
-                    .isInstanceOf(TimeoutException.class);
-
-                external.rollback();
-
-                Map<String, Object> fin = future.get(15, TimeUnit.SECONDS);
-                assertThat(fin.get("manifest_promoted"))
-                    .as("gate released -- the alias-resolved manifest promote completes")
-                    .isEqualTo(1);
-            } finally {
-                executor.shutdownNow();
-            }
-        }
-
-        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
-            + "WHERE doc_id = 'gate-doc-4' AND encode(chash,'hex') = '" + canonical + "'"))
-            .as("the manifest row landed at the ALIAS-RESOLVED canonical digest, proving the "
-                + "alias arm actually ran (not merely the decode arm)")
-            .isEqualTo(1);
-    }
+    // nexus-lgdel.l1: Order 24
+    // (finalizeTenant_aliasResolvedLegacyPointer_blocksOnExternalExclusiveGate_
+    // thenProceeds) DELETED — its subject was proving the gate-resolution
+    // query's ALIAS arm (COALESCE(a.new_chash, decode(s.chash,'hex')))
+    // gates correctly for a legacy-shaped staged pointer. That arm is
+    // REMOVED with nexus.chash_alias: the gate-resolution query's `cand`
+    // derived table now has exactly one arm, the direct 64-hex decode,
+    // already covered by every gate test through Order(23).
 
     // ── Order 25: F12b — finalize's manifest INSERT must stamp `collection` ──
 
@@ -1460,21 +1208,25 @@ class StagingPromoteOpsIntegrationTest {
     // deleted raw SQL). No test in this file ever called finalizeTenant
     // with synthesizeOrphans=true for ANY dim before nexus-o8dil.50 — the
     // three tests below are the first coverage of this branch at all, not
-    // merely the first per-dim coverage. Each test proves two things
-    // together: (a) the orphan's content row lands in the CORRECT dim
-    // column and no OTHER dim column, and (b) a manifest pointer that
-    // resolves through the orphan's synthetic alias promotes cleanly
-    // instead of tripping the dangling_manifest fatal check — the actual
-    // production hazard the pre-fix hardcoding created for 384/1024 (a
-    // committed alias with no backing content anywhere, aborting the WHOLE
-    // finalizeTenant transaction the moment anything referenced it).
+    // merely the first per-dim coverage. Each test proves: the orphan's
+    // content row lands in the CORRECT dim column and no OTHER dim column.
+    //
+    // nexus-lgdel.l1: the SECOND half this comment used to describe — "a
+    // manifest pointer that resolves through the orphan's synthetic alias
+    // promotes cleanly" — is RETIRED along with nexus.chash_alias. The
+    // synthetic chash is now computed directly (ChashSqlIdioms.digestField
+    // over the same deterministic seed, recomputed per dim rather than
+    // staged once and joined back), so there is no alias fact left for a
+    // manifest pointer to resolve THROUGH; a staged manifest pointer whose
+    // chash is the ORIGINAL legacy_ref text (not a 64-hex chash) never
+    // resolves under the direct-hex-only manifestResolvable condition
+    // either way, so it is no longer seeded here.
     //
     // RDR-191 repoint (nexus-o8dil.17): nexus.chunks_384/768/1024 collapsed
     // into ONE table, nexus.chunks, with a per-dim embedding_<dim> column.
-    // (a) above was originally phrased as "the CORRECT dim TABLE and
-    // nowhere else"; see assertOrphanSynthesizesIntoDim's own comment for
-    // why "table" became "column" without weakening what is actually
-    // proven.
+    // The dim-coverage proof is phrased as "the CORRECT dim COLUMN and no
+    // OTHER dim column" — see assertOrphanSynthesizesIntoDim's own comment
+    // for why "table" became "column" without weakening what is proven.
 
     private void assertOrphanSynthesizesIntoDim(int dim, int order) {
         String coll = "knowledge__dimcheck" + dim + "__model-" + dim + "__v1";
@@ -1495,8 +1247,8 @@ class StagingPromoteOpsIntegrationTest {
             return null;
         });
         // The orphan itself: an empty-text staged chunk row at this dim —
-        // orphanCond requires no pre-existing alias and no non-empty
-        // sibling row sharing the ref (neither holds here, fresh ref).
+        // orphanCond requires no non-empty sibling row sharing the ref
+        // (fresh ref here, so it holds).
         scope.withTenant(T_DIM, ctx -> {
             ctx.execute("INSERT INTO staging.chunks "
                 + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) "
@@ -1505,28 +1257,22 @@ class StagingPromoteOpsIntegrationTest {
                 T_DIM, coll, dim, legacyRef);
             return null;
         });
-        // A manifest pointer referencing the SAME legacy ref — the Item8
-        // scenario: this can only resolve through the synthetic alias
-        // finalize is about to build.
-        scope.withTenant(T_DIM, ctx -> {
-            ctx.execute("INSERT INTO staging.document_chunks "
-                + "(tenant_id, doc_id, position, chash) VALUES (?, ?, 0, ?) "
-                + "ON CONFLICT DO NOTHING", T_DIM, doc, legacyRef);
-            return null;
-        });
 
         Map<String, Object> fin = ops.finalizeTenant(T_DIM, true);
 
         assertThat(((Number) fin.get("orphans_synthesized")).intValue())
             .as("dim " + dim + ": exactly this one new orphan synthesizes")
             .isEqualTo(1);
-        assertThat(fin.get("dangling_manifest"))
-            .as("dim " + dim + ": the manifest row that resolves through the "
-                + "synthetic alias has real backing content -- the fatal "
-                + "dangling-manifest abort this bug used to trip for "
-                + "384/1024 must not fire")
-            .isEqualTo(0);
+        assertThat(fin.get("dangling_manifest")).isEqualTo(0);
         assertThat(fin.get("residual_mismatched")).isEqualTo(0);
+
+        // nexus-lgdel.l1: the synthetic chash is now computed DIRECTLY from
+        // the same deterministic seed StagingPromoteOps.finalizeTenant uses
+        // (ChashSqlIdioms.digestField over "nexus:synthetic-chash:v1|"
+        // + tenant + "|" + collection + "|" + legacyRef) — there is no
+        // longer an alias row to JOIN through to locate the surrogate row.
+        String synthChashHex = digestHex(
+            "nexus:synthetic-chash:v1|" + T_DIM + "|" + coll + "|" + legacyRef);
 
         // RDR-191 repoint (nexus-o8dil.17): nexus.chunks_384/768/1024
         // collapsed into ONE table, nexus.chunks, with a per-dim
@@ -1535,15 +1281,14 @@ class StagingPromoteOpsIntegrationTest {
         // expressible -- there is only one table -- so the equivalent,
         // still-meaningful assertion is "landed in the dim-correct COLUMN":
         // embedding_<dim> IS NOT NULL on the surrogate row, and each OTHER
-        // dim's embedding_<other> column carries NO row for this alias (the
+        // dim's embedding_<other> column carries NO row for this chash (the
         // direct analogue of "no cross-dim leakage into chunks_<other>" --
         // this is the actual regression a09e6b486 fixed: the orphan-
         // synthesize INSERT choosing the wrong embedding column, not the
         // wrong physical table).
         assertThat(countAs(T_DIM, "SELECT count(*) FROM nexus.chunks c "
-            + "JOIN nexus.chash_alias a ON a.new_chash = c.chash "
-            + "WHERE c.tenant_id = '" + T_DIM + "' AND a.old_ref = '" + legacyRef + "' "
-            + "AND a.source = 'staging:synthetic' AND c.chunk_text = '' "
+            + "WHERE c.tenant_id = '" + T_DIM + "' AND encode(c.chash, 'hex') = '" + synthChashHex + "' "
+            + "AND c.chunk_text = '' "
             + "AND c.metadata->>'chash_origin' = 'synthetic' "
             + "AND c.embedding_" + dim + " IS NOT NULL"))
             .as("dim " + dim + ": the surrogate content row landed with the "
@@ -1552,16 +1297,11 @@ class StagingPromoteOpsIntegrationTest {
         for (int other : new int[] {384, 768, 1024}) {
             if (other == dim) continue;
             assertThat(countAs(T_DIM, "SELECT count(*) FROM nexus.chunks c "
-                + "JOIN nexus.chash_alias a ON a.new_chash = c.chash "
-                + "WHERE a.old_ref = '" + legacyRef + "' AND c.embedding_" + other + " IS NOT NULL"))
+                + "WHERE c.tenant_id = '" + T_DIM + "' AND encode(c.chash, 'hex') = '" + synthChashHex + "' "
+                + "AND c.embedding_" + other + " IS NOT NULL"))
                 .as("dim " + dim + ": no cross-dim leakage into embedding_" + other)
                 .isEqualTo(0);
         }
-        assertThat(countAs(T_DIM, "SELECT count(*) FROM nexus.catalog_document_chunks "
-            + "WHERE tenant_id = '" + T_DIM + "' AND doc_id = '" + doc + "'"))
-            .as("dim " + dim + ": the referencing manifest pointer promoted "
-                + "instead of aborting or staying stuck")
-            .isEqualTo(1);
     }
 
     @Test
@@ -1693,14 +1433,15 @@ class StagingPromoteOpsIntegrationTest {
     @Test
     @Order(34)
     void finalizeTenant_nonConformantTopicAssignmentDocId_rejectsByName() {
-        // A staged doc_id that is neither alias-resolvable, nor already a
-        // conformant 64-hex chash, nor a legacy 16/32-hex shape awaiting a
-        // future alias (that third case stays silently STAGED, Order 6's
-        // "topic-never-landed" scenario covers it) is arbitrary text: a
-        // memory-note title, a historic tumbler, anything an ETL-era row
-        // could have carried. D0.9 requires finalize to fail loud, naming
-        // the offending value, rather than pass it through to a column
-        // that can no longer hold it once D1's bytea conversion lands.
+        // A staged doc_id that is not already a conformant 64-hex chash is
+        // arbitrary text: a memory-note title, a historic tumbler, a
+        // legacy 16/32-hex shape (nexus-lgdel.l1 tightened the reject to
+        // cover this case too — chash_alias is retired, so a legacy shape
+        // can never resolve and is non-conformant now, not merely staged-
+        // pending), anything an ETL-era row could have carried. D0.9
+        // requires finalize to fail loud, naming the offending value,
+        // rather than pass it through to a column that can no longer hold
+        // it once D1's bytea conversion lands.
         String badDocId = "some-memory-note-title-not-a-chash";
         scope.withTenant(T_REJECT, ctx -> {
             ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "

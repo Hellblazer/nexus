@@ -13,7 +13,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
 import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
 import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
@@ -92,8 +91,10 @@ public final class ChashCensus {
     // differing only by table name) collapse to the one physical column that
     // now exists.
     public static final List<Exclusion> TEXT_EXCLUSIONS = List.of(
-        new Exclusion("chash_alias", "old_ref",
-            "THE legacy-reference registry — holding old ids is its purpose"),
+        // chash_alias.old_ref LEFT this list at nexus-lgdel.l1: the table is
+        // DROPPED (RDR-180's "legacy references stay resolvable forever"
+        // promise had a beneficiary population that reached zero — Hal
+        // directive 2026-08-16, T2 nexus/plan-legacy-retirement-2026-08-16).
         new Exclusion("chash_remap", "old_id",
             "remap facts: old_id is free-form by design (RDR-180 Item6a)"),
         // chash_remap.new_chash LEFT this list at RDR-194 P2 (bead
@@ -115,9 +116,9 @@ public final class ChashCensus {
             "sha256 of source CONTENT (a document identity, not a chunk id) — "
             + "legacy-width source hashes are historical facts, not pointers"));
 
-    public static final List<Exclusion> BYTEA_EXCLUSIONS = List.of(
-        new Exclusion("chash_alias", "old_bytes",
-            "the byte carrier of old_ref — any width by design"));
+    // BYTEA_EXCLUSIONS' sole entry (chash_alias.old_bytes) LEFT the list at
+    // nexus-lgdel.l1 along with the table (see TEXT_EXCLUSIONS' comment).
+    public static final List<Exclusion> BYTEA_EXCLUSIONS = List.of();
 
     /** The known chash-bearing inventory the enumeration MUST rediscover. */
     // chash_index.chash left the inventory WITH the table (RDR-187 DROP,
@@ -200,32 +201,45 @@ public final class ChashCensus {
         return residue;
     }
 
-    /** EITHER era's chash shape — the 64-only filter was the blindness. */
+    /**
+     * EITHER era's chash shape — the 64-only filter was the blindness.
+     * SURVIVES for {@code topic_assignments} only (nexus-lgdel.l1): that
+     * leg's own retirement to canonical-only belongs to nexus-tk070.p3d, not
+     * this commit. {@code frecency}/{@code relevance_log} move to {@link
+     * #CANONICAL_SHAPE} below — the new {@code chunk_id ~
+     * '^[0-9a-f]{64}$'} CHECK (legacy-001-drop-chash-alias.xml) makes a
+     * legacy-width value in either column structurally impossible from this
+     * migration forward, so scanning for the wider shape on those two legs
+     * would only ever match pre-existing rows the same changeset just
+     * deleted.
+     */
     private static final String EITHER_ERA_SHAPE = "^([0-9a-f]{32}|[0-9a-f]{64})$";
+
+    /** Canonical-only shape — {@code frecency}/{@code relevance_log}'s dangling
+     *  leg after nexus-lgdel.l1 (see {@link #EITHER_ERA_SHAPE}'s javadoc). */
+    private static final String CANONICAL_SHAPE = "^[0-9a-f]{64}$";
 
     /**
      * Count rows of one hex-keyed pointer table (nexus-4okz4 increment 4)
-     * whose {@code hexCol} value is shaped like a chash of either era AND
-     * resolves to a live chunk by NO route — neither directly nor through
-     * {@code chash_alias}. Fully typed DSL: {@code topic_assignments},
-     * {@code frecency}, {@code relevance_log} are compile-time-known
-     * tables (unlike the runtime-discovered columns above), so this reuses
-     * the generated {@code Tables} constants and {@link
-     * ChashSqlIdioms#existsInAnyDim} rather than string-formatting a
-     * template. {@code decode(hexCol, 'hex')}/{@code 'hex'} occurrences
-     * below are each in their OWN independent {@code NOT EXISTS}/{@code
-     * EXISTS} clause (no DISTINCT-ON/GROUP-BY structural-match requirement
-     * across them), so plain binds (not {@code DSL.inline}) are safe per
-     * the INLINE-VS-BIND rule ({@link ChashSqlIdioms} class javadoc).
+     * whose {@code hexCol} value is shaped like {@code shape} AND resolves
+     * to a live chunk by NO route. Fully typed DSL: {@code
+     * topic_assignments}, {@code frecency}, {@code relevance_log} are
+     * compile-time-known tables (unlike the runtime-discovered columns
+     * above), so this reuses the generated {@code Tables} constants and
+     * {@link ChashSqlIdioms#existsInAnyDim} rather than string-formatting a
+     * template.
+     *
+     * <p>nexus-lgdel.l1: the {@code chash_alias} fallback-resolution arm
+     * (a row unresolvable directly but resolvable through the legacy-ref
+     * map) is REMOVED with the table — the map is gone, there is no second
+     * route left to check. A row this predicate now finds dangling is
+     * dangling by the direct-content-existence test alone.
      */
-    private static Integer unresolvableHexCount(DSLContext ctx, TableField<?, String> hexCol) {
+    private static Integer unresolvableHexCount(DSLContext ctx, TableField<?, String> hexCol, String shape) {
         Field<byte[]> decoded = DSL.function("decode", byte[].class, hexCol, DSL.val("hex"));
         return ctx.selectCount().from(hexCol.getTable())
-            .where(hexCol.likeRegex(EITHER_ERA_SHAPE))
+            .where(hexCol.likeRegex(shape))
             .and(DSL.not(ChashSqlIdioms.existsInAnyDim(ctx, decoded)))
-            .and(DSL.notExists(ctx.selectOne().from(CHASH_ALIAS)
-                    .where(CHASH_ALIAS.OLD_REF.eq(hexCol))
-                    .and(ChashSqlIdioms.existsInAnyDim(ctx, CHASH_ALIAS.NEW_CHASH))))
             .fetchOne(0, Integer.class);
     }
 
@@ -244,11 +258,11 @@ public final class ChashCensus {
      * for, whose "all clear" is evidence of a blind query, not a clean store.
      *
      * <p>DANGLING now means what it says: the pointer resolves to a live chunk
-     * by NO route — neither directly nor through the permanent {@code
-     * chash_alias} map, which is the whole point of that map (RDR-180: legacy
-     * references stay resolvable forever). A legacy-width pointer WITH an
-     * alias entry is therefore resolvable and not counted; one without is
-     * genuine debt and is.
+     * by NO route. RDR-180's "legacy references stay resolvable forever"
+     * promise (the {@code chash_alias} fallback route) was RETIRED at
+     * nexus-lgdel.l1 — the beneficiary population it was written for reached
+     * zero, so a legacy-width pointer is now dangling on the direct-existence
+     * test alone, with no second route to check.
      *
      * <p>The TEXT columns keep a shape filter, widened to "a chash of EITHER
      * era" (32- or 64-hex). CORRECTED (RDR-194 D1, nexus-tk070.p3a,
@@ -266,12 +280,17 @@ public final class ChashCensus {
      */
     private static Map<String, Integer> danglingPointers(DSLContext ctx) {
         Map<String, Integer> out = new LinkedHashMap<>();
-        Map<String, TableField<?, String>> hexKeyed = Map.of(
-            "topic_assignments", TOPIC_ASSIGNMENTS.DOC_ID,
-            "frecency", FRECENCY.CHUNK_ID,
-            "relevance_log", RELEVANCE_LOG.CHUNK_ID);
+        // topic_assignments keeps EITHER_ERA_SHAPE (its own retirement to
+        // canonical-only belongs to nexus-tk070.p3d); frecency/relevance_log
+        // move to CANONICAL_SHAPE (nexus-lgdel.l1 — see EITHER_ERA_SHAPE's
+        // javadoc for why).
+        Map<String, TableField<?, String>> hexKeyed = new LinkedHashMap<>();
+        hexKeyed.put("topic_assignments", TOPIC_ASSIGNMENTS.DOC_ID);
+        hexKeyed.put("frecency", FRECENCY.CHUNK_ID);
+        hexKeyed.put("relevance_log", RELEVANCE_LOG.CHUNK_ID);
         for (Map.Entry<String, TableField<?, String>> e : hexKeyed.entrySet()) {
-            Integer n = unresolvableHexCount(ctx, e.getValue());
+            String shape = "topic_assignments".equals(e.getKey()) ? EITHER_ERA_SHAPE : CANONICAL_SHAPE;
+            Integer n = unresolvableHexCount(ctx, e.getValue(), shape);
             if (n != null && n > 0) out.put("dangling." + e.getKey(), n);
         }
         // RDR-187 (nexus-piwya.5): the dangling.chash_index leg is RETIRED

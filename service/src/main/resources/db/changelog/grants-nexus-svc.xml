@@ -167,45 +167,18 @@ BEGIN
 END
 $$;
 
--- MAINTAIN on chash_alias (rdr180-17 / F2, production 2026-07-20): the rekey and
--- staging-promote paths ANALYZE this table INSIDE their own transaction, because a
--- multi-tenant store's SECOND tenant onward is otherwise planned against statistics
--- autoanalyze froze at "100% tenant 1" while the current tenant's alias rows are still
--- uncommitted and invisible. Measured cost of the blindness: 101 minutes versus 461
--- seconds for identical work.
--- WHY A GRANT IS REQUIRED, not just the statement: nexus_svc holds DML only and does
--- not own the table, and Postgres does NOT error when a non-owner analyzes — it emits a
--- WARNING and SKIPS. Without MAINTAIN the ANALYZE is a SILENT no-op that leaves the
--- planner exactly as blind.
--- MAINTAIN is PostgreSQL 17+, and this changeset runs against substrates whose major
--- version nexus does NOT choose:
---   * MANAGED/cloud: no PostgreSQL is installed by us at all — the engine runs against
---     a provider-managed server (Crunchy Bridge), whose major is theirs, not ours.
---     Verified 2026-07-20: major_version 17, live 17.10 (170010) — so the grant DOES
---     apply in production and F2's in-transaction ANALYZE is live there. Their major
---     can still move without our say, which is why this stays a guard and not an
---     assumption.
---   * LOCAL service: we always install our own signed bundle (17.5, PG_VERSION in
---     engine-service-release.yml) — never a host PostgreSQL, which is not a supported
---     mode — BUT the explicit data-directory carve-out deliberately KEEPS the cluster
---     an earlier, pre-bundle install created, and those can be older.
--- This guard is therefore NOT a bring-your-own fallback and NOT detect-and-adapt about
--- our own provisioning; it is a precondition on a statement that would otherwise
--- CRASH-LOOP boot on a substrate we did not pick (the GH #1390 shape: never let a
--- migration hard-fail a store it cannot fix). Where MAINTAIN is unavailable the
--- in-transaction ANALYZE degrades to the no-op described above; the engine reports
--- `alias_stats_refreshed` per run so that is auditable rather than assumed, and this
--- NOTICE names it at boot rather than leaving it to be discovered as a slow rekey.
-DO $$
-BEGIN
-    IF current_setting('server_version_num')::int >= 170000 THEN
-        EXECUTE 'GRANT MAINTAIN ON nexus.chash_alias TO nexus_svc';
-    ELSE
-        RAISE NOTICE 'grants-nexus-svc: server % predates MAINTAIN (PG17+); the rekey/promote in-transaction ANALYZE of nexus.chash_alias will be SKIPPED by Postgres. Single-tenant stores are unaffected; a multi-tenant rekey may plan against stale statistics (F2, rekey cascade measured 101min vs 461s).',
-            current_setting('server_version');
-    END IF;
-END
-$$;
+-- MAINTAIN on chash_alias (rdr180-17 / F2, production 2026-07-20) — RETIRED
+-- at nexus-lgdel.l1: nexus.chash_alias is DROPPED (legacy-001-drop-chash-
+-- alias.xml), and its only two callers (RekeyOps.rekey, StagingPromoteOps.
+-- promoteCollection's refreshAliasStats call) are deleted in that same
+-- commit. Editing this runAlways changeset's body is checksum-safe
+-- (ValidatingVisitor skips the MD5SUM comparison for shouldAlwaysRun() —
+-- see grants-003-purge-vacuum-maintain's comment for the identical
+-- precedent). This grant is removed outright rather than guarded, unlike
+-- grants-003's early-return pattern: that guard exists for a table that is
+-- CONDITIONALLY present depending on unify-migration state; chash_alias has
+-- no such conditional existence going forward, so there is nothing left to
+-- guard for.
 
 -- Default privileges: future tables/sequences created by the schema owner automatically
 -- carry the same grants for nexus_svc (self-healing for new migrations).
@@ -256,8 +229,9 @@ GRANT SELECT ON public.databasechangeloglock TO nexus_svc;
         <comment>
             nexus-0ys55: MAINTAIN on the five purge-trash VACUUM targets (nexus.chunks_384,
             nexus.chunks_768, nexus.chunks_1024, nexus.catalog_document_chunks,
-            nexus.catalog_documents) -- mirrors the chash_alias MAINTAIN grant above
-            (grants-nexus-svc-1, rdr180-17/F2) EXACTLY: same PG17+ version guard, same
+            nexus.catalog_documents) -- mirrors the RETIRED chash_alias MAINTAIN grant
+            that used to precede this one (grants-nexus-svc-1, rdr180-17/F2, removed at
+            nexus-lgdel.l1) EXACTLY: same PG17+ version guard, same
             runAlways self-healing placement, same reason a GRANT is required at all --
             nexus_svc holds DML only and does not own these tables (nexus_admin does), and
             PostgreSQL does NOT error when a non-owner without MAINTAIN vacuums a table --
@@ -284,8 +258,8 @@ GRANT SELECT ON public.databasechangeloglock TO nexus_svc;
             table list drifting out of lockstep with the other two -- if it silently
             stops covering all five, this pin is gone and nothing else replaces it.
 
-            MAINTAIN is PostgreSQL 17+ -- same substrate-version caveat as the chash_alias
-            grant above (MANAGED/cloud is Crunchy Bridge-provided, verified 17.10 as of
+            MAINTAIN is PostgreSQL 17+ -- same substrate-version caveat the RETIRED chash_alias
+            grant carried (MANAGED/cloud is Crunchy Bridge-provided, verified 17.10 as of
             2026-07-20; LOCAL always installs our own signed 17.5+ bundle but keeps whatever
             data directory a pre-bundle install left behind, which can be older). Where
             MAINTAIN is unavailable this degrades to the SAME graceful path

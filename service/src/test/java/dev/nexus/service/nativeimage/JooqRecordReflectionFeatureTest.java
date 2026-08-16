@@ -106,7 +106,15 @@ class JooqRecordReflectionFeatureTest {
     // shape as gc_restore_rereferenced above) — no further delta.
     // nexus.manifest_verify(text) is DELIBERATELY KEPT (completeIndexRun
     // depends on it), so its Record type is unaffected.
-    private static final int EXPECTED_RECORD_TYPES = 63;
+    // 63 -> 62: nexus-lgdel.l1 (legacy-001-drop-chash-alias.xml) DROPPED
+    // nexus.chash_alias — a plain table, one generated Record type (-1).
+    // nexus.chash_old_bytes(text), also dropped by the same changelog,
+    // RETURNS bytea (a scalar routine, no Record type, same shape as
+    // gc_restore_rereferenced above) — no further delta. The layered
+    // CREATE OR REPLACE on nexus.remap_membership(text,text) changes its
+    // body only, not its RETURNS TABLE signature — its existing Record
+    // type is unaffected.
+    private static final int EXPECTED_RECORD_TYPES = 62;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

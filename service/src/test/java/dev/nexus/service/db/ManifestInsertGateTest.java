@@ -131,26 +131,18 @@ class ManifestInsertGateTest {
      *       independently-reachable rename implementation; gated both
      *       endpoints since nexus-11gh6 post-review (T2 nexus/review-11gh6-
      *       gate-2026-08-08 [21797] Important finding).</li>
-     *   <li>{@code RekeyOps.rekey} — the manifest cascade's plain {@code chash}
-     *       repoint (step 5); gated per-distinct-target-collection since
-     *       nexus-t76bp, 2026-08-08. REWORKED same day (critic-p1 Critical,
-     *       T2 nexus/critique-t76bp-rekey-gate-2026-08-08 [21807]): the
-     *       resolution now runs BEFORE step 3 (not immediately before step
-     *       5), joining the alias map's {@code old_bytes} values against
-     *       {@code nexus.chunks} (RDR-191 Phase 4 unified; formerly {@code
-     *       chunks_384/768/1024}) — gating steps 3-4's content
-     *       mutations too, not just step 5's manifest UPDATE. See {@code
-     *       RekeyOps.rekey}'s own step-(2b) comment for the full
-     *       coextensiveness argument and the named orphan-synthesize
-     *       residual its step-6 abort-on-nonzero covers instead.</li>
      * </ul>
+     * {@code RekeyOps.rekey}'s own manifest-cascade UPDATE site (gated
+     * per-distinct-target-collection, nexus-t76bp) was REMOVED from this
+     * allowlist at nexus-lgdel.l1 — the whole class is deleted (its only
+     * caller, the client {@code chash_rekey} upgrade rung, is deleted in
+     * the same commit family).
      * A file/method not listed here that matches either UPDATE pattern fails
      * {@link #everyCatalogDocumentChunksUpdateAcrossTheWholeTree_isOnTheAllowlist}.
      */
     private static final Map<String, Set<String>> ALLOWED_UPDATE_SITES = Map.of(
         "CatalogRepository.java", Set.of("renameCollectionTxn"),
-        "ChashRepository.java", Set.of("renameCollection"),
-        "RekeyOps.java", Set.of("rekey"));
+        "ChashRepository.java", Set.of("renameCollection"));
 
     @Test
     void exactlyOneInsertIntoCatalogDocumentChunksSite() throws IOException {

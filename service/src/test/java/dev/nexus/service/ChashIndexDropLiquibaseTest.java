@@ -29,12 +29,16 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       CHECK — they die with the table)</li>
  *   <li>{@code staging.chash_index} (the dead-sink landing twin) is ALSO
  *       gone — dropped by rdr187-002 at nexus-piwya.11</li>
- *   <li>the SURVIVORS are intact: {@code nexus.chash_alias} (permanent by
- *       RDR-180 decision), {@code idx_chunks_tenant_chash} (RDR-191 Phase 4:
- *       the former three per-dim probe indexes are now ONE index on the
- *       unified {@code nexus.chunks} table), and the surviving chash octet
- *       CHECKs ({@code chunks_chash_octet_check}, also unified from three to
- *       one, and the manifest's own, still NOT VALID until nexus-uu4ue)</li>
+ *   <li>the SURVIVORS are intact: {@code idx_chunks_tenant_chash} (RDR-191
+ *       Phase 4: the former three per-dim probe indexes are now ONE index on
+ *       the unified {@code nexus.chunks} table), and the surviving chash
+ *       octet CHECKs ({@code chunks_chash_octet_check}, also unified from
+ *       three to one, and the manifest's own, still NOT VALID until
+ *       nexus-uu4ue). {@code nexus.chash_alias} itself is NO LONGER a
+ *       survivor — RDR-180 called it permanent, but nexus-lgdel.l1 dropped
+ *       it once its beneficiary population reached zero; this test now pins
+ *       that it is ALSO gone (legacy-001-drop-chash-alias.xml), a second,
+ *       independent DROP in a later changelog than this test's own subject.</li>
  *   <li>a second Liquibase update is a clean no-op (MARK_RAN-safe
  *       preconditions)</li>
  * </ol>
@@ -107,8 +111,9 @@ class ChashIndexDropLiquibaseTest {
         assertThat(intOf(
             "SELECT count(*) FROM information_schema.tables " +
             "WHERE table_schema = 'nexus' AND table_name = 'chash_alias'"))
-            .as("chash_alias is PERMANENT (RDR-180) — must survive the DROP")
-            .isEqualTo(1);
+            .as("chash_alias is dropped at nexus-lgdel.l1 (legacy-001-drop-chash-alias.xml) "
+                + "— RDR-180 called it permanent, but its beneficiary population reached zero")
+            .isZero();
         assertThat(intOf(
             "SELECT count(*) FROM information_schema.tables " +
             "WHERE table_schema = 'staging' AND table_name = 'chash_index'"))

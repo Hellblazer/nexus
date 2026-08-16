@@ -532,10 +532,18 @@ class CatalogRenameCollectionTest {
         st.execute("INSERT INTO nexus.hook_failures (tenant_id, doc_id, collection, hook_name, error, occurred_at) "
             + "VALUES ('" + tenant + "', 'rn-doc-1', '" + coll + "', 'post_store', 'boom', NOW())");
         // relevance_log: 2 (no FK, but re-homed — RDR-164 §Approach Phase 3 third audit table)
+        // nexus-lgdel.l1: chunk_id must be canonical 64-hex TEXT now
+        // (relevance_log_chunk_id_canonical_check, legacy-001-drop-chash-
+        // alias.xml) — 'ch1'/'ch2' no longer pass. NOT the chash(seed) helper
+        // below: that produces a 32-ASCII-char string relying on Postgres's
+        // bytea escape-literal cast (32 chars -> 32 bytes) for the chunks.chash
+        // BYTEA column; chunk_id here is TEXT and needs a real 64-hex STRING.
         st.execute("INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, collection, action, session_id, timestamp) "
-            + "VALUES ('" + tenant + "', 'q1', 'ch1', '" + coll + "', 'click', 's1', NOW())");
+            + "VALUES ('" + tenant + "', 'q1', '0b2ace5def2ecf1234ae0db2a062b83fe40dd330121844b37bc8bdfb6b2f3ea5', "
+            + "'" + coll + "', 'click', 's1', NOW())");
         st.execute("INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, collection, action, session_id, timestamp) "
-            + "VALUES ('" + tenant + "', 'q2', 'ch2', '" + coll + "', 'skip', 's1', NOW())");
+            + "VALUES ('" + tenant + "', 'q2', 'f7088d7f354fadfc6fe69df2f0a9f2057a715e9a62672258a88ee200e72f1c22', "
+            + "'" + coll + "', 'skip', 's1', NOW())");
     }
 
     /** RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into nexus.chunks --
