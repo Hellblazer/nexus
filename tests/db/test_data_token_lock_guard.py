@@ -41,6 +41,9 @@ from typing import Any
 import pytest
 
 from nexus.db.data_token import (
+    _MINT_LOCK_WAIT_CEILING_S,
+    _MINT_LOCK_WAIT_HEADROOM_S,
+    _MINT_RETRY_WALL_WORST_CASE_S,
     DataTokenManager,
     DataTokenMintError,
     _data_token_lease_path,
@@ -120,6 +123,106 @@ def _manager(
         wall_clock=wall_clock,
         **kwargs,
     )
+
+
+# ── deadline derivation (nexus-9rr0a) ────────────────────────────────────
+
+
+def test_lock_wait_ceiling_is_derived_with_meaningful_headroom() -> None:
+    """nexus-9rr0a: the waiter deadline must be DERIVED from the mint's own
+    retry-wall constants plus EXPLICIT headroom, never a hand-typed literal
+    that can silently drift from the constants it claims to track. Filed
+    from a substantive-critic finding on nexus-nnr26: the prior literal
+    (65.0s) carried only ~8%/5s margin over the ~60s worst case, computed
+    by hand in a comment rather than from the constants themselves."""
+    assert _MINT_LOCK_WAIT_CEILING_S == pytest.approx(
+        _MINT_RETRY_WALL_WORST_CASE_S + _MINT_LOCK_WAIT_HEADROOM_S
+    )
+    # The ceiling must never sink back toward the raw worst case -- a
+    # meaningful margin, not the prior ~8% one.
+    assert _MINT_LOCK_WAIT_CEILING_S >= _MINT_RETRY_WALL_WORST_CASE_S * 1.5
+    assert _MINT_LOCK_WAIT_HEADROOM_S >= _MINT_RETRY_WALL_WORST_CASE_S * 0.5
+
+
+def test_lock_wait_timeout_message_names_degraded_server_alongside_stuck_sibling(
+    tmp_path: Path,
+) -> None:
+    """nexus-9rr0a: a waiter that exhausts its deadline must not assert the
+    sibling holder is stuck as the ONLY explanation -- the holder may be a
+    beat away from succeeding against a genuinely degraded mint endpoint,
+    still within its own legitimate retry budget."""
+    lock_path = _data_token_mint_lock_path(BASE_URL, TENANT, tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        poster = _FakePoster()
+        mgr = _manager(
+            poster, _FakeClock(), config_dir=tmp_path, wall_clock=_FakeWallClock(),
+            sleep=lambda s: None, lock_wait_ceiling_seconds=0.05,
+        )
+        with pytest.raises(DataTokenMintError) as exc_info:
+            mgr.bearer_for(BASE_URL, TENANT)
+        message = str(exc_info.value).lower()
+        assert "stuck" in message
+        assert "degraded" in message
+        assert "retry budget" in message
+        # nexus-9rr0a critique: the two-wall ceiling rides out exactly one
+        # holder handoff; the message must name the multi-holder chain case
+        # so a chain timeout is not misread as a stuck sibling.
+        assert "chain of siblings" in message
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+# ── per-key lock sharding (nexus-7qz06) ──────────────────────────────────
+
+
+def test_different_keys_do_not_serialize_on_each_others_lock(tmp_path: Path) -> None:
+    """nexus-7qz06: the in-process guard is SHARDED per (base_url, tenant)
+    key -- a slow/stuck holder for key A must never block an unrelated
+    key B's bearer_for in the same process. Deterministic: key A's lock is
+    held by a thread parked on an Event (never a real mint attempt), key
+    B's call is proven non-blocking via a bounded thread join, no
+    sleep-racing."""
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-b", "expires_in_seconds": 300})
+    mgr = _manager(poster, _FakeClock(), config_dir=tmp_path, wall_clock=_FakeWallClock())
+
+    key_a = ("https://a.example", "tenant-a")
+    lock_a = mgr._lock_for(key_a)
+
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def _hold_key_a() -> None:
+        with lock_a:
+            acquired.set()
+            release.wait(timeout=5)
+
+    holder = threading.Thread(target=_hold_key_a)
+    holder.start()
+    assert acquired.wait(timeout=5), "holder thread never acquired key A's lock"
+
+    result: dict[str, str | None] = {}
+
+    def _call_key_b() -> None:
+        result["token"] = mgr.bearer_for("https://b.example", "tenant-b")
+
+    caller = threading.Thread(target=_call_key_b)
+    caller.start()
+    caller.join(timeout=2)
+
+    assert not caller.is_alive(), (
+        "bearer_for for an UNRELATED key blocked while key A's lock was "
+        "held -- the in-process lock is not sharded per key "
+        "(nexus-7qz06 regression)"
+    )
+    assert result["token"] == "tok-b"
+
+    release.set()
+    holder.join(timeout=5)
 
 
 # ── lock-file path helper ────────────────────────────────────────────────

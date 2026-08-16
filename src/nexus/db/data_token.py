@@ -99,15 +99,43 @@ exclusive acquire; on failure it re-reads the lease file (the winner will
 have published while holding the lock) and returns the borrowed token the
 instant it appears, without ever itself acquiring the lock. Only the lock
 HOLDER mints. A bounded wait ceiling (:data:`_MINT_LOCK_WAIT_CEILING_S`,
-sized above the mint's own worst-case retry wall time) protects against a
-holder that never publishes (e.g. its own mint failed) — past the ceiling
-the waiter fails loud with :class:`DataTokenMintError` rather than hang
-indefinitely, mirroring the deadline-exceeded behavior of the t1
-precedent's own bounded-poll variant (nexus-by875). Reads stay entirely
-lock-free: the guard wraps ONLY the genuine cache-miss-with-no-fresh-lease
-path (see :meth:`DataTokenManager.bearer_for`) — an existing fresh lease is
-still borrowed without ever touching the lock file, so the reuse happy path
-carries zero lock-contention cost.
+DERIVED per nexus-9rr0a from the mint's own worst-case retry wall
+constants plus explicit headroom — see :data:`_MINT_RETRY_WALL_WORST_CASE_S`
+and :data:`_MINT_LOCK_WAIT_HEADROOM_S` — never a hand-typed literal)
+protects against a holder that never publishes (e.g. its own mint failed)
+— past the ceiling the waiter fails loud with :class:`DataTokenMintError`
+(naming BOTH possibilities — a genuinely stuck sibling, or a degraded mint
+endpoint whose sibling is still within its own legitimate retry budget —
+nexus-9rr0a) rather than hang indefinitely, mirroring the deadline-exceeded
+behavior of the t1 precedent's own bounded-poll variant (nexus-by875).
+Reads stay entirely lock-free: the guard wraps ONLY the genuine
+cache-miss-with-no-fresh-lease path (see :meth:`DataTokenManager.bearer_for`)
+— an existing fresh lease is still borrowed without ever touching the lock
+file, so the reuse happy path carries zero lock-contention cost.
+
+Per-key in-process locking (nexus-7qz06): the in-process guard around
+:meth:`bearer_for`'s check-then-mint sequence is SHARDED per
+``(base_url, tenant)`` key (a dict of ``threading.Lock`` objects behind a
+short-lived registry lock, see :meth:`DataTokenManager._lock_for`) rather
+than one process-wide lock. A slow/degraded mint-on-miss race for one key
+(up to the full :data:`_MINT_LOCK_WAIT_CEILING_S` wait, plus this caller's
+own mint attempt if it becomes the next holder) no longer blocks an
+UNRELATED key's ``bearer_for`` call in the same process — relevant to a
+long-lived multi-tenant process (e.g. an MCP server juggling several
+tenants/endpoints through the process-wide :func:`get_data_token_manager`
+singleton), which is exactly the shape this sharding targets.
+
+Scope boundary — HOST-LOCAL ONLY (nexus-b0svi): the ``fcntl.flock`` guard
+above coordinates processes on ONE machine. It provides ZERO coordination
+across DIFFERENT hosts sharing the same ``mint_token`` credential — a
+multi-host fleet racing a cold start (e.g. a CI fleet of separate runners,
+or nexus-wrwb7's eventual multi-machine edge-JIT-retirement rollout) still
+deterministically hits ``MintRateLimiter``'s ``burst=5`` hard-fail exactly
+as before this fix, just at HOST granularity instead of process
+granularity. This fix closes the single-machine fan-out case only; a
+multi-host rollout needs either server-side coordination or per-host
+credentials, and should not treat this module's docstring as having
+already solved that case.
 
 Mint-body tenant resolution (nexus-ssqk9): every ``Http*Store`` defaults its
 own ``tenant`` constructor kwarg to ``DEFAULT_TENANT = "default"`` — but a
@@ -196,18 +224,6 @@ _MINT_LOCK_PREFIX: str = "data_token_mint_lock."
 #: bounded-poll variant's 0.05s interval exactly.
 _MINT_LOCK_POLL_INTERVAL_S: float = 0.05
 
-#: Hard ceiling on how long a losing racer waits for the lock holder to
-#: either publish a lease or release the lock (nexus-nnr26). Sized
-#: comfortably above the mint's own worst-case retry wall time (2 sleeps
-#: capped at _MINT_RETRY_AFTER_CAP_S=15s + 3 attempts' _MINT_TIMEOUT_S=10s
-#: transport timeouts ~= 60s, see DataTokenManager._mint's docstring) so a
-#: waiter never gives up while the holder is still within its own
-#: legitimate retry budget. Past this, the wait fails loud
-#: (DataTokenMintError) rather than block indefinitely -- mirrors
-#: nexus.db.t1._lock_guarded_mint_or_borrow's deadline-exceeded behavior
-#: (nexus-by875).
-_MINT_LOCK_WAIT_CEILING_S: float = 65.0
-
 #: Backoff between attempts when the server supplies no Retry-After header
 #: (design of record: "1s/2s"). Indexed by ``attempt - 1``.
 _MINT_BACKOFF_SCHEDULE: tuple[float, ...] = (1.0, 2.0)
@@ -224,6 +240,70 @@ _MINT_BACKOFF_SCHEDULE: tuple[float, ...] = (1.0, 2.0)
 #: an outage to surface, not absorb (review round-2 Significant,
 #: nexus-ssqk9 thread).
 _MINT_RETRY_AFTER_CAP_S: float = 15.0
+
+#: DERIVED (nexus-9rr0a): the worst-case wall time a single
+#: :meth:`DataTokenManager._mint` call can legitimately burn retrying
+#: against a degraded server (repeated 429/502/503/504) before it either
+#: succeeds or gives up and raises. Every attempt pays its own transport
+#: timeout; every attempt but the last is followed by a sleep capped at
+#: ``_MINT_RETRY_AFTER_CAP_S`` (an honored server ``Retry-After`` can hit
+#: that cap; the unforced ``_MINT_BACKOFF_SCHEDULE`` values are smaller and
+#: therefore never the binding case here):
+#:
+#:     _MINT_MAX_ATTEMPTS(3) x _MINT_TIMEOUT_S(10s)                = 30s
+#:   + (_MINT_MAX_ATTEMPTS(3) - 1) x _MINT_RETRY_AFTER_CAP_S(15s)  = 30s
+#:   ---------------------------------------------------------------------
+#:                                                                  = 60s
+#:
+#: A module-level derivation (not a hand-typed literal) so this and
+#: :data:`_MINT_LOCK_WAIT_CEILING_S` below can never silently drift apart
+#: the way a hand-maintained comment-vs-literal pair can (nexus-9rr0a,
+#: filed from a substantive-critic finding on nexus-nnr26: the prior 65.0s
+#: literal carried only ~8%/5s margin over this same 60s figure, computed
+#: by hand in a comment rather than from these constants).
+_MINT_RETRY_WALL_WORST_CASE_S: float = (
+    _MINT_MAX_ATTEMPTS * _MINT_TIMEOUT_S
+    + (_MINT_MAX_ATTEMPTS - 1) * _MINT_RETRY_AFTER_CAP_S
+)
+
+#: Explicit headroom (nexus-9rr0a) above :data:`_MINT_RETRY_WALL_WORST_CASE_S`
+#: for :data:`_MINT_LOCK_WAIT_CEILING_S` below. A waiting racer's deadline
+#: is evaluated ONLY while it is still waiting for a BUSY lock (see
+#: :meth:`DataTokenManager._mint_guarded`) — the instant it becomes the
+#: holder itself, it is free to run its own full retry wall with no further
+#: deadline check. So the risk this headroom defends against is narrower
+#: than "two retry walls back to back": it is a waiting racer's deadline
+#: firing while the CURRENT holder is still legitimately inside its own
+#: single retry wall (scheduling jitter, GC pauses, or a Retry-After
+#: response arriving a beat later than the theoretical cap). A full extra
+#: retry-wall's worth of headroom (rather than the prior ~8%) is cheap to
+#: grant — this path only ever costs real wall time when the mint endpoint
+#: is already degraded, i.e. the unhappy path is already slow.
+#:
+#: DELIBERATE POLICY BOUNDARY (nexus-9rr0a critique): the ceiling below
+#: (wall + this headroom = two walls) rides out at most ONE holder-to-holder
+#: handoff — holder A burns its full wall and fails, holder B (some other
+#: racer that won the released lock) starts a fresh wall — before a racer
+#: STILL waiting fails loud. A waiter that wins the lock at any point stops
+#: being subject to the deadline entirely (it runs its own wall as holder),
+#: so the only exposure is a waiter that loses the lock race across two or
+#: more consecutive predecessors' walls against a degraded endpoint. No
+#: finite ceiling survives an arbitrary chain; two walls then fail-loud is
+#: the chosen bound, and the timeout message names the chain case so the
+#: error is not misread as a stuck sibling.
+_MINT_LOCK_WAIT_HEADROOM_S: float = _MINT_RETRY_WALL_WORST_CASE_S
+
+#: Hard ceiling on how long a losing racer waits for the lock holder to
+#: either publish a lease or release the lock (nexus-nnr26; DERIVED per
+#: nexus-9rr0a from :data:`_MINT_RETRY_WALL_WORST_CASE_S` +
+#: :data:`_MINT_LOCK_WAIT_HEADROOM_S` above, rather than a hand-typed
+#: literal). Past this, the wait fails loud (DataTokenMintError) rather
+#: than block indefinitely -- mirrors
+#: nexus.db.t1._lock_guarded_mint_or_borrow's deadline-exceeded behavior
+#: (nexus-by875).
+_MINT_LOCK_WAIT_CEILING_S: float = (
+    _MINT_RETRY_WALL_WORST_CASE_S + _MINT_LOCK_WAIT_HEADROOM_S
+)
 
 
 class DataTokenMintError(RuntimeError):
@@ -335,10 +415,16 @@ class DataTokenManager:
     """Mints and caches short-TTL data tokens against a mint-locked credential.
 
     One live token per ``(base_url, tenant)`` key (nexus-lgiqw residue
-    discipline). Thread-safe: the whole check-then-mint sequence is guarded
-    by a single lock, so concurrent callers racing on an empty/expired cache
-    entry mint exactly once — the simplest correct shape given a mint is a
-    single bounded HTTP round trip, not a hot-path operation.
+    discipline). Thread-safe: the whole check-then-mint sequence for a given
+    key is guarded by a lock SHARDED per ``(base_url, tenant)`` key
+    (nexus-7qz06 — see :meth:`_lock_for`), so concurrent callers racing on
+    the SAME key's empty/expired cache entry mint exactly once, while
+    callers racing on DIFFERENT keys never serialize on each other. Prior to
+    nexus-7qz06 a single process-wide lock was held across the full
+    mint-on-miss poll loop (up to :data:`_MINT_LOCK_WAIT_CEILING_S`), so a
+    slow cold-start race for one key could stall an unrelated key's
+    ``bearer_for`` in the same process — see the module docstring's
+    "Per-key in-process locking" section.
 
     Args:
         clock: Monotonic clock, injectable for deterministic tests.
@@ -371,9 +457,12 @@ class DataTokenManager:
             for deterministic tests; defaults to ``time.time``.
         lock_wait_ceiling_seconds: Hard ceiling on how long a losing racer
             waits for the mint-on-miss lock holder to publish or release
-            (nexus-nnr26). Defaults to :data:`_MINT_LOCK_WAIT_CEILING_S`.
-            Injectable so a test can force the deadline-exceeded path
-            without a real ~65s wait. Deliberately measured against real
+            (nexus-nnr26). Defaults to :data:`_MINT_LOCK_WAIT_CEILING_S`,
+            DERIVED (nexus-9rr0a) from the mint's own worst-case retry wall
+            plus explicit headroom -- see :data:`_MINT_RETRY_WALL_WORST_CASE_S`
+            and :data:`_MINT_LOCK_WAIT_HEADROOM_S`. Injectable so a test can
+            force the deadline-exceeded path without a real multi-second
+            wait. Deliberately measured against real
             ``time.monotonic()`` inside :meth:`_mint_guarded`, never the
             injectable ``clock`` above -- mirrors
             ``nexus.db.t1._lock_guarded_mint_or_borrow``'s own deadline,
@@ -403,7 +492,12 @@ class DataTokenManager:
         self._config_dir = config_dir
         self._wall_clock = wall_clock
         self._lock_wait_ceiling_seconds = lock_wait_ceiling_seconds
-        self._lock = threading.Lock()
+        # nexus-7qz06: sharded per-(base_url, tenant) locks rather than one
+        # process-wide lock — see _lock_for. _registry_lock guards only the
+        # dict's own get-or-create, never the check-then-mint sequence a
+        # per-key lock protects.
+        self._registry_lock = threading.Lock()
+        self._key_locks: dict[tuple[str, str], threading.Lock] = {}
         self._cache: dict[tuple[str, str], _CachedToken] = {}
 
     # ── Credential resolution ────────────────────────────────────────────────
@@ -436,6 +530,23 @@ class DataTokenManager:
 
         return nexus_config_dir()
 
+    def _lock_for(self, key: tuple[str, str]) -> threading.Lock:
+        """Return the per-``(base_url, tenant)`` lock for *key*, creating it
+        under a short-lived registry lock on first use (nexus-7qz06).
+
+        Locks are never removed once created — one extra ``threading.Lock``
+        object per distinct key for the life of the process is negligible,
+        and removing entries would reintroduce a race between "no one holds
+        this key's lock right now" and deleting the very object a
+        concurrent racer is about to acquire.
+        """
+        with self._registry_lock:
+            lock = self._key_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._key_locks[key] = lock
+            return lock
+
     # ── Public API ───────────────────────────────────────────────────────────
 
     def bearer_for(self, base_url: str, tenant: str) -> str | None:
@@ -458,7 +569,7 @@ class DataTokenManager:
         if not credential:
             return None
         key = (base_url.rstrip("/"), tenant)
-        with self._lock:
+        with self._lock_for(key):
             cached = self._cache.get(key)
             first_mint = cached is None
             if cached is not None and not self._needs_refresh(cached):
@@ -511,7 +622,7 @@ class DataTokenManager:
         ever clobber a sibling.
         """
         key = (base_url.rstrip("/"), tenant)
-        with self._lock:
+        with self._lock_for(key):
             popped = self._cache.pop(key, None)
         if popped is not None:
             self._delete_lease(base_url, tenant, expected_token=popped.token)
@@ -541,7 +652,7 @@ class DataTokenManager:
         first call — the exact residue-discipline bug this method fixes).
         """
         key = (base_url.rstrip("/"), tenant)
-        with self._lock:
+        with self._lock_for(key):
             cached = self._cache.get(key)
             return cached is not None and not self._needs_refresh(cached)
 
@@ -555,7 +666,7 @@ class DataTokenManager:
         granted TTL; this is what makes that claim true.
         """
         key = (base_url.rstrip("/"), tenant)
-        with self._lock:
+        with self._lock_for(key):
             cached = self._cache.get(key)
             return cached.ttl_seconds if cached is not None else None
 
@@ -747,9 +858,18 @@ class DataTokenManager:
                             f"{self._lock_wait_ceiling_seconds:.0f}s for "
                             f"{_host(base_url)} tenant={tenant!r} — a sibling "
                             "process holds the mint lock without publishing "
-                            "a lease (its own mint likely failed or is "
-                            "stuck); giving up rather than waiting "
-                            "indefinitely"
+                            "a lease. This can mean the sibling's own mint "
+                            "failed or is genuinely stuck, OR that the mint "
+                            "endpoint is degraded (repeated "
+                            "429/502/503/504) and the sibling is still "
+                            "within its own legitimate retry budget "
+                            f"(~{_MINT_RETRY_WALL_WORST_CASE_S:.0f}s worst "
+                            "case), OR that a chain of siblings each burned "
+                            "a retry wall in turn against a degraded "
+                            "endpoint (this wait rides out one holder "
+                            "handoff, then gives up); giving up rather than "
+                            "waiting indefinitely — retry, or check the "
+                            "mint endpoint's health if this recurs."
                         )
                     self._sleep(_MINT_LOCK_POLL_INTERVAL_S)
                     continue

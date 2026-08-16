@@ -66,7 +66,7 @@
 #   9. Genuine concurrency (nexus-nnr26): an 8-way backgrounded `&`
 #      fan-out of cold `nx` subprocesses, lease file removed first so
 #      every one is a real cold start. Asserts 0 subprocess failures and
-#      a bounded total mint count (<= 2) across all 8 — the flock-guarded
+#      exactly ONE total mint across all 8 (nexus-4jfaf) — the flock-guarded
 #      mint-on-miss fast-follow this leg exists to prove, since every
 #      other leg above drives subprocesses strictly SEQUENTIALLY and so
 #      cannot exercise the race at all.
@@ -456,8 +456,18 @@ for i in $(seq 1 "$FANOUT_N"); do
 done
 [ "$FANOUT_MINT_COUNT" -ge 1 ] \
     || _fail "the 8-way concurrent fan-out logged ZERO data_token_minted events across all legs — the cold-start setup above (lease removal) likely did not take effect, proving nothing"
-[ "$FANOUT_MINT_COUNT" -le 2 ] \
-    || _fail "the 8-way concurrent fan-out minted $FANOUT_MINT_COUNT times (expected <= 2) — flock-guarded mint-on-miss is not converging concurrent cold-start racers (nexus-nnr26 regression)"
+# nexus-4jfaf: tightened from "<= 2" to "== 1" — the flock design gives a
+# deterministic mutual-exclusion + atomic-rename-visibility guarantee, so
+# 8 genuinely concurrent cold-start racers on ONE machine converge on
+# EXACTLY one mint (matching the unit suite's own
+# test_concurrent_cold_start_racers_across_separate_managers_converge_to_one_mint
+# assertion, tests/db/test_data_token_lock_guard.py). The looser "<= 2"
+# bound predates a real end-to-end run of this leg; a 2026-08-16 run on
+# develop @ ac082bd9b (engine-service-v0.1.75, sandboxed HOME) came back
+# 8/8 succeeded with exactly 1 total mint, so the tighter bound is backed
+# by evidence, not just theory — see nexus-4jfaf's bd notes.
+[ "$FANOUT_MINT_COUNT" -eq 1 ] \
+    || _fail "the 8-way concurrent fan-out minted $FANOUT_MINT_COUNT times (expected exactly 1) — either flock-guarded mint-on-miss is not converging concurrent cold-start racers (nexus-nnr26 regression), or a racer took the OSError lock-open degrade branch and minted unguarded (check for lock-file create failures / FD pressure in the run's environment before diagnosing the flock path)"
 echo "  fan-out: $FANOUT_N/$FANOUT_N succeeded, $FANOUT_MINT_COUNT total mint(s)"
 
 echo "── non-vacuity ──"
