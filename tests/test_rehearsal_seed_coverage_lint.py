@@ -250,6 +250,30 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # both tables).
         ("legacy-001-1", "nexus-lgdel.l1"),
         ("legacy-001-2", "nexus-lgdel.l1"),
+        # nexus-tk070.p3b (RDR-194 § D1 steps b/c/d): taxonomy-010-1's
+        # source_collection backfill + counted delete of the ambiguous/
+        # unresolvable remainders + SET NOT NULL, all in one changeset,
+        # RLS toggle-wrapped around the three DML statements (nexus.
+        # topic_assignments and nexus.chunks both FORCE RLS). Seeded as
+        # three topic_assignments rows sharing one topic, all DELETE arms:
+        # an ambiguous row (chash under two collections, deleted), an
+        # unresolvable row (conformant 64-hex shape, no matching chunk at
+        # all, deleted -- proves the anti-join arm independently of the
+        # shape predicate), and a legacy-shape-coincidental-match row
+        # (32-hex doc_id that DOES text-match a real chunk, deleted anyway
+        # -- the cc4/HAL no-wedge proof that the shape predicate wins over
+        # a coincidental anti-join match); effect-asserted (all three
+        # gone, FORCE restored on both toggled tables, source_collection is
+        # SET NOT NULL at HEAD). The positive unique-resolution BACKFILL
+        # arm cannot be constructed in this old-tag-hop fixture (the OLD
+        # leg's chunks_384/768/1024 carry a length(chash)=32 CHECK, so
+        # every chash seedable pre-hop is legacy-width and therefore
+        # excluded from backfill candidacy by taxonomy-010-1's own shape
+        # guard) -- it is proven separately by a dedicated HEAD-schema
+        # integration test (Taxonomy010BackfillDirectIntegrationTest),
+        # outside the seed-coverage lint's scope (that lint only covers
+        # the hop's own toggle-wrapped row-DML changesets).
+        ("taxonomy-010-1", "nexus-tk070.p3b"),
     }
 )
 

@@ -221,6 +221,10 @@ def test_grants_changeset_view_era_revokes_tables():
     assert [cs.get("id") for cs in diag_sets] == [
         "grants-nexus-diag-1",
         "grants-nexus-diag-2",
+        # nexus-8yz1p (2026-08-16): third, era-independent staging-schema
+        # SELECT changeset -- deliberately its own changeset, not folded
+        # into -1's era-gated body (see that changeset's own comment).
+        "grants-nexus-diag-3",
     ]
     for cs in diag_sets:
         assert cs.get("runAlways") == "true", (

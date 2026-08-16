@@ -281,25 +281,36 @@ class TestICF:
         assert icf[B + 1] == pytest.approx(0.0)
 
     def test_icf_n_effective_excludes_null_source(self, db: T2Database) -> None:
-        """Legacy NULL ``source_collection`` rows don't inflate N or DF."""
+        """SUPERSEDED (RDR-194 D1/P3b, nexus-11pe7): source_collection is NOT
+        NULL as of taxonomy-010-1 -- a "legacy NULL row" can no longer be
+        constructed at all, so this no longer tests ICF's exclusion logic;
+        it tests that the write itself is refused. compute_icf_map's own
+        NULL-exclusion predicate is now structurally dead code (every row is
+        NOT NULL by construction), retirement of which is out of scope here
+        (D0.10 census-leg-retirement discipline: it retires with whatever
+        follow-up phase removes the now-unreachable branch, not silently
+        alongside an unrelated bead).
+        """
+        import httpx
+
         B = _unique_topic_base()
         _seed_projection_rows(db, [
             ("docA", B + 1, "code__c1"),
             ("docB", B + 1, "code__c2"),
             ("docC", B + 2, "code__c1"),
         ])
-        # Insert a legacy NULL row directly (simulate pre-migration state).
-        # SQLite: raw INSERT. Engine: the fidelity import surface writes the
-        # NULL similarity/source_collection verbatim — same legacy shape.
+        # A NULL source_collection write must now fail loud, not silently
+        # land and get excluded downstream.
         _insert_topic(db, topic_id=B + 99, collection="code__any", label="legacy")
-        db.taxonomy.import_assignment(
-            doc_id="docLegacy", topic_id=B + 99, assigned_by="projection",
-            similarity=None, assigned_at=None, source_collection=None,
-        )
+        with pytest.raises(httpx.HTTPStatusError):
+            db.taxonomy.import_assignment(
+                doc_id="docLegacy", topic_id=B + 99, assigned_by="projection",
+                similarity=None, assigned_at=None, source_collection=None,
+            )
         db.taxonomy.clear_icf_cache()
 
         icf = db.taxonomy.compute_icf_map()
-        # Legacy NULL row excluded: N_effective stays 2 (c1, c2); the
+        # The refused row never landed: N_effective stays 2 (c1, c2); the
         # legacy topic is absent from the map.
         assert B + 99 not in icf
         # Topic B+1 in both collections → ICF = 0.
@@ -778,7 +789,8 @@ class TestAudit:
                 assigned_at=f"2026-04-10T12:{i:02d}:00",
             )
         # HDBSCAN row that must NOT be counted.
-        db.taxonomy.assign_topic("hdbscan-doc", B + 1, assigned_by="hdbscan")
+        db.taxonomy.assign_topic(
+            "hdbscan-doc", B + 1, assigned_by="hdbscan", source_collection="code__auditC0")
         db.taxonomy.clear_icf_cache()
         return db, B
 

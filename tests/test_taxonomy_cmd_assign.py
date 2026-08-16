@@ -112,6 +112,19 @@ def test_assign_accepts_conformant_64hex_doc_id(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     with T2Database(db_path) as db:
         assignments = db.taxonomy.get_assignments_for_docs([VALID_CHASH])
+        details = db.taxonomy.get_assignment_details([VALID_CHASH])
     assert assignments.get(VALID_CHASH) == topic_id, (
         "the conformant doc_id must reach the store once validation passes"
+    )
+    # Reviewer Minor-3 (RDR-194 P3b/nexus-11pe7 stacked review, T2 nexus/
+    # rdr194-p3b-substantive-critique-2026-08-16 [22755]): topic_id alone
+    # does not prove source_collection was populated -- assign_cmd resolves
+    # it from the RESOLVED topic's own `collection` field (get_topic_by_id),
+    # not from the --collection lookup-scope flag; assert the WRITTEN row
+    # actually carries it, at the CLI level, not merely that the topic_id
+    # link exists.
+    assert len(details) == 1, details
+    assert details[0]["source_collection"] == "proj", (
+        "source_collection must be populated from the resolved topic's own "
+        f"collection ('proj'), not left NULL: got {details[0]!r}"
     )

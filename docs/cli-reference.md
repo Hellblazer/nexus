@@ -1372,7 +1372,7 @@ nx taxonomy review --auto --dry-run             # preview verdicts, apply nothin
 nx taxonomy review --auto --yes                 # skip the destructive-action confirm prompt
 nx taxonomy review --auto --batch-size 20       # topics per claude_dispatch call (default 40)
 nx taxonomy label                               # batch-relabel with Claude haiku
-nx taxonomy assign doc-id "topic label"         # manually assign a doc
+nx taxonomy assign doc-id "topic label"         # manually assign a doc (see below)
 nx taxonomy rename "old label" "new label"      # rename a topic
 nx taxonomy merge "source" "target"             # merge topics
 nx taxonomy split "label" --k 3                 # split into sub-topics
@@ -1388,6 +1388,27 @@ nx taxonomy validate-refs docs/**/*.md                        # stale-reference 
 nx taxonomy backfill-source-collection                        # dry-run: backfill legacy source_collection rows
 nx taxonomy backfill-source-collection --apply                # commit the backfill (irreversible)
 ```
+
+### `nx taxonomy assign`
+
+Manually assign one document (chunk) to a topic by label: `nx taxonomy assign
+DOC_ID "topic label" [-c/--collection SCOPE]`. `DOC_ID` must be a conformant
+64-character lowercase hex chunk chash (RDR-194 D1) — `topic_assignments.doc_id`
+is a chunk chash end to end, not a title or catalog tumbler; pass the chash
+`nx search` / `nx query` reports.
+
+`--collection` scopes the LABEL LOOKUP only (disambiguates same-named topics
+in different collections) — it does not, by itself, decide what gets stored.
+`source_collection` on the written assignment row is resolved from the
+RESOLVED topic's own `collection` field, not from `--collection` (RDR-194
+D1/P3b): `--collection` is an optional filter with no default, whereas the
+topic's own collection is always on record once the topic exists, so it is
+the authoritative value — the same identity `assign_from_chashes_<dim>`'s
+centroid branch and the engine's own non-projection assignment path resolve
+to. `topic_assignments.source_collection` is `NOT NULL`; a resolved topic
+with no collection on record is a corrupt `topics` row, not user error, and
+the command raises a `UsageError` naming the topic id rather than silently
+guessing a value.
 
 ### `nx taxonomy review --auto`
 

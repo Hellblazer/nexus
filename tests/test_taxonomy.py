@@ -78,7 +78,21 @@ def _seed_assignment(
     assigned_at: str | None = None,
     source_collection: str | None = None,
 ) -> None:
-    """Insert one topic_assignments row on either substrate."""
+    """Insert one topic_assignments row on either substrate.
+
+    RDR-194 D1/P3b (nexus-11pe7): source_collection is NOT NULL as of
+    taxonomy-010-1. When the caller does not supply one, it is derived from
+    the ASSIGNED topic's own ``collection`` field -- the correct value for
+    every own-pass (non-cross-collection) seed shape this helper's callers
+    use, matching assign_from_chashes_<dim>'s centroid branch (P3a) /
+    TaxonomyRepository.assignOne's non-projection branch (P3b) / the CLI's
+    ``nx taxonomy assign`` (P3b) all resolving the SAME identity. A test that
+    genuinely wants a DIFFERENT (cross-collection) source_collection still
+    passes one explicitly; this default only fills the common case.
+    """
+    if source_collection is None:
+        topic_row = taxonomy.get_topic_by_id(topic_id)
+        source_collection = topic_row.get("collection") if topic_row else None
     taxonomy.import_assignment(
         doc_id=doc_id,
         topic_id=topic_id,
@@ -460,7 +474,7 @@ def test_assign_topic(db: T2Database) -> None:
     # nexus.taxonomy.assign_topic facade omits it).
     topic_id = _seed_topic(db.taxonomy, "test-topic", collection="proj")
 
-    db.taxonomy.assign_topic("doc-123", topic_id, assigned_by="hdbscan")
+    db.taxonomy.assign_topic("doc-123", topic_id, assigned_by="hdbscan", source_collection="proj")
 
     assert db.taxonomy.get_assignments_for_docs(["doc-123"]) == {"doc-123": topic_id}
 
@@ -469,8 +483,8 @@ def test_assign_topic_idempotent(db: T2Database) -> None:
     """Assigning same doc to same topic twice doesn't error."""
     topic_id = _seed_topic(db.taxonomy, "test-topic", collection="proj")
 
-    db.taxonomy.assign_topic("doc-123", topic_id, assigned_by="hdbscan")
-    db.taxonomy.assign_topic("doc-123", topic_id, assigned_by="hdbscan")  # no error
+    db.taxonomy.assign_topic("doc-123", topic_id, assigned_by="hdbscan", source_collection="proj")
+    db.taxonomy.assign_topic("doc-123", topic_id, assigned_by="hdbscan", source_collection="proj")  # no error
 
     assert db.taxonomy.get_all_topic_doc_ids(topic_id) == ["doc-123"]
 
@@ -492,8 +506,8 @@ def test_assign_topic_updates_doc_count_cache(db: T2Database) -> None:
         )
 
     # HDBSCAN path (default assigned_by)
-    db.taxonomy.assign_topic("doc-a", topic_id, assigned_by="hdbscan")
-    db.taxonomy.assign_topic("doc-b", topic_id, assigned_by="hdbscan")
+    db.taxonomy.assign_topic("doc-a", topic_id, assigned_by="hdbscan", source_collection="proj")
+    db.taxonomy.assign_topic("doc-b", topic_id, assigned_by="hdbscan", source_collection="proj")
     cached, derived = _cached_and_derived()
     assert cached == derived == 2, f"cached={cached} derived={derived}"
 
@@ -571,7 +585,8 @@ def test_rebuild_taxonomy_preserves_manual_assignment(
     )
     # Operator manually assigns a doc to an existing topic.
     first_topic = min(_collection_topic_ids(db.taxonomy, "manual__coll"))
-    db.taxonomy.assign_topic("manual-doc", first_topic, assigned_by="manual")
+    db.taxonomy.assign_topic(
+        "manual-doc", first_topic, assigned_by="manual", source_collection="manual__coll")
 
     db.taxonomy.rebuild_taxonomy(
         "manual__coll", doc_ids, embeddings, texts, chroma_client,
@@ -2283,7 +2298,7 @@ class TestProjectionLinks:
         )
         # A non-projection assignment must be ignored by the helper.
         db.taxonomy.assign_topic(
-            "doc-4", tgt_a, assigned_by="hdbscan",
+            "doc-4", tgt_a, assigned_by="hdbscan", source_collection="c_target_a",
         )
 
         counts = db.taxonomy.get_projection_counts_by_collection()
@@ -2304,7 +2319,8 @@ class TestProjectionLinks:
 
         # Three docs assigned to src-topic via hdbscan, then projected to tgt-topic.
         for doc_id in ("doc-1", "doc-2", "doc-3"):
-            db.taxonomy.assign_topic(doc_id, src_id, assigned_by="hdbscan")
+            db.taxonomy.assign_topic(
+                doc_id, src_id, assigned_by="hdbscan", source_collection="c_src")
             db.taxonomy.assign_topic(
                 doc_id, tgt_id, assigned_by="projection",
                 similarity=0.8, source_collection="c_src",
@@ -2335,7 +2351,7 @@ class TestProjectionLinks:
         ])
 
         # Assign a projection pair
-        db.taxonomy.assign_topic("doc-1", src_id, assigned_by="hdbscan")
+        db.taxonomy.assign_topic("doc-1", src_id, assigned_by="hdbscan", source_collection="c1")
         db.taxonomy.assign_topic(
             "doc-1", tgt_id, assigned_by="projection",
             similarity=0.9, source_collection="c1",
@@ -2677,7 +2693,8 @@ class TestManualPreservation:
         # Manually assign a doc and rename a topic
         topics = db.taxonomy.get_topics()
         topic = topics[0]
-        db.taxonomy.assign_topic("manual-doc", topic["id"], assigned_by="manual")
+        db.taxonomy.assign_topic(
+            "manual-doc", topic["id"], assigned_by="manual", source_collection="test__preserve")
         db.taxonomy.rename_topic(topic["id"], "operator-approved")
 
         # Rebuild (with merge strategy)

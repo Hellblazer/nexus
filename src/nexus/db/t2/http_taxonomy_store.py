@@ -749,12 +749,22 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                     "source_collection": collection_name,
                 })
             else:
+                # RDR-194 D1/P3b (nexus-11pe7): source_collection populated on
+                # the centroid (non-cross-collection) branch too -- the
+                # Python-side mirror of assign_from_chashes_<dim>'s plpgsql
+                # centroid branch (P3a) and TaxonomyRepository.assignOne's
+                # non-projection branch (P3b), both of which persist their
+                # own p_collection/sourceCollection parameter here. This
+                # branch's own WHERE-equivalent (get_by_collection(
+                # collection_name), not get_foreign) already scopes centroid
+                # candidates to collection_name, so it IS the doc's source
+                # collection by construction -- never a fallback/guess.
                 out.append({
                     "doc_id": doc_id,
                     "topic_id": topic_id,
                     "assigned_by": by,
                     "similarity": None,
-                    "source_collection": None,
+                    "source_collection": collection_name,
                 })
         return out
 
@@ -1103,9 +1113,13 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         (``chunks_<dim>``, just upserted by the SAME flush) and the centroids
         (``taxonomy_centroids_<dim>``), so compute-and-persist collapses into
         ONE round trip — no client-side embedding re-download, no local
-        cosine math. ``assign_batch``/``compute_assignments`` themselves are
-        UNCHANGED and still used by discover/rebuild/split, which need the
-        computed (not just persisted) assignment rows.
+        cosine math. ``assign_batch``/``compute_assignments`` are still used
+        by discover/rebuild/split, which need the computed (not just
+        persisted) assignment rows -- STILL LIVE, not dead code, so a
+        NOT NULL/schema change to what they persist (RDR-194 D1/P3b,
+        nexus-11pe7: ``compute_assignments``'s centroid branch now populates
+        ``source_collection`` instead of leaving it ``None``) is a real
+        production-path fix, not a no-op on unreachable code.
 
         NO FALLBACK (nexus-yu9w5, mirrors nexus-sghyo): an engine below
         ``REQUIRED_ENGINE_VERSION`` that does not carry this route 404s, and

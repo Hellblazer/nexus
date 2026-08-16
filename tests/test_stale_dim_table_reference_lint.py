@@ -486,7 +486,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "route to chunks_768 pre-unify; historical only."
     ),
     "tests/test_rehearsal_seed_coverage_lint.py": (
-        8,
+        9,
         "Comments narrating which straddle-era per-dim content "
         "(chunks_384/768/1024, taxonomy_centroids_384/768/1024) the "
         "rehearsal seed must cover; historical/explanatory, matches "
@@ -495,7 +495,12 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "fk-004-1-reconcile entry's comment narrates the same fk-002-"
         "already-enforces-registration fact as the Java SEED-COVERAGE "
         "block's sibling comment — historical narration, not a live "
-        "reference."
+        "reference. +1 (8->9, nexus-tk070.p3b, RDR-194 P3b 2026-08-16): the "
+        "taxonomy-010-1 DECLARED_SEED_COVERAGE entry's comment explains why "
+        "its rehearsal fixture uses legacy-width (chunks_384/768) content "
+        "for the ambiguous/unresolvable arms rather than canonical 64-hex — "
+        "historical narration of the same OLD-schema length(chash)=32 "
+        "constraint, not a live reference."
     ),
     "tests/test_o8dil7_prune_misclassified_manifest_antijoin_engine.py": (
         1,
@@ -542,7 +547,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "own caution about SchemaMigratorIntegrationTest."
     ),
     "service/src/test/java/dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java": (
-        37,
+        42,
         "nexus-4m6i0.6 upgrade-rehearsal suite: injects a pre-unify schema "
         "divergence and upgrades it to HEAD across the vectors-004/"
         "taxonomy-007 changesets, then asserts the per-dim tables are GONE "
@@ -554,7 +559,25 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "fk-002 (already applied at OLD_TAG) enforces registration on every "
         "chunks_384/768/1024 write before this hop starts — historical "
         "narration of why that changeset's additive reconcile always finds "
-        "zero unregistered rows in this fixture, not a live reference."
+        "zero unregistered rows in this fixture, not a live reference. "
+        "+5 (37->42, nexus-tk070.p3b, RDR-194 P3b 2026-08-16): the "
+        "taxonomy-010-1 leg's own SEED-block comment explains it seeds its "
+        "ambiguous-arm content into chunks_384/chunks_768 (the OLD "
+        "per-dim tables' length(chash)=32 CHECK forces legacy-width "
+        "content, so a canonical 64-hex chash cannot be constructed "
+        "pre-hop) — the SAME historical/explanatory narration style as "
+        "every other entry in this pin, not a live reference."
+    ),
+    "service/src/test/java/dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java": (
+        3,
+        "nexus-tk070.p3b (RDR-194 P3b, 2026-08-16): class javadoc explains "
+        "why this test does NOT go through SchemaUpgradeRehearsalIntegration"
+        "Test's old-tag-hop seeding mechanism for its positive KEEP arm -- "
+        "the OLD per-dim chunks_384/768/1024 tables' length(chash)=32 CHECK "
+        "makes canonical 64-hex content unconstructible there, so this test "
+        "seeds directly into nexus.chunks post-HEAD instead. Historical/"
+        "explanatory narration of the same constraint the rehearsal test's "
+        "own pin documents, not a live reference."
     ),
     "service/src/test/java/dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java": (
         2,

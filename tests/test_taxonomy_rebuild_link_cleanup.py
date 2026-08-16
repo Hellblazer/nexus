@@ -164,7 +164,7 @@ class TestRebuildLinkCleanup:
         for doc_id, topic_id in [("note1", a), ("note2", b)]:
             db.taxonomy.import_assignment(
                 doc_id=doc_id, topic_id=topic_id, assigned_by="hdbscan",
-                similarity=None, assigned_at=None, source_collection=None,
+                similarity=None, assigned_at=None, source_collection="proj",
             )
         db.taxonomy.upsert_topic_links(
             [{"from_topic_id": a, "to_topic_id": b, "link_count": 1, "link_types": ["relates"]}]

@@ -82,13 +82,18 @@ def _seed_topic(
         )
         n = n_docs if n_docs is not None else doc_count
         for i in range(n):
+            # RDR-194 D1/P3b (nexus-11pe7): source_collection is NOT NULL;
+            # this own-pass seed's source collection is this topic's own
+            # `collection` parameter, the same identity every other own-pass
+            # writer (assign_from_chashes_<dim> centroid branch, assignOne's
+            # non-projection branch, this file's own callers) resolves to.
             db.taxonomy.import_assignment(
                 doc_id=f"{label}-doc-{i}.py",
                 topic_id=topic_id,
                 assigned_by="test-seed",
                 similarity=None,
                 assigned_at=None,
-                source_collection=None,
+                source_collection=collection,
             )
     return topic_id
 
