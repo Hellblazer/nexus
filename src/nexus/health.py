@@ -2232,6 +2232,14 @@ def _check_mint_token() -> list[HealthResult]:
     # BEFORE calling bearer_for so the success line can say which happened.
     manager = get_data_token_manager()
     was_live = manager.has_live_token(base_url, tenant)
+    # nexus-9c7t9: a SEPARATE peek at the cross-process lease file -- only
+    # meaningful when there is no in-process hit, since an in-process hit
+    # never consults the lease file at all (see DataTokenManager.bearer_for).
+    # A real subprocess (every `nx doctor` invocation) has an EMPTY
+    # in-process cache by construction, so this is what makes "reused"
+    # genuinely observable on the CLI now, not just inside one long-lived
+    # process.
+    had_fresh_lease = (not was_live) and manager.has_fresh_lease(base_url, tenant)
     try:
         manager.bearer_for(base_url, tenant)
     except DataTokenMintError as exc:
@@ -2240,7 +2248,12 @@ def _check_mint_token() -> list[HealthResult]:
             detail=f"mint round trip FAILED against {host}: {exc}",
         )]
 
-    verb = "reused the cached" if was_live else "minted a fresh"
+    if was_live:
+        verb = "reused the cached (in-process)"
+    elif had_fresh_lease:
+        verb = "reused the cached (lease file)"
+    else:
+        verb = "minted a fresh"
     ttl = manager.granted_ttl_seconds(base_url, tenant)
     ttl_detail = f"granted TTL {ttl:.0f}s" if ttl is not None else "granted TTL unknown"
     return [HealthResult(

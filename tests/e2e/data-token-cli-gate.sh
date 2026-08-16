@@ -51,10 +51,19 @@
 #      for why "exactly one mint across every command in this script" is
 #      NOT the correct invariant to assert here, and what is asserted
 #      instead.
-#   7. Negative arm: wrong mint_tenant -> loud typed 403, never a silent
+#   7. Cross-process lease reuse (nexus-9c7t9): the lease file store put
+#      (leg 5) wrote is what makes leg 5's `nx doctor` invocation (leg 6,
+#      itself a fresh subprocess with an EMPTY in-process cache) report
+#      "reused the cached (lease file)" instead of "minted a fresh" — this
+#      leg asserts that wording directly, then drives a THIRD subprocess
+#      (another poisoned search) and asserts its stderr shows the
+#      lease-reuse event with NO new mint. Also asserts the lease file
+#      itself: exists, mode 0600, never contains the raw mint-locked
+#      credential.
+#   8. Negative arm: wrong mint_tenant -> loud typed 403, never a silent
 #      fallback, never a hang; restore + one more round trip proves
 #      recovery.
-#   8. Non-vacuity + explicit verdict line + trap-based teardown.
+#   9. Non-vacuity + explicit verdict line + trap-based teardown.
 #
 # Cost: ~5-15 min (engine binary + PG bundle + bge ONNX download fresh
 # unless DATA_TOKEN_GATE_CACHE seeds the model cache — see fresh-install-
@@ -149,7 +158,7 @@ _nx_poisoned() {
         "$BIN_DIR/nx" "$@"
 }
 
-echo "── 1/8 Build the wheel under test + virgin venv install ──"
+echo "── 1/9 Build the wheel under test + virgin venv install ──"
 ( cd "$REPO_ROOT" && uv build --wheel -o "$WORK/dist" ) >"$LOGS/build.log" 2>&1 \
     || _fail "wheel build failed (see $LOGS/build.log)"
 WHEEL="$(ls "$WORK"/dist/conexus-*.whl)"
@@ -159,7 +168,7 @@ uv pip install -q --python "$VENV/bin/python" "$WHEEL"
 BIN_DIR="$VENV/bin"
 _nx --version
 
-echo "── 2/8 nx init (local mode, virgin HOME, scrubbed env) ──"
+echo "── 2/9 nx init (local mode, virgin HOME, scrubbed env) ──"
 _nx init -y --no-autostart 2>&1 | tee "$LOGS/init.log"
 grep -Eq "the service backend is serving" "$LOGS/init.log" \
     || _fail "init did not confirm a serving backend"
@@ -169,7 +178,7 @@ if [ -n "${DATA_TOKEN_GATE_CACHE:-}" ] && [ -d "$HOME_DIR/.cache/nexus" ]; then
     cp -R "$HOME_DIR/.cache/nexus" "$DATA_TOKEN_GATE_CACHE/nexus" 2>/dev/null || true
 fi
 
-echo "── 3/8 issue a scope=mint-locked credential bound to tenant 'gate-dtok' ──"
+echo "── 3/9 issue a scope=mint-locked credential bound to tenant 'gate-dtok' ──"
 # nexus-ssqk9 tenant-asymmetric shape: "gate-dtok" is deliberately NOT
 # "default" — every Http*Store the CLI constructs defaults its own tenant
 # kwarg to "default", so mint_tenant (leg 4) is what makes the mint BODY
@@ -194,7 +203,7 @@ grep -q "^Tenant: gate-dtok$" "$WORK/issue.out" \
 MINT_LOCKED_TOKEN="$(sed -n '/^Token (shown once/{n;p;}' "$WORK/issue.out")"
 [ -n "$MINT_LOCKED_TOKEN" ] || _fail "could not extract the issued mint-locked token"
 
-echo "── 4/8 nx config set mint_token / mint_tenant — masking assertions ──"
+echo "── 4/9 nx config set mint_token / mint_tenant — masking assertions ──"
 _nx config set mint_token "$MINT_LOCKED_TOKEN" >"$LOGS/config-set-token.log" 2>&1 \
     || _fail "config set mint_token failed"
 _nx config set mint_tenant gate-dtok >"$LOGS/config-set-tenant.log" 2>&1 \
@@ -218,7 +227,7 @@ grep -Eq "mint_token +.*\*\*\*" "$LOGS/config-list.log" \
 grep -Eq "mint_tenant +gate-dtok" "$LOGS/config-list.log" \
     || _fail "nx config list did not show mint_tenant unmasked as 'gate-dtok'"
 
-echo "── 5/8 store put + search round trip — self-minted data token ONLY ──"
+echo "── 5/9 store put + search round trip — self-minted data token ONLY ──"
 # NX_SERVICE_TOKEN is poisoned for these two calls (see _nx_poisoned()'s
 # header comment for why this is the strong proof, not the weak one). A
 # pass here is only possible via nexus.db.data_token.DataTokenManager
@@ -246,7 +255,7 @@ grep -q "data_token_minted" "$LOGS/store-put.stderr.log" \
 grep -q "data_token_mint_failed" "$LOGS/store-put.stderr.log" \
     && _fail "store put logged a data_token_mint_failed event despite the round trip reporting success — investigate before trusting this leg"
 
-echo "── 6/8 nx doctor: mint check green, live round trip + TTL ──"
+echo "── 6/9 nx doctor: mint check green, live round trip + TTL ──"
 # Runs UNPOISONED (_nx, not _nx_poisoned) — see _nx_poisoned()'s header
 # comment: _check_mint_token() never attempts the static/lease token at
 # all, so poisoning here would only risk failing doctor's UNRELATED
@@ -277,40 +286,74 @@ _DOCTOR_TTL_RE='data token via .+\(granted TTL [0-9.]+s\)'
 [[ "$DOCTOR_MINT_LINE" == *"✓"* ]] \
     || _fail "doctor's mint check line is not ok=True (got: $DOCTOR_MINT_LINE)"
 
-echo "── 7/8 residue discipline (nexus-lgiqw) — at the CLI-subprocess granularity ──"
-# IMPORTANT DIVERGENCE FROM THE BRIEF, recorded here rather than only in
-# the write-up: "assert EXACTLY ONE mint occurred across ALL the
-# commands in this script" is not an invariant this architecture makes
-# true, and is not what is asserted below.
+echo "── 7/9 cross-process lease reuse (nexus-9c7t9) ──"
+# Leg 5 (store put) minted and published the cross-process lease file for
+# (base_url, tenant="default"). Leg 6's `nx doctor` above is itself a
+# FRESH subprocess with an EMPTY in-process cache — its own mint check
+# should therefore have BORROWED that lease rather than minting again.
+# Assert the wording directly rather than trusting leg 6's looser
+# "✓ + granted TTL" checks to have caught a regression here.
+[[ "$DOCTOR_MINT_LINE" == *"reused the cached (lease file)"* ]] \
+    || _fail "doctor did not report reusing the cross-process lease file (got: $DOCTOR_MINT_LINE) — the cross-process cache did not take effect, or doctor minted its own token instead of borrowing store put's"
+if [[ "$DOCTOR_MINT_LINE" == *"minted a fresh"* ]]; then
+    _fail "doctor minted a FRESH token instead of reusing the lease store put (leg 5) already published — nexus-9c7t9 regression"
+fi
+
+# The lease file itself: exists, tight perms, never the raw credential.
+LEASE_FILES=("$HOME_DIR"/.config/nexus/data_token_lease.*)
+[ -e "${LEASE_FILES[0]}" ] \
+    || _fail "no data_token_lease.* file found under \$HOME/.config/nexus after store put + doctor"
+LEASE_FILE="${LEASE_FILES[0]}"
+LEASE_PERMS="$(stat -f '%Lp' "$LEASE_FILE" 2>/dev/null || stat -c '%a' "$LEASE_FILE" 2>/dev/null)"
+[ "$LEASE_PERMS" = "600" ] \
+    || _fail "lease file $LEASE_FILE has perms $LEASE_PERMS, expected 600"
+if grep -qF "$MINT_LOCKED_TOKEN" "$LEASE_FILE"; then
+    _fail "lease file $LEASE_FILE contains the raw mint-locked CREDENTIAL — the lease must hold only the short-TTL data token, never the credential used to mint it"
+fi
+
+# A THIRD subprocess (another poisoned search) must ALSO borrow the lease
+# — no new mint, a lease-reuse event on its own stderr.
+_nx_poisoned search "self-minted data token round trip" \
+    >"$LOGS/second-search.log" 2>"$LOGS/second-search.stderr.log" \
+    || _fail "second search (cross-process lease reuse leg) failed (see $LOGS/second-search.log / .stderr.log)"
+grep -q "dtok-gate-sentinel" "$LOGS/second-search.log" \
+    || _fail "second search did not return the sentinel"
+if grep -q "data_token_minted" "$LOGS/second-search.stderr.log"; then
+    _fail "second search minted a NEW token instead of reusing the cross-process lease (see $LOGS/second-search.stderr.log)"
+fi
+grep -q "data_token_lease_reused" "$LOGS/second-search.stderr.log" \
+    || _fail "second search's stderr shows no data_token_lease_reused event — the cross-process borrow was not exercised (see $LOGS/second-search.stderr.log)"
+
+echo "── 8/9 residue discipline (nexus-lgiqw) — at the CLI-subprocess granularity ──"
+# HISTORY, updated for nexus-9c7t9: before the cross-process lease-file
+# cache (leg 7, above), EVERY `nx <cmd>` invocation in this script minted
+# its OWN data token — store put, search, doctor, and every subsequent
+# command in this script each ran a fresh Python interpreter with an
+# empty in-process cache and no way to see another process's mint. That
+# is what made "assert EXACTLY ONE mint occurred across ALL the commands
+# in this script" unachievable, and it is what nexus-9c7t9 exists to fix
+# — leg 7 above now demonstrates doctor and a second search BOTH reusing
+# store put's lease instead of minting fresh.
 #
-# nexus.db.data_token.get_data_token_manager() is a PROCESS-WIDE
-# singleton (module-level global, src/nexus/db/data_token.py) with NO
-# cross-process persistence — no cache file, no daemon-held session
-# token, nothing under NEXUS_CONFIG_DIR. Every `nx <cmd>` invocation in
-# this script is a SEPARATE subprocess with a fresh Python interpreter,
-# so EVERY command that touches the engine mints its OWN data token: the
-# store-put leg above minted one, the search leg minted another, doctor
-# minted a third, and this leg will mint a fourth (and a fifth on
-# recovery). A "SECOND doctor run must say reused" assertion — the
-# brief's suggested fallback — is not achievable either, for the same
-# reason: doctor is a fresh subprocess each time, so it will ALWAYS
-# report "minted a fresh", never "reused the cached", no matter how many
-# times this script re-invokes it back to back.
-#
-# The residue-discipline invariant nexus-lgiqw actually documents (and
-# that the pytest E2E at tests/db/test_data_token_manager_e2e.py proves)
-# is IN-PROCESS: one live token per (base_url, tenant), reused across
-# every engine call a SINGLE process makes, never re-minted per call.
-# That is provable from outside a subprocess via its own stderr at
-# NEXUS_LOG_LEVEL=INFO — which is exactly what leg 5 already captured
-# and asserted (data_token_minted present, data_token_mint_failed
-# absent) for store put, a command that makes at least two authenticated
-# engine round trips in one process (T2 catalog registration + T3 vector
-# write) via the SAME manager singleton. This leg makes that assertion
-# explicit and adds the exact-count form: exactly ONE data_token_minted
-# event for store put's process, never two-or-more (which would mean the
-# singleton was NOT being reused across store put's own internal calls
-# — the actual regression nexus-lgiqw guards against).
+# This leg keeps the ORIGINAL, narrower residue-discipline invariant
+# nexus-lgiqw actually documents (and that the pytest E2E at
+# tests/db/test_data_token_manager_e2e.py proves): one live token per
+# (base_url, tenant), reused across every engine call a SINGLE process
+# makes, never re-minted per call, regardless of what the cross-process
+# lease cache does or does not do. That is provable from outside a
+# subprocess via its own stderr at NEXUS_LOG_LEVEL=INFO — which is
+# exactly what leg 5 already captured and asserted (data_token_minted
+# present, data_token_mint_failed absent) for store put, a command that
+# makes at least two authenticated engine round trips in one process (T2
+# catalog registration + T3 vector write) via the SAME manager
+# singleton. This leg makes that assertion explicit and adds the
+# exact-count form: exactly ONE data_token_minted event for store put's
+# process, never two-or-more (which would mean the singleton was NOT
+# being reused across store put's own internal calls — the actual
+# regression nexus-lgiqw guards against). Store put is also still the
+# FIRST engine-touching command in the whole script, so no lease exists
+# yet when it runs — its own mint count is unaffected by leg 7's
+# cross-process borrowing landing afterward.
 STORE_PUT_MINT_COUNT="$(grep -c "data_token_minted" "$LOGS/store-put.stderr.log" || true)"
 [ "$STORE_PUT_MINT_COUNT" = "1" ] \
     || _fail "store put minted $STORE_PUT_MINT_COUNT times in one process (expected exactly 1 — nexus-lgiqw residue-discipline regression: the process-wide DataTokenManager singleton was re-minting per engine call instead of reusing its cache)"
@@ -318,7 +361,17 @@ STORE_PUT_REFRESH_COUNT="$(grep -c "data_token_refresh" "$LOGS/store-put.stderr.
 [ "$STORE_PUT_REFRESH_COUNT" = "0" ] \
     || _fail "store put logged $STORE_PUT_REFRESH_COUNT unexpected data_token_refresh event(s) — a fresh 3600s-TTL token should never need refreshing within one short-lived CLI process"
 
-echo "── 8/8 negative arm: wrong mint_tenant -> loud 403, then recovery ──"
+echo "── 9/9 negative arm: wrong mint_tenant -> loud 403, then recovery ──"
+# nexus-9c7t9: a FRESH, unexpired lease for (base_url, tenant="default")
+# already exists at this point (leg 7 proved it) — without removing it, a
+# poisoned search below would silently BORROW that valid lease instead of
+# ever attempting a mint, and the negative arm would prove nothing (the
+# wrong mint_tenant only matters for an ACTUAL mint attempt's request
+# body, never consulted on a lease-file cache hit). Delete it first so
+# the next search is a genuine cache miss that must mint fresh under the
+# now-wrong mint_tenant.
+rm -f "$HOME_DIR"/.config/nexus/data_token_lease.* \
+    || _fail "could not remove the lease file ahead of the negative arm"
 _nx config set mint_tenant wrong-tenant >"$LOGS/config-set-wrong-tenant.log" 2>&1 \
     || _fail "config set mint_tenant wrong-tenant failed"
 NEG_RC=0

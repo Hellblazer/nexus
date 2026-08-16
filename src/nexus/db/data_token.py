@@ -32,6 +32,53 @@ silently fall back to the static token as though nothing were configured.
 Residue discipline (nexus-lgiqw): ONE live token per ``(base_url, tenant)``
 key, cached and refreshed only when needed — never minted per call.
 
+Cross-process lease-file cache (nexus-9c7t9): the in-process cache above
+solves residue/rate-limit pressure WITHIN one long-lived process (the MCP
+server); it does nothing for short-lived ``nx`` CLI subprocesses, where
+every invocation starts with an empty ``_cache`` dict and mints fresh. Once
+a mint credential is configured, minting more than
+``MintRateLimiter.burst=5`` times per (credential, tenant) per minute
+fails loud server-side — five back-to-back CLI invocations exhausts it.
+
+Fix: mirror the lease-file precedent in :mod:`nexus.db.t1`
+(``publish_t1_session_lease`` / ``read_t1_session_lease``) — persist the
+short-TTL DATA token (never the mint credential) to
+``~/.config/nexus/data_token_lease.<key>``, where ``<key>`` is a
+filesystem-safe digest of ``(base_url host:port, tenant)`` (never a raw
+URL in the filename — see :func:`_lease_key`). Mode ``0600``, atomic
+temp-file + ``os.replace`` publish. On a genuine in-process cache MISS
+(never on a refresh-due-but-still-cached entry), :meth:`bearer_for` reads
+the lease file BEFORE minting; it is accepted only when its format
+version, tenant, and base-url digest all match AND its remaining TTL
+exceeds the same 20% :data:`_REFRESH_THRESHOLD` the in-process cache
+enforces. A refresh-due-but-still-cached entry deliberately does NOT
+consult the lease: a sibling may well have republished something newer,
+but a refresh-due borrower would re-check within one threshold window
+anyway, and always minting on refresh keeps exactly one code path
+responsible for extending the machine-wide token lifetime (the trade is
+one possibly-redundant mint per TTL window against a second
+read-then-trust branch on the hot path). Any other state (absent,
+corrupt, foreign, stale) is treated as a clean miss (debug log) and the
+manager mints as before. Every
+successful mint (fresh OR refresh) publishes the lease so the NEXT cold
+process can borrow it; a lease-write failure is logged as a warning and
+never fails the mint itself — the lease is an optimization, the mint is
+the source of truth. :meth:`invalidate` (the 401 self-heal path) removes
+the lease file alongside the in-process cache entry, best-effort.
+
+Concurrency (deliberately NOT flock/O_EXCL-guarded): two cold processes
+racing to fill an empty/stale cache slot may both mint and both publish —
+last writer wins on the file, and the loser's own in-process token is
+still perfectly valid (it just isn't the one on disk any more). This is
+ACCEPTABLE, not a bug to fix: the race window is bounded to once per
+TTL-refresh boundary per ``(base_url, tenant)``, `MintRateLimiter`'s
+burst=5 absorbs a handful of concurrent cold starts, and a real
+correctness hazard (not just an efficiency one) would be required to
+justify the complexity of cross-process locking here — none exists,
+since a double mint produces two independently valid tokens, not
+corruption. Do not add ``fcntl.flock`` without a documented correctness
+rationale (nexus-9c7t9 design of record, point 3).
+
 Mint-body tenant resolution (nexus-ssqk9): every ``Http*Store`` defaults its
 own ``tenant`` constructor kwarg to ``DEFAULT_TENANT = "default"`` — but a
 real ``scope=mint-locked`` credential is bound server-side to WHATEVER
@@ -50,7 +97,9 @@ whenever the credential's bound tenant is not literally ``"default"``.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import threading
 import time
 import urllib.error
@@ -58,7 +107,9 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import structlog
 
@@ -91,6 +142,16 @@ _RETRYABLE_MINT_STATUSES: frozenset[int] = frozenset({429, 502, 503, 504})
 
 #: Attempt budget for the mint retry: 1 initial + 2 retries (3 total).
 _MINT_MAX_ATTEMPTS: int = 3
+
+#: Cross-process lease file (nexus-9c7t9): filename prefix under
+#: ``nexus_config_dir()``, mirroring ``nexus.db.t1``'s
+#: ``t1_session_lease.<session_id>`` naming convention.
+_DATA_TOKEN_LEASE_PREFIX: str = "data_token_lease."
+
+#: Bumped whenever the lease-file JSON shape changes. A lease written by a
+#: mismatched format version is treated as absent (fail-safe), never
+#: partially trusted.
+_LEASE_FORMAT_VERSION: int = 1
 
 #: Backoff between attempts when the server supplies no Retry-After header
 #: (design of record: "1s/2s"). Indexed by ``attempt - 1``.
@@ -130,6 +191,27 @@ def _host(url: str) -> str:
         return netloc or url
     except Exception:  # noqa: BLE001 — logging helper must never raise
         return url
+
+
+def _lease_key(base_url: str, tenant: str) -> str:
+    """Filesystem-safe digest identifying a ``(base_url host:port, tenant)``
+    pair for the lease-file name (nexus-9c7t9 design point 1: "do not embed
+    a raw URL in the filename"). Deterministic, collision-resistant, and
+    stable across processes -- the same digest for the same pair every
+    time, which is what lets a cold process compute the exact lease path
+    to check without ever listing the directory.
+
+    The FULL 64-char hex digest is kept (never sliced) -- this is a
+    filename, not a chash, but `tests/test_no_chash_truncation.py`'s
+    repo-wide ``hexdigest()[:N]`` scan cannot tell the two apart, and a
+    full digest is just as valid a filename component as a truncated one.
+    """
+    host = _host(base_url)
+    return hashlib.sha256(f"{host}\x00{tenant}".encode("utf-8")).hexdigest()
+
+
+def _data_token_lease_path(base_url: str, tenant: str, config_dir: Path) -> Path:
+    return config_dir / f"{_DATA_TOKEN_LEASE_PREFIX}{_lease_key(base_url, tenant)}"
 
 
 def _default_poster(
@@ -211,6 +293,19 @@ class DataTokenManager:
         default_ttl_seconds: Requested ``ttl_seconds`` on each mint.
         sleep: Backoff sleep, injectable for deterministic tests (critic S2 —
             no real ``time.sleep`` in a unit test).
+        config_dir: Directory the cross-process lease file lives under
+            (nexus-9c7t9). ``None`` (the default) resolves
+            ``nexus.config.nexus_config_dir()`` lazily on first use —
+            deferred so importing this module never pulls in the config
+            module's own import graph. Injectable in tests (a ``tmp_path``)
+            so lease-file tests never touch the real ``~/.config/nexus``.
+        wall_clock: Wall-clock time source for the lease file's absolute
+            ``expires_at`` (nexus-9c7t9). Deliberately SEPARATE from
+            ``clock`` (which stays monotonic, in-process-only, and
+            untouched by this change) -- a lease file is read by a
+            DIFFERENT process with its own monotonic clock, so only
+            wall-clock time is comparable across processes. Injectable
+            for deterministic tests; defaults to ``time.time``.
     """
 
     def __init__(
@@ -222,6 +317,8 @@ class DataTokenManager:
         mint_tenant: Callable[[], str] | None = None,
         default_ttl_seconds: int = DEFAULT_TTL_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
+        config_dir: Path | None = None,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._clock = clock
         self._poster = poster
@@ -229,6 +326,8 @@ class DataTokenManager:
         self._mint_tenant = mint_tenant
         self._default_ttl_seconds = default_ttl_seconds
         self._sleep = sleep
+        self._config_dir = config_dir
+        self._wall_clock = wall_clock
         self._lock = threading.Lock()
         self._cache: dict[tuple[str, str], _CachedToken] = {}
 
@@ -255,6 +354,13 @@ class DataTokenManager:
         """True when a ``mint_token`` credential is configured."""
         return bool(self._resolve_credential())
 
+    def _resolve_config_dir(self) -> Path:
+        if self._config_dir is not None:
+            return self._config_dir
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+
+        return nexus_config_dir()
+
     # ── Public API ───────────────────────────────────────────────────────────
 
     def bearer_for(self, base_url: str, tenant: str) -> str | None:
@@ -276,8 +382,21 @@ class DataTokenManager:
             first_mint = cached is None
             if cached is not None and not self._needs_refresh(cached):
                 return cached.token
+            if first_mint:
+                # nexus-9c7t9: a genuine cache MISS (never a refresh-due
+                # entry — see the module docstring's "Cross-process
+                # lease-file cache" section) tries the cross-process
+                # lease file before minting.
+                leased = self._read_lease(base_url, tenant)
+                if leased is not None:
+                    self._cache[key] = leased
+                    _log.info(
+                        "data_token_lease_reused", tenant=tenant, endpoint=_host(base_url),
+                    )
+                    return leased.token
             fresh = self._mint(base_url, tenant, credential)
             self._cache[key] = fresh
+            self._write_lease(base_url, tenant, fresh)
             event = "data_token_minted" if first_mint else "data_token_refresh"
             _log.info(event, tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_host(base_url))
             return fresh.token
@@ -287,13 +406,37 @@ class DataTokenManager:
 
         Called by a consuming client after it observes a 401 with this
         token — the next :meth:`bearer_for` call re-mints instead of
-        returning the same rejected value.
+        returning the same rejected value. Also removes the cross-process
+        lease file (nexus-9c7t9, best-effort) so a sibling process does not
+        borrow the same now-rejected token — but ONLY when the on-disk
+        lease still holds the token being invalidated (compare-and-delete,
+        review round-1 Significant): in a 401 storm two processes hold the
+        same revoked token, and after the first one re-mints and publishes
+        a FRESH lease, the second one's invalidate must not wipe that
+        fresh sibling lease (it would force a needless extra mint during
+        exactly the recovery path this cache exists to smooth). A process
+        with no in-process record of the token skips the file entirely for
+        the same reason: it has nothing to compare, so deleting would only
+        ever clobber a sibling.
         """
         key = (base_url.rstrip("/"), tenant)
         with self._lock:
-            had = self._cache.pop(key, None) is not None
-        if had:
+            popped = self._cache.pop(key, None)
+        if popped is not None:
+            self._delete_lease(base_url, tenant, expected_token=popped.token)
             _log.info("data_token_invalidated", tenant=tenant, endpoint=_host(base_url))
+
+    def has_fresh_lease(self, base_url: str, tenant: str) -> bool:
+        """True when a fresh (not due-for-refresh) cross-process lease-file
+        entry exists for ``(base_url, tenant)`` — a PEEK, never mints,
+        never populates the in-process cache (nexus-9c7t9).
+
+        Distinct from :meth:`has_live_token`, which only checks the
+        in-process dict. Lets a caller (the ``nx doctor`` check) report
+        "reused (lease file)" separately from "reused (in-process)" and
+        "minted a fresh".
+        """
+        return self._read_lease(base_url, tenant) is not None
 
     def has_live_token(self, base_url: str, tenant: str) -> bool:
         """True when a cached, not-yet-due-for-refresh token already exists
@@ -330,6 +473,115 @@ class DataTokenManager:
     def _needs_refresh(self, cached: _CachedToken) -> bool:
         remaining = cached.expires_at - self._clock()
         return remaining <= cached.ttl_seconds * _REFRESH_THRESHOLD
+
+    # ── Cross-process lease file (nexus-9c7t9) ──────────────────────────────
+
+    def _read_lease(self, base_url: str, tenant: str) -> _CachedToken | None:
+        """Read the cross-process lease file for ``(base_url, tenant)``, IF
+        it is fresh and genuinely belongs to this pair. Returns ``None`` on
+        ANY of: absent, corrupt, wrong format version, tenant/digest
+        mismatch, or remaining TTL at or below the refresh threshold —
+        fail-safe, never fail-open (mirrors ``nexus.db.t1.read_t1_session_
+        lease``'s stance exactly). Never raises, never mints, never mutates
+        ``self._cache`` — a pure read, safe to call as a peek
+        (:meth:`has_fresh_lease`) or as part of :meth:`bearer_for`.
+        """
+        path = _data_token_lease_path(base_url, tenant, self._resolve_config_dir())
+        try:
+            raw = path.read_text()
+            data = json.loads(raw)
+            if data.get("format_version") != _LEASE_FORMAT_VERSION:
+                return None
+            if data.get("tenant") != tenant:
+                return None
+            if data.get("base_url_digest") != _lease_key(base_url, tenant):
+                return None
+            token = data["token"]
+            expires_at_wall = float(data["expires_at"])
+            ttl_seconds = float(data["ttl_seconds"])
+        except OSError:
+            return None  # absent — the common case, not worth a log line
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            _log.debug("data_token_lease_unparseable", tenant=tenant, endpoint=_host(base_url))
+            return None
+        if not token:
+            return None
+        remaining = expires_at_wall - self._wall_clock()
+        if remaining <= ttl_seconds * _REFRESH_THRESHOLD:
+            # Expired, or too close to expiry to be worth borrowing (same
+            # 20% threshold the in-process cache enforces) — a caller that
+            # borrowed this would pay a near-immediate re-mint anyway.
+            return None
+        now = self._clock()
+        return _CachedToken(token=token, minted_at=now, expires_at=now + remaining, ttl_seconds=ttl_seconds)
+
+    def _write_lease(self, base_url: str, tenant: str, cached: _CachedToken) -> None:
+        """Publish *cached* to the cross-process lease file, best-effort.
+
+        Never raises: a write failure is a lost optimization for the NEXT
+        cold process, not a reason to fail a mint that already succeeded
+        (nexus-9c7t9 design point 2 — "never fails the mint"). Atomic
+        temp-file + ``os.replace`` publish, mode ``0600``, mirroring
+        :func:`nexus.db.t1.publish_t1_session_lease` exactly. Never
+        contains the mint credential — only the short-TTL data token.
+        """
+        try:
+            remaining = cached.expires_at - self._clock()
+            if remaining <= 0:
+                return  # already expired by the time we got here — nothing worth publishing
+            config_dir = self._resolve_config_dir()
+            config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path = _data_token_lease_path(base_url, tenant, config_dir)
+            payload = {
+                "format_version": _LEASE_FORMAT_VERSION,
+                "token": cached.token,
+                "tenant": tenant,
+                "base_url_digest": _lease_key(base_url, tenant),
+                "expires_at": self._wall_clock() + remaining,
+                "ttl_seconds": cached.ttl_seconds,
+                "minted_by_pid": os.getpid(),
+            }
+            data = json.dumps(payload).encode("utf-8")
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+            fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            os.replace(str(tmp), str(path))
+        except OSError as exc:
+            _log.warning(
+                "data_token_lease_write_failed", tenant=tenant, endpoint=_host(base_url), error=str(exc),
+            )
+
+    def _delete_lease(
+        self, base_url: str, tenant: str, *, expected_token: str | None = None,
+    ) -> None:
+        """Remove the cross-process lease file, best-effort/idempotent
+        (mirrors :func:`nexus.db.t1.clear_t1_session_lease`).
+
+        With ``expected_token`` given (the :meth:`invalidate` path), the
+        file is unlinked ONLY when its on-disk token still equals that
+        value — compare-and-delete, so invalidating a revoked token never
+        clobbers a FRESH lease a sibling process republished in the
+        meantime (401-storm interleave, review round-1 Significant). The
+        read-compare-unlink is not atomic; the surviving race window is a
+        sibling publishing between the compare and the unlink, which
+        costs that sibling one extra mint — the same bounded, harmless
+        class as the documented cold-start double-mint.
+        """
+        path = _data_token_lease_path(base_url, tenant, self._resolve_config_dir())
+        try:
+            if expected_token is not None:
+                data = json.loads(path.read_text())
+                if data.get("token") != expected_token:
+                    return
+            path.unlink()
+        except (OSError, ValueError):
+            # Unreadable/corrupt lease on the compare path: leave it for
+            # _read_lease's own fail-safe rejection rather than deleting
+            # blind; missing file is simply done.
+            pass
 
     def _mint(self, base_url: str, tenant: str, credential: str) -> _CachedToken:
         url = base_url.rstrip("/") + "/v1/data-tokens/mint"

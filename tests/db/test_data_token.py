@@ -21,6 +21,15 @@ from nexus.db.data_token import (
     reset_data_token_manager,
 )
 
+# nexus-9c7t9: every mint now also (best-effort) writes a cross-process
+# lease file under ``nexus_config_dir()``. The managers in this file never
+# pass an explicit ``config_dir``, so they resolve the real function --
+# but the suite-wide autouse ``_isolate_config_dir`` fixture (conftest.py)
+# already redirects ``NEXUS_CONFIG_DIR`` to a per-test ``tmp_path``, so no
+# extra isolation fixture is needed here. See the loop-test tenant
+# comment below for the one place per-test (not per-suite) isolation
+# still mattered: three manager instances sharing ONE test's tmp_path.
+
 
 class _FakeClock:
     def __init__(self, start: float = 1_000_000.0) -> None:
@@ -335,7 +344,12 @@ def test_mint_retries_on_502_503_504_then_succeeds() -> None:
         sleep = _FakeSleep()
         mgr = _manager(poster, _FakeClock(), sleep=sleep)
 
-        token = mgr.bearer_for(BASE_URL, TENANT)
+        # nexus-9c7t9: a distinct tenant per iteration -- three FRESH
+        # manager instances share this test's one tmp_path config_dir
+        # (the isolation fixture above), so reusing TENANT across
+        # iterations would let iteration N borrow iteration N-1's
+        # lease-file mint instead of exercising its own fake poster.
+        token = mgr.bearer_for(BASE_URL, f"{TENANT}-{gateway_status}")
 
         assert token == "tok-1"
         assert len(poster.calls) == 2

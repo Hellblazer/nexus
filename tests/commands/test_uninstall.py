@@ -151,3 +151,71 @@ class TestManagedBranch:
         assert res.exit_code == 0, res.output
         out = res.output.lower()
         assert "nx_service_url" in out and ("unset" in out or "export" in out)
+
+
+class TestDataTokenLeaseTeardown:
+    """nexus-9c7t9: cross-process data-token lease files are removed
+    unconditionally (mode-agnostic — not gated on --remove-data or on
+    local-vs-managed detection)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_local_no_managed(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+        with patch("nexus.commands.uninstall._local_service_present", return_value=False), \
+             patch("nexus.commands.uninstall.get_credential", return_value=""):
+            yield
+
+    def _write_lease_file(self, config_dir, name: str = "data_token_lease.abc123") -> None:
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / name).write_text('{"token": "tok-1"}')
+
+    def test_lease_files_removed_with_yes(self, monkeypatch, tmp_path) -> None:
+        config_dir = tmp_path / ".config" / "nexus"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+        self._write_lease_file(config_dir)
+        self._write_lease_file(config_dir, "data_token_lease.def456")
+
+        res = CliRunner().invoke(main, ["uninstall", "--yes"])
+
+        assert res.exit_code == 0, res.output
+        assert list(config_dir.glob("data_token_lease.*")) == []
+        assert "removed 2 cached lease file" in res.output.lower()
+
+    def test_lease_files_previewed_on_dry_run_not_removed(self, monkeypatch, tmp_path) -> None:
+        config_dir = tmp_path / ".config" / "nexus"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+        self._write_lease_file(config_dir)
+
+        res = CliRunner().invoke(main, ["uninstall"])
+
+        assert res.exit_code == 0, res.output
+        assert len(list(config_dir.glob("data_token_lease.*"))) == 1
+        assert "would remove 1 cached lease file" in res.output.lower()
+
+    def test_no_lease_files_is_a_silent_noop(self, monkeypatch, tmp_path) -> None:
+        config_dir = tmp_path / ".config" / "nexus"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+
+        res = CliRunner().invoke(main, ["uninstall", "--yes"])
+
+        assert res.exit_code == 0, res.output
+        assert "lease" not in res.output.lower()
+        assert "nothing to uninstall" in res.output.lower()
+
+    def test_lease_teardown_never_touches_unrelated_config_dir_files(self, monkeypatch, tmp_path) -> None:
+        """Only the data_token_lease.* prefix is touched -- other files
+        under nexus_config_dir() (e.g. a t1_session_lease.* file) must
+        survive untouched."""
+        config_dir = tmp_path / ".config" / "nexus"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+        self._write_lease_file(config_dir)
+        config_dir.mkdir(parents=True, exist_ok=True)
+        unrelated = config_dir / "t1_session_lease.some-session"
+        unrelated.write_text('{"token": "unrelated"}')
+
+        res = CliRunner().invoke(main, ["uninstall", "--yes"])
+
+        assert res.exit_code == 0, res.output
+        assert list(config_dir.glob("data_token_lease.*")) == []
+        assert unrelated.exists()

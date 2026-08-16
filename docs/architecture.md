@@ -757,21 +757,58 @@ the transient gateway/rate-limit statuses `{429, 502, 503, 504}` —
 the shared `nexus.rate_brake` brake (that brake coordinates bulk-write
 workers; a mint is a single infrequent auth round trip). `nx doctor`'s
 mint_token check routes through `DataTokenManager`'s process-wide singleton
-(never a throwaway instance), and its success line reports both which
-happened (minted vs. reused) and the granted TTL. The cache is
-PER-PROCESS ONLY — there is no cross-process persistence, so every `nx`
-subprocess (each CLI invocation, doctor included) mints its own token and
-reports "minted", never "reused"; "reused" appears only within one
-long-lived process (the MCP server, or repeated calls inside a single
-command). Consequences of that scope, measured at nexus-rftfs: CLI-heavy
-usage produces one short-TTL `scope=data` row per invocation on the
-engine (the nexus-lgiqw residue class until its reaper ships), and the
-engine's `MintRateLimiter` default burst (5 per credential+tenant per
-minute) bounds how many back-to-back `nx` invocations can mint before
-failing loud — acceptable for interactive use and the single-read canary,
-NOT yet for always-on `mint_token` under scripted bulk CLI loops (the
-cross-process cache / rate-headroom follow-up is tracked on the
-nexus-rftfs bead thread).
+(never a throwaway instance), and its success line reports which of three
+things happened (minted a fresh token, reused an in-process cached one, or
+reused one borrowed from the cross-process lease file — see below) plus
+the granted TTL.
+
+**Cross-process lease-file cache (nexus-9c7t9).** The in-process cache
+above solves residue/rate-limit pressure only WITHIN one long-lived
+process (the MCP server); every short-lived `nx` CLI subprocess used to
+start with an empty cache and mint fresh, so five or more back-to-back `nx`
+invocations in one minute exhausted the engine's `MintRateLimiter` default
+burst (5 per credential+tenant per minute) and failed loud. Fixed by
+mirroring the lease-file precedent in `nexus.db.t1`
+(`publish_t1_session_lease` / `read_t1_session_lease`): every successful
+mint also (best-effort) persists the short-TTL DATA TOKEN — never the mint
+credential — to `~/.config/nexus/data_token_lease.<key>`, where `<key>` is
+a filesystem-safe digest of `(base_url host:port, tenant)`. Mode `0600`,
+atomic temp-file + `os.replace` publish. On a genuine in-process cache MISS
+(never on a refresh-due-but-still-cached entry), `DataTokenManager.
+bearer_for` reads the lease file BEFORE minting, accepting it only when its
+format version, tenant, and base-url digest all match AND its remaining
+TTL exceeds the same 20% refresh threshold the in-process cache enforces;
+any other state (absent, corrupt, foreign, stale) is a clean miss and the
+manager mints as before. A lease-write failure is logged as a warning and
+NEVER fails the mint — the lease is an optimization, the mint is the
+source of truth. `invalidate()` (the 401 self-heal path) removes the lease
+file alongside the in-process entry, best-effort. `nx uninstall` removes
+every `data_token_lease.*` file unconditionally (not gated on
+`--remove-data`), alongside the managed credentials.
+
+Concurrency is deliberately NOT `flock`/`O_EXCL`-guarded: two cold
+processes racing to fill an empty/stale cache slot may both mint and both
+publish — last writer wins on the file, and the loser's own in-process
+token is still perfectly valid, just not the one on disk any more. This is
+accepted, not a bug: the race window is bounded to once per TTL-refresh
+boundary per `(base_url, tenant)`, and `MintRateLimiter`'s burst=5 absorbs
+a handful of concurrent cold starts — a double mint produces two
+independently valid tokens, never corruption, so there is no correctness
+reason (only an efficiency one) to add cross-process locking here.
+
+Practical effect: a real `nx` CLI subprocess always has an empty
+in-process cache, so it either mints fresh (the very first invocation
+after boot, or after the lease has gone stale) or borrows the lease file a
+prior invocation published — `nx doctor`'s success line distinguishes
+"reused the cached (lease file)" from "reused the cached (in-process)"
+(observable only inside one long-lived process, e.g. the MCP server) and
+"minted a fresh". Consequences of the residual scope, measured at
+nexus-rftfs and narrowed by nexus-9c7t9: the engine still sees roughly one
+short-TTL `scope=data` row per (endpoint, tenant) per TTL window rather
+than per invocation (the nexus-lgiqw residue class shrinks accordingly),
+and `MintRateLimiter`'s burst ceiling now only binds a genuine COLD-START
+STORM (many `nx` processes launched concurrently before any lease exists)
+rather than ordinary sequential CLI usage.
 
 ### Concurrency Model ([RDR-063](rdr/rdr-063-t2-domain-split.md) Phase 2) — HISTORICAL
 
