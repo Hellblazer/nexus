@@ -413,10 +413,14 @@ public final class RemapHandler implements HttpHandler {
     /**
      * Validate a new_chash fact (RDR-180, nexus-jxizy.7): the canonical
      * 64-hex full digest, parsed through the Chash type — the pre-flip
-     * 64->32 truncation is retired with the [:32] era. Legacy 32-hex facts
-     * already persisted by pre-cohort migrations stay readable (the widened
-     * chash_remap CHECK + remap_membership's alias chain cover them); NEW
-     * facts on a converged pair always carry the full digest.
+     * 64->32 truncation is retired with the [:32] era. The legacy 32-hex
+     * tolerance is RETIRED with RDR-194 P2 (nexus-tk070.p2): the column is
+     * bytea with an octet_length=32 CHECK (remap-003-new-chash-bytea.xml),
+     * the widened CHECK and remap_membership's hex/UTF8 CASE fallback are
+     * both deleted, and cloud-count-2 measured ZERO legacy rows before the
+     * conversion (T2 rdr194-cloud-count-2-2026-08-15) — a 32-hex fact is
+     * now rejected here AND at the repository guard, with alias resolution
+     * (chash_alias) or POST /v1/remap/clear_leg as the operator remedies.
      */
     private static String normalizeChash(String chash) {
         if (chash == null || chash.isBlank()) {

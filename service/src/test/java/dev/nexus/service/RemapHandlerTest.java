@@ -308,9 +308,10 @@ class RemapHandlerTest {
             assertThat(rs.getLong("total"))
                 .as("upsert on the natural key — one row, not two")
                 .isEqualTo(1);
-            assertThat(rs.getString("new_chash"))
-                .as("re-recording replaces the fact (deterministic resume)")
-                .isEqualTo(chash("h5v2"));
+            assertThat(rs.getBytes("new_chash"))
+                .as("re-recording replaces the fact (deterministic resume) — new_chash is "
+                    + "bytea now (RDR-194 D3), so this compares the decoded storage form")
+                .isEqualTo(dev.nexus.service.db.Chash.fromHex(chash("h5v2")).toBytes());
             assertThat(rs.getString("provenance")).isEqualTo("resume");
         }
     }
@@ -341,9 +342,11 @@ class RemapHandlerTest {
                 "SELECT new_chash FROM nexus.chash_remap WHERE tenant_id = '" + TENANT + "' " +
                 "AND source_collection = '" + src + "'");
             assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("new_chash"))
-                .as("RDR-180: the full 64-hex digest is the canonical chash — no [:32] truncation")
-                .isEqualTo(full);
+            assertThat(rs.getBytes("new_chash"))
+                .as("RDR-180: the full 64-hex digest is the canonical chash — no [:32] "
+                    + "truncation; new_chash is bytea now (RDR-194 D3), so this compares "
+                    + "the decoded storage form")
+                .isEqualTo(dev.nexus.service.db.Chash.fromHex(full).toBytes());
         }
     }
 
@@ -366,6 +369,39 @@ class RemapHandlerTest {
             {"source_collection":"legacy__h7__src","entries":[
               {"old_id":"legacy-1","new_chash":"abc123","target_collection":"t","provenance":"test"}
             ]}""");
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("new_chash");
+    }
+
+    /**
+     * RDR-194 D3 (bead nexus-tk070.p2): one char short of the canonical 64 —
+     * an odd-length hex string that would fail {@code decode(..., 'hex')} at
+     * the DB layer if it ever got there. The Java guard (now canonical-form,
+     * not the old 32-or-64 length tolerance) must reject it BEFORE any SQL
+     * round trip, with a teaching message.
+     */
+    @Test
+    void recordBatch_63CharChash_rejected400() throws Exception {
+        var resp = post("/v1/remap/record_batch", TOKEN, TENANT, """
+            {"source_collection":"legacy__h7b__src","entries":[
+              {"old_id":"legacy-1","new_chash":"%s","target_collection":"t","provenance":"test"}
+            ]}""".formatted(chash("h7b").substring(0, 63)));
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("new_chash");
+    }
+
+    /**
+     * RDR-194 D3: 64 chars but not hex — must never reach {@code decode()}.
+     * A raw ASCII string this length would decode successfully (bytea input
+     * is not the failure mode here); the Java guard's canonical-form check
+     * (not merely a length check) is what catches it.
+     */
+    @Test
+    void recordBatch_nonHexCharacters_rejected400() throws Exception {
+        var resp = post("/v1/remap/record_batch", TOKEN, TENANT, """
+            {"source_collection":"legacy__h7c__src","entries":[
+              {"old_id":"legacy-1","new_chash":"%s","target_collection":"t","provenance":"test"}
+            ]}""".formatted("g".repeat(64)));
         assertThat(resp.statusCode()).isEqualTo(400);
         assertThat(resp.body()).contains("new_chash");
     }

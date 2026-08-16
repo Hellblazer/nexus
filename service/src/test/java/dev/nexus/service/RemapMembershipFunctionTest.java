@@ -279,6 +279,46 @@ class RemapMembershipFunctionTest {
         assertThat(m[1]).isEqualTo(1);
     }
 
+    // ── Test 6b: alias-chaining preserved through the RDR-194 P2 rewrite ─────
+
+    /**
+     * RDR-194 D3 (bead nexus-tk070.p2): the layered {@code CREATE OR REPLACE}
+     * deletes the CASE hex/UTF8 decode branch but MUST preserve the
+     * alias-chaining contract verbatim — a {@code chash_remap.new_chash}
+     * value superseded by a rekey (recorded in {@code nexus.chash_alias})
+     * resolves through the alias to the chash actually present in the
+     * target chunk table, not the stale recorded value. Since new_chash is
+     * bytea now with an {@code octet_length = 32} CHECK, both the recorded
+     * (old) and resolved (new) chashes here are conformant 32-byte digests
+     * — this is the general post-rekey shape, not the pre-P2
+     * 16-byte-legacy-reference shape, which the column can no longer store
+     * at all.
+     */
+    @Test
+    void aliasChaining_supersededChashResolvesThroughChashAlias() throws Exception {
+        String src = "legacy__minilm__t6b";
+        String tgt = "knowledge__voyage__t6b";
+        String oldChash = chash("t6b-old");   // what the map recorded
+        String newChash = chash("t6b-new");   // what a later rekey produced
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            insertCollection(su, TENANT, tgt);
+            // The map claim still names the OLD (now-superseded) chash.
+            insertMapRow(su, TENANT, src, "legacy-id-1", oldChash, tgt);
+            // Only the NEW chash is actually present in the target.
+            insertChunk1024(su, TENANT, tgt, newChash);
+            // The rekey's alias record: old -> new.
+            insertAliasRow(su, TENANT, "t6b-old-ref", oldChash, newChash);
+        }
+
+        long[] m = membership(src, tgt);
+        assertThat(m[0]).as("the leg claims exactly 1 remapped id").isEqualTo(1);
+        assertThat(m[1])
+            .as("the claim resolves through chash_alias to the chash actually present "
+                + "— alias-chaining survives the CASE-branch deletion")
+            .isEqualTo(1);
+    }
+
     // ── Test 6: function is SECURITY INVOKER (RLS applies inside it) ─────────
 
     @Test
@@ -342,15 +382,37 @@ class RemapMembershipFunctionTest {
             "VALUES ('" + tenant + "', '" + name + "') ON CONFLICT DO NOTHING");
     }
 
+    /**
+     * RDR-194 D3 (bead nexus-tk070.p2): new_chash is bytea now — the raw SQL
+     * literal must go through {@code decode(..., 'hex')} exactly like every
+     * other bytea seam in this file ({@link #insertChunk1024}, the DELETE in
+     * test 2), never a bare string cast (which would store the 64 ASCII
+     * bytes of the hex text itself, failing the octet_length=32 CHECK).
+     */
     private void insertMapRow(Connection su, String tenant, String src,
                               String oldId, String newChash, String tgt) throws Exception {
         stampGuc(su, tenant);
         su.createStatement().execute(
             "INSERT INTO nexus.chash_remap " +
             "(tenant_id, source_collection, old_id, new_chash, target_collection, created_at, provenance) " +
-            "VALUES ('" + tenant + "', '" + src + "', '" + oldId + "', '" + newChash + "', " +
+            "VALUES ('" + tenant + "', '" + src + "', '" + oldId + "', decode('" + newChash + "', 'hex'), " +
             "'" + tgt + "', now(), 'fn-test') " +
             "ON CONFLICT (tenant_id, source_collection, old_id) DO NOTHING");
+    }
+
+    /**
+     * Seed a {@code nexus.chash_alias} row: {@code oldBytesHex} (the legacy
+     * 16-byte-decoded reference chash_remap.new_chash may still carry) maps
+     * to {@code newChashHex} (the canonical 32-byte digest actually present
+     * in the target chunk table).
+     */
+    private void insertAliasRow(Connection su, String tenant, String oldRef,
+                                String oldBytesHex, String newChashHex) throws Exception {
+        su.createStatement().execute(
+            "INSERT INTO nexus.chash_alias (tenant_id, old_ref, old_bytes, new_chash, source) " +
+            "VALUES ('" + tenant + "', '" + oldRef + "', decode('" + oldBytesHex + "', 'hex'), " +
+            "decode('" + newChashHex + "', 'hex'), 'fn-test') " +
+            "ON CONFLICT (tenant_id, old_ref) DO NOTHING");
     }
 
     private void insertChunk1024(Connection su, String tenant, String collection,

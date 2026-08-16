@@ -643,6 +643,21 @@
          the RLS toggle discipline, and the row-export-before-delete shape. -->
     <include file="db/changelog/catalog-032-links-tumbler-fk.xml"/>
 
+    <!-- RDR-194 Phase P2 (Decision D3, bead nexus-tk070.p2) —
+         chash_remap.new_chash TEXT -> bytea, the widened
+         length(new_chash) IN (32,64) CHECK replaced by
+         octet_length(new_chash) = 32, and remap_membership's CASE hex/UTF8
+         decode branch deleted (nothing left to decode once the column is
+         bytea). Placed after catalog-032-links-tumbler-fk.xml (current
+         tail) and before the grants-nexus-svc.xml runAlways block, matching
+         the established late-append convention (D0.1; see catalog-031's /
+         telemetry-004's / aspects-003's / plans-002's / taxonomy-008's /
+         catalog-032's own <include> comments for the identical reasoning).
+         See remap-003-new-chash-bytea.xml's own header for the full D3
+         trace, the cloud-count-2 gate record, and the rollback-ordering
+         derivation. -->
+    <include file="db/changelog/remap-003-new-chash-bytea.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

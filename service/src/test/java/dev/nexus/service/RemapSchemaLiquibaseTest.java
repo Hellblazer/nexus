@@ -190,27 +190,67 @@ class RemapSchemaLiquibaseTest {
         }
     }
 
-    // ── Test 4: CHECK rejects wrong-length new_chash ─────────────────────────
+    // ── Test 4: CHECK rejects a direct 16-byte (or any non-32-byte) insert ───
 
+    /**
+     * RDR-194 D3 (bead nexus-tk070.p2): new_chash is bytea now, CHECKed
+     * {@code octet_length(new_chash) = 32} (remap-003-new-chash-bytea.xml),
+     * replacing the pre-P2 TEXT length(32,64) CHECK this test used to pin.
+     * A direct 16-byte insert is exactly the legacy-32-hex-decoded shape D3's
+     * gate reasoning names (a 32-hex-char era fact decodes to 16 bytes) —
+     * the case that must now be REJECTED rather than tolerated.
+     */
     @Test
-    void remapTable_checkRejectsWrongLengthChash() throws Exception {
+    void remapTable_checkRejects16ByteInsert() throws Exception {
         assertThatThrownBy(() -> {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 stampGuc(su, "check-tenant");
-                su.createStatement().execute(
+                try (var ps = su.prepareStatement(
+                        "INSERT INTO nexus.chash_remap " +
+                        "(tenant_id, source_collection, old_id, new_chash, target_collection, " +
+                        " created_at, provenance) " +
+                        "VALUES (?, ?, ?, ?, ?, now(), ?)")) {
+                    ps.setString(1, "check-tenant");
+                    ps.setString(2, "src-coll");
+                    ps.setString(3, "legacy-1");
+                    ps.setBytes(4, new byte[16]);  // 16 bytes, not 32
+                    ps.setString(5, "tgt-coll");
+                    ps.setString(6, "test");
+                    ps.execute();
+                }
+            }
+        })
+        .as("new_chash whose stored width != 32 bytes must be rejected by the CHECK "
+            + "constraint (the legacy 16-byte-decoded shape D3's gate reasoning names)")
+        .isInstanceOf(Exception.class)
+        .hasMessageContaining("check constraint");
+    }
+
+    /**
+     * The companion positive case: a 32-byte value is accepted (this is the
+     * conformant shape every live write now takes — RemapRepository always
+     * binds exactly 32 bytes via {@code Chash.fromHex(...).toBytes()}).
+     */
+    @Test
+    void remapTable_checkAccepts32ByteInsert() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            stampGuc(su, "check-tenant-ok");
+            try (var ps = su.prepareStatement(
                     "INSERT INTO nexus.chash_remap " +
                     "(tenant_id, source_collection, old_id, new_chash, target_collection, " +
                     " created_at, provenance) " +
-                    "VALUES ('check-tenant', 'src-coll', 'legacy-1', " +
-                    // 31 hex chars — one short of the required 32
-                    "'0123456789abcdef0123456789abcde', 'tgt-coll', now(), 'test')");
+                    "VALUES (?, ?, ?, ?, ?, now(), ?)")) {
+                ps.setString(1, "check-tenant-ok");
+                ps.setString(2, "src-coll");
+                ps.setString(3, "legacy-1");
+                ps.setBytes(4, new byte[32]);
+                ps.setString(5, "tgt-coll");
+                ps.setString(6, "test");
+                ps.execute();
             }
-        })
-        .as("new_chash with length != 32 must be rejected by the CHECK constraint " +
-            "(mirrors the SQLite CHECK(length(new_chash) = 32))")
-        .isInstanceOf(Exception.class)
-        .hasMessageContaining("check constraint");
+        }
     }
 
     // ── Test 5: reverse index (tenant_id, new_chash) ─────────────────────────
@@ -237,9 +277,9 @@ class RemapSchemaLiquibaseTest {
     void tenantIsolation_viaTenantScope() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
-            insertRow(su, "alpha", "coll-a", "old-a1", "a".repeat(32));
-            insertRow(su, "alpha", "coll-a", "old-a2", "b".repeat(32));
-            insertRow(su, "beta",  "coll-b", "old-b1", "c".repeat(32));
+            insertRow(su, "alpha", "coll-a", "old-a1", chashBytes((byte) 1));
+            insertRow(su, "alpha", "coll-a", "old-a2", chashBytes((byte) 2));
+            insertRow(su, "beta",  "coll-b", "old-b1", chashBytes((byte) 3));
             su.commit();
         }
 
@@ -264,8 +304,8 @@ class RemapSchemaLiquibaseTest {
     void bypassRls_superuserSeesAllTenants() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
-            insertRow(su, "gamma-su", "coll-g", "old-g1", "d".repeat(32));
-            insertRow(su, "delta-su", "coll-d", "old-d1", "e".repeat(32));
+            insertRow(su, "gamma-su", "coll-g", "old-g1", chashBytes((byte) 4));
+            insertRow(su, "delta-su", "coll-d", "old-d1", chashBytes((byte) 5));
             su.commit();
         }
 
@@ -287,7 +327,7 @@ class RemapSchemaLiquibaseTest {
     void rls_failClosed_noGucStamp_returnsZeroRows() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
-            insertRow(su, "failclosed-tenant", "coll-fc", "old-fc1", "f".repeat(32));
+            insertRow(su, "failclosed-tenant", "coll-fc", "old-fc1", chashBytes((byte) 6));
             su.commit();
         }
 
@@ -314,9 +354,11 @@ class RemapSchemaLiquibaseTest {
                     " created_at, provenance) " +
                     "VALUES (?, ?, ?, ?, ?, now(), ?)",
                     "zeta",  // tenant_id mismatch — WITH CHECK must reject
-                    "coll-x", "old-x1", "0".repeat(32), "tgt-x", "test"))
+                    "coll-x", "old-x1", chashBytes((byte) 7), "tgt-x", "test"))
         )
-        .as("INSERT with tenant_id != GUC value must be rejected by RLS WITH CHECK")
+        .as("INSERT with tenant_id != GUC value must be rejected by RLS WITH CHECK "
+            + "(new_chash is a conformant 32-byte value so the CHECK constraint does "
+            + "not mask the RLS failure this test targets)")
         .isInstanceOf(Exception.class)
         .hasMessageContaining("violates row-level security policy");
     }
@@ -343,7 +385,7 @@ class RemapSchemaLiquibaseTest {
 
     /** Insert a map row via superuser connection (bypasses RLS for seeding). */
     private void insertRow(Connection su, String tenant, String sourceCollection,
-                           String oldId, String newChash) throws Exception {
+                           String oldId, byte[] newChash) throws Exception {
         try (var ps = su.prepareStatement("SELECT set_config(?, ?, true)")) {
             ps.setString(1, TenantConstants.GUC_NAME);
             ps.setString(2, tenant);
@@ -358,9 +400,16 @@ class RemapSchemaLiquibaseTest {
             ps.setString(1, tenant);
             ps.setString(2, sourceCollection);
             ps.setString(3, oldId);
-            ps.setString(4, newChash);
+            ps.setBytes(4, newChash);
             ps.setString(5, "tgt-" + sourceCollection);
             ps.executeUpdate();
         }
+    }
+
+    /** A conformant 32-byte new_chash value, distinct per fill byte (test fixtures only). */
+    private static byte[] chashBytes(byte fill) {
+        byte[] b = new byte[32];
+        java.util.Arrays.fill(b, fill);
+        return b;
     }
 }

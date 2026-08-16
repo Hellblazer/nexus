@@ -96,8 +96,17 @@ public final class ChashCensus {
             "THE legacy-reference registry — holding old ids is its purpose"),
         new Exclusion("chash_remap", "old_id",
             "remap facts: old_id is free-form by design (RDR-180 Item6a)"),
-        new Exclusion("chash_remap", "new_chash",
-            "widened era facts: 32-hex pre-flip rows stay readable (rdr180-13)"),
+        // chash_remap.new_chash LEFT this list at RDR-194 P2 (bead
+        // nexus-tk070.p2, remap-003-new-chash-bytea.xml): the column is
+        // bytea now, so the schema-derived TEXT scan no longer discovers it
+        // at all (assertDiscoversKnownInventory would fail on a stale entry
+        // here) and the widened 32-hex-era tolerance this exclusion named
+        // is gone WITH the column (cloud-count-2, T2 [22670]: the live
+        // chash_remap measured zero rows, so there was nothing to widen
+        // for). It is not moved to BYTEA_EXCLUSIONS either: the new
+        // octet_length(new_chash)=32 CHECK makes every stored value
+        // conformant by construction, so the bytea residue scan (width !=
+        // 32) can never find anything there to exclude.
         new Exclusion("chunks", "chunk_text",
             "free content — a note BODY may legitimately be a bare hash string"),
         new Exclusion("relevance_log", "query", "free content (user query text)"),
