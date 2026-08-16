@@ -1070,25 +1070,33 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
     def orphaned_links(self) -> list[dict]:
         """Return catalog_links rows whose from_tumbler or to_tumbler
-        resolves to no document (nexus-ysrwi, GH #1419 issue 7).
+        resolves to a TOMBSTONED (soft-deleted) document, not a live one
+        (nexus-ysrwi, GH #1419 issue 7; narrowed by RDR-194 § D2 /
+        nexus-tk070.p1).
 
-        ``catalog_links`` carries a PK and a UNIQUE constraint but NO
-        foreign key to ``catalog_documents`` (catalog-001-baseline.xml), so
-        a link survives when its referenced document is hard-deleted. The
-        only production hard-delete of document rows is
-        ``CatalogRepository.deleteCollectionTxn``'s per-collection
-        ``catalog_documents`` delete (called from :meth:`delete_collection`)
-        — it has no corresponding ``catalog_links`` cleanup step, so a
-        cross-collection link whose endpoint's collection gets deleted
-        dangles forever. Closing that write-time gap needs an engine change
-        (a new step in that transaction) — this method is the DETECTION
-        half only.
+        ``catalog_links`` now carries ``fk_catalog_links_from_document`` /
+        ``fk_catalog_links_to_document`` (catalog-032-links-tumbler-fk.xml,
+        ON DELETE CASCADE ON UPDATE CASCADE to ``catalog_documents
+        (tenant_id, tumbler)``), so a link whose endpoint has NO
+        ``catalog_documents`` row at all can no longer exist — the FK
+        rejects the write (surfaced client-side as ``ValueError`` from the
+        ``dangling_endpoint`` 400) and cascades any pre-existing such row
+        away on delete. What survives, and what this method now reports,
+        is the narrower case the FK deliberately does not cover: an
+        endpoint that resolves to a document row that still exists but is
+        tombstoned (``deleted_at`` set) — a soft delete, which satisfies
+        the FK but is no longer a *live* document. ``nx doctor
+        --check-dangling-links`` / ``--strict-dangling-links`` is RETIRED
+        (the FK closed the write-time gap that check existed to detect);
+        this method and its endpoint remain for the tombstoned-endpoint
+        case.
 
         Uses GET /v1/catalog/links/orphaned (v0.1.55,
         ``CatalogRepository.orphanedLinks`` / ``CatalogHandler
         .handleLinksOrphaned``). Each dict carries ``id``, ``from_tumbler``,
         ``to_tumbler``, ``link_type``, ``created_by``, and ``side``
-        (``"from"``/``"to"``/``"both"``) naming which endpoint is missing.
+        (``"from"``/``"to"``/``"both"``) naming which endpoint is
+        tombstoned.
         """
         result = self._get("/links/orphaned")
         # Shape-guard the response. A truthy NON-dict (a bare JSON array, say)
@@ -2022,13 +2030,27 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         catches — every install would take an uncaught exception on its next
         index pass, since a stale link-context reference occurs on every one.
 
-        FORWARD-COMPATIBLE BY CONSTRUCTION, which is why it can ship first:
-        against an engine that never emits that code this branch is unreachable,
-        and ``allow_dangling`` on the payload is ignored by an engine that does
-        not read it. So this is safe on today's engine and correct on the next.
+        FORWARD-COMPATIBLE BY CONSTRUCTION, which is why it could ship first:
+        against an engine that never emits that code this branch was unreachable,
+        and ``allow_dangling`` on the payload was ignored by an engine that did
+        not read it. So it was safe on the pre-FK engine and is correct now.
 
         Discriminates on ``code``, never on the bare 400: a malformed-body 400
         must keep raising what it raises today.
+
+        ``allow_dangling=True`` NARROWED, RDR-194 § D2 (nexus-tk070.p1) —
+        ``fk_catalog_links_from_document`` / ``fk_catalog_links_to_document``
+        now enforce endpoint EXISTENCE at the database level, independent of
+        this client's ``requireLiveEndpoints`` bypass. So today: a link to a
+        TOMBSTONED document (row exists, ``deleted_at`` set) still writes with
+        ``allow_dangling=True`` — the row satisfies the FK even though it is
+        not LIVE. A link to a tumbler with NO ``catalog_documents`` row at ALL
+        now raises the SAME ``ValueError`` this method already translates
+        ``dangling_endpoint`` into (the engine maps the real SQLSTATE 23503 to
+        the identical wire shape), even with ``allow_dangling=True`` — there is
+        no client-visible difference between "refused by the Java live-check"
+        and "refused by the real FK constraint" except which one the payload
+        happened to reach.
         """
         try:
             result = self._post("/link", payload)
