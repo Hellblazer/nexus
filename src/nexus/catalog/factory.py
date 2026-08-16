@@ -495,5 +495,35 @@ def make_catalog_client_for_migration(
 
     _log.debug("catalog_client_for_migration", base_url=base_url)
     if base_url:
+        # code-review WORTH-TRACKING (nexus-wrwb7 fix pass, nexus-ssqk9
+        # relay): deliberately stays fully pinned, unlike the no-base_url
+        # branch below. This branch exists specifically for a caller that
+        # names a NON-DEFAULT target endpoint (module docstring: "a
+        # specific Postgres service endpoint that may differ from the
+        # configured default"). A configured mint_token credential is
+        # scoped to the DEFAULT managed engine's mint contract; self-minting
+        # against it and presenting the result to a DIFFERENT, explicitly-
+        # named migration target would be silently wrong, not an
+        # improvement — so this call site does NOT apply the data-token
+        # override. No live call site passes base_url= today (grepped
+        # 2026-08-16); revisit if one appears and genuinely wants
+        # self-minting against its own explicit target.
         return HttpCatalogClient(base_url=base_url, _token=token)
-    return HttpCatalogClient(_token=token) if token else HttpCatalogClient()
+    if not token:
+        return HttpCatalogClient()
+    # code-review Sig#1 addendum (nexus-ssqk9): this branch resolves the
+    # SAME default managed endpoint every other T2 store uses (no base_url
+    # override), so it gets the identical treatment as the SessionEnd
+    # summary fix above — apply the data-token override BEFORE
+    # construction so a configured mint_token credential is not silently
+    # skipped on this low-traffic migration path either.
+    from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.db.service_endpoint import resolve_service_endpoint  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.db.t2._refreshable_client import DEFAULT_TENANT  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+    resolved_base_url, _ = resolve_service_endpoint()
+    data_token = get_data_token_manager().bearer_for(resolved_base_url, DEFAULT_TENANT)
+    return HttpCatalogClient(
+        base_url=resolved_base_url,
+        _token=data_token if data_token is not None else token,
+    )

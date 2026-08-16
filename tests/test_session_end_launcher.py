@@ -235,6 +235,95 @@ def test_hooks_json_session_end_timeout_covers_service_summary() -> None:
     )
 
 
+# ── _print_service_tier_summary: data-token override (nexus-ssqk9 fix pass) ──
+
+
+class _FakeTierStore:
+    """Records the kwargs it was constructed with; behaves as a no-op
+    HttpTelemetryStore double for _print_service_tier_summary."""
+
+    def __init__(self, *, base_url: str, _token: str) -> None:
+        self.base_url = base_url
+        self.token = _token
+
+    def query_tier_writes_once(self, *, session_id: str, timeout: float = 2.0) -> list:
+        return []
+
+    def close(self) -> None:
+        pass
+
+
+def test_print_service_tier_summary_applies_data_token_override() -> None:
+    """code-review Sig#1 (nexus-wrwb7 fix pass, nexus-ssqk9 relay):
+    ``HttpTelemetryStore(base_url=..., _token=...)`` pins BOTH halves,
+    which sets ``_token_pinned=True`` and used to permanently skip
+    ``RefreshableHttpStoreMixin._apply_data_token_override`` -- this
+    SessionEnd summary would never adopt a self-minted data token even
+    with ``mint_token`` configured. The override must be applied
+    explicitly, BEFORE construction, so the store is still built fully
+    pinned (zero wait risk) but with the RIGHT token from the start."""
+    import nexus._session_end_launcher as launcher
+
+    captured: dict[str, str] = {}
+
+    class _CapturingStore(_FakeTierStore):
+        def __init__(self, *, base_url: str, _token: str) -> None:
+            captured["base_url"] = base_url
+            captured["token"] = _token
+            super().__init__(base_url=base_url, _token=_token)
+
+    class _MintedManager:
+        def bearer_for(self, base_url: str, tenant: str) -> str | None:
+            return "self-minted-data-token"
+
+    with (
+        patch("nexus.session.resolve_active_session_id", return_value="sess-123"),
+        patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint",
+            return_value=("http://127.0.0.1:9999", "static-service-token"),
+        ),
+        patch("nexus.db.data_token.get_data_token_manager", return_value=_MintedManager()),
+        patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore", _CapturingStore),
+    ):
+        launcher._print_service_tier_summary()  # must not raise
+
+    assert captured["token"] == "self-minted-data-token"
+    assert captured["base_url"] == "http://127.0.0.1:9999"
+
+
+def test_print_service_tier_summary_unconfigured_uses_static_token() -> None:
+    """Zero behavior change when mint_token is not configured: the store
+    must still be constructed with the static service token resolved by
+    resolve_service_endpoint(), byte-identical to pre-nexus-wrwb7."""
+    import nexus._session_end_launcher as launcher
+
+    captured: dict[str, str] = {}
+
+    class _CapturingStore(_FakeTierStore):
+        def __init__(self, *, base_url: str, _token: str) -> None:
+            captured["base_url"] = base_url
+            captured["token"] = _token
+            super().__init__(base_url=base_url, _token=_token)
+
+    class _InertManager:
+        def bearer_for(self, base_url: str, tenant: str) -> str | None:
+            return None
+
+    with (
+        patch("nexus.session.resolve_active_session_id", return_value="sess-123"),
+        patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint",
+            return_value=("http://127.0.0.1:9999", "static-service-token"),
+        ),
+        patch("nexus.db.data_token.get_data_token_manager", return_value=_InertManager()),
+        patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore", _CapturingStore),
+    ):
+        launcher._print_service_tier_summary()
+
+    assert captured["token"] == "static-service-token"
+    assert captured["base_url"] == "http://127.0.0.1:9999"
+
+
 def test_hooks_json_session_end_drops_detach_fallback() -> None:
     """Phase C drops the ``|| nx hook session-end-detach`` fallback.
 

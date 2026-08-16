@@ -103,7 +103,9 @@ class TestManagedBranch:
                    side_effect=lambda n: cleared.append(n) or True):
             res = CliRunner().invoke(main, ["uninstall", "--yes"])
         assert res.exit_code == 0, res.output
-        assert cleared == ["service_url", "service_token"]
+        # nexus-wrwb7: mint_token joined the managed-credential teardown set.
+        # nexus-ssqk9: mint_tenant travels as a pair with mint_token.
+        assert cleared == ["service_url", "service_token", "mint_token", "mint_tenant"]
         assert "managed" in res.output.lower()
         # Sig-1/Sig-2: managed-only → the local teardown is NEVER invoked.
         assert m_local.call_count == 0

@@ -709,6 +709,59 @@ db.telemetry.log_relevance(query, ...)             # domain method
 Existing call sites that use `db.search(...)`, `db.save_plan(...)`,
 etc. continue to work via facade delegation -- no migration required.
 
+### Authentication: static token vs self-minted data tokens (conexus RDR-005 2a)
+
+Every HTTP storage client (T1 `HttpScratchStore`, the eight T2 `Http*Store`
+classes via `RefreshableHttpStoreMixin`, T3 `HttpVectorClient`, and the
+catalog client) presents an `Authorization: Bearer <token>` header on every
+call. By default that token is the static `service_token` credential
+(`nx config set service_token`) or a supervisor-published lease token —
+unchanged since RDR-152. When a `mint_token` credential is configured
+(`nx config set mint_token`, a `scope=mint`/`scope=mint-locked` bearer),
+`nexus.db.data_token.DataTokenManager` self-mints a short-TTL `scope=data`
+token per `(base_url, tenant)` (`POST /v1/data-tokens/mint`, cached and
+refreshed below a 20%-of-TTL threshold or on a 401) and every client
+presents THAT instead — a client-held resolution seam, not a per-call-site
+change. This is the client half of RDR-005's staged cutover: conexus's edge
+today still JIT-injects a shared per-tenant credential and strips whatever
+`Authorization` the client sends (RDR-005 2a's variant-3 posture); once the
+edge flips to pure pass-through, a `mint_token`-configured client presents
+its OWN credential's data token end-to-end instead of riding the edge's
+injected one. Unconfigured installs (the default, local mode included) see
+zero behavior change. A mint failure with `mint_token` configured never
+falls back silently to the static token — it fails loud
+(`DataTokenMintError`), since a half-provisioned install must surface.
+
+**`mint_token` and `mint_tenant` travel as a pair** (nexus-ssqk9). Every
+`Http*Store` defaults its own `tenant` constructor kwarg to
+`DEFAULT_TENANT = "default"` — but a real `scope=mint-locked` credential is
+bound server-side to whatever tenant the operator issued it under (e.g.
+`"nexus"`), and `DataTokenHandler` 403s the mint the instant the request
+body's `tenant` field differs from that bound tenant. `mint_tenant`
+(`nx config set mint_tenant <tenant>` / `NX_MINT_TENANT`) lets an operator
+name the credential's real bound tenant once; `DataTokenManager._mint` then
+sends `mint_tenant` (when configured) as the mint body's `tenant` field
+INSTEAD OF the caller-passed tenant — every store's own tenant-scoped cache
+key and `X-Nexus-Tenant` header convention are unaffected, only the wire-level
+mint body changes. A 403 from a mint-locked credential names both the
+configured/requested tenant and the remedy (`nx config set mint_tenant
+<tenant>`) in the raised `DataTokenMintError`, rather than only relaying the
+server's own error text. `mint_tenant` is not itself a secret (a tenant
+slug, not a bearer) — it displays unmasked from `nx config get`/`nx config
+list`, unlike every other `CREDENTIALS`-registry entry.
+
+The mint round trip additionally carries a small bounded retry (max 3
+attempts, 1s/2s backoff, honoring a server `Retry-After` when present) on
+the transient gateway/rate-limit statuses `{429, 502, 503, 504}` —
+`MintRateLimiter` genuinely 429s under load — deliberately never touching
+the shared `nexus.rate_brake` brake (that brake coordinates bulk-write
+workers; a mint is a single infrequent auth round trip). `nx doctor`'s
+mint_token check routes through `DataTokenManager`'s process-wide singleton
+(never a throwaway instance) so repeated `nx doctor` runs REUSE a live
+cached token rather than minting a fresh one every invocation, and its
+success line reports both which happened (minted vs. reused) and the
+granted TTL.
+
 ### Concurrency Model ([RDR-063](rdr/rdr-063-t2-domain-split.md) Phase 2) — HISTORICAL
 
 > **This subsection describes the retired SQLite substrate.** The per-store

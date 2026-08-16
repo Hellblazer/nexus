@@ -28,7 +28,9 @@ from nexus.config import get_credential, unset_credential
 from nexus.daemon.installer import uninstall_daemon
 
 #: The managed-client credentials cleared by the managed-only teardown branch.
-_MANAGED_CREDENTIALS = ("service_url", "service_token")
+#: nexus-ssqk9: mint_tenant travels as a PAIR with mint_token -- clearing one
+#: without the other leaves a half-torn-down config.
+_MANAGED_CREDENTIALS = ("service_url", "service_token", "mint_token", "mint_tenant")
 
 
 def _local_service_present() -> bool:
@@ -80,7 +82,7 @@ def _teardown_managed(*, confirm: bool) -> tuple[list[str], list[str]]:
     else:
         lines.append(
             "Managed client: would clear the managed endpoint config "
-            "(service_url + service_token) from config.yml."
+            f"({', '.join(_MANAGED_CREDENTIALS)}) from config.yml."
         )
     # Honesty guard: a shell-exported env var overrides config.yml and survives.
     env_overrides = [e for e in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN") if os.environ.get(e, "").strip()]

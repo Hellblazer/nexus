@@ -355,6 +355,11 @@ class RefreshableHttpStoreMixin:
         self._base_url = base_url.rstrip("/")
         self._tenant = tenant
         self._token = _token
+        # nexus-wrwb7: prefer a self-minted data token when a mint_token
+        # credential is configured (RDR-005 2a self-minting). No-op (and
+        # byte-identical to pre-existing behavior) when unconfigured, and
+        # never applied over an explicitly test-pinned token.
+        self._apply_data_token_override()
 
         # Deliberately NOT constructed with base_url=... — this is the
         # crux of the bead (design doc's "f2qvx half"). httpx.Client's
@@ -383,6 +388,39 @@ class RefreshableHttpStoreMixin:
         self._client.close()
 
     # ── Credential / endpoint refresh ───────────────────────────────────────
+
+    def _apply_data_token_override(self) -> None:
+        """Substitute a self-minted data token for the resolved
+        ``self._token`` when a ``mint_token`` credential is configured
+        (nexus-wrwb7, RDR-005 2a).
+
+        Skipped when the caller EXPLICITLY pinned ``_token`` at
+        construction (``self._token_pinned``) -- a test fixture pinning a
+        token for a fake server must not have it silently swapped out.
+        A mint FAILURE (:class:`~nexus.db.data_token.DataTokenMintError`)
+        propagates uncaught -- a half-provisioned install (mint_token
+        configured but bad/unreachable) must surface, never fall back
+        silently to the stale/static token.
+
+        ``getattr(..., True)`` (not a bare attribute access): an instance
+        built via ``SomeAdopter.__new__(SomeAdopter)`` bypassing
+        ``__init__`` -- a real, widely-used pattern across this mixin's
+        nine adopters' test suites (``HttpCatalogClient``,
+        ``HttpTaxonomyStore``, ``HttpTelemetryStore``,
+        ``HttpDocumentAspectsStore``, etc.) -- has no ``_token_pinned``
+        attribute at all. Defaulting to ``True`` (pinned/no-op) rather than
+        crashing with ``AttributeError`` mirrors the identical fix applied
+        to ``HttpScratchStore``'s bespoke copy of this method after the
+        exact AttributeError surfaced live in
+        ``tests/test_scratch_cmd_service_errors.py`` (nexus-wrwb7).
+        """
+        if getattr(self, "_token_pinned", True):
+            return
+        from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+
+        token = get_data_token_manager().bearer_for(self._base_url, self._tenant)
+        if token is not None:
+            self._token = token
 
     def _auth_headers(self) -> dict[str, str]:
         """Build the auth headers FRESH from the CURRENT cached token.
@@ -468,6 +506,11 @@ class RefreshableHttpStoreMixin:
             self._base_url = base_url.rstrip("/")
             if not self._token_pinned:
                 self._token = token
+        # nexus-wrwb7: re-apply the data-token override AFTER re-resolving
+        # the static half above -- self._send() already invalidated the
+        # manager's cached entry for this (base_url, tenant) before calling
+        # this method, so this mints fresh rather than replaying a stale one.
+        self._apply_data_token_override()
         _log.info(
             "refreshable_http_store.reresolved",
             store=type(self).__name__,
@@ -622,6 +665,15 @@ class RefreshableHttpStoreMixin:
                 path=path,
                 reason=type(exc).__name__,
             )
+            # nexus-wrwb7: drop any cached self-minted data token for this
+            # exact (base_url, tenant) BEFORE re-resolving -- otherwise
+            # _apply_data_token_override() inside _invalidate_and_reresolve
+            # would just hand back the same (possibly 401-rejected) cached
+            # token instead of re-minting. Harmless no-op when unconfigured
+            # or nothing was cached.
+            from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+
+            get_data_token_manager().invalidate(self._base_url, self._tenant)
             self._invalidate_and_reresolve()
             return self._once_with_gateway_retry(method, path, **kwargs)
 

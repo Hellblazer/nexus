@@ -2171,6 +2171,91 @@ def _check_credential_persistence() -> list[HealthResult]:
     ]
 
 
+def _check_mint_token() -> list[HealthResult]:
+    """RDR-005 2a self-minting credential (nexus-wrwb7).
+
+    Reports ``mint_token`` presence and, when configured, performs ONE live
+    mint round trip via ``DataTokenManager`` to confirm the credential and
+    endpoint are usable. Degrades cleanly -- never false-clean, never
+    crashes ``nx doctor``:
+
+      - unconfigured: a loud (visible, ``ok=True``) skip line -- self-
+        minting is optional; the static ``service_token`` path runs
+        unchanged for every install that has not opted in.
+      - configured but the engine endpoint is not resolvable: soft warning
+        (non-fatal), never silently "ok".
+      - configured but the mint round trip itself fails
+        (``DataTokenMintError``): soft warning naming the failure.
+      - configured and reachable: reports whether the round trip MINTED a
+        fresh token or REUSED the manager's cached live one, plus the
+        granted TTL (critic S1/S3, nexus-ssqk9). IMPORTANT: on the managed
+        CLOUD path, pre-cutover, the edge strips client ``Authorization``
+        and injects its own credential (RDR-005 2a staged cutover -- T2
+        ``conexus/conexus-06`` answer, 2026-08-15). A mint succeeding
+        THROUGH the edge does not yet prove THIS credential's own
+        authority, so the success line is worded neutrally rather than
+        claiming credential-specific proof.
+    """
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+
+    label = "Data-token self-minting (mint_token)"
+    credential = (get_credential("mint_token") or "").strip()
+    if not credential:
+        return [HealthResult(
+            label=label,
+            ok=True,
+            detail="not configured — self-minting inactive; the static "
+                   "service_token path is used unchanged (optional, RDR-005 2a)",
+        )]
+
+    from nexus.db.data_token import DataTokenMintError, get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.db.service_endpoint import (  # noqa: PLC0415 — deferred to avoid circular import
+        resolve_service_endpoint_with_evidence_gate,
+    )
+
+    try:
+        base_url, _static_token = resolve_service_endpoint_with_evidence_gate()
+    except Exception as exc:  # noqa: BLE001 — best-effort: endpoint unresolvable degrades to a warning
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"mint_token is configured but the engine endpoint is not resolvable: {exc}",
+        )]
+
+    import urllib.parse  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+
+    host = urllib.parse.urlsplit(base_url).netloc or base_url
+    tenant = "default"
+    # critic S3 (nexus-ssqk9, residue class nexus-lgiqw): the PROCESS-WIDE
+    # singleton, never a throwaway DataTokenManager() -- constructing a
+    # fresh manager per invocation minted a NEW token every single `nx
+    # doctor` run, defeating the manager's own residue discipline. Peek
+    # BEFORE calling bearer_for so the success line can say which happened.
+    manager = get_data_token_manager()
+    was_live = manager.has_live_token(base_url, tenant)
+    try:
+        manager.bearer_for(base_url, tenant)
+    except DataTokenMintError as exc:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"mint round trip FAILED against {host}: {exc}",
+        )]
+
+    verb = "reused the cached" if was_live else "minted a fresh"
+    ttl = manager.granted_ttl_seconds(base_url, tenant)
+    ttl_detail = f"granted TTL {ttl:.0f}s" if ttl is not None else "granted TTL unknown"
+    return [HealthResult(
+        label=label,
+        ok=True,
+        detail=(
+            f"{verb} data token via {host} ({ttl_detail}). Pre-cutover on "
+            "the managed cloud path this does NOT yet prove this "
+            "credential's own authority (the edge still strips/injects "
+            "Authorization until the RDR-005 2a cutover) — treat as "
+            "reachability, not proof."
+        ),
+    )]
+
+
 # ── RDR-152 / bead nexus-gmiaf.33: storage-service health checks ──────────────
 
 # Authoritative set of tenant tables that MUST have RLS enabled, forced, and at
@@ -4964,6 +5049,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_process_skew())
     results.extend(_check_plugin_name())
     results.extend(_check_credential_persistence())
+    results.extend(_check_mint_token())
 
     _local = is_local_mode()
     if _local:

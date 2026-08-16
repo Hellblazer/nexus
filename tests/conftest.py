@@ -960,6 +960,18 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "NX_SERVICE_TOKEN",
         "NX_SERVICE_HOST",
         "NX_SERVICE_PORT",
+        # nexus-wrwb7: the RDR-005 2a self-minting credential. A developer
+        # shell holding the REAL provisioned mint-locked credential (e.g.
+        # exported for manual cloud-path testing) would otherwise leak into
+        # every unit test, making DataTokenManager attempt a real mint
+        # against whatever LOCAL substrate/lease endpoint each test
+        # resolves -- which that production credential is not bound to and
+        # correctly 401s, breaking unrelated tests exactly like the
+        # service_token/service_url ambient-leak class above. Tests that
+        # WANT mint_token configured set NX_MINT_TOKEN explicitly via their
+        # own monkeypatch, which (per the ordering contract documented
+        # above) lands after this delenv and wins.
+        "NX_MINT_TOKEN",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -2562,7 +2574,7 @@ def _reap_leaked_test_daemons(tmp_path_factory):
 
 
 def fake_credentials(value: str = "test-key", *, passthrough: tuple[str, ...] = (
-    "service_url", "service_token",
+    "service_url", "service_token", "mint_token",
 )):
     """A ``get_credential`` side_effect that does NOT poison the endpoint.
 
@@ -2583,6 +2595,18 @@ def fake_credentials(value: str = "test-key", *, passthrough: tuple[str, ...] = 
     there. Under the engine substrate it was the single largest failure
     cause found in this port — 29 of 32 in tests/test_indexer_e2e.py plus 4
     in tests/test_indexer_duplicate_content.py.
+
+    ``mint_token`` (nexus-wrwb7, RDR-005 2a) joined the passthrough set the
+    same way and for the same reason: it is not a generic credential either
+    -- ``DataTokenManager.is_configured()`` treats ANY non-empty value as
+    "self-minting is active", so the blanket "test-key" stub silently
+    flipped every indexer test using this helper into attempting a real
+    mint against the substrate's endpoint (which correctly 401s a bogus
+    credential), the identical "stub chosen for one axis perturbs a
+    neighbouring one" failure class the ``service_url`` fix above already
+    describes. Passthrough here means "delegate to the real resolver",
+    which for an unconfigured test returns "" -- self-minting stays
+    correctly inert, exactly as an indexer test not opting into it expects.
 
     This keeps the blanket answer for the credential the tests actually care
     about (embedder routing keys on ``voyage_api_key`` PRESENCE) while

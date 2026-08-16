@@ -93,13 +93,29 @@ _REQUEST_COUNT: dict[str, int] = {}
 #: normal handling. Reset per test.
 _GATEWAY_FAIL_QUEUE: list[int] = []
 
+# ── nexus-wrwb7: self-minted data-token resolution-seam state ───────────────
+#: The mint credential the fake service accepts on POST /v1/data-tokens/mint.
+_MINT_CREDENTIAL = "test-mint-credential"
+#: The most recently minted data token, or None before any mint. The echo
+#: endpoint accepts EITHER this OR ``_VALID_BEARER`` -- mirrors the real
+#: engine treating both the static service token and a live data token as
+#: valid concurrently.
+_MINTED_DATA_TOKEN: str | None = None
+_MINT_CALLS: int = 0
+#: When set, /v1/data-tokens/mint responds with this status instead of
+#: minting -- used to test a mint failure surfacing loud.
+_MINT_FORCE_STATUS: int | None = None
+
 
 def _reset_fake_service_state() -> None:
-    global _VALID_BEARER, _ALWAYS_401
+    global _VALID_BEARER, _ALWAYS_401, _MINTED_DATA_TOKEN, _MINT_CALLS, _MINT_FORCE_STATUS
     _VALID_BEARER = _INITIAL_BEARER
     _ALWAYS_401 = False
     _REQUEST_COUNT.clear()
     _GATEWAY_FAIL_QUEUE.clear()
+    _MINTED_DATA_TOKEN = None
+    _MINT_CALLS = 0
+    _MINT_FORCE_STATUS = None
 
 
 class _FakeHandler(BaseHTTPRequestHandler):
@@ -127,14 +143,35 @@ class _FakeHandler(BaseHTTPRequestHandler):
 
     def _check_bearer(self) -> bool:
         auth = self.headers.get("Authorization", "")
-        if _ALWAYS_401 or auth != f"Bearer {_VALID_BEARER}":
+        valid = {f"Bearer {_VALID_BEARER}"}
+        if _MINTED_DATA_TOKEN:
+            valid.add(f"Bearer {_MINTED_DATA_TOKEN}")
+        if _ALWAYS_401 or auth not in valid:
             self._send(401, {"error": "unauthorized"})
             return False
         return True
 
+    def _handle_mint(self) -> None:
+        global _MINTED_DATA_TOKEN, _MINT_CALLS
+        _MINT_CALLS += 1
+        length = int(self.headers.get("Content-Length", "0"))
+        _ = json.loads(self.rfile.read(length)) if length else {}
+        if _MINT_FORCE_STATUS is not None:
+            self._send(_MINT_FORCE_STATUS, {"error": "forced mint failure"})
+            return
+        auth = self.headers.get("Authorization", "")
+        if auth != f"Bearer {_MINT_CREDENTIAL}":
+            self._send(401, {"error": "invalid mint credential"})
+            return
+        _MINTED_DATA_TOKEN = f"minted-data-token-{_MINT_CALLS}"
+        self._send(200, {"data_token": _MINTED_DATA_TOKEN, "expires_in_seconds": 300})
+
     def do_POST(self):  # noqa: N802
         path = self.path.split("?")[0]
         self._record("POST", path)
+        if path == "/v1/data-tokens/mint":
+            self._handle_mint()
+            return
         if path != "/v1/echo":
             self._send(404, {"error": "not found"})
             return
@@ -1222,3 +1259,98 @@ class TestPostPerRequestTimeoutOverride:
 
         assert result == {"echo": {"value": "no-timeout"}}
         assert "timeout" not in captured[-1]
+
+
+# ── nexus-wrwb7: mint_token resolution-seam (RDR-005 2a self-minting) ───────
+
+
+class TestMintTokenResolutionSeam:
+    """The T2 mixin half of the DataTokenManager resolution seam.
+
+    Regression pin: every OTHER test in this file runs with NX_MINT_TOKEN
+    unset, and passed unchanged after this wiring landed -- byte-identical
+    behavior for unconfigured installs is exercised implicitly by the whole
+    rest of the file, not just this class.
+    """
+
+    def _reset_manager(self):
+        from nexus.db.data_token import reset_data_token_manager
+        reset_data_token_manager()
+
+    def test_unconfigured_never_calls_mint(self, fake_service) -> None:
+        """No NX_MINT_TOKEN -> the manager is inert; zero mint calls, and
+        the static service_token path is exactly what a pre-wrwb7 install
+        saw."""
+        self._reset_manager()
+        store = _make_echo_store()
+
+        result = store.echo_post("no mint configured")
+
+        assert result == {"echo": {"value": "no mint configured"}}
+        assert _MINT_CALLS == 0
+
+    def test_mint_token_configured_presents_data_token(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A configured mint_token credential mints ONCE at construction and
+        the minted data token -- not the static service_token -- is what
+        authenticates the echo call."""
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        self._reset_manager()
+        try:
+            store = _make_echo_store()
+
+            result = store.echo_post("mint configured")
+
+            assert result == {"echo": {"value": "mint configured"}}
+            assert _MINT_CALLS == 1
+            assert _MINTED_DATA_TOKEN is not None
+        finally:
+            self._reset_manager()
+
+    def test_401_triggers_single_remint_then_succeeds(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cached data token is rejected server-side (simulating an
+        external revoke/rotation) -- the store invalidates the manager's
+        cache entry, re-mints exactly once, and the retry succeeds."""
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        self._reset_manager()
+        try:
+            store = _make_echo_store()
+
+            baseline = store.echo_post("before revoke")
+            assert baseline == {"echo": {"value": "before revoke"}}
+            assert _MINT_CALLS == 1
+
+            global _MINTED_DATA_TOKEN
+            _MINTED_DATA_TOKEN = "revoked-elsewhere"  # simulate an out-of-band rotation
+
+            result = store.echo_post("after revoke")
+
+            assert result == {"echo": {"value": "after revoke"}}
+            assert _MINT_CALLS == 2, "expected exactly one re-mint, not zero and not a loop"
+            assert _REQUEST_COUNT["POST /v1/echo"] == 3, (
+                "baseline (1) + rejected retry with the stale cached token (1) "
+                "+ success with the freshly re-minted token (1)"
+            )
+        finally:
+            self._reset_manager()
+
+    def test_persistent_mint_rejection_fails_loud_not_silent_fallback(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """mint_token IS configured but the credential itself is bad -- this
+        must surface as a typed, loud failure, never a silent fallback to
+        the static service_token (a half-provisioned install must be
+        visible, not masked)."""
+        from nexus.db.data_token import DataTokenMintError
+
+        monkeypatch.setenv("NX_MINT_TOKEN", "wrong-credential")
+        self._reset_manager()
+        try:
+            with pytest.raises(DataTokenMintError):
+                _make_echo_store()
+            assert _MINT_CALLS == 1
+        finally:
+            self._reset_manager()

@@ -466,6 +466,18 @@ def _request_once(
     import urllib.request  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     base_url, token = _resolve_endpoint()
+    # nexus-wrwb7 (RDR-005 2a self-minting): when a mint_token credential is
+    # configured, present the manager's self-minted data token instead of
+    # the static service_token/lease token resolved above. Inert (returns
+    # None) when unconfigured -- zero behavior change for every install that
+    # has not opted in. A mint failure raises DataTokenMintError, which
+    # propagates uncaught -- a half-provisioned install must surface, never
+    # silently fall back to the static token.
+    from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+
+    data_token = get_data_token_manager().bearer_for(base_url, tenant)
+    if data_token is not None:
+        token = data_token
     headers = {
         "Authorization": f"Bearer {token}",
         "X-Nexus-Tenant": tenant,
@@ -889,6 +901,20 @@ def _request(
             path=path,
             reason=type(exc).__name__,
         )
+        # nexus-wrwb7: drop any cached self-minted data token for the
+        # endpoint this failed request just used, BEFORE _invalidate_endpoint
+        # clears the module lease cache -- otherwise the retry's
+        # get_data_token_manager().bearer_for() call in _request_once would
+        # just hand back the same (possibly 401-rejected) cached token
+        # instead of re-minting. Best-effort: a resolution failure here must
+        # not block the pre-existing endpoint retry below.
+        try:
+            _stale_base_url, _ = _resolve_endpoint()
+            from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+
+            get_data_token_manager().invalidate(_stale_base_url, tenant)
+        except Exception as data_token_exc:  # noqa: BLE001 — best-effort; the endpoint retry below is what must proceed
+            _log.debug("vector_data_token_invalidate_skipped", error=str(data_token_exc))
         _invalidate_endpoint()
         # nexus-7dsgp: give a not-yet-republished lease a bounded chance to
         # appear before the retry re-reads it — see _wait_for_lease_republication's

@@ -122,7 +122,11 @@ class _FlakyClient:
         self.exc = exc or httpx.ConnectError("connection refused")
         self.posts = 0
 
-    def post(self, path, json=None):  # noqa: A002
+    def post(self, path, json=None, headers=None):  # noqa: A002
+        # nexus-ssqk9: HttpScratchStore._post/_post_raw now pass a
+        # per-request headers= override (critic S4, proactive data-token
+        # resolution) -- accepted and ignored here, this fake only needs
+        # to prove the connect-error-then-recover sequencing.
         self.posts += 1
         if self.raise_first and self.posts == 1:
             raise self.exc

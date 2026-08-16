@@ -458,7 +458,32 @@ CREDENTIALS: dict[str, str] = {
     # consume point the conexus issuance contract targets.
     "service_url":       "NX_SERVICE_URL",
     "service_token":     "NX_SERVICE_TOKEN",
+    # RDR-005 2a self-minting (nexus-wrwb7): a scope=mint or scope=mint-locked
+    # credential. When configured, nexus.db.data_token.DataTokenManager
+    # self-mints short-TTL data tokens (POST /v1/data-tokens/mint) instead of
+    # presenting the static service_token on engine calls. Unconfigured =
+    # zero behavior change (the manager is inert; see the module docstring).
+    "mint_token":        "NX_MINT_TOKEN",
+    # nexus-ssqk9 (RDR-005 2a follow-up): the TENANT stamped in the mint
+    # request body, overriding the caller-passed tenant (which every
+    # Http*Store defaults to DEFAULT_TENANT="default"). A scope=mint-locked
+    # credential is bound to its OWN tenant server-side (DataTokenHandler
+    # 403s the mint the moment the body tenant differs) -- a real deployed
+    # credential is routinely bound to something other than the client's
+    # "default" convention (e.g. "nexus"), so mint_token and mint_tenant
+    # travel as a PAIR: set mint_tenant to the credential's actual bound
+    # tenant whenever it is not literally "default". Resolved via the same
+    # env-wins-over-config.yml machinery as every other CREDENTIALS entry,
+    # but it is NOT a secret -- see NON_SECRET_CREDENTIALS below, which
+    # keeps `nx config get/list` from masking it.
+    "mint_tenant":       "NX_MINT_TENANT",
 }
+
+#: Entries in CREDENTIALS that are not actually secrets -- a tenant slug, a
+#: URL -- and so must display UNMASKED from `nx config get`/`nx config list`
+#: (nexus-ssqk9). Deliberately narrow: only ``mint_tenant`` opts in today;
+#: `service_url` stays masked by its pre-existing behavior, unchanged here.
+NON_SECRET_CREDENTIALS: frozenset[str] = frozenset({"mint_tenant"})
 
 
 # ── Config directory helper ──────────────────────────────────────────────────

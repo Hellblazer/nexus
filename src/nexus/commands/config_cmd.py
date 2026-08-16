@@ -7,6 +7,7 @@ import yaml
 
 from nexus.config import (
     CREDENTIALS,
+    NON_SECRET_CREDENTIALS,
     _global_config_path,
     get_credential,
     load_config,
@@ -144,7 +145,10 @@ def config_get(key: str, show: bool) -> None:
     else:
         val = get_credential(key)
         if val:
-            click.echo(val if show else _mask(val))
+            # nexus-ssqk9: a NON_SECRET_CREDENTIALS entry (e.g. mint_tenant)
+            # is a plain setting, not a secret -- display it unmasked
+            # regardless of --show, same as a dotted-key setting above.
+            click.echo(val if (show or key in NON_SECRET_CREDENTIALS) else _mask(val))
         else:
             click.echo(f"{key}: not set")
 
@@ -174,12 +178,13 @@ def config_list() -> None:
         env_val = os.environ.get(env_var, "")
         file_val = file_creds.get(cred, "")
 
+        unmasked = cred in NON_SECRET_CREDENTIALS
         if env_val:
             source = f"env:{env_var}"
-            display = _mask(env_val)
+            display = env_val if unmasked else _mask(env_val)
         elif file_val:
             source = "config.yml"
-            display = _mask(file_val)
+            display = file_val if unmasked else _mask(file_val)
         else:
             source = ""
             display = "(not set)"
