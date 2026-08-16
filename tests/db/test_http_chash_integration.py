@@ -31,11 +31,16 @@ ChashHandler's own route table:
      retirement so a stale client's failure is self-diagnosing.
   b) lookup / count / distinct_collections / is_empty / registered_chashes
      are served from the chunks tables (the 3-table UNION probe)
-  c) delete_collection is STILL a deprecated no-op returning deleted:0;
-     delete_stale is 410 GONE. The two differ — do not collapse them. Both
-     must NOT escalate into content (chunk) deletion, and that property is
-     asserted on both paths because it belongs to the chunks tables, not to
-     the dead router, and so outlives the endpoints it was written against.
+  c) delete_collection is ALSO 410 GONE (nexus-lgdel.l2, joining delete_stale
+     — the two used to differ, no longer). It was the one remaining
+     deprecated no-op after .11: an orphan sweep found zero production
+     callers, so both the route and the HttpChashIndex.delete_collection
+     client wrapper are deleted outright, not merely retired. delete_stale
+     alone keeps its own dedicated "must NOT escalate into content deletion"
+     coverage below — that property belongs to the chunks tables, not to the
+     dead router, and outlives the endpoint it was written against;
+     delete_collection carries no equivalent coverage post-deletion because
+     there is no client method left to call it through.
   d) rename_collection stays REAL: re-homes chunks_<dim>.collection
   e) import is 410 GONE. It was an HONEST no-op (imported:0) for one release
      so an old client's verify-fill saw visible divergence rather than
@@ -370,23 +375,11 @@ class TestChashMVV:
 
         assert chash_store.count_for_collection(_coll("b")) == 0
 
-    def test_c_delete_collection_never_escalates_to_content(self, chash_store, service):
-        """c) delete_collection is a deprecated no-op (deleted:0) and must NOT
-        escalate into deleting the REAL chunk rows — content deletion is the
-        vector/catalog API's job (RDR-187 design note in ChashHandler)."""
-        coll = _coll("c")
-        chash = _seed_chunk(service, text="rdr187 delete-collection guard", collection=coll)
-        assert chash_store.count_for_collection(coll) == 1
-
-        assert chash_store.delete_collection(coll) == 0
-        assert chash_store.count_for_collection(coll) == 1, (
-            "deprecated delete_collection must not delete chunk content"
-        )
-        assert chash_store.lookup(chash), "chunk must remain lookup-visible"
-
-    def test_c2_delete_collection_absent_returns_zero(self, chash_store):
-        """c2) delete_collection on an absent collection returns 0."""
-        assert chash_store.delete_collection("no_such_collection") == 0
+    # test_c_delete_collection_never_escalates_to_content and
+    # test_c2_delete_collection_absent_returns_zero DELETED at nexus-lgdel.l2:
+    # HttpChashIndex.delete_collection and POST /v1/chash/delete_collection
+    # are both deleted (orphaned no-op, zero production callers) — there is
+    # no client method left to exercise the now-410 route through.
 
     def test_d_distinct_collections_derive_from_chunks(self, chash_store, service):
         """d) distinct_collections reflects collections that actually hold

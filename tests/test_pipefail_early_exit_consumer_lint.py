@@ -806,33 +806,6 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_acquire.sh:122",
         "tests/e2e/migration-rehearsal/rehearse_acquire.sh:134",
         "tests/e2e/migration-rehearsal/rehearse_acquire.sh:80",
-        # nexus-eo3qv (post-cutover REDESIGN): every entry below shifted
-        # after the header docstring grew (+~20 lines), the old Stage 4
-        # engine-swap block was retired (-~14 lines net after the Stage
-        # 4/5 rewrite), and the era-guard prose was reworded. Numbers
-        # regenerated from the detector itself (_early_exit_consumer_hits),
-        # not arithmetic.
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:99",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:118",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:167",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:266",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:269",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:301",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:306",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:311",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:345",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:348",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:369",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:372",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:420",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:436",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:537",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:540",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:549",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:558",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:563",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:579",
-        "tests/e2e/migration-rehearsal/rehearse_chash_window.sh:584",
         "tests/e2e/migration-rehearsal/rehearse_cold.sh:113",
         "tests/e2e/migration-rehearsal/rehearse_cold.sh:77",
         "tests/e2e/migration-rehearsal/rehearse_era_hop.sh:143",
@@ -855,27 +828,6 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:90",
         "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:91",
         "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:94",
-        # gap-8/gap-15 (T2 [22511]): retargeted after the `-e` addition +
-        # RC-capture rewires (GA_OUT/GB_OUT/GU_OUT/DIRECT_OUT,
-        # `expect_sql`'s internal `sql()` capture, and several
-        # cleanup-command `|| true` additions) shifted every line below.
-        # Same 15 sites, same shapes -- none of this pass's edits touched
-        # these grep-q pipelines themselves.
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:269",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:272",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:280",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:292",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:293",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:325",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:328",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:334",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:348",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:355",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:356",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:484",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:487",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:490",
-        "tests/e2e/migration-rehearsal/rehearse_guided.sh:811",
         "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh:101",
         "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh:175",
         "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:120",
@@ -950,22 +902,18 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_stranded.sh:361",
         "tests/e2e/migration-rehearsal/rehearse_stranded.sh:377",
         "tests/e2e/migration-rehearsal/rehearse_stranded.sh:80",
-        # nexus-eo3qv: shifted after the CHASH_WINDOW redesign added net
-        # lines to run.sh (header comments, the inverted FATAL guard, the
-        # wheel-only build-branch rewiring). Numbers regenerated from the
-        # detector itself (_early_exit_consumer_hits), not arithmetic.
-        # Retargeted (nexus-z0ylb): the --candidate-migration additions
-        # earlier in run.sh shifted every one of these 5 pre-existing
-        # `ls -t dist/conexus-*.whl | head -1` sites by +29 lines total
-        # (+27 from the original wiring, +2 from the live-acceptance
-        # remediation's comment-only edits); a 6th (identical shape) was
-        # ADDED by --candidate-migration's own worktree-wheel staging line.
-        "tests/e2e/migration-rehearsal/run.sh:621",
-        "tests/e2e/migration-rehearsal/run.sh:652",
-        "tests/e2e/migration-rehearsal/run.sh:668",
-        "tests/e2e/migration-rehearsal/run.sh:723",
-        "tests/e2e/migration-rehearsal/run.sh:740",
-        "tests/e2e/migration-rehearsal/run.sh:788",
+        # Retargeted (nexus-lgdel.l2): the CHASH_WINDOW leg's own
+        # `ls -t dist/conexus-*.whl | head -1` site was one of these six --
+        # deleting the leg (rehearse_chash_window.sh, Dockerfile.chash-window,
+        # and every CHASH_WINDOW branch in run.sh) removed that site outright,
+        # leaving 5, and shifted every remaining site upward by the deleted
+        # lines. Numbers regenerated from the detector itself
+        # (_early_exit_consumer_hits), not arithmetic.
+        "tests/e2e/migration-rehearsal/run.sh:538",
+        "tests/e2e/migration-rehearsal/run.sh:569",
+        "tests/e2e/migration-rehearsal/run.sh:624",
+        "tests/e2e/migration-rehearsal/run.sh:641",
+        "tests/e2e/migration-rehearsal/run.sh:689",
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.
@@ -1027,10 +975,11 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # a locally-built candidate's Liquibase walk over a POPULATED
         # store, hand-swapped in against a running floor engine (the
         # nexus-eo3qv-disclosed gap). Same established idioms as its
-        # closest template, rehearse_chash_window.sh, reused verbatim
-        # where the shape matches -- every site below mirrors an already-
-        # exempted chash-window site of the identical shape (WHEEL `ls |
-        # head -1`, the `_wait_healthy` status poll, a captured-output
+        # closest template, rehearse_chash_window.sh (deleted at
+        # nexus-lgdel.l2, its own leg retired), reused verbatim where the
+        # shape matches -- every site below mirrors that template's
+        # identical shape (WHEEL `ls | head -1`, the `_wait_healthy`
+        # status poll, a captured-output
         # `printf | grep -q` marker/string check gating an if/else, and a
         # diagnostic `printf | head -N | sed` dump inside a failure
         # branch that runs strictly AFTER the real grep -q decision has
@@ -1043,17 +992,21 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # genuine control-flow-gating pipe (feeds the loud-abort decision
         # on zero parsed topics) -- same class as the rest of this set,
         # not display-only, so EXEMPT rather than `|| true`.
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:110",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:161",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:308",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:358",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:361",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:446",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:482",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:485",
+        # Retargeted AGAIN (nexus-lgdel.l2): the header comment lost 5 lines
+        # (a stale --chash-window cross-reference, deleted along with that
+        # leg) shifting every site below by -5. Numbers regenerated from the
+        # detector itself (_early_exit_consumer_hits), not arithmetic.
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:105",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:156",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:303",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:353",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:356",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:441",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:477",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:480",
+        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:496",
         "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:501",
         "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:506",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:511",
     }
 )
 # 157: +1 for rehearse_package_upgrade.sh:173 -- the 898d41762 axis-naming
@@ -1069,7 +1022,12 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
 # remediation (nexus-z0ylb) -- the Stage 3d topic-count parse added one
 # new early-exit-consumer pipe (`grep -oE ... | head -1`); every other
 # site in that file's set was retargeted in place, net count unchanged.
-_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 169
+# nexus-lgdel.l2: -21 (rehearse_chash_window.sh, file deleted), -15
+# (rehearse_guided.sh, file deleted), and -1 (run.sh's own CHASH_WINDOW-leg
+# `head -1` site, deleted with the leg) removed entries wholesale:
+# 169 - 21 - 15 - 1 = 132. The remaining 5 run.sh sites were retargeted in
+# place, not counted as a change.
+_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 132
 
 
 def test_pipefail_early_exit_exempt_ratchet() -> None:

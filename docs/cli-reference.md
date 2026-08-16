@@ -1550,7 +1550,7 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 | `--title TITLE` | Exact title metadata match (deletes all matching chunks) |
 | `-y` / `--yes` | Skip confirmation prompt |
 
-Note: IDs shown by `nx store list` are 64 hex chars (the full `sha256(text)` digest — RDR-180; pre-cohort 32-hex IDs resolve via the permanent `chash_alias` route). `--title` delete is paginated and safe for multi-chunk documents. To delete an entire collection use `nx collection delete`.
+Note: IDs shown by `nx store list` are 64 hex chars (the full `sha256(text)` digest — RDR-180). Pre-cohort 32-hex IDs are no longer resolvable at all: the `chash_alias` legacy-reference route was retired at nexus-lgdel.l1 (its beneficiary population reached zero) — re-index the source to mint a canonical 64-hex chash. `--title` delete is paginated and safe for multi-chunk documents. To delete an entire collection use `nx collection delete`.
 
 Deleting a `store_put`-origin document (`content_type == "knowledge"`, no `file_path`) also tombstones its catalog row via a chash-keyed, best-effort reap, so it drops out of `nx catalog list` immediately rather than waiting for the next `nx catalog gc` sweep. **The reap now runs BEFORE the T3 chunk delete, not after (RDR-191 F10c, nexus-o8dil.5).** The engine's delete is anti-join-scoped: it refuses to remove a chunk that any live catalog manifest row still references, including the note's own not-yet-tombstoned row, so reaping first is what lets the ordinary single-owner delete succeed at all.
 
@@ -2170,27 +2170,14 @@ count is below the floor (fix: `nx plan reseed`), exit 2 (counts UNKNOWN)
 when the service is unreachable. No `nx plan repair` hint (that command
 group no longer exists; see [`nx plan repair`](#nx-plan-repair-removed)).
 
-```
-nx doctor --check-t3-legacy-metadata                        # Survey T3 for legacy doc_id/source_path chunk metadata
-nx doctor --check-t3-legacy-metadata --strict-legacy-metadata  # Exit non-zero if any collection still carries it
-```
-
-The `--check-t3-legacy-metadata` flag (nexus-1714) surveys local (Chroma)
-T3 collections and reports, per collection, whether any chunk still
-carries `doc_id` or `source_path` metadata — both retired by RDR-108
-Phase 3 in favour of the catalog `document_chunks` manifest. It gates
-removal of the legacy tolerance branches in `mcp/core.py`,
-`indexer_utils.py`, and `search_engine.py`: while any collection reports
-`LEGACY`, those branches must stay. Detection is a single cheap
-`get(where=…, limit=1)` presence probe per field per collection. Default
-behaviour is warn (exit 0); add `--strict-legacy-metadata` to exit
-non-zero when legacy metadata is found (for CI gating). The check is a
-local-Chroma concern and reports *not applicable* in service/cloud mode,
-where chunks use the RDR-155 pgvector schema. As of 7.0.0 (RDR-155 P4b
-deleted the Chroma dependency entirely) every production install is
-service-backed, so this check always reports not-applicable there; the
-Chroma survey branch survives only for legacy/test fixtures that inject a
-chroma-backed `T3Database` directly.
+`--check-t3-legacy-metadata` / `--strict-legacy-metadata` (nexus-1714) were
+DELETED at nexus-lgdel.l2: the check surveyed local Chroma T3 collections
+for pre-RDR-108-Phase-3 `doc_id`/`source_path` chunk metadata, and reported
+*not applicable* on every service-backed install. Since the RDR-155 P4b
+Chroma deletion (7.0.0) the dependency itself is gone — there is no
+Chroma-backed `T3Database` left to survey, in production or in test
+fixtures — so the check had reported *not applicable* unconditionally for
+every current install; structurally dead, not merely legacy-flavored.
 
 ```
 nx doctor --trim-telemetry              # Delete aged search_telemetry + hook_failures rows (default 30 days)

@@ -356,11 +356,13 @@ agree at the full 256 bits, by construction.
 **Migration status:** the flip SHIPPED (RDR-180 closed 2026-07-20; epic
 `nexus-jxizy`): the producer emits the full digest, the engine stores bytea,
 and the `chash-rekey` ladder rung rekeyed existing stores (254,846
-production rows, zero loss). For every rehashable
-row the legacy 32-hex is the strict prefix of the new 64-hex (same text, same
-digest); the persisted `chash_alias` table is the collision-free resolver for
-legacy references thereafter (prefix matching only *builds* the map, it is not
-the resolver).
+production rows, zero loss). For every rehashable row the legacy 32-hex was
+the strict prefix of the new 64-hex (same text, same digest); the
+`chash_alias` table was the collision-free resolver for legacy references in
+that window. **Retired (nexus-lgdel.l1, 2026-08-16):** the beneficiary
+population reached zero, so `chash_alias` and the whole legacy-reference
+resolution route are DROPPED — a legacy 32-hex reference is no longer
+resolvable at all; re-index the source to mint a canonical 64-hex chash.
 
 ### Metadata field semantics (chunk vs document level)
 
@@ -370,7 +372,7 @@ Two hash fields look similar but mean very different things. Confusing them prod
 |---|---|---|---|---|
 | `content_hash` | document | `sha256(file_bytes)` | every indexer at register time (`indexer.py:1198`) | document-level dedup; staleness comparison — paired with the index-run fence's three-way state, see [Index-run fence (RUNFENCE)](#index-run-fence-runfence) below; backup-snapshot identity |
 | `chunk_text_hash` | chunk | `sha256(chunk_text)` (full 64 chars) | every indexer per chunk; healed on an upgraded store by the ladder (`nx upgrade`) | content-addressed link spans (`chash:<hex>`); `nx t3 reidentify` natural-ID source (first 32 chars); cross-collection chunk dedup |
-| `chunk_text_hash` (as chunk id) | chunk | the full SHA (RDR-180) | every indexer via `chunk_identity.chunk_id` | the chunk natural ID and the `document_chunks.chash` join key; the pre-RDR-180 `[:32]` truncation is retired (legacy 32-hex references resolve via `chash_alias`) |
+| `chunk_text_hash` (as chunk id) | chunk | the full SHA (RDR-180) | every indexer via `chunk_identity.chunk_id` | the chunk natural ID and the `document_chunks.chash` join key; the pre-RDR-180 `[:32]` truncation is retired, and so (nexus-lgdel.l1) is the `chash_alias` legacy-reference resolver that used to bridge it — a legacy 32-hex reference is unresolvable now, re-index the source |
 | `source_uri` | document | `file://...` or `x-devonthink-item://<uuid>` etc. | indexer / MCP write paths | persistent URI identity; aspect-extraction routing; audit-membership home detection |
 | `source_path` | document | absolute or repo-relative file path | indexer | display + grep targets; legacy path predating `source_uri` |
 | `chunk_start_char` / `chunk_end_char` | chunk | char offsets in the source file | indexer per chunk | `chunk:char` span resolution; UI highlight |
@@ -515,10 +517,11 @@ Tumbler comparison semantics and the two graph-traversal views
 The `document_chunks` manifest schema is covered above (§ Metadata field
 semantics, § Index-run fence), not separately in catalog.md. The
 `ChashIndex` routing table is **retired** (RDR-187): the PG table
-`nexus.chash_index` was dropped as of engine v0.1.51, and `chash_alias` is
-the surviving legacy-reference resolver (see
+`nexus.chash_index` was dropped as of engine v0.1.51. `chash_alias`, the
+legacy-reference resolver that briefly survived it, is itself **retired**
+(nexus-lgdel.l1, 2026-08-16 — see
 [Chunk identity](#chunk-identity-the-canonical-chash-rdr-180) above) —
-catalog.md's own ChashIndex/migration-runbook material predates the drop.
+catalog.md's own ChashIndex/migration-runbook material predates both drops.
 `nx t3 reidentify` (still a live command, `commands/t3.py`) walks a
 collection's chunks to backfill/normalize legacy chunk ids; it is retained
 for the chunk-identity history
@@ -682,7 +685,7 @@ dispatch retry of [RDR-129](rdr/rdr-129-t2-daemon-serving-path-cross-store-conte
 | Plans             | `HttpPlanLibrary`           | `db.plans`             | Plan templates, plan search, plan TTL                                      |
 | Taxonomy          | `HttpTaxonomyStore`         | `db.taxonomy`          | HDBSCAN topic discovery, centroid ANN assignment, merge strategy, review workflow ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)) |
 | Telemetry         | `HttpTelemetryStore`        | `db.telemetry`         | Relevance log (query/chunk/action triples), retention-based expiry         |
-| Chash index       | `HttpChashIndex`            | `db.chash_index`       | **RETIRED (RDR-187)**: the PG table `nexus.chash_index` is DROPPED as of engine v0.1.51 — it was the router remnant of the split-store architecture; `chash_alias` is the surviving resolver. The client store class remains only as a shim until the final `/v1/chash/*` 410 flip (nexus-piwya.11). Historical: global chash → (collection, doc_id) lookup, dual-written at every T3 upsert site ([RDR-086](rdr/rdr-086-chash-span-resolution.md) Phase 1) |
+| Chash index       | `HttpChashIndex`            | `db.chash_index`       | **RETIRED (RDR-187)**: the PG table `nexus.chash_index` is DROPPED as of engine v0.1.51 — it was the router remnant of the split-store architecture. `chash_alias`, the legacy-reference resolver that briefly succeeded it, is itself **retired** (nexus-lgdel.l1, 2026-08-16) — a legacy 32-hex reference is no longer resolvable at all. The client store class remains only as a shim until the final `/v1/chash/*` 410 flip (nexus-piwya.11) — its own `delete_collection` method was deleted at nexus-lgdel.l2, the last remaining no-op that route ever served. Historical: global chash → (collection, doc_id) lookup, dual-written at every T3 upsert site ([RDR-086](rdr/rdr-086-chash-span-resolution.md) Phase 1) |
 | Document aspects  | `HttpDocumentAspectsStore`  | `db.document_aspects`  | Per-document structured aspects (problem, method, datasets, baselines, results, extras) keyed by `(collection, source_path)`; populated by the async aspect-extraction worker ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) P1.1) |
 | Aspect queue      | `HttpAspectQueue`           | `db.aspect_queue`      | Durable queue feeding the aspect-extraction worker; FIFO `claim_next` with cross-process compare-and-swap atomicity; `reclaim_stale` recovers rows from crashed workers ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) follow-up) |
 | Document highlights | `HttpDocumentHighlightsStore` | `db.document_highlights` | Per-document DEVONthink highlight / mention markdown notes, keyed by catalog tumbler (`doc_id`); populated by `nx dt index --highlights` ([RDR-139](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md) Layer E). Deliberately separate from `document_aspects`: free-text highlights must not contend with the aspect worker's whole-row overwrite or its confidence gate |

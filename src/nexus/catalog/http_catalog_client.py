@@ -1824,14 +1824,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         service mode — return ``None`` so callers fall back gracefully.
         ``t3`` is a local-mode artefact; accepted for conformance, ignored.
 
-        CAVEAT (review 2026-07-19, pre-existing): the returned
-        ``chunk_hash`` echoes the CALLER's requested width — a legacy
-        32-hex span that resolves via the engine's alias route is NOT
-        rewritten to the canonical 64-hex identity here (unlike
-        ``catalog_spans.resolve_chash_globally``, which rewrites). Both
-        current callers only null-check the result; a future caller that
-        trusts ``chunk_hash`` as canonical must rewrite it itself or go
-        through ``resolve_chash``.
+        The chash embedded in ``span`` must be the canonical 64-hex identity
+        — there is no legacy-ref retry (nexus-lgdel.l1 retired the
+        alias-resolution route this used to fall back to via
+        ``/v1/chash/lookup``; a legacy 32-hex ref now simply MISSes, same as
+        any other unknown identifier).
         """
         if not span.startswith("chash:"):
             return None
@@ -1840,11 +1837,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         except ValueError:
             return None
         try:
-            # RDR-180: pass the citation's own width through — 64-hex resolves
-            # directly; a legacy 32-hex reference rides the engine's alias
-            # route. Truncating a canonical citation to 32 would force EVERY
-            # resolution through the legacy path and dangle for post-cutover
-            # content (which has no alias row).
+            # RDR-180: full-width pass-through (see resolve_chash's width note).
             result = self._get(
                 "/resolve_span",
                 span_chash=hex_chash,

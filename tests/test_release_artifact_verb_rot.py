@@ -88,8 +88,8 @@ staleness by ``test_allowlists_are_not_stale``:
   * ``_RETIRED_SCRIPT_ALLOWLIST`` (whole-file): for a file where EVERY
     invocation of a since-deleted verb is providably unreachable — the
     script self-guards on that verb's ``--help`` exit code before ever
-    calling it (``rehearse_guided.sh`` / ``rehearse_cold.sh`` /
-    ``rehearse_hole_punch.sh``), or the one live rehearsal (``rehearse.sh``)
+    calling it (``rehearse_cold.sh`` / ``rehearse_hole_punch.sh``), or the
+    one live rehearsal (``rehearse.sh``)
     wraps its dead Phase B in exactly that guard, or the harness dispatcher
     (``run.sh``) only NAMES the deleted verb while explaining why its flag
     now refuses. These are RDR-155 P4b's own historical debris — real,
@@ -174,19 +174,14 @@ _GLOBAL_NOISE_ALLOWLIST: dict[str, str] = {
 #: Reserved for files where the ENTIRE set of findings stems from the same
 #: self-guard or historical-notice property — see module docstring.
 _RETIRED_SCRIPT_ALLOWLIST: dict[str, str] = {
-    "tests/e2e/migration-rehearsal/rehearse_guided.sh": (
-        "Self-guarded: 'if ! nx guided-upgrade --help ...; then echo RETIRED; exit 2; fi' "
-        "at the top of the file exits before any real use of guided-upgrade below can run. "
-        "guided-upgrade was deleted by RDR-155 P4b (7e47c285); nexus-8nlj4 owns deleting or "
-        "repointing this file."
-    ),
     "tests/e2e/migration-rehearsal/rehearse_cold.sh": (
-        "Same top-of-file self-guard as rehearse_guided.sh ('if ! nx guided-upgrade --help "
-        "...; then RETIRED; exit 2; fi'); every use below (including its own guided-upgrade "
-        "calls) is unreachable. RDR-155 P4b; nexus-8nlj4."
+        "Self-guarded: 'if ! nx guided-upgrade --help ...; then echo RETIRED; exit 2; fi' "
+        "at the top of the file exits before any real use of guided-upgrade below can run "
+        "(including its own guided-upgrade calls). guided-upgrade was deleted by RDR-155 P4b "
+        "(7e47c285); nexus-8nlj4 owns deleting or repointing this file."
     ),
     "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh": (
-        "Same top-of-file self-guard as rehearse_guided.sh; also unreachably invokes "
+        "Same top-of-file self-guard as rehearse_cold.sh; also unreachably invokes "
         "'nx storage migrate all' (the storage group was deleted the same RDR-155 P4b "
         "commit). Both are dead code behind the guided-upgrade preflight. nexus-8nlj4."
     ),
@@ -381,7 +376,6 @@ _ANCHOR_MIN_COUNTS: dict[str, int] = {
     # still sees real content in these files, not just that the allowlist
     # is silencing an empty scan.
     "tests/e2e/migration-rehearsal/rehearse.sh": 20,
-    "tests/e2e/migration-rehearsal/rehearse_guided.sh": 5,
     # nexus-zmfan widening (hand-verified 2026-08-07):
     "scripts/reinstall-tool.sh": 2,
     "conexus/hooks/hooks.json": 1,
@@ -471,8 +465,7 @@ def test_verb_resolution_correctly_accepts_known_live_verbs() -> None:
 _REASON_CLAIMS: dict[str, str] = {
     # Each reason asserts the script self-guards on the deleted verb's --help
     # exit code, making every later invocation unreachable. Assert the guard.
-    "tests/e2e/migration-rehearsal/rehearse_guided.sh": "nx guided-upgrade --help",
-    "tests/e2e/migration-rehearsal/rehearse_cold.sh": "--help",
+    "tests/e2e/migration-rehearsal/rehearse_cold.sh": "nx guided-upgrade --help",
     "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh": "--help",
     # "Phase B is internally guarded ('if nx migrate-to-service --help ...')".
     "tests/e2e/migration-rehearsal/rehearse.sh": "nx migrate-to-service --help",

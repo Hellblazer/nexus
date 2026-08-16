@@ -601,130 +601,6 @@ def _run_check_aspect_queue() -> None:
     _report_aspect_queue_service()
 
 
-# ── --check-t3-legacy-metadata (nexus-1714) ──────────────────────────────────
-
-
-def _legacy_fields_present(collection, fields: tuple[str, ...]) -> set[str]:
-    """Return the subset of *fields* present (non-empty) on any chunk.
-
-    Chroma cannot answer "does any chunk carry key X" via a ``where`` filter:
-    ``{X: {'$ne': ''}}`` also matches chunks that *lack* the key entirely
-    (verified on chromadb 1.5.x), so it cannot distinguish a legacy chunk from
-    a Phase-3-clean one. Instead we page the collection's metadata
-    (``include=["metadatas"]``, ``limit<=300`` per the quota) and inspect the
-    keys Python-side, short-circuiting as soon as every field is found.
-    """
-    found: set[str] = set()
-    offset = 0
-    page = 300  # nexus.db.limits paging ceiling (RDR-155 P4b rehome)
-    while True:
-        res = collection.get(limit=page, offset=offset, include=["metadatas"])
-        metas = res.get("metadatas") or []
-        if not metas:
-            break
-        for m in metas:
-            for f in fields:
-                if f not in found and m.get(f):
-                    found.add(f)
-        if len(found) == len(fields) or len(metas) < page:
-            break
-        offset += page
-    return found
-
-
-def _run_check_t3_legacy_metadata(*, strict: bool = False) -> None:
-    """Report local T3 collections still carrying legacy chunk metadata.
-
-    RDR-108 Phase 3 retired ``doc_id`` / ``source_path`` from chunk metadata
-    (the catalog ``document_chunks`` manifest is authoritative). Tolerance
-    branches in ``mcp/core.py``, ``indexer_utils.py``, and ``search_engine.py``
-    still read those fields for pre-Phase-3 chunks; this check tells an operator
-    whether the corpus is fully pruned so those branches can be removed
-    (nexus-1714).
-
-    Scope (deliberate, not silent): this is a local-Chroma concern. The RDR-155
-    pgvector service path stores chunks under a different schema and does not
-    expose arbitrary-metadata ``where`` filters, so the check reports *not
-    applicable* in service mode rather than producing a misleading result.
-    """
-    # nexus-cv6jp: gate on the HANDLE, not on install mode.
-    #
-    # This was `if not is_local_mode(): return "not applicable"`. That equated
-    # "local install" with "local Chroma", which stopped being true at RDR-155:
-    # a local install now runs the bundled PG + pgvector service too. So on a
-    # MIGRATED LOCAL box is_local_mode() is True, the guard did not fire, and
-    # the survey ran against pgvector with a Chroma frame — reporting on
-    # arbitrary-metadata `where` filters that backend does not expose.
-    #
-    # is_service_backed(db) asks the question that actually matters — is this
-    # handle the HTTP client? — and is the documented instance-based guard
-    # (RDR-155 P4a.2), so injected chroma-backed T3Database test fixtures keep
-    # taking the legacy branch regardless of env state.
-    from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    try:
-        db = make_t3()
-    except Exception as exc:  # noqa: BLE001 — diagnostic: report unavailability, never crash doctor
-        click.echo(f"T3 legacy-metadata check: T3 unavailable ({exc}).")
-        return
-
-    if is_service_backed(db):
-        click.echo(
-            "T3 legacy-metadata check: not applicable — T3 is service-backed "
-            "(pgvector). Legacy doc_id/source_path chunk metadata is a "
-            "local-Chroma concern and that backend uses a different schema. "
-            "NOTE: since the RDR-155 P4b Chroma deletion this is the normal "
-            "answer on every production install, local or cloud."
-        )
-        return
-
-    cols = db.list_collections()
-    if not cols:
-        click.echo("T3 legacy-metadata check: no collections found.")
-        return
-
-    click.echo(
-        "T3 legacy-metadata check (RDR-108 Phase 3 retired doc_id + "
-        "source_path):"
-    )
-    offenders: list[str] = []
-    for c in sorted(cols, key=lambda c: c["name"]):
-        name = c["name"]
-        total = c.get("count", 0)
-        try:
-            col = db.get_collection(name)
-            present = _legacy_fields_present(col, ("doc_id", "source_path"))
-        except Exception as exc:  # noqa: BLE001 — per-collection probe failure is reported, scan continues
-            click.echo(f"  {name}: probe failed ({exc})")
-            continue
-        has_doc_id = "doc_id" in present
-        has_source_path = "source_path" in present
-        legacy = has_doc_id or has_source_path
-        marker = "  ⚠ LEGACY" if legacy else ""
-        click.echo(
-            f"  {name}: {total} chunk(s); "
-            f"doc_id={'yes' if has_doc_id else 'no'} "
-            f"source_path={'yes' if has_source_path else 'no'}{marker}"
-        )
-        if legacy:
-            offenders.append(name)
-
-    if offenders:
-        click.echo(
-            f"\n{len(offenders)} collection(s) still carry legacy chunk "
-            "metadata. These gate removal of the legacy tolerance branches "
-            "(mcp/core.py, indexer_utils.py, search_engine.py)."
-        )
-        if strict:
-            sys.exit(1)
-    else:
-        click.echo(
-            "\nAll collections are Phase-3 clean (no doc_id/source_path "
-            "chunk metadata)."
-        )
-
-
 # ── --check-tier-discipline (nexus-a52i) ─────────────────────────────────────
 
 
@@ -1260,25 +1136,6 @@ def _run_check_mineru() -> None:
          "nexus-bb5c8.",
 )
 @click.option(
-    "--check-t3-legacy-metadata",
-    "check_t3_legacy_metadata",
-    is_flag=True,
-    default=False,
-    help="Survey local (Chroma) T3 collections for chunks still carrying "
-         "legacy doc_id / source_path metadata (RDR-108 Phase 3 retired "
-         "both). Gates removal of the tolerance branches in mcp/core.py, "
-         "indexer_utils.py, search_engine.py. Not applicable in service "
-         "mode. nexus-1714.",
-)
-@click.option(
-    "--strict-legacy-metadata",
-    "strict_legacy_metadata",
-    is_flag=True,
-    default=False,
-    help="Make --check-t3-legacy-metadata exit non-zero when any "
-         "collection still carries legacy metadata (default: warn only).",
-)
-@click.option(
     "--days",
     "days",
     default=30,
@@ -1299,8 +1156,6 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_aspect_queue: bool,
                check_t1: bool,
                check_wal_retention: bool,
-               check_t3_legacy_metadata: bool,
-               strict_legacy_metadata: bool,
                check_tier_discipline: bool,
                check_storage_boundary: bool,
                fail_on_violation: bool,
@@ -1355,10 +1210,6 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_aspect_queue:
         _run_check_aspect_queue()
-        return
-
-    if check_t3_legacy_metadata:
-        _run_check_t3_legacy_metadata(strict=strict_legacy_metadata)
         return
 
     if check_t1:

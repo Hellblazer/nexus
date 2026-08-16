@@ -97,9 +97,10 @@ bidirectionally:
 Only a file where EVERY occurrence is provably frozen — no future edit could
 plausibly add a NEW banned token without also rewriting the file wholesale —
 stays a bare reason-only exemption in ``_FROZEN_FILE_ALLOWLIST``: the lint
-file itself (self-referential by construction) and the RETIRED
-``rehearse_guided.sh`` stub (exits 2 before any of its dead per-dim SQL can
-run; nexus-8nlj4 owns deleting it, not this lint).
+file itself (self-referential by construction). The RETIRED
+``rehearse_guided.sh`` stub formerly held the other such entry (exits 2
+before any of its dead per-dim SQL can run); deleted at nexus-lgdel.l2
+along with the stub itself.
 
 DOCUMENTED RESIDUAL (stated precisely, not glossed over): a count pin is a
 CARDINALITY check, not a content check. A 1-FOR-1 SWAP inside a pinned file
@@ -211,16 +212,6 @@ _FROZEN_FILE_ALLOWLIST: dict[str, str] = {
         "reason necessarily name the banned identifiers verbatim. "
         "Self-referential by construction — a count pin on itself would be "
         "circular (the pin's own digits change the count it pins)."
-    ),
-    "tests/e2e/migration-rehearsal/rehearse_guided.sh": (
-        "RETIRED script (exits 2 at its own top-of-file --help guard, "
-        ":75-79); its 13 per-dim SQL sites below the guard are dead code, "
-        "unreachable at runtime, left as historical debris per nexus-rmver "
-        "item 6 (nexus-8nlj4 owns deleting or repointing this file; not "
-        "this bead). Frozen: the guard makes every line below it dead, so "
-        "a new stale reference added below the guard is exactly as "
-        "unreachable as the 13 already there — there is no live-vs-stale "
-        "distinction left to lose by not counting."
     ),
 }
 
@@ -436,22 +427,11 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "nexus-ifgxr: the docstring quoting the retired 'dispatches to "
         "chunks_1024' exception text now quotes the embedding_ wording."
     ),
-    "tests/e2e/migration-rehearsal/rehearse_chash_window.sh": (
-        11,
-        "The nexus-azx14 file itself — see module docstring's ALLOWLIST "
-        "DESIGN section for the full incident this pin exists to close. "
-        "Pre-swap era-guard references to the legacy per-dim tables are "
-        "this script's PURPOSE (it rehearses the straddle window itself), "
-        "not staleness — but a NEW stale reference (e.g. another post-swap "
-        "leg written against a dropped table) would push this count ABOVE "
-        "11 and trip the guard, which is the whole point. Concurrently "
-        "edited by a sibling agent in this same batch — count is AS OF "
-        "THIS COMMIT, will legitimately move again; do not treat a future "
-        "re-pin as unreviewed the way PgVectorRepository.java's is flagged "
-        "above, since this file's shape (era-guard script) makes every "
-        "occurrence auditable by a human reading the diff, unlike a large "
-        "javadoc-heavy Java file in flux."
-    ),
+    # WAS rehearse_chash_window.sh (11 hits, the nexus-azx14 file itself) —
+    # deleted at nexus-lgdel.l2 along with its whole leg (Dockerfile.chash-
+    # window, run.sh's --chash-window flag path and stage copy): the leg's
+    # entire subject was the pre-cutover legacy 32-hex window this pin
+    # tracked, so the file and its pin retire together.
     # ── tests: synthetic fixtures using the tokens as arbitrary example
     #    names, unrelated to real changelog/table content ─────────────────
     "tests/test_changelog_validate_precondition_lint.py": (
