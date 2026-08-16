@@ -266,8 +266,9 @@
 
     <!-- RDR-180 (bead nexus-jxizy.2): chash becomes the full 32-byte SHA-256
          stored as BYTEA — eight column conversions, octet_length CHECKs
-         (NOT VALID until the per-tenant rekey), the permanent chash_alias
-         resolver, and the hex-at-the-boundary function re-creations. Runs
+         (NOT VALID until the per-tenant rekey), the chash_alias resolver
+         (SUPERSEDED: dropped at nexus-lgdel.l1, legacy-001 below), and the
+         hex-at-the-boundary function re-creations. Runs
          AFTER every chash-bearing baseline (vectors, chash, catalog,
          taxonomy, telemetry, remap); before grants. This engine generation
          deploys only inside the RDR-180 freeze window. -->

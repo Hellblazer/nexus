@@ -331,7 +331,7 @@ ALTER TABLE nexus.chunks_384  DROP CONSTRAINT IF EXISTS chunks_384_chash_octet_c
     </changeSet>
 
     <changeSet id="rdr180-12-chash-alias" author="nexus-jxizy.2">
-        <comment>The PERMANENT legacy-reference resolver (RDR-180 Item6): old_ref is the original string form (32-hex chunk ids, ETL-era external ids), old_bytes its byte carrier (the cascade join key), new_chash the canonical 32-byte digest. Survives forever — bead comments, T2 memories, plan_json step ids and prose citations hold old refs that are not remappable in place. Prefix-match only BUILDS maps; THIS resolves them, collision-free. FORCE RLS like every tenant table</comment>
+        <comment>The PERMANENT legacy-reference resolver (RDR-180 Item6): old_ref is the original string form (32-hex chunk ids, ETL-era external ids), old_bytes its byte carrier (the cascade join key), new_chash the canonical 32-byte digest. Survives forever — bead comments, T2 memories, plan_json step ids and prose citations hold old refs that are not remappable in place. Prefix-match only BUILDS maps; THIS resolves them, collision-free. FORCE RLS like every tenant table. SUPERSEDED: the beneficiary population reached zero and the table was DROPPED at nexus-lgdel.l1 (legacy-001-drop-chash-alias.xml, 2026-08-16, Hal delete directive) — this comment is historical record of the original design intent</comment>
         <sql splitStatements="true" stripComments="false">
 CREATE TABLE nexus.chash_alias (
     tenant_id  TEXT  NOT NULL DEFAULT '',
