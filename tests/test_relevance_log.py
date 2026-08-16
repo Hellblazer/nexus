@@ -25,6 +25,7 @@ from nexus.mcp_infra import (
     record_search_trace,
     reset_singletons,
 )
+from tests._t2_fixture_ops import canonical_chunk_id as _cid
 from tests.conftest import make_vector_test_client
 
 
@@ -61,7 +62,7 @@ def test_log_relevance_inserts_row(t2):
     """log_relevance() inserts a row and returns its id."""
     row_id = t2.log_relevance(
         query="vector search",
-        chunk_id="chunk-abc",
+        chunk_id=_cid("chunk-abc"),
         action="stored",
         session_id="sess-1",
         collection="knowledge__notes",
@@ -69,14 +70,14 @@ def test_log_relevance_inserts_row(t2):
     assert row_id is not None
     rows = t2.get_relevance_log()
     assert [(r["query"], r["chunk_id"], r["action"]) for r in rows] == [
-        ("vector search", "chunk-abc", "stored")
+        ("vector search", _cid("chunk-abc"), "stored")
     ]
 
 
 def test_get_relevance_log_no_filter(t2):
     """get_relevance_log() returns all rows when no filter given."""
-    t2.log_relevance("q1", "c1", "stored")
-    t2.log_relevance("q2", "c2", "linked")
+    t2.log_relevance("q1", _cid("c1"), "stored")
+    t2.log_relevance("q2", _cid("c2"), "linked")
     rows = t2.get_relevance_log()
     assert len(rows) == 2
     assert {r["action"] for r in rows} == {"stored", "linked"}
@@ -84,23 +85,23 @@ def test_get_relevance_log_no_filter(t2):
 
 def test_get_relevance_log_filter_by_query(t2):
     """get_relevance_log() filters by query."""
-    t2.log_relevance("q1", "c1", "stored")
-    t2.log_relevance("q2", "c2", "linked")
+    t2.log_relevance("q1", _cid("c1"), "stored")
+    t2.log_relevance("q2", _cid("c2"), "linked")
     rows = t2.get_relevance_log(query="q1")
     assert len(rows) == 1
-    assert rows[0]["chunk_id"] == "c1"
+    assert rows[0]["chunk_id"] == _cid("c1")
 
 
 def test_get_relevance_log_filter_by_chunk(t2):
-    t2.log_relevance("q1", "c1", "stored")
-    t2.log_relevance("q2", "c1", "linked")
-    rows = t2.get_relevance_log(chunk_id="c1")
+    t2.log_relevance("q1", _cid("c1"), "stored")
+    t2.log_relevance("q2", _cid("c1"), "linked")
+    rows = t2.get_relevance_log(chunk_id=_cid("c1"))
     assert len(rows) == 2
 
 
 def test_get_relevance_log_filter_by_action(t2):
-    t2.log_relevance("q1", "c1", "stored")
-    t2.log_relevance("q2", "c2", "linked")
+    t2.log_relevance("q1", _cid("c1"), "stored")
+    t2.log_relevance("q2", _cid("c2"), "linked")
     rows = t2.get_relevance_log(action="stored")
     assert len(rows) == 1
     assert rows[0]["query"] == "q1"
@@ -108,8 +109,8 @@ def test_get_relevance_log_filter_by_action(t2):
 
 def test_get_relevance_log_ordered_most_recent_first(t2):
     """get_relevance_log() returns rows ordered most-recent first."""
-    t2.log_relevance("q1", "c1", "stored")
-    t2.log_relevance("q2", "c2", "stored")
+    t2.log_relevance("q1", _cid("c1"), "stored")
+    t2.log_relevance("q2", _cid("c2"), "stored")
     rows = t2.get_relevance_log()
     # Most recent first: q2 before q1
     assert rows[0]["query"] == "q2"
@@ -224,7 +225,7 @@ def test_store_put_logs_relevance_for_recent_searches(t1, tmp_path, monkeypatch)
     record_search_trace(
         "test-session-e2",
         "how does vector search work",
-        [("chunk-1", "knowledge__ml"), ("chunk-2", "knowledge__ml")],
+        [(_cid("chunk-1"), "knowledge__ml"), (_cid("chunk-2"), "knowledge__ml")],
     )
 
     # Call store_put — should log relevance for both chunks
@@ -239,7 +240,7 @@ def test_store_put_logs_relevance_for_recent_searches(t1, tmp_path, monkeypatch)
     queries = {r["query"] for r in rows}
     chunks = {r["chunk_id"] for r in rows}
     assert queries == {"how does vector search work"}
-    assert chunks == {"chunk-1", "chunk-2"}
+    assert chunks == {_cid("chunk-1"), _cid("chunk-2")}
 
 
 def test_store_put_without_search_trace_no_log(t1, tmp_path, monkeypatch):
@@ -277,8 +278,8 @@ def test_store_put_only_logs_latest_trace(t1, tmp_path, monkeypatch):
     from nexus.mcp_infra import inject_t3
     inject_t3(mock_t3)
 
-    record_search_trace("test-session-e2", "old query", [("c-old", "knowledge__a")])
-    record_search_trace("test-session-e2", "newer query", [("c-new-1", "knowledge__a"), ("c-new-2", "knowledge__a")])
+    record_search_trace("test-session-e2", "old query", [(_cid("c-old"), "knowledge__a")])
+    record_search_trace("test-session-e2", "newer query", [(_cid("c-new-1"), "knowledge__a"), (_cid("c-new-2"), "knowledge__a")])
 
     store_put(content="notes", collection="knowledge")
 
@@ -287,13 +288,13 @@ def test_store_put_only_logs_latest_trace(t1, tmp_path, monkeypatch):
     # Only 2 rows (from the latest trace), not 3
     assert len(rows) == 2
     assert {r["query"] for r in rows} == {"newer query"}
-    assert {r["chunk_id"] for r in rows} == {"c-new-1", "c-new-2"}
+    assert {r["chunk_id"] for r in rows} == {_cid("c-new-1"), _cid("c-new-2")}
 
 
 def test_get_relevance_log_filter_by_session(t2):
     """get_relevance_log() filters by session_id."""
-    t2.log_relevance("q1", "c1", "stored", session_id="sess-a")
-    t2.log_relevance("q2", "c2", "stored", session_id="sess-b")
+    t2.log_relevance("q1", _cid("c1"), "stored", session_id="sess-a")
+    t2.log_relevance("q2", _cid("c2"), "stored", session_id="sess-b")
     rows = t2.get_relevance_log(session_id="sess-a")
     assert len(rows) == 1
     assert rows[0]["query"] == "q1"
@@ -302,9 +303,9 @@ def test_get_relevance_log_filter_by_session(t2):
 def test_log_relevance_batch(t2):
     """log_relevance_batch inserts multiple rows in one transaction."""
     rows = [
-        ("q1", "c1", "knowledge__a", "stored", "sess-1"),
-        ("q1", "c2", "knowledge__a", "stored", "sess-1"),
-        ("q2", "c3", "knowledge__b", "linked", "sess-1"),
+        ("q1", _cid("c1"), "knowledge__a", "stored", "sess-1"),
+        ("q1", _cid("c2"), "knowledge__a", "stored", "sess-1"),
+        ("q2", _cid("c3"), "knowledge__b", "linked", "sess-1"),
     ]
     count = t2.log_relevance_batch(rows)
     assert count == 3
@@ -361,7 +362,7 @@ def test_catalog_link_logs_relevance_with_collection_match(t1, tmp_path, monkeyp
     record_search_trace(
         "test-session-e2",
         "ml concepts",
-        [("chunk-1", "knowledge__ml"), ("chunk-2", "knowledge__other")],
+        [(_cid("chunk-1"), "knowledge__ml"), (_cid("chunk-2"), "knowledge__other")],
     )
 
     # Create a link — target is in knowledge__ml, matches chunk-1
@@ -376,7 +377,7 @@ def test_catalog_link_logs_relevance_with_collection_match(t1, tmp_path, monkeyp
     with T2Database(t2_path) as db:
         rows = db.get_relevance_log(action="linked")
     assert len(rows) == 1
-    assert rows[0]["chunk_id"] == "chunk-1"
+    assert rows[0]["chunk_id"] == _cid("chunk-1")
     assert rows[0]["query"] == "ml concepts"
 
 

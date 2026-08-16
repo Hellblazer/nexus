@@ -3564,9 +3564,10 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
         entry = t3.get_by_id(col_name, doc_id)
         if entry is None:
             # Title fallback: 64 lowercase hex chars is the canonical id
-            # (RDR-180 full digest); 32 is a legacy half-digest reference
-            # (resolvable via chash_alias, still hash-shaped — never a
-            # title). Anything else, try treating it as an exact title.
+            # (RDR-180 full digest); 32 is a legacy half-digest reference —
+            # no longer resolvable (nexus-lgdel.l1 retired chash_alias),
+            # but still hash-SHAPED, so still never a title. Anything else,
+            # try treating it as an exact title.
             looks_like_hash = len(doc_id) in (32, 64) and all(c in "0123456789abcdef" for c in doc_id)
             if not looks_like_hash:
                 ids = t3.find_ids_by_title(col_name, doc_id)

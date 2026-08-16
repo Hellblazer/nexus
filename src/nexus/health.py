@@ -2289,7 +2289,6 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.catalog_links",
     "nexus.catalog_meta",
     "nexus.catalog_owners",
-    "nexus.chash_alias",
     # "nexus.chash_index" REMOVED (RDR-187/nexus-piwya.9, .9 review High):
     # the table is dropped, and _check_rls_present LEFT-JOINs this list
     # against live pg_class — a listed-but-dropped table is a PERMANENT
@@ -2297,6 +2296,11 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     # only the XML cross-walk, which reads immutable history; the live
     # check is the consumer that matters. The completeness guard carries a
     # matching dropped-tables exemption.)
+    # "nexus.chash_alias" REMOVED (nexus-lgdel.l1, legacy-001-drop-chash-
+    # alias.xml): same chash_index precedent — the table is dropped, so it
+    # must not be a permanent false FATAL here. The completeness guard's
+    # dropped-tables exemption in tests/test_health_service_checks.py
+    # carries the matching entry.
     "nexus.chash_remap",
     # nexus.chunks: RDR-191 Phase 4 unify (nexus-o8dil.51). Added in the SAME
     # engine release as vectors-004-unify-chunks.xml, which creates the

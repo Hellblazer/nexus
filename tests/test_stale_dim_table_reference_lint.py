@@ -241,13 +241,10 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "the unified-vs-legacy era is ambiguous. Named explicitly in the "
         "nexus-rmver audit as straddle-era handling, not stale debris."
     ),
-    "src/nexus/upgrade_ladder/rungs/chash_rekey.py": (
-        4,
-        "The upgrade-ladder rung that performs the chunks_384/768/1024 -> "
-        "nexus.chunks rekey itself; it must name the source tables to "
-        "migrate off them. Named explicitly in the nexus-rmver audit as "
-        "straddle-era handling, not stale debris."
-    ),
+    # WAS src/nexus/upgrade_ladder/rungs/chash_rekey.py (4 hits) — the whole
+    # file was deleted at nexus-lgdel.l1 (the upgrade rung it implemented
+    # retired with it), so the entry retires too rather than pointing at a
+    # nonexistent path.
     "src/nexus/db/chash_tables.py": (
         17,
         "Legacy-era chash-bearing-table emitters (CHASH_BEARING_TABLES, "
@@ -353,12 +350,9 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "'{@code nexus.chunks_384/768/1024} collapsed into...'); historical "
         "only."
     ),
-    "service/src/main/java/dev/nexus/service/db/RekeyOps.java": (
-        5,
-        "Javadoc/comments narrating the RDR-191 unification and the "
-        "pre-unify per-dim EXISTS shape the rekey logic replaced; "
-        "historical only."
-    ),
+    # WAS service/src/main/java/dev/nexus/service/db/RekeyOps.java (5 hits)
+    # — the whole class was deleted at nexus-lgdel.l1 (the chash-rekey rung
+    # it implemented server-side retired along with the client-side rung).
     "service/src/main/java/dev/nexus/service/db/ChashCensus.java": (
         2,
         "Comments narrating the RDR-191 unification of the three per-dim "
@@ -383,10 +377,12 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "// comment)."
     ),
     "service/src/main/java/dev/nexus/service/db/StagingPromoteOps.java": (
-        2,
-        "Comments narrating the pre-unify per-dim dispatch shape "
-        "('hardcoded to chunks_768/dim=768', '(chunks_384|768|1024)'); "
-        "historical only."
+        1,
+        "Comment narrating the pre-unify per-dim dispatch shape "
+        "('(chunks_384|768|1024)'); historical only. (nexus-lgdel.l1: the "
+        "'hardcoded to chunks_768/dim=768' narration this pin also used to "
+        "cover was rewritten when the orphan-synthesize chash_alias staging "
+        "step was removed -- see the file's own comment history.)"
     ),
     # ── tests: wire-compat / straddle-era fixtures mirroring the src/java
     #    files above ──────────────────────────────────────────────────────
@@ -429,12 +425,9 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "(SchemaMigrator.java's CHASH_LEN_CONSTRAINTS); mirrors that "
         "file's allowlist reason."
     ),
-    "tests/upgrade/test_chash_rekey_verification_non_vacuous.py": (
-        3,
-        "Verifies the chash_rekey upgrade rung's own straddle-era per-dim "
-        "detection (chunks_384/768/1024 substring checks); mirrors "
-        "chash_rekey.py's allowlist reason."
-    ),
+    # WAS tests/upgrade/test_chash_rekey_verification_non_vacuous.py (3 hits)
+    # — deleted at nexus-lgdel.l1 alongside chash_rekey.py itself (its
+    # SUBJECT was that rung's verify() correctness, the deleted capability).
     "tests/e2e/migration-rehearsal/seed_legacy.py": (
         2,
         "A LEGACY store-state seeding script by name and purpose: seeds a "
@@ -494,11 +487,8 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "constraint-does-not-exist case for chunks_384; mirrors health.py's "
         "allowlist reason."
     ),
-    "tests/upgrade/test_chash_rekey_rung.py": (
-        1,
-        "Comment narrating the rekey rung's own chunks_384/768/1024 -> "
-        "nexus.chunks collapse; historical only."
-    ),
+    # WAS tests/upgrade/test_chash_rekey_rung.py (1 hit) — deleted at
+    # nexus-lgdel.l1 (the rung it tested no longer exists).
     "tests/catalog/test_http_catalog_client.py": (
         1,
         "Asserts a straddle-era table-name set including 'nexus.chunks_384' "
@@ -646,13 +636,9 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     ),
     # ── synthetic fixture: an arbitrary example key, unrelated to real
     #    table/column content (mirrors the tests/ synthetic-fixture group) ──
-    "service/src/test/java/dev/nexus/service/http/RekeyJobsTest.java": (
-        1,
-        "ENVELOPE = Map.of(\"disposition\", \"rekeyed\", \"chunks_1024\", 12) "
-        "is a made-up async-job-result fixture exercising RekeyJobs' poll/"
-        "terminal-state mechanics; \"chunks_1024\" here is an arbitrary "
-        "example key, not a query against or reference to the real table."
-    ),
+    # WAS service/src/test/java/dev/nexus/service/http/RekeyJobsTest.java
+    # (1 hit) — RekeyJobs.java and its test were deleted at nexus-lgdel.l1
+    # (the rekey-job async surface retired with the chash-rekey rung).
     # ── pure historical prose (javadoc/comment narrating the RDR-191
     #    unification, mirrors the service/src/main/java historical-prose
     #    group above; no live per-dim SQL target remains in any of these) ──
@@ -734,12 +720,19 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "Comment narrating the RDR-191 Phase 4 unification of "
         "chunks_384/768/1024 into nexus.chunks; historical only."
     ),
-    "service/src/test/java/dev/nexus/service/db/ManifestInsertGateTest.java": (
-        1,
-        "Javadoc narrating the alias-map resolution as joining against "
-        "nexus.chunks ('RDR-191 Phase 4 unified; formerly "
-        "chunks_384/768/1024'); historical only."
-    ),
+    # "service/src/test/java/dev/nexus/service/db/ManifestInsertGateTest.java"
+    # entry REMOVED at nexus-lgdel.l1: the javadoc this pin covered
+    # (RekeyOps.rekey's alias-map resolution joining against nexus.chunks,
+    # "RDR-191 Phase 4 unified; formerly chunks_384/768/1024") was removed
+    # along with the RekeyOps.java ALLOWED_UPDATE_SITES entry it described --
+    # the whole class is deleted (its only caller, the client chash_rekey
+    # upgrade rung, is deleted in the same commit family). Zero live hits
+    # now, so per test_allowlists_are_not_stale's own discipline ("a pin of
+    # 0 is not a real exemption, it is just an unlisted file in disguise")
+    # the entry is removed outright, not pinned at 0 -- the file goes back
+    # to being covered by the unlisted-file guard
+    # (test_no_live_code_references_a_retired_per_dim_table), which will
+    # catch any future re-introduction.
     "service/src/test/java/dev/nexus/service/db/RawSqlGateTest.java": (
         3,
         "Javadoc narrating the RAW-SQL canary's RETARGET from "
@@ -825,13 +818,9 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "Javadoc/comments narrating a manifest row as 'RDR-191 Phase 4 "
         "unified; formerly chunks_384/768/1024'; historical only."
     ),
-    "service/src/test/java/dev/nexus/service/RekeyOpsIntegrationTest.java": (
-        5,
-        "Comments narrating the RDR-191 repoint's pre-unification content "
-        "layout (content living in chunks_384 vs chunks_768 across "
-        "collections) that the rekey fixtures' setup narrates for context; "
-        "historical only."
-    ),
+    # WAS service/src/test/java/dev/nexus/service/RekeyOpsIntegrationTest.java
+    # (5 hits) — deleted at nexus-lgdel.l1 alongside RekeyOps.java itself
+    # (its SUBJECT was the deleted rekey rung's server-side correctness).
     "service/src/test/java/dev/nexus/service/SoftDeleteTest.java": (
         3,
         "Javadoc/comments narrating the pre-unify 384/768/1024 fixture "

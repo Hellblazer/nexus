@@ -539,26 +539,12 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     "metadata":   {},
                     "chunk_hash": chash,
                 })
-        elif op == "/v1/chash/lookup":
-            # nexus-84tr4: the alias-aware route. Echoes the CANONICAL 64-hex
-            # it resolved — identity for canonical input, alias-chained for a
-            # legacy 32-hex ref. Unknown refs echo nothing.
-            params = self._query_params()
-            chash = params.get("chash", "")
-            if chash == _LEGACY_CHASH_32:
-                self._send_json({"chash": _GLOBAL_CHASH_FULL, "rows": [
-                    {"collection": "knowledge__o__bge-768__v1"},
-                ]})
-            elif chash == "00000000" * 8:
-                self._send_json({"rows": []})
-            else:
-                self._send_json({"chash": chash, "rows": []})
         elif op == "/resolve_chash":
             params = self._query_params()
             chash = params.get("chash", "")
-            # A legacy-width ref has no row here: /resolve_chash carries no
-            # alias fallback, which is precisely the asymmetry nexus-84tr4 fixes.
-            if chash == "00000000" * 8 or chash == _LEGACY_CHASH_32:
+            # nexus-lgdel.l1: no alias fallback exists any more — an unknown
+            # (or legacy-width) chash simply 404s.
+            if chash == "00000000" * 8:
                 self.send_response(404)
                 self.end_headers()
             else:
@@ -1993,7 +1979,6 @@ _MISSING_32 = "feeded00" * 4              # first 32 chars
 _GLOBAL_CHASH_FULL = "aabbccdd" * 8        # 64-char hex for global lookup
 _GLOBAL_CHASH_32   = "aabbccdd" * 4        # first 32 chars
 _MISS_GLOBAL_FULL  = "00000000" * 8        # 64-char hex — missing in server
-_LEGACY_CHASH_32   = "aabbccdd" * 4        # pre-RDR-180 32-hex ref, aliases to _GLOBAL_CHASH_FULL
 _MISS_GLOBAL_32    = "00000000" * 4        # first 32 chars
 
 
@@ -2136,44 +2121,12 @@ class TestResolveChash:
         finally:
             server.shutdown()
 
-    def test_resolve_chash_alias_chains_a_legacy_width_ref(self) -> None:
-        """nexus-84tr4: a legacy 32-hex ref must resolve, not silently MISS.
+    def test_resolve_chash_genuine_miss_makes_exactly_one_call(self) -> None:
+        """A ref unknown to the server returns None with exactly one GET.
 
-        /resolve_chash has no alias fallback (that lives on /v1/chash/lookup),
-        so resolve_chash used to MISS on exactly the refs
-        resolve_chash_globally RESOLVED — two functions disagreeing about one
-        identifier space. Harmless on a fully rekeyed store, where callers
-        read 64-hex manifest chashes; a silent miss for a user pasting a
-        legacy citation, or on any un-rekeyed store.
+        nexus-lgdel.l1: resolve_chash no longer retries a miss through the
+        (now-deleted) alias-aware route, so there is nothing left to loop.
         """
-        server, base_url = start_fake_server()
-        try:
-            client = HttpCatalogClient(base_url=base_url, _token="tok")
-            result = client.resolve_chash(f"chash:{_LEGACY_CHASH_32}")
-            assert result is not None, "legacy-width ref must alias-chain, not miss"
-            assert result["chunk_text"] == "resolved chunk body"
-            # The CANONICAL identity comes back, not the legacy ref that went
-            # in — the same rewrite the citation resolver performs, so a
-            # caller comparing against a 64-char citation matches.
-            assert result["chash"] == _GLOBAL_CHASH_FULL
-            assert result["chunk_hash"] == _GLOBAL_CHASH_FULL
-        finally:
-            server.shutdown()
-
-    def test_resolve_chash_alias_retry_preserves_char_range(self) -> None:
-        """The span slice must survive the alias retry."""
-        server, base_url = start_fake_server()
-        try:
-            client = HttpCatalogClient(base_url=base_url, _token="tok")
-            result = client.resolve_chash(f"chash:{_LEGACY_CHASH_32}:9-14")
-            assert result is not None
-            assert result["chunk_text"] == "chunk"
-            assert result["char_range"] == (9, 14)
-        finally:
-            server.shutdown()
-
-    def test_resolve_chash_genuine_miss_does_not_loop(self) -> None:
-        """A ref unknown to BOTH routes still returns None, after one retry."""
         server, base_url = start_fake_server()
         try:
             FakeCatalogHandler.get_ops.clear()
@@ -2181,8 +2134,7 @@ class TestResolveChash:
             assert client.resolve_chash(f"chash:{_MISS_GLOBAL_FULL}") is None
             resolves = [o for o in FakeCatalogHandler.get_ops if o == "/resolve_chash"]
             assert len(resolves) == 1, (
-                "the alias route reported no different canonical identity, so "
-                f"there is nothing to retry; got {FakeCatalogHandler.get_ops}"
+                f"expected exactly one /resolve_chash call, no retry; got {FakeCatalogHandler.get_ops}"
             )
         finally:
             server.shutdown()

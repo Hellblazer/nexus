@@ -853,12 +853,13 @@ _ALL_TENANT_TABLES = [
     "nexus.catalog_collections",
     "nexus.catalog_document_chunks",
     "nexus.catalog_documents",
-    "nexus.chash_alias",
     "nexus.catalog_links",
     "nexus.catalog_meta",
     "nexus.catalog_owners",
     # ("nexus.chash_index" removed — RDR-187/nexus-piwya.9: dropped table,
     # mirrors health._RLS_TENANT_TABLES)
+    # ("nexus.chash_alias" removed — nexus-lgdel.l1: dropped table
+    # (legacy-001-drop-chash-alias.xml), mirrors health._RLS_TENANT_TABLES)
     "nexus.chash_remap",
     "nexus.chunks",  # RDR-191 Phase 4 (nexus-o8dil.51)
     "nexus.claude_assisted_remediation_consents",
@@ -1361,6 +1362,7 @@ class TestRlsTableCompleteness:
         # retirement, with the dropping changeset named.
         dropped = {
             "nexus.chash_index",  # rdr187-001-drop-chash-index.xml (RDR-187)
+            "nexus.chash_alias",  # legacy-001-drop-chash-alias.xml (nexus-lgdel.l1)
         }
         return frozenset(found - dropped)
 

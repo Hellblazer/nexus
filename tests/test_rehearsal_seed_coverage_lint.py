@@ -239,6 +239,17 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # strictly earlier in db.changelog-master.xml's include order, on
         # every real deployment. Phase 7 is closed on catalog-025's own
         # evidence.
+        # nexus-lgdel.l1 (epic nexus-lgdel, THE DELETE): legacy-001-1/
+        # legacy-001-2's shape-agnostic DELETE (chunk_id !~ '^[0-9a-f]{64}$')
+        # on nexus.frecency/nexus.relevance_log, the SAME NO FORCE/FORCE
+        # toggle-wrap shape as catalog-013-1b/catalog-014-0/catalog-025-0/
+        # catalog-029-1/catalog-032-1. Seeded as one legacy-width (32-hex)
+        # and one canonical-width (64-hex) row per table -- the DELETE/KEEP
+        # dual-arm proof; effect-asserted (the legacy-width row is gone
+        # post-hop, the canonical-width row survives, FORCE restored on
+        # both tables).
+        ("legacy-001-1", "nexus-lgdel.l1"),
+        ("legacy-001-2", "nexus-lgdel.l1"),
     }
 )
 

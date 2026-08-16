@@ -409,9 +409,6 @@ def test_survivor_symbols_present() -> None:
             "verify_service_version",
             "verify_voyage_capability",
         },
-        SRC / "db" / "t2" / "rekey_client.py": {
-            "HttpRekeyClient",              # P0e rekey split (D-D)
-        },
     }
     for path, symbols in expectations.items():
         assert path.exists(), f"survivor module missing: {path.relative_to(REPO_ROOT)}"
@@ -431,13 +428,22 @@ def test_surviving_migration_modules_present() -> None:
         assert (SRC / "commands" / rel).exists(), f"commands/{rel} must survive P2"
 
 
-def test_ladder_registry_is_rekey_only() -> None:
+def test_ladder_registry_is_rung_less() -> None:
+    """RDR-155 P4b's D-D kept the chash-rekey rung alive as the ladder's
+    sole survivor ("the ladder is RDR-185's standing convergence mechanism,
+    not migration plumbing"). nexus-lgdel.l1 supersedes that: the rung's own
+    legacy-identity era retired, and its detect() had already read as
+    permanently converged on every current and fresh install, so the D-D
+    rationale for keeping it no longer applies. This test now pins the
+    OPPOSITE of the old assertion — a re-introduction of
+    ``default_chash_rekey_rung`` here would mean the deleted rung's wiring
+    crept back in."""
     text = (SRC / "upgrade_ladder" / "registry.py").read_text(encoding="utf-8")
     assert "T2SchemaRung" not in text, "registry still wires T2SchemaRung"
     assert "SubstrateEtlRung" not in text, "registry still wires SubstrateEtlRung"
-    assert "default_chash_rekey_rung" in text, (
-        "chash-rekey rung must SURVIVE (D-D) — the ladder is RDR-185's standing "
-        "convergence mechanism, not migration plumbing"
+    assert "default_chash_rekey_rung" not in text, (
+        "chash-rekey rung wiring reappeared in registry.py — nexus-lgdel.l1 "
+        "retired it; RUNG_ORDER must stay empty until a future rung is added"
     )
 
 

@@ -162,10 +162,11 @@ class HttpChashIndex(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         data = self._get("/v1/chash/lookup", params={"chash": chash})
         rows = (data or {}).get("rows", [])
-        # RDR-180: the engine echoes the CANONICAL 64-hex it resolved
-        # (identity-mapped for canonical input; alias-resolved for legacy
-        # 32-hex refs) — surfaced per-row so the citation resolver can
-        # rewrite a legacy reference to its canonical identity.
+        # RDR-180: the engine echoes the canonical 64-hex it resolved
+        # (identity-mapped for canonical input) — surfaced per-row so
+        # callers get a consistent shape. nexus-lgdel.l1 retired the
+        # alias-resolution route this endpoint used to fall back to for a
+        # legacy 32-hex ref; only direct 64-hex lookups resolve now.
         canonical = (data or {}).get("chash")
         if canonical:
             for r in rows:

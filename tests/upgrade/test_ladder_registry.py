@@ -2,8 +2,10 @@
 """RDR-185 P0.1 (nexus-n7u38.1): ordered ladder registry + RQ2 hard edges.
 
 RDR-155 P4b re-ground: the t2-schema / substrate-etl rungs (and their
-co-resident axes) died with the migration machinery. The surviving edge
-set: package → everything; engine → chash-rekey. The graph validator and
+co-resident axes) died with the migration machinery, leaving chash-rekey as
+the sole surviving rung. nexus-lgdel.l1 retired that rung too — the ladder
+is rung-less (RUNG_ORDER == ()) until a future data transition needs one.
+The surviving edge set: package → everything. The graph validator and
 registry mechanics are unchanged and stay pinned here.
 """
 from __future__ import annotations
@@ -20,7 +22,6 @@ from nexus.upgrade_ladder.registry import (
     PRECONDITION_ENGINE,
     PRECONDITION_PACKAGE,
     PRECONDITION_PROCESS,
-    RUNG_CHASH_REKEY,
     RUNG_ORDER,
     LadderOrderError,
     LadderRegistry,
@@ -51,10 +52,6 @@ class StubRung:
 
 def test_package_edge_precedes_everything() -> None:
     assert (PRECONDITION_PACKAGE, ALL_RUNGS) in HARD_EDGES
-
-
-def test_engine_edge_targets_chash_rekey() -> None:
-    assert (PRECONDITION_ENGINE, RUNG_CHASH_REKEY) in HARD_EDGES
 
 
 def test_co_resident_axes_registry_is_empty_post_p4b() -> None:
@@ -139,22 +136,22 @@ def test_registry_rejects_duplicate_names() -> None:
         LadderRegistry((StubRung("same"), StubRung("same")))
 
 
-def test_registry_accepts_canonical_order() -> None:
-    registry = LadderRegistry((StubRung(RUNG_CHASH_REKEY),))
-    assert [r.name for r in registry] == [RUNG_CHASH_REKEY]
-
-
-def test_registry_allows_synthetic_names_alongside_canonical() -> None:
+def test_registry_allows_synthetic_names_with_no_canonical_edges() -> None:
     """Interim rungs MAY wrap existing verbs under non-canonical names
-    (Decision-Space option 2) — only edges over KNOWN names are enforced."""
+    (Decision-Space option 2) — only edges over KNOWN names are enforced,
+    and RUNG_ORDER is currently empty (nexus-lgdel.l1: no canonical rung
+    survives), so an all-synthetic registration is the norm, not a special
+    case alongside a canonical name."""
     registry = LadderRegistry(
-        (StubRung("interim-wrapped-verb"), StubRung(RUNG_CHASH_REKEY))
+        (StubRung("interim-wrapped-verb-a"), StubRung("interim-wrapped-verb-b"))
     )
     assert len(registry) == 2
 
 
-def test_default_registry_is_rekey_only() -> None:
-    """The production registry post-P4b: exactly the chash-rekey rung, in
-    canonical order (RDR-155 P4b D-D: the ladder is rekey-only)."""
+def test_default_registry_is_empty() -> None:
+    """The production registry post-nexus-lgdel.l1: rung-less. RDR-180's
+    chash-rekey rung (the ladder's last surviving data rung, RDR-155 P4b
+    D-D) retired with the legacy-identity era it existed to converge
+    installs out of."""
     registry = default_registry()
-    assert [r.name for r in registry] == list(RUNG_ORDER) == [RUNG_CHASH_REKEY]
+    assert [r.name for r in registry] == list(RUNG_ORDER) == []
