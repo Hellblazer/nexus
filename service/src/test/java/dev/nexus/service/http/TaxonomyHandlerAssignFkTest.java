@@ -114,10 +114,14 @@ class TaxonomyHandlerAssignFkTest {
 
     @Test
     void assign_nonexistentTopicId_returns409_withSqlstate() throws Exception {
-        // assigned_by != "projection" takes the plain-insert branch (no
-        // collection auto-stub needed) — isolates the topic_id FK exactly.
+        // RDR-194 D1/P3b (nexus-tk070.p3b): source_collection is now NOT NULL
+        // and is auto-stubbed by BOTH branches (RDR-156 P0.2), so a real value
+        // is required here to isolate the topic_id FK specifically -- without
+        // it, the NOT NULL constraint fires first and this test would observe
+        // sqlstate 23502, not the topic_id FK's 23503 it means to exercise.
         CapturingExchange ex = post("/v1/taxonomy/assignments/assign",
-            "{\"doc_id\":\"some-doc\",\"topic_id\":999999,\"assigned_by\":\"manual\"}");
+            "{\"doc_id\":\"some-doc\",\"topic_id\":999999,\"assigned_by\":\"manual\","
+            + "\"source_collection\":\"coll\"}");
         handleWithTenant(ex);
         assertThat(ex.status)
             .as("a nonexistent topic_id violates topics(id) FK → typed 409, not 500")
@@ -156,9 +160,49 @@ class TaxonomyHandlerAssignFkTest {
         // must still succeed (the guard doesn't over-fire).
         long topicId = repo.insertTopic(TENANT, "fk-test-topic", null, "coll", 0, "2026-07-01T00:00:00Z", null);
         CapturingExchange ex = post("/v1/taxonomy/assignments/assign",
-            "{\"doc_id\":\"some-doc\",\"topic_id\":" + topicId + ",\"assigned_by\":\"manual\"}");
+            "{\"doc_id\":\"some-doc\",\"topic_id\":" + topicId + ",\"assigned_by\":\"manual\","
+            + "\"source_collection\":\"coll\"}");
         handleWithTenant(ex);
         assertThat(ex.status).as("existing topic_id: assignment succeeds").isEqualTo(200);
+    }
+
+    @Test
+    void assign_missingSourceCollection_nonProjection_returns409() throws Exception {
+        // Substantive-critic Sig-1 (RDR-194 P3b/nexus-11pe7 stacked review,
+        // T2 nexus/rdr194-p3b-substantive-critique-2026-08-16 [22755]): the
+        // wire endpoint accepts source_collection as OPTIONAL (Java
+        // optStringOrNull), and TaxonomyRepository.assignOne's non-projection
+        // branch now writes it verbatim -- a caller (old SDK, an integration
+        // outside the in-tree writer-sweep this phase audited) posting
+        // assigned_by != "projection" with source_collection omitted hits
+        // topic_assignments.source_collection's NOT NULL constraint
+        // (SQLSTATE 23502) at INSERT. This pins that the degrade is graceful
+        // (HttpUtil.sendTypedDbError's existing class-23 branch already
+        // covers 23502 generically, ahead of the generic 500) rather than
+        // merely asserted by review narrative -- the sibling
+        // assign_nonexistentTopicId_returns409_withSqlstate test above had to
+        // be PATCHED to supply source_collection precisely to avoid tripping
+        // this exposure while isolating a DIFFERENT violation (the topic_id
+        // FK); this test isolates the NOT NULL violation itself, on an
+        // otherwise-valid request (existing topic_id, real assigned_by).
+        long topicId = repo.insertTopic(
+            TENANT, "missing-sc-topic", null, "coll", 0, "2026-07-01T00:00:00Z", null);
+        CapturingExchange ex = post("/v1/taxonomy/assignments/assign",
+            "{\"doc_id\":\"some-doc\",\"topic_id\":" + topicId + ",\"assigned_by\":\"manual\"}");
+        handleWithTenant(ex);
+        assertThat(ex.status)
+            .as("a non-projection assign with no source_collection violates the NOT NULL "
+                + "constraint -> typed 409, not a raw 500")
+            .isEqualTo(409);
+        assertThat(ex.bodyString()).contains("\"sqlstate\":\"23502\"");
+        assertThat(ex.bodyString())
+            .contains("\"error\":\"integrity constraint violation\"");
+        // Same info-disclosure discipline as the topic_id-FK test above: no
+        // raw driver prose (offending value, PG hint lines) in the body.
+        assertThat(ex.bodyString())
+            .as("the raw driver message must not be echoed into the response")
+            .doesNotContain("Detail:")
+            .doesNotContain("null value in column");
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

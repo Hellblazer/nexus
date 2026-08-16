@@ -921,10 +921,22 @@ public final class StagingPromoteOps {
                     + nonConformantDocIds + " -- refusing to write "
                     + "arbitrary text to a chash-typed column (RDR-194 D0.9)");
             }
+            // RDR-194 D1/P3b (nexus-tk070.p3b, relayed finding nexus-hva5p):
+            // source_collection wired through as `s.topic_collection` -- staging.
+            // topic_assignments carries no SEPARATE source_collection column
+            // (staging-001-landing-tables.xml's DDL is just tenant_id/doc_id/
+            // topic_id/topic_label/topic_collection), but for this ETL's shape
+            // that is the correct value: legacy SQLite taxonomy assignment never
+            // captured a cross-collection ("projection") distinction, so every
+            // promoted row here is structurally an own-pass/centroid-style
+            // assignment, for which source_collection == the assigned topic's
+            // OWN collection by construction (the same identity
+            // assign_from_chashes_<dim>'s centroid branch relies on, P3a).
             counts.put("topic_assignments_promoted", ctx.insertInto(TOPIC_ASSIGNMENTS,
-                    TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
+                    TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
                 .select(ctx.selectDistinct(
-                        currentTenantSetting(), staDocId, TOPICS.ID)
+                        currentTenantSetting(), staDocId, TOPICS.ID, staTopicCollection)
                     .from(sta)
                     .join(TOPICS).on(TOPICS.LABEL.eq(staTopicLabel)
                         .and(TOPICS.COLLECTION.eq(staTopicCollection)))

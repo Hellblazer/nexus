@@ -197,14 +197,18 @@ class SchemaRollbackRoundTripIntegrationTest {
 
 
     /**
-     * The eight {@code runAlways} changesets, in master order (RDR-191 Phase 4
-     * unify added {@code grants-005-chunks-unify-maintain}, formerly seven
-     * after nexus-hzhgl added {@code grants-004-monitor-wal-visibility},
-     * formerly six after nexus-0ys55 added {@code
-     * grants-003-purge-vacuum-maintain}, formerly five). Their identity is
-     * asserted (not merely their count) so that adding or removing a
-     * {@code runAlways} changeset forces a deliberate look at this test rather
-     * than silently changing which changesets the rollback leg reaches first.
+     * The nine {@code runAlways} changesets, in master order (nexus-8yz1p
+     * added {@code grants-nexus-diag-3} — a THIRD, era-independent nexus_diag
+     * changeset for staging-schema SELECT, deliberately its own changeset
+     * rather than folded into grants-nexus-diag-1's era-gated body; see that
+     * changeset's own comment. Formerly eight after RDR-191 Phase 4 unify
+     * added {@code grants-005-chunks-unify-maintain}, formerly seven after
+     * nexus-hzhgl added {@code grants-004-monitor-wal-visibility}, formerly
+     * six after nexus-0ys55 added {@code grants-003-purge-vacuum-maintain},
+     * formerly five). Their identity is asserted (not merely their count) so
+     * that adding or removing a {@code runAlways} changeset forces a
+     * deliberate look at this test rather than silently changing which
+     * changesets the rollback leg reaches first.
      */
     private static final List<String> RUN_ALWAYS_IDS = List.of(
         "staging-4-svc-grants",
@@ -214,7 +218,8 @@ class SchemaRollbackRoundTripIntegrationTest {
         "grants-004-monitor-wal-visibility",
         "grants-005-chunks-unify-maintain",
         "grants-nexus-diag-1",
-        "grants-nexus-diag-2");
+        "grants-nexus-diag-2",
+        "grants-nexus-diag-3");
 
     /**
      * Pins the mechanism the rollback leg depends on: a second {@code migrate}

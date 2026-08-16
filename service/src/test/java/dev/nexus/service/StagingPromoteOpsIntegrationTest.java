@@ -603,8 +603,9 @@ class StagingPromoteOpsIntegrationTest {
                 topicId = rs.getLong(1);
             }
             su.createStatement().execute(
-                "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by) "
-                + "VALUES ('" + T1 + "', '" + legacyHex + "', " + topicId + ", 'kmd5b')");
+                "INSERT INTO nexus.topic_assignments "
+                + "(tenant_id, doc_id, topic_id, assigned_by, source_collection) "
+                + "VALUES ('" + T1 + "', '" + legacyHex + "', " + topicId + ", 'kmd5b', 'code__kmd5b')");
         }
         try {
             Map<String, Integer> residue = scope.withTenant(T1, ctx ->

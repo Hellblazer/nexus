@@ -357,8 +357,9 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             // early-stop strategy (hnsw.iterative_scan=relaxed_order, set by
             // explain() below) actually cheaper than a full scan+sort.
             st.execute(
-                "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, assigned_at) "
-                + "SELECT tenant_id, encode(chash, 'hex'), 900001, 'planshape-seed', NOW() "
+                "INSERT INTO nexus.topic_assignments "
+                + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
+                + "SELECT tenant_id, encode(chash, 'hex'), 900001, 'planshape-seed', collection, NOW() "
                 + "FROM nexus.chunks WHERE tenant_id = '" + TENANT + "' AND collection = '" + COL_384 + "' "
                 + "AND get_byte(chash, 0) < 26");
 

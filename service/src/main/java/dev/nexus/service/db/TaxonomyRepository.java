@@ -469,10 +469,14 @@ public final class TaxonomyRepository {
         // already rolled back → safe.
         return DeadlockRetry.run("taxonomy.assignMany", () -> tenantScope.withTenant(tenant, ctx -> {
             // Review #5: register each distinct source_collection ONCE per
-            // batch instead of one idempotent INSERT per projection row
-            // (batches routinely share a single collection).
+            // batch instead of one idempotent INSERT per row (batches
+            // routinely share a single collection). RDR-194 D1/P3b
+            // (nexus-tk070.p3b): no longer projection-only -- assignOne's
+            // non-projection branch now persists source_collection too
+            // (mirrors P3a's plpgsql centroid-branch fix), so ANY row
+            // carrying a non-blank source_collection needs the same
+            // auto-stub, not just "assigned_by": "projection" rows.
             ordered.stream()
-                .filter(r -> "projection".equals(r.get("assigned_by")))
                 .map(r -> optS(r, "source_collection"))
                 .filter(c -> c != null && !c.isBlank())
                 .distinct()
@@ -543,12 +547,29 @@ public final class TaxonomyRepository {
                .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
                .execute();
         } else {
+            // RDR-194 D1/P3b (nexus-tk070.p3b): source_collection wired through
+            // on the non-projection branch too -- the Java-side mirror of P3a's
+            // plpgsql assign_from_chashes_<dim> centroid-branch fix.
+            // `sourceCollection` is ALREADY a parameter on this method (flows in
+            // from assignTopic/assignMany's public API unconditionally, not just
+            // the projection branch above); this branch was simply discarding
+            // it. No fallback/synthesis is added here (D0.9): if a caller
+            // supplies null, this INSERT now fails loud against
+            // topic_assignments.source_collection's NOT NULL constraint rather
+            // than persisting a value the P3b migration would later have had to
+            // delete as unresolvable derived garbage. Mirrors the projection
+            // branch's own auto-stub call above (RDR-156 P0.2): a caller
+            // supplying a genuinely new collection must not need a separate
+            // pre-registration round trip just because this is the
+            // non-projection branch.
+            if (ensureCollection) ensureCollectionRegistered(ctx, tenant, sourceCollection);
             ctx.insertInto(TOPIC_ASSIGNMENTS,
                     TOPIC_ASSIGNMENTS.TENANT_ID,
                     TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID,
-                    TOPIC_ASSIGNMENTS.ASSIGNED_BY)
-               .values(tenant, docId, topicId, assignedBy)
+                    TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+               .values(tenant, docId, topicId, assignedBy, sourceCollection)
                .onConflict(
                    TOPIC_ASSIGNMENTS.TENANT_ID,
                    TOPIC_ASSIGNMENTS.DOC_ID,
@@ -2043,7 +2064,7 @@ public final class TaxonomyRepository {
                     .get(TOPICS.ID);
                 childIds.add(childId);
 
-                batchInsertAssignments(ctx, tenant, childId, docIds, "split");
+                batchInsertAssignments(ctx, tenant, childId, docIds, "split", collectionName);
             }
 
             // RDR-154 P0 (nexus-i7ivk): no manual parent zero-out. The parent's
@@ -2180,7 +2201,7 @@ public final class TaxonomyRepository {
                 }
                 topicIds.add(topicId);
 
-                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy);
+                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy, collection);
             }
 
             // Manual transfers are intentionally NOT batched (nexus-eh89h): they
@@ -2191,18 +2212,25 @@ public final class TaxonomyRepository {
             for (var e : transfers.entrySet()) {
                 int specIndex = ((Number) e.getValue()).intValue();
                 if (specIndex >= 0 && specIndex < topicIds.size()) {
+                    // RDR-194 D1/P3b (nexus-tk070.p3b): source_collection wired
+                    // through -- `collection` is this method's own rebuild-scope
+                    // parameter (already used above to resolve/insert the target
+                    // topic), the correct value since a manual transfer moves a
+                    // doc WITHIN this same rebuild's collection, never across one.
                     ctx.insertInto(TOPIC_ASSIGNMENTS,
                             TOPIC_ASSIGNMENTS.TENANT_ID,
                             TOPIC_ASSIGNMENTS.DOC_ID,
                             TOPIC_ASSIGNMENTS.TOPIC_ID,
-                            TOPIC_ASSIGNMENTS.ASSIGNED_BY)
-                       .values(tenant, e.getKey(), topicIds.get(specIndex), "manual")
+                            TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                            TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+                       .values(tenant, e.getKey(), topicIds.get(specIndex), "manual", collection)
                        .onConflict(
                            TOPIC_ASSIGNMENTS.TENANT_ID,
                            TOPIC_ASSIGNMENTS.DOC_ID,
                            TOPIC_ASSIGNMENTS.TOPIC_ID)
                        .doUpdate()
                        .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "manual")
+                       .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, collection)
                        .execute();
                 }
             }
@@ -2290,7 +2318,7 @@ public final class TaxonomyRepository {
                 }
                 topicIds.add(topicId);
 
-                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy);
+                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy, collection);
             }
             log.info("persist_discovered collection={} topics={}", collection, topicIds.size());
             return topicIds;
@@ -2319,20 +2347,22 @@ public final class TaxonomyRepository {
      */
     private static void batchInsertAssignments(org.jooq.DSLContext ctx, String tenant,
                                                long topicId, List<String> docIds,
-                                               String assignedBy) {
+                                               String assignedBy, String sourceCollection) {
         if (docIds == null || docIds.isEmpty()) return;
-        // 4 bind params per row → 5000 rows = 20000 params, under PG's Int16
-        // Bind-message parameter-count limit of 32767. (A topic with >5000 docs
-        // fires the trigger ceil(N/5000) times — still vastly better than per-row;
+        // 5 bind params per row (RDR-194 D1/P3b, nexus-tk070.p3b: source_collection
+        // added) → 5000 rows = 25000 params, still under PG's Int16 Bind-message
+        // parameter-count limit of 32767. (A topic with >5000 docs fires the
+        // trigger ceil(N/5000) times — still vastly better than per-row;
         // realistic topics are hundreds to low-thousands.)
         final int MAX_ROWS = 5000;
         for (int start = 0; start < docIds.size(); start += MAX_ROWS) {
             List<String> batch = docIds.subList(start, Math.min(start + MAX_ROWS, docIds.size()));
             var insert = ctx.insertInto(TOPIC_ASSIGNMENTS,
                     TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
-                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY);
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION);
             for (String docId : batch) {
-                insert = insert.values(tenant, docId, topicId, assignedBy);
+                insert = insert.values(tenant, docId, topicId, assignedBy, sourceCollection);
             }
             insert.onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                               TOPIC_ASSIGNMENTS.TOPIC_ID)

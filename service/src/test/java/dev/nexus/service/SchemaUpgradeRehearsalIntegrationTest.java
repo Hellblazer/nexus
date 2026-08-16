@@ -370,13 +370,19 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   catalog-032-1 nexus-tk070.p1
                 //   legacy-001-1 nexus-lgdel.l1
                 //   legacy-001-2 nexus-lgdel.l1
+                //   taxonomy-010-1 nexus-tk070.p3b
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
                     // FK parents (fk-002/fk-003's NOT VALID FKs, applied by the
                     // old leg, enforce on new writes).
                     for (String[] tc : new String[][]{
-                        {"t1", "code__x"}, {"t1", "code__y"}, {"t2", "code__z"}}) {
+                        {"t1", "code__x"}, {"t1", "code__y"}, {"t2", "code__z"},
+                        // nexus-tk070.p3b: two collections DEDICATED to taxonomy-010-1's
+                        // ambiguous-arm seed below, distinct from code__x/code__y so its
+                        // fresh chunks_384/768 rows don't perturb vectors-004-1's own
+                        // per-collection row-count assertions further down.
+                        {"t1", "code__p3ba"}, {"t1", "code__p3bb"}}) {
                         registerCollection(su, tc[0], tc[1]);
                     }
                     // Legacy 64-char chash_index rows — Catalog013RlsReplayTest's
@@ -496,6 +502,60 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     seedRelevanceLogRow(su, "t1", "9".repeat(32), "legacy-001-seed-query");
                     seedRelevanceLogRow(su, "t1", "f".repeat(64), "legacy-001-seed-query");
 
+                    // taxonomy-010-1 (nexus-tk070.p3b, RDR-194 § D1 steps b/c/d):
+                    // topic_assignments.source_collection remediation. THREE
+                    // source_collection-NULL assignments, one per DELETE arm,
+                    // under a shared topic (PK is (tenant_id, doc_id, topic_id),
+                    // so sharing topic_id across distinct doc_id values is
+                    // fine). The positive (b) UNIQUE-RESOLUTION backfill arm is
+                    // NOT exercisable in THIS old-tag hop: chunks_384/768/1024
+                    // (the ONLY pre-hop route into nexus.chunks -- it does not
+                    // exist until vectors-004-1 copies these tables, mid-hop)
+                    // carry a `length(chash) = 32` CHECK inherited from the OLD
+                    // leg's tree (catalog-002-hygiene), so every chash this
+                    // fixture CAN seed is legacy-width (16 bytes post-decode)
+                    // and therefore EXCLUDED from backfill candidacy by
+                    // taxonomy-010-1's own `doc_id ~ '^[0-9a-f]{64}$'` shape
+                    // guard -- exactly the LEGACY-SHAPE-COINCIDENTAL-MATCH arm
+                    // below, not a KEEP arm. The KEEP arm is proven separately,
+                    // free of that legacy-schema constraint, by
+                    // Taxonomy010BackfillDirectIntegrationTest (fresh 64-hex
+                    // content seeded straight into nexus.chunks post-HEAD).
+                    long p3bTopicId = seedTopic(su, "t1", "code__x", "rehearsal-p3b-topic");
+                    // (c) AMBIGUOUS arm: the SAME (legacy-width) chash exists
+                    // under TWO distinct collections (code__p3ba via
+                    // chunks_384, code__p3bb via chunks_768 -- dedicated
+                    // collections registered above so these fresh rows don't
+                    // perturb vectors-004-1's own per-collection row-count
+                    // assertions on code__x/code__y further down) -- must be
+                    // DELETED, unattributable. The ambiguous-DELETE predicate
+                    // does not gate on doc_id shape, so 32-hex content
+                    // exercises it exactly as well as 64-hex would.
+                    seedChunk384LegacyContent(su, "t1", "code__p3ba", "b".repeat(32), "p3b ambiguous chunk a");
+                    seedChunkDimLegacyContent(su, 768, "t1", "code__p3bb", "b".repeat(32), "p3b ambiguous chunk b");
+                    seedTopicAssignment(su, "t1", "b".repeat(32), p3bTopicId);
+                    // (c) UNRESOLVABLE (anti-join) arm: doc_id is canonical
+                    // 64-hex SHAPE but has NO backing chunk anywhere -- must be
+                    // DELETED, proving the anti-join arm fires independently of
+                    // the shape predicate (this doc_id passes the shape check).
+                    seedTopicAssignment(su, "t1", "c".repeat(64), p3bTopicId);
+                    // (c) LEGACY-SHAPE-COINCIDENTAL-MATCH arm (the cc4/HAL
+                    // no-wedge proof): doc_id = "1"x32, the SAME legacy 32-hex
+                    // chash already seeded above for the j862l chunks_384
+                    // fixture (tenant t1, collection code__x) -- an anti-join
+                    // alone WOULD find a match here (encode(chash,'hex') round-
+                    // trips to "1"x32), but taxonomy-010-1's backfill excludes
+                    // it on shape ALONE (never reaches the anti-join), and the
+                    // explicit doc_id !~ '^[0-9a-f]{64}$' arm of the
+                    // UNRESOLVABLE delete catches it regardless of the
+                    // (irrelevant here) anti-join outcome. This is the exact
+                    // shape cc4's 5,896-row cloud population takes (T2
+                    // nexus/rdr194-cc4-census-2026-08-16): a non-conformant
+                    // doc_id that happens to text-match real chunk content
+                    // must still be treated as unresolvable garbage, never
+                    // silently backfilled or left behind.
+                    seedTopicAssignment(su, "t1", "1".repeat(32), p3bTopicId);
+
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("superuser ground truth after seeding").isEqualTo(5);
                     assertThat(count(su,
@@ -532,6 +592,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     assertThat(count(admin, "SELECT count(*) FROM nexus.relevance_log"))
                         .as("FORCE RLS must hide both seeded relevance_log rows from the "
                             + "non-BYPASSRLS owner — legacy-001-2's own toggle-wrap target")
+                        .isEqualTo(0);
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.topic_assignments"))
+                        .as("FORCE RLS must hide all four seeded topic_assignments rows from "
+                            + "the non-BYPASSRLS owner — taxonomy-010-1's own toggle-wrap target")
                         .isEqualTo(0);
                 }
 
@@ -908,6 +972,64 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("the canonical-width relevance_log row must survive legacy-001-2's "
                             + "remediation — a shape-agnostic-gone-wrong DELETE would wrongly "
                             + "remove this too")
+                        .isEqualTo(1);
+
+                    // taxonomy-010-1 leg (nexus-tk070.p3b, RDR-194 § D1 steps b/c/d,
+                    // seed-coverage lint follow-up): all three DELETE arms,
+                    // effect-asserted -- every seeded row is gone (none of the
+                    // three text-match a UNIQUE collection: the ambiguous arm
+                    // matches two, the unresolvable arm matches none, the
+                    // legacy-shape arm is excluded by shape before matching is
+                    // even attempted). GET DIAGNOSTICS ROW_COUNT drives each
+                    // RAISE NOTICE 1:1 from the same DELETE statements these
+                    // row-state assertions observe, so proving the row set is
+                    // exactly this shape is equivalent evidence to the NOTICE
+                    // counts themselves (JDBC has no listener attached to
+                    // Liquibase's own internal migration connection to capture
+                    // the NOTICE text directly). The positive (b) backfill arm
+                    // is proven separately by
+                    // Taxonomy010BackfillDirectIntegrationTest -- see the SEED
+                    // block's own comment for why this old-tag-hop fixture
+                    // structurally cannot construct that arm.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_assignments "
+                        + "WHERE tenant_id = 't1' AND source_collection IS NULL"))
+                        .as("no source_collection-NULL row may survive taxonomy-010-1 -- SET NOT "
+                            + "NULL would otherwise have failed the whole migration walk")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_assignments "
+                        + "WHERE tenant_id = 't1' AND doc_id = '" + "b".repeat(32) + "'"))
+                        .as("the ambiguous arm's row must be DELETED by taxonomy-010-1 -- its chash "
+                            + "resolves to two distinct collections and cannot be attributed")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_assignments "
+                        + "WHERE tenant_id = 't1' AND doc_id = '" + "c".repeat(64) + "'"))
+                        .as("the unresolvable (anti-join) arm's row must be DELETED -- its doc_id is "
+                            + "canonical 64-hex SHAPE but no nexus.chunks row matches it at all, "
+                            + "proving the anti-join arm fires independently of the shape predicate")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_assignments "
+                        + "WHERE tenant_id = 't1' AND doc_id = '" + "1".repeat(32) + "'"))
+                        .as("the legacy-shape-coincidental-match arm's row must be DELETED despite "
+                            + "a real chunk existing at the same text-matched chash -- the "
+                            + "doc_id !~ '^[0-9a-f]{64}$' shape predicate must win over a coincidental "
+                            + "anti-join match, the exact cc4/HAL no-wedge proof")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.topic_assignments'::regclass, 'nexus.chunks'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-010-1 toggled")
+                        .isEqualTo(2);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM information_schema.columns "
+                        + "WHERE table_schema = 'nexus' AND table_name = 'topic_assignments' "
+                        + "AND column_name = 'source_collection' AND is_nullable = 'NO'"))
+                        .as("source_collection must be SET NOT NULL at HEAD -- taxonomy-010-1's "
+                            + "final DDL step, only reachable if all three DML steps ahead of it "
+                            + "left no NULL row behind")
                         .isEqualTo(1);
                 }
             }
@@ -1322,6 +1444,45 @@ class SchemaUpgradeRehearsalIntegrationTest {
             ps.setString(1, tenant);
             ps.setString(2, query);
             ps.setString(3, chunkId);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A {@code nexus.topics} row (nexus-tk070.p3b, taxonomy-010-1's FK parent
+     * -- {@code topic_assignments.topic_id} REFERENCES {@code topics(id)} ON
+     * DELETE CASCADE). Returns the generated {@code id} for
+     * {@link #seedTopicAssignment} to reference.
+     */
+    private static long seedTopic(Connection c, String tenant, String collection, String label)
+            throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
+            + "VALUES (?, ?, ?, now()) RETURNING id")) {
+            ps.setString(1, tenant);
+            ps.setString(2, label);
+            ps.setString(3, collection);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    /**
+     * A {@code nexus.topic_assignments} row with {@code source_collection}
+     * deliberately NULL (nexus-tk070.p3b, taxonomy-010-1's remediation input
+     * shape) -- the pre-P3a writer state every arm of taxonomy-010-1's
+     * backfill/delete resolves.
+     */
+    private static void seedTopicAssignment(Connection c, String tenant, String docId, long topicId)
+            throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by) "
+            + "VALUES (?, ?, ?, 'rehearsal-seed')")) {
+            ps.setString(1, tenant);
+            ps.setString(2, docId);
+            ps.setLong(3, topicId);
             ps.executeUpdate();
         }
     }

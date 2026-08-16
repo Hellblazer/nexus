@@ -269,7 +269,7 @@ class TaxonomyRepositoryTest {
     @Test @Order(10)
     void deleteTopic_returnsCollectionAndCascades() {
         long topicId = repo.insertTopic(TENANT_A, "doomed-topic", null, COL_A, 0, null, null);
-        repo.assignTopic(TENANT_A, "doc-del-1", topicId, "manual", null, null, null);
+        repo.assignTopic(TENANT_A, "doc-del-1", topicId, "manual", null, COL_A, null);
 
         Optional<String> col = repo.deleteTopic(TENANT_A, topicId);
         assertThat(col).isPresent().contains(COL_A);
@@ -305,8 +305,8 @@ class TaxonomyRepositoryTest {
     @Test @Order(12)
     void assignTopic_nonProjection_insertOrIgnore() {
         long topicId = repo.insertTopic(TENANT_A, "assign-manual-topic", null, COL_A, 0, null, null);
-        repo.assignTopic(TENANT_A, "doc-manual", topicId, "manual", null, null, null);
-        repo.assignTopic(TENANT_A, "doc-manual", topicId, "manual", null, null, null); // idempotent
+        repo.assignTopic(TENANT_A, "doc-manual", topicId, "manual", null, COL_A, null);
+        repo.assignTopic(TENANT_A, "doc-manual", topicId, "manual", null, COL_A, null); // idempotent
 
         List<String> docs = repo.getTopicDocIds(TENANT_A, topicId, 0);
         assertThat(docs).containsExactly("doc-manual");
@@ -331,8 +331,8 @@ class TaxonomyRepositoryTest {
     @Test @Order(14)
     void getAssignmentsForDocs_andByLabel() {
         long topicId = repo.insertTopic(TENANT_A, "label-search-topic", null, COL_A, 0, null, null);
-        repo.assignTopic(TENANT_A, "doc-label-1", topicId, "manual", null, null, null);
-        repo.assignTopic(TENANT_A, "doc-label-2", topicId, "manual", null, null, null);
+        repo.assignTopic(TENANT_A, "doc-label-1", topicId, "manual", null, COL_A, null);
+        repo.assignTopic(TENANT_A, "doc-label-2", topicId, "manual", null, COL_A, null);
 
         List<Map<String, Object>> assignments = repo.getAssignmentsForDocs(
             TENANT_A, List.of("doc-label-1", "doc-label-2", "doc-label-missing"));
@@ -345,7 +345,7 @@ class TaxonomyRepositoryTest {
     @Test @Order(15)
     void purgeAssignmentsForDoc_removesEmptyTopics() {
         long topicId = repo.insertTopic(TENANT_A, "purge-only-topic", null, COL_A, 0, null, null);
-        repo.assignTopic(TENANT_A, "doc-purge-only", topicId, "manual", null, null, null);
+        repo.assignTopic(TENANT_A, "doc-purge-only", topicId, "manual", null, COL_A, null);
 
         int removed = repo.purgeAssignmentsForDoc(TENANT_A, COL_A, "doc-purge-only");
         assertThat(removed).isEqualTo(1);
@@ -843,8 +843,8 @@ class TaxonomyRepositoryTest {
         long t2 = repo.insertTopic(TENANT_A, "os-topic-2", null, COL_OS, 0, PAST_TS, "[\"b\"]");
         repo.markTopicReviewed(TENANT_A, t2, "accepted");
         // One manual assignment (must surface) + one hdbscan (must NOT surface).
-        repo.assignTopic(TENANT_A, "os-doc-manual", t1, "manual", null, null, null);
-        repo.assignTopic(TENANT_A, "os-doc-hdbscan", t1, "hdbscan", null, null, null);
+        repo.assignTopic(TENANT_A, "os-doc-manual", t1, "manual", null, COL_OS, null);
+        repo.assignTopic(TENANT_A, "os-doc-hdbscan", t1, "hdbscan", null, COL_OS, null);
 
         Map<String, Object> state = repo.readRebuildOldState(TENANT_A, COL_OS);
 
@@ -871,7 +871,7 @@ class TaxonomyRepositoryTest {
     void persistRebuildTopics_replaceSemanticsClearsOldInsertsNewAppliesManual() {
         // Seed an "old" topic + assignment that the rebuild must clear.
         long oldId = repo.insertTopic(TENANT_A, "rb-old", null, COL_RB, 1, PAST_TS, null);
-        repo.assignTopic(TENANT_A, "rb-doc-1", oldId, "hdbscan", null, null, null);
+        repo.assignTopic(TENANT_A, "rb-doc-1", oldId, "hdbscan", null, COL_RB, null);
 
         var specs = List.of(
             m("label", "rb-new-0", "doc_count", 2, "terms", "[\"x\"]",
@@ -1329,13 +1329,14 @@ class TaxonomyRepositoryTest {
         long tSeq   = repo.insertTopic(TENANT_A, "am-seq-topic", null, COL_A, 0, null, null);
 
         int persisted = repo.assignMany(TENANT_A, List.of(
-            m("doc_id", "am-doc-1", "topic_id", tBatch, "assigned_by", "centroid"),
+            m("doc_id", "am-doc-1", "topic_id", tBatch, "assigned_by", "centroid",
+              "source_collection", COL_A),
             m("doc_id", "am-doc-2", "topic_id", tBatch, "assigned_by", "projection",
               "similarity", 0.7, "source_collection", COL_A)));
         assertThat(persisted).isEqualTo(2);
 
         // Equivalent sequence of single-row assignTopic calls to a sibling topic.
-        repo.assignTopic(TENANT_A, "am-doc-1", tSeq, "centroid", null, null, null);
+        repo.assignTopic(TENANT_A, "am-doc-1", tSeq, "centroid", null, COL_A, null);
         repo.assignTopic(TENANT_A, "am-doc-2", tSeq, "projection", 0.7, COL_A, null);
 
         assertThat(repo.getTopicDocIds(TENANT_A, tBatch, 0))
@@ -1354,8 +1355,10 @@ class TaxonomyRepositoryTest {
         // Two identical (doc_id, topic_id) non-projection rows in ONE call: the
         // second hits ON CONFLICT DO NOTHING (separate INSERT statements) — no error.
         int persisted = repo.assignMany(TENANT_A, List.of(
-            m("doc_id", "am-doc-dup", "topic_id", t, "assigned_by", "centroid"),
-            m("doc_id", "am-doc-dup", "topic_id", t, "assigned_by", "centroid")));
+            m("doc_id", "am-doc-dup", "topic_id", t, "assigned_by", "centroid",
+              "source_collection", COL_A),
+            m("doc_id", "am-doc-dup", "topic_id", t, "assigned_by", "centroid",
+              "source_collection", COL_A)));
         assertThat(persisted).isEqualTo(2);
         assertThat(repo.getTopicDocIds(TENANT_A, t, 0)).containsExactly("am-doc-dup");
     }

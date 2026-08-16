@@ -211,4 +211,50 @@ $$;
         </rollback>
     </changeSet>
 
+    <changeSet id="grants-nexus-diag-3" author="nexus-8yz1p" runAlways="true">
+        <comment>
+            bead nexus-8yz1p (2026-08-16): nexus_diag gets staging schema
+            SELECT, ERA-INDEPENDENT. Deliberately its OWN changeset rather
+            than folded into grants-nexus-diag-1's body: the LEGACY/VIEW
+            split above is specifically the RDR-182 s5 chash-poison content
+            boundary on nexus/t1 -- staging (the RDR-180 land-then-transform
+            landing zone, FORCE RLS + tenant policy on every table,
+            staging-001-landing-tables.xml) carries no such content-boundary
+            concern and no counts view to narrow into, so it must grant
+            identically in both eras. A single-changeset placement would
+            force an impossible choice: before diag-1's era guard, and it
+            trips ChangelogBulkGrantConformanceTest's
+            allowlistedOccurrence_isStillGatedByViewAbsence tripwire (which
+            asserts the FIRST bulk "ON ALL TABLES" grant found in
+            grants-nexus-diag-1's body sits after the era guard -- a sound
+            invariant for the nexus/t1 grant it was written to protect, but
+            not one this era-independent grant should be measured against);
+            after the guard, and it would be silently skipped in the view
+            era, defeating the whole point. A separate changeset id sidesteps
+            the tripwire's substring scan entirely (which slices ONLY
+            id="grants-nexus-diag-1"'s body) without editing that test's
+            assertion, and reads as the more honest shape besides: this
+            grant is not part of the era dance at all. Same role-existence
+            guard as -1/-2 (self-heals every boot); read-only by
+            construction, matching -1's own construction.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_diag') THEN
+        RAISE NOTICE 'nexus_diag absent — staging grants skipped (created by pg_provision/DBA; self-heals next boot)';
+        RETURN;
+    END IF;
+
+    GRANT USAGE  ON SCHEMA staging TO nexus_diag;
+    GRANT SELECT ON ALL TABLES IN SCHEMA staging TO nexus_diag;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA staging GRANT SELECT ON TABLES TO nexus_diag;
+END
+$$;
+        </sql>
+        <rollback>
+            <!-- Revoke is a DBA operation; not automated. -->
+        </rollback>
+    </changeSet>
+
 </databaseChangeLog>

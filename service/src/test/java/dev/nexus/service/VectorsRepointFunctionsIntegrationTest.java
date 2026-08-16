@@ -253,8 +253,9 @@ class VectorsRepointFunctionsIntegrationTest {
 
             try (Statement st = su.createStatement()) {
                 st.execute(
-                    "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by) "
-                        + "SELECT '" + TENANT + "', '" + chashHex + "', t.id, 'centroid' "
+                    "INSERT INTO nexus.topic_assignments "
+                        + "(tenant_id, doc_id, topic_id, assigned_by, source_collection) "
+                        + "SELECT '" + TENANT + "', '" + chashHex + "', t.id, 'centroid', '" + collection + "' "
                         + "FROM nexus.topics t WHERE t.tenant_id = '" + TENANT + "' AND t.label = 'alpha'");
             }
 

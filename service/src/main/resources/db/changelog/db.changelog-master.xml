@@ -704,6 +704,20 @@
          own header for the full rollback-ordering derivation. -->
     <include file="db/changelog/legacy-002-drop-remap-membership.xml"/>
 
+    <!-- RDR-194 Phase P3b (Decision D1, bead nexus-tk070.p3b): remediate
+         topic_assignments.source_collection (unique-resolution backfill,
+         counted DELETE of the ambiguous/unresolvable remainders, SET NOT
+         NULL) — the prerequisite for P3d's composite FK. Placed after
+         legacy-002-drop-remap-membership.xml (current tail) and before the
+         grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention (D0.1; see catalog-031's / telemetry-004's /
+         aspects-003's / plans-002's / taxonomy-008's / catalog-032's /
+         remap-003's / taxonomy-009's / legacy-001's / legacy-002's own
+         <include> comments for the identical reasoning). See
+         taxonomy-010-source-collection-backfill.xml's own header for the
+         full D1 trace and the cc4 disposition. -->
+    <include file="db/changelog/taxonomy-010-source-collection-backfill.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

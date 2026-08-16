@@ -428,29 +428,35 @@ class CollectionRegistryFkTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // GROUP 4 — NULL source_collection is accepted (MATCH SIMPLE legacy tolerance)
+    // GROUP 4 — NULL source_collection is REJECTED (RDR-194 D1/P3b, nexus-tk070.p3b)
     //
-    // EXPECTED GREEN: source_collection IS NULLABLE; null satisfies any FK.
+    // SUPERSEDED (nexus-tk070.p3b, taxonomy-010-1): source_collection is NOT
+    // NULL as of P3b — the MATCH SIMPLE null-exemption this group originally
+    // documented as accepted is exactly the vacuous-VALIDATE escape hatch D1
+    // exists to close. EXPECTED GREEN: a null source_collection now fails
+    // loud at INSERT time (D0.9 no-silent-fallback), never silently
+    // satisfies topic_assignments_collection_fk via MATCH SIMPLE.
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(40)
-    void topicAssignments_nullSourceCollection_accepted() throws Exception {
-        // GREEN before AND after P0.2 lands (MATCH SIMPLE: null FK column = no check).
+    void topicAssignments_nullSourceCollection_rejected() throws Exception {
+        // RED before P3b (NULL was accepted under MATCH SIMPLE); GREEN after
+        // taxonomy-010-1's SET NOT NULL.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "null-src-doc");
             insertTopic(su, TENANT_A, 8002L, "null-src-topic", "null-src-col");
-            su.createStatement().execute(
-                "INSERT INTO nexus.topic_assignments " +
-                "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
-                "('" + TENANT_A + "', 'null-src-doc', 8002, 'hdbscan', NOW())");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT source_collection FROM nexus.topic_assignments " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='null-src-doc' AND topic_id=8002");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("source_collection"))
-                .as("NULL source_collection must be accepted (MATCH SIMPLE, no FK violation)")
-                .isNull();
+            PSQLException ex = assertThrows(PSQLException.class, () ->
+                su.createStatement().execute(
+                    "INSERT INTO nexus.topic_assignments " +
+                    "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
+                    "('" + TENANT_A + "', 'null-src-doc', 8002, 'hdbscan', NOW())")
+            );
+            assertThat(ex.getMessage())
+                .as("source_collection must reject NULL post-P3b -- not-null violation, "
+                    + "not a silent MATCH SIMPLE pass-through")
+                .containsIgnoringCase("null value")
+                .containsIgnoringCase("source_collection");
         }
     }
 

@@ -267,8 +267,8 @@ class ForeignKeyConstraintTest {
             String chash = "7740557a279d0481db33c93fd0342464"; // 32-hex chunk chash, not a tumbler
             su.createStatement().execute(
                 "INSERT INTO nexus.topic_assignments " +
-                "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
-                "('" + TENANT_A + "', '" + chash + "', 100, 'hdbscan', NOW())");
+                "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
+                "('" + TENANT_A + "', '" + chash + "', 100, 'hdbscan', 'col-a', NOW())");
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.topic_assignments " +
                 "WHERE tenant_id='" + TENANT_A + "' AND doc_id='" + chash + "'");
@@ -286,8 +286,8 @@ class ForeignKeyConstraintTest {
             Exception ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
                     "INSERT INTO nexus.topic_assignments " +
-                    "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
-                    "('" + TENANT_A + "', 'aabbccddeeff00112233445566778899', 999999, 'hdbscan', NOW())")
+                    "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
+                    "('" + TENANT_A + "', 'aabbccddeeff00112233445566778899', 999999, 'hdbscan', 'col-a', NOW())")
             );
             assertThat(ex.getMessage()).containsIgnoringCase("foreign key");
         }
@@ -304,8 +304,8 @@ class ForeignKeyConstraintTest {
             String chash = "1199aabbccddeeff00112233445566ab";
             su.createStatement().execute(
                 "INSERT INTO nexus.topic_assignments " +
-                "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
-                "('" + TENANT_A + "', '" + chash + "', 199, 'hdbscan', NOW())");
+                "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
+                "('" + TENANT_A + "', '" + chash + "', 199, 'hdbscan', 'col-a', NOW())");
 
             su.createStatement().execute(
                 "DELETE FROM nexus.catalog_documents " +
@@ -772,8 +772,8 @@ class ForeignKeyConstraintTest {
             insertTopic(su, TENANT_A, 300L, "rls-topic", "col-rls");
             su.createStatement().execute(
                 "INSERT INTO nexus.topic_assignments " +
-                "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
-                "('" + TENANT_A + "', 'rls-ta-tumbler', 300, 'hdbscan', NOW())");
+                "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
+                "('" + TENANT_A + "', 'rls-ta-tumbler', 300, 'hdbscan', 'col-rls', NOW())");
         }
 
         try (Connection svc = svcDs.getConnection()) {
