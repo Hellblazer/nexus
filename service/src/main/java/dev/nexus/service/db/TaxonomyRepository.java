@@ -61,6 +61,27 @@ public final class TaxonomyRepository {
         this.tenantScope = tenantScope;
     }
 
+    // ── doc_id hex/bytes boundary (RDR-194 P3c, nexus-tk070.p3c) ────────────────
+
+    /**
+     * Hex -> the {@code topic_assignments.doc_id} bytea storage form
+     * (RDR-194 P3c). Mirrors {@code RemapRepository}'s {@code
+     * newChashBytes} idiom exactly (RDR-194 P2 precedent): this repository
+     * is the hex/bytes seam, never a jOOQ Converter/forcedType override
+     * (D0.7 — compilation failure is the intended call-site census).
+     * Callers everywhere else in the public API keep passing/receiving the
+     * 64-hex wire form (D0.8); only the two INSERT/WHERE boundary sites
+     * touch this.
+     */
+    private static byte[] docIdBytes(String docIdHex) {
+        return Chash.fromHex(docIdHex).toBytes();
+    }
+
+    /** Bytea -> the wire-hex form (D0.8: the wire contract stays 64-hex). */
+    private static String docIdHex(byte[] docIdBytes) {
+        return Chash.fromSha256Bytes(docIdBytes).toHex();
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     static OffsetDateTime parseTs(String s) {
@@ -525,7 +546,7 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.SIMILARITY,
                     TOPIC_ASSIGNMENTS.ASSIGNED_AT,
                     TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-               .values(tenant, docId, topicId, "projection", similarity, assignedAtTs, sourceCollection)
+               .values(tenant, docIdBytes(docId), topicId, "projection", similarity, assignedAtTs, sourceCollection)
                .onConflict(
                     TOPIC_ASSIGNMENTS.TENANT_ID,
                     TOPIC_ASSIGNMENTS.DOC_ID,
@@ -569,7 +590,7 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.TOPIC_ID,
                     TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                     TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-               .values(tenant, docId, topicId, assignedBy, sourceCollection)
+               .values(tenant, docIdBytes(docId), topicId, assignedBy, sourceCollection)
                .onConflict(
                    TOPIC_ASSIGNMENTS.TENANT_ID,
                    TOPIC_ASSIGNMENTS.DOC_ID,
@@ -728,20 +749,30 @@ public final class TaxonomyRepository {
                 .from(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId));
             var rows = (limit > 0 ? q.limit(limit) : q).fetch();
-            return rows.map(r -> r.get(TOPIC_ASSIGNMENTS.DOC_ID));
+            return rows.map(r -> docIdHex(r.get(TOPIC_ASSIGNMENTS.DOC_ID)));
         });
     }
 
-    /** Return {doc_id, topic_id} pairs for given doc_ids. */
+    /**
+     * Return {doc_id, topic_id} pairs for given doc_ids.
+     *
+     * <p>RDR-194 P3c (nexus-tk070.p3c): {@code .in(docIds)} on a {@code
+     * Field<byte[]>} accepts a raw {@code Collection<?>} by jOOQ's own API
+     * shape — a {@code List<String>} keeps COMPILING here with no error,
+     * then either fails at bind time or (worse) silently matches nothing.
+     * Compiler-SILENT; hand-fixed and covered by a dedicated test per the
+     * bead's own naming of this class of site.
+     */
     public List<Map<String, Object>> getAssignmentsForDocs(String tenant, List<String> docIds) {
         if (docIds == null || docIds.isEmpty()) return List.of();
+        List<byte[]> docIdBytesList = docIds.stream().map(TaxonomyRepository::docIdBytes).toList();
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
                .from(TOPIC_ASSIGNMENTS)
-               .where(TOPIC_ASSIGNMENTS.DOC_ID.in(docIds))
+               .where(TOPIC_ASSIGNMENTS.DOC_ID.in(docIdBytesList))
                .fetch()
                .map(r -> Map.of(
-                   "doc_id",   r.get(TOPIC_ASSIGNMENTS.DOC_ID),
+                   "doc_id",   docIdHex(r.get(TOPIC_ASSIGNMENTS.DOC_ID)),
                    "topic_id", r.get(TOPIC_ASSIGNMENTS.TOPIC_ID))));
     }
 
@@ -779,6 +810,9 @@ public final class TaxonomyRepository {
      */
     public List<Map<String, Object>> getAssignmentDetails(String tenant, List<String> docIds) {
         if (docIds == null || docIds.isEmpty()) return List.of();
+        // RDR-194 P3c: compiler-silent .in(Collection<?>) site, see
+        // getAssignmentsForDocs's javadoc for why this needs hand-fixing.
+        List<byte[]> docIdBytesList = docIds.stream().map(TaxonomyRepository::docIdBytes).toList();
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(TOPIC_ASSIGNMENTS.DOC_ID,
                        TOPIC_ASSIGNMENTS.TOPIC_ID,
@@ -787,12 +821,12 @@ public final class TaxonomyRepository {
                        TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
                        TOPIC_ASSIGNMENTS.ASSIGNED_AT)
                .from(TOPIC_ASSIGNMENTS)
-               .where(TOPIC_ASSIGNMENTS.DOC_ID.in(docIds))
+               .where(TOPIC_ASSIGNMENTS.DOC_ID.in(docIdBytesList))
                .orderBy(TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
                .fetch()
                .map(r -> {
                    Map<String, Object> m = new LinkedHashMap<>();
-                   m.put("doc_id",            r.get(TOPIC_ASSIGNMENTS.DOC_ID));
+                   m.put("doc_id",            docIdHex(r.get(TOPIC_ASSIGNMENTS.DOC_ID)));
                    m.put("topic_id",          r.get(TOPIC_ASSIGNMENTS.TOPIC_ID));
                    m.put("assigned_by",       r.get(TOPIC_ASSIGNMENTS.ASSIGNED_BY));
                    m.put("similarity",        r.get(TOPIC_ASSIGNMENTS.SIMILARITY));
@@ -810,17 +844,57 @@ public final class TaxonomyRepository {
                .join(TOPICS).on(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
                .where(TOPICS.LABEL.eq(label))
                .fetch()
-               .map(r -> r.get(TOPIC_ASSIGNMENTS.DOC_ID)));
+               .map(r -> docIdHex(r.get(TOPIC_ASSIGNMENTS.DOC_ID))));
     }
 
     /**
      * Purge topic_assignments for a deleted doc. Matches purge_assignments_for_doc.
      * Returns count of removed assignment rows.
+     *
+     * <p>{@code title} IS the doc_id hex when it names a real chunk chash despite
+     * the parameter name (RDR-194 D1's own finding: {@code http_taxonomy_store.py}
+     * calls the doc_id "title" at this call site — the name is not evidence of a
+     * different identity space for a CHASH-shaped value).
+     *
+     * <p><strong>RDR-194 P3c correction (nexus-tk070.p3c, found by
+     * tests/test_t2.py::test_delete going red):</strong> this method has a SECOND,
+     * genuinely-different caller this bead's own D1 research did not audit —
+     * {@code T2Database.delete}'s memory-to-taxonomy cross-domain cascade
+     * ({@code src/nexus/db/t2/__init__.py:556}), which calls this UNCONDITIONALLY
+     * on every successful memory delete with the memory entry's OWN {@code title}
+     * (e.g. {@code "doomed.md"}), not a chunk chash, on the defensive theory that a
+     * topic_assignments row might reference it. D1's own finding — every live
+     * writer emits a 64-hex chunk chash, the memory-title-clustering read path
+     * that would have made a title a real candidate died with SQLite at commit
+     * {@code f24bdb853} — means that theory is structurally impossible for a
+     * non-canonical title: no row can EVER match it. Pre-P3c this was a harmless
+     * TEXT no-op (zero rows, no error). Post-P3c, {@link #docIdBytes} on a
+     * non-hex title would throw and abort the ENTIRE memory delete, which is not
+     * this call's contract. Guarding on the same {@code ^[0-9a-f]{64}$} shape
+     * predicate the P3b migration itself gates candidacy on (D0.9: this is
+     * recognizing a structural impossibility, not resolving/coercing a bad
+     * value) preserves the exact pre-P3c no-op behavior for a non-chash title,
+     * while a genuinely chash-shaped title still gets full delete semantics.
      */
     public int purgeAssignmentsForDoc(String tenant, String project, String title) {
+        if (!title.matches("^[0-9a-f]{64}$")) {
+            // Not a chash-shaped identifier -- structurally cannot match any
+            // topic_assignments row (see javadoc above). Still run the
+            // empty-topics sweep below, matching this method's pre-P3c
+            // behavior for a non-matching title (unconditional, not gated
+            // on removed > 0).
+            return tenantScope.withTenant(tenant, ctx -> {
+                ctx.deleteFrom(TOPICS)
+                   .where(TOPICS.COLLECTION.eq(project)
+                       .and(TOPICS.ID.notIn(
+                           selectDistinct(TOPIC_ASSIGNMENTS.TOPIC_ID).from(TOPIC_ASSIGNMENTS))))
+                   .execute();
+                return 0;
+            });
+        }
         return tenantScope.withTenant(tenant, ctx -> {
             int removed = ctx.deleteFrom(TOPIC_ASSIGNMENTS)
-                .where(TOPIC_ASSIGNMENTS.DOC_ID.eq(title)
+                .where(TOPIC_ASSIGNMENTS.DOC_ID.eq(docIdBytes(title))
                     .and(TOPIC_ASSIGNMENTS.TOPIC_ID.in(
                         select(TOPICS.ID).from(TOPICS).where(TOPICS.COLLECTION.eq(project)))))
                 .execute();
@@ -1048,7 +1122,7 @@ public final class TaxonomyRepository {
             var rows = ctx.select(max(TOPIC_ASSIGNMENTS.SIMILARITY).as("ms"))
                 .from(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                    .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(docId))
+                    .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(docIdBytes(docId)))
                     .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(sourceCollection))
                     .and(TOPIC_ASSIGNMENTS.SIMILARITY.isNotNull()))
                 .fetch();
@@ -1261,7 +1335,7 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.SIMILARITY,
                     TOPIC_ASSIGNMENTS.ASSIGNED_AT,
                     TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-               .values(tenant, docId, topicId, assignedBy, similarity, assignedAtTs, sourceCollection)
+               .values(tenant, docIdBytes(docId), topicId, assignedBy, similarity, assignedAtTs, sourceCollection)
                .onConflict(
                     TOPIC_ASSIGNMENTS.TENANT_ID,
                     TOPIC_ASSIGNMENTS.DOC_ID,
@@ -1462,7 +1536,7 @@ public final class TaxonomyRepository {
                 String assignedAt = optS(r, "assigned_at");
                 OffsetDateTime assignedAtTs = (assignedAt != null && !assignedAt.isBlank())
                     ? parseTsStrict(assignedAt) : null;
-                insert = insert.values(tenant, reqS(r, "doc_id"), reqL(r, "topic_id"),
+                insert = insert.values(tenant, docIdBytes(reqS(r, "doc_id")), reqL(r, "topic_id"),
                         optS(r, "assigned_by"), optD(r, "similarity"), assignedAtTs,
                         optS(r, "source_collection"));
             }
@@ -2111,8 +2185,10 @@ public final class TaxonomyRepository {
                     .and(TOPICS.COLLECTION.eq(collection)))
                 .fetch()
                 .map(r -> {
+                    // RDR-194 P3c: compiler-silent Map<String,Object> put site
+                    // (byte[] type-checks as Object) -- hand-fixed.
                     Map<String, Object> m = new LinkedHashMap<>();
-                    m.put("doc_id",   r.get(TOPIC_ASSIGNMENTS.DOC_ID));
+                    m.put("doc_id",   docIdHex(r.get(TOPIC_ASSIGNMENTS.DOC_ID)));
                     m.put("topic_id", r.get(TOPIC_ASSIGNMENTS.TOPIC_ID));
                     return m;
                 });
@@ -2223,7 +2299,7 @@ public final class TaxonomyRepository {
                             TOPIC_ASSIGNMENTS.TOPIC_ID,
                             TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                             TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-                       .values(tenant, e.getKey(), topicIds.get(specIndex), "manual", collection)
+                       .values(tenant, docIdBytes(e.getKey()), topicIds.get(specIndex), "manual", collection)
                        .onConflict(
                            TOPIC_ASSIGNMENTS.TENANT_ID,
                            TOPIC_ASSIGNMENTS.DOC_ID,
@@ -2362,7 +2438,7 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                     TOPIC_ASSIGNMENTS.SOURCE_COLLECTION);
             for (String docId : batch) {
-                insert = insert.values(tenant, docId, topicId, assignedBy, sourceCollection);
+                insert = insert.values(tenant, docIdBytes(docId), topicId, assignedBy, sourceCollection);
             }
             insert.onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                               TOPIC_ASSIGNMENTS.TOPIC_ID)

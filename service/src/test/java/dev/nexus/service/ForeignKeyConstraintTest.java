@@ -264,7 +264,7 @@ class ForeignKeyConstraintTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertTopic(su, TENANT_A, 100L, "test-topic", "col-a");
-            String chash = "7740557a279d0481db33c93fd0342464"; // 32-hex chunk chash, not a tumbler
+            String chash = hexChash("fk-topicAssignment-chashDocId"); // 64-hex chunk chash, not a tumbler
             su.createStatement().execute(
                 "INSERT INTO nexus.topic_assignments " +
                 "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
@@ -287,7 +287,7 @@ class ForeignKeyConstraintTest {
                 su.createStatement().execute(
                     "INSERT INTO nexus.topic_assignments " +
                     "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
-                    "('" + TENANT_A + "', 'aabbccddeeff00112233445566778899', 999999, 'hdbscan', 'col-a', NOW())")
+                    "('" + TENANT_A + "', '" + hexChash("fk-topicAssignment-topicIdFk") + "', 999999, 'hdbscan', 'col-a', NOW())")
             );
             assertThat(ex.getMessage()).containsIgnoringCase("foreign key");
         }
@@ -301,7 +301,7 @@ class ForeignKeyConstraintTest {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "1.99");
             insertTopic(su, TENANT_A, 199L, "no-cascade-topic", "col-a");
-            String chash = "1199aabbccddeeff00112233445566ab";
+            String chash = hexChash("fk-deleteCatalogDoc-doesNotAffectTopicAssignments");
             su.createStatement().execute(
                 "INSERT INTO nexus.topic_assignments " +
                 "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
@@ -773,14 +773,14 @@ class ForeignKeyConstraintTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.topic_assignments " +
                 "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
-                "('" + TENANT_A + "', 'rls-ta-tumbler', 300, 'hdbscan', 'col-rls', NOW())");
+                "('" + TENANT_A + "', '" + hexChash("rls-ta-tumbler") + "', 300, 'hdbscan', 'col-rls', NOW())");
         }
 
         try (Connection svc = svcDs.getConnection()) {
             svc.createStatement().execute(
                 "SELECT set_config('nexus.tenant', '" + TENANT_B + "', true)");
             ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.topic_assignments WHERE doc_id='rls-ta-tumbler'");
+                "SELECT COUNT(*) FROM nexus.topic_assignments WHERE doc_id='" + hexChash("rls-ta-tumbler") + "'");
             rs.next();
             assertThat(rs.getInt(1))
                 .as("Tenant-B must not see Tenant-A topic_assignments after FK addition")
@@ -844,5 +844,20 @@ class ForeignKeyConstraintTest {
             "INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) " +
             "VALUES (" + id + ", '" + tenantId + "', '" + label + "', '" + collection + "', 0, NOW(), 'pending') " +
             "ON CONFLICT (id) DO NOTHING");
+    }
+
+    /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
+     *  (bytea since nexus-tk070.p3c). The pre-existing inline literals here predate
+     *  RDR-180's full-digest flip and were only 32 hex chars (a legacy half-digest
+     *  shape); topic_assignments.doc_id has no FK to catalog_documents (nexus-sa14p),
+     *  so this is independent of any tumbler value used elsewhere in the same test. */
+    private static String hexChash(String seed) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 }

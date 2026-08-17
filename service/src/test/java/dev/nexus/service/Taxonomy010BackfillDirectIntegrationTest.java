@@ -51,7 +51,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * CHECK in the way), giving the bead's own explicit TDD ask ("seed a fixture
  * with one uniquely-resolvable + one ambiguous + one unresolvable row; assert
  * exactly one survives with the right collection and BOTH delete counts
- * reported") a fixture that can actually hold all three shapes.
+ * reported") a fixture that can actually hold all three shapes. A FOURTH row
+ * was added 2026-08-17 (critical fix round, critic CRITICAL / bead
+ * nexus-i3k3e): a shape-invalid doc_id with a NON-NULL source_collection
+ * already set (the cc4 census's 1,262-row wedge class), proving the fixed
+ * UNRESOLVABLE delete's shape branch is unconditional on source_collection.
  *
  * <p><strong>Re-running a one-shot changeset.</strong>
  * {@code taxonomy-010-1} already executed once (over zero rows) during the
@@ -120,6 +124,30 @@ class Taxonomy010BackfillDirectIntegrationTest {
             // the pre-remediation shape the real migration walk saw.
             su.createStatement().execute(
                 "ALTER TABLE nexus.topic_assignments ALTER COLUMN source_collection DROP NOT NULL");
+            // RDR-194 P3c (nexus-tk070.p3c): startAll()'s full migration now
+            // ALSO runs taxonomy-011-1, converting doc_id to bytea. This test
+            // replays taxonomy-010-1's OWN <sql> text unmodified (extractChangesetSql,
+            // see class javadoc) -- that text was written for a TEXT-typed doc_id
+            // (`ta.doc_id ~ '^[0-9a-f]{64}$'`, `encode(c.chash,'hex') = ta.doc_id`)
+            // and would fail to typecheck against bytea (`~` is not defined for
+            // bytea; the TEXT/bytea equality would not typecheck either). Same
+            // test-only relaxation technique as source_collection above: revert
+            // doc_id to TEXT for the scope of this dedicated, throwaway container
+            // so the changeset's own SQL runs exactly as authored.
+            //
+            // RDR-194 critical fix round (2026-08-17, nexus-i3k3e/Sig-2):
+            // startAll()'s full migration now ALSO runs taxonomy-011-8,
+            // which Liquibase-owns a LIVE nexus.diag_chash_conformance view
+            // depending on doc_id. The ALTER below would now hit the exact
+            // "cannot alter type of a column used by a view or rule" error
+            // taxonomy-011-1's own forward pass exists to dodge -- drop the
+            // view first (same test-only-relaxation shape as the two
+            // statements above; a real migration walk never does this,
+            // taxonomy-011-8 recreates it going forward every boot).
+            su.createStatement().execute(
+                "DROP VIEW IF EXISTS nexus.diag_chash_conformance");
+            su.createStatement().execute(
+                "ALTER TABLE nexus.topic_assignments ALTER COLUMN doc_id TYPE TEXT USING encode(doc_id, 'hex')");
 
             registerCollection(su, TENANT, "code__x");
             registerCollection(su, TENANT, "code__y");
@@ -142,11 +170,34 @@ class Taxonomy010BackfillDirectIntegrationTest {
             String unresolvableChash = "c".repeat(64);
             seedTopicAssignment(su, TENANT, unresolvableChash, topicId);
 
+            // (c) UNRESOLVABLE (shape-invalid, NON-NULL source_collection)
+            // arm — the exact cc4/nexus-i3k3e cloud wedge fixture (critical
+            // fix round, 2026-08-17). This is the cc4 census's 1,262-row
+            // class: a legacy 32-hex (non-canonical-shape) doc_id whose
+            // source_collection was ALREADY set by the pre-P3a
+            // projection/cross-collection writer branch, which persisted
+            // source_collection unconditionally. Before the 2026-08-17 fix,
+            // the UNRESOLVABLE delete's entire predicate (shape check AND
+            // anti-join) was scoped to `source_collection IS NULL`, so this
+            // row's non-NULL source_collection would have made it SURVIVE
+            // this changeset untouched, wedging on taxonomy-011-1's guard
+            // downstream. Post-fix, the shape-invalid branch is
+            // unconditional on source_collection, so this row must be
+            // deleted despite its non-NULL source_collection.
+            String legacyNonNullChash = "d".repeat(32);
+            seedTopicAssignment(su, TENANT, legacyNonNullChash, topicId, "code__x");
+
             assertThat(count(su,
                 "SELECT count(*) FROM nexus.topic_assignments "
                 + "WHERE tenant_id = '" + TENANT + "' AND source_collection IS NULL"))
-                .as("ground truth before re-running taxonomy-010-1's SQL: all three seeded rows NULL")
+                .as("ground truth before re-running taxonomy-010-1's SQL: the three "
+                    + "NULL-source_collection seeded rows (unique/ambiguous/unresolvable) "
+                    + "— the fourth (legacyNonNullChash) is deliberately NOT NULL")
                 .isEqualTo(3);
+            assertThat(count(su,
+                "SELECT count(*) FROM nexus.topic_assignments WHERE tenant_id = '" + TENANT + "'"))
+                .as("ground truth before re-running taxonomy-010-1's SQL: four rows total")
+                .isEqualTo(4);
 
             String sql = extractChangesetSql(CHANGELOG_FILE, CHANGESET_ID);
             List<String> notices;
@@ -168,15 +219,19 @@ class Taxonomy010BackfillDirectIntegrationTest {
                 .as("ambiguous-delete count must be exactly 1")
                 .contains("deleted 1 ambiguous row(s)");
             assertThat(notices.get(2))
-                .as("unresolvable-delete count must be exactly 1")
-                .contains("deleted 1 unresolvable row(s)");
+                .as("unresolvable-delete count must be exactly 2 (RDR-194 critical fix "
+                    + "round, 2026-08-17, nexus-i3k3e) -- the pre-existing canonical-shape "
+                    + "anti-join row (unresolvableChash) PLUS the new shape-invalid "
+                    + "non-NULL-source_collection row (legacyNonNullChash), the cc4 wedge "
+                    + "class -- one DELETE statement, one ROW_COUNT, both rows")
+                .contains("deleted 2 unresolvable row(s)");
 
             // ── Row-state ground truth: exactly the unique-resolution row
             // survives, backfilled with its ONE real collection. ──
             assertThat(count(su,
                 "SELECT count(*) FROM nexus.topic_assignments "
                 + "WHERE tenant_id = '" + TENANT + "'"))
-                .as("exactly one of the three seeded rows survives")
+                .as("exactly one of the four seeded rows survives")
                 .isEqualTo(1);
             assertThat(count(su,
                 "SELECT count(*) FROM nexus.topic_assignments "
@@ -196,12 +251,34 @@ class Taxonomy010BackfillDirectIntegrationTest {
                 .as("the unresolvable row must be gone")
                 .isEqualTo(0);
             assertThat(count(su,
+                "SELECT count(*) FROM nexus.topic_assignments "
+                + "WHERE tenant_id = '" + TENANT + "' AND doc_id = '" + legacyNonNullChash + "'"))
+                .as("RDR-194 critical fix round (nexus-i3k3e): the shape-invalid row must be "
+                    + "gone DESPITE its non-NULL source_collection -- direct proof the "
+                    + "2026-08-17 fix's shape branch is unconditional on source_collection, "
+                    + "not the pre-fix behavior that would have left this row behind")
+                .isEqualTo(0);
+            assertThat(count(su,
                 "SELECT count(*) FROM information_schema.columns "
                 + "WHERE table_schema = 'nexus' AND table_name = 'topic_assignments' "
                 + "AND column_name = 'source_collection' AND is_nullable = 'NO'"))
                 .as("SET NOT NULL must have re-applied cleanly -- only reachable if the DML "
                     + "ahead of it left no NULL row for this tenant behind")
                 .isEqualTo(1);
+            // ── The guard taxonomy-011-1 runs next in the real changelog walk
+            // (this test replays taxonomy-010-1 alone, not the full walk) --
+            // direct proof this tenant's surviving rows would now PASS that
+            // guard's exact predicate, closing the loop on the nexus-i3k3e
+            // wedge: before the fix, this count would have been 1 (the
+            // legacyNonNullChash row survives), which is exactly what would
+            // have RAISE EXCEPTIONed taxonomy-011-1's guard on the cloud walk.
+            assertThat(count(su,
+                "SELECT count(*) FROM nexus.topic_assignments "
+                + "WHERE tenant_id = '" + TENANT + "' AND doc_id !~ '^[0-9a-f]{64}$'"))
+                .as("taxonomy-011-1's own guard predicate must find zero non-canonical "
+                    + "doc_id rows for this tenant after taxonomy-010-1's fixed DELETE -- "
+                    + "the direct nexus-i3k3e wedge-closure proof")
+                .isEqualTo(0);
         }
     }
 
@@ -288,6 +365,29 @@ class Taxonomy010BackfillDirectIntegrationTest {
             ps.setString(1, tenant);
             ps.setString(2, docId);
             ps.setLong(3, topicId);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A {@code nexus.topic_assignments} row with an EXPLICIT, non-NULL
+     * {@code source_collection} (RDR-194 critical fix round, 2026-08-17,
+     * nexus-i3k3e) -- the cc4 census's 1,262-row wedge class: a legacy
+     * non-canonical-shape {@code doc_id} whose {@code source_collection}
+     * was already set by a pre-P3a writer branch, which the ORIGINAL
+     * (pre-fix) NULL-scoped UNRESOLVABLE delete predicate silently skipped.
+     */
+    private static void seedTopicAssignment(
+            Connection c, String tenant, String docId, long topicId, String sourceCollection)
+            throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.topic_assignments "
+            + "(tenant_id, doc_id, topic_id, assigned_by, source_collection) "
+            + "VALUES (?, ?, ?, 'direct-test-seed', ?)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, docId);
+            ps.setLong(3, topicId);
+            ps.setString(4, sourceCollection);
             ps.executeUpdate();
         }
     }

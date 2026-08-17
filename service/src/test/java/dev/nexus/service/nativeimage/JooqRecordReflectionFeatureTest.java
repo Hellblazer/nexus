@@ -118,7 +118,17 @@ class JooqRecordReflectionFeatureTest {
     // DROPPED nexus.remap_membership(text,text) outright — the orphaned
     // GET /v1/remap/membership read surface had zero production callers.
     // RETURNS TABLE, one generated Record type (-1).
-    private static final int EXPECTED_RECORD_TYPES = 61;
+    // 61 -> 62: RDR-194 critical fix round (2026-08-17, critic Sig-2 /
+    // bead nexus-i3k3e's Sig-2 finding, taxonomy-011-8) — nexus.diag_
+    // chash_conformance becomes a Liquibase-OWNED CREATE OR REPLACE VIEW
+    // for the first time (previously created only out-of-band by the
+    // superuser pg_provision path, never visible to a jOOQ codegen run
+    // that boots the schema purely from the changelog). jOOQ generates
+    // one Record type per VIEW just as it does per TABLE, so this
+    // changeset existing at all is +1 (DiagChashConformanceRecord),
+    // regardless of the view's own column set never having changed.
+    // This is the deliberate bump the assertion message demands.
+    private static final int EXPECTED_RECORD_TYPES = 62;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

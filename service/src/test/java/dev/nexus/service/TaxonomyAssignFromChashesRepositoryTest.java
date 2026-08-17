@@ -381,10 +381,11 @@ class TaxonomyAssignFromChashesRepositoryTest {
             "2026-01-01T00:00:00Z", null);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // RDR-194 P3c: doc_id is bytea now -- decode('hex') the bind parameter.
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.topic_assignments"
                     + " (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)"
-                    + " VALUES (?, ?, ?, 'projection', 0.999, now(), ?)")) {
+                    + " VALUES (?, decode(?, 'hex'), ?, 'projection', 0.999, now(), ?)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, c1);
                 ps.setLong(3, tStrong);

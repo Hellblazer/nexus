@@ -334,9 +334,11 @@ class CombinedQueryParityTest {
             "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
             "SELECT '" + TENANT_A + "', 'ex'||g, 0, decode(lpad(g::text, 64, '0'), 'hex'), '" + COLL_EXPLAIN + "' " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        // RDR-194 P3c: topic_assignments.doc_id is bytea now — decode(lpad(...), 'hex').
         su.createStatement().execute(
             "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, source_collection, assigned_at) " +
-            "SELECT '" + TENANT_A + "', lpad(g::text, 64, '0'), " + topicId + ", '" + COLL_EXPLAIN + "', " +
+            "SELECT '" + TENANT_A + "', decode(lpad(g::text, 64, '0'), 'hex'), " + topicId + ", '"
+            + COLL_EXPLAIN + "', " +
             "'2026-01-01T00:00:00+00'::timestamptz FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
     }
 
@@ -941,7 +943,9 @@ class CombinedQueryParityTest {
             "SELECT encode(c.chash, 'hex') AS id " +
             "  FROM " + DimTables.CHUNKS_TABLE_NAME + " c " +
             "  JOIN nexus.topic_assignments ta " +
-            "    ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex') " +
+            // RDR-194 P3c: doc_id is bytea now -- direct equality, no encode(),
+            // matching search_topic_scoped_<dim>'s own post-P3c join predicate.
+            "    ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash " +
             "  JOIN nexus.topics t " +
             "    ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id " +
             " WHERE c.collection = '" + collection + "' " +
@@ -1068,10 +1072,11 @@ class CombinedQueryParityTest {
 
     private static void insertTopicAssignment(Connection su, String tenantId, String docId,
                                               long topicId, String collection) throws Exception {
+        // RDR-194 P3c: topic_assignments.doc_id is bytea now — decode('hex').
         su.createStatement().execute(
             "INSERT INTO nexus.topic_assignments " +
             "  (tenant_id, doc_id, topic_id, source_collection, assigned_at) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + topicId + ", '" + collection + "', " +
+            "VALUES ('" + tenantId + "', decode('" + docId + "', 'hex'), " + topicId + ", '" + collection + "', " +
             "'2026-01-01T00:00:00+00'::timestamptz) " +
             "ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING");
     }

@@ -167,7 +167,7 @@ class CatalogDocumentCascadeTest {
             assertChildCounts(su, TENANT, "hard-doc-1", 0, 0, 0, 0);
             // topic_assignments has NO document-rooted FK (fk-001 changeset 1 = index only) — survives.
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.topic_assignments WHERE tenant_id='" + TENANT
-                + "' AND doc_id='hard-doc-1'"))
+                + "' AND doc_id='" + hexChash("hard-doc-1") + "'"))
                 .as("topic_assignments NOT cascaded by document delete (no doc-rooted FK)").isEqualTo(1);
             // nexus-tk070.p1 (RDR-194 § D2): fk_catalog_links_from_document/_to_document
             // now cascade BOTH links (either endpoint = hard-doc-1) off this same hard delete.
@@ -264,7 +264,10 @@ class CatalogDocumentCascadeTest {
             + "VALUES ('" + tenant + "', '" + COLL + "', '/p/q-" + tenant + "-" + tumbler + ".md', 'pending', NOW(), '" + tumbler + "')");
     }
 
-    /** Seed a topic + a topic_assignment keyed to {@code docId} for {@code tenant}. */
+    /** Seed a topic + a topic_assignment keyed to {@code docId} for {@code tenant}. doc_id is
+     *  bytea now (nexus-tk070.p3c) — {@code docId} is hashed via {@link #hexChash} to a genuine
+     *  64-hex chash, independent of the catalog tumbler string (topic_assignments.doc_id has
+     *  no FK to catalog_documents — see the class javadoc / nexus-sa14p). */
     private static void seedTopicAssignment(Connection su, String tenant, String docId) throws Exception {
         var st = su.createStatement();
         st.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '" + COLL + "') "
@@ -274,7 +277,7 @@ class CatalogDocumentCascadeTest {
         st.execute("INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) "
             + "VALUES (" + topicId + ", '" + tenant + "', 'topic-dc', '" + COLL + "', 0, NOW(), 'pending')");
         st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', '" + docId + "', " + topicId + ", 'projection', '" + COLL + "', NOW())");
+            + "VALUES ('" + tenant + "', '" + hexChash(docId) + "', " + topicId + ", 'projection', '" + COLL + "', NOW())");
     }
 
     /** Seed one catalog_links row directly (raw SQL, bypassing the repository's
@@ -293,6 +296,19 @@ class CatalogDocumentCascadeTest {
 
     private static String chash(String seed) {
         return (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
+    }
+
+    /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
+     *  (bytea since nexus-tk070.p3c), unlike {@link #chash} above which is a 32-char
+     *  synthetic id used only for the chunks/manifest {@code chash} column. */
+    private static String hexChash(String seed) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private static int rows(Connection su, String sql) throws Exception {

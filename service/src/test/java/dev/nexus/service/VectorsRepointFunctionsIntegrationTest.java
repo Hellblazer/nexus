@@ -252,10 +252,18 @@ class VectorsRepointFunctionsIntegrationTest {
             }
 
             try (Statement st = su.createStatement()) {
+                // RDR-194 P3c (nexus-tk070.p3c): doc_id is bytea now -- decode('hex')
+                // explicitly. A bare '<hex-string>' literal against a bytea column is
+                // NOT a type error (Postgres accepts it as legacy "escape format"
+                // input, silently reinterpreting the hex characters as their own raw
+                // ASCII bytes), so this would have silently written garbage bytes and
+                // made every search_topic_scoped_<dim> assertion below fail to find
+                // the seeded row for the wrong reason.
                 st.execute(
                     "INSERT INTO nexus.topic_assignments "
                         + "(tenant_id, doc_id, topic_id, assigned_by, source_collection) "
-                        + "SELECT '" + TENANT + "', '" + chashHex + "', t.id, 'centroid', '" + collection + "' "
+                        + "SELECT '" + TENANT + "', decode('" + chashHex + "', 'hex'), t.id, 'centroid', '"
+                        + collection + "' "
                         + "FROM nexus.topics t WHERE t.tenant_id = '" + TENANT + "' AND t.label = 'alpha'");
             }
 

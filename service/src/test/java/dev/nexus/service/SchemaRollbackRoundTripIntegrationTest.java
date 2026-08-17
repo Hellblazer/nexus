@@ -197,12 +197,18 @@ class SchemaRollbackRoundTripIntegrationTest {
 
 
     /**
-     * The nine {@code runAlways} changesets, in master order (nexus-8yz1p
-     * added {@code grants-nexus-diag-3} — a THIRD, era-independent nexus_diag
-     * changeset for staging-schema SELECT, deliberately its own changeset
-     * rather than folded into grants-nexus-diag-1's era-gated body; see that
-     * changeset's own comment. Formerly eight after RDR-191 Phase 4 unify
-     * added {@code grants-005-chunks-unify-maintain}, formerly seven after
+     * The TEN {@code runAlways} changesets, in master order (RDR-194
+     * critical fix round, 2026-08-17, added {@code taxonomy-011-8} —
+     * Liquibase-owned {@code nexus.diag_chash_conformance} view creation +
+     * conditional nexus_diag grant, self-healing every boot exactly like
+     * the grants-nexus-diag changesets; see that changeset's own comment
+     * in {@code taxonomy-011-doc-id-bytea.xml}. Formerly nine after
+     * nexus-8yz1p added {@code grants-nexus-diag-3} — a THIRD,
+     * era-independent nexus_diag changeset for staging-schema SELECT,
+     * deliberately its own changeset rather than folded into
+     * grants-nexus-diag-1's era-gated body; see that changeset's own
+     * comment. Formerly eight after RDR-191 Phase 4 unify added
+     * {@code grants-005-chunks-unify-maintain}, formerly seven after
      * nexus-hzhgl added {@code grants-004-monitor-wal-visibility}, formerly
      * six after nexus-0ys55 added {@code grants-003-purge-vacuum-maintain},
      * formerly five). Their identity is asserted (not merely their count) so
@@ -212,6 +218,7 @@ class SchemaRollbackRoundTripIntegrationTest {
      */
     private static final List<String> RUN_ALWAYS_IDS = List.of(
         "staging-4-svc-grants",
+        "taxonomy-011-8",
         "grants-nexus-svc-1",
         "grants-002-changelog-read",
         "grants-003-purge-vacuum-maintain",
@@ -313,26 +320,44 @@ class SchemaRollbackRoundTripIntegrationTest {
     }
 
     /**
-     * The nexus_diag ERA TRANSITION, executed for the first time: legacy grants
-     * → the superuser provisioning path creates
-     * {@code nexus.diag_chash_conformance} → the view-era REVOKE fires. Two
-     * properties are asserted together because they share one cause.
+     * The nexus_diag ERA TRANSITION. Two properties, asserted together
+     * because they share one cause.
      *
-     * <p><strong>The boundary (RDR-182 s5).</strong> {@code grants-nexus-diag-2}
-     * is what turns the diagnostic role's content boundary from a product-level
-     * lint into a DB-enforced one, by revoking the direct table SELECT that
-     * {@code grants-nexus-diag-1} granted in the legacy era. Nothing had ever
-     * executed that transition. It is also precisely what a {@code runOnChange}
-     * "fix" for nexus-ixsxa would have silently forfeited:
-     * {@code ShouldRunChangeSetFilter} rejects an already-ran
-     * {@code runOnChange} changeset outright, so the era would never be
-     * re-evaluated and the revoke would never fire.
+     * <p><strong>REVISED 2026-08-17 (RDR-194 critical fix round, critic
+     * Sig-2 / bead nexus-i3k3e's Sig-2 finding, taxonomy-011-8).</strong>
+     * The "legacy era" this test originally exercised naturally (view
+     * absent when {@code grants-nexus-diag-1} first ran, until a SEPARATE
+     * superuser step created the view) is now STRUCTURALLY UNREACHABLE from
+     * ANY fresh {@code migrate()} call: {@code taxonomy-011-8}, placed
+     * BEFORE {@code grants-nexus-diag.xml} in the master changelog,
+     * self-heals {@code nexus.diag_chash_conformance} into existence on
+     * EVERY walk (creating it if absent, tolerating a foreign owner if
+     * already present) — so by the time {@code grants-nexus-diag-1}'s own
+     * era guard runs, the view has ALWAYS already been (re)created in the
+     * SAME walk, on EVERY cluster, fresh or upgrading. This is the intended
+     * effect of closing nexus-i3k3e's Sig-2 gap, not a regression: nothing
+     * exercises legacy grants "for real" anymore. Two things are now
+     * asserted instead of the old two-phase narrative:
+     * <ol>
+     *   <li>The NEW invariant — a single fresh {@code migrate()} lands
+     *       DIRECTLY in view era (no base-table grants ever fire), proven
+     *       below.</li>
+     *   <li>{@code grants-nexus-diag-1}'s LEGACY BRANCH's own SQL LOGIC is
+     *       still correct, even though it is now practically unreachable
+     *       via a live walk — proven by extracting and directly replaying
+     *       its {@code <sql>} text (the same technique
+     *       {@link Taxonomy010BackfillDirectIntegrationTest} uses for its
+     *       own structurally-unreachable-via-rehearsal arm) against a
+     *       connection where the view has been dropped out-of-band. This
+     *       is DEFENSE IN DEPTH, not a claim that a real cluster can reach
+     *       this state: a real cluster's next boot re-heals the view via
+     *       {@code taxonomy-011-8} before {@code grants-nexus-diag-1} ever
+     *       sees it absent again.</li>
+     * </ol>
      *
-     * <p><strong>The row invariant (nexus-ixsxa).</strong> The view era is the
-     * arm nobody had measured — the bead recorded it as safe because
-     * {@code grants-nexus-diag-2}'s precondition passes there. It does, and
-     * {@code grants-nexus-diag-1}'s, being the exclusive complement on the same
-     * probe, then fails: that era accumulated too, just under a different id.
+     * <p><strong>The row invariant (nexus-ixsxa), unchanged.</strong> A
+     * reboot must re-stamp the {@code runAlways} rows in place, not grow
+     * the changelog.
      */
     @Test
     void eraTransitionRevokesTableSelectWithoutGrowingTheChangelog() throws Exception {
@@ -348,37 +373,26 @@ class SchemaRollbackRoundTripIntegrationTest {
                         + "NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS");
             }
             try (HikariDataSource ds = newAdminPool(pg, "nexus-admin-era-transition")) {
-                // ── LEGACY era: no counts view, so diag-1 grants table SELECT.
-                SchemaMigrator.migrate(ds);
-                try (Connection c = ds.getConnection()) {
-                    assertThat(diagBaseTableGrants(c))
-                        .as("legacy era: grants-nexus-diag-1 must grant nexus_diag direct table "
-                            + "SELECT — without this the revoke asserted below would pass "
-                            + "vacuously against a role that never had the grant")
-                        .isNotEmpty();
-                }
-
-                // ── The provisioning path creates the view. SUPERUSER-owned on
-                // purpose: under FORCE RLS a counts view sees every tenant's
-                // rows only when its owner is RLS-exempt, and diag-2's revoke
-                // loop is owner-restricted precisely so it never touches this
-                // foreign-owned relation (nexus-46yy3, a live-reproduced P0).
-                try (Connection su = pg.createConnection("")) {
-                    su.createStatement().execute(
-                        "CREATE VIEW nexus.diag_chash_conformance AS "
-                            + "SELECT 'stub'::text AS table_name, 0::bigint AS non_conformant");
-                    su.createStatement().execute(
-                        "GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag");
-                }
-
-                // ── VIEW era: diag-2 fires, diag-1 stands down.
+                // ── A single fresh migrate() now lands DIRECTLY in view
+                // era: taxonomy-011-8 (earlier in the master changelog)
+                // self-heals the view into existence before diag-1 ever
+                // runs in this SAME walk, so diag-1's legacy branch never
+                // fires on a fresh cluster (2026-08-17 fix; see javadoc).
                 int viewEraRows;
                 SchemaMigrator.migrate(ds);
                 try (Connection c = ds.getConnection()) {
+                    assertThat(count(c,
+                        "SELECT count(*) FROM pg_class cl JOIN pg_namespace n "
+                        + "ON n.oid = cl.relnamespace WHERE n.nspname = 'nexus' "
+                        + "AND cl.relname = 'diag_chash_conformance'"))
+                        .as("taxonomy-011-8 must have created the view in this SAME "
+                            + "fresh walk, before grants-nexus-diag-1 ever ran")
+                        .isEqualTo(1);
                     assertThat(diagBaseTableGrants(c))
-                        .as("view era: grants-nexus-diag-2 must revoke every direct BASE TABLE "
-                            + "SELECT, leaving the counts view as nexus_diag's only content "
-                            + "path — the RDR-182 s5 boundary becoming structural")
+                        .as("a FRESH cluster must land DIRECTLY in view era — "
+                            + "grants-nexus-diag-1's legacy branch must NOT have fired, "
+                            + "since the view already existed (created by taxonomy-011-8 "
+                            + "earlier in this SAME walk) by the time diag-1 ran")
                         .isEmpty();
                     viewEraRows = changelogRowCount(c);
                 }
@@ -386,18 +400,82 @@ class SchemaRollbackRoundTripIntegrationTest {
                 SchemaMigrator.migrate(ds);
                 try (Connection c = ds.getConnection()) {
                     assertThat(duplicateChangelogRows(c))
-                        .as("view era: grants-nexus-diag-1 is the exclusive complement of "
-                            + "grants-nexus-diag-2 on the same probe, so as a MARK_RAN "
-                            + "precondition it appended a row here on every boot (nexus-ixsxa)")
+                        .as("a reboot must not grow the changelog with duplicate "
+                            + "runAlways rows (nexus-ixsxa)")
                         .isEmpty();
                     assertThat(changelogRowCount(c))
-                        .as("view era: a reboot must re-stamp the runAlways rows in place")
+                        .as("a reboot must re-stamp the runAlways rows in place")
                         .isEqualTo(viewEraRows);
+                    assertThat(diagBaseTableGrants(c))
+                        .as("view era holds across a reboot too — still no base-table "
+                            + "grants")
+                        .isEmpty();
                 }
+            }
+
+            // ── DEFENSE IN DEPTH (see javadoc): grants-nexus-diag-1's
+            // legacy branch is now practically unreachable via a live walk,
+            // but its OWN SQL logic must still be correct for the day it
+            // matters again (a cluster whose changelog predates
+            // taxonomy-011-8, upgrading through this exact changeset).
+            // Direct-replay proof, bypassing Liquibase's own ordering
+            // entirely — mirrors Taxonomy010BackfillDirectIntegrationTest's
+            // extractChangesetSql technique.
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute("DROP VIEW nexus.diag_chash_conformance");
+                String sql = extractChangesetSql(
+                    "db/changelog/grants-nexus-diag.xml", "grants-nexus-diag-1");
+                su.createStatement().execute(sql);
+                assertThat(diagBaseTableGrants(su))
+                    .as("grants-nexus-diag-1's own legacy-branch SQL, replayed directly "
+                        + "against a connection where the view genuinely does not exist, "
+                        + "must still grant nexus_diag direct table SELECT — the branch's "
+                        + "logic itself is unbroken even though a live walk can no longer "
+                        + "reach it")
+                    .isNotEmpty();
             }
         } finally {
             pg.stop();
         }
+    }
+
+    /**
+     * Read the direct {@code <sql>} children of {@code <changeSet id="changesetId">}
+     * out of {@code changelogFile} (classpath resource), concatenated in document
+     * order. Same technique as
+     * {@code Taxonomy010BackfillDirectIntegrationTest#extractChangesetSql}
+     * (duplicated locally rather than shared — no common test-utility class
+     * exists for this yet).
+     */
+    private static String extractChangesetSql(String changelogFile, String changesetId) throws Exception {
+        org.w3c.dom.Document doc;
+        try (var in = SchemaRollbackRoundTripIntegrationTest.class.getClassLoader()
+                .getResourceAsStream(changelogFile)) {
+            if (in == null) {
+                throw new IllegalStateException("changelog not found on classpath: " + changelogFile);
+            }
+            var factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
+            factory.setNamespaceAware(true);
+            doc = factory.newDocumentBuilder().parse(in);
+        }
+        org.w3c.dom.NodeList changeSets = doc.getElementsByTagNameNS(
+            "http://www.liquibase.org/xml/ns/dbchangelog", "changeSet");
+        for (int i = 0; i < changeSets.getLength(); i++) {
+            org.w3c.dom.Element cs = (org.w3c.dom.Element) changeSets.item(i);
+            if (changesetId.equals(cs.getAttribute("id"))) {
+                StringBuilder sb = new StringBuilder();
+                org.w3c.dom.NodeList children = cs.getChildNodes();
+                for (int j = 0; j < children.getLength(); j++) {
+                    org.w3c.dom.Node n = children.item(j);
+                    if (n.getNodeType() == org.w3c.dom.Node.ELEMENT_NODE && "sql".equals(n.getLocalName())) {
+                        sb.append(n.getTextContent()).append('\n');
+                    }
+                }
+                return sb.toString();
+            }
+        }
+        throw new IllegalStateException("changeset not found: " + changesetId + " in " + changelogFile);
     }
 
     /**
@@ -1763,6 +1841,13 @@ class SchemaRollbackRoundTripIntegrationTest {
             }
         }
         return out;
+    }
+
+    private static int count(Connection c, String sql) throws Exception {
+        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            rs.next();
+            return rs.getInt(1);
+        }
     }
 
     /** The last {@code n} changeset ids by execution order (newest first). */

@@ -404,11 +404,14 @@ class CollectionRegistryFkTest {
             insertTopic(su, TENANT_A, 8001L, "casc-topic", "casc__topic_home");
             // Fixture: registered collection 'casc__old'
             insertCollection(su, TENANT_A, "casc__old");
-            // Fixture: topic_assignment with source_collection='casc__old'
+            // Fixture: topic_assignment with source_collection='casc__old'. doc_id is
+            // bytea now (nexus-tk070.p3c) -- a genuine 64-hex chash, independent of the
+            // catalog_documents tumbler seeded above (topic_assignments.doc_id has no FK
+            // to catalog_documents).
             su.createStatement().execute(
                 "INSERT INTO nexus.topic_assignments " +
                 "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
-                "('" + TENANT_A + "', 'casc-doc-1', 8001, 'hdbscan', 'casc__old', NOW())");
+                "('" + TENANT_A + "', '" + hexChash("casc-doc-1") + "', 8001, 'hdbscan', 'casc__old', NOW())");
 
             // Rename collection: 'casc__old' -> 'casc__new'
             su.createStatement().execute(
@@ -419,7 +422,7 @@ class CollectionRegistryFkTest {
             // Assert: topic_assignments.source_collection must now be 'casc__new'
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT source_collection FROM nexus.topic_assignments " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='casc-doc-1' AND topic_id=8001");
+                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='" + hexChash("casc-doc-1") + "' AND topic_id=8001");
             assertThat(rs.next()).as("topic_assignment row must still exist after rename").isTrue();
             assertThat(rs.getString("source_collection"))
                 .as("ON UPDATE CASCADE must propagate collection rename to topic_assignments.source_collection")
@@ -450,7 +453,7 @@ class CollectionRegistryFkTest {
                 su.createStatement().execute(
                     "INSERT INTO nexus.topic_assignments " +
                     "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
-                    "('" + TENANT_A + "', 'null-src-doc', 8002, 'hdbscan', NOW())")
+                    "('" + TENANT_A + "', '" + hexChash("null-src-doc") + "', 8002, 'hdbscan', NOW())")
             );
             assertThat(ex.getMessage())
                 .as("source_collection must reject NULL post-P3b -- not-null violation, "
@@ -475,7 +478,7 @@ class CollectionRegistryFkTest {
                 su.createStatement().execute(
                     "INSERT INTO nexus.topic_assignments " +
                     "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
-                    "('" + TENANT_A + "', 'unreg-src-doc', 8003, 'hdbscan', 'truly-unreg-src-col', NOW())")
+                    "('" + TENANT_A + "', '" + hexChash("unreg-src-doc") + "', 8003, 'hdbscan', 'truly-unreg-src-col', NOW())")
             );
             assertThat(ex.getMessage())
                 .as("topic_assignments_collection_fk must reject non-null source_collection not in catalog_collections")
@@ -1291,7 +1294,7 @@ class CollectionRegistryFkTest {
             assertReconcileLoadBearing(su, "topic_assignments", FK_TOPIC_ASSIGN, "source_collection",
                 "ON UPDATE CASCADE ON DELETE RESTRICT", T, COL,
                 "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) " +
-                "VALUES ('" + T + "', 'p03-ta-doc', 90301, 'hdbscan', '" + COL + "', NOW())",
+                "VALUES ('" + T + "', '" + hexChash("p03-ta-doc") + "', 90301, 'hdbscan', '" + COL + "', NOW())",
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
                 "SELECT DISTINCT tenant_id, source_collection FROM nexus.topic_assignments " +
                 "WHERE source_collection IS NOT NULL AND source_collection != '' ON CONFLICT (tenant_id, name) DO NOTHING");
@@ -1427,6 +1430,19 @@ class CollectionRegistryFkTest {
         // Pad seed bytes to exactly 32 hex chars by repeating and truncating
         String hex = (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
         return hex;
+    }
+
+    /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
+     *  (bytea since nexus-tk070.p3c), unlike {@link #validChash} above which is only
+     *  32 hex chars (used for the chunks.chash column, a different width). */
+    private static String hexChash(String seed) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     /**

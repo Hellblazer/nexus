@@ -899,6 +899,14 @@ public final class StagingPromoteOps {
             Field<String> staDocId = DSL.field(DSL.name("s", "doc_id"), String.class);
             Field<String> staTopicLabel = DSL.field(DSL.name("s", "topic_label"), String.class);
             Field<String> staTopicCollection = DSL.field(DSL.name("s", "topic_collection"), String.class);
+            // RDR-194 P3c (nexus-tk070.p3c): nexus.topic_assignments.doc_id is
+            // bytea now -- decode staDocId at the boundary, mirroring the
+            // sChashDecoded idiom above (:641). Safe because the non-conformant
+            // reject guard immediately below AND the INSERT ... SELECT's own
+            // `staDocId.likeRegex('^[0-9a-f]{64}$')` WHERE clause already
+            // restrict every row this decode ever runs against to canonical
+            // 64-hex -- never a bare decode over an unguarded value (D0.9).
+            Field<byte[]> staDocIdDecoded = DSL.function("decode", byte[].class, staDocId, DSL.val("hex"));
             // NON-CONFORMANT REJECT (RDR-194 D0.9, nexus-tk070.p3a, tightened
             // nexus-lgdel.l1): a staged doc_id that is not already a
             // conformant 64-hex chash is arbitrary text this column can no
@@ -936,7 +944,7 @@ public final class StagingPromoteOps {
                     TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
                 .select(ctx.selectDistinct(
-                        currentTenantSetting(), staDocId, TOPICS.ID, staTopicCollection)
+                        currentTenantSetting(), staDocIdDecoded, TOPICS.ID, staTopicCollection)
                     .from(sta)
                     .join(TOPICS).on(TOPICS.LABEL.eq(staTopicLabel)
                         .and(TOPICS.COLLECTION.eq(staTopicCollection)))

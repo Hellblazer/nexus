@@ -33,6 +33,54 @@
     approximately 5,896 (plus any genuinely ambiguous rows from the
     conformant 64-hex population).
 
+    CRITICAL FIX (2026-08-17, critical fix round, critic CRITICAL / bead
+    nexus-i3k3e): the disposition paragraph above was WRONG about "P3b's
+    original design already handles the population cc4 found." cc4's own
+    per-row breakdown (same T2 entry) shows only 4,634 of the 5,896 legacy
+    32-hex rows have `source_collection IS NULL`; the remaining 1,262
+    already carry a non-NULL `source_collection` (the pre-P3a
+    projection/cross-collection writer branch always persisted
+    `source_collection`, even for a non-canonical `doc_id`). The
+    UNRESOLVABLE arm's original predicate scoped its ENTIRE OR-clause
+    (shape check AND anti-join) to `source_collection IS NULL`, so those
+    1,262 rows were never touched by this changeset, surviving into
+    `taxonomy-011-1`'s guard where they deterministically `RAISE
+    EXCEPTION` with a remedy ("re-run taxonomy-010-1") that changes
+    nothing for a row this changeset already ran over and skipped — a
+    real cloud wedge, not a hypothetical, caught before it shipped. Fixed
+    below: the shape-invalid branch of the UNRESOLVABLE delete is now
+    UNCONDITIONAL on `source_collection`, matching Hal's own no-wedge
+    wording verbatim ("a non-canonical doc_id row is unrecomputable
+    garbage REGARDLESS of its source_collection") rather than the
+    NULL-scoped reading this changeset originally implemented. See the
+    UNRESOLVABLE bullet below and the DELETE's own inline comment for the
+    corrected predicate and the reasoning for what stays NULL-scoped.
+
+    WHY EDITING THIS ALREADY-COMMITTED CHANGESET IN PLACE IS LEGITIMATE
+    (D0.2 exception, recorded per the coordinator's explicit instruction):
+    `taxonomy-010-1` is committed on `develop` (`6c3917769`), which
+    normally means D0.2 forbids editing its body (only CREATE OR REPLACE
+    layering or a header-prose correction is allowed on an APPLIED
+    changeset). But D0.2 exists to protect changesets that have ALREADY
+    RUN against a REAL install — editing the body of a changeset some
+    user's database has already executed would desync that database's
+    checksum/state from a re-derivation of the same id. `taxonomy-010-1`
+    has never been in that position: no `engine-service` tag has ever
+    shipped it (the floor at the time of this fix predates P3b entirely),
+    so it has only ever executed against EPHEMERAL rehearsal/test
+    containers that are torn down at the end of each run, never a real
+    install's persistent database. There is no real checksum to desync
+    and no real state to strand. Editing the body here is therefore the
+    correct fix — NOT a new changeset layered on top (which would still
+    leave the original, wrong DELETE as the FIRST thing any install ever
+    executes) and NOT a separate pre-`taxonomy-011` cleanup changeset
+    (which would run the correct logic a second time, redundantly, for
+    every install going forward, for a bug that never actually shipped).
+    This exception does not generalize: the moment ANY `engine-service`
+    tag carries this changeset, this same edit would require the
+    CREATE-OR-REPLACE-layering or new-changeset treatment D0.2 normally
+    mandates.
+
     NO-WEDGE DISCIPLINE (Hal directive 2026-08-16, binding, bead notes):
     every DELETE below is SHAPE-AGNOSTIC — it never assumes a particular
     doc_id shape and never fails the walk on an unexpected one. The backfill
@@ -49,7 +97,12 @@
     by an explicit, human-legible predicate as well as the anti-join — the
     two conditions are logically overlapping (a non-conformant doc_id can
     never match any chunk) but both are asserted so the shape rule is visible
-    on its own, not merely an emergent property of the anti-join. SET NOT
+    on its own, not merely an emergent property of the anti-join. CORRECTED
+    2026-08-17 (see "CRITICAL FIX" above): the shape predicate is now a
+    TOP-LEVEL OR branch, unconditional on `source_collection`, not nested
+    inside the `source_collection IS NULL` scoping the anti-join branch
+    keeps — a non-conformant `doc_id` is deleted no matter what its
+    `source_collection` already holds. SET NOT
     NULL is a plain constraint promotion (a catalog-level scan, not RLS-gated
     DML), so it cannot raise once the three DML steps ahead of it have run:
     no residual-guard branch is added that could RAISE on an unexpected row —
@@ -74,11 +127,16 @@
           present under MORE THAN ONE distinct collection for the tenant — it
           cannot be attributed after the fact (self-join semi-join against
           `nexus.chunks`, never a count comparison).
-        - UNRESOLVABLE: `source_collection IS NULL` and the doc_id is either
-          shape-non-conformant OR has no matching `nexus.chunks` row at all —
-          the anti-join/shape-predicate OR described above. This arm is what
-          absorbs cc4's 5,896 legacy 32-hex rows, and any other non-conformant
-          shape a user install accumulated, unconditionally.
+        - UNRESOLVABLE: the doc_id is shape-non-conformant (checked
+          REGARDLESS of `source_collection` — CORRECTED 2026-08-17, see
+          "CRITICAL FIX" above), OR `source_collection IS NULL` and the
+          doc_id has no matching `nexus.chunks` row at all (anti-join,
+          still NULL-scoped — a shape-valid dangling reference is a
+          different failure mode this changeset does not additionally
+          widen scope to chase). This arm is what absorbs ALL of cc4's
+          5,896 legacy 32-hex rows (4,634 NULL-scoped + 1,262 non-NULL),
+          and any other non-conformant-shape row a user install
+          accumulated, unconditionally.
         Priced as safe (D1's own trade-off, taken deliberately): topic
         assignments are DERIVED data, recomputable by re-running assignment,
         and the writers' own `ON CONFLICT DO NOTHING` makes recomputation
@@ -142,13 +200,19 @@
     <changeSet id="taxonomy-010-1" author="nexus-tk070.p3b">
         <comment>
             (b) Unique-resolution backfill of source_collection; (c) counted
-            DELETE of the ambiguous and unresolvable NULL remainders, both
-            RAISE NOTICE'd; (d) SET NOT NULL. RLS toggle-wrapped around the
+            DELETE of the ambiguous remainder (NULL-scoped) and the
+            unresolvable remainder (shape-invalid branch UNCONDITIONAL on
+            source_collection, anti-join branch NULL-scoped — CORRECTED
+            2026-08-17, critical fix round / bead nexus-i3k3e), both RAISE
+            NOTICE'd; (d) SET NOT NULL. RLS toggle-wrapped around the
             three DML statements (nexus.topic_assignments and nexus.chunks
             both carry FORCE ROW LEVEL SECURITY); SET NOT NULL runs after RLS
             is restored, needing no toggle of its own. See this file's header
             for the full D1 remediation trace, the shape-agnostic no-wedge
-            discipline, and the cc4 disposition.
+            discipline, the cc4 disposition, and the CRITICAL FIX paragraph
+            explaining both the correction and why editing this
+            already-committed-but-never-deployed changeset in place is
+            legitimate.
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.topic_assignments NO FORCE ROW LEVEL SECURITY;
@@ -216,26 +280,57 @@ BEGIN
     RAISE NOTICE 'RDR-194 P3b source_collection backfill (nexus-tk070.p3b): deleted % ambiguous row(s) (doc_id chash present under more than one collection)', v_ambiguous_count;
 
     -- (c) Counted DELETE of the UNRESOLVABLE remainder: shape-agnostic by
-    -- construction (HAL directive 2026-08-16). Either doc_id is not the
-    -- canonical 64-hex shape (the legacy-001-1/legacy-001-2 idiom) OR no
-    -- nexus.chunks row matches it at all (anti-join). Never decodes, so it
-    -- never raises on ANY doc_id shape a user install accumulated —
-    -- absorbs cc4's 5,896 legacy 32-hex rows (T2
-    -- nexus/rdr194-cc4-census-2026-08-16) unconditionally, along with
-    -- every other unresolvable shape.
+    -- construction (HAL directive 2026-08-16). CORRECTED 2026-08-17
+    -- (critical fix round, critic CRITICAL / bead nexus-i3k3e): the
+    -- SHAPE-INVALID branch below is UNCONDITIONAL on source_collection —
+    -- it is NOT scoped by `ta.source_collection IS NULL` — because Hal's
+    -- own no-wedge directive is unambiguous on this point: "a
+    -- non-canonical doc_id row is unrecomputable garbage REGARDLESS of
+    -- its source_collection." The original version of this DELETE scoped
+    -- BOTH the shape check and the anti-join to `source_collection IS
+    -- NULL`, which the cc4 census (T2 nexus/rdr194-cc4-census-2026-08-16)
+    -- proved wrong on real cloud data: of cc4's 5,896 legacy 32-hex rows,
+    -- only 4,634 have source_collection IS NULL — the remaining 1,262
+    -- ALREADY carry a non-NULL source_collection (set by the pre-P3a
+    -- projection/cross-collection writer branch, which always persisted
+    -- source_collection even for a non-canonical doc_id) and were
+    -- silently skipped by the NULL-scoped predicate, surviving
+    -- unremediated into taxonomy-011-1's guard where they deterministically
+    -- RAISE EXCEPTION with a remedy ("re-run taxonomy-010-1") that changes
+    -- nothing for them — a genuine wedge, not a hypothetical.
+    --
+    -- The ANTI-JOIN branch (a canonical-64-hex doc_id with no backing
+    -- nexus.chunks row) stays NULL-scoped, deliberately NOT widened: a
+    -- shape-VALID doc_id with a missing chunk match is a DIFFERENT failure
+    -- mode (a dangling reference, not a malformed identifier) that
+    -- taxonomy-011-1's guard does not even check (the guard is a pure
+    -- regex shape test) — widening it would delete rows this phase has
+    -- no wedge-risk reason to touch, silent scope creep beyond the fix
+    -- this round exists to make. Likewise the AMBIGUOUS delete arm above
+    -- and the (b) backfill arm stay NULL-scoped as originally designed —
+    -- neither can ever match a shape-invalid doc_id in the first place (a
+    -- 32-hex value cannot text-equal any encode(chash,'hex') of a 32-byte
+    -- chash, which is always exactly 64 hex characters), so widening
+    -- either would be a no-op for THIS bug and is not attempted.
+    --
+    -- Never decodes, so it never raises on ANY doc_id shape a user install
+    -- accumulated — absorbs ALL of cc4's 5,896 legacy 32-hex rows (T2
+    -- nexus/rdr194-cc4-census-2026-08-16), 4,634 NULL-scoped plus 1,262
+    -- non-NULL, unconditionally, along with every other unresolvable
+    -- shape.
     DELETE FROM nexus.topic_assignments ta
-    WHERE ta.source_collection IS NULL
-      AND (
-          ta.doc_id !~ '^[0-9a-f]{64}$'
-          OR NOT EXISTS (
-              SELECT 1
-                FROM nexus.chunks c
-               WHERE c.tenant_id = ta.tenant_id
-                 AND encode(c.chash, 'hex') = ta.doc_id
-          )
-      );
+    WHERE ta.doc_id !~ '^[0-9a-f]{64}$'
+       OR (
+           ta.source_collection IS NULL
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM nexus.chunks c
+                WHERE c.tenant_id = ta.tenant_id
+                  AND encode(c.chash, 'hex') = ta.doc_id
+           )
+       );
     GET DIAGNOSTICS v_unresolvable_count = ROW_COUNT;
-    RAISE NOTICE 'RDR-194 P3b source_collection backfill (nexus-tk070.p3b): deleted % unresolvable row(s) (non-conformant doc_id shape or no matching nexus.chunks row)', v_unresolvable_count;
+    RAISE NOTICE 'RDR-194 P3b source_collection backfill (nexus-tk070.p3b): deleted % unresolvable row(s) (non-conformant doc_id shape, REGARDLESS of source_collection, OR a NULL-source_collection row with no matching nexus.chunks row)', v_unresolvable_count;
 END $$;
 
 ALTER TABLE nexus.chunks FORCE ROW LEVEL SECURITY;

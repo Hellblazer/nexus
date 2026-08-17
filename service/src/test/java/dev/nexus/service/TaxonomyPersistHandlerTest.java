@@ -133,7 +133,7 @@ class TaxonomyPersistHandlerTest {
         String col = "knowledge__hpd";
         var spec = Map.of(
             "label", "topic-a", "doc_count", 2, "terms", "[\"a\"]",
-            "assigned_by", "hdbscan", "doc_ids", List.of("hd-disc-1", "hd-disc-2"));
+            "assigned_by", "hdbscan", "doc_ids", List.of(hexChash("hd-disc-1"), hexChash("hd-disc-2")));
         var body = mapper.writeValueAsString(Map.of("collection", col, "specs", List.of(spec)));
 
         var resp = post("/v1/taxonomy/topics/persist_discovered", body);
@@ -176,20 +176,20 @@ class TaxonomyPersistHandlerTest {
         String col = "knowledge__hrb";
         // Seed an "old" topic via discover.
         var old = Map.of("label", "old", "doc_count", 1, "terms", "[]",
-                         "assigned_by", "hdbscan", "doc_ids", List.of("hd-rb-1"));
+                         "assigned_by", "hdbscan", "doc_ids", List.of(hexChash("hd-rb-1")));
         post("/v1/taxonomy/topics/persist_discovered",
              mapper.writeValueAsString(Map.of("collection", col, "specs", List.of(old))));
 
         var specs = List.of(
             Map.of("label", "new-0", "doc_count", 2, "terms", "[\"x\"]",
                    "review_status", "pending", "assigned_by", "hdbscan",
-                   "doc_ids", List.of("hd-rb-1", "hd-rb-2")),
+                   "doc_ids", List.of(hexChash("hd-rb-1"), hexChash("hd-rb-2"))),
             Map.of("label", "new-1", "doc_count", 0, "terms", "[\"y\"]",
                    "review_status", "pending", "assigned_by", "hdbscan",
                    "doc_ids", List.of()));
         var body = mapper.writeValueAsString(Map.of(
             "collection", col, "specs", specs,
-            "manual_transfers", Map.of("hd-rb-manual", 1)));
+            "manual_transfers", Map.of(hexChash("hd-rb-manual"), 1)));
 
         var resp = post("/v1/taxonomy/topics/persist_rebuild", body);
         assertThat(resp.statusCode()).isEqualTo(200);
@@ -205,7 +205,7 @@ class TaxonomyPersistHandlerTest {
             .containsExactlyInAnyOrder("new-0", "new-1");
         var manual = mapper.convertValue(os.get("manual_assignments"), LIST_T);
         assertThat(manual).hasSize(1);
-        assertThat(manual.get(0).get("doc_id")).isEqualTo("hd-rb-manual");
+        assertThat(manual.get(0).get("doc_id")).isEqualTo(hexChash("hd-rb-manual"));
         assertThat(((Number) manual.get(0).get("topic_id")).longValue()).isEqualTo(secondId);
     }
 
@@ -226,7 +226,7 @@ class TaxonomyPersistHandlerTest {
         String newCol = "knowledge__rn-new";
         var spec = Map.of(
             "label", "rn-topic", "doc_count", 1, "terms", "[\"x\"]",
-            "assigned_by", "hdbscan", "doc_ids", List.of("rn-1"));
+            "assigned_by", "hdbscan", "doc_ids", List.of(hexChash("rn-1")));
         assertThat(post("/v1/taxonomy/topics/persist_discovered",
             mapper.writeValueAsString(Map.of("collection", oldCol, "specs", List.of(spec))))
             .statusCode()).isEqualTo(200);
@@ -268,6 +268,19 @@ class TaxonomyPersistHandlerTest {
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────────
+
+    /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
+     *  (bytea since nexus-tk070.p3c; doc_ids/manual_transfers keys here flow into it
+     *  via TaxonomyRepository.persistDiscoveredTopics/persistRebuildTopics). */
+    private static String hexChash(String seed) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
 
     private HttpResponse<String> get(String path) throws Exception {
         var req = HttpRequest.newBuilder()

@@ -306,10 +306,11 @@ class PgVectorCombinedQueryContractTest {
         // chunk row to land BEFORE the manifest row (previously order-independent).
         insertChunk(su, tenant, dim, collection, chash, tumbler, x, y);
         insertManifest(su, tenant, tumbler, chash, collection);
-        // chunk-level topic membership: topic_assignments.doc_id = chash (nexus-sa14p)
+        // chunk-level topic membership: topic_assignments.doc_id = chash (nexus-sa14p).
+        // RDR-194 P3c: doc_id is bytea now — decode('hex').
         su.createStatement().execute(
             "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', '" + chash + "', " + topicId + ", '" + collection + "', "
+            + "VALUES ('" + tenant + "', decode('" + chash + "', 'hex'), " + topicId + ", '" + collection + "', "
             + "'2026-01-01T00:00:00+00'::timestamptz) ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING");
     }
 

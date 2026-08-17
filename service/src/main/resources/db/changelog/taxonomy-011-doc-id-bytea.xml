@@ -1,0 +1,1219 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-194 Phase P3c (Decision D1, bead nexus-tk070.p3c): `nexus.
+    topic_assignments.doc_id` hex TEXT -> `bytea`. The arc's highest-risk
+    single step (P3 commit 3 of 4) — ALL-OR-NOTHING: `ALTER COLUMN doc_id
+    TYPE bytea USING decode(doc_id,'hex')` cannot partially succeed, and no
+    CASE branch is added to absorb a row it cannot decode (D0.9).
+
+    WHY THIS IS SAFE NOW, NOT BEFORE. P3a (`taxonomy-009-assign-source-
+    collection.xml`) closed every writer and admitting path that could still
+    produce a non-conformant `doc_id`. P3b (`taxonomy-010-source-collection-
+    backfill.xml`) then counted-deleted every remaining `source_collection
+    IS NULL` row whose `doc_id` was not canonical 64-hex OR did not resolve
+    to exactly one `nexus.chunks` row (the `doc_id !~ '^[0-9a-f]{64}$' OR NOT
+    EXISTS(...)` unresolvable arm — shape-agnostic, absorbed cc4's 5,896
+    legacy 32-hex rows unconditionally) and SET `source_collection` NOT
+    NULL. By the time THIS changeset runs, on any install that walked the
+    changelog in order, every surviving row's `doc_id` is guaranteed
+    64-lowercase-hex.
+
+    HAL DIRECTIVE 2026-08-16 (binding, nexus-tk070.p3c bead notes): never
+    wedge a user upgrade on residual garbage. Even though P3b's deletes run
+    one changeset earlier in the SAME forward walk, this changeset still
+    guards the conversion with an explicit precheck (CORRECTED 2026-08-17,
+    critic Sig-1: the mechanism is NOT an inline `CASE WHEN ... THEN
+    decode(...) ELSE NULL END` inside the `USING` clause — it is a
+    SEPARATE `DO $$ ... $$` block, run FIRST in this changeset's own `<sql>`
+    element, that `SELECT count(*)`s every row failing the canonical-64-hex
+    shape and `RAISE EXCEPTION`s by name if any exist; the `ALTER COLUMN
+    doc_id TYPE bytea USING decode(doc_id, 'hex')` that follows, in the
+    changeset's SECOND `<sql>` element, is then a BARE `decode()` call with
+    no CASE guard of its own) rather than a bare `decode(doc_id,'hex')`
+    with no precheck at all, which would raise an opaque Postgres error
+    naming neither the row nor the remedy on a pathological install that
+    skipped P3b's cleanup somehow. This is WEDGE-PROOFING, not tolerance
+    (D0.9): the guard does not let a non-conformant row THROUGH — it still
+    fails the migration (the precheck's `RAISE EXCEPTION` runs inside the
+    same changeset transaction as the ALTER that follows, so a precheck
+    failure rolls back before the ALTER ever executes), just with a named
+    count and a named remedy instead of a bare Postgres decode error. No
+    branch RESOLVES or PRESERVES a legacy shape; every path that finds one
+    still stops the walk — functionally equivalent to an inline CASE guard,
+    just a different mechanism (two statements, not one).
+
+    WHAT SHIPS, EIGHT changesets (`EXPECT_NEW_CHANGESETS=8`, re-pinned to
+    this file as authored — RDR-194 P3c section: "1+6+1", the trailing +1
+    added 2026-08-17 in the critical fix round below, item 8):
+
+      1. taxonomy-011-1: `DROP VIEW IF EXISTS nexus.diag_chash_conformance`
+         (found empirically via the migration-rehearsal gate, RDR-180
+         precedent: rdr180-1-drop-dependent-views dropped the SAME view for
+         the SAME reason — Postgres refuses `ALTER COLUMN TYPE` on a column
+         a view depends on, and this client/superuser-provisioned view,
+         defined in `nexus.db.chash_tables.diag_conformance_view_ddl`, is
+         NOT Liquibase-owned; `pg_provision` recreates it best-effort on the
+         next provision/service-start pass), then the guarded `ALTER COLUMN
+         doc_id TYPE bytea`, plus ANALYZE in the same pass (D0.5 — the PK
+         `(tenant_id, doc_id, topic_id)` and the doc_id-bearing indexes at
+         `taxonomy-001-baseline.xml:126` (PK), `:134` (idx_ta_tenant_doc_id),
+         `:138` (idx_ta_tenant_doc_topic), and
+         `fk-001-catalog-cross-store.xml:111-112`
+         (idx_ta_tenant_doc_id_fk) all rebuild automatically as part of the
+         column rewrite — Postgres handles this; nothing here names them
+         individually). `COMMENT ON COLUMN` records the settled D1 semantics
+         (chunk chash, never a mixed identity space or catalog tumbler)
+         directly on the column, superseding the "tumblers" framing this
+         phase has been correcting since P3a. The view's own generator
+         (`chash_tables.py`) is updated in the SAME commit to emit a
+         bytea-native anti-join for `doc_id` (direct equality, no
+         regex/decode) instead of the TEXT-shaped form it used before —
+         `frecency`/`relevance_log`'s debt legs keep the TEXT form
+         unchanged (see `ChashBearingTable.bytea`'s own docstring).
+      2-4. taxonomy-011-2/3/4: layered `CREATE OR REPLACE FUNCTION` of
+         `nexus.assign_from_chashes_{384,768,1024}` (the writers) on top of
+         the applied `taxonomy-009-{1,2,3}` bodies (D0.2 — taxonomy-009 is
+         the LIVE generation; the original `vectors-005-1{6,7,8}` bodies
+         taxonomy-009 itself superseded are NOT the layering base). Each
+         `nearest` CTE gains one column, `c.chash AS m_chash_bytes`
+         (alongside the existing `encode(c.chash,'hex') AS m_chash`, kept
+         verbatim for the function's own wire contract below); each
+         `persisted` CTE's INSERT selects `n.m_chash_bytes` for `doc_id`
+         instead of `n.m_chash`. Nothing else changes — not the `nearest`
+         CTE's join/filter logic, not the `ON CONFLICT` shape, not the
+         final `RETURN QUERY` projection.
+      5-7. taxonomy-011-5/6/7: layered `CREATE OR REPLACE FUNCTION` of
+         `nexus.search_topic_scoped_{384,768,1024}` (the readers) on top of
+         the applied `vectors-006-3` bodies (D0.2 — vectors-006-3 is the
+         LIVE generation; `catalog-006`/`vectors-005-5` are superseded
+         predecessors, not the layering base). The join predicate
+         `ta.doc_id = encode(c.chash, 'hex')` becomes `ta.doc_id = c.chash`
+         — direct bytea equality, no encode/decode anywhere in the body.
+         Nothing else changes.
+      8. taxonomy-011-8 (ADDED 2026-08-17, critical fix round, critic
+         Sig-2 / bead nexus-i3k3e's Sig-2 finding, coordinated with bead
+         nexus-7shei): Liquibase now OWNS `nexus.diag_chash_conformance`
+         going forward. Changeset 1 above DROPs the view IF it exists (it
+         depends on `doc_id` and blocks the ALTER) and previously claimed
+         `pg_provision` would recreate it "best-effort on the next
+         provision/service-start pass" — a claim `reprovision_diag_view_
+         best_effort()` makes FALSE in general (dead code, zero callers):
+         on ANY install where the view once existed and got dropped
+         (by this changeset or otherwise), nothing brings it back without
+         this fix. (Measured 2026-08-17: conexus's own cloud cluster
+         carries no such view at all today — every view in its `nexus`
+         schema is already migration-role-owned — so this specific gap is
+         not currently live there; the fix closes it as a GENERAL
+         guarantee for any install shape, not a response to an observed
+         cloud incident.) This changeset
+         `CREATE OR REPLACE VIEW`s it from the SAME generator
+         (`nexus.db.chash_tables.diag_conformance_view_ddl()`) the
+         superuser provisioning path uses — now emitting `WITH
+         (security_invoker = true)`, the PG15+ option that evaluates RLS
+         against the INVOKING role rather than the view's OWNER, which is
+         what makes it safe for a NON-superuser owner (Liquibase's
+         `nexus_admin`, NOSUPERUSER NOCREATEROLE, no BYPASSRLS) to create
+         a view that still counts every tenant's rows correctly when
+         queried by `nexus_diag` (BYPASSRLS) — see the generator's own
+         docstring for the full nexus-vounk-to-security_invoker
+         derivation. `runAlways="true"`, mirroring `grants-nexus-diag-3`'s
+         shape exactly: idempotent `CREATE OR REPLACE` self-heals the view
+         every boot regardless of who last dropped it, and a
+         role-existence-guarded `GRANT SELECT` self-heals for a
+         `nexus_diag` role created after this boot. The embedded SQL is a
+         SEPARATE literal copy from the Python generator (a static XML
+         changelog cannot import it) — pinned to match by
+         `tests/test_diag_conformance_view.py::
+         test_liquibase_owned_view_matches_the_generator`. `pg_provision`'s
+         superuser path is NOT deleted (still the only creator below this
+         engine version, and for the fresh-init window nexus-7shei tracks
+         separately — see that function's own updated docstring for the
+         exact boundary between what this changeset fixes and what
+         remains open).
+
+    THE WIRE CONTRACT DOES NOT MOVE (D0.8). The writers' own
+    `RETURNS TABLE(chash text, ...)` and the readers' own
+    `RETURNS TABLE(id text, ...)` are byte-identical to their current
+    signatures — `m_chash` (hex text) is still what `RETURN QUERY` projects;
+    only the topic_assignments.doc_id INSERT target and the search JOIN
+    predicate move to raw bytes. Python is unchanged (D1's own "Python is
+    unchanged" finding); `nx taxonomy assign`'s 64-hex CLI validation
+    (P3a) and `StagingPromoteOps`'s reject guard (P3a) already close the two
+    admitting paths this column ever had.
+
+    PLAN AUDIT FINDING FOLDED IN (2026-08-15 HIGH, bead comment): a plan
+    audit of this bead found SIX live SQL functions binding `doc_id` as hex
+    TEXT with no Liquibase VALIDATE/view dependency to catch a stale binding
+    at boot — they would fail at FIRST CALL, silently, after changeset 1 ran
+    alone. All six are layered here in the SAME file as the ALTER, per that
+    finding.
+
+    JAVA WORK LIST (D0.7: "jOOQ regenerates on every schema change; the
+    regenerated types are the Java work list. Compilation failure is the
+    call-site census."). Deliberately NOT using a jOOQ Converter/forcedType
+    override to keep `TOPIC_ASSIGNMENTS.DOC_ID` typed as `String` post-regen
+    — that would suppress exactly the compiler-driven census D0.7 requires,
+    and would leave the seven `TaxonomyHandler.java` sites (D0.8: explicit
+    hex encode outbound / decode inbound) and TaxonomyRepository's own five
+    compiler-SILENT sites (`Field.in(Collection<?>)` is untyped; a
+    `Map<String,Object>` put type-checks a `byte[]` as `Object`) unfixed and
+    untested, which the bead's acceptance criteria require visited
+    individually. `RemapRepository` (RDR-194 P2, already shipped) is the
+    precedent: native `byte[]`-typed jOOQ fields, explicit
+    `Chash.fromHex(...).toBytes()` / `Chash.fromSha256Bytes(...).toHex()`
+    boundary helpers, never a converter override.
+
+    ROLLBACK ORDERING (read before touching any `<rollback>` block — same
+    hazard `remap-003-new-chash-bytea.xml`'s header derives, scaled to six
+    functions instead of one). Forward order is 1 then 2..7 (the six
+    function bodies require `doc_id` already be bytea for the `LANGUAGE sql`
+    readers to even typecheck at CREATE time — `LANGUAGE sql` bodies are
+    validated against the catalog immediately, unlike deferred `plpgsql`).
+    Liquibase's reverse walk therefore undoes 7,6,5,4,3,2 THEN 1. A literal
+    restoration of any pre-P3c function body at steps 7..2 would attempt to
+    typecheck `ta.doc_id = encode(c.chash,'hex')` (TEXT vs bytea) or insert
+    hex TEXT into a still-bytea `doc_id` column WHILE `doc_id` is still
+    bytea (changeset 1 has not rolled back yet) — the readers would fail
+    outright at CREATE time. So changesets 2 through 7 all carry a
+    DELIBERATELY EMPTY rollback (D0.6, reason inline at each). Changeset 1's
+    rollback, which always runs LAST in a reverse walk regardless of how
+    many of 2..7 rolled back first, does ALL SEVEN reversions together in
+    ONE pass: column back to TEXT via `encode`, ANALYZE, and all six
+    functions restored to their taxonomy-009/vectors-006 pre-P3c bodies
+    verbatim. That ordering is correct whether all seven roll back together
+    in one operation or changeset 1 rolls back alone in a later, separate
+    operation (the column and every function are still bytea/new at that
+    point either way, so the combined restoration is unconditionally safe
+    to run there too).
+
+    CHANGESET 8'S PLACE IN THAT ORDERING (added 2026-08-17, critical fix
+    round). Changeset 8 is the LAST forward changeset in this file, so it
+    is the FIRST to roll back in a reverse walk: 8, then 7..2, then 1.
+    Unlike 2..7, changeset 8's rollback is NOT empty — it
+    `DROP VIEW IF EXISTS nexus.diag_chash_conformance` — because THIS
+    changeset (not `pg_provision`) is now what created the view via
+    Liquibase, so its natural undo is to drop what it created, and doing
+    so FIRST in the reverse walk is exactly what changeset 1's own
+    rollback needs: by the time changeset 1's rollback runs (`ALTER
+    COLUMN doc_id TYPE TEXT`, same "cannot alter type of a column used by
+    a view" hazard as the forward pass), changeset 8's rollback has
+    already dropped the view, so the ALTER succeeds unobstructed. A
+    partial rollback that stops at 8 (e.g. `rollback-count=1`) leaves the
+    view absent and `doc_id` still bytea — a safe, already-documented
+    degrade (view absent = probe falls back to legacy statements), not a
+    correctness gap.
+
+    Placed after `taxonomy-010-source-collection-backfill.xml` (current
+    tail) and before the `grants-nexus-svc.xml` runAlways block, matching
+    the established late-append convention (D0.1; see catalog-031's /
+    telemetry-004's / aspects-003's / plans-002's / taxonomy-008's /
+    catalog-032's / remap-003's / taxonomy-009's / legacy-001's /
+    legacy-002's / taxonomy-010's own `<include>` comments for the identical
+    reasoning).
+
+    Census leg: `ChashCensus` leg C1 (`dangling.topic_assignments`) is NOT
+    retired here — it moves from a hex-regex/decode form
+    (`unresolvableHexCount` against `EITHER_ERA_SHAPE`) to a bytea-native
+    `octet_length` form (`unresolvableBytesCount`), preserving identical
+    detection power, but the leg itself and its "either era" width
+    tolerance formally retire together only at RDR-194 P3d (D0.10), in the
+    same commit as the `doc_id` FK VALIDATE — not before. See
+    `ChashCensus.java`'s own updated javadoc.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: doc_id TEXT -> bytea, guarded decode, ANALYZE ─────── -->
+    <changeSet id="taxonomy-011-1" author="nexus-tk070.p3c">
+        <comment>
+            nexus.topic_assignments.doc_id: TEXT -> bytea. A DO-block
+            precheck (SELECT count(*) + RAISE EXCEPTION, NOT an inline CASE
+            inside the ALTER's USING clause — corrected 2026-08-17, critic
+            Sig-1) runs first and asserts every row is canonical-64-hex
+            (D0.9 wedge-proofing, HAL directive 2026-08-16: never wedge on
+            residual garbage, but never silently admit it either) even
+            though P3b's cleanup already guarantees every surviving row is
+            conformant one changeset earlier in the same walk. Only then
+            does the second sql element run the ALTER with a bare
+            `USING decode(doc_id, 'hex')`. ANALYZE in the same pass (D0.5)
+            — the PK and doc_id indexes rebuild automatically. See this
+            file's header for the full derivation.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.topic_assignments NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_bad_count BIGINT;
+BEGIN
+    -- nexus-1wjmq: this SELECT is DML against a FORCE-RLS table, and this
+    -- DO block executes immediately at migration time (not deferred like a
+    -- function body) -- toggle-wrapped above/below so the count sees every
+    -- tenant's rows rather than silently reporting zero.
+    SELECT count(*) INTO v_bad_count
+      FROM nexus.topic_assignments
+     WHERE doc_id !~ '^[0-9a-f]{64}$';
+    IF v_bad_count > 0 THEN
+        RAISE EXCEPTION 'RDR-194 P3c (nexus-tk070.p3c): % topic_assignments row(s) with a non-canonical doc_id survived to the bytea conversion -- re-run taxonomy-010-1''s backfill/delete DML (its unresolvable arm is shape-agnostic and absorbs exactly this population) before retrying this migration', v_bad_count;
+    END IF;
+END $$;
+
+ALTER TABLE nexus.topic_assignments FORCE ROW LEVEL SECURITY;
+        </sql>
+        <sql splitStatements="false" stripComments="false">
+-- RDR-194 critical fix round 2 (2026-08-17, bead nexus-7ec4i, P0). RDR-180
+-- precedent (rdr180-1-drop-dependent-views): nexus.diag_chash_conformance
+-- (src/nexus/db/pg_provision.py, nexus.db.chash_tables.diag_conformance_
+-- view_ddl) references doc_id as one of its DEBT_CHASH_TABLES legs --
+-- Postgres refuses ALTER COLUMN TYPE on a column a view depends on
+-- ("cannot alter type of a column used by a view or rule") REGARDLESS OF
+-- WHO OWNS THE VIEW -- this is a structural dependency restriction, not a
+-- permissions check (verified empirically: a table-owning, non-view-owning
+-- role hits the identical "cannot alter type" error a plain DROP-then-ALTER
+-- would). GENERAL ownership defense, not a claim about any one deployment's
+-- current state (measured 2026-08-17: conexus's cloud cluster carries NO
+-- such view at all, and every view in schema nexus there is already
+-- migration-role-owned -- the view most likely never existed on cloud, the
+-- provisioning path being table-existence-gated and its heal path dead
+-- code). The edge this defends is a DIFFERENT install shape: an OLDER LOCAL
+-- install where pg_provision's superuser bootstrap DID succeed in creating
+-- the view before this migration ever ran, or a BYO-Postgres DBA install
+-- that followed docs/configuration.md's (superuser-oriented) DDL. This
+-- migration role does not own such a view, so a bare `DROP VIEW IF EXISTS`
+-- would raise `insufficient_privilege` ("must be owner of view") -- IF
+-- EXISTS only suppresses the object-ABSENT error class, never an ownership
+-- error. Unlike taxonomy-011-8's CREATE OR REPLACE / GRANT (which CAN
+-- gracefully skip on a foreign owner, since nothing else in that changeset
+-- depends on the view's existence), a graceful skip here is NOT viable:
+-- if the DROP is merely skipped and the walk proceeds, the very next
+-- statement (the ALTER below) hits the SAME structural block anyway --
+-- proven above, this is not owner-conditional -- aborting this changeset
+-- regardless, just via a generic, unnamed Postgres error instead of a
+-- diagnosable one. So the catch below RAISES, not just NOTICEs: it turns
+-- an opaque failure into a NAMED, actionable one (D0.9 wedge-proofing,
+-- the same philosophy as this changeset's own doc_id shape guard above --
+-- fail loud with a remedy, never silently tolerate or half-apply). The
+-- doc_id TYPE bytea conversion genuinely CANNOT proceed while any view
+-- depends on the column, so this changeset correctly still fails when the
+-- edge fires; the fix is operational (drop the foreign view first), not a
+-- workaround this migration role can perform on its own.
+DO $$
+BEGIN
+    BEGIN
+        DROP VIEW IF EXISTS nexus.diag_chash_conformance;
+    EXCEPTION WHEN insufficient_privilege THEN
+        RAISE EXCEPTION 'RDR-194 P3c (nexus-tk070.p3c, nexus-7ec4i): nexus.diag_chash_conformance exists but this migration role does not own it and cannot drop it. The doc_id TYPE bytea conversion below cannot proceed while ANY view depends on doc_id, regardless of ownership -- PostgreSQL refuses ALTER COLUMN TYPE whenever a dependent view exists. Remedy: the view''s owning role (typically a superuser, e.g. the local bundle''s bootstrap identity, or a BYO-Postgres DBA''s own role) must run DROP VIEW IF EXISTS nexus.diag_chash_conformance, then retry this migration -- taxonomy-011-8, later in this same walk, recreates it owned by this migration role with security_invoker, closing this permanently.';
+    END;
+END
+$$;
+        </sql>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topic_assignments
+    ALTER COLUMN doc_id TYPE bytea USING decode(doc_id, 'hex');
+
+COMMENT ON COLUMN nexus.topic_assignments.doc_id IS
+  'Content address of the assigned chunk (RDR-194 D1) -- a chunk chash, never a mixed identity space and never a catalog doc tumbler (the "tumblers" framing this phase corrected at P3a). 32-byte SHA-256 digest (bytea); 64-lowercase-hex is the wire form (RETURNS TABLE (chash text) contracts unchanged). Composite FK (tenant_id, source_collection, doc_id) REFERENCING nexus.chunks (tenant_id, collection, chash) lands at RDR-194 P3d.';
+
+ANALYZE nexus.topic_assignments;
+        </sql>
+        <rollback>
+            <!-- Runs LAST in a reverse walk (see this file's header,
+                 "ROLLBACK ORDERING"): restores the column AND all six
+                 functions together in one pass, since changesets 2-7's own
+                 rollbacks are deliberately empty. -->
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topic_assignments
+    ALTER COLUMN doc_id TYPE TEXT USING encode(doc_id, 'hex');
+
+COMMENT ON COLUMN nexus.topic_assignments.doc_id IS NULL;
+
+ANALYZE nexus.topic_assignments;
+            </sql>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_384(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_384 &lt;=&gt; ct.embedding_384))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_384 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_384 &lt;=&gt; ct.embedding_384) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_384 &lt;=&gt; ct.embedding_384))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_384 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_384 &lt;=&gt; ct.embedding_384) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_768(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_768 &lt;=&gt; ct.embedding_768))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_768 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_768 &lt;=&gt; ct.embedding_768) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_768 &lt;=&gt; ct.embedding_768))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_768 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_768 &lt;=&gt; ct.embedding_768) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_1024(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                            AS m_chash,
+                   ct.topic_id                                                       AS m_topic_id,
+                   (1 - (c.embedding_1024 &lt;=&gt; ct.embedding_1024))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_1024 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_1024 &lt;=&gt; ct.embedding_1024) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                            AS m_chash,
+                   ct.topic_id                                                       AS m_topic_id,
+                   (1 - (c.embedding_1024 &lt;=&gt; ct.embedding_1024))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_1024 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_1024 &lt;=&gt; ct.embedding_1024) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_384(
+    p_query       vector(384),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 &lt;=&gt; p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex')
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_384 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_384 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_768(
+    p_query       vector(768),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 &lt;=&gt; p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex')
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_768 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_768 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_1024(
+    p_query       vector(1024),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 &lt;=&gt; p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex')
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_1024 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_1024 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changesets 2-4: writers, layered on taxonomy-009's live bodies ── -->
+    <changeSet id="taxonomy-011-2" author="nexus-tk070.p3c">
+        <comment>
+            nexus.assign_from_chashes_384: doc_id INSERT target moves from
+            hex text (n.m_chash) to raw bytes (n.m_chash_bytes, = c.chash
+            directly, no encode/decode). RETURNS TABLE(chash text, ...)
+            wire contract unchanged -- RETURN QUERY still projects n.m_chash
+            (hex). Layered CREATE OR REPLACE over taxonomy-009-1 (the LIVE
+            generation, not vectors-005-16). Rollback deliberately empty
+            (D0.6) -- see this file's header, "ROLLBACK ORDERING".
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_384(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_384 &lt;=&gt; ct.embedding_384))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_384 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_384 &lt;=&gt; ct.embedding_384) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_384 &lt;=&gt; ct.embedding_384))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_384 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_384 &lt;=&gt; ct.embedding_384) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <!-- Deliberately empty (D0.6) — see this file's header,
+                 "ROLLBACK ORDERING". taxonomy-011-1's rollback restores this
+                 function's pre-P3c (taxonomy-009-1) body, always last in a
+                 reverse walk, once the column is TEXT again. -->
+        </rollback>
+    </changeSet>
+
+    <changeSet id="taxonomy-011-3" author="nexus-tk070.p3c">
+        <comment>
+            nexus.assign_from_chashes_768: same fix as taxonomy-011-2,
+            layered over taxonomy-009-2. Rollback deliberately empty (D0.6).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_768(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_768 &lt;=&gt; ct.embedding_768))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_768 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_768 &lt;=&gt; ct.embedding_768) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_768 &lt;=&gt; ct.embedding_768))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_768 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_768 &lt;=&gt; ct.embedding_768) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <!-- Deliberately empty (D0.6) — see taxonomy-011-1's rollback. -->
+        </rollback>
+    </changeSet>
+
+    <changeSet id="taxonomy-011-4" author="nexus-tk070.p3c">
+        <comment>
+            nexus.assign_from_chashes_1024: same fix as taxonomy-011-2,
+            layered over taxonomy-009-3. Rollback deliberately empty (D0.6).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_1024(
+    p_collection       text,
+    p_chashes          text[],
+    p_cross_collection boolean
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        INSERT INTO nexus.catalog_collections (tenant_id, name)
+        VALUES (current_setting('nexus.tenant', true), p_collection)
+        ON CONFLICT (tenant_id, name) DO NOTHING;
+
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                            AS m_chash,
+                   c.chash                                                           AS m_chash_bytes,
+                   ct.topic_id                                                       AS m_topic_id,
+                   (1 - (c.embedding_1024 &lt;=&gt; ct.embedding_1024))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection &lt;&gt; p_collection
+               AND ct.embedding_1024 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_1024 &lt;=&gt; ct.embedding_1024) ASC, ct.collection ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                            AS m_chash,
+                   c.chash                                                           AS m_chash_bytes,
+                   ct.topic_id                                                       AS m_topic_id,
+                   (1 - (c.embedding_1024 &lt;=&gt; ct.embedding_1024))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.collection = p_collection
+               AND ct.embedding_1024 IS NOT NULL
+             WHERE c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_1024 &lt;=&gt; ct.embedding_1024) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <!-- Deliberately empty (D0.6) — see taxonomy-011-1's rollback. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changesets 5-7: readers, layered on vectors-006-3's live bodies ── -->
+    <changeSet id="taxonomy-011-5" author="nexus-tk070.p3c">
+        <comment>
+            nexus.search_topic_scoped_384: join predicate
+            `ta.doc_id = encode(c.chash, 'hex')` becomes
+            `ta.doc_id = c.chash` -- direct bytea equality, no encode/decode
+            anywhere in the body. Layered CREATE OR REPLACE over
+            vectors-006-3 (the LIVE generation). Rollback deliberately empty
+            (D0.6) -- LANGUAGE sql bodies validate immediately; restoring
+            the TEXT-comparison form while doc_id is still bytea would fail
+            to typecheck at CREATE time. See this file's header, "ROLLBACK
+            ORDERING".
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_384(
+    p_query       vector(384),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 &lt;=&gt; p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_384 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_384 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- Deliberately empty (D0.6) — see this changeset's own
+                 comment and taxonomy-011-1's rollback. -->
+        </rollback>
+    </changeSet>
+
+    <changeSet id="taxonomy-011-6" author="nexus-tk070.p3c">
+        <comment>
+            nexus.search_topic_scoped_768: same fix as taxonomy-011-5,
+            layered over vectors-006-3's _768 body. Rollback deliberately
+            empty (D0.6).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_768(
+    p_query       vector(768),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 &lt;=&gt; p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_768 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_768 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- Deliberately empty (D0.6) — see taxonomy-011-5's comment
+                 and taxonomy-011-1's rollback. -->
+        </rollback>
+    </changeSet>
+
+    <changeSet id="taxonomy-011-7" author="nexus-tk070.p3c">
+        <comment>
+            nexus.search_topic_scoped_1024: same fix as taxonomy-011-5,
+            layered over vectors-006-3's _1024 body. Rollback deliberately
+            empty (D0.6).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_1024(
+    p_query       vector(1024),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 &lt;=&gt; p_query)::float8
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_1024 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NULL))
+     ORDER BY c.embedding_1024 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <!-- Deliberately empty (D0.6) — see taxonomy-011-5's comment
+                 and taxonomy-011-1's rollback. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 8: Liquibase-owned diag_chash_conformance view ───────── -->
+    <changeSet id="taxonomy-011-8" author="nexus-tk070.p3c" runAlways="true">
+        <comment>
+            Liquibase-owned `CREATE OR REPLACE VIEW nexus.diag_chash_
+            conformance` (critical fix round 2026-08-17, critic Sig-2 / bead
+            nexus-i3k3e's Sig-2 finding): changeset 1 above DROPs this view
+            and its own header/comment claimed `pg_provision` would recreate
+            it "best-effort on the next provision/service-start pass" — a
+            claim that was FALSE for any deployment where nothing ever calls
+            `reprovision_diag_view_best_effort()` again (dead code, zero
+            callers). This changeset closes that hole for good: the SAME
+            text `nexus.db.chash_tables.diag_conformance_view_ddl()`
+            generates (now `WITH (security_invoker = true)`, which is what
+            makes a Liquibase-owned view — created as `nexus_admin`,
+            NOSUPERUSER, no BYPASSRLS — still count every tenant's rows
+            correctly for `nexus_diag`, BYPASSRLS, regardless of who owns
+            the view; see that function's own docstring for the full
+            derivation), plus a role-existence-guarded `GRANT SELECT`
+            mirroring `grants-nexus-diag-3`'s shape exactly. `runAlways`
+            self-heals both the view and the grant on every boot, closing
+            the reprovisioning gap permanently rather than once. See this
+            file's header, "WHAT SHIPS" item 8 and "ROLLBACK ORDERING",
+            for the full derivation and how this interacts with changeset
+            1's own rollback. `pg_provision`'s superuser path is untouched
+            (see its own docstring for the narrow window it remains the
+            only creator for, and what of bead nexus-7shei is still open).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    -- Nested BEGIN/EXCEPTION (2026-08-17, critical fix round, critic
+    -- Sig-1/-2): a PRE-EXISTING FOREIGN-OWNED view (e.g. pg_provision's
+    -- own superuser-owned view, still live on an install this changeset
+    -- has not yet converged with; or a DBA-provisioned managed-deployment
+    -- copy) makes this role's CREATE OR REPLACE fail with
+    -- insufficient_privilege ("must be owner of view ..."), NOT
+    -- duplicate_table -- REPLACE never raises "already exists". Catching
+    -- it here means a foreign-owned view degrades to a graceful skip
+    -- (that owner's existing definition stands) rather than aborting the
+    -- ENTIRE migration walk -- the same no-wedge ethos this whole
+    -- critical fix round exists to enforce, applied to this changeset's
+    -- own new DDL. A nested BEGIN/EXCEPTION block creates an implicit
+    -- savepoint, so the catch does not abort the surrounding changeset's
+    -- transaction.
+    BEGIN
+        CREATE OR REPLACE VIEW nexus.diag_chash_conformance WITH (security_invoker = true) AS
+        SELECT 'nexus.chunks' AS table_name, count(*) AS non_conformant FROM nexus.chunks WHERE octet_length(chash) &lt;&gt; 32
+        UNION ALL
+        SELECT 'nexus.catalog_document_chunks' AS table_name, count(*) AS non_conformant FROM nexus.catalog_document_chunks WHERE octet_length(chash) &lt;&gt; 32
+        UNION ALL
+        SELECT 'nexus.topic_assignments' AS table_name, count(*) AS non_conformant FROM nexus.topic_assignments t WHERE NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = t.doc_id)
+        UNION ALL
+        SELECT 'nexus.frecency' AS table_name, count(*) AS non_conformant FROM nexus.frecency t WHERE t.chunk_id ~ '^[0-9a-f]+$' AND length(t.chunk_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = decode(t.chunk_id, 'hex'))
+        UNION ALL
+        SELECT 'nexus.relevance_log' AS table_name, count(*) AS non_conformant FROM nexus.relevance_log t WHERE t.chunk_id ~ '^[0-9a-f]+$' AND length(t.chunk_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = decode(t.chunk_id, 'hex'));
+    EXCEPTION WHEN insufficient_privilege THEN
+        RAISE NOTICE 'nexus.diag_chash_conformance already exists with a foreign (non-migration-role) owner -- skipping CREATE OR REPLACE; that owner''s existing definition stands and self-heals automatically if that owner ever drops it';
+    END;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_diag') THEN
+        RAISE NOTICE 'nexus_diag absent — diag view grant skipped (created by pg_provision/DBA; self-heals next boot)';
+    ELSE
+        -- Same foreign-owner degrade as above: GRANT on a relation this
+        -- role does not own also raises insufficient_privilege, not a
+        -- hard requirement -- the foreign owner's own GRANT (pg_provision
+        -- already issues one for the view IT creates) covers nexus_diag
+        -- in that case instead.
+        BEGIN
+            GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag;
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE NOTICE 'cannot GRANT SELECT on a foreign-owned nexus.diag_chash_conformance -- its owner must grant nexus_diag directly (matches what the pg_provision superuser path already does for the view it creates)';
+        END;
+    END IF;
+END
+$$;
+        </sql>
+        <rollback>
+            <!-- NOT empty (unlike 2-7) — this changeset, not pg_provision,
+                 is what creates the view via Liquibase, so its natural
+                 undo is to drop what it created. Runs FIRST in a reverse
+                 walk (see this file's header, "ROLLBACK ORDERING",
+                 "CHANGESET 8'S PLACE IN THAT ORDERING"), clearing the view
+                 out of the way before changeset 1's rollback needs to
+                 ALTER doc_id back to TEXT.
+
+                 RDR-194 critical fix round 2 (2026-08-17, bead nexus-7ec4i,
+                 P0): same foreign-ownership defense as changeset 1's own
+                 forward DROP VIEW, and the same reason a graceful skip is
+                 not viable here either — if THIS drop is merely skipped
+                 (foreign owner survives), changeset 1's rollback ALTER
+                 (doc_id back to TEXT) hits the identical structural
+                 "column used by a view or rule" block regardless of
+                 ownership, so this rollback correctly still fails when the
+                 edge fires, with a named remedy instead of an opaque one. -->
+            <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    BEGIN
+        DROP VIEW IF EXISTS nexus.diag_chash_conformance;
+    EXCEPTION WHEN insufficient_privilege THEN
+        RAISE EXCEPTION 'RDR-194 P3c (nexus-tk070.p3c, nexus-7ec4i): nexus.diag_chash_conformance exists but this migration role does not own it and cannot drop it. Changeset taxonomy-011-1''s rollback (doc_id TYPE TEXT) cannot proceed while ANY view depends on doc_id, regardless of ownership. Remedy: the view''s owning role must run DROP VIEW IF EXISTS nexus.diag_chash_conformance, then retry this rollback.';
+    END;
+END
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

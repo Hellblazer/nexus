@@ -55,6 +55,10 @@ class TaxonomyHandlerAssignFkTest {
     private static final String SVC_ROLE = "svc_tax_assign_fk_test";
     private static final String SVC_PASS = "svc_tax_assign_fk_test_pass";
     private static final String TENANT   = "tax-assign-fk-tenant";
+    // nexus-tk070.p3c: doc_id is bytea now; TaxonomyRepository.assignOne parses it
+    // via Chash.fromHex, so the wire value here must be genuine 64-lowercase-hex,
+    // not the old free-text "some-doc" placeholder.
+    private static final String DOC_ID_HEX = hexChash("some-doc");
 
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
@@ -120,7 +124,7 @@ class TaxonomyHandlerAssignFkTest {
         // it, the NOT NULL constraint fires first and this test would observe
         // sqlstate 23502, not the topic_id FK's 23503 it means to exercise.
         CapturingExchange ex = post("/v1/taxonomy/assignments/assign",
-            "{\"doc_id\":\"some-doc\",\"topic_id\":999999,\"assigned_by\":\"manual\","
+            "{\"doc_id\":\"" + DOC_ID_HEX + "\",\"topic_id\":999999,\"assigned_by\":\"manual\","
             + "\"source_collection\":\"coll\"}");
         handleWithTenant(ex);
         assertThat(ex.status)
@@ -160,7 +164,7 @@ class TaxonomyHandlerAssignFkTest {
         // must still succeed (the guard doesn't over-fire).
         long topicId = repo.insertTopic(TENANT, "fk-test-topic", null, "coll", 0, "2026-07-01T00:00:00Z", null);
         CapturingExchange ex = post("/v1/taxonomy/assignments/assign",
-            "{\"doc_id\":\"some-doc\",\"topic_id\":" + topicId + ",\"assigned_by\":\"manual\","
+            "{\"doc_id\":\"" + DOC_ID_HEX + "\",\"topic_id\":" + topicId + ",\"assigned_by\":\"manual\","
             + "\"source_collection\":\"coll\"}");
         handleWithTenant(ex);
         assertThat(ex.status).as("existing topic_id: assignment succeeds").isEqualTo(200);
@@ -188,7 +192,7 @@ class TaxonomyHandlerAssignFkTest {
         long topicId = repo.insertTopic(
             TENANT, "missing-sc-topic", null, "coll", 0, "2026-07-01T00:00:00Z", null);
         CapturingExchange ex = post("/v1/taxonomy/assignments/assign",
-            "{\"doc_id\":\"some-doc\",\"topic_id\":" + topicId + ",\"assigned_by\":\"manual\"}");
+            "{\"doc_id\":\"" + DOC_ID_HEX + "\",\"topic_id\":" + topicId + ",\"assigned_by\":\"manual\"}");
         handleWithTenant(ex);
         assertThat(ex.status)
             .as("a non-projection assign with no source_collection violates the NOT NULL "
@@ -218,6 +222,18 @@ class TaxonomyHandlerAssignFkTest {
 
     private static CapturingExchange post(String path, String jsonBody) {
         return new CapturingExchange("POST", URI.create(path), jsonBody);
+    }
+
+    /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
+     *  (bytea since nexus-tk070.p3c). */
+    private static String hexChash(String seed) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(seed.getBytes(StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     /** Minimal {@link HttpExchange} that captures the response status + body. */

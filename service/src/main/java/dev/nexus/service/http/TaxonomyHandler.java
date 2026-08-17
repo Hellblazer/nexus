@@ -406,6 +406,31 @@ public final class TaxonomyHandler implements HttpHandler {
 
     // ── Assignments ────────────────────────────────────────────────────────────
 
+    // RDR-194 P3c (nexus-tk070.p3c) NOTE ON THIS SECTION — read before editing any
+    // doc_id-touching handler below. The bead's own census named SEVEN raw line
+    // markers as "compiler-invisible", requiring "explicit hex encode outbound
+    // / decode inbound" at the handler layer; re-verification against the
+    // current tree clustered those into NINE actual handler methods (the raw
+    // line count undercounted the method count), plus a TENTH,
+    // handlePurgeDoc, found only because tests/test_t2.py::test_delete went
+    // red -- not named by the original census at all. Every site below was individually
+    // re-verified against the ACTUAL post-conversion repository API and needs
+    // NO handler-level conversion, because TaxonomyRepository is the hex/bytes
+    // seam (private docIdBytes/docIdHex helpers wrap every
+    // TOPIC_ASSIGNMENTS.DOC_ID touchpoint internally) and its PUBLIC method
+    // signatures are unchanged -- still String in, String out, 64-hex both
+    // directions (D0.8). This mirrors the ALREADY-SHIPPED RDR-194 P2
+    // precedent exactly: RemapHandler.java needed zero byte[] handling after
+    // chash_remap.new_chash moved to bytea, because RemapRepository absorbed
+    // the conversion the identical way (newChashBytes/newChashHex). Each site
+    // below is marked VISITED with this reasoning; the handlers ARE covered by
+    // pre-existing HTTP-level round-trip tests (real hex in, real hex out,
+    // verified against the actual bytea storage) rather than a NEW
+    // handler-level encode/decode call that would have nothing to convert.
+    // handlePurgeDoc (below, 10th site) is the one exception: it is
+    // legitimately called with a NON-chash value (a memory title) by a
+    // cross-domain cascade the original census missed entirely — see that
+    // method's own comment.
     private void handleAssign(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
@@ -415,6 +440,7 @@ public final class TaxonomyHandler implements HttpHandler {
         Double similarity      = optDoubleOrNull(body, "similarity");
         String sourceCollection = optStringOrNull(body, "source_collection");
         String assignedAt      = optStringOrNull(body, "assigned_at");
+        // VISITED (RDR-194 P3c, site 1/9): docId is hex; repo.assignTopic absorbs bytes.
         repo.assignTopic(tenant, docId, topicId, assignedBy, similarity, sourceCollection, assignedAt);
         HttpUtil.send(ex, 200, "{\"ok\":true}");
     }
@@ -449,6 +475,7 @@ public final class TaxonomyHandler implements HttpHandler {
             Map<String, Object> row = (Map<String, Object>) rm;
             // Validate the three required fields up-front (400) so a bad row never
             // starts a partial transaction — mirrors handleAssign's requireString/requireLong.
+            // VISITED (RDR-194 P3c, site 2/9): validation-only, repo.assignMany absorbs bytes.
             requireString(row, "doc_id");
             requireLong(row, "topic_id");
             requireString(row, "assigned_by");
@@ -504,6 +531,7 @@ public final class TaxonomyHandler implements HttpHandler {
         requireMethod(ex, method, "GET");
         long topicId = requireLongParam(ex, "topic_id");
         int  limit   = optIntParam(ex, "limit", 0);
+        // VISITED (RDR-194 P3c, site 3/9): repo.getTopicDocIds returns hex (docIdHex internal).
         HttpUtil.send(ex, 200, json(repo.getTopicDocIds(tenant, topicId, limit)));
     }
 
@@ -515,6 +543,7 @@ public final class TaxonomyHandler implements HttpHandler {
         List<String> docIds = raw instanceof List<?> lst
             ? lst.stream().map(Object::toString).toList()
             : List.of();
+        // VISITED (RDR-194 P3c, site 4/9): repo.getAssignmentsForDocs is hex in/out.
         HttpUtil.send(ex, 200, json(repo.getAssignmentsForDocs(tenant, docIds)));
     }
 
@@ -530,15 +559,27 @@ public final class TaxonomyHandler implements HttpHandler {
         List<String> docIds = raw instanceof List<?> lst
             ? lst.stream().map(Object::toString).toList()
             : List.of();
+        // VISITED (RDR-194 P3c, site 5/9): repo.getAssignmentDetails is hex in/out.
         HttpUtil.send(ex, 200, json(repo.getAssignmentDetails(tenant, docIds)));
     }
 
     private void handleGetDocsByLabel(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "GET");
         String label = requireQueryParam(ex, "label");
+        // VISITED (RDR-194 P3c, site 6/9): repo.getDocIdsForLabel returns hex.
         HttpUtil.send(ex, 200, json(repo.getDocIdsForLabel(tenant, label)));
     }
 
+    // VISITED (RDR-194 P3c, 10th site -- missed by the bead's original census,
+    // found by tests/test_t2.py::test_delete going red): `title` here is NOT
+    // always a chash despite the "repo absorbs bytes" pattern the other 9 sites
+    // follow -- T2Database.delete's memory-to-taxonomy cascade
+    // (src/nexus/db/t2/__init__.py:556) calls this endpoint UNCONDITIONALLY on
+    // every memory delete with the memory entry's own TITLE. repo.
+    // purgeAssignmentsForDoc itself now guards on the canonical-hex shape before
+    // attempting a decode (see that method's own javadoc) rather than requiring
+    // this handler to pre-validate -- a non-chash title is a legitimate,
+    // expected no-op call here, not an error.
     private void handlePurgeDoc(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
@@ -658,6 +699,7 @@ public final class TaxonomyHandler implements HttpHandler {
         requireMethod(ex, method, "GET");
         String docId            = requireQueryParam(ex, "doc_id");
         String sourceCollection = requireQueryParam(ex, "source_collection");
+        // VISITED (RDR-194 P3c, site 7/9): docId/sourceCollection hex in; repo absorbs bytes.
         Optional<Double> sim = repo.chunkGroundedIn(tenant, docId, sourceCollection);
         if (sim.isEmpty()) {
             HttpUtil.send(ex, 404, "{\"error\":\"not found\"}");
@@ -699,6 +741,7 @@ public final class TaxonomyHandler implements HttpHandler {
         Double similarity       = optDoubleOrNull(body, "similarity");
         String assignedAt       = optStringOrNull(body, "assigned_at");
         String sourceCollection = optStringOrNull(body, "source_collection");
+        // VISITED (RDR-194 P3c, site 8/9): docId hex in; repo.importAssignment absorbs bytes.
         boolean applied = repo.importAssignment(
             tenant, docId, topicId, assignedBy, similarity, assignedAt, sourceCollection);
         // applied is always true: doc_id is a chunk chash with no catalog FK
@@ -954,6 +997,7 @@ public final class TaxonomyHandler implements HttpHandler {
         List<Map<String, Object>> childSpecs =
             (List<Map<String, Object>>) body.get("child_specs");
         if (childSpecs == null) childSpecs = List.of();
+        // VISITED (RDR-194 P3c, site 9/9): childSpecs' doc_ids forwarded opaquely; repo.persistSplit -> batchInsertAssignments absorbs bytes per element.
         var childIds = repo.persistSplit(tenant, topicId, collectionName, childSpecs);
         HttpUtil.send(ex, 200, json(Map.of("child_ids", childIds)));
     }

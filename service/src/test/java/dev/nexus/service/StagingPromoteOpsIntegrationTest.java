@@ -602,10 +602,15 @@ class StagingPromoteOpsIntegrationTest {
                 rs.next();
                 topicId = rs.getLong(1);
             }
+            // RDR-194 P3c: doc_id is bytea now -- decode('hex') so this actually
+            // stores the intended 16 bytes (a bare string literal against a bytea
+            // column is legacy "escape format" input, silently storing 32 raw ASCII
+            // bytes instead of the 16 real bytes legacyHex's own comment documents).
             su.createStatement().execute(
                 "INSERT INTO nexus.topic_assignments "
                 + "(tenant_id, doc_id, topic_id, assigned_by, source_collection) "
-                + "VALUES ('" + T1 + "', '" + legacyHex + "', " + topicId + ", 'kmd5b', 'code__kmd5b')");
+                + "VALUES ('" + T1 + "', decode('" + legacyHex + "', 'hex'), " + topicId
+                + ", 'kmd5b', 'code__kmd5b')");
         }
         try {
             Map<String, Integer> residue = scope.withTenant(T1, ctx ->

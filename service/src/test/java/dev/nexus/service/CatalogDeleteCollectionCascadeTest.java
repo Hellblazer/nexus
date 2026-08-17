@@ -333,10 +333,13 @@ class CatalogDeleteCollectionCascadeTest {
         // taxonomy_meta: 1 (fk-003-4 RESTRICT — must be purged before the registry row)
         st.execute("INSERT INTO nexus.taxonomy_meta (tenant_id, collection) VALUES ('" + tenant + "', '" + COLL + "')");
         // topic_assignments: 2, both with source_collection=COLL, referencing the topic
+        // nexus-tk070.p3c: doc_id is bytea now — a genuine 64-hex chash, not the
+        // catalog tumbler string (topic_assignments.doc_id is independent of
+        // catalog_documents.tumbler; see the class javadoc / nexus-sa14p).
         st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', 'dc-doc-1', " + topicId + ", 'projection', '" + COLL + "', NOW())");
+            + "VALUES ('" + tenant + "', '" + hexChash("dc-doc-1") + "', " + topicId + ", 'projection', '" + COLL + "', NOW())");
         st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', 'dc-doc-2', " + topicId + ", 'projection', '" + COLL + "', NOW())");
+            + "VALUES ('" + tenant + "', '" + hexChash("dc-doc-2") + "', " + topicId + ", 'projection', '" + COLL + "', NOW())");
         // centroids: one per dim (cugrk), one unified nexus.taxonomy_centroids table
         // (RDR-191). PK is (tenant_id, collection, topic_id) -- three DIFFERENT
         // topic_ids, not the shared `topicId` above (which would collide on the
@@ -376,6 +379,19 @@ class CatalogDeleteCollectionCascadeTest {
 
     private static String chash(String seed) {
         return (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
+    }
+
+    /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
+     *  (bytea since nexus-tk070.p3c), unlike {@link #chash} above which is a 32-char
+     *  synthetic id used only for the chunks/manifest {@code chash} column. */
+    private static String hexChash(String seed) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private static int rows(Connection su, String sql) throws Exception {

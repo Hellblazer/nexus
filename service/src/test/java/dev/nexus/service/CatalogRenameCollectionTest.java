@@ -495,11 +495,13 @@ class CatalogRenameCollectionTest {
             + "VALUES (" + topicId + ", '" + tenant + "', 'topic-rn', '" + coll + "', 0, NOW(), 'pending')");
         // taxonomy_meta: 1 (fk-003-4 RESTRICT)
         st.execute("INSERT INTO nexus.taxonomy_meta (tenant_id, collection) VALUES ('" + tenant + "', '" + coll + "')");
-        // topic_assignments: 2 (source_collection=coll)
+        // topic_assignments: 2 (source_collection=coll). doc_id is bytea now
+        // (nexus-tk070.p3c) — a genuine 64-hex chash, independent of the catalog
+        // tumbler string (topic_assignments.doc_id has no FK to catalog_documents).
         st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', 'rn-doc-1', " + topicId + ", 'projection', '" + coll + "', NOW())");
+            + "VALUES ('" + tenant + "', '" + hexChash("rn-doc-1") + "', " + topicId + ", 'projection', '" + coll + "', NOW())");
         st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', 'rn-doc-2', " + topicId + ", 'projection', '" + coll + "', NOW())");
+            + "VALUES ('" + tenant + "', '" + hexChash("rn-doc-2") + "', " + topicId + ", 'projection', '" + coll + "', NOW())");
         // centroids: one per dim, one unified nexus.taxonomy_centroids table (RDR-191).
         // PK is (tenant_id, collection, topic_id) -- three DIFFERENT topic_ids, not
         // the shared `topicId` above (would collide on the unified PK; pre-unification
@@ -559,6 +561,19 @@ class CatalogRenameCollectionTest {
 
     private static String chash(String seed) {
         return (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
+    }
+
+    /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
+     *  (bytea since nexus-tk070.p3c), unlike {@link #chash} above which is a 32-char
+     *  synthetic id used only for the chunks/manifest {@code chash} column. */
+    private static String hexChash(String seed) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private static int rows(Connection su, String sql) throws Exception {

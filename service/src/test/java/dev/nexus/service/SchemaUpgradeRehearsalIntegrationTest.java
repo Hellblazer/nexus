@@ -371,6 +371,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   legacy-001-1 nexus-lgdel.l1
                 //   legacy-001-2 nexus-lgdel.l1
                 //   taxonomy-010-1 nexus-tk070.p3b
+                //   taxonomy-011-1 nexus-tk070.p3c
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -505,7 +506,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // taxonomy-010-1 (nexus-tk070.p3b, RDR-194 § D1 steps b/c/d):
                     // topic_assignments.source_collection remediation. THREE
                     // source_collection-NULL assignments, one per DELETE arm,
-                    // under a shared topic (PK is (tenant_id, doc_id, topic_id),
+                    // plus a FOURTH, non-NULL-source_collection assignment
+                    // added 2026-08-17 (critical fix round, nexus-i3k3e -- the
+                    // cc4 wedge class), under a shared topic (PK is (tenant_id, doc_id, topic_id),
                     // so sharing topic_id across distinct doc_id values is
                     // fine). The positive (b) UNIQUE-RESOLUTION backfill arm is
                     // NOT exercisable in THIS old-tag hop: chunks_384/768/1024
@@ -555,6 +558,20 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // must still be treated as unresolvable garbage, never
                     // silently backfilled or left behind.
                     seedTopicAssignment(su, "t1", "1".repeat(32), p3bTopicId);
+                    // (c) UNRESOLVABLE (shape-invalid, NON-NULL
+                    // source_collection) arm — the cc4/nexus-i3k3e cloud
+                    // wedge fixture (critical fix round, 2026-08-17). The
+                    // cc4 census's exact 1,262-row class: a legacy 32-hex
+                    // (non-canonical-shape) doc_id whose source_collection
+                    // was ALREADY set by the pre-P3a projection/
+                    // cross-collection writer branch. Before the
+                    // 2026-08-17 fix, this row's non-NULL source_collection
+                    // would have made it SURVIVE taxonomy-010-1's
+                    // NULL-scoped delete untouched, then deterministically
+                    // RAISE EXCEPTION on taxonomy-011-1's guard a few
+                    // changesets later in this SAME migration walk — this
+                    // fixture proves the full walk now survives that row.
+                    seedTopicAssignment(su, "t1", "8".repeat(32), p3bTopicId, "code__x");
 
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("superuser ground truth after seeding").isEqualTo(5);
@@ -594,7 +611,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "non-BYPASSRLS owner — legacy-001-2's own toggle-wrap target")
                         .isEqualTo(0);
                     assertThat(count(admin, "SELECT count(*) FROM nexus.topic_assignments"))
-                        .as("FORCE RLS must hide all four seeded topic_assignments rows from "
+                        .as("FORCE RLS must hide all five seeded topic_assignments rows from "
                             + "the non-BYPASSRLS owner — taxonomy-010-1's own toggle-wrap target")
                         .isEqualTo(0);
                 }
@@ -977,10 +994,13 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // taxonomy-010-1 leg (nexus-tk070.p3b, RDR-194 § D1 steps b/c/d,
                     // seed-coverage lint follow-up): all three DELETE arms,
                     // effect-asserted -- every seeded row is gone (none of the
-                    // three text-match a UNIQUE collection: the ambiguous arm
+                    // four text-match a UNIQUE collection: the ambiguous arm
                     // matches two, the unresolvable arm matches none, the
                     // legacy-shape arm is excluded by shape before matching is
-                    // even attempted). GET DIAGNOSTICS ROW_COUNT drives each
+                    // even attempted, and the fourth -- non-NULL source_collection,
+                    // shape-invalid, the cc4/nexus-i3k3e wedge fixture added
+                    // 2026-08-17 -- is excluded by shape UNCONDITIONALLY on
+                    // source_collection). GET DIAGNOSTICS ROW_COUNT drives each
                     // RAISE NOTICE 1:1 from the same DELETE statements these
                     // row-state assertions observe, so proving the row set is
                     // exactly this shape is equivalent evidence to the NOTICE
@@ -997,26 +1017,51 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("no source_collection-NULL row may survive taxonomy-010-1 -- SET NOT "
                             + "NULL would otherwise have failed the whole migration walk")
                         .isEqualTo(0);
+                    // RDR-194 P3c (nexus-tk070.p3c): doc_id is bytea at HEAD now (this
+                    // leg runs the FULL hop, which includes taxonomy-011-1's ALTER) --
+                    // these three comparisons use encode(doc_id,'hex') rather than a
+                    // bare string literal. A raw `doc_id = '<64-char-string>'` against a
+                    // bytea column is NOT a type error (Postgres accepts it as legacy
+                    // "escape format" input, silently reinterpreting the hex-looking
+                    // characters as their own raw ASCII bytes) -- it would compile and
+                    // ALWAYS evaluate false regardless of the row's real content, making
+                    // an isEqualTo(0) assertion vacuously true even if the targeted
+                    // DELETE had a bug and left the row behind. encode(doc_id,'hex')
+                    // keeps the comparison on the TEXT side, so it fails loud if a row
+                    // this arm was supposed to delete unexpectedly survives.
                     assertThat(count(su,
                         "SELECT count(*) FROM nexus.topic_assignments "
-                        + "WHERE tenant_id = 't1' AND doc_id = '" + "b".repeat(32) + "'"))
+                        + "WHERE tenant_id = 't1' AND encode(doc_id, 'hex') = '" + "b".repeat(32) + "'"))
                         .as("the ambiguous arm's row must be DELETED by taxonomy-010-1 -- its chash "
                             + "resolves to two distinct collections and cannot be attributed")
                         .isEqualTo(0);
                     assertThat(count(su,
                         "SELECT count(*) FROM nexus.topic_assignments "
-                        + "WHERE tenant_id = 't1' AND doc_id = '" + "c".repeat(64) + "'"))
+                        + "WHERE tenant_id = 't1' AND encode(doc_id, 'hex') = '" + "c".repeat(64) + "'"))
                         .as("the unresolvable (anti-join) arm's row must be DELETED -- its doc_id is "
                             + "canonical 64-hex SHAPE but no nexus.chunks row matches it at all, "
                             + "proving the anti-join arm fires independently of the shape predicate")
                         .isEqualTo(0);
                     assertThat(count(su,
                         "SELECT count(*) FROM nexus.topic_assignments "
-                        + "WHERE tenant_id = 't1' AND doc_id = '" + "1".repeat(32) + "'"))
+                        + "WHERE tenant_id = 't1' AND encode(doc_id, 'hex') = '" + "1".repeat(32) + "'"))
                         .as("the legacy-shape-coincidental-match arm's row must be DELETED despite "
                             + "a real chunk existing at the same text-matched chash -- the "
                             + "doc_id !~ '^[0-9a-f]{64}$' shape predicate must win over a coincidental "
                             + "anti-join match, the exact cc4/HAL no-wedge proof")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_assignments "
+                        + "WHERE tenant_id = 't1' AND encode(doc_id, 'hex') = '" + "8".repeat(32) + "'"))
+                        .as("RDR-194 critical fix round (nexus-i3k3e, 2026-08-17): the "
+                            + "non-NULL-source_collection shape-invalid row (the cc4 census's "
+                            + "1,262-row wedge class) must be DELETED DESPITE its already-set "
+                            + "source_collection -- direct proof the fixed UNRESOLVABLE delete's "
+                            + "shape branch is unconditional on source_collection. Before the fix "
+                            + "this row would have survived taxonomy-010-1 and this test would "
+                            + "never have reached this assertion at all -- taxonomy-011-1's guard, "
+                            + "a few changesets later in this SAME migration walk, would have "
+                            + "RAISE EXCEPTIONed the whole walk first")
                         .isEqualTo(0);
                     assertThat(count(su,
                         "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
@@ -1030,6 +1075,40 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("source_collection must be SET NOT NULL at HEAD -- taxonomy-010-1's "
                             + "final DDL step, only reachable if all three DML steps ahead of it "
                             + "left no NULL row behind")
+                        .isEqualTo(1);
+
+                    // taxonomy-011-1 leg (nexus-tk070.p3c, RDR-194 § D1 step (e), seed-
+                    // coverage lint follow-up). This changeset carries NO INSERT/UPDATE/
+                    // DELETE -- its own guard is a read-only SELECT COUNT(*) wrapped in
+                    // the SAME NO FORCE/FORCE toggle shape as fk-004-0-reconcile-precount
+                    // (nexus-iq0qr, see that entry's own comment in the Python
+                    // DECLARED_SEED_COVERAGE for the identical structural reasoning),
+                    // which trips this lint's rule (b) regardless of carrying no literal
+                    // DML. No NEW seed data is needed: taxonomy-010-1's own seeded rows
+                    // (asserted immediately above) are EXACTLY the population the guard
+                    // walks, and by construction every surviving row is canonical 64-hex
+                    // (the three DELETE arms just proven above removed everything that
+                    // was not) -- so the guard is expected to find zero bad rows and let
+                    // the ALTER proceed, which is what "this test reaches this line at
+                    // all" already proves (a RAISE EXCEPTION here would abort the whole
+                    // migration walk before Liquibase's UPDATE SUMMARY, well before this
+                    // JDBC connection could run a single assertion). The two checks below
+                    // are the POSITIVE, independently-verifiable proof the ALTER itself
+                    // (not just the guard) actually ran, matching fk-004-0-reconcile-
+                    // precount's own "changeset EXECUTES" bar.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM information_schema.columns "
+                        + "WHERE table_schema = 'nexus' AND table_name = 'topic_assignments' "
+                        + "AND column_name = 'doc_id' AND udt_name = 'bytea'"))
+                        .as("topic_assignments.doc_id must be bytea at HEAD -- taxonomy-011-1's "
+                            + "ALTER COLUMN TYPE, only reachable if the guard above found zero "
+                            + "non-canonical rows")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity "
+                        + "AND oid = 'nexus.topic_assignments'::regclass"))
+                        .as("FORCE ROW LEVEL SECURITY restored on nexus.topic_assignments after "
+                            + "taxonomy-011-1's own NO FORCE/FORCE toggle around its guard")
                         .isEqualTo(1);
                 }
             }
@@ -1483,6 +1562,28 @@ class SchemaUpgradeRehearsalIntegrationTest {
             ps.setString(1, tenant);
             ps.setString(2, docId);
             ps.setLong(3, topicId);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A {@code nexus.topic_assignments} row with an EXPLICIT, non-NULL
+     * {@code source_collection} (RDR-194 critical fix round, 2026-08-17,
+     * nexus-i3k3e) -- the cc4 census's 1,262-row wedge class. See
+     * {@link Taxonomy010BackfillDirectIntegrationTest}'s identical overload
+     * for the full derivation.
+     */
+    private static void seedTopicAssignment(
+            Connection c, String tenant, String docId, long topicId, String sourceCollection)
+            throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.topic_assignments "
+            + "(tenant_id, doc_id, topic_id, assigned_by, source_collection) "
+            + "VALUES (?, ?, ?, 'rehearsal-seed', ?)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, docId);
+            ps.setLong(3, topicId);
+            ps.setString(4, sourceCollection);
             ps.executeUpdate();
         }
     }

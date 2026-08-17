@@ -356,10 +356,12 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             // (most candidates do NOT qualify) is what makes the filtered-ANN
             // early-stop strategy (hnsw.iterative_scan=relaxed_order, set by
             // explain() below) actually cheaper than a full scan+sort.
+            // RDR-194 P3c: topic_assignments.doc_id is bytea now — select chash
+            // directly, no encode('hex').
             st.execute(
                 "INSERT INTO nexus.topic_assignments "
                 + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-                + "SELECT tenant_id, encode(chash, 'hex'), 900001, 'planshape-seed', collection, NOW() "
+                + "SELECT tenant_id, chash, 900001, 'planshape-seed', collection, NOW() "
                 + "FROM nexus.chunks WHERE tenant_id = '" + TENANT + "' AND collection = '" + COL_384 + "' "
                 + "AND get_byte(chash, 0) < 26");
 
@@ -670,27 +672,24 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     }
 
     /**
-     * UNLIKE the {@code search_metadata_scoped}/{@code search_graph_hop} siblings above,
-     * {@code search_topic_scoped}'s join to {@code topic_assignments} is written as {@code
-     * ta.doc_id = encode(c.chash, 'hex')} -- a function applied to the INDEXED side
-     * ({@code c.chash}), not a plain column equality. PostgreSQL does not invert an
-     * arbitrary function call ({@code encode}/{@code decode} are not recognized as a pushable
-     * pair) to derive a sargable {@code c.chash = decode(ta.doc_id, 'hex')} condition, so this
-     * join can NEVER drive an indexed (let alone HNSW-ordered) per-row probe into {@code
-     * nexus.chunks} keyed off {@code topic_assignments} -- a property of the function AS
-     * ORIGINALLY AUTHORED in vectors-005, unrelated to and unaffected by vectors-006's
-     * {@code embedding_384 IS NOT NULL} guard. This is the SAME "does not bind HNSW by
-     * design" shape {@link #hybridSearch_selectiveGateRank_shape_usesFullHnswIndex_768}
-     * documents for its own, differently-caused reason -- verified empirically: even with a
-     * deliberately SELECTIVE topic tag (~10% of the fixture, {@code get_byte(chash,0)<26} in
-     * {@link #seedFixtures}), the planner still drives from {@code topic_assignments} and
-     * bitmap-scans {@code nexus.chunks} by {@code (tenant_id, collection)} only, filtering the
-     * join condition as a residual predicate -- there is no achievable plan shape in which this
-     * function's distance ORDER BY binds the HNSW index at all, guard or no guard. What IS
-     * provable, and is this test's actual job: the guard does not further degrade the plan into
-     * an UNSCOPED sequential scan of {@code nexus.chunks} (still tenant+collection scoped via
-     * {@code idx_chunks_embedding_384}'s sibling {@code chunks_pk}) and the distance projection
-     * still names the CORRECT dim column.
+     * STALE-PROSE CORRECTION (RDR-194 P3c, nexus-tk070.p3c, 2026-08): this javadoc
+     * originally documented {@code search_topic_scoped}'s join to {@code
+     * topic_assignments} as {@code ta.doc_id = encode(c.chash, 'hex')} -- a function
+     * applied to the indexed side, non-sargable by construction, with the plan-driver
+     * analysis below derived from that shape. {@code taxonomy-011-doc-id-bytea.xml}
+     * (P3c) converted {@code topic_assignments.doc_id} to {@code bytea} and the join
+     * is now direct equality, {@code ta.doc_id = c.chash} -- no {@code encode}/{@code
+     * decode} on either side. RE-VERIFIED empirically (2026-08-16): the join IS now
+     * sargable -- {@code EXPLAIN} shows an {@code Index Scan using
+     * idx_chunks_tenant_chash on chunks c ... Index Cond: (chash = ta.doc_id)},
+     * replacing the old bitmap-scan-by-(tenant_id,collection)-then-residual-filter
+     * shape this paragraph originally described. Still NOT HNSW-bound (the index used
+     * is the chash btree, not the vector index -- ORDER BY still needs a Sort node
+     * over the small joined result), so the "does not bind HNSW by design" framing
+     * survives, but the "can NEVER drive an indexed... probe" claim did not: it now
+     * does, just not the vector index. The assertions below were updated accordingly
+     * (accept either {@code chunks_pk} or {@code idx_chunks_tenant_chash} for the
+     * tenant-scoping check, since the planner's chosen index changed).
      */
     @Test
     void searchTopicScoped_shape_projectsCorrectDimColumn_andStaysCollectionScoped_384() throws Exception {
@@ -704,11 +703,21 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 + "dim column (embedding_384) after vectors-006-3's guard was added. Plan was:%n%s",
                 plan)
             .contains("embedding_384 <=>");
+        // RDR-194 P3c (nexus-tk070.p3c): the join to topic_assignments changed from
+        // `ta.doc_id = encode(c.chash, 'hex')` to direct bytea equality
+        // `ta.doc_id = c.chash`, which turned out to BE sargable after all (the
+        // stale javadoc paragraph above already flags this as unverified/re-derive-
+        // if-it-matters) -- the planner now drives an Index Scan on
+        // idx_chunks_tenant_chash keyed off ta.doc_id, not chunks_pk. The scoping
+        // property this assertion actually cares about (tenant_id, collection) is
+        // still enforced via that index's own Index Cond, so this checks for either
+        // scoped index rather than pinning to the specific one the planner happens
+        // to choose.
         assertThat(plan)
             .as("search_topic_scoped_384's embedding_384 IS NOT NULL guard (vectors-006-3) must "
                 + "not degrade the scan into an UNSCOPED sequential scan of nexus.chunks -- it must "
-                + "still be scoped by (tenant_id, collection) via chunks_pk. Plan was:%n%s", plan)
-            .contains("chunks_pk");
+                + "still be scoped by tenant_id (chunks_pk or idx_chunks_tenant_chash). Plan was:%n%s", plan)
+            .containsAnyOf("chunks_pk", "idx_chunks_tenant_chash");
         assertThat(plan)
             .as("must not degrade to a full sequential scan of nexus.chunks ignoring "
                 + "tenant/collection scoping. Plan was:%n%s", plan)
