@@ -24,8 +24,8 @@ def test_boundary_helpers_round_trip() -> None:
     assert len(raw) == 32
     assert to_citation_hex(raw) == full
     import pytest
-    with pytest.raises(ValueError, match="chash_alias"):
-        to_storage_bytes(full[:32])  # legacy width names the resolver path
+    with pytest.raises(ValueError, match="re-index the source"):
+        to_storage_bytes(full[:32])  # legacy width names the remedy (nexus-lgdel.l1: chash_alias is gone)
 
 
 def test_chunk_id_from_hash_matches_chunk_id() -> None:

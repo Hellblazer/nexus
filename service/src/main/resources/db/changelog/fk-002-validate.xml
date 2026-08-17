@@ -65,6 +65,24 @@
 
     Must come after fk-002-collection-registry.xml (the NOT VALID FKs it validates)
     in db.changelog-master.xml.
+
+    STALE-PROSE CORRECTION (nexus-o8dil.49, RDR-191 Phase 5, 2026-08):
+    fk-002-7/8/9 (VALIDATE chunks_384/768/1024_collection_fk) permanently
+    MARK_RAN-skip on every box from this release forward — vectors-004-
+    unify-chunks.xml's DROP TABLE ... CASCADE already removed their target
+    constraints along with chunks_384/768/1024, so each precondition's
+    `SELECT COUNT(*) FROM pg_constraint WHERE conname = '<name>'` finds zero
+    rows. Per nexus-4m6i0.13's MARK_RAN freeze semantics (documented in
+    detail below), this is a harmless, permanent, one-time skip — not a
+    crash-loop, and not something a future box will retry. fk-002-10/11
+    (chash_index_collection_fk — already dead earlier, RDR-187/nexus-piwya.9
+    — and topic_assignments_collection_fk, still live) are unaffected by
+    RDR-191. No new-id VALIDATE changeset supersedes fk-002-7/8/9 anywhere
+    in this codebase: there is nothing left to validate for a constraint
+    that no longer exists. The unified nexus.chunks table's own collection
+    FK (chunks_collection_fk) is validated by
+    fk-004-chunks-collection-registry.xml's fk-004-2 changeset instead — a
+    NEW constraint, not a revival of any of these three.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"

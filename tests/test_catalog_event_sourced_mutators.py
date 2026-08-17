@@ -100,11 +100,17 @@ class TestUpdateEventSourced:
             owner, "doc.md", content_type="prose",
             file_path=f"{slug}/doc.md", chunk_count=0,
         )
+        # nexus-cefa1.2: bib_enriched_at is timestamptz now (catalog-031-1-documents-
+        # temporal) — CatalogRepository.utcIso reads it back in the catalog's
+        # micros+offset convention (INDEXED_AT_FMT, kept per Hal directive
+        # 2026-08-15). This literal already carries microseconds so it round-trips
+        # exactly; see CatalogRepository.utcIso's javadoc for the one shape
+        # (no-fraction input) that would not.
         cat.update(
             tumbler, bib_year=2020, bib_authors="X", bib_venue="V",
             bib_citation_count=5, bib_semantic_scholar_id="ss1",
             bib_openalex_id="W1", bib_doi="10.1/x",
-            bib_enriched_at="2026-01-01T00:00:00Z",
+            bib_enriched_at="2026-01-01T00:00:00.000000+00:00",
         )
         entry = cat.resolve(tumbler)
         assert entry.bib_year == 2020
@@ -114,7 +120,7 @@ class TestUpdateEventSourced:
         assert entry.bib_semantic_scholar_id == "ss1"
         assert entry.bib_openalex_id == "W1"
         assert entry.bib_doi == "10.1/x"
-        assert entry.bib_enriched_at == "2026-01-01T00:00:00Z"
+        assert entry.bib_enriched_at == "2026-01-01T00:00:00.000000+00:00"
 
 
 # ── delete_document ──────────────────────────────────────────────────────

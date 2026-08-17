@@ -182,18 +182,23 @@ final class SharedCluster {
                     su.setAutoCommit(true);
                     try (var st = su.createStatement()) {
                         st.execute("CREATE DATABASE \"" + TEMPLATE_DB + "\"");
-                        // The one cluster-wide role every ordinary class's own idempotent
-                        // bootstrap also creates -- pre-creating it here is an optimization,
-                        // not a correctness requirement (every caller's own CREATE ROLE ...
-                        // IF NOT EXISTS would otherwise just no-op it into existence on
-                        // first use).
-                        st.execute("DO $$ BEGIN "
-                            + "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '"
-                            + PgContainerHelper.SVC_USERNAME + "') THEN "
-                            + "    CREATE ROLE " + PgContainerHelper.SVC_USERNAME + " LOGIN PASSWORD '"
-                            + PgContainerHelper.SVC_PASSWORD + "' NOSUPERUSER NOBYPASSRLS; "
-                            + "  END IF; "
-                            + "END $$");
+                        // nexus_svc is NOT pre-created here (nexus-v80f2, 2026-08-15, critic
+                        // finding S2 -- was previously a redundant `CREATE ROLE ... IF NOT
+                        // EXISTS` without NOINHERIT). role-001-nexus-svc.xml is documented as
+                        // the FIRST include in the master changelog, so its own idempotent
+                        // CREATE ROLE (which DOES carry NOINHERIT) is guaranteed to run before
+                        // any later changeset that needs nexus_svc to exist -- this pre-create
+                        // was an optimization only (per the removed comment: "not a correctness
+                        // requirement"), never load-bearing. Keeping it meant two independent
+                        // CREATE ROLE literals had to be hand-kept in lockstep; the shared-
+                        // cluster copy silently omitting NOINHERIT is exactly the drift class
+                        // that produced this finding -- since this pre-create ran first, it
+                        // won the IF-NOT-EXISTS race and role-001's NOINHERIT clause never
+                        // executed against this template at all. Removing the duplicate
+                        // makes role-001-nexus-svc.xml the SOLE source of truth for every
+                        // shared-cluster test: dropping NOINHERIT from its CREATE ROLE now
+                        // flips CatalogSchemaLiquibaseTest#nexusSvcRoleIsNoinherit red, where
+                        // before it would have had no effect on this path whatsoever.
                     }
                 }
 

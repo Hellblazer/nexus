@@ -1,0 +1,303 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-194 Phase P1 (Decision D2, bead nexus-tk070.p1) — the catalog_links
+    tumbler FKs. `nexus.catalog_links.from_tumbler` / `.to_tumbler` are plain
+    TEXT with no referential integrity to `nexus.catalog_documents`
+    (`catalog-001-baseline.xml:127-159`); a link's endpoint document can be
+    hard-deleted (`CatalogRepository.deleteCollectionTxn` step 6, or
+    `nexus.purge_trash` step 4, `catalog-029-manifest-chunk-fk.xml:328-331`)
+    and the link row survives as dangling bookkeeping. RDR-194 § D2 decided
+    the fix is two FKs with ON DELETE CASCADE, not an explicit delete step —
+    the creation path is already guarded (`CatalogRepository.upsertLink` ->
+    `requireLiveEndpoints` unless `allow_dangling`), so deletion is the sole
+    producer, and `purge_trash` step 4 is plpgsql-only with no Java on the
+    path an explicit step could occupy. Do not re-litigate D2 here; see
+    `docs/rdr/rdr-194-fk-census-structural-schema-warts.md` § D2 for the full
+    argument (three facts: creation already guarded, purge_trash unreachable
+    from Java, an explicit step is prevention-by-remembering).
+
+    THREE-STEP SHAPE (D0.3, matching `catalog-029-manifest-chunk-fk.xml:19-45`,
+    itself matching fk-002's ADD-NOT-VALID -> reconcile -> VALIDATE shape) —
+    all four changesets ship TOGETHER in ONE file, ONE release, ONE migration
+    walk:
+
+      1. catalog-032-0: ADD CONSTRAINT ... NOT VALID, both FKs (two ALTER
+         statements, one changeset).
+      2. catalog-032-1: anti-join remediation (F17 shape: an anti-join
+         against `catalog_documents`, never a count comparison) — DELETEs
+         every `catalog_links` row whose `from_tumbler` OR `to_tumbler` has
+         no matching `catalog_documents` row for that `tenant_id`. RLS
+         toggle-wrapped (both tables carry FORCE ROW LEVEL SECURITY; see
+         below). Exports the affected rows (bounded, first 200 plus a total)
+         via RAISE NOTICE BEFORE the DELETE, per RDR-194 § D2 ("the deleted
+         rows are exported to the run's log first, so the loss is bounded,
+         visible, and auditable, never silent") — this is the ONE deliberate
+         divergence from `catalog-029-1`'s shape, which only RAISE NOTICEs a
+         post-delete count; D2's own text requires the pre-delete export.
+      3. catalog-032-2 / catalog-032-3: VALIDATE CONSTRAINT, one changeset
+         per constraint, each carrying its own per-constraint MARK_RAN
+         precondition (`tests/test_changelog_validate_precondition_lint.py`
+         requires per-constraint, not per-changeset, coverage — a single
+         guarded changeset validating both would leave the second bare).
+
+    Because all four changesets run in the SAME migration walk, changeset 1
+    always runs before changeset 2, which always runs before 3/4 — the
+    fk-002-validate.xml gap-window class (an earlier release's ADD-NOT-VALID
+    racing a LATER release's VALIDATE) does not exist here. The MARK_RAN
+    guards exist purely to satisfy the project's blanket "every bare
+    VALIDATE CONSTRAINT is guarded" tripwire, which carves out no
+    same-release exception (identical reasoning to `catalog-029-2`'s own
+    guard).
+
+    FK SHAPE — both FKs, per RDR-194 § D2 verbatim:
+      `FOREIGN KEY (tenant_id, from_tumbler|to_tumbler)
+       REFERENCES nexus.catalog_documents (tenant_id, tumbler)
+       ON DELETE CASCADE ON UPDATE CASCADE`
+    `(tenant_id, tumbler)` is `catalog_documents`'s PK
+    (`catalog-001-baseline.xml:96`, `catalog_documents_pk`). ON UPDATE
+    CASCADE is D2's explicit decision (unlike fk-001's FKs to the same
+    referent, which predate this RDR and carry no ON UPDATE clause) — a
+    tumbler is not expected to change, but the parent-key-update contract is
+    stated explicitly rather than left to accidentally match fk-001's older,
+    narrower shape. Plain (non-deferrable): unlike `fk_catalog_chunks_chunk`
+    (catalog-029-0), there is no companion call site that deletes the parent
+    and re-creates it in the same transaction while a child row transiently
+    dangles — D2 explicitly rejects an explicit Java delete step in favor of
+    the FK doing the whole job declaratively (Alternatives A5/A6), so there
+    is no ordering problem a DEFERRABLE clause would need to solve.
+
+    ON DELETE CASCADE SEMANTICS (RDR-194 § D2, recorded here per the bead's
+    instruction): soft delete via `document_trash` (tombstoning,
+    `catalog_documents.deleted_at`) does NOT fire this cascade — the
+    document row still exists, so both FKs remain satisfied and the links
+    survive pointing at a tombstoned (not gone) document, matching the
+    narrowed `allow_dangling=true` contract below. Only a HARD delete of the
+    `catalog_documents` row fires the cascade: `CatalogRepository
+    .deleteCollectionTxn` (Java, `CatalogRepository.java` ~6024) and
+    `nexus.purge_trash` step 4 (plpgsql,
+    `catalog-029-manifest-chunk-fk.xml:328-331`, "physically delete
+    tombstoned documents older than the threshold"). The FK covers BOTH
+    without any code change to either — `purge_trash` already relies on
+    fk-001's CASCADE to clear four child tables at that same step 4 DELETE;
+    this adds a fifth for free, which is the entire point of D2's decision
+    over the rejected explicit-step alternative (A5).
+
+    WIRE CONTRACT NARROWING (D2, Java companion in this same commit):
+    `CatalogRepository.upsertLink`'s `allow_dangling=true` path bypasses
+    `requireLiveEndpoints` (which requires a LIVE, non-tombstoned document)
+    but still writes through this table's real FK — a link to a TOMBSTONED
+    document still writes (the row exists), a link to a tumbler with NO row
+    at all now raises SQLSTATE 23503 on one of these two constraints, mapped
+    to the existing `400 {"code":"dangling_endpoint"}` payload
+    (`http_catalog_client.py:2044-2049` already translates that to
+    `ValueError`, unchanged).
+
+    RLS DISCIPLINE (catalog-032-1 only; catalog-032-0/2/3 are pure DDL, no
+    DML): `catalog_links` and `catalog_documents` both carry FORCE ROW LEVEL
+    SECURITY (`catalog-001-baseline.xml:260-261`, `:253-254`). Liquibase
+    runs as `nexus_admin`, the table owner but NOT BYPASSRLS
+    (`role-001-nexus-svc.xml`) — under FORCE RLS with no `nexus.tenant` GUC
+    set at migration time, an untoggled read of `catalog_documents` returns
+    ZERO rows for every tenant, which would make the anti-join misclassify
+    EVERY link row as dangling and delete the entire table (the identical
+    trap `catalog-025`'s and `catalog-029-1`'s own headers document). Both
+    tables are toggled NO FORCE, then restored to FORCE, symmetrically,
+    inside catalog-032-1's own changeset (the same toggle-wrapped shape
+    `catalog-029-1` uses, matching `tests/test_changelog_rls_lint.py`'s
+    approved shape 1).
+
+    NO LOCK TABLE ... ACCESS EXCLUSIVE is needed before catalog-032-1's
+    DELETE, for the identical reason `catalog-029-1`'s header gives:
+    catalog-032-0 (same migration walk, immediately before) already adds
+    both FKs NOT VALID, which enforce every NEW write from the instant they
+    commit — no writer running after catalog-032-0 commits can create a new
+    dangling row, so catalog-032-1's anti-join only ever cleans up rows that
+    predate this walk.
+
+    Registered at the changelog TAIL, after `taxonomy-008-link-types-jsonb.xml`
+    (the current last `<include>` before the runAlways grants) and before
+    `grants-nexus-svc.xml` / `grants-nexus-diag.xml`, matching every other
+    late-appended changelog's file-order convention (D0.1).
+
+    `EXPECT_NEW_CHANGESETS=4` (design intent, RDR-194 § P1) — re-pinned to
+    this file as authored: catalog-032-0 (1, two ALTER statements),
+    catalog-032-1 (1), catalog-032-2 (1), catalog-032-3 (1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset catalog-032-0: ADD CONSTRAINT ... NOT VALID (both FKs) ─── -->
+    <changeSet id="catalog-032-0" author="nexus-tk070.p1">
+        <comment>
+            fk_catalog_links_from_document / fk_catalog_links_to_document:
+            FOREIGN KEY (tenant_id, from_tumbler|to_tumbler) REFERENCES
+            nexus.catalog_documents (tenant_id, tumbler) ON DELETE CASCADE ON
+            UPDATE CASCADE NOT VALID (RDR-194 § D2). NOT VALID enforces every
+            new write immediately; retroactive validation of pre-existing rows
+            is catalog-032-1 (remediate) then catalog-032-2/3 (VALIDATE).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_links
+    ADD CONSTRAINT fk_catalog_links_from_document
+    FOREIGN KEY (tenant_id, from_tumbler)
+    REFERENCES nexus.catalog_documents (tenant_id, tumbler)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE
+    NOT VALID;
+
+ALTER TABLE nexus.catalog_links
+    ADD CONSTRAINT fk_catalog_links_to_document
+    FOREIGN KEY (tenant_id, to_tumbler)
+    REFERENCES nexus.catalog_documents (tenant_id, tumbler)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE
+    NOT VALID;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.catalog_links DROP CONSTRAINT IF EXISTS fk_catalog_links_from_document;
+            ALTER TABLE nexus.catalog_links DROP CONSTRAINT IF EXISTS fk_catalog_links_to_document;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset catalog-032-1: anti-join remediation (F17 shape), row export first ── -->
+    <changeSet id="catalog-032-1" author="nexus-tk070.p1">
+        <comment>
+            Delete every catalog_links row whose from_tumbler OR to_tumbler has
+            no matching nexus.catalog_documents row for that tenant_id — an
+            anti-join against the document store (F17), never a count
+            comparison. RLS toggle-wrapped (nexus-1wjmq shape): both
+            catalog_links and nexus.catalog_documents carry FORCE ROW LEVEL
+            SECURITY and Liquibase's nexus_admin owner is not BYPASSRLS, so
+            both are toggled off for the read/delete and restored before this
+            changeset ends. RDR-194 § D2 requires the affected rows to be
+            EXPORTED to the run log BEFORE the delete (bounded to the first
+            200, with the total count), not just a post-delete count, so the
+            loss is bounded, visible, and auditable. Both the export RAISE
+            NOTICEs and the final deleted-count RAISE NOTICE are captured by
+            Liquibase's JdbcExecutor from the JDBC Statement's SQLWarning chain
+            and logged through its own (SLF4J-backed) logger by default
+            (SHOW_SQL_WARNING_MESSAGES defaults true) — no runAlways, no
+            DDL-in-Python, no bespoke Java capture.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.catalog_links NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_row           RECORD;
+    v_total_count   BIGINT;
+    v_export_count  INTEGER := 0;
+    v_deleted_count BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO v_total_count
+    FROM nexus.catalog_links l
+    WHERE NOT EXISTS (
+        SELECT 1 FROM nexus.catalog_documents d
+         WHERE d.tenant_id = l.tenant_id AND d.tumbler = l.from_tumbler
+    ) OR NOT EXISTS (
+        SELECT 1 FROM nexus.catalog_documents d
+         WHERE d.tenant_id = l.tenant_id AND d.tumbler = l.to_tumbler
+    );
+
+    RAISE NOTICE 'RDR-194 P1 catalog_links-FK remediation (nexus-tk070.p1): % dangling catalog_links row(s) found (from_tumbler or to_tumbler has no matching nexus.catalog_documents row); exporting up to 200 below before delete', v_total_count;
+
+    FOR v_row IN
+        SELECT l.tenant_id, l.from_tumbler, l.to_tumbler, l.link_type
+          FROM nexus.catalog_links l
+         WHERE NOT EXISTS (
+             SELECT 1 FROM nexus.catalog_documents d
+              WHERE d.tenant_id = l.tenant_id AND d.tumbler = l.from_tumbler
+         ) OR NOT EXISTS (
+             SELECT 1 FROM nexus.catalog_documents d
+              WHERE d.tenant_id = l.tenant_id AND d.tumbler = l.to_tumbler
+         )
+         ORDER BY l.tenant_id, l.from_tumbler, l.to_tumbler, l.link_type
+         LIMIT 200
+    LOOP
+        v_export_count := v_export_count + 1;
+        RAISE NOTICE 'RDR-194 P1 dangling catalog_links row %/% (of % total): tenant_id=%, from_tumbler=%, to_tumbler=%, link_type=%',
+            v_export_count, LEAST(v_total_count, 200), v_total_count,
+            v_row.tenant_id, v_row.from_tumbler, v_row.to_tumbler, v_row.link_type;
+    END LOOP;
+
+    DELETE FROM nexus.catalog_links l
+    WHERE NOT EXISTS (
+        SELECT 1 FROM nexus.catalog_documents d
+         WHERE d.tenant_id = l.tenant_id AND d.tumbler = l.from_tumbler
+    ) OR NOT EXISTS (
+        SELECT 1 FROM nexus.catalog_documents d
+         WHERE d.tenant_id = l.tenant_id AND d.tumbler = l.to_tumbler
+    );
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    RAISE NOTICE 'RDR-194 P1 catalog_links-FK remediation (nexus-tk070.p1): deleted % dangling catalog_links row(s) with no matching nexus.catalog_documents endpoint', v_deleted_count;
+END $$;
+
+ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_links FORCE ROW LEVEL SECURITY;
+
+ANALYZE nexus.catalog_links;
+        </sql>
+        <rollback>
+            <!-- No rollback: the deleted rows are unrestorable link bookkeeping
+                 (RDR-194 § D2 prices this deletion as safe: "a link with a
+                 vanished endpoint is unrepairable bookkeeping, the same class
+                 catalog-029-1 prices as safe to delete"). Rolling back the
+                 FK/VALIDATE is catalog-032-0's / catalog-032-2's / catalog-032-3's
+                 own rollback. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset catalog-032-2: VALIDATE fk_catalog_links_from_document ── -->
+    <changeSet id="catalog-032-2" author="nexus-tk070.p1">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT COUNT(*) FROM pg_constraint WHERE conname = 'fk_catalog_links_from_document'</sqlCheck>
+        </preConditions>
+        <comment>
+            VALIDATE fk_catalog_links_from_document — retroactively check
+            pre-existing rows now that catalog-032-1 has remediated any
+            dangling population. Guarded by a whole-changeset precondition
+            (nexus-4m6i0.13/nexus-ms57z shape 1, same as catalog-029-2's own),
+            covering ONLY this constraint (per-constraint coverage, not
+            per-changeset — tests/test_changelog_validate_precondition_lint.py):
+            skips (marks ran, once) instead of hard-ERRORing a crash-loop boot
+            on any box where the constraint doesn't exist. All four
+            catalog-032 changesets ship together in one file/release, so this
+            guard is expected to be a permanent no-op in practice
+            (catalog-032-0 always runs first in the same walk) — it is added
+            purely to satisfy the project's blanket "every bare VALIDATE
+            CONSTRAINT is guarded" tripwire, which does not carve out a
+            same-release exception.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_links VALIDATE CONSTRAINT fk_catalog_links_from_document;
+        </sql>
+        <rollback>
+            <!-- VALIDATE cannot be un-done (no INVALIDATE in PG); the
+                 constraint itself is dropped by catalog-032-0's rollback. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset catalog-032-3: VALIDATE fk_catalog_links_to_document ──── -->
+    <changeSet id="catalog-032-3" author="nexus-tk070.p1">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT COUNT(*) FROM pg_constraint WHERE conname = 'fk_catalog_links_to_document'</sqlCheck>
+        </preConditions>
+        <comment>
+            VALIDATE fk_catalog_links_to_document — see catalog-032-2's
+            comment; identical shape, the other of the two constraints
+            (per-constraint coverage requires its own guard).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_links VALIDATE CONSTRAINT fk_catalog_links_to_document;
+        </sql>
+        <rollback>
+            <!-- VALIDATE cannot be un-done (no INVALIDATE in PG); the
+                 constraint itself is dropped by catalog-032-0's rollback. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

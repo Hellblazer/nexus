@@ -203,24 +203,40 @@ def test_kill_control_reverting_the_raise_reproduces_the_damage(tmp_path) -> Non
     """KILL CONTROL (mandatory — feedback_falsify_by_deleting_the_code /
     memo §5 item 4). Reverts ``_upsert_skip_reembed`` to its EXACT
     pre-nexus-tp8yk shape (``missing=None`` -> no reroute, return
-    normally) and proves the P1 damage REAPPEARS under the IDENTICAL
-    fault injection as the base test above: a manifest gets committed for
-    3 chunks that never actually landed in T3. Without this control, the
-    base test's green could be incidental (e.g. some other guard
-    happening to catch it); with it, the base test's pass is provably
-    driven by D1's raise and nothing else.
+    normally) and drives the IDENTICAL fault injection as the base test
+    above with D1's raise gone.
 
     SUBTLE, and worth recording: under the FULL nexus-tp8yk codebase (D1
     reverted, D2's independent tripwire still live), the overall call
     still raises — but as ``IndexRunVerifyRefused`` from the explicit
     ``_fence_complete`` (D2a), not ``ChunkLandingUnverifiedError`` (D1).
     D2's engine-side fail-closed verify catches the SAME underlying
-    anomaly one step later, at the COMPLETION STAMP — but only AFTER
-    ``hooks.fire_batch`` has already written the dangling manifest rows.
-    That ordering is exactly the bead's complaint ("PDF ingest can COMMIT
-    manifest rows for chunk batches that never landed") — D1 is what
-    keeps the manifest itself clean; D2 alone would still let the
-    dangling rows through and only refuse the LATER completion claim.
+    anomaly one step later, at the COMPLETION STAMP.
+
+    RE-DERIVED (2026-08-17, catalog-029-manifest-chunk-fk.xml). This used
+    to assert the bead's original P1 damage reproduces WITHOUT D1: 3
+    dangling manifest rows committed for chunks that never landed,
+    ``hooks.fire_batch`` -> ``manifest_write_batch_hook`` having nothing
+    left to stop it once D1's raise is gone. That is no longer reachable,
+    and NOT because this control weakened. RDR-191's manifest FK
+    (``nexus.catalog_document_chunks`` -> ``nexus.chunks``,
+    ``fk_catalog_chunks_chunk``) landed AFTER nexus-tp8yk and closes the
+    SAME gap from underneath, independent of D1: ``manifest_write_batch_
+    hook`` is best-effort (any failure logged and swallowed, never
+    propagated — its own docstring), so the FK 409 does not surface as an
+    exception here, but it DOES mean the per-doc write is refused at the
+    database and zero rows land. Probe evidence (this run, engine
+    substrate): ``manifest_write_many_doc_failed ... reason='foreign key
+    violation (doc_id not registered?) [fk_catalog_chunks_chunk]'``, then
+    ``get_manifest(doc_id) == []``. D1 is STILL what makes the failure
+    LOUD and immediate (``ChunkLandingUnverifiedError`` before
+    ``hooks.fire_batch`` even runs) rather than a swallowed warning plus a
+    later, unrelated-looking ``IndexRunVerifyRefused`` — that half of the
+    contract this kill control exists to pin is unchanged and still
+    proven below. What changed is the SECOND assertion: the manifest is
+    no longer merely "correctly refused completion despite being dirty"
+    — it is never dirty in the first place, because the FK is a second,
+    independent guard the bead's original design did not have.
     """
     from nexus.catalog.factory import make_catalog_reader
     from nexus.db.http_vector_client import HttpVectorClient
@@ -264,15 +280,17 @@ def test_kill_control_reverting_the_raise_reproduces_the_damage(tmp_path) -> Non
                 streaming="never",
             )
 
-    # THE DAMAGE: a manifest gets committed anyway — existing_ids lied,
-    # update_chunks never confirmed anything, and nothing stopped
-    # hooks.fire_batch (and therefore manifest_write_batch_hook) from
-    # writing 3 rows for chunks that were never actually upserted.
+    # THE FK CLOSES THE GAP INDEPENDENTLY OF D1: existing_ids lied,
+    # update_chunks never confirmed anything, and hooks.fire_batch (via
+    # manifest_write_batch_hook) DID attempt to write 3 rows for chunks
+    # that were never actually upserted — but catalog-029-manifest-chunk-
+    # fk.xml's FK refuses that write at the database, so the manifest
+    # stays clean (0 rows) even with D1 gone. This is the new, STRONGER
+    # contract: a second, independent guard now backstops D1's raise.
     manifest = make_catalog_reader().get_manifest(doc_id)
-    assert len(manifest) == 3, (
-        "kill control failed to reproduce the damage — expected 3 "
-        f"dangling manifest rows for a batch that never landed, got "
-        f"{len(manifest)}: {manifest}"
+    assert manifest == [], (
+        "the manifest-chunk FK must refuse the dangling write even with "
+        f"D1's raise reverted — expected 0 rows, got {len(manifest)}: {manifest}"
     )
     entry = make_catalog_reader().resolve(doc_id)
     assert entry is not None

@@ -107,13 +107,36 @@ class GrantsPgMonitorTest {
                 .as("nexus_svc must hold pg_monitor after grants-004-monitor-wal-visibility")
                 .isTrue();
 
+            // nexus-v80f2: nexus_svc is NOINHERIT (matches cloud, measured
+            // rolinherit=FALSE, conexus relay [22485]) -- pin it here so this
+            // class's own fixture role never silently drifts back to INHERIT.
+            assertThat(isNoinherit(su, SVC_ROLE))
+                .as("nexus_svc must be NOINHERIT")
+                .isTrue();
+
             try (Connection svcConn = DriverManager.getConnection(pg.getJdbcUrl(), SVC_ROLE, SVC_PASS)) {
+                // NOINHERIT means pg_monitor's privileges are NOT ambient on a
+                // plain session -- falsify the naive expectation before proving
+                // the supported path (nexus-bb5c8's decision of record:
+                // src/nexus/db/svc_monitor.py issues SET ROLE unconditionally).
+                try (Statement st = svcConn.createStatement()) {
+                    assertThatThrownBy(() -> st.executeQuery("SELECT count(*) FROM pg_ls_waldir()"))
+                        .as("pg_ls_waldir() must be permission-denied on a plain NOINHERIT "
+                            + "nexus_svc session -- pg_monitor membership alone is not usable "
+                            + "privilege without SET ROLE")
+                        .isInstanceOf(Exception.class)
+                        .hasMessageContaining("permission denied");
+                }
+
+                try (Statement st = svcConn.createStatement()) {
+                    st.execute("SET ROLE pg_monitor");
+                }
                 try (Statement st = svcConn.createStatement();
                      ResultSet rs = st.executeQuery("SELECT count(*) FROM pg_ls_waldir()")) {
                     assertThat(rs.next()).isTrue();
                     assertThat(rs.getLong(1))
-                        .as("pg_ls_waldir() must be callable as nexus_svc and return at least "
-                            + "the current WAL segment")
+                        .as("pg_ls_waldir() must be callable as nexus_svc after SET ROLE "
+                            + "pg_monitor and return at least the current WAL segment")
                         .isGreaterThanOrEqualTo(1L);
                 }
             }
@@ -129,8 +152,17 @@ class GrantsPgMonitorTest {
     private static void provisionAdminAndSvcRoles(Connection su) throws Exception {
         exec(su, "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '" + ADMIN_PASS
             + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
+        // NOINHERIT (nexus-v80f2, 2026-08-15): this class opts OUT of shared-cluster
+        // reuse (startDedicated()) and reconstructs nexus_svc by hand, bypassing
+        // role-001-nexus-svc.xml's own NOINHERIT bootstrap -- so this literal must
+        // carry the same attribute or it silently diverges from both role-001 and
+        // the production posture (pg_provision.py's _create_roles / _backfill_svc_
+        // noinherit), reintroducing the exact drift nexus-bb5c8 found: a real
+        // nexus_svc gets pg_monitor's privileges ambiently, this test's fixture
+        // role would not have, and pg_ls_waldir() would pass here for a reason
+        // production cannot rely on.
         exec(su, "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-            + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+            + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT");
         exec(su, "GRANT CREATE ON DATABASE postgres TO " + ADMIN_ROLE);
         exec(su, "GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
         exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
@@ -156,6 +188,18 @@ class GrantsPgMonitorTest {
         try (var ps = c.prepareStatement("SELECT pg_has_role(?, ?, 'member')")) {
             ps.setString(1, role);
             ps.setString(2, memberOf);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getBoolean(1);
+            }
+        }
+    }
+
+    /** nexus-v80f2: {@code rolinherit = false} for *role*. */
+    private static boolean isNoinherit(Connection c, String role) throws Exception {
+        try (var ps = c.prepareStatement(
+            "SELECT NOT rolinherit FROM pg_roles WHERE rolname = ?")) {
+            ps.setString(1, role);
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 return rs.getBoolean(1);

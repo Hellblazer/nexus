@@ -201,6 +201,17 @@ def test_config_get_dotted_show_not_masked(runner, fake_home) -> None:
     assert "docling" in result.output
 
 
+def test_config_get_mint_tenant_not_masked_without_show(runner, fake_home) -> None:
+    """nexus-ssqk9: mint_tenant is a plain tenant slug, not a secret -- it
+    must display unmasked even WITHOUT --show, unlike every other
+    top-level credential (test_config_get_masks_by_default's contrast)."""
+    runner.invoke(main, ["config", "set", "mint_tenant=nexus"])
+    result = runner.invoke(main, ["config", "get", "mint_tenant"])
+    assert result.exit_code == 0, result.output
+    assert "nexus" in result.output
+    assert "***" not in result.output
+
+
 # ── nx config list ──────────────────────────────────────────────────────────
 
 
@@ -225,6 +236,20 @@ def test_config_list_shows_non_secret_settings(runner, fake_home) -> None:
     result = runner.invoke(main, ["config", "list"])
     assert result.exit_code == 0
     assert "indexing" in result.output.lower()
+
+
+def test_config_list_shows_mint_tenant_unmasked(runner, fake_home) -> None:
+    """nexus-ssqk9: mint_tenant rides the CREDENTIALS (env-wins) machinery
+    like service_url, but is not itself a secret -- `nx config list` must
+    not mask it the way it masks voyage_api_key (test_config_list_masks_values)."""
+    runner.invoke(main, ["config", "set", "mint_tenant=nexus"])
+    result = runner.invoke(main, ["config", "list"])
+    assert result.exit_code == 0
+    assert "mint_tenant" in result.output
+    assert "nexus" in result.output
+    for line in result.output.splitlines():
+        if "mint_tenant" in line:
+            assert "***" not in line
 
 
 # ── nx config init ──────────────────────────────────────────────────────────

@@ -22,7 +22,6 @@ import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
-import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
@@ -78,9 +77,9 @@ import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
  *       placement, recorded in the bead close): staged manifest rows insert
  *       through the alias join (or a direct 64-hex decode), canonical at
  *       INSERT.</li>
- *   <li>Pointer stores: topic_assignments (alias-repointed where
- *       chash-shaped, verbatim where a memory title — the mixed identity
- *       space stays TEXT debt), frecency (GREATEST-merge, staging-sourced
+ *   <li>Pointer stores: topic_assignments (alias-repointed; doc_id is a
+ *       chunk chash end to end — RDR-180 Item6/Item6a, never a memory-note
+ *       title and not a mixed identity space), frecency (GREATEST-merge, staging-sourced
  *       twin of the RekeyOps aggregate), relevance_log (anti-join dedupe —
  *       BIGSERIAL target has no natural key), document_aspects +
  *       aspect_extraction_queue (anti-join on (collection, source_path)).</li>
@@ -126,13 +125,6 @@ public final class StagingPromoteOps {
 
     public StagingPromoteOps(TenantScope tenantScope) {
         this.tenantScope = tenantScope;
-    }
-
-    /** Thrown on the C1 guard: a staged ref contradicts a committed alias. */
-    public static final class PromoteConflictException extends RuntimeException {
-        public PromoteConflictException(String message) {
-            super(message);
-        }
     }
 
     /** Thrown when staged rows cannot promote (dim mismatch, NULL vectors). */
@@ -182,6 +174,28 @@ public final class StagingPromoteOps {
      *  unset rather than defaulting). */
     private static Field<OffsetDateTime> parseStagedTimestampNullable(Field<String> raw) {
         return DSL.nullif(raw, "").cast(OffsetDateTime.class);
+    }
+
+    /**
+     * {@code nullif(raw, '')::jsonb} — the staged-TEXT-to-jsonb parse idiom
+     * for columns converted by the schema type-hygiene arc (epic
+     * nexus-cefa1; {@code document_aspects.extras} is the first user,
+     * nexus-cefa1.4 / P3). Sibling of {@link #parseStagedTimestamp} /
+     * {@link #parseStagedTimestampNullable}: same {@code NULLIF(raw,'')}
+     * shape, cast to {@code jsonb} instead of {@code timestamptz}, no
+     * {@code now()}-style fallback (there is no meaningful default JSON
+     * value to substitute).
+     *
+     * <p>Staging stays typeless by design (the staged column itself is
+     * still TEXT — this cast only happens at promote time). A malformed
+     * staged value therefore fails LOUD at promote time (PostgreSQL raises
+     * "invalid input syntax for type json" for the whole transactional
+     * {@code finalizeTenant} promote), rather than landing silently — the
+     * same fail-loud posture this class already applies via {@link
+     * PromotePreconditionException}, not a new behavior.
+     */
+    private static Field<JSONB> parseStagedJson(Field<String> raw) {
+        return DSL.nullif(raw, "").cast(JSONB.class);
     }
 
     /**
@@ -252,14 +266,9 @@ public final class StagingPromoteOps {
             Field<JSONB> scChunkMeta = DSL.field(DSL.name("s", "chunk_meta"), JSONB.class);
             Field<byte[]> scDigest = ChashSqlIdioms.digestField(scChunkText);
 
-            // Per-tenant serialization (review P1 High: TOCTOU between the
-            // C1 guard SELECT and the alias INSERT under READ COMMITTED —
-            // a concurrent promote could commit a conflicting alias in the
-            // gap and the ON CONFLICT DO NOTHING would keep it SILENTLY).
-            // The xact-scoped advisory lock serializes every promote AND
-            // finalize for one tenant; released automatically at txn end.
-            // jOOQ DSL rendering (nexus-4okz4 increment 3): mirrors
-            // RekeyOps' identical advisory-lock rendering exactly.
+            // Per-tenant serialization. The xact-scoped advisory lock
+            // serializes every promote AND finalize for one tenant;
+            // released automatically at txn end.
             ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
                        DSL.function("hashtext", Integer.class,
                            DSL.val("staging:").concat(currentTenantSetting()))))
@@ -292,55 +301,12 @@ public final class StagingPromoteOps {
                     + "was not legal for these rows)");
             }
 
-            // (2) C1 GUARD: staged refs vs COMMITTED alias state, tenant-wide.
-            var conflict = ctx.select(
-                    scLegacyRef,
-                    hex(CHASH_ALIAS.NEW_CHASH),
-                    hex(scDigest),
-                    CHASH_ALIAS.SOURCE)
-                .from(sc)
-                .join(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(scLegacyRef))
-                .where(scCollection.eq(collection))
-                .and(scChunkText.ne(""))
-                .and(CHASH_ALIAS.NEW_CHASH.isDistinctFrom(scDigest))
-                .fetchAny();
-            if (conflict != null) {
-                throw new PromoteConflictException(
-                    "staged ref '" + conflict.get(0, String.class) + "' in '" + collection
-                    + "' computes digest " + conflict.get(2, String.class)
-                    + " but chash_alias already maps it to " + conflict.get(1, String.class)
-                    + " (source: " + conflict.get(3, String.class) + ") — the same legacy id "
-                    + "denotes different content across collections; refusing to pick "
-                    + "silently (GH #1390: correct addresses only)");
-            }
-
-            // (3) alias facts for genuinely-legacy staged refs.
-            counts.put("alias_rows", ctx.insertInto(CHASH_ALIAS,
-                    CHASH_ALIAS.TENANT_ID, CHASH_ALIAS.OLD_REF, CHASH_ALIAS.OLD_BYTES,
-                    CHASH_ALIAS.NEW_CHASH, CHASH_ALIAS.SOURCE)
-                .select(ctx.select(
-                        currentTenantSetting(),
-                        scLegacyRef,
-                        ChashSqlIdioms.chashOldBytesField(scLegacyRef),
-                        scDigest,
-                        DSL.val("staging:").concat(scCollection))
-                    .from(sc)
-                    .where(scCollection.eq(collection))
-                    .and(scChunkText.ne(""))
-                    .and(scLegacyRef.ne(hex(scDigest))))
-                .onConflict(CHASH_ALIAS.TENANT_ID, CHASH_ALIAS.OLD_REF)
-                .doNothing()
-                .execute());
-
-            // (3a) Un-blind the planner before the promote/collapse joins read
-            // the rows just written — the same F2 exposure RekeyOps carries
-            // (production 2026-07-20): alias rows inserted in THIS transaction
-            // are invisible to a planner working from statistics autoanalyze
-            // froze at the previous tenant's distribution, which turns the
-            // alias joins below into nested loops over the full pointer tables.
-            // Silent no-op without MAINTAIN (grants-nexus-svc, PG17+), so the
-            // outcome rides the envelope rather than being assumed.
-            counts.put("alias_stats_refreshed", ChashSqlIdioms.refreshAliasStats(ctx));
+            // (2)/(3) C1 GUARD and alias-fact recording — RETIRED at
+            // nexus-lgdel.l1 along with nexus.chash_alias: both existed
+            // solely to reconcile a staged LEGACY ref against the map, and
+            // the map is gone. scDigest (below, still computed for the
+            // content INSERT's chunk_text_hash stamp and M1 tiebreak) is
+            // the only survivor of this block.
 
             // (4) collection registration stub — the chunks tables carry a
             // (tenant, collection) FK to catalog_collections (RDR-156
@@ -510,19 +476,24 @@ public final class StagingPromoteOps {
             // RekeyOps C1 same-table-shadowing class: `sc` ("s") and this
             // subquery's table ("c2") are two genuinely different alias
             // names, not one unaliased constant referenced twice.
+            // nexus-lgdel.l1: the chash_alias EXISTS conjunct (a staged
+            // empty-text row resolved via a COMMITTED alias fact from an
+            // earlier promote) is REMOVED with the table — the only
+            // resolution route left for a reference-only row is a
+            // content-bearing sibling staged in THIS SAME batch (below).
             var c2 = DSL.table(DSL.name("staging", "chunks")).as("c2");
             Field<String> c2LegacyRef = DSL.field(DSL.name("c2", "legacy_ref"), String.class);
             Field<String> c2ChunkText = DSL.field(DSL.name("c2", "chunk_text"), String.class);
-            Condition orphanCond = scChunkText.eq("")
-                .and(DSL.notExists(ctx.selectOne().from(CHASH_ALIAS)
-                    .where(CHASH_ALIAS.OLD_REF.eq(scLegacyRef))))
-                .and(DSL.notExists(ctx.selectOne().from(c2)
-                    .where(c2LegacyRef.eq(scLegacyRef))
-                    .and(c2ChunkText.ne(""))));
+            Condition hasContentSibling = DSL.exists(ctx.selectOne().from(c2)
+                .where(c2LegacyRef.eq(scLegacyRef))
+                .and(c2ChunkText.ne("")));
+            Condition orphanCond = scChunkText.eq("").and(DSL.not(hasContentSibling));
+            // "reference_only_resolved" now means what it says via the ONE
+            // surviving route: an empty-text row whose legacy_ref matches a
+            // content-bearing sibling landed in the same staging batch.
             counts.put("reference_only_resolved", ctx.selectCount().from(sc)
                 .where(scChunkText.eq(""))
-                .and(DSL.exists(ctx.selectOne().from(CHASH_ALIAS)
-                    .where(CHASH_ALIAS.OLD_REF.eq(scLegacyRef))))
+                .and(hasContentSibling)
                 .fetchOne(0, Integer.class));
             if (synthesizeOrphans) {
                 // Alias the surrogates FIRST so pointer promotion below
@@ -532,6 +503,16 @@ public final class StagingPromoteOps {
                 // formula, generic over ANY Field<String> seed) exactly as
                 // RekeyOps' own orphan-synthesize branch does — same idiom,
                 // staged-source operands.
+                // nexus-lgdel.l1: the two-pass shape (stage an alias fact
+                // marked SOURCE='staging:synthetic', then per-dim JOIN back
+                // to it) existed to give every dim iteration the SAME
+                // synthetic chash for a given legacy_ref without recomputing
+                // it. Without chash_alias to stage that fact in, synthSeed/
+                // synthChash below are computed directly — digestField is a
+                // pure deterministic expression, so every dim's INSERT
+                // recomputing it from the SAME scLegacyRef yields the
+                // identical chash by construction, with no staging table
+                // needed to keep them in agreement.
                 Field<String> synthSeed = DSL.val("nexus:synthetic-chash:v1|")
                     .concat(currentTenantSetting())
                     .concat(DSL.val("|"))
@@ -539,60 +520,25 @@ public final class StagingPromoteOps {
                     .concat(DSL.val("|"))
                     .concat(scLegacyRef);
                 Field<byte[]> synthChash = ChashSqlIdioms.digestField(synthSeed);
-                ctx.insertInto(CHASH_ALIAS,
-                        CHASH_ALIAS.TENANT_ID, CHASH_ALIAS.OLD_REF, CHASH_ALIAS.OLD_BYTES,
-                        CHASH_ALIAS.NEW_CHASH, CHASH_ALIAS.SOURCE)
-                    .select(ctx.select(
-                            currentTenantSetting(), scLegacyRef,
-                            ChashSqlIdioms.chashOldBytesField(scLegacyRef),
-                            synthChash, DSL.val("staging:synthetic"))
-                        .from(sc)
-                        .where(orphanCond))
-                    .onConflict(CHASH_ALIAS.TENANT_ID, CHASH_ALIAS.OLD_REF)
-                    .doNothing()
-                    .execute();
                 // chunk_text_hash mirrors the SURROGATE chash (RDR-086
                 // metadata parity, same rationale as the content INSERT).
                 //
-                // FIXED (nexus-o8dil.50, RDR-191 P4): this branch used to be
-                // hardcoded to chunks_768/dim=768 only, "preserved verbatim"
-                // from the deleted raw SQL. That was not a merely-incomplete
-                // convenience: the CHASH_ALIAS insert directly above is
-                // dim-agnostic (aliases EVERY row matching orphanCond,
-                // regardless of scDim), so a 384/1024 orphan got a committed
-                // alias with NO backing content row in any dim table. If a
-                // staged manifest pointer (staging.document_chunks) later
-                // resolved through that alias — precisely the case Item8
-                // exists to handle — this method's own dangling_manifest
-                // fatal check (below, (7) in-txn verify) would find a
-                // catalog_document_chunks row whose chash has no content
-                // anywhere and throw IllegalStateException, ABORTING THE
-                // WHOLE finalizeTenant TRANSACTION for the tenant. Because
-                // finalize is documented idempotent/re-runnable, every retry
-                // hits the identical alias again — a repeatable, tenant-wide
-                // finalize blocker, not a silent skip.
-                //
-                // Both non-768 dims are reachable in production, not
-                // hypothetical: 384 is Tier-0 MiniLM (nexus.db.local_ef,
-                // the fastembed-less local-mode default — installs without
-                // `conexus[local]` embed at 384d), 1024 is Voyage (the
-                // cloud-mode default). staging.chunks.dim is a VALUE column
-                // by design for exactly this reason — see
-                // staging-001-landing-tables.xml's own comment: "mixed dims
-                // legal, no ANN index — never searched". A guided-upgrade
-                // migration from either of those installs can legitimately
-                // land 384/1024 orphan rows.
-                //
-                // Fix: loop over all three dims via the same chunkDim(int)
+                // Loop over all three dims via the same chunkDim(int)
                 // accessor promoteCollection's content INSERT (5) already
                 // uses, explicit-three (not a loop over a shared dim
-                // registry — same no-common-typed-interface discipline as
-                // RekeyOps.DIMS / ChashSqlIdioms.danglingManifestCountDsl,
-                // see the chunkDim javadoc). "orphans_synthesized" stays a
-                // single summed count — same convention residual_mismatched
-                // already uses for its three explicit per-dim calls.
+                // registry — same no-common-typed-interface discipline
+                // ChashSqlIdioms.danglingManifestCountDsl's javadoc
+                // documents). "orphans_synthesized" stays a single summed
+                // count — same convention residual_mismatched already uses
+                // for its three explicit per-dim calls. Both non-768 dims
+                // are reachable in production, not hypothetical: 384 is
+                // Tier-0 MiniLM (nexus.db.local_ef, the fastembed-less
+                // local-mode default), 1024 is Voyage (the cloud-mode
+                // default); staging.chunks.dim is a VALUE column by design
+                // (staging-001-landing-tables.xml: "mixed dims legal, no
+                // ANN index — never searched").
                 Field<JSONB> synthStamp = ChashSqlIdioms.jsonbBuildObject(
-                    "chash_origin", "synthetic", "chunk_text_hash", hex(CHASH_ALIAS.NEW_CHASH));
+                    "chash_origin", "synthetic", "chunk_text_hash", hex(synthChash));
                 int synthesized = 0;
                 for (int d : new int[] {384, 768, 1024}) {
                     ChunkDim dim = chunkDim(d);
@@ -602,12 +548,10 @@ public final class StagingPromoteOps {
                             dim.tenantId(), dim.collection(), dim.chash(),
                             dim.chunkText(), dim.embedding(), dim.metadata())
                         .select(ctx.select(
-                                currentTenantSetting(), scCollection, CHASH_ALIAS.NEW_CHASH, DSL.val(""),
+                                currentTenantSetting(), scCollection, synthChash, DSL.val(""),
                                 scEmbeddingTyped, ChashSqlIdioms.mergeMetadata(scChunkMeta, synthStamp))
                             .from(sc)
-                            .join(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(scLegacyRef)
-                                .and(CHASH_ALIAS.SOURCE.eq("staging:synthetic")))
-                            .where(scChunkText.eq(""))
+                            .where(orphanCond)
                             .and(scDim.eq(d))
                             .and(scEmbeddingRaw.isNotNull()))
                         .onConflict(dim.tenantId(), dim.collection(), dim.chash())
@@ -711,11 +655,13 @@ public final class StagingPromoteOps {
             // for sweep-gate acquisition) and the per-row verified manifest
             // resolution further down (which needs the SAME chash, not the
             // batch's whole set).
-            Field<byte[]> resolvedChash = DSL.coalesce(CHASH_ALIAS.NEW_CHASH, sChashDecoded);
+            // nexus-lgdel.l1: resolvedChash was COALESCE(CHASH_ALIAS.NEW_CHASH,
+            // sChashDecoded) — the alias arm is gone with the table, so the
+            // only remaining resolution is the direct 64-hex decode.
+            Field<byte[]> resolvedChash = sChashDecoded;
             var cand = ctx.selectDistinct(resolvedChash.as("chash"))
                 .from(sdc)
-                .leftJoin(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(sChash))
-                .where(CHASH_ALIAS.NEW_CHASH.isNotNull().or(sChash.likeRegex("^[0-9a-f]{64}$")))
+                .where(sChash.likeRegex("^[0-9a-f]{64}$"))
                 .asTable("cand");
             // RDR-191 repoint (nexus-o8dil.17): the former three-dim UNION
             // ALL collapses to a single SELECT — nexus.chunks is now the
@@ -738,8 +684,14 @@ public final class StagingPromoteOps {
                 CatalogRepository.acquireSweepGateShared(ctx, tenant, c);
             }
 
-            Condition manifestResolvable = CHASH_ALIAS.NEW_CHASH.isNotNull()
-                .or(sChash.likeRegex("^[0-9a-f]{64}$").and(ChashSqlIdioms.existsInAnyDim(ctx, sChashDecoded)));
+            // nexus-lgdel.l1: the CHASH_ALIAS.NEW_CHASH.isNotNull() OR-arm is
+            // REMOVED with the table — this reduces to the direct 64-hex
+            // admission arm alone (the LOCKSTEP invariant with
+            // CatalogRepository.stagingGuardCondition, see that method's
+            // javadoc). A staged manifest row keyed by a legacy ref no
+            // longer promotes silently.
+            Condition manifestResolvable =
+                sChash.likeRegex("^[0-9a-f]{64}$").and(ChashSqlIdioms.existsInAnyDim(ctx, sChashDecoded));
             // nexus-o8dil.3 (RDR-191 F12b(ii), verified anchor sheet finding
             // C): this INSERT's 9-column list omitted `collection` entirely
             // -- every finalize-promoted manifest row was a partial-NULL FK
@@ -795,7 +747,6 @@ public final class StagingPromoteOps {
                         sChunkIndex, sLineStart, sLineEnd, sCharStart, sCharEnd,
                         docPhysicalCollection)
                     .from(sdc)
-                    .leftJoin(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(sChash))
                     .leftJoin(CATALOG_DOCUMENTS).on(CATALOG_DOCUMENTS.TUMBLER.eq(sDocId))
                     .where(manifestPromotable))
                 .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
@@ -803,9 +754,7 @@ public final class StagingPromoteOps {
                 .doNothing()
                 .execute());
             counts.put("manifest_unresolved", ctx.selectCount().from(sdc)
-                .where(DSL.notExists(ctx.selectOne().from(CHASH_ALIAS)
-                    .where(CHASH_ALIAS.OLD_REF.eq(sChash))))
-                .and(DSL.not(sChash.likeRegex("^[0-9a-f]{64}$").and(ChashSqlIdioms.existsInAnyDim(ctx, sChashDecoded))))
+                .where(DSL.not(sChash.likeRegex("^[0-9a-f]{64}$").and(ChashSqlIdioms.existsInAnyDim(ctx, sChashDecoded))))
                 .fetchOne(0, Integer.class));
             // nexus-s13u0 visibility: DISTINCT staged doc_ids with NO
             // catalog_documents row at all -- a NARROWER diagnostic than
@@ -920,16 +869,18 @@ public final class StagingPromoteOps {
                 .join(sdc).on(sDocId.eq(CATALOG_DOCUMENTS.TUMBLER))
                 .where(CATALOG_DOCUMENTS.CONTENT_TYPE.eq("knowledge"))
                 .and(DSL.coalesce(CATALOG_DOCUMENTS.FILE_PATH, "").eq(""))
-                .and(DSL.notExists(ctx.selectOne().from(CHASH_ALIAS)
-                    .where(CHASH_ALIAS.OLD_REF.eq(sChash))))
                 .and(DSL.not(sChash.likeRegex("^[0-9a-f]{64}$").and(ChashSqlIdioms.existsInAnyDim(ctx, sChashDecoded))))
                 .orderBy(CATALOG_DOCUMENTS.TITLE)
                 .limit(100)
                 .fetch(CATALOG_DOCUMENTS.TITLE);
             counts.put("unresolved_knowledge_titles", unresolvedKnowledgeTitles);
 
-            // (3) topic_assignments: alias-repoint chash-shaped doc_ids,
-            //     verbatim pass-through for memory titles (mixed identity).
+            // (3) topic_assignments: alias-repoint chash-shaped doc_ids.
+            //     doc_id is a chunk chash end to end (RDR-180 Item6 :80,
+            //     Item6a :82; RDR-194 D1, nexus-tk070.p3a, nexus-yo9mi):
+            //     NOT a mixed identity space, and never a memory-note title
+            //     (that JOIN lived only in the deleted SQLite store, commit
+            //     f24bdb853; nothing replaced it).
             //     RESOLVABLE-ONLY (census discipline, nexus-jxizy.10.5): a
             //     legacy-shaped doc_id with NO alias yet stays STAGED — a
             //     later finalize converges it once its content collection
@@ -943,29 +894,115 @@ public final class StagingPromoteOps {
             // doc_id has no alias yet stays STAGED for a later finalize.
             // jOOQ DSL rendering (nexus-4okz4 increment 3): staging.
             // topic_assignments accessors via the house pattern;
-            // Field.notLikeRegex renders PostgreSQL's `!~`.
+            // Field.likeRegex renders PostgreSQL's `~`.
             var sta = DSL.table(DSL.name("staging", "topic_assignments")).as("s");
             Field<String> staDocId = DSL.field(DSL.name("s", "doc_id"), String.class);
             Field<String> staTopicLabel = DSL.field(DSL.name("s", "topic_label"), String.class);
             Field<String> staTopicCollection = DSL.field(DSL.name("s", "topic_collection"), String.class);
+            // RDR-194 P3c (nexus-tk070.p3c): nexus.topic_assignments.doc_id is
+            // bytea now -- decode staDocId at the boundary, mirroring the
+            // sChashDecoded idiom above (:641). Safe because the non-conformant
+            // reject guard immediately below AND the INSERT ... SELECT's own
+            // `staDocId.likeRegex('^[0-9a-f]{64}$')` WHERE clause already
+            // restrict every row this decode ever runs against to canonical
+            // 64-hex -- never a bare decode over an unguarded value (D0.9).
+            Field<byte[]> staDocIdDecoded = DSL.function("decode", byte[].class, staDocId, DSL.val("hex"));
+            // NON-CONFORMANT REJECT -> SKIP-AND-SCREAM (RDR-194 P3d, bead
+            // nexus-cncue's DISPOSITION OF RECORD, deep-analyst analysis T2
+            // nexus/cncue-finalize-reject-reconciliation [22750]): the prior
+            // IllegalStateException hard-throw (nexus-tk070.p3a, tightened
+            // nexus-lgdel.l1) is converted to a counted + WARN-logged
+            // exclusion. The decisive fact: the promote INSERT's own
+            // `staDocId.likeRegex('^[0-9a-f]{64}$')` WHERE clause (below)
+            // ALREADY guarantees a non-conformant staged value can never
+            // reach nexus.topic_assignments -- this pre-check purchases
+            // ZERO additional write-safety over that predicate, only
+            // visibility. A tenant-wide abort over it is disproportionate
+            // for this idempotent/re-runnable method (class javadoc): the
+            // wedge is reachable (conexus==6.18.1's two-hop upgrade client
+            // posts doc_id verbatim with no shape validation), permanent
+            // (deterministic -- the same row fails every re-run), and its
+            // only in-product remedy (POST /v1/staging/clear) discards the
+            // tenant's ENTIRE staged migration across all seven tables, not
+            // just the offending row. Matches the settled precedent 80
+            // lines above in this SAME method (manifest_doc_not_registered/
+            // manifest_doc_no_collection: counter + WARN, not a throw) and
+            // this leg's own sibling axis (topic_assignments_unresolved,
+            // just below: unresolved topics also stay staged, uncounted-
+            // as-a-throw). D0.9 stays satisfied on its own terms: nothing
+            // is coerced, nothing is widened, the offending values are
+            // still named -- just via a greppable structured log instead
+            // of a tenant-wedging stack trace.
+            int nonConformantCount = ctx.selectCount().from(sta)
+                .where(DSL.not(staDocId.likeRegex("^[0-9a-f]{64}$")))
+                .fetchOne(0, Integer.class);
+            counts.put("topic_assignments_non_conformant", nonConformantCount);
+            if (nonConformantCount > 0) {
+                List<String> nonConformantSample = ctx.selectDistinct(staDocId)
+                    .from(sta)
+                    .where(DSL.not(staDocId.likeRegex("^[0-9a-f]{64}$")))
+                    .limit(10)
+                    .fetch(staDocId);
+                log.warn("event=staging_finalize_topic_assignment_non_conformant tenant={} count={} sample={}",
+                    tenant, nonConformantCount, nonConformantSample);
+            }
+            // RESOLVABLE-ONLY anti-join against nexus.chunks (RDR-194 P3d
+            // scope enlargement, cncue analysis §2b/§4.3, CRITICAL finding):
+            // once the composite FK topic_assignments_chunk_fk (companion
+            // Liquibase commit, same bead) is VALIDATEd, a CONFORMANT 64-hex
+            // staged doc_id whose (source_collection, doc_id) tuple has no
+            // matching nexus.chunks row -- the topics ETL landed before its
+            // content collection promoted -- would otherwise violate the FK:
+            // SQLSTATE 23503, tenant-wide transaction abort, naming no
+            // offending row. That is exactly the RESOLVABLE-ONLY deferral
+            // this method's own comment above (`(3) topic_assignments`)
+            // already promises: "a legacy-shaped doc_id with NO alias yet
+            // stays STAGED." Gated here the same way the manifest promote
+            // gates on `manifestResolvable` above -- an unresolvable row
+            // simply does not join, stays staged, and is counted below; a
+            // later finalize converges it once its content collection
+            // promotes.
+            Condition topicChunkResolvable = DSL.exists(ctx.selectOne().from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(staTopicCollection))
+                .and(CHUNKS.CHASH.eq(staDocIdDecoded)));
+            // RDR-194 D1/P3b (nexus-tk070.p3b, relayed finding nexus-hva5p):
+            // source_collection wired through as `s.topic_collection` -- staging.
+            // topic_assignments carries no SEPARATE source_collection column
+            // (staging-001-landing-tables.xml's DDL is just tenant_id/doc_id/
+            // topic_id/topic_label/topic_collection), but for this ETL's shape
+            // that is the correct value: legacy SQLite taxonomy assignment never
+            // captured a cross-collection ("projection") distinction, so every
+            // promoted row here is structurally an own-pass/centroid-style
+            // assignment, for which source_collection == the assigned topic's
+            // OWN collection by construction (the same identity
+            // assign_from_chashes_<dim>'s centroid branch relies on, P3a).
             counts.put("topic_assignments_promoted", ctx.insertInto(TOPIC_ASSIGNMENTS,
-                    TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
+                    TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
                 .select(ctx.selectDistinct(
-                        currentTenantSetting(),
-                        DSL.coalesce(hex(CHASH_ALIAS.NEW_CHASH), staDocId),
-                        TOPICS.ID)
+                        currentTenantSetting(), staDocIdDecoded, TOPICS.ID, staTopicCollection)
                     .from(sta)
                     .join(TOPICS).on(TOPICS.LABEL.eq(staTopicLabel)
                         .and(TOPICS.COLLECTION.eq(staTopicCollection)))
-                    .leftJoin(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(staDocId))
-                    .where(CHASH_ALIAS.NEW_CHASH.isNotNull()
-                        .or(staDocId.notLikeRegex("^([0-9a-f]{16}|[0-9a-f]{32})$"))))
+                    .where(staDocId.likeRegex("^[0-9a-f]{64}$"))
+                    .and(topicChunkResolvable))
                 .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
                 .doNothing()
                 .execute());
             counts.put("topic_assignments_unresolved", ctx.selectCount().from(sta)
                 .where(DSL.notExists(ctx.selectOne().from(TOPICS)
                     .where(TOPICS.LABEL.eq(staTopicLabel).and(TOPICS.COLLECTION.eq(staTopicCollection)))))
+                .fetchOne(0, Integer.class));
+            // Companion counter for the anti-join above: conformant,
+            // topic-resolvable staged rows whose chunk has not promoted to
+            // nexus.chunks yet -- the population the anti-join defers
+            // rather than lets hit the FK. Distinct from
+            // topic_assignments_unresolved (topic missing) -- a row can be
+            // topic-resolvable and chunk-pending simultaneously; both
+            // counters can be nonzero for the same underlying row.
+            counts.put("topic_assignments_chunk_pending", ctx.selectCount().from(sta)
+                .where(staDocId.likeRegex("^[0-9a-f]{64}$"))
+                .and(DSL.not(topicChunkResolvable))
                 .fetchOne(0, Integer.class));
 
             // (4) frecency: GREATEST-merge from the staged rows through the
@@ -978,32 +1015,18 @@ public final class StagingPromoteOps {
             //     different source/join shape, not reusable as-is).
             // jOOQ DSL rendering (nexus-4okz4 increment 3): the GROUP BY
             // uses the UNALIASED target-id expression object (not the
-            // `.as("target_id")` decorated one used in the SELECT list) so
-            // the rendered SQL groups by the full COALESCE(...) expression,
+            // `.as("target_id")` decorated one used in the SELECT list),
             // matching the raw form's `GROUP BY 1` (positional — the sole
             // non-aggregate SELECT column) without relying on PostgreSQL's
             // group-by-output-alias extension.
             //
-            // PIN (empirically found via StagingPromoteOpsIntegrationTest,
-            // not anticipated by review): targetIdExpr's `encode(..., 'hex')`
-            // MUST use DSL.inline("hex"), not the shared hex() helper's
-            // DSL.val("hex") — this expression is rendered TWICE in the
-            // final SQL text (once for the SELECT list, once for GROUP BY),
-            // and jOOQ mints an INDEPENDENT bind placeholder per textual
-            // occurrence even for the identical Java Field object. PostgreSQL
-            // validates GROUP BY coverage by PARSE-TREE structural equality
-            // BEFORE parameter binding, so two occurrences of
-            // `encode(chash_alias.new_chash, $N)` with DIFFERENT parameter
-            // numbers are NOT recognized as the same expression — Postgres
-            // then reports `chash_alias.new_chash` as absent from GROUP BY,
-            // even though the SAME value is bound to both placeholders at
-            // execution time. DSL.inline(...) renders the literal directly
-            // into the SQL text (no placeholder), so both occurrences are
-            // byte-for-byte identical and the parser's equality check
-            // passes. Bare-column GROUP BY targets (e.g. RekeyOps'
-            // frecencyAliasAggregateDsl, which groups by CHASH_ALIAS.NEW_CHASH
-            // directly) never hit this — a plain column reference has no
-            // embedded literal to duplicate.
+            // nexus-lgdel.l1: the increment-3 PIN documented HERE about
+            // DSL.inline vs DSL.val for a COALESCE(encode(...),...) target
+            // expression no longer applies — targetIdExpr is now the bare
+            // sfChunkId column (see below), which has no embedded literal
+            // to duplicate across the SELECT list and GROUP BY occurrences.
+            // See ChashSqlIdioms' class javadoc for the general inline-vs-
+            // bind rule this class no longer needs to invoke here.
             var sf = DSL.table(DSL.name("staging", "frecency")).as("s");
             Field<String> sfChunkId = DSL.field(DSL.name("s", "chunk_id"), String.class);
             Field<Double> sfFrecencyScore = DSL.field(DSL.name("s", "frecency_score"), Double.class);
@@ -1011,9 +1034,11 @@ public final class StagingPromoteOps {
             Field<String> sfLastHitAt = DSL.field(DSL.name("s", "last_hit_at"), String.class);
             Field<String> sfEmbeddedAt = DSL.field(DSL.name("s", "embedded_at"), String.class);
             Field<Integer> sfTtlDays = DSL.field(DSL.name("s", "ttl_days"), Integer.class);
-            Field<String> targetIdExpr = DSL.coalesce(
-                DSL.function("encode", String.class, CHASH_ALIAS.NEW_CHASH, DSL.inline("hex")),
-                sfChunkId);
+            // nexus-lgdel.l1: targetIdExpr was COALESCE(encode(CHASH_ALIAS.
+            // NEW_CHASH,'hex'), sfChunkId) — the alias arm is gone with the
+            // table, so this reduces to the staged chunk_id itself (already
+            // filtered to 64-hex by the WHERE below).
+            Field<String> targetIdExpr = sfChunkId;
             var stagedFrecencyAgg = ctx.select(
                     targetIdExpr.as("target_id"),
                     DSL.max(sfFrecencyScore).as("fs"),
@@ -1022,8 +1047,7 @@ public final class StagingPromoteOps {
                     DSL.max(parseStagedTimestamp(sfEmbeddedAt)).as("ea"),
                     DSL.max(sfTtlDays).as("td"))
                 .from(sf)
-                .leftJoin(CHASH_ALIAS).on(sfChunkId.eq(CHASH_ALIAS.OLD_REF))
-                .where(CHASH_ALIAS.NEW_CHASH.isNotNull().or(sfChunkId.likeRegex("^[0-9a-f]{64}$")))
+                .where(sfChunkId.likeRegex("^[0-9a-f]{64}$"))
                 .groupBy(targetIdExpr)
                 .asTable("g");
             Field<String> gTargetId = stagedFrecencyAgg.field("target_id", String.class);
@@ -1068,7 +1092,10 @@ public final class StagingPromoteOps {
             Field<String> srlAction = DSL.field(DSL.name("s", "action"), String.class);
             Field<String> srlSessionId = DSL.field(DSL.name("s", "session_id"), String.class);
             Field<String> srlTs = DSL.field(DSL.name("s", "ts"), String.class);
-            Field<String> resolvedChunkId = DSL.coalesce(hex(CHASH_ALIAS.NEW_CHASH), srlChunkId);
+            // nexus-lgdel.l1: resolvedChunkId was COALESCE(hex(CHASH_ALIAS.
+            // NEW_CHASH), srlChunkId) — the alias arm is gone with the
+            // table, reducing to the staged chunk_id itself.
+            Field<String> resolvedChunkId = srlChunkId;
             Field<OffsetDateTime> resolvedTs = parseStagedTimestamp(srlTs);
             counts.put("relevance_log_promoted", ctx.insertInto(RELEVANCE_LOG,
                     RELEVANCE_LOG.TENANT_ID, RELEVANCE_LOG.QUERY, RELEVANCE_LOG.CHUNK_ID,
@@ -1078,8 +1105,7 @@ public final class StagingPromoteOps {
                         currentTenantSetting(), srlQuery, resolvedChunkId, srlCollection,
                         srlAction, srlSessionId, resolvedTs)
                     .from(srl)
-                    .leftJoin(CHASH_ALIAS).on(CHASH_ALIAS.OLD_REF.eq(srlChunkId))
-                    .where(CHASH_ALIAS.NEW_CHASH.isNotNull().or(srlChunkId.likeRegex("^[0-9a-f]{64}$")))
+                    .where(srlChunkId.likeRegex("^[0-9a-f]{64}$"))
                     .and(DSL.notExists(ctx.selectOne().from(RELEVANCE_LOG)
                         .where(RELEVANCE_LOG.QUERY.eq(srlQuery))
                         .and(RELEVANCE_LOG.CHUNK_ID.eq(resolvedChunkId))
@@ -1120,7 +1146,11 @@ public final class StagingPromoteOps {
                 .select(ctx.select(
                         currentTenantSetting(), sdaCollection, sdaSourcePath,
                         sdaProblemFormulation, sdaProposedMethod, sdaExperimentalDatasets,
-                        sdaExperimentalBaselines, sdaExperimentalResults, sdaExtras, sdaConfidence,
+                        sdaExperimentalBaselines, sdaExperimentalResults,
+                        // nexus-cefa1.4: DOCUMENT_ASPECTS.EXTRAS is jsonb now — staging.
+                        // document_aspects.extras stays TEXT (typeless by design), so the
+                        // promote SELECT needs the explicit staged-TEXT-to-jsonb cast.
+                        parseStagedJson(sdaExtras), sdaConfidence,
                         parseStagedTimestamp(sdaExtractedAt),
                         sdaModelVersion, sdaExtractorName, sdaSourceUri, sdaDocId)
                     .from(sda)

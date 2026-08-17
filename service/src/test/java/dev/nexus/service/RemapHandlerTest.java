@@ -31,8 +31,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>The bead's TDD contract, end to end over HTTP:
  * <ol>
- *   <li>record_batch writes facts; the live-membership function REFLECTS them</li>
- *   <li>clear_leg removes the leg's rows; membership reads nothing owed (0/0)</li>
+ *   <li>record_batch writes facts; a chash_remap+chunks join REFLECTS them
+ *       (formerly the live-membership function/endpoint — DELETED at
+ *       nexus-lgdel.l2, orphaned read surface, zero production callers; the
+ *       {@code membership()} test helper below now computes the same thing
+ *       directly)</li>
+ *   <li>clear_leg removes the leg's rows; the same join reads nothing owed (0/0)</li>
  *   <li>batch bound: &gt;300 entries → 400 (chroma_quotas heritage cap)</li>
  *   <li>RLS through the HTTP layer: another tenant's facts are invisible</li>
  *   <li>upsert: re-recording the same old_id replaces the fact (idempotent resume)</li>
@@ -97,22 +101,6 @@ class RemapHandlerTest {
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chash_remap TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);  // RDR-191 Phase 4: unified
-            // RDR-180: remap_membership() now chains through chash_alias to resolve
-            // legacy-era facts against a rekeyed store (rdr180-002 comment).
-            su.createStatement().execute(
-                "GRANT SELECT ON nexus.chash_alias TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.remap_membership(text, text) TO " + SVC_ROLE);
-            // nexus-b878d: the async rekey tests below drive a REAL rekey through
-            // the endpoint, so this role needs what RekeyOps needs — the same
-            // write set and the MAINTAIN that its in-transaction ANALYZE uses
-            // (rdr180-17 / F2). Without these the job would land FAILED on a
-            // privilege error and the poll assertions would be testing the error
-            // path while appearing to test the happy one.
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT MAINTAIN ON nexus.chash_alias TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT ON nexus.service_tokens, nexus.session_tokens TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -308,9 +296,10 @@ class RemapHandlerTest {
             assertThat(rs.getLong("total"))
                 .as("upsert on the natural key — one row, not two")
                 .isEqualTo(1);
-            assertThat(rs.getString("new_chash"))
-                .as("re-recording replaces the fact (deterministic resume)")
-                .isEqualTo(chash("h5v2"));
+            assertThat(rs.getBytes("new_chash"))
+                .as("re-recording replaces the fact (deterministic resume) — new_chash is "
+                    + "bytea now (RDR-194 D3), so this compares the decoded storage form")
+                .isEqualTo(dev.nexus.service.db.Chash.fromHex(chash("h5v2")).toBytes());
             assertThat(rs.getString("provenance")).isEqualTo("resume");
         }
     }
@@ -341,9 +330,11 @@ class RemapHandlerTest {
                 "SELECT new_chash FROM nexus.chash_remap WHERE tenant_id = '" + TENANT + "' " +
                 "AND source_collection = '" + src + "'");
             assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("new_chash"))
-                .as("RDR-180: the full 64-hex digest is the canonical chash — no [:32] truncation")
-                .isEqualTo(full);
+            assertThat(rs.getBytes("new_chash"))
+                .as("RDR-180: the full 64-hex digest is the canonical chash — no [:32] "
+                    + "truncation; new_chash is bytea now (RDR-194 D3), so this compares "
+                    + "the decoded storage form")
+                .isEqualTo(dev.nexus.service.db.Chash.fromHex(full).toBytes());
         }
     }
 
@@ -366,6 +357,39 @@ class RemapHandlerTest {
             {"source_collection":"legacy__h7__src","entries":[
               {"old_id":"legacy-1","new_chash":"abc123","target_collection":"t","provenance":"test"}
             ]}""");
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("new_chash");
+    }
+
+    /**
+     * RDR-194 D3 (bead nexus-tk070.p2): one char short of the canonical 64 —
+     * an odd-length hex string that would fail {@code decode(..., 'hex')} at
+     * the DB layer if it ever got there. The Java guard (now canonical-form,
+     * not the old 32-or-64 length tolerance) must reject it BEFORE any SQL
+     * round trip, with a teaching message.
+     */
+    @Test
+    void recordBatch_63CharChash_rejected400() throws Exception {
+        var resp = post("/v1/remap/record_batch", TOKEN, TENANT, """
+            {"source_collection":"legacy__h7b__src","entries":[
+              {"old_id":"legacy-1","new_chash":"%s","target_collection":"t","provenance":"test"}
+            ]}""".formatted(chash("h7b").substring(0, 63)));
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("new_chash");
+    }
+
+    /**
+     * RDR-194 D3: 64 chars but not hex — must never reach {@code decode()}.
+     * A raw ASCII string this length would decode successfully (bytea input
+     * is not the failure mode here); the Java guard's canonical-form check
+     * (not merely a length check) is what catches it.
+     */
+    @Test
+    void recordBatch_nonHexCharacters_rejected400() throws Exception {
+        var resp = post("/v1/remap/record_batch", TOKEN, TENANT, """
+            {"source_collection":"legacy__h7c__src","entries":[
+              {"old_id":"legacy-1","new_chash":"%s","target_collection":"t","provenance":"test"}
+            ]}""".formatted("g".repeat(64)));
         assertThat(resp.statusCode()).isEqualTo(400);
         assertThat(resp.body()).contains("new_chash");
     }
@@ -528,9 +552,12 @@ class RemapHandlerTest {
 
     @Test
     void noAuth_rejected401() throws Exception {
+        // nexus-lgdel.l2: retargeted off the deleted /v1/remap/membership
+        // route onto a surviving read endpoint — this test's subject is the
+        // AuthFilter's blanket 401 enforcement, not any one specific route.
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort()
-                + "/v1/remap/membership?source_collection=a&target_collection=b"))
+                + "/v1/remap/count"))
             .header("X-Nexus-Tenant", TENANT)
             .GET().build();
         var resp = http.send(req, HttpResponse.BodyHandlers.ofString());
@@ -539,12 +566,41 @@ class RemapHandlerTest {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
+    /**
+     * nexus-lgdel.l2: {@code GET /v1/remap/membership} and {@code
+     * nexus.remap_membership()} are DELETED — an orphaned read surface with
+     * zero production callers (the old client was deleted at {@code 88d91bd58};
+     * the surviving rung calls only {@code POST /v1/remap/rekey}). This helper
+     * computes the SAME {@code mapped_total}/{@code present_count} directly
+     * against {@code chash_remap} + the unified chunks table, mirroring the
+     * deleted function's join exactly, so record_batch/clear_leg/RLS coverage
+     * below is unaffected by the read surface's removal. Uses a SUPERUSER
+     * connection (no RLS enforcement via session GUC), so both the map-fact
+     * scope and the chunks-presence scope are filtered by {@code tenant}
+     * explicitly here — the function relied on RLS to do this implicitly.
+     */
     private Map<String, Object> membership(String token, String tenant,
                                            String src, String tgt) throws Exception {
-        var resp = get("/v1/remap/membership?source_collection=" + src
-            + "&target_collection=" + tgt, token, tenant);
-        assertThat(resp.statusCode()).isEqualTo(200);
-        return mapper.readValue(resp.body(), MAP_T);
+        try (Connection su = pg.createConnection("")) {
+            var ps = su.prepareStatement(
+                "SELECT count(*)::bigint AS mapped_total, "
+                + "count(*) FILTER (WHERE EXISTS (SELECT 1 FROM " + DimTables.CHUNKS_TABLE_NAME + " c "
+                + "WHERE c.tenant_id = ? AND c.collection = ? AND c.chash = r.new_chash))::bigint AS present_count "
+                + "FROM nexus.chash_remap r "
+                + "WHERE r.tenant_id = ? AND r.source_collection = ? AND r.target_collection = ?");
+            ps.setString(1, tenant);
+            ps.setString(2, tgt);
+            ps.setString(3, tenant);
+            ps.setString(4, src);
+            ps.setString(5, tgt);
+            var rs = ps.executeQuery();
+            assertThat(rs.next()).isTrue();
+            // int, not long: matches what the deleted HTTP endpoint's Jackson
+            // deserialization produced (small counts decode as Integer), which
+            // every call site below asserts against with bare int literals.
+            return Map.of("mapped_total", (int) rs.getLong("mapped_total"),
+                          "present_count", (int) rs.getLong("present_count"));
+        }
     }
 
     /** Seed target chunk rows (superuser) so membership can find the claims. */
@@ -564,139 +620,9 @@ class RemapHandlerTest {
         }
     }
 
-    // ── nexus-b878d: the rekey is submitted and polled, never awaited ────────
-
-    /**
-     * The submission contract: 202 with a job id, immediately, and NOT the
-     * envelope. The synchronous form could not survive the tls sidecar's ~120s
-     * proxy_read_timeout at production scale (gate-xr789: 504 at 120.3s over a
-     * transaction that committed 88s later), so no request is held open for the
-     * duration of a rekey any more.
-     */
-    @Test
-    void rekeySubmit_returns202WithAJobId_notTheEnvelope() throws Exception {
-        HttpResponse<String> submit = post("/v1/remap/rekey", TOKEN, TENANT, "{}");
-        assertThat(submit.statusCode()).isEqualTo(202);
-
-        Map<String, Object> body = mapper.readValue(submit.body(), MAP_T);
-        assertThat(body).containsEntry("status", "running").containsKey("job_id");
-        assertThat(body)
-            .as("the envelope is fetched by poll, never returned by the submit")
-            .doesNotContainKey("envelope");
-
-        String jobId = (String) body.get("job_id");
-        assertThat((String) body.get("poll")).isEqualTo("/v1/remap/rekey/" + jobId);
-
-        Map<String, Object> done = pollToTerminal(jobId, TOKEN, TENANT);
-        assertThat(done).containsEntry("status", "succeeded");
-        @SuppressWarnings("unchecked")
-        Map<String, Object> envelope = (Map<String, Object>) done.get("envelope");
-        assertThat(envelope)
-            .as("the poll carries the RekeyOps counts envelope through unchanged")
-            .containsKeys("rehashed", "collapsed_duplicates", "residual_mismatched");
-    }
-
-    /**
-     * A job id minted by a previous engine instance must not read as "never
-     * existed" — but it must ALSO not claim the store is unchanged.
-     *
-     * <p>The commit happens inside TenantScope and the registry marks the job
-     * SUCCEEDED only after the call returns, so a death between the two leaves
-     * a committed rekey with no SUCCEEDED record. An engine that answered
-     * "store unchanged" there would be telling an operator nothing happened
-     * when something did — the exact failure the 504 produced and this endpoint
-     * was rebuilt to remove. So the response reports the outcome as UNKNOWN and
-     * names what settles it.
-     */
-    @Test
-    void pollingAJobFromAPriorEngineInstance_reportsUnknownNotUnchanged() throws Exception {
-        HttpResponse<String> res = get("/v1/remap/rekey/0000dead-"
-            + java.util.UUID.randomUUID(), TOKEN, TENANT);
-        assertThat(res.statusCode())
-            .as("410, not 404 — the id was real, it just predates this instance")
-            .isEqualTo(410);
-
-        Map<String, Object> body = mapper.readValue(res.body(), MAP_T);
-        assertThat(body).containsEntry("status", "lost");
-        assertThat(body)
-            .as("the one thing this response must never assert is that the store is clean")
-            .containsEntry("store_changed", "unknown");
-
-        String error = (String) body.get("error");
-        assertThat(error).contains("previous engine instance");
-        assertThat(error)
-            .as("says outright that the claim is not guaranteed")
-            .contains("NOT guaranteed");
-        assertThat(error)
-            .as("points at the authoritative record")
-            .contains("event=rekey_complete");
-        assertThat(error)
-            .as("and at the safe recovery, which is what an operator actually needs")
-            .contains("idempotent");
-        assertThat(error)
-            .as("must not assert the store is unchanged")
-            .doesNotContain("the store is unchanged");
-    }
-
-    @Test
-    void pollingAnUnknownOrMalformedJobId_isDistinguished() throws Exception {
-        // Our epoch, no such job.
-        HttpResponse<String> unknown = get("/v1/remap/rekey/"
-            + currentEpoch() + "-" + java.util.UUID.randomUUID(), TOKEN, TENANT);
-        assertThat(unknown.statusCode()).isEqualTo(404);
-
-        HttpResponse<String> malformed = get("/v1/remap/rekey/nodash", TOKEN, TENANT);
-        assertThat(malformed.statusCode()).isEqualTo(400);
-    }
-
-    /** Holding a job id is not a way to observe another tenant's rekey. */
-    @Test
-    void aJobIdIsTenantScopedOnPoll() throws Exception {
-        HttpResponse<String> submit = post("/v1/remap/rekey", TOKEN, TENANT, "{}");
-        assertThat(submit.statusCode()).isEqualTo(202);
-        String jobId = (String) mapper.readValue(submit.body(), MAP_T).get("job_id");
-        pollToTerminal(jobId, TOKEN, TENANT);
-
-        HttpResponse<String> crossTenant = get("/v1/remap/rekey/" + jobId, OTHER_TOKEN, OTHER_TENANT);
-        assertThat(crossTenant.statusCode())
-            .as("another tenant's job reads as unknown, not as an envelope")
-            .isEqualTo(404);
-        assertThat(crossTenant.body()).doesNotContain("envelope");
-    }
-
-    @Test
-    void rekeySubmitRejectsABadOrphanPolicyBeforeStartingAnything() throws Exception {
-        HttpResponse<String> res = post("/v1/remap/rekey", TOKEN, TENANT,
-            "{\"orphan_policy\":\"invent-one\"}");
-        assertThat(res.statusCode()).isEqualTo(400);
-        assertThat(res.body()).doesNotContain("job_id");
-    }
-
-    @Test
-    void pollRouteRejectsNonGet() throws Exception {
-        HttpResponse<String> res = post("/v1/remap/rekey/" + currentEpoch() + "-x", TOKEN, TENANT, "{}");
-        assertThat(res.statusCode()).isEqualTo(405);
-    }
-
-    /** The engine epoch as seen from outside: the prefix of a freshly minted id. */
-    private String currentEpoch() throws Exception {
-        HttpResponse<String> submit = post("/v1/remap/rekey", TOKEN, TENANT, "{}");
-        String jobId = (String) mapper.readValue(submit.body(), MAP_T).get("job_id");
-        pollToTerminal(jobId, TOKEN, TENANT);
-        return jobId.substring(0, jobId.indexOf('-'));
-    }
-
-    private Map<String, Object> pollToTerminal(String jobId, String token, String tenant)
-            throws Exception {
-        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60);
-        while (System.nanoTime() < deadline) {
-            HttpResponse<String> res = get("/v1/remap/rekey/" + jobId, token, tenant);
-            Map<String, Object> body = mapper.readValue(res.body(), MAP_T);
-            if (!"running".equals(body.get("status"))) return body;
-            Thread.sleep(10);
-        }
-        throw new AssertionError("rekey job " + jobId + " never reached a terminal state");
-    }
+    // nexus-lgdel.l1: the async rekey submit/poll tests formerly here were
+    // DELETED along with the rekey endpoints and RekeyOps — the mechanism was
+    // retired with nexus.chash_alias. See RemapHandler's class javadoc.
 
     /** Deterministic 64-hex chash from a seed string — the FULL sha256
      *  digest (RDR-180: the pre-flip [:16-byte] truncation is retired). */

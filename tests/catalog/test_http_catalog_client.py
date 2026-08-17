@@ -21,6 +21,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -178,11 +179,9 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     #: not just the client-side kwarg.
     last_show_follow_alias: "bool | None" = None
 
-    #: nexus-5xn3k.3: /manifest/verify response body — override per-test to
-    #: exercise the missing>0 branch. Default mirrors a clean document.
-    manifest_verify_response: dict[str, Any] = {"referenced": 0, "present": 0, "missing": 0}
-    #: last doc_id query param /manifest/verify actually received.
-    last_manifest_verify_doc_id: str = ""
+    # manifest_verify_response/last_manifest_verify_doc_id REMOVED (RDR-191
+    # Phase 6, nexus-o8dil.33) alongside the client's manifest_verify method
+    # and its only test consumer.
     #: nexus-5xn3k.3: /index-run/complete response — override to exercise the
     #: 409 IndexRunVerifyRefused branch (set complete_index_run_conflict=True).
     complete_index_run_conflict: bool = False
@@ -207,8 +206,6 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         cls.descendants_count = 2
         cls.show_alias_map = {}
         cls.last_show_follow_alias = None
-        cls.manifest_verify_response = {"referenced": 0, "present": 0, "missing": 0}
-        cls.last_manifest_verify_doc_id = ""
         cls.complete_index_run_conflict = False
         cls.last_begin_index_run_body = {}
         cls.last_begin_index_run_many_body = {}
@@ -392,19 +389,6 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             # chashes (truncation defence, v0.1.55+); the client reconciles
             # len(chashes) == count and fails loud on deviation.
             self._send_json({"chashes": [CHASH_A, CHASH_B], "count": 2})
-        elif op == "/manifest/orphans":
-            params = self._query_params()
-            dim = int(params.get("dim", "0"))
-            self._send_json({
-                "dim": dim,
-                "count": 2,
-                "orphans": [
-                    {"doc_id": "1.1.1", "position": 0, "chash": CHASH_A,
-                     "collection": "knowledge__o__minilm-l6-v2-384__v1"},
-                    {"doc_id": "1.1.1", "position": 1, "chash": CHASH_B,
-                     "collection": "knowledge__o__minilm-l6-v2-384__v1"},
-                ],
-            })
         elif op == "/manifest/null_collection":
             # T2 nexus/chroma-residue-plan-2026-08-10 §C2: GET
             # /manifest/null_collection -> {total, backfillable} — mirrors
@@ -424,38 +408,26 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                      "non_conformant": 0, "sample_chashes": []},
                 ],
             })
-        elif op == "/manifest/verify":
-            # nexus-5xn3k.3: mirrors CatalogRepository.manifestVerify's
-            # {referenced, present, missing} shape. Default clean (0/0/0);
-            # tests override via FakeCatalogHandler.manifest_verify_response.
-            params = self._query_params()
-            resp = dict(FakeCatalogHandler.manifest_verify_response)
-            FakeCatalogHandler.last_manifest_verify_doc_id = params.get("doc_id", "")
-            self._send_json(resp)
-        elif op == "/manifest/verify_all":
-            # nexus-ac4id part 2: mirrors CatalogRepository.manifestVerifyAll's
-            # {"collections": [...], "count": n} shape.
-            self._send_json({
-                "collections": [
-                    {"collection": "docs__o__voyage-context-3__v1",
-                     "referenced": 5, "present": 5, "missing": 0},
-                ],
-                "count": 1,
-            })
+        # /manifest/verify and /manifest/verify_all route branches REMOVED
+        # (RDR-191 Phase 6, nexus-o8dil.33) alongside the client's
+        # manifest_verify/manifest_verify_all methods and their only test
+        # consumers. (nexus.manifest_verify(text) itself is kept server-side
+        # for completeIndexRun — see /index-run/complete below — but this
+        # fake never needed a route for that internal call.)
         elif op == "/collections/list":
             # nexus-8y1tm: full CatalogRepository.collRow() shape (10 keys) —
             # owner_id added so collections_by_owner's client-side filter
             # (c.get("owner_id") == owner_id) has something to match ("1.1" is
             # the tumbler_prefix every fixture owner in this file uses).
-            # legacy_grandfathered is an int (0/1) on the wire (collRow's
-            # ``legcy`` param is a boxed Integer column, not a boolean) —
-            # deliberately NOT coerced to a Python bool here (see
-            # nexus-8y1tm KNOWN DRIFT note on get_collection/list_collections).
+            # legacy_grandfathered is a JSON boolean on the wire since
+            # catalog-031-type-hygiene (nexus-cefa1.2): collRow puts a real
+            # Java Boolean. Engines older than that sent 0/1; the client's
+            # _coerce_legacy_grandfathered bool() cast accepts both.
             self._send_json({"collections": [{
                 "name": "code__test__voyage-code-3__v1", "content_type": "code",
                 "owner_id": "1.1", "embedding_model": "voyage-code-3",
                 "model_version": "1", "display_name": "code__test__voyage-code-3__v1",
-                "legacy_grandfathered": 0, "superseded_by": "", "superseded_at": "",
+                "legacy_grandfathered": False, "superseded_by": "", "superseded_at": "",
                 "created_at": "2026-07-01T00:00:00+00:00",
             }]})
         elif op == "/collections/get":
@@ -472,10 +444,10 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     "embedding_model": "voyage-code-3",
                     "model_version": "1",
                     "display_name": name,
-                    # legacy_grandfathered: int (0/1) on the wire, matching
-                    # CatalogRepository.collRow's boxed-Integer column — see
-                    # the KNOWN DRIFT note where this is registered/excluded.
-                    "legacy_grandfathered": 0 if "__" in name else 1,
+                    # legacy_grandfathered: JSON boolean on the wire since
+                    # catalog-031 (collRow's column is boolean now); derived
+                    # from name conformance the way the live server does.
+                    "legacy_grandfathered": "__" not in name,
                     "superseded_by": "", "superseded_at": "",
                     "created_at": "2026-07-01T00:00:00+00:00",
                 })
@@ -567,26 +539,12 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     "metadata":   {},
                     "chunk_hash": chash,
                 })
-        elif op == "/v1/chash/lookup":
-            # nexus-84tr4: the alias-aware route. Echoes the CANONICAL 64-hex
-            # it resolved — identity for canonical input, alias-chained for a
-            # legacy 32-hex ref. Unknown refs echo nothing.
-            params = self._query_params()
-            chash = params.get("chash", "")
-            if chash == _LEGACY_CHASH_32:
-                self._send_json({"chash": _GLOBAL_CHASH_FULL, "rows": [
-                    {"collection": "knowledge__o__bge-768__v1"},
-                ]})
-            elif chash == "00000000" * 8:
-                self._send_json({"rows": []})
-            else:
-                self._send_json({"chash": chash, "rows": []})
         elif op == "/resolve_chash":
             params = self._query_params()
             chash = params.get("chash", "")
-            # A legacy-width ref has no row here: /resolve_chash carries no
-            # alias fallback, which is precisely the asymmetry nexus-84tr4 fixes.
-            if chash == "00000000" * 8 or chash == _LEGACY_CHASH_32:
+            # nexus-lgdel.l1: no alias fallback exists any more — an unknown
+            # (or legacy-width) chash simply 404s.
+            if chash == "00000000" * 8:
                 self.send_response(404)
                 self.end_headers()
             else:
@@ -682,8 +640,9 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             # since v0.1.61 (nexus-ocf52).
             tumblers = ["1.1.1"]
             self._send_json({"tumblers": tumblers, "count": len(tumblers)})
-        elif op == "/manifest/backfill":
-            self._send_json({"stamped": 7})
+        # /manifest/backfill route branch REMOVED (RDR-191 Phase 6,
+        # nexus-o8dil.33) alongside the client's manifest_backfill method
+        # and its only test consumer.
         elif op == "/index-run/begin":
             # nexus-5xn3k.3: mirrors CatalogHandler.handleIndexRunBegin.
             FakeCatalogHandler.last_begin_index_run_body = body
@@ -1533,36 +1492,13 @@ class TestHttpCatalogClientRoundTrip:
 
         assert client.relation_counts([]) == {}
 
-    def test_manifest_backfill_and_verify_journey(
-        self, client: HttpCatalogClient,
-    ) -> None:
-        # RDR-159 P-1b: POST /manifest/backfill → {"stamped": n}
-        assert client.manifest_backfill() == 7
-
-        # RUNFENCE (nexus-5xn3k.3) round trips.
-        FakeCatalogHandler.reset_log()
-        FakeCatalogHandler.manifest_verify_response = {"referenced": 3, "present": 1, "missing": 2}
-        result = client.manifest_verify("1.1.1")
-        assert result == {"referenced": 3, "present": 1, "missing": 2}
-        assert FakeCatalogHandler.last_manifest_verify_doc_id == "1.1.1"
-
-        result_all = client.manifest_verify_all()
-        assert result_all["count"] == 1
-        assert result_all["collections"][0]["referenced"] == 5
-
-    def test_manifest_orphans_journey(self, client: HttpCatalogClient) -> None:
-        # RDR-159 P-1b: GET /manifest/orphans?dim= → {dim, count, orphans}
-        result = client.manifest_orphans(384, limit=100)
-        assert result["dim"] == 384
-        assert result["count"] == 2
-        assert len(result["orphans"]) == 2
-        assert result["orphans"][0]["doc_id"] == "1.1.1"
-
-        with pytest.raises(ValueError, match="dim must be one of"):
-            client.manifest_orphans(512)
-
-        with pytest.raises(ValueError, match="limit must be > 0"):
-            client.manifest_orphans(384, limit=0)
+    # test_manifest_backfill_and_verify_journey and test_manifest_orphans_journey
+    # DELETED (RDR-191 Phase 6, nexus-o8dil.33): manifest_backfill,
+    # manifest_verify, manifest_verify_all, and manifest_orphans client
+    # methods are all retired — the manifest-chunk FK makes the dangling
+    # state they detected/fixed unreachable. FakeCatalogHandler's route
+    # branches for these are removed alongside these tests, its only
+    # consumers.
 
     def test_chash_conformance_report_returns_per_table_counts(
         self, client: HttpCatalogClient,
@@ -2043,7 +1979,6 @@ _MISSING_32 = "feeded00" * 4              # first 32 chars
 _GLOBAL_CHASH_FULL = "aabbccdd" * 8        # 64-char hex for global lookup
 _GLOBAL_CHASH_32   = "aabbccdd" * 4        # first 32 chars
 _MISS_GLOBAL_FULL  = "00000000" * 8        # 64-char hex — missing in server
-_LEGACY_CHASH_32   = "aabbccdd" * 4        # pre-RDR-180 32-hex ref, aliases to _GLOBAL_CHASH_FULL
 _MISS_GLOBAL_32    = "00000000" * 4        # first 32 chars
 
 
@@ -2186,44 +2121,12 @@ class TestResolveChash:
         finally:
             server.shutdown()
 
-    def test_resolve_chash_alias_chains_a_legacy_width_ref(self) -> None:
-        """nexus-84tr4: a legacy 32-hex ref must resolve, not silently MISS.
+    def test_resolve_chash_genuine_miss_makes_exactly_one_call(self) -> None:
+        """A ref unknown to the server returns None with exactly one GET.
 
-        /resolve_chash has no alias fallback (that lives on /v1/chash/lookup),
-        so resolve_chash used to MISS on exactly the refs
-        resolve_chash_globally RESOLVED — two functions disagreeing about one
-        identifier space. Harmless on a fully rekeyed store, where callers
-        read 64-hex manifest chashes; a silent miss for a user pasting a
-        legacy citation, or on any un-rekeyed store.
+        nexus-lgdel.l1: resolve_chash no longer retries a miss through the
+        (now-deleted) alias-aware route, so there is nothing left to loop.
         """
-        server, base_url = start_fake_server()
-        try:
-            client = HttpCatalogClient(base_url=base_url, _token="tok")
-            result = client.resolve_chash(f"chash:{_LEGACY_CHASH_32}")
-            assert result is not None, "legacy-width ref must alias-chain, not miss"
-            assert result["chunk_text"] == "resolved chunk body"
-            # The CANONICAL identity comes back, not the legacy ref that went
-            # in — the same rewrite the citation resolver performs, so a
-            # caller comparing against a 64-char citation matches.
-            assert result["chash"] == _GLOBAL_CHASH_FULL
-            assert result["chunk_hash"] == _GLOBAL_CHASH_FULL
-        finally:
-            server.shutdown()
-
-    def test_resolve_chash_alias_retry_preserves_char_range(self) -> None:
-        """The span slice must survive the alias retry."""
-        server, base_url = start_fake_server()
-        try:
-            client = HttpCatalogClient(base_url=base_url, _token="tok")
-            result = client.resolve_chash(f"chash:{_LEGACY_CHASH_32}:9-14")
-            assert result is not None
-            assert result["chunk_text"] == "chunk"
-            assert result["char_range"] == (9, 14)
-        finally:
-            server.shutdown()
-
-    def test_resolve_chash_genuine_miss_does_not_loop(self) -> None:
-        """A ref unknown to BOTH routes still returns None, after one retry."""
         server, base_url = start_fake_server()
         try:
             FakeCatalogHandler.get_ops.clear()
@@ -2231,8 +2134,7 @@ class TestResolveChash:
             assert client.resolve_chash(f"chash:{_MISS_GLOBAL_FULL}") is None
             resolves = [o for o in FakeCatalogHandler.get_ops if o == "/resolve_chash"]
             assert len(resolves) == 1, (
-                "the alias route reported no different canonical identity, so "
-                f"there is nothing to retry; got {FakeCatalogHandler.get_ops}"
+                f"expected exactly one /resolve_chash call, no retry; got {FakeCatalogHandler.get_ops}"
             )
         finally:
             server.shutdown()
@@ -2491,6 +2393,39 @@ class TestResolvePathOwnerCache:
 
 
 # ── nexus-ai41v / nexus-9ssih: link audit + dangling-endpoint translation ─────
+
+
+class TestOrphanedLinksWireShapeIsNotTrusted:
+    """``HttpCatalogClient.orphaned_links()`` parsing (nexus-ysrwi review,
+    2026-07-25). Moved here from the retired ``tests/test_doctor_dangling_links.py``
+    (nexus-tk070.p1, RDR-194 § D2: the ``nx doctor --check-dangling-links``
+    CLI flag retired one-for-one with catalog-032's VALIDATE, but the client
+    method and its ``GET /v1/catalog/links/orphaned`` HTTP surface did NOT —
+    CatalogRepository#orphanedLinks's own updated javadoc explains why: it
+    stays useful post-FK for the TOMBSTONED-endpoint case an FK deliberately
+    does not cover). These two tests exercise the client's own defensive
+    parsing, independent of doctor.py, so they survive the CLI retirement
+    unchanged.
+    """
+
+    def test_a_non_dict_response_raises_the_type_doctor_handles(self) -> None:
+        """A bare JSON array would make `.get()` raise AttributeError, which a
+        caller's `except (httpx.HTTPError, RuntimeError)` would NOT catch --
+        so the caller would crash with a raw traceback instead of a clean,
+        typed failure."""
+        client = HttpCatalogClient.__new__(HttpCatalogClient)
+        with patch.object(HttpCatalogClient, "_get", return_value=[1, 2, 3]):
+            with pytest.raises(RuntimeError) as exc:
+                client.orphaned_links()
+        assert "wire shape" in str(exc.value).lower()
+        assert "list" in str(exc.value), "the error must name what actually arrived"
+
+    def test_an_empty_response_is_still_an_empty_list_not_an_error(self) -> None:
+        """Non-regression: no orphans is a legitimate, common answer."""
+        client = HttpCatalogClient.__new__(HttpCatalogClient)
+        for empty in ({}, {"links": []}, None):
+            with patch.object(HttpCatalogClient, "_get", return_value=empty):
+                assert client.orphaned_links() == []
 
 
 class TestLinkAuditIsNoLongerAStub:

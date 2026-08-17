@@ -1302,9 +1302,18 @@ class TestComputeAndAssign:
         # oracle is deleted, which is what Phase 0 (nexus-tdkg1.1) froze the
         # supplemental contract for. The expected values were always literal,
         # so the assertions keep their teeth without the second term.
+        #
+        # RDR-194 D1/P3b (nexus-11pe7, 2026-08-16): source_collection on the
+        # centroid branch is now the query collection ("c") instead of None
+        # -- topic_assignments.source_collection is NOT NULL as of
+        # taxonomy-010-1, and this branch's own candidate set
+        # (get_by_collection(collection_name), non-cross-collection) makes
+        # "c" the doc's real source collection by construction, mirroring
+        # assign_from_chashes_<dim>'s centroid branch (P3a) and
+        # TaxonomyRepository.assignOne's non-projection branch (P3b).
         assert [a["topic_id"] for a in http_out] == [1, 2]
         assert all(a["assigned_by"] == "centroid" for a in http_out)
-        assert all(a["similarity"] is None and a["source_collection"] is None for a in http_out)
+        assert all(a["similarity"] is None and a["source_collection"] == "c" for a in http_out)
         assert [set(a) for a in http_out] == [
             {"doc_id", "topic_id", "assigned_by", "similarity", "source_collection"}
         ] * 2

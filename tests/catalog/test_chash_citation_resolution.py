@@ -5,8 +5,11 @@
 held the [:32] truncation (G1 — resolution effectively ran at 128 bits).
 Post-flip the stored natural id IS the full digest, so a 64-hex citation
 resolves end-to-end at 256 bits. These tests prove the resolver path with
-seam fakes; the legacy 32-hex resolution rides the chash_alias map (the
-engine-side read seam), pinned here at the grammar/derivation level.
+seam fakes. nexus-lgdel.l1 retired the chash_alias-backed legacy 32-hex
+alias-chaining route these tests used to pin — a legacy reference still
+PARSES (grammar-level, see ``test_grammar_accepts_canonical_and_legacy_
+reference_widths``) but no longer resolves; it dangles like any other
+unmapped identifier.
 """
 from __future__ import annotations
 
@@ -63,34 +66,27 @@ def test_grammar_accepts_canonical_and_legacy_reference_widths():
     assert hex_chash == FULL and char_range is None
     hex_chash, char_range = parse_chash_span(f"chash:{FULL}:5-12")
     assert char_range == (5, 12)
-    # RDR-180 Failure Modes: legacy 32-hex REFERENCES parse (they resolve
-    # via the chash_alias route) — only truly-malformed widths reject.
+    # RDR-180 Failure Modes: legacy 32-hex REFERENCES still parse (grammar
+    # level) — only truly-malformed widths reject. nexus-lgdel.l1: they no
+    # longer RESOLVE (the chash_alias route died); see
+    # test_unmapped_legacy_reference_is_dangling_not_an_error below.
     hex_chash, char_range = parse_chash_span(f"chash:{FULL[:32]}")
     assert hex_chash == FULL[:32]
     with pytest.raises(ValueError):
         parse_chash_span("chash:" + "a" * 40)
 
 
-def test_legacy_32_hex_citation_resolves_via_the_alias_route():
-    """The Failure-Modes promise end-to-end (critic-180-cohort finding 1):
-    a 32-hex reference from an old bead comment / T2 memory resolves —
-    the engine lookup alias-chains and echoes the canonical, the client
-    rewrites and fetches by the canonical identity."""
-    class _AliasAwareIndex(_FakeChashIndex):
-        def lookup(self, chash: str):
-            self.lookups.append(chash)
-            if chash == FULL[:32]:  # legacy ref: engine echoes canonical
-                return [{"collection": _FakeCollection.name,
-                         "created_at": "2026-07-18T00:00:00Z", "chash": FULL}]
-            if chash == FULL:
-                return [{"collection": _FakeCollection.name,
-                         "created_at": "2026-07-18T00:00:00Z", "chash": FULL}]
-            return []
-
-    ref = resolve_chash_globally(f"chash:{FULL[:32]}", _FakeT3(), _AliasAwareIndex())
-    assert ref is not None
-    assert ref["chunk_text"] == TEXT
-    assert ref["chunk_hash"] == FULL  # rewritten to the canonical identity
+def test_legacy_32_hex_reference_is_dangling_not_an_error():
+    """nexus-lgdel.l1: the chash_alias-backed alias-chaining route is
+    retired, so a legacy 32-hex reference (from an old bead comment / T2
+    memory) is no longer resolvable at all — even one that WOULD have
+    named a live chunk at full width dangles, because nothing in the
+    store is keyed at the legacy width any more. This supersedes the old
+    critic-180-cohort finding 1 promise (alias-chain resolution), which
+    the directive of record (T2 nexus/plan-legacy-retirement-2026-08-16)
+    explicitly retires rather than preserves."""
+    ref = resolve_chash_globally(f"chash:{FULL[:32]}", _FakeT3(), _FakeChashIndex())
+    assert ref is None
 
 
 def test_unmapped_legacy_reference_is_dangling_not_an_error():

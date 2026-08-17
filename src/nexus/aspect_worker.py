@@ -951,11 +951,12 @@ def drain_worker(
 # ── Hook function (wired by hook_registry.install_default_hooks) ────────────
 
 
-#: A 32-char lowercase-hex chunk hash (the Chroma natural id). Note-backed
-#: aspect rows carry this as ``source_path`` by design (RDR-172 owns note
-#: identity via ``doc_id``); it is NOT a filesystem path, so Gap-2
-#: canonicalization skips it.
-_CHASH_RE = re.compile(r"^[0-9a-f]{32}$")
+#: A lowercase-hex chunk hash — 64-char since the RDR-180 identity flip;
+#: 32-char in historical rows written before it. Note-backed aspect rows
+#: carry this as ``source_path`` by design (RDR-172 owns note identity via
+#: ``doc_id``); it is NOT a filesystem path, so Gap-2 canonicalization
+#: skips it.
+_CHASH_RE = re.compile(r"^([0-9a-f]{32}|[0-9a-f]{64})$")
 
 
 def _resolve_catalog_reader():
@@ -980,8 +981,9 @@ def _canonicalize_source_path(collection: str, source_path: str) -> str:
     rows).
 
     Only file-backed (path-shaped) ``source_path`` values are considered.
-    Note-backed rows carry a 32-hex chash with no path separator and are
-    returned untouched so the probe never false-warns on a correct chash.
+    Note-backed rows carry a hex chash (64-hex today; 32-hex in historical
+    rows) with no path separator and are returned untouched so the probe
+    never false-warns on a correct chash.
 
     Reachability of the normalize branch (important — do not oversell this):
     the catalog probe matches ``physical_collection AND (file_path = source_path

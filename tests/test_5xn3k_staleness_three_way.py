@@ -12,6 +12,16 @@ Design memo (T2 nexus "5xn3k-design-2026-08-02") §3.4:
                                      engine call, via _manifest_is_fully_present).
     * verify unreachable          -> fail open at WARNING.
 
+RDR-191 PHASE 6 REBASE (nexus-o8dil.33), 2026-08-15: the manifest-chunk FK
+makes `_manifest_is_fully_present`'s underlying question provably always
+True (see its own docstring) — it is now a bare `return True`, never calls
+`manifest_verify`, and never fails or warns. The 'unknown' fall-through
+branch tests below are rebased accordingly: the branch still runs (no probe
+skipped), but the probe itself is a no-op that always says "fresh" — the
+distinction this file still proves is DEFINITIVE-no-probe (complete/
+indexing/failed, unaffected by Phase 6) vs FALL-THROUGH (unknown, still
+reaches `_manifest_is_fully_present`, which Phase 6 changed the answer of).
+
 Both `_index_document` (the prose gate) and `index_pdf` (the PDF gate) share
 the SAME decision helper, `_index_run_fresh` — this file drives BOTH real
 gate functions (not just the helper in isolation) so a future edit that
@@ -110,7 +120,11 @@ class _FakeCat:
         self.by_doc_id_calls += 1
         return self.entry
 
-    # the fall-through verify (_manifest_is_fully_present)
+    # the fall-through verify (_manifest_is_fully_present) — UNUSED as of
+    # RDR-191 Phase 6 (nexus-o8dil.33): the function no longer calls
+    # manifest_verify at all (it is a bare `return True`). Kept as a spy so
+    # tests can assert manifest_verify_calls == 0 (the regression this
+    # rebase pins), rather than deleting the double and losing that check.
     def manifest_verify(self, doc_id: str):
         self.manifest_verify_calls += 1
         if self.verify_exc is not None:
@@ -189,33 +203,48 @@ def test_prose_unknown_falls_through_to_verify_clean_skips(monkeypatch) -> None:
         monkeypatch, entry, verify_result={"referenced": 2, "present": 2, "missing": 0},
     )
     assert chunk_fn.call_count == 0, "a clean verify must still skip"
-    assert cat.manifest_verify_calls == 1
+    assert cat.manifest_verify_calls == 0, (
+        "RDR-191 Phase 6: _manifest_is_fully_present no longer calls "
+        "manifest_verify at all"
+    )
 
 
-def test_prose_unknown_falls_through_to_verify_missing_is_stale(monkeypatch, caplog) -> None:
-    _configure_structlog_to_stdlib()
+def test_prose_unknown_falls_through_no_longer_re_indexes_on_a_stale_verify_result(
+    monkeypatch,
+) -> None:
+    """RDR-191 Phase 6 rebase (nexus-o8dil.33) of the former
+    test_prose_unknown_falls_through_to_verify_missing_is_stale: the
+    manifest-chunk FK makes 'missing' provably always False, so
+    _manifest_is_fully_present no longer calls manifest_verify or branches
+    on its result at all. A verify_result claiming missing chunks (were it
+    ever consulted) would no longer change the outcome — the document
+    always reads as fresh and skips. This is a POSITIVE proof the fixture
+    is provided but ignored, not merely "nothing happens": the fixture uses
+    the SAME shape the old test used to force a re-index, to make clear the
+    behavior changed, not that the fixture was silently dropped."""
     entry = _Entry("1.1.1", None, "")
-    with caplog.at_level(logging.WARNING, logger="nexus.doc_indexer"):
-        result, chunk_fn, cat = _run_prose_gate(
-            monkeypatch, entry, verify_result={"referenced": 3, "present": 1, "missing": 2},
-        )
-    assert chunk_fn.call_count == 1, "verify reporting missing chunks must re-index"
-    assert cat.manifest_verify_calls == 1
-    assert any(r.msg == "index_manifest_incomplete_reindexing" for r in caplog.records)
+    result, chunk_fn, cat = _run_prose_gate(
+        monkeypatch, entry, verify_result={"referenced": 3, "present": 1, "missing": 2},
+    )
+    assert chunk_fn.call_count == 0, (
+        "the FK makes 'missing' unreachable; the document now always "
+        "reads as fresh regardless of the (unconsulted) verify_result"
+    )
+    assert cat.manifest_verify_calls == 0
 
 
-def test_prose_unknown_verify_unreachable_fails_open_and_warns(monkeypatch, caplog) -> None:
-    _configure_structlog_to_stdlib()
+def test_prose_unknown_verify_unreachable_no_longer_touches_the_catalog(monkeypatch) -> None:
+    """RDR-191 Phase 6 rebase of the former
+    test_prose_unknown_verify_unreachable_fails_open_and_warns: there is no
+    verify call left to be unreachable, so verify_exc (were it ever
+    consulted) changes nothing and no WARNING is logged — the fail-open
+    behavior is now unconditional truth, not a caught exception."""
     entry = _Entry("1.1.1", None, "")
-    with caplog.at_level(logging.WARNING, logger="nexus.doc_indexer"):
-        result, chunk_fn, cat = _run_prose_gate(
-            monkeypatch, entry, verify_exc=RuntimeError("engine unreachable"),
-        )
-    assert chunk_fn.call_count == 0, "fail-open must preserve the pre-fix skip"
-    assert any(
-        r.msg == "index_manifest_presence_check_failed" and r.levelname == "WARNING"
-        for r in caplog.records
-    ), "verify-unreachable must log at WARNING, never DEBUG (the ac4id lesson)"
+    result, chunk_fn, cat = _run_prose_gate(
+        monkeypatch, entry, verify_exc=RuntimeError("engine unreachable"),
+    )
+    assert chunk_fn.call_count == 0, "the document reads as fresh and skips unconditionally"
+    assert cat.manifest_verify_calls == 0
 
 
 def test_prose_fence_read_itself_unreadable_fails_open_and_warns(monkeypatch, caplog) -> None:
@@ -295,21 +324,33 @@ def test_pdf_unknown_falls_through_to_verify_clean_skips(monkeypatch) -> None:
         monkeypatch, entry, verify_result={"referenced": 2, "present": 2, "missing": 0},
     )
     assert pdf_chunks_mock.call_count == 0
-    assert cat.manifest_verify_calls == 1
+    assert cat.manifest_verify_calls == 0, (
+        "RDR-191 Phase 6: _manifest_is_fully_present no longer calls "
+        "manifest_verify at all"
+    )
 
 
-def test_pdf_unknown_falls_through_to_verify_missing_is_stale(monkeypatch) -> None:
+def test_pdf_unknown_falls_through_no_longer_re_indexes_on_a_stale_verify_result(
+    monkeypatch,
+) -> None:
+    """RDR-191 Phase 6 rebase (nexus-o8dil.33) of the former
+    test_pdf_unknown_falls_through_to_verify_missing_is_stale — mirrors the
+    prose-gate sibling test's rebase rationale."""
     entry = _Entry("1.1.1", None, "")
     result, pdf_chunks_mock, cat = _run_pdf_gate(
         monkeypatch, entry, verify_result={"referenced": 3, "present": 1, "missing": 2},
     )
-    assert pdf_chunks_mock.call_count == 1
-    assert cat.manifest_verify_calls == 1
+    assert pdf_chunks_mock.call_count == 0, (
+        "the FK makes 'missing' unreachable; the document now always "
+        "reads as fresh regardless of the (unconsulted) verify_result"
+    )
+    assert cat.manifest_verify_calls == 0
 
 
-def test_pdf_unknown_verify_unreachable_fails_open(monkeypatch) -> None:
+def test_pdf_unknown_verify_unreachable_no_longer_touches_the_catalog(monkeypatch) -> None:
     entry = _Entry("1.1.1", None, "")
     result, pdf_chunks_mock, cat = _run_pdf_gate(
         monkeypatch, entry, verify_exc=RuntimeError("engine unreachable"),
     )
-    assert pdf_chunks_mock.call_count == 0, "fail-open must preserve the pre-fix skip"
+    assert pdf_chunks_mock.call_count == 0, "the document reads as fresh and skips unconditionally"
+    assert cat.manifest_verify_calls == 0

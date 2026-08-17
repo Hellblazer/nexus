@@ -22,7 +22,12 @@ from pathlib import Path
 
 import pytest
 
-from tests._catalog_fixture_ops import ActiveCatalog, active_reader, count_documents
+from tests._catalog_fixture_ops import (
+    ActiveCatalog,
+    active_reader,
+    count_documents,
+    seed_manifest_chunks,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -60,6 +65,7 @@ def _populate_knowledge_doc(cat: ActiveCatalog, *, title: str, chash: str,
     tumbler, _created = catalog_store_hook_tracked(
         title=title, doc_id=chash, collection_name=collection,
     )
+    seed_manifest_chunks(collection, [chash])
     cat.append_manifest_chunks(
         tumbler, [{"chash": chash, "position": 0}], collection=collection,
     )
@@ -80,14 +86,14 @@ class TestDedupA1:
         chash = _chash("same-content")
 
         first_tumbler = _populate_knowledge_doc(
-            cat, title="Doc A", chash=chash, collection="knowledge__test1",
+            cat, title="Doc A", chash=chash, collection="knowledge__test1__bge-base-en-v15-768__v1",
         )
         assert count_documents() == 1
 
         second_tumbler, created = catalog_store_hook_tracked(
             title="Doc B",  # deliberately DIFFERENT title
             doc_id=chash,   # SAME chash
-            collection_name="knowledge__test2",
+            collection_name="knowledge__test2__bge-base-en-v15-768__v1",
         )
 
         assert created is False, "dedup must fire, not mint a new document"
@@ -101,11 +107,11 @@ class TestDedupA1:
         cat = _make_catalog(tmp_path)
         _populate_knowledge_doc(
             cat, title="Doc A", chash=_chash("content-a"),
-            collection="knowledge__test1",
+            collection="knowledge__test1__bge-base-en-v15-768__v1",
         )
         tumbler_b, created = catalog_store_hook_tracked(
             title="Doc B", doc_id=_chash("content-b"),
-            collection_name="knowledge__test2",
+            collection_name="knowledge__test2__bge-base-en-v15-768__v1",
         )
         assert created is True
         assert count_documents() == 2
@@ -120,7 +126,7 @@ class TestDeletePathA2:
         cat = _make_catalog(tmp_path)
         chash = _chash("delete-me")
         tumbler = _populate_knowledge_doc(
-            cat, title="To Delete", chash=chash, collection="knowledge__test",
+            cat, title="To Delete", chash=chash, collection="knowledge__test__bge-base-en-v15-768__v1",
         )
         assert count_documents() == 1
 
@@ -149,7 +155,7 @@ class TestTombstoneReapA4:
         cat = _make_catalog(tmp_path)
         chash = _chash("reap-me")
         _populate_knowledge_doc(
-            cat, title="To Reap", chash=chash, collection="knowledge__test",
+            cat, title="To Reap", chash=chash, collection="knowledge__test__bge-base-en-v15-768__v1",
         )
         assert count_documents() == 1
 
@@ -179,6 +185,7 @@ def _register_knowledge_doc_directly(cat: ActiveCatalog, *, title: str,
         owner, title, content_type="knowledge", physical_collection=collection,
         meta={"doc_id": chash},
     )
+    seed_manifest_chunks(collection, [chash])
     cat.append_manifest_chunks(
         str(tumbler), [{"chash": chash, "position": 0}], collection=collection,
     )
@@ -197,10 +204,10 @@ class TestAmbiguousChash:
         cat = _make_catalog(tmp_path)
         chash = _chash("shared-boilerplate")
         _register_knowledge_doc_directly(
-            cat, title="Doc One", chash=chash, collection="knowledge__one",
+            cat, title="Doc One", chash=chash, collection="knowledge__one__bge-base-en-v15-768__v1",
         )
         _register_knowledge_doc_directly(
-            cat, title="Doc Two", chash=chash, collection="knowledge__two",
+            cat, title="Doc Two", chash=chash, collection="knowledge__two__bge-base-en-v15-768__v1",
         )
         assert count_documents() == 2
 
@@ -222,10 +229,10 @@ class TestAmbiguousChash:
         cat = _make_catalog(tmp_path)
         chash = _chash("shared-again")
         _register_knowledge_doc_directly(
-            cat, title="Doc One", chash=chash, collection="knowledge__one",
+            cat, title="Doc One", chash=chash, collection="knowledge__one__bge-base-en-v15-768__v1",
         )
         _register_knowledge_doc_directly(
-            cat, title="Doc Two", chash=chash, collection="knowledge__two",
+            cat, title="Doc Two", chash=chash, collection="knowledge__two__bge-base-en-v15-768__v1",
         )
 
         tumbler, error = store_delete_catalog_cleanup(chash, expected_collection=None)
@@ -259,11 +266,11 @@ class TestFollowAliasAtThisCallSite:
         cat = _make_catalog(tmp_path)
         chash = _chash("aliased-doc")
         alias_tumbler = _populate_knowledge_doc(
-            cat, title="Old Home", chash=chash, collection="knowledge__old",
+            cat, title="Old Home", chash=chash, collection="knowledge__old__bge-base-en-v15-768__v1",
         )
         canonical_tumbler = _populate_knowledge_doc(
             cat, title="Canonical Home", chash=_chash("other"),
-            collection="knowledge__new",
+            collection="knowledge__new__bge-base-en-v15-768__v1",
         )
         # set_alias is not on CATALOG_WRITE_OPS (nexus-iltyk) — use the
         # fixture ops' documented escape hatch for un-whitelisted writes.

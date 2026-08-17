@@ -10,7 +10,6 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_STATS;
-import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_CONFORMANCE_REPORT;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_DOC_COUNTS;
@@ -21,9 +20,7 @@ import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
 import static dev.nexus.service.jooq.nexus.Tables.LINKS_BY_TYPE_COUNTS;
-import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_ORPHANS;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_VERIFY;
-import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_VERIFY_ALL;
 import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
@@ -195,7 +192,10 @@ public final class CatalogRepository {
     private static final Field<String>  EX_DOC_PCOLL  = DSL.field("EXCLUDED.physical_collection", String.class);
     private static final Field<Integer> EX_DOC_CHUNKS = DSL.field("EXCLUDED.chunk_count",  Integer.class);
     private static final Field<String>  EX_DOC_HEAD   = DSL.field("EXCLUDED.head_hash",    String.class);
-    private static final Field<String>  EX_DOC_IDXAT  = DSL.field("EXCLUDED.indexed_at",   String.class);
+    // nexus-cefa1.2: EX_DOC_IDXAT (a hand-built Field<String> EXCLUDED shim) retired —
+    // CATALOG_DOCUMENTS.INDEXED_AT is timestamptz now (catalog-031-1-documents-temporal),
+    // so the ON CONFLICT merge uses DSL.excluded(CATALOG_DOCUMENTS.INDEXED_AT) directly,
+    // which auto-derives the correct generated OffsetDateTime type.
     private static final Field<String>  EX_DOC_META   = DSL.field("EXCLUDED.metadata",     String.class);
     private static final Field<Double>  EX_DOC_SMTIME = DSL.field("EXCLUDED.source_mtime", Double.class);
     private static final Field<String>  EX_DOC_ALIAS  = DSL.field("EXCLUDED.alias_of",     String.class);
@@ -207,7 +207,9 @@ public final class CatalogRepository {
     private static final Field<String>  EX_DOC_BIS2   = DSL.field("EXCLUDED.bib_semantic_scholar_id", String.class);
     private static final Field<String>  EX_DOC_BIOA   = DSL.field("EXCLUDED.bib_openalex_id", String.class);
     private static final Field<String>  EX_DOC_BIDOI  = DSL.field("EXCLUDED.bib_doi",      String.class);
-    private static final Field<String>  EX_DOC_BIAT   = DSL.field("EXCLUDED.bib_enriched_at", String.class);
+    // nexus-cefa1.2: EX_DOC_BIAT retired for the same reason as EX_DOC_IDXAT above —
+    // CATALOG_DOCUMENTS.BIB_ENRICHED_AT is timestamptz now; use
+    // DSL.excluded(CATALOG_DOCUMENTS.BIB_ENRICHED_AT) at the ON CONFLICT merge site.
     // GREATEST for source_mtime ETL
     private static final Field<Double>  EX_DOC_SMTIME_GREATEST =
         DSL.field("GREATEST(catalog_documents.source_mtime, EXCLUDED.source_mtime)", Double.class);
@@ -264,7 +266,6 @@ public final class CatalogRepository {
     private static final Field<String>  EX_COL_EMBD   = DSL.field("EXCLUDED.embedding_model", String.class);
     private static final Field<String>  EX_COL_MVER   = DSL.field("EXCLUDED.model_version", String.class);
     private static final Field<String>  EX_COL_DNAME  = DSL.field("EXCLUDED.display_name", String.class);
-    private static final Field<Integer> EX_COL_LEGCY  = DSL.field("EXCLUDED.legacy_grandfathered", Integer.class);
     private static final Field<String>  EX_COL_SUPBY  = DSL.field("EXCLUDED.superseded_by",  String.class);
     private static final Field<String>  EX_COL_SUPAT  = DSL.field("EXCLUDED.superseded_at",  String.class);
     private static final Field<String>  EX_COL_CRTAT  = DSL.field("EXCLUDED.created_at",     String.class);
@@ -755,13 +756,13 @@ public final class CatalogRepository {
                .values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                        nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
                        nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
-                       nne(s(d,"head_hash")), nne(s(d,"indexed_at")),
+                       nne(s(d,"head_hash")), tsOrNull(s(d,"indexed_at")),
                        jsonbVal(metaJson),
                        nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), nne(s(d,"source_uri")),
                        ni(i(d,"bib_year"), 0), nne(s(d,"bib_authors")),
                        nne(s(d,"bib_venue")), ni(i(d,"bib_citation_count"), 0),
                        nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
-                       nne(s(d,"bib_doi")), nne(s(d,"bib_enriched_at")))
+                       nne(s(d,"bib_doi")), tsOrNull(s(d,"bib_enriched_at")))
                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                .doUpdate()
                .set(CATALOG_DOCUMENTS.TITLE,  EX_DOC_TITLE)
@@ -773,7 +774,7 @@ public final class CatalogRepository {
                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,  EX_DOC_PCOLL)
                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, EX_DOC_CHUNKS)
                .set(CATALOG_DOCUMENTS.HEAD_HASH,   EX_DOC_HEAD)
-               .set(CATALOG_DOCUMENTS.INDEXED_AT,  EX_DOC_IDXAT)
+               .set(CATALOG_DOCUMENTS.INDEXED_AT,  DSL.excluded(CATALOG_DOCUMENTS.INDEXED_AT))
                .set(F_DOC_META,   EX_DOC_META)
                .set(CATALOG_DOCUMENTS.SOURCE_MTIME, EX_DOC_SMTIME)
                .set(CATALOG_DOCUMENTS.ALIAS_OF,  EX_DOC_ALIAS)
@@ -785,7 +786,7 @@ public final class CatalogRepository {
                .set(CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID,   EX_DOC_BIS2)
                .set(CATALOG_DOCUMENTS.BIB_OPENALEX_ID,   EX_DOC_BIOA)
                .set(CATALOG_DOCUMENTS.BIB_DOI,  EX_DOC_BIDOI)
-               .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT,   EX_DOC_BIAT)
+               .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT,   DSL.excluded(CATALOG_DOCUMENTS.BIB_ENRICHED_AT))
                // nexus-mqd6t: explicit un-tombstone (see the javadoc above).
                // TOMBSTONE-EXEMPT (nexus-mqd6t): the ONE sanctioned resurrection --
                // deliberately unconditional, no WHERE guard applies to an ON
@@ -1102,7 +1103,7 @@ public final class CatalogRepository {
                        nne(s(fields,"physical_collection", "")),
                        ni(i(fields,"chunk_count"), 0),
                        nne(s(fields,"head_hash", "")),
-                       nne(s(fields,"indexed_at", "")),
+                       tsOrNull(s(fields,"indexed_at", "")),
                        jsonbVal(metaJson),
                        nd(dbl(fields,"source_mtime")),
                        nne(s(fields,"alias_of", "")),
@@ -1114,7 +1115,7 @@ public final class CatalogRepository {
                        nne(s(fields,"bib_semantic_scholar_id", "")),
                        nne(s(fields,"bib_openalex_id", "")),
                        nne(s(fields,"bib_doi", "")),
-                       nne(s(fields,"bib_enriched_at", "")))
+                       tsOrNull(s(fields,"bib_enriched_at", "")))
                // nexus-78n33: TOCTOU backstop. Two concurrent registrations of
                // the same NEW source_uri can both pass the idempotency SELECT
                // above (READ COMMITTED); the partial unique index
@@ -1357,7 +1358,7 @@ public final class CatalogRepository {
                             nne(s(fields, "physical_collection", "")),
                             ni(i(fields, "chunk_count"), 0),
                             nne(s(fields, "head_hash", "")),
-                            nne(s(fields, "indexed_at", "")),
+                            tsOrNull(s(fields, "indexed_at", "")),
                             jsonbVal(metaJson),
                             nd(dbl(fields, "source_mtime")),
                             nne(s(fields, "alias_of", "")),
@@ -1369,7 +1370,7 @@ public final class CatalogRepository {
                             nne(s(fields, "bib_semantic_scholar_id", "")),
                             nne(s(fields, "bib_openalex_id", "")),
                             nne(s(fields, "bib_doi", "")),
-                            nne(s(fields, "bib_enriched_at", "")));
+                            tsOrNull(s(fields, "bib_enriched_at", "")));
                 }
                 // nexus-78n33: same TOCTOU backstop as the single-doc path —
                 // a row whose source_uri was registered by a CONCURRENT
@@ -2044,6 +2045,23 @@ public final class CatalogRepository {
                     : more.set(F_DOC_META, merged);
                 continue;
             }
+            // nexus-cefa1.2: indexed_at / bib_enriched_at are timestamptz now
+            // (catalog-031-1-documents-temporal) — the generic untyped DSL.field(...)
+            // fallback below would bind the caller's raw JSON string straight against
+            // a typed OffsetDateTime column. Parse strictly (same helper the write
+            // paths use) and bind the real typed field instead.
+            if ("indexed_at".equals(e.getKey())) {
+                var ts = tsOrNull(String.valueOf(e.getValue()));
+                more = (more == null) ? step.set(CATALOG_DOCUMENTS.INDEXED_AT, ts)
+                                       : more.set(CATALOG_DOCUMENTS.INDEXED_AT, ts);
+                continue;
+            }
+            if ("bib_enriched_at".equals(e.getKey())) {
+                var ts = tsOrNull(String.valueOf(e.getValue()));
+                more = (more == null) ? step.set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT, ts)
+                                       : more.set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT, ts);
+                continue;
+            }
             @SuppressWarnings("unchecked")
             Field<Object> f = (Field<Object>) DSL.field(DSL.name("catalog_documents", e.getKey()));
             more = (more == null) ? step.set(f, e.getValue()) : more.set(f, e.getValue());
@@ -2091,9 +2109,9 @@ public final class CatalogRepository {
      * set (empty string, per {@link #registerDocument}'s default) still counts
      * a first real head_hash as a change.
      */
-    private static Field<String> stampedIndexedAtOnHeadHashChange(String newHeadHash) {
+    private static Field<java.time.OffsetDateTime> stampedIndexedAtOnHeadHashChange(String newHeadHash) {
         return DSL.when(CATALOG_DOCUMENTS.HEAD_HASH.isDistinctFrom(newHeadHash),
-                        DSL.val(java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).format(INDEXED_AT_FMT)))
+                        DSL.val(java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC)))
                   .otherwise(CATALOG_DOCUMENTS.INDEXED_AT);
     }
 
@@ -2700,118 +2718,53 @@ public final class CatalogRepository {
         });
     }
 
-    /** RDR-159 dim → chunks_&lt;dim&gt; routing; the stored functions accept only these. */
+    /** RDR-159 dim → chunks_&lt;dim&gt; routing; {@link #requireSupportedDim} accepts only these. */
     private static final Set<Integer> MANIFEST_DIMS = Set.of(384, 768, 1024);
 
-    /**
-     * RDR-159 P-1b (nexus-avjdd): idempotent collection-stamping backfill.
-     *
-     * <p>Invokes the {@code nexus.manifest_backfill()} stored function
-     * (catalog-004) under the request tenant's RLS GUC, stamping
-     * {@code catalog_document_chunks.collection} from the owning doc's
-     * {@code physical_collection} where NULL. Returns the number of rows
-     * stamped. MUST run BEFORE {@link #manifestOrphans} — rows with a NULL
-     * collection are pre-backfill state, not orphans.
-     */
-    public long manifestBackfill(String tenant) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            Long count = dev.nexus.service.jooq.nexus.Routines.manifestBackfill(ctx.configuration());
-            return count != null ? count : 0L;
-        });
-    }
+    // RDR-191 Phase 6 (nexus-o8dil.33): manifestBackfill/manifestOrphanReport/
+    // manifestOrphanCount, and the nexus.manifest_backfill()/manifest_orphans(dim)
+    // SQL functions they wrapped, are RETIRED here — the manifest-chunk FK
+    // (catalog-029, VALIDATEd, deployed engine-service-v0.1.76) makes the
+    // dangling state they detected unreachable (a dangling INSERT or a DELETE
+    // of a still-referenced chunk is now rejected at the source). See
+    // catalog-030-retire-manifest-verify.xml's header for the full trace.
 
     /**
-     * RDR-159 P-1b (nexus-avjdd): manifest rows with NO corresponding chunk row
-     * in {@code chunks_<dim>} — the exact count PLUS a capped sample, computed in
-     * ONE transaction (one RLS-stamped snapshot) so the count and the sample are
-     * mutually consistent (CRITICAL: a two-call count-then-sample could diverge
-     * under a concurrent write).
-     *
-     * <p>Invokes the {@code nexus.manifest_orphans(dim)} stored function
-     * (catalog-004) under the request tenant's RLS GUC. Because the function is
-     * SECURITY INVOKER and the service role is NOBYPASSRLS, FORCE RLS on the
-     * base tables (catalog_document_chunks / catalog_documents / chunks_&lt;dim&gt;)
-     * scopes the result to the request tenant — the {@code tenant} argument is
-     * load-bearing, not advisory. Tombstone-aware (excludes soft-deleted docs).
-     *
-     * <p>Returns {@code {"count": <long>, "orphans": <List<Map>>}}. {@code count}
-     * is exact; {@code orphans} is capped at {@code limit} (> 0). {@code dim}
-     * must be 384/768/1024 (validated here so an unsupported dim is a clean
-     * IllegalArgumentException → 400, not a PL/pgSQL RAISE → 500).
-     *
-     * <p>Call protocol: run {@link #manifestBackfill} FIRST — pre-backfill rows
-     * (collection IS NULL) are silently excluded by the function, so an orphan
-     * check on an un-backfilled manifest reads a false-clean zero.
-     */
-    public Map<String, Object> manifestOrphanReport(String tenant, int dim, int limit) {
-        requireSupportedDim(dim);
-        if (limit <= 0) {
-            throw new IllegalArgumentException(
-                "limit must be > 0 (the sample is bounded; use count for the gate)");
-        }
-        return tenantScope.withTenant(tenant, ctx -> {
-            long count = ctx.fetchCount(MANIFEST_ORPHANS.call(dim));
-            var sample = ctx.selectFrom(MANIFEST_ORPHANS.call(dim))
-                             .limit(limit)
-                             .fetch()
-                             .map(org.jooq.Record::intoMap);
-            Map<String, Object> out = new LinkedHashMap<>();
-            out.put("count", count);
-            out.put("orphans", sample);
-            return out;
-        });
-    }
-
-    /**
-     * RDR-159 P-1b (nexus-avjdd): exact count of manifest orphans for the given
-     * dim — the cheap count-only form for the migration validation gate (zero
-     * orphans is the clean signal). Tenant-scoped via the RLS GUC (see
-     * {@link #manifestOrphanReport} for the scoping rationale).
-     */
-    public long manifestOrphanCount(String tenant, int dim) {
-        requireSupportedDim(dim);
-        return tenantScope.withTenant(tenant, ctx ->
-            (long) ctx.fetchCount(MANIFEST_ORPHANS.call(dim)));
-    }
-
-    /**
-     * Read-only census of the population {@code manifest_orphans}/{@code
-     * manifest_verify_all} structurally cannot see (T2 nexus/chroma-residue-
-     * plan-2026-08-10 §C2): manifest rows with {@code collection IS NULL}.
-     * Both functions filter {@code collection IS NOT NULL} before doing
-     * anything else (catalog-004-manifest-functions.xml's {@code
-     * manifest_orphans}; catalog-020-index-run-fence.xml's {@code
-     * manifest_verify}/{@code manifest_verify_all}) — a NULL-collection row
-     * is invisible to every one of them, not counted as an orphan and not
-     * counted as damaged. Without this report a caller reading a clean zero
-     * from those checks cannot tell "verified clean" from "never looked at."
+     * Read-only census of the population the (now-retired) {@code
+     * manifest_orphans}/{@code manifest_verify_all} functions structurally
+     * could never see (T2 nexus/chroma-residue-plan-2026-08-10 §C2): manifest
+     * rows with {@code collection IS NULL}. EXPLICITLY NOT RETIRED alongside
+     * them (RDR-191 Decision item 4's own carve-out) — the manifest-chunk FK
+     * does not cover this population either (PostgreSQL {@code MATCH SIMPLE}
+     * exempts any row with a NULL key column from enforcement entirely), so
+     * this census remains the ONLY visibility into a population that is
+     * permanently unenforced by any mechanism, schema or code.
      *
      * <p>Splits the total into:
      * <ul>
      *   <li>{@code total} — every live-document manifest row with {@code
      *       collection IS NULL}.
      *   <li>{@code backfillable} — the subset whose owning document HAS a
-     *       {@code physical_collection}. {@link #manifestBackfill} stamps
-     *       exactly this subset (its WHERE clause, catalog-004-manifest-
-     *       functions.xml changeset 2, is {@code physical_collection IS NOT
-     *       NULL AND != ''}) — after backfill runs, these rows become
-     *       visible to the orphan/verify checks.
+     *       {@code physical_collection}. The now-retired {@code
+     *       nexus.manifest_backfill()} used to stamp exactly this subset
+     *       (its WHERE clause, catalog-004-manifest-functions.xml changeset
+     *       2, was {@code physical_collection IS NOT NULL AND != ''}); with
+     *       that function gone and catalog-025's {@code collection NOT NULL}
+     *       promotion in place, no NEW row can ever land in this bucket
+     *       again — {@code backfillable} on a post-Phase-7 install measures a
+     *       structurally-empty population, not a live remedy path.
      * </ul>
-     * {@code total - backfillable} is the population backfill can NEVER
-     * reach: ghost/sourceless documents (physical_collection NULL or
-     * empty — see {@code CatalogRepository#register}'s ghost-element
-     * contract). catalog-014-manifest-collection-stamp.xml's changeset
-     * comment states this in so many words: "ghost docs (physical_collection
-     * empty) ... are skipped, matching manifest_backfill()'s semantics." A
-     * caller must not promise running backfill will cover that remainder —
-     * it is permanently excluded from every orphan/verify check, backfill
-     * or no backfill.
+     * {@code total - backfillable} is the population backfill could NEVER
+     * reach even when it existed: ghost/sourceless documents
+     * (physical_collection NULL or empty — see {@code
+     * CatalogRepository#register}'s ghost-element contract).
+     * catalog-014-manifest-collection-stamp.xml's changeset comment states
+     * this in so many words: "ghost docs (physical_collection empty) ... are
+     * skipped, matching manifest_backfill()'s semantics."
      *
-     * <p>Tombstone-aware ({@code d.deleted_at IS NULL}), matching {@code
-     * manifest_verify_all}'s own filter, so the population this report
-     * describes lines up with the checks it explains the blind spot of.
-     * Both counts are read in the SAME tenant-scoped transaction so they
-     * are mutually consistent. NEVER mutates.
+     * <p>Tombstone-aware ({@code d.deleted_at IS NULL}). Both counts are read
+     * in the SAME tenant-scoped transaction so they are mutually consistent.
+     * NEVER mutates.
      */
     public Map<String, Long> manifestNullCollectionReport(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -3137,37 +3090,70 @@ public final class CatalogRepository {
             if (!allowDangling) {
                 requireLiveEndpoints(ctx, tenant, s(lnk, "from_tumbler"), s(lnk, "to_tumbler"));
             }
-            var rec = ctx.insertInto(CATALOG_LINKS,
-                    CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
-                    CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
-               .values(DSL.val(tenant),
-                       DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
-                       DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
-                       DSL.val(nne(s(lnk,"created_by"))), DSL.val(createdAtOrNow(s(lnk,"created_at"))),
-                       jsonbVal(metaJson))
-               .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
-               .doUpdate()
-               .set(CATALOG_LINKS.FROM_SPAN, EX_LNK_FSPAN)
-               .set(CATALOG_LINKS.TO_SPAN, EX_LNK_TSPAN)
-               // nexus-s4e1n: created_by is DELIBERATELY NOT SET on the merge
-               // path. A second creator of the same edge does not take over the
-               // attribution — it is folded into meta['co_discovered_by'] below.
-               .set(F_LNK_META,  LNK_META_FOLD)
-               // nexus-xtmtf: CATALOG_LINKS (generated) carries a real CatalogLinksRecord
-               // shape, unlike the old hand-built Table<?>. .returning(Field...) on a
-               // recognized table returns the table's OWN record shape with the extra
-               // expression appended, so position 0 is no longer our boolean expression
-               // (jOOQ logs "API misuse ... not present in table" and get(0,...) silently
-               // reads the wrong column). .returningResult(...) requests EXACTLY this
-               // field and nothing else, independent of the table's real column list.
-               .returningResult(DSL.field("(xmax = 0)", Boolean.class))
-               .fetchOne();
-            return rec != null && Boolean.TRUE.equals(rec.value1());
+            try {
+                var rec = ctx.insertInto(CATALOG_LINKS,
+                        CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
+                        CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
+                   .values(DSL.val(tenant),
+                           DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
+                           DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
+                           DSL.val(nne(s(lnk,"created_by"))), DSL.val(createdAtOrNow(s(lnk,"created_at"))),
+                           jsonbVal(metaJson))
+                   .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
+                   .doUpdate()
+                   .set(CATALOG_LINKS.FROM_SPAN, EX_LNK_FSPAN)
+                   .set(CATALOG_LINKS.TO_SPAN, EX_LNK_TSPAN)
+                   // nexus-s4e1n: created_by is DELIBERATELY NOT SET on the merge
+                   // path. A second creator of the same edge does not take over the
+                   // attribution — it is folded into meta['co_discovered_by'] below.
+                   .set(F_LNK_META,  LNK_META_FOLD)
+                   // nexus-xtmtf: CATALOG_LINKS (generated) carries a real CatalogLinksRecord
+                   // shape, unlike the old hand-built Table<?>. .returning(Field...) on a
+                   // recognized table returns the table's OWN record shape with the extra
+                   // expression appended, so position 0 is no longer our boolean expression
+                   // (jOOQ logs "API misuse ... not present in table" and get(0,...) silently
+                   // reads the wrong column). .returningResult(...) requests EXACTLY this
+                   // field and nothing else, independent of the table's real column list.
+                   .returningResult(DSL.field("(xmax = 0)", Boolean.class))
+                   .fetchOne();
+                return rec != null && Boolean.TRUE.equals(rec.value1());
+            } catch (org.jooq.exception.DataAccessException e) {
+                // nexus-tk070.p1 (RDR-194 § D2): allow_dangling=true skips
+                // requireLiveEndpoints above, but the row still has to satisfy
+                // fk_catalog_links_from_document / fk_catalog_links_to_document
+                // (catalog-032-links-tumbler-fk.xml) — a link to a TOMBSTONED
+                // document still writes (the row exists), a link to a tumbler
+                // with NO row at all now raises SQLSTATE 23503 here. Map it to
+                // the SAME DanglingEndpointException requireLiveEndpoints
+                // throws, so CatalogHandler's existing catch
+                // (400 {"code":"dangling_endpoint"}) covers both paths with no
+                // handler change, and http_catalog_client.py's translation to
+                // ValueError (:2044-2049) keeps working unchanged.
+                if (SqlConstraints.violatesAnyFk(e,
+                        "fk_catalog_links_from_document", "fk_catalog_links_to_document")) {
+                    String constraint = SqlConstraints.violated(e);
+                    List<String> missing = "fk_catalog_links_from_document".equals(constraint)
+                        ? List.of("from_tumbler") : List.of("to_tumbler");
+                    throw new DanglingEndpointException(missing,
+                        "dangling link endpoint: " + String.join(", ", missing)
+                        + " does not resolve to any catalog document"
+                        + " (from_tumbler=" + s(lnk, "from_tumbler")
+                        + " to_tumbler=" + s(lnk, "to_tumbler") + ").");
+                }
+                throw e;
+            }
         });
     }
 
     /**
      * nexus-9ssih — a link whose endpoint does not resolve to a LIVE document.
+     * Two sources, same exception type (nexus-tk070.p1, RDR-194 § D2 added
+     * the second): {@link #requireLiveEndpoints} throws it directly when
+     * {@code allow_dangling} is unset; {@link #upsertLink}'s catch throws it
+     * when {@code allow_dangling=true} bypassed that check but the write still
+     * violated {@code fk_catalog_links_from_document}/{@code _to_document} —
+     * a tumbler with NO {@code catalog_documents} row at all, as opposed to a
+     * TOMBSTONED one (which satisfies the FK and writes).
      *
      * <p>Extends {@link IllegalArgumentException} so the handler's existing
      * ladder already maps it to 400; {@link #missing()} lets the wire response
@@ -3279,18 +3265,17 @@ public final class CatalogRepository {
             if (linkType != null && !linkType.isBlank())   cond = cond.and(CATALOG_LINKS.LINK_TYPE.eq(linkType));
             if (createdBy != null && !createdBy.isBlank()) cond = cond.and(CATALOG_LINKS.CREATED_BY.eq(createdBy));
             if (createdAtBefore != null && !createdAtBefore.isBlank())
-                // nexus-4j80w: '' rows (pre-fix service-written links with no
-                // stamped timestamp) must be UNMATCHABLE by a before-filter —
-                // '' < any-date is TRUE under TEXT comparison, and without this
-                // guard every such row matched every before-filter. Fail-safe:
-                // they can still be reached by non-temporal filters. Mirrors the
-                // local arm's guard (catalog_links.py: "created_at != '' AND
-                // created_at < ?"). No backfill of existing '' rows — stamping
-                // them with now() would lie about age, and stamping a sentinel
-                // epoch would make them match every before-filter, i.e. the
-                // exact hazard this guard exists to close.
-                cond = cond.and(CATALOG_LINKS.CREATED_AT.ne(""))
-                           .and(CATALOG_LINKS.CREATED_AT.lessThan(createdAtBefore));
+                // nexus-4j80w, updated by nexus-cefa1.2 (catalog-031-2-links-created-at):
+                // created_at is timestamptz NULL now, not TEXT NOT NULL DEFAULT ''. A
+                // NULL created_at (the former ''-sentinel — never-stamped pre-fix rows,
+                // and any legitimately-unset row) is UNMATCHABLE by `< :before` for free
+                // under standard SQL NULL comparison semantics — no explicit ne("")/
+                // IS NOT NULL guard needed any more; PostgreSQL never lets `NULL < x`
+                // evaluate TRUE. The removed guard's intent (never let an unstamped row
+                // match every before-filter) is preserved automatically. createdAtBefore
+                // itself is caller input — strict-parsed, garbage is a 400 (see
+                // parseCreatedAtBeforeStrict), never a silently-dropped filter.
+                cond = cond.and(CATALOG_LINKS.CREATED_AT.lessThan(parseCreatedAtBeforeStrict(createdAtBefore)));
             // direction + tumbler: filter by tumbler in the appropriate column(s)
             if (tumbler != null && !tumbler.isBlank()) {
                 String dir = direction != null ? direction : "both";
@@ -3323,12 +3308,12 @@ public final class CatalogRepository {
             if (linkType != null && !linkType.isBlank())   cond = cond.and(CATALOG_LINKS.LINK_TYPE.eq(linkType));
             if (createdBy != null && !createdBy.isBlank()) cond = cond.and(CATALOG_LINKS.CREATED_BY.eq(createdBy));
             if (createdAtBefore != null && !createdAtBefore.isBlank())
-                // nexus-4j80w: same non-empty guard as queryLinks — see that
-                // call site for the full rationale. This is the destructive
-                // twin (bulk_unlink); without the guard it deleted the entire
-                // link graph on any --created-at-before call.
-                cond = cond.and(CATALOG_LINKS.CREATED_AT.ne(""))
-                           .and(CATALOG_LINKS.CREATED_AT.lessThan(createdAtBefore));
+                // nexus-4j80w / nexus-cefa1.2: same NULL-is-unmatchable guard as
+                // queryLinks — see that call site for the full rationale. This is
+                // the destructive twin (bulk_unlink); a NULL created_at (former
+                // ''-sentinel) still cannot match `< :before`, so it still cannot
+                // be swept by any --created-at-before call.
+                cond = cond.and(CATALOG_LINKS.CREATED_AT.lessThan(parseCreatedAtBeforeStrict(createdAtBefore)));
             return ctx.deleteFrom(CATALOG_LINKS).where(cond).execute();
         });
     }
@@ -3624,14 +3609,10 @@ public final class CatalogRepository {
      * --force repairing chunk_count=0 ghosts) left indexed_at frozen at the
      * original ghost registration date — misleading repair provenance.
      */
-    private static final java.time.format.DateTimeFormatter INDEXED_AT_FMT =
-        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSSxxx");
-
     private static void stampIndexedAt(DSLContext ctx, String tenant, String docId) {
-        // Fixed-width micros + "+00:00", byte-identical shape to Python's
-        // datetime.now(UTC).isoformat(): indexed_at is TEXT and MAX()'d
-        // lexicographically (catalog-009 collection_health_meta) — mixed
-        // widths/suffixes would break sortability at second-boundary ties.
+        // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
+        // — bind OffsetDateTime.now(UTC) directly, no string formatting needed. MAX()'d
+        // as a real timestamp by collection_health_meta, not lexicographically.
         //
         // nexus-eldyi: guarded with deleted_at IS NULL — the non-resurrection
         // rule buildUpdateDocumentQuery enforces was bypassed here, so a
@@ -3643,7 +3624,7 @@ public final class CatalogRepository {
         // purgeManifest).
         ctx.update(CATALOG_DOCUMENTS)
            .set(CATALOG_DOCUMENTS.INDEXED_AT,
-                java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).format(INDEXED_AT_FMT))
+                java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC))
            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
            .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
            .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
@@ -4824,12 +4805,18 @@ public final class CatalogRepository {
      * will reference. Mirrors {@code StagingPromoteOps.finalizeTenant}'s
      * OWN chash resolution exactly — direct 64-hex admission
      * ({@code StagingPromoteOps.java} {@code manifestResolvable}'s
-     * {@code sChash.likeRegex("^[0-9a-f]{64}$")} arm) plus {@code
-     * chash_alias} mapping ({@code CHASH_ALIAS.OLD_REF} join) — so guard
-     * and promote cannot diverge (coextensive-by-construction, the same
+     * {@code sChash.likeRegex("^[0-9a-f]{64}$")} arm), so guard and
+     * promote cannot diverge (coextensive-by-construction, the same
      * discipline {@code StagingPromoteOps} already applies to its own
      * target-collection gating query). Keep this pair in lockstep with
      * that resolution expression if either ever changes.
+     *
+     * <p>nexus-lgdel.l1: the {@code chash_alias}-mapping arm ({@code
+     * CHASH_ALIAS.OLD_REF} join) is REMOVED with the table — both this
+     * guard and {@code StagingPromoteOps.manifestResolvable} reduce to the
+     * direct 64-hex admission arm alone, in the same commit. This is the
+     * fail-loud behaviour intended: a staged manifest row keyed by a
+     * legacy ref no longer promotes silently.
      *
      * <p>REV 1's shape (a single {@code LEFT JOIN staging.document_chunks}
      * + {@code COALESCE}, function applied to the STAGING side) is
@@ -4843,22 +4830,19 @@ public final class CatalogRepository {
      * the flush chunk cap), so with the accompanying Liquibase index on
      * {@code staging.document_chunks(chash)} it plans as a genuine Nested
      * Loop Anti Join / Index Scan — empirically ~600x faster on the same
-     * fixture. Two independent {@code NOT EXISTS} clauses, not one LEFT
-     * JOIN + COALESCE: direct-hex and chash_alias arms are each proven
-     * live independently in {@code CatalogManifestSweepRepositoryTest}
-     * (falsified by deleting each clause in turn).
+     * fixture.
      */
     private static Condition stagingGuardCondition(DSLContext ctx, String tenant, Field<byte[]> candidateChash) {
+        // nexus-lgdel.l1: the chash_alias-mapping arm (a second independent
+        // NOT EXISTS over CHASH_ALIAS.OLD_REF) is REMOVED with the table —
+        // this guard and StagingPromoteOps.manifestResolvable both reduce to
+        // the direct 64-hex admission arm alone, in the same commit. `tenant`
+        // is now unused by this method but kept in the signature (its sole
+        // caller passes it already, and removing it is a needless diff).
         var s = DSL.table(DSL.name("staging", "document_chunks")).as("s");
         Field<String> sChash = DSL.field(DSL.name("s", "chash"), String.class);
-        var s2 = DSL.table(DSL.name("staging", "document_chunks")).as("s2");
-        Field<String> s2Chash = DSL.field(DSL.name("s2", "chash"), String.class);
         Field<String> hexCandidate = DSL.function("encode", String.class, candidateChash, DSL.val("hex"));
-        return DSL.notExists(ctx.selectOne().from(s).where(sChash.eq(hexCandidate)))
-            .and(DSL.notExists(ctx.selectOne().from(CHASH_ALIAS)
-                .join(s2).on(s2Chash.eq(CHASH_ALIAS.OLD_REF))
-                .where(CHASH_ALIAS.TENANT_ID.eq(tenant))
-                .and(CHASH_ALIAS.NEW_CHASH.eq(candidateChash))));
+        return DSL.notExists(ctx.selectOne().from(s).where(sChash.eq(hexCandidate)));
     }
 
     /**
@@ -5278,27 +5262,17 @@ public final class CatalogRepository {
                     tenant, docId);
     }
 
-    /** GET /v1/catalog/manifest/verify?doc_id=X primitive — per-document referenced/present/missing. */
-    public ManifestVerifyCounts manifestVerify(String tenant, String docId) {
-        return tenantScope.withTenant(tenant, ctx -> manifestVerifyCtx(ctx, docId));
-    }
-
-    /**
-     * GET /v1/catalog/manifest/verify_all primitive — every live document in the
-     * tenant, grouped by collection (nexus-ac4id part 2: replaces client-side
-     * per-collection T3 paging with one engine-side anti-join).
-     */
-    public List<Map<String, Object>> manifestVerifyAll(String tenant) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.selectFrom(MANIFEST_VERIFY_ALL.call()).fetch().map(r -> {
-                Map<String, Object> m = new LinkedHashMap<>();
-                m.put("collection", r.get(MANIFEST_VERIFY_ALL.COLLECTION));
-                m.put("referenced", r.get(MANIFEST_VERIFY_ALL.REFERENCED));
-                m.put("present",    r.get(MANIFEST_VERIFY_ALL.PRESENT));
-                m.put("missing",    r.get(MANIFEST_VERIFY_ALL.MISSING));
-                return m;
-            }));
-    }
+    // RDR-191 Phase 6 (nexus-o8dil.33): the PUBLIC manifestVerify(tenant, docId)
+    // (backed the retired GET /manifest/verify route) and manifestVerifyAll
+    // (backed the retired GET /manifest/verify_all route, and nexus.manifest_
+    // verify_all() itself is DROPPED — catalog-030) are removed here. The
+    // PRIVATE manifestVerifyCtx helper a few lines up, and the underlying
+    // nexus.manifest_verify(text) SQL function it calls, are NOT removed:
+    // completeIndexRun and stampCompleteIfVerified below still depend on both
+    // for the write-path fail-closed verify-then-stamp — a different
+    // completeness question (referenced == the caller's claimed chunk_count)
+    // the manifest-chunk FK does not answer. See catalog-030-retire-manifest-
+    // verify.xml's header for the full trace.
 
     /**
      * POST /v1/catalog/index-run/begin — idempotent. Stamps
@@ -5324,7 +5298,7 @@ public final class CatalogRepository {
                .set(CATALOG_DOCUMENTS.INDEX_CONTENT_HASH, nne(contentHash))
                .set(CATALOG_DOCUMENTS.INDEX_RUN_ID, nne(runId))
                .set(CATALOG_DOCUMENTS.INDEX_STARTED_AT,
-                    java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).format(INDEXED_AT_FMT))
+                    java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC))
                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .execute();
@@ -5908,7 +5882,7 @@ public final class CatalogRepository {
                        s(coll, "name"), nne(s(coll, "content_type")),
                        nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
                        nne(s(coll, "model_version")), nne(s(coll, "display_name")),
-                       ni(i(coll, "legacy_grandfathered"), 0),
+                       nb(bFlag(coll, "legacy_grandfathered"), false),
                        nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
                        tsOrNull(s(coll, "created_at")))
                .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
@@ -5998,9 +5972,48 @@ public final class CatalogRepository {
         return counts;
     }
 
+    /**
+     * RDR-191 Phase 5 (nexus-o8dil.29, class-B site 2): fk_catalog_chunks_chunk
+     * (catalog-029-0, DEFERRABLE INITIALLY IMMEDIATE) would otherwise raise on
+     * {@link #deleteCollectionTxn}'s step 1 — it deletes FROM nexus.chunks while the
+     * manifest rows that reference those chunks still exist (step 1b, immediately
+     * after, then step 6's fk-001 CASCADE for anything step 1b missed). Deferring
+     * pushes the check to the caller's transaction commit ({@code
+     * tenantScope.withTenant}), by which point every referencing manifest row is
+     * gone. Mirrors the Liquibase-side fix in {@code nexus.purge_trash}
+     * (catalog-029-3) — same F8a/F10b class-B shape, Java call site instead of a
+     * stored function. Hoisted into its own named method (RawSqlGateTest's
+     * SANCTIONED_STATEMENTS is method-granular and cannot see into a lambda body).
+     */
+    private static void deferManifestChunkFk(DSLContext ctx) {
+        ctx.execute("SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED");
+    }
+
     private Map<String, Integer> deleteCollectionTxn(String tenant, String name) {
         return tenantScope.withTenant(tenant, ctx -> {
+            deferManifestChunkFk(ctx);
+
             Map<String, Integer> counts = new LinkedHashMap<>();
+            // 0. RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk
+            //    (tenant_id, source_collection, doc_id) -> chunks(tenant_id,
+            //    collection, chash), ON DELETE CASCADE, NOT deferrable -- deleting
+            //    FROM nexus.chunks below (step 1) would otherwise CASCADE-delete
+            //    any matching topic_assignments row immediately, silently, before
+            //    step 3's own explicit DELETE ever runs. That explicit DELETE's
+            //    own row count is this method's cross-language-contract "topic_
+            //    assignments" key (collection_rename.py / collection_purge.py read
+            //    it literally, same contract step 4's own comment documents for
+            //    "taxonomy_centroids") -- if the cascade beats it to the rows, the
+            //    count silently drops to 0 for a real deletion that did happen,
+            //    just not through the counted statement. Deleting topic_
+            //    assignments FIRST, before chunks, makes the explicit DELETE the
+            //    one that actually removes the rows (the later chunks-triggered
+            //    cascade then has nothing left to act on -- a harmless no-op), so
+            //    the returned count stays accurate. Nothing else in this method
+            //    depends on chunks preceding topic_assignments (unlike step 1b's
+            //    catalog_document_chunks, which has its own documented ordering
+            //    reason relative to step 1).
+            counts.put("topic_assignments", ctx.deleteFrom(TOPIC_ASSIGNMENTS).where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(name)).execute());
             // 1. T3 chunk vectors (registry children, fk-002 RESTRICT). RDR-191
             //    (nexus-o8dil.48): one DELETE against the unified nexus.chunks,
             //    not three against chunks_384/768/1024 -- the cascade-count key
@@ -6031,10 +6044,13 @@ public final class CatalogRepository {
             // 2. (chash_index leg RETIRED — RDR-187/nexus-piwya.9: the router
             //    table is dropped; conexus's rdr164 cascade EXPLAIN probe
             //    retargets in lockstep with this removal.)
-            // 3. taxonomy: projection assignments by source_collection (fk-002-5 RESTRICT),
-            //    then topics (fk-003 RESTRICT) — deleting topics cascades any remaining
-            //    assignments via topic_assignments.topic_id -> topics(id) ON DELETE CASCADE.
-            counts.put("topic_assignments", ctx.deleteFrom(TOPIC_ASSIGNMENTS).where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(name)).execute());
+            // 3. taxonomy: topics (fk-003 RESTRICT) — topic_assignments by
+            //    source_collection already deleted at step 0 above (RDR-194 P3d
+            //    ordering fix); deleting topics here cascades any remaining
+            //    assignments via topic_assignments.topic_id -> topics(id) ON
+            //    DELETE CASCADE (a different axis than source_collection, so a
+            //    topic_assignments row from ANOTHER collection but pointing at
+            //    one of THIS collection's topics can still exist here).
             counts.put("topics", ctx.deleteFrom(TOPICS).where(TOPICS.COLLECTION.eq(name)).execute());
             // 3b. taxonomy_meta (fk-003-4 RESTRICT; PK (tenant_id, collection) — explicit DELETE).
             //     topic_links clears via topics(id) ON DELETE CASCADE in step 3, so it needs no row here.
@@ -6062,7 +6078,14 @@ public final class CatalogRepository {
             // the four FK children; topic_assignments (no doc-rooted FK) is
             // cleaned explicitly by this method's collection-scoped taxonomy
             // delete — a per-DOC hard path would have to do its own purge
-            // (nexus-7n553 tripwire at deleteDocument).
+            // (nexus-7n553 tripwire at deleteDocument). RDR-194 § D2
+            // (nexus-tk070.p1): catalog_links also cascades off THIS delete now,
+            // via fk_catalog_links_from_document / fk_catalog_links_to_document
+            // (catalog-032-links-tumbler-fk.xml, ON DELETE CASCADE on both
+            // from_tumbler and to_tumbler) — no explicit step needed here, unlike
+            // topic_assignments above; the FK was chosen specifically because it
+            // ALSO covers nexus.purge_trash's plpgsql hard-delete path, which no
+            // Java step here could reach.
             counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute());
             // 7. registry row LAST (RESTRICT children are now gone).
             counts.put("catalog_collections", ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute());
@@ -6145,7 +6168,7 @@ public final class CatalogRepository {
      * to INTEGER so ordering is numeric, mirroring the retired local arm's
      * {@code MAX(CAST(SUBSTR(model_version,2) AS INTEGER))} (catalog_docs.py).
      * Malformed/legacy values (empty, no leading {@code v}) fall back to 0 rather
-     * than failing the cast — {@code LEGACY_GRANDFATHERED.eq(0)} already excludes
+     * than failing the cast — {@code LEGACY_GRANDFATHERED.eq(false)} already excludes
      * the rows expected to be non-conformant, but this keeps the ORDER BY itself
      * total rather than erroring on an unexpected shape.
      */
@@ -6163,7 +6186,7 @@ public final class CatalogRepository {
                        .where(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType)
                               .and(CATALOG_COLLECTIONS.OWNER_ID.eq(ownerId))
                               .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(embeddingModel))
-                              .and(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED.eq(0))
+                              .and(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED.eq(false))
                               .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
                        .orderBy(COL_VERSION_NUM.desc(), CATALOG_COLLECTIONS.NAME.desc())
                        .limit(1).fetchOne();
@@ -6610,11 +6633,33 @@ public final class CatalogRepository {
             //    topics, so an explicit re-home); aspects, highlights and the extraction
             //    queue; catalog_documents itself; and the audit/telemetry tables.
             //    (chash_index leg RETIRED — RDR-187/nexus-piwya.9.)
+            // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk (tenant_id,
+            // source_collection, doc_id) -> chunks(tenant_id, collection, chash) is ON
+            // UPDATE CASCADE, and chunks is re-homed BEFORE topic_assignments in the
+            // list above (correct: topic_assignments's own explicit UPDATE below would
+            // otherwise try to move source_collection to newName while doc_id's chunk
+            // is STILL at oldName, an immediate FK violation -- the target tuple must
+            // already exist). But that ordering means chunks' rename CASCADES topic_
+            // assignments.source_collection to newName as a side effect, silently,
+            // before the loop's own topic_assignments statement ever runs -- its
+            // `WHERE source_collection = oldName` then matches zero already-cascaded
+            // rows, and would under-report a real rename as zero in the counts map
+            // this method returns (a cross-language contract read by collection_
+            // rename.py). Capture the TRUE population via a pre-count BEFORE the loop,
+            // independent of whichever mechanism (explicit UPDATE or FK cascade)
+            // ends up performing the actual write -- this is a 1:1 rename (every
+            // oldName row becomes a newName row, never a merge-with-loss), so the
+            // pre-count is exactly the correct post-rename delta regardless.
+            int topicAssignmentsPreCount = ctx.selectCount().from(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(oldName))
+                .fetchOne(0, Integer.class);
             for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
                 counts.put(t.countKey(),
                     ctx.update(t.table()).set(t.collection(), newName)
                        .where(t.collection().eq(oldName)).execute());
             }
+            // Override with the pre-count captured above -- see the comment there.
+            counts.put("topic_assignments", topicAssignmentsPreCount);
 
             // 3. RETIRE the old registry row X as a superseded tombstone (nexus-cecqy).
             //
@@ -6867,7 +6912,10 @@ public final class CatalogRepository {
                        .fetchOne();
 
             Map<String, Object> result = new LinkedHashMap<>();
-            result.put("last_indexed", r == null ? null : r.value1());
+            // nexus-cefa1.2: LAST_INDEXED is MAX(timestamptz) now (catalog-031-1-documents-
+            // temporal simplified the view) — format for the wire; null (no dated doc,
+            // or zero documents) stays null exactly as before.
+            result.put("last_indexed", r == null ? null : utcIso(r.value1()));
             result.put("orphan_count", r == null ? 0L : r.value2());
             // nexus-agsq7: index-age staleness; null when no dated doc qualifies.
             result.put("stale_source_ratio", r == null ? null : r.value3());
@@ -6961,6 +7009,21 @@ public final class CatalogRepository {
      * <p>{@code side} names which endpoint dangles ({@code "from"}, {@code "to"},
      * or {@code "both"}) so an operator can tell a deleted target from a
      * deleted source without a second query.
+     *
+     * <p><strong>Post-nexus-tk070.p1 (RDR-194 § D2) semantics.</strong>
+     * {@code fromMissing}/{@code toMissing} above are LIVE-document checks
+     * ({@code DELETED_AT IS NULL}), not row-existence checks, and this method
+     * therefore stays useful after {@code fk_catalog_links_from_document} /
+     * {@code fk_catalog_links_to_document} land: a row with NO matching
+     * {@code catalog_documents} row at all is now impossible (the FK prevents
+     * it going forward and the P1 remediation deleted the pre-existing
+     * population), so this method's remaining output is exactly the
+     * TOMBSTONED-endpoint case, which the FK deliberately does not cover
+     * (soft delete via {@code document_trash} does not fire ON DELETE
+     * CASCADE). Enforcement therefore narrows this method's job rather than
+     * retiring it — only the {@code nx doctor --check-dangling-links} CLI
+     * detection retires (D0.10), not this repository method, its HTTP
+     * endpoint, or the Python client method that calls it.
      */
     public List<Map<String, Object>> orphanedLinks(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -7331,13 +7394,13 @@ public final class CatalogRepository {
                     insert = insert.values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                             nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
                             nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
-                            nne(s(d,"head_hash")), nne(s(d,"indexed_at")),
+                            nne(s(d,"head_hash")), tsOrNull(s(d,"indexed_at")),
                             jsonbVal(metaJson),
                             nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), nne(s(d,"source_uri")),
                             ni(i(d,"bib_year"), 0), nne(s(d,"bib_authors")),
                             nne(s(d,"bib_venue")), ni(i(d,"bib_citation_count"), 0),
                             nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
-                            nne(s(d,"bib_doi")), nne(s(d,"bib_enriched_at")));
+                            nne(s(d,"bib_doi")), tsOrNull(s(d,"bib_enriched_at")));
                 }
                 insert.onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                       .doUpdate()
@@ -7350,7 +7413,7 @@ public final class CatalogRepository {
                       .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,  EX_DOC_PCOLL)
                       .set(CATALOG_DOCUMENTS.CHUNK_COUNT, EX_DOC_CHUNKS)
                       .set(CATALOG_DOCUMENTS.HEAD_HASH,   EX_DOC_HEAD)
-                      .set(CATALOG_DOCUMENTS.INDEXED_AT,  EX_DOC_IDXAT)
+                      .set(CATALOG_DOCUMENTS.INDEXED_AT,  DSL.excluded(CATALOG_DOCUMENTS.INDEXED_AT))
                       .set(F_DOC_META,   EX_DOC_META)
                       // GREATEST: never downgrade source_mtime on re-import
                       .set(CATALOG_DOCUMENTS.SOURCE_MTIME, EX_DOC_SMTIME_GREATEST)
@@ -7363,7 +7426,7 @@ public final class CatalogRepository {
                       .set(CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID,   EX_DOC_BIS2)
                       .set(CATALOG_DOCUMENTS.BIB_OPENALEX_ID,   EX_DOC_BIOA)
                       .set(CATALOG_DOCUMENTS.BIB_DOI,  EX_DOC_BIDOI)
-                      .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT,   EX_DOC_BIAT)
+                      .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT,   DSL.excluded(CATALOG_DOCUMENTS.BIB_ENRICHED_AT))
                       .execute();
             }
             return rows.size();
@@ -7385,13 +7448,13 @@ public final class CatalogRepository {
                .values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                        nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
                        nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
-                       nne(s(d,"head_hash")), nne(s(d,"indexed_at")),
+                       nne(s(d,"head_hash")), tsOrNull(s(d,"indexed_at")),
                        jsonbVal(metaJson),
                        nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), nne(s(d,"source_uri")),
                        ni(i(d,"bib_year"), 0), nne(s(d,"bib_authors")),
                        nne(s(d,"bib_venue")), ni(i(d,"bib_citation_count"), 0),
                        nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
-                       nne(s(d,"bib_doi")), nne(s(d,"bib_enriched_at")))
+                       nne(s(d,"bib_doi")), tsOrNull(s(d,"bib_enriched_at")))
                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                .doUpdate()
                .set(CATALOG_DOCUMENTS.TITLE,  EX_DOC_TITLE)
@@ -7403,7 +7466,7 @@ public final class CatalogRepository {
                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,  EX_DOC_PCOLL)
                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, EX_DOC_CHUNKS)
                .set(CATALOG_DOCUMENTS.HEAD_HASH,   EX_DOC_HEAD)
-               .set(CATALOG_DOCUMENTS.INDEXED_AT,  EX_DOC_IDXAT)
+               .set(CATALOG_DOCUMENTS.INDEXED_AT,  DSL.excluded(CATALOG_DOCUMENTS.INDEXED_AT))
                .set(F_DOC_META,   EX_DOC_META)
                // GREATEST: never downgrade source_mtime on re-import
                .set(CATALOG_DOCUMENTS.SOURCE_MTIME, EX_DOC_SMTIME_GREATEST)
@@ -7416,7 +7479,7 @@ public final class CatalogRepository {
                .set(CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID,   EX_DOC_BIS2)
                .set(CATALOG_DOCUMENTS.BIB_OPENALEX_ID,   EX_DOC_BIOA)
                .set(CATALOG_DOCUMENTS.BIB_DOI,  EX_DOC_BIDOI)
-               .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT,   EX_DOC_BIAT)
+               .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT,   DSL.excluded(CATALOG_DOCUMENTS.BIB_ENRICHED_AT))
                .execute();
         }
     }
@@ -7430,6 +7493,16 @@ public final class CatalogRepository {
      * once the link exists, so this is accepted for the initial migration.  Same
      * convergence gap as pre-nexus-9wz72 importChunk; revisit at final cutover if
      * stale link metadata surfaces in production.
+     *
+     * <p><b>Endpoint contract (nexus-tk070.p1 review fix 1, RDR-194 § D2):</b> a
+     * TOMBSTONED endpoint (a {@code catalog_documents} row that exists but is
+     * soft-deleted) still satisfies {@code fk_catalog_links_from_document} /
+     * {@code fk_catalog_links_to_document} and writes — this path legitimately
+     * writes edges for documents whose LIVE state it does not control. An
+     * ABSENT endpoint (no {@code catalog_documents} row at all) is rejected by
+     * the FK and surfaces as {@link DanglingEndpointException} (400 {@code
+     * dangling_endpoint}, the same shape {@link #upsertLink} produces): ETL
+     * callers must import documents before importing the links between them.
      */
     public void importLink(String tenant, Map<String, Object> lnk) {
         tenantScope.withTenant(tenant, ctx -> {
@@ -7444,6 +7517,28 @@ public final class CatalogRepository {
      * intra-statement conflicts against {@code DO NOTHING} are a documented
      * no-op (unlike {@code DO UPDATE}, which cannot affect the same row
      * twice).
+     *
+     * <p><b>Dangling endpoints (nexus-tk070.p1 review fix 1, RDR-194 § D2):</b>
+     * a single Postgres statement is all-or-nothing — if ANY row in a chunk
+     * violated {@code fk_catalog_links_from_document} /
+     * {@code fk_catalog_links_to_document} (an endpoint with NO {@code
+     * catalog_documents} row at all), the WHOLE chunk's INSERT would roll
+     * back, including rows that would otherwise have succeeded — a raw
+     * Postgres 23503 also poisons the surrounding transaction ("current
+     * transaction is aborted") for any statement after it, which rules out
+     * diagnosing the FAILED insert with a follow-up SELECT on the same
+     * connection. So this validates every row's endpoints EXIST (live or
+     * tombstoned — {@link #requireImportLinkEndpointsExist}) BEFORE issuing
+     * the chunk's INSERT: no per-row skipping, no partial success (no
+     * silent fallback — ETL must import documents before links), and the
+     * {@link DanglingEndpointException} names the first offending {@code
+     * (from_tumbler, to_tumbler, link_type)} row without ever touching the
+     * DB with a doomed INSERT. The FK itself remains a backstop for the
+     * (effectively unreachable within one request) race between the
+     * precheck and the INSERT — if it fires anyway, the {@code catch} below
+     * maps it to the same {@code DanglingEndpointException} type, without
+     * per-row detail (a fresh SELECT is not safe once the transaction has
+     * aborted).
      */
     public int importLinksBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
@@ -7451,6 +7546,7 @@ public final class CatalogRepository {
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 9);
             for (int start = 0; start < rows.size(); start += chunkSize) {
                 var batch = rows.subList(start, Math.min(start + chunkSize, rows.size()));
+                requireImportLinkEndpointsExist(ctx, tenant, batch);
                 var insert = ctx.insertInto(CATALOG_LINKS,
                         CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
                         CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META);
@@ -7459,30 +7555,100 @@ public final class CatalogRepository {
                     insert = insert.values(DSL.val(tenant),
                             DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
                             DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
-                            DSL.val(nne(s(lnk,"created_by"))), DSL.val(nne(s(lnk,"created_at"))),
+                            DSL.val(nne(s(lnk,"created_by"))), DSL.val(tsOrNull(s(lnk,"created_at"))),
                             jsonbVal(metaJson));
                 }
-                insert.onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
-                      .doNothing()
-                      .execute();
+                try {
+                    insert.onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
+                          .doNothing()
+                          .execute();
+                } catch (org.jooq.exception.DataAccessException e) {
+                    if (!SqlConstraints.violatesAnyFk(e,
+                            "fk_catalog_links_from_document", "fk_catalog_links_to_document")) {
+                        throw e;
+                    }
+                    String constraint = SqlConstraints.violated(e);
+                    List<String> missing = "fk_catalog_links_from_document".equals(constraint)
+                        ? List.of("from_tumbler") : List.of("to_tumbler");
+                    throw new DanglingEndpointException(missing,
+                        "dangling link endpoint in import batch (endpoint removed between "
+                        + "precheck and insert): " + String.join(", ", missing)
+                        + " does not resolve to any catalog document.");
+                }
             }
             return rows.size();
         });
     }
 
+    /**
+     * Reject the WHOLE chunk if any row's {@code from_tumbler} or {@code
+     * to_tumbler} resolves to NO {@code catalog_documents} row at all (live
+     * or tombstoned) — the exact condition {@code
+     * fk_catalog_links_from_document}/{@code fk_catalog_links_to_document}
+     * enforces (nexus-tk070.p1 review fix 1). Runs BEFORE the chunk's
+     * multi-row INSERT so a dangling row is named exactly, by its own
+     * identity, without ever provoking the real constraint violation (see
+     * {@link #importLinksBatch}'s javadoc for why a post-hoc diagnostic
+     * query is not safe here).
+     */
+    private static void requireImportLinkEndpointsExist(DSLContext ctx, String tenant, List<Map<String, Object>> batch) {
+        var referenced = new LinkedHashSet<String>();
+        for (var lnk : batch) {
+            referenced.add(s(lnk, "from_tumbler"));
+            referenced.add(s(lnk, "to_tumbler"));
+        }
+        var existing = new HashSet<>(ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.in(referenced)))
+            .fetch(CATALOG_DOCUMENTS.TUMBLER));
+        for (var lnk : batch) {
+            String fromT = s(lnk, "from_tumbler");
+            String toT = s(lnk, "to_tumbler");
+            List<String> missing = new ArrayList<>(2);
+            if (!existing.contains(fromT)) missing.add("from_tumbler");
+            if (!existing.contains(toT)) missing.add("to_tumbler");
+            if (!missing.isEmpty()) {
+                throw new DanglingEndpointException(missing,
+                    "dangling link endpoint in import batch: " + String.join(", ", missing)
+                    + " does not resolve to any catalog document"
+                    + " (from_tumbler=" + fromT + " to_tumbler=" + toT
+                    + " link_type=" + s(lnk, "link_type") + ").");
+            }
+        }
+    }
+
     private void doImportLink(DSLContext ctx, String tenant, Map<String, Object> lnk) {
         String metaJson = jsonOrNull(lnk.get("metadata"));
-        ctx.insertInto(CATALOG_LINKS,
-                CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
-                CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
-           .values(DSL.val(tenant),
-                   DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
-                   DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
-                   DSL.val(nne(s(lnk,"created_by"))), DSL.val(nne(s(lnk,"created_at"))),
-                   jsonbVal(metaJson))
-           .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
-           .doNothing()
-           .execute();
+        try {
+            ctx.insertInto(CATALOG_LINKS,
+                    CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
+                    CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
+               .values(DSL.val(tenant),
+                       DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
+                       DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
+                       DSL.val(nne(s(lnk,"created_by"))), DSL.val(tsOrNull(s(lnk,"created_at"))),
+                       jsonbVal(metaJson))
+               .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
+               .doNothing()
+               .execute();
+        } catch (org.jooq.exception.DataAccessException e) {
+            // nexus-tk070.p1 review fix 1 (RDR-194 § D2): map the FK
+            // violation the SAME way upsertLink's catch does — an absent
+            // endpoint (no catalog_documents row at all) is rejected; a
+            // TOMBSTONED endpoint still satisfies the FK and writes.
+            if (!SqlConstraints.violatesAnyFk(e,
+                    "fk_catalog_links_from_document", "fk_catalog_links_to_document")) {
+                throw e;
+            }
+            String constraint = SqlConstraints.violated(e);
+            List<String> missing = "fk_catalog_links_from_document".equals(constraint)
+                ? List.of("from_tumbler") : List.of("to_tumbler");
+            throw new DanglingEndpointException(missing,
+                "dangling link endpoint in import: " + String.join(", ", missing)
+                + " does not resolve to any catalog document"
+                + " (from_tumbler=" + s(lnk, "from_tumbler")
+                + " to_tumbler=" + s(lnk, "to_tumbler")
+                + " link_type=" + s(lnk, "link_type") + ").");
+        }
     }
 
     /**
@@ -7605,7 +7771,7 @@ public final class CatalogRepository {
                             s(coll, "name"), nne(s(coll, "content_type")),
                             nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
                             nne(s(coll, "model_version")), nne(s(coll, "display_name")),
-                            ni(i(coll, "legacy_grandfathered"), 0),
+                            nb(bFlag(coll, "legacy_grandfathered"), false),
                             nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
                             tsOrNull(s(coll, "created_at")));
                 }
@@ -7644,7 +7810,7 @@ public final class CatalogRepository {
                    s(coll, "name"), nne(s(coll, "content_type")),
                    nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
                    nne(s(coll, "model_version")), nne(s(coll, "display_name")),
-                   ni(i(coll, "legacy_grandfathered"), 0),
+                   nb(bFlag(coll, "legacy_grandfathered"), false),
                    nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
                    tsOrNull(s(coll, "created_at")));
         insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
@@ -7700,7 +7866,10 @@ public final class CatalogRepository {
         m.put("physical_collection", raw.getOrDefault("physical_collection", null));
         m.put("chunk_count",         raw.getOrDefault("chunk_count", null));
         m.put("head_hash",           raw.getOrDefault("head_hash", null));
-        m.put("indexed_at",          raw.getOrDefault("indexed_at", null));
+        // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
+        // — .intoMap() hands back an OffsetDateTime, not a String; format for the wire.
+        // Stays nullable, matching the pre-migration nullable-TEXT-no-default contract.
+        m.put("indexed_at",          utcIso((java.time.OffsetDateTime) raw.get("indexed_at")));
         Object rawMeta = raw.get("metadata");
         if (rawMeta != null) {
             try {
@@ -7721,7 +7890,10 @@ public final class CatalogRepository {
         m.put("bib_semantic_scholar_id", nne((String) raw.getOrDefault("bib_semantic_scholar_id", null)));
         m.put("bib_openalex_id",         nne((String) raw.getOrDefault("bib_openalex_id", null)));
         m.put("bib_doi",                 nne((String) raw.getOrDefault("bib_doi", null)));
-        m.put("bib_enriched_at",         nne((String) raw.getOrDefault("bib_enriched_at", null)));
+        // nexus-cefa1.2: bib_enriched_at is timestamptz now — was NOT NULL DEFAULT ''
+        // before catalog-031-1-documents-temporal, so preserve the always-non-null ""
+        // wire contract via nne() around the formatted read.
+        m.put("bib_enriched_at",         nne(utcIso((java.time.OffsetDateTime) raw.get("bib_enriched_at"))));
         // nexus-5xn3k.2 (RUNFENCE): index_state stays NULL-able (NULL = unknown,
         // catalog-020's deliberate no-backfill default) — do NOT nne() it, unlike
         // the other three (NOT NULL DEFAULT '' columns, same nne() treatment as
@@ -7729,7 +7901,9 @@ public final class CatalogRepository {
         m.put("index_state",        raw.getOrDefault("index_state", null));
         m.put("index_content_hash", nne((String) raw.getOrDefault("index_content_hash", null)));
         m.put("index_run_id",       nne((String) raw.getOrDefault("index_run_id", null)));
-        m.put("index_started_at",   nne((String) raw.getOrDefault("index_started_at", null)));
+        // nexus-cefa1.2: index_started_at is timestamptz now — same NOT-NULL-DEFAULT-''
+        // wire-contract preservation as bib_enriched_at above.
+        m.put("index_started_at",   nne(utcIso((java.time.OffsetDateTime) raw.get("index_started_at"))));
         return m;
     }
 
@@ -7797,7 +7971,7 @@ public final class CatalogRepository {
 
     private static Map<String, Object> linkRow(Long id, String from, String to, String type,
                                                  String fromSpan, String toSpan,
-                                                 String createdBy, String createdAt, Object meta) {
+                                                 String createdBy, java.time.OffsetDateTime createdAt, Object meta) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id",           id);
         m.put("from_tumbler", from);
@@ -7806,7 +7980,10 @@ public final class CatalogRepository {
         m.put("from_span",    fromSpan);
         m.put("to_span",      toSpan);
         m.put("created_by",   createdBy);
-        m.put("created_at",   createdAt);
+        // nexus-cefa1.2: created_at is timestamptz now (catalog-031-2-links-created-at);
+        // stays nullable on the wire exactly as the pre-migration nullable TEXT column
+        // did — no nne() forcing to "" here, unlike collRow's NOT-NULL-DEFAULT-'' columns.
+        m.put("created_at",   utcIso(createdAt));
         if (meta != null) {
             try {
                 m.put("metadata", MAPPER.readValue(meta.toString(), MAP_TYPE));
@@ -7817,7 +7994,7 @@ public final class CatalogRepository {
 
     private static Map<String, Object> collRow(String name, String ctype, String owner,
                                                  String embd, String mver, String dname,
-                                                 Integer legcy, String supBy, String supAt, String crAt) {
+                                                 Boolean legcy, String supBy, String supAt, String crAt) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("name",                 name);
         m.put("content_type",         nne(ctype));
@@ -7825,7 +8002,11 @@ public final class CatalogRepository {
         m.put("embedding_model",      nne(embd));
         m.put("model_version",        nne(mver));
         m.put("display_name",         nne(dname));
-        m.put("legacy_grandfathered", legcy != null ? legcy : 0);
+        // nexus-cefa1.2: legacy_grandfathered is boolean now (catalog-031-3-collections-
+        // legacy-bool) — a real JSON boolean on the wire; Python's _coerce_legacy_
+        // grandfathered already normalizes via bool(x), which accepts either shape, so
+        // this is a compatible wire-format tightening, not a break.
+        m.put("legacy_grandfathered", legcy != null ? legcy : Boolean.FALSE);
         m.put("superseded_by",        nne(supBy));
         m.put("superseded_at",        nne(supAt));
         m.put("created_at",           nne(crAt));
@@ -7871,29 +8052,132 @@ public final class CatalogRepository {
         return "true".equalsIgnoreCase(String.valueOf(v));
     }
 
+    /**
+     * nexus-cefa1.2: Boolean field extraction for catalog_collections.legacy_grandfathered
+     * (boolean now, catalog-031-3-collections-legacy-bool). Mirrors {@link #i}'s leniency
+     * in reverse — Python clients already send a real JSON boolean (nexus-cecqy), but a
+     * legacy/raw 0-1 JSON number is still tolerated defensively. Returns null when absent
+     * so the caller's own default (via {@link #nb}) applies, exactly like {@link #i}.
+     */
+    private static Boolean bFlag(Map<String, Object> m, String k) {
+        Object v = m.get(k);
+        if (v instanceof Boolean b) return b;
+        if (v instanceof Number n) return n.intValue() != 0;
+        return null;
+    }
+
+    /** Non-null boolean: returns def if null. Mirrors {@link #ni} for the boolean flags. */
+    private static boolean nb(Boolean v, boolean def) { return v != null ? v : def; }
+
     /** Non-null empty: returns "" if null. */
     private static String nne(String v) { return v != null ? v : ""; }
 
     /**
      * nexus-4j80w: {@code upsertLink}'s created_at default. The client never
-     * sends {@code created_at}; {@code nne()} alone defaulted it to {@code ""},
-     * and {@code "" < any-date} is TRUE under lexical TEXT comparison, so every
-     * service-written link matched EVERY {@code created_at_before} predicate —
-     * {@code bulk_unlink --created-at-before} deleted the entire link graph,
-     * and the MCP confirmation preview computed through the same predicate so
-     * it read as correct.
+     * sends {@code created_at}; leaving it unset used to default to {@code ""}
+     * under {@code nne()}, and {@code "" < any-date} was TRUE under lexical TEXT
+     * comparison, so every service-written link matched EVERY {@code
+     * created_at_before} predicate — {@code bulk_unlink --created-at-before}
+     * deleted the entire link graph, and the MCP confirmation preview computed
+     * through the same predicate so it read as correct.
      *
-     * <p>Stamp a REAL ISO-8601 UTC timestamp on insert instead, in the same
-     * fixed-width-micros + {@code "+00:00"} shape {@link #stampIndexedAt} uses
-     * (via {@link #INDEXED_AT_FMT}) — byte-identical to the local arm's
-     * {@code datetime.now(UTC).isoformat()}, so old (local-written) and new
-     * (service-written) rows sort consistently as TEXT. Only applies to the
-     * INSERT values list; the {@code doUpdate()} merge path never touches
-     * {@code created_at}, so an existing row's timestamp is never overwritten.
+     * <p>Stamp a REAL timestamp on insert instead of leaving it unset. Since
+     * nexus-cefa1.2 (catalog-031-2-links-created-at) created_at is timestamptz,
+     * so this binds an {@link java.time.OffsetDateTime} directly — no string
+     * formatting round-trip needed any more. Only applies to the INSERT values
+     * list; the {@code doUpdate()} merge path never touches {@code created_at},
+     * so an existing row's timestamp is never overwritten.
      */
-    private static String createdAtOrNow(String createdAt) {
-        if (createdAt != null && !createdAt.isBlank()) return createdAt;
-        return java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).format(INDEXED_AT_FMT);
+    private static java.time.OffsetDateTime createdAtOrNow(String createdAt) {
+        java.time.OffsetDateTime parsed = tsOrNull(createdAt);
+        return parsed != null ? parsed : java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC);
+    }
+
+    /**
+     * nexus-cefa1.2: strict parse for a CALLER-SUPPLIED {@code createdAtBefore}
+     * filter (queryLinks / bulkDeleteLinks) — unlike {@link #tsOrNull}'s
+     * leniency toward absent/blank internal fidelity-import values (where blank
+     * legitimately means "not set"), a non-blank filter value that fails to
+     * parse is a caller error and must 400, never silently produce an
+     * always-false (or always-true) condition. {@link #tsOrNull} already throws
+     * {@link java.time.format.DateTimeParseException} on genuinely unparseable
+     * non-blank input; this wraps that as {@link IllegalArgumentException} so
+     * CatalogHandler's generic ladder maps it to 400 (DateTimeParseException
+     * alone is not an IllegalArgumentException and would fall through to 500).
+     */
+    private static java.time.OffsetDateTime parseCreatedAtBeforeStrict(String createdAtBefore) {
+        try {
+            return tsOrNull(createdAtBefore);
+        } catch (java.time.format.DateTimeParseException e) {
+            throw new IllegalArgumentException(
+                "createdAtBefore: not a parseable timestamp: " + createdAtBefore, e);
+        }
+    }
+
+    /**
+     * nexus-cefa1.2: the catalog convention for a timestamptz-for-the-wire
+     * render — microsecond precision, explicit {@code +00:00} offset. This IS
+     * {@code INDEXED_AT_FMT} (the pre-migration TEXT-column "now" stamp
+     * formatter), restored under its original name and widened from a
+     * write-only helper to the read formatter too: {@link #utcIso} normalizes
+     * to UTC via {@code withOffsetSameInstant} before formatting, so it
+     * renders any stored instant in this shape regardless of the offset it
+     * carries.
+     */
+    private static final java.time.format.DateTimeFormatter INDEXED_AT_FMT =
+        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSSxxx");
+
+    /**
+     * nexus-cefa1.2: render a timestamptz read (indexed_at / bib_enriched_at /
+     * index_started_at / catalog_links.created_at, all newly timestamptz as of
+     * catalog-031-type-hygiene.xml) for the wire in the catalog's established
+     * micros+offset shape ({@link #INDEXED_AT_FMT}) — NOT {@code
+     * OffsetDateTime.toString()} (nexus-onjvy class: elides zero seconds,
+     * renders in whatever offset the value carries) and NOT the coarser
+     * "...Z" second-precision shape {@code TelemetryRepository}/{@code
+     * TaxonomyRepository} use for their own timestamptz columns. Null stays
+     * null; callers that need the historical "always non-null, empty string
+     * when unset" contract (bib_enriched_at, index_started_at) wrap this in
+     * {@link #nne}.
+     *
+     * <p><b>Why micros+offset, not second-precision "...Z" (plan directive,
+     * Hal 2026-08-15):</b> every Python writer stamps {@code
+     * datetime.now(timezone.utc).isoformat()}, which is exactly this shape —
+     * microseconds + {@code +00:00}. Keeping this formatter for reads too
+     * means a stamp written by the PUBLISHED client (not ours to edit; a
+     * network-visible contract) round-trips byte-identical through this
+     * migration: precision-preserving, same-offset-notation rendering is the
+     * MINIMAL externally-visible change, matching the plan's own naming of
+     * {@code INDEXED_AT_FMT} as the formatter to preserve. A first pass of
+     * this migration used the coarser "...Z" shape reasoning that the TEXT
+     * column's lexicographic-sortability rationale for fixed-width micros is
+     * retired by this same migration (true — {@code collection_health_meta}'s
+     * {@code MAX(indexed_at)} and every {@code created_at < :before} filter
+     * now run as real timestamp arithmetic against the FULL stored precision
+     * regardless of how the wire value is rendered) — but that argument only
+     * shows second-precision is SAFE, not that it is the right call once an
+     * external, already-shipped consumer contract is in view: two exact-
+     * equality Python tests (now reverted, see their own history) demonstrated
+     * a real consumer that compares these wire strings for equality, which is
+     * exactly the risk a lossy round-trip creates for a client already in the
+     * wild.
+     *
+     * <p><b>One accepted, NOT engineered-around, residual shape difference:</b>
+     * Python's {@code isoformat()} omits the fractional-seconds group entirely
+     * when {@code microsecond == 0} (e.g. {@code "2026-01-01T00:00:00+00:00"},
+     * no {@code .000000}), while this Java formatter's {@code SSSSSS} pattern
+     * always emits exactly six digits. So a Python-written stamp that happens
+     * to land on a whole second reads back WITH a {@code .000000} it was
+     * written WITHOUT — the one class of caller-supplied string this
+     * formatter does not echo byte-for-byte. Every other case (any non-zero
+     * microsecond component, or any value formatted by THIS formatter in the
+     * first place, e.g. Java's own {@code stampIndexedAt}/{@code
+     * beginIndexRun}/{@code createdAtOrNow} "now" stamps) round-trips exactly,
+     * since Postgres timestamptz stores full microsecond precision ({@code
+     * TIMESTAMPWITHTIMEZONE(6)}).
+     */
+    private static String utcIso(java.time.OffsetDateTime ts) {
+        return ts == null ? null : INDEXED_AT_FMT.format(ts.withOffsetSameInstant(java.time.ZoneOffset.UTC));
     }
 
     /**

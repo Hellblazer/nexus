@@ -33,15 +33,17 @@ class ChashTypeTest {
     }
 
     @Test
-    void fromHex_rejects_legacy32_withAliasResolutionHint() {
+    void fromHex_rejects_legacy32_withReIndexHint() {
         // THE INVERSION: 32-hex was the canonical accept pre-RDR-180; now it
-        // is a legacy reference. Never truncated, never padded — the message
-        // must steer callers to the chash_alias resolution path.
+        // is a legacy reference. Never truncated, never padded. nexus-lgdel.l1:
+        // the chash_alias resolution route is RETIRED — the message now steers
+        // callers to re-index the source, the only remaining remedy.
         assertThatThrownBy(() -> Chash.fromHex(LEGACY32))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("got 32 chars")
             .hasMessageContaining("legacy 32-hex")
-            .hasMessageContaining("chash_alias");
+            .hasMessageContaining("no resolution route left")
+            .hasMessageContaining("re-index the source");
     }
 
     @Test

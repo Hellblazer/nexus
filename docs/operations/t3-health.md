@@ -38,31 +38,32 @@ The per-name tombstoned-vs-absent probe (`probe_collection_state`) raised for th
 
 **Action**: re-run `nx catalog doctor --collections-drift` once the vector service is reachable. A name in this bucket has NOT been classified as tombstoned or gone — neither of the two remedies above applies until it re-probes cleanly.
 
-## Manifest damage (RUNFENCE)
+## Removed check: manifest damage (RUNFENCE) corpus-wide sweep
 
-### Symptom: `nx doctor` names collection(s) with dangling manifest chashes
+`nx doctor`'s corpus-wide "dangling manifest chashes" sweep
+(`manifest_verify_all()`) and the per-document `nx catalog manifest-verify
+TUMBLER_OR_TITLE` diagnostic it pointed at were REMOVED in RDR-191 Phase 6
+(bead nexus-o8dil.33, 2026-08-15). The manifest-chunk FK
+(`catalog_document_chunks -> nexus.chunks`, RDR-191 Phase 5, VALIDATEd)
+now REJECTS a manifest row referencing a nonexistent chunk at write time —
+the class this section used to triage (chunks removed or superseded
+without the manifest being updated to match) is unreachable by
+construction, so there is no longer a corpus sweep or a per-document check
+to run for it.
 
-`nx doctor`'s corpus-wide sweep (`manifest_verify_all`) reports one or more
-collections where a document's RUNFENCE manifest references chunk chashes
-that no longer exist in T3.
+If a document's chunks look wrong today, use `nx catalog show
+TUMBLER_OR_TITLE` (`index_state`) instead: the write-path fail-closed
+verify-then-stamp (`CatalogRepository.completeIndexRun`) already refuses
+to mark a document `complete` unless its manifest was verified whole at
+write time, so `index_state != 'complete'` is the current signal that
+`nx index <path> --force` is worth running. `nx catalog verify
+--collection NAME` still detects per-document manifest damage
+client-side, independent of the retired engine functions, if you need a
+`referenced`/`present`/`missing` breakdown for a specific collection.
 
-**Cause**: a document's indexed chunks were removed or superseded (GC,
-partial re-index failure, manual T3 surgery) without the manifest being
-updated to match.
-
-**Triage**: `nx catalog manifest-verify TUMBLER_OR_TITLE` against the
-specific document(s) named — it checks that one document's manifest against
-T3 (referenced/present/missing chash counts, plus `index_state`) without a
-full corpus scan. A `missing > 0` result prints a DAMAGED verdict.
-
-**Action**: `nx index <path> --force` to repair — this re-runs extraction and
-writes a fresh manifest for the document.
-
-**False-positive note**: a **pre-fence engine** (one built before the
-RUNFENCE fence routes shipped) answers the per-document check with a 404,
-which `nx doctor` renders as a LOUD SKIP warning, not a DAMAGED verdict — this
-is an engine-freshness gap, not manifest corruption. Confirm the engine
-version before treating a SKIPPED+WARNING row as real damage.
+If you are troubleshooting a pre-Phase-6 install and hit this symptom, the
+guidance (including the pre-fence-engine 404 false-positive note) is in
+this file's git history.
 
 ## Removed checks: `--t3-doc-id-coverage` and `--replay-equality`
 

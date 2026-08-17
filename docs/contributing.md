@@ -249,6 +249,38 @@ Every step below is **required**. Missing any one of them has caused problems in
    run from the `engine-release` skill before a new `engine-service-v*` tag
    deploys (nexus-9ssih deploy order); it is not part of this PyPI checklist.
 
+0b. **Remediation-commit gate (BLOCKING — run alongside step 0)**
+   ```bash
+   uv run python scripts/check_remediation_commits_ride_release.py --release-ref vX.Y.Z
+   ```
+   Run against the release tag (or the branch tip about to be tagged). This
+   closes the gap nexus-3n7pr's incident exposed (nexus-fix9t): a
+   remediation bead sequenced "after the client release ships" implicitly
+   assumes the commit its plan depends on will actually be an ancestor of
+   that release. Nothing checked this — 7.7.0 shipped before commit
+   `5f59ede70` (the `nexus-gvmbo` / `nexus-b91tv` `manifest_backfill`
+   safety fixes), so the installed `nx` at 7.7.0 carried the pre-fix
+   DESTRUCTIVE module the remediation plan assumed was already safe.
+
+   Non-zero exit = STOP. The output names the bead and the missing commit;
+   the remedy is either re-sequence the named bead to run after a release
+   that DOES carry the commit, or include the commit in this release before
+   cutting it.
+
+   **Bead-authoring convention this gate reads**: when a bead's remediation
+   is sequenced behind a specific commit ("do not run this until commit X
+   has shipped"), write a line anywhere in the bead's description or a
+   comment:
+   ```
+   requires-commit: <sha>
+   ```
+   one sha per line (7-40 hex characters). This structured marker is
+   scanned first and is the reliable form. Two free-text phrasings are also
+   recognized as a best-effort net for beads written before this convention
+   existed — `requires commit <sha>` and `must include <sha>` — but do not
+   rely on free-text scraping for a bead you are writing today; use the
+   marker. Closed beads are never scanned.
+
 1. **Verify the full release test battery passes**
    ```bash
    uv run pytest                                             # unit suite (no API keys)
@@ -371,6 +403,26 @@ Every step below is **required**. Missing any one of them has caused problems in
    explicit `SHAKEDOWN PASSED`/`SHAKEDOWN FAILED` verdict line. Halt on
    any failure.
 
+7d. **Data-token CLI gate** (optional, ~5-15 min; not part of the
+   standard battery above — run it once before flipping `mint_token` on
+   for real, or after touching `src/nexus/db/data_token.py`,
+   `commands/config_cmd.py`, `commands/service_cmd.py`'s token group, or
+   `health.py`'s `_check_mint_token`)
+   ```bash
+   ./tests/e2e/data-token-cli-gate.sh
+   ```
+   RDR-005 2a self-minting (nexus-rftfs / nexus-wrwb7 / nexus-ssqk9): the
+   sandboxed-HOME, real-`nx`-subprocess journey for client-side
+   data-token self-minting — issues a `scope=mint-locked` credential
+   against a throwaway local engine, `nx config set mint_token`/
+   `mint_tenant`, a `store put`/`search` round trip that can only
+   succeed via the self-minted token, `nx doctor`'s mint check, and a
+   wrong-`mint_tenant` negative arm. Complements
+   `tests/db/test_data_token_manager_e2e.py` (which proves the
+   `DataTokenManager` seam in-process) by proving the CLI/config.yml/
+   doctor wiring only a real subprocess exercises. Must end
+   `DATA-TOKEN CLI GATE PASSED`.
+
 8. **Commit on a release branch and PR to `main`** (branch protection requires a PR; do NOT direct-push).
    Base the release branch on **develop**, not main — a release PROMOTES develop's accumulated
    state to main (§ Git Workflow above); branching off main would release main's stale tree with
@@ -429,6 +481,38 @@ Every step below is **required**. Missing any one of them has caused problems in
     downgrade guard misfired on reinstalls. Running this step immediately
     after tag-push is the moment the merge is conflict-free by construction
     (see `.claude/skills/release/SKILL.md` Step 11b).
+
+### Schema/data-migration releases (conditional)
+
+Trigger: this release's tag (client `vX.Y.Z` or engine `engine-service-vX.Y.Z`) carries a schema or data migration — a new Liquibase changeset, a new `upgrade_ladder` rung, or any change to a shape data already has to conform to. Four requirements, none of which the checklist above enforced before this section existed (T2 [22511] gap 9 — no schema-migration protocol existed in any release document; every prior trigger for "is this release safe" reduced to version identity and the standard functional gates, none of which speak to migration risk specifically). Operational checklist form: `.claude/skills/release/SKILL.md` Step 6d (client-side data migrations) and `.claude/skills/engine-release/SKILL.md` Step 5b (engine-side schema DDL). This section is their shared rationale and evidence citations.
+
+1. **Populated-store upgrade rehearsal at a stated, representative scale.** The mechanism is `NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade` (published-bytes mode; see Step 11c below) run against a corpus seeded above a named floor, not the harness's default toy seed (10-30 documents across `rehearse_cold.sh`, `rehearse_acquire.sh`, `rehearse_shakeout.sh`, `rehearse_hole_punch.sh`). State the floor and the actual seed count used in the release relay. If the seed cannot be brought to a genuinely representative scale before deploy, say so explicitly — do not let a toy-scale pass stand in for an at-scale one. RDR-191 is the standing evidence for why this matters: the cloud 385,484-row unify-chunks migration (T2 [22485]) is the only at-scale proof this project has produced for a chunk-table DDL change, and it ran in PRODUCTION — no pre-production rehearsal at that scale has ever happened. Treat that as a named, accepted gap until a representative-scale pre-production rehearsal exists, not a silently inherited one.
+
+2. **A rollback decision point, settled before the deploy relay fires.** Determine explicitly whether the migration can be rolled back after it commits. Non-transactional DDL (`CREATE INDEX CONCURRENTLY`, any Liquibase changeset that cannot run inside a transaction) forfeits the free atomic rollback a transactional migration gets — RDR-191's `nexus-o8dil.22` names this exactly: "CIC, non-blocking, +11%, cannot run in a transaction, and therefore forfeits the free atomic rollback that the local path gets." When the answer is no, write **IRREVERSIBLE** in the relay verbatim, and attach its substitute: a written rollback/abort runbook (exact statements, abort criteria) that exists and is in the operator's hand before the window opens, not improvised mid-window.
+
+3. **A freeze window derived from measurement, not a guess.** Generalizing the `nexus-o8dil.22` window pre-flight (T2 [22420] / [22427] / [22485]): (a) copy-peak — the largest transient storage footprint the migration needs mid-flight; (b) WAL budget — retained WAL under the deployment's replication settings during the window, checked against `max_wal_size`; (c) disk floor — abort unless available disk clears (steady-state floor + copy-peak) with a stated margin, re-measured immediately before executing (corpus growth between planning and execution shrinks the margin). Record the threshold and the abort condition in the operator runbook, not just the target duration.
+
+4. **Post-deploy data-integrity verification beyond version identity.** A `/version` match proves the binary shipped, not that the data survived. Verify, per T2 [22485]'s pattern: exact row-count reconciliation pre vs. post (per dimension/table, not an aggregate), that `ANALYZE` actually fired, and that the standing functional gates (`tests/e2e/cloud-client-path-gate.sh`; the deploy gate's parity/recall legs) are green post-migration. [22485]'s own verdict is the bar: "ROW INVARIANT EXACT: 385,484 pre == post ... ANALYZE fired ... STEP-6 green (112/113 parity, recall 12/12 pools identical), cloud client-path gate PASSED all four legs."
+
+### Break-glass: retry, yank, revert, and tag retraction
+
+Two prior pointers to this content — `.claude/skills/release/SKILL.md`'s "See also" list and AGENTS.md § Cutting a release, both saying "rollback / one-time setup steps live in `docs/contributing.md` § Release Process" — named nothing until this subsection existed (T2 [22511] Explore sweep, dangling-pointer finding; Step 11 above only ever covered pre-release-version yanking). This is what they were pointing at.
+
+**Publish failed after the tag already pushed.** Never move, delete, or force-push a published release tag (`vX.Y.Z` or `engine-service-vX.Y.Z`) to retry a failed publish — see "Tag retraction" below for why. Use the `release.yml` `workflow_dispatch` retry path instead: it checks out the ALREADY-PUSHED tag but runs the CURRENT workflow file from `main`, so a bug in the pipeline itself (not the artifact) can be fixed on `main` and re-run against the same immutable tag.
+```bash
+gh workflow run release.yml --ref main -f tag=vX.Y.Z
+```
+This is exactly the v7.7.0 sequence (2026-08-14, commit `62da4273b`): the first tag-push run failed because `GITHUB_REF_NAME` resolves to the triggering BRANCH on `workflow_dispatch`, not the tag, so the version-verify step compared `main` against `pyproject.toml`'s `7.7.0` and red'd on the retry path's first real exercise. The fix landed on `main` (`RELEASE_TAG` now resolves from the dispatch's `tag` input when present, mirroring the checkout step), and the SAME `v7.7.0` tag was re-dispatched without ever being moved. Before this path existed, `v7.6.0`'s publish failure (a `twine`/metadata-version mismatch, unrelated to the artifact — `gh-action-pypi-publish`'s bundled twine predated `hatchling`'s Metadata-Version 2.5) had no such recourse and the tag was moved twice to retry — see "Tag retraction" for why that was the wrong fix and is now forbidden.
+
+**PyPI yank for a bad full release** (distinct from Step 11's pre-release-version yank above). PyPI yanking marks a release as yanked; it does not delete it. Effect: `pip install conexus` (unpinned, or a range) stops resolving to the yanked version; an exact pin (`conexus==X.Y.Z`) still installs it, with a warning. It does **not** un-install it from any box that already ran `pip install`/`uv tool install` before the yank, and it does **not** touch `.claude-plugin/marketplace.json`'s `source.ref` on `main` — if the bad release's plugin-side commit already landed and got tagged, `source.ref` still points new `/plugin install` users at that content until a NEW release supersedes it. To yank: https://pypi.org/manage/project/conexus/release/X.Y.Z/ → "Yank release", with a reason. A yank is a signal, not a recall; the actual fix is always a new release.
+
+**Engine-deploy revert.** The engine-service cloud deployment is conexus-managed infrastructure this repo does not drive directly (AGENTS.md § T1 sub-agent contract's "Hal relays the cross-instance bus" convention applies here too). A revert is **relay-mediated**, with real limits:
+- There is no button here to press; surface an explicit relay naming the target tag to redeploy (normally the previous `engine-service-v*` identity), never frame it as autonomous.
+- For a migration-carrying tag, redeploying an older BINARY does not undo an already-committed schema change — the schema and the binary are two different things to revert, and a `CREATE INDEX CONCURRENTLY`-style migration (see "Schema/data-migration releases" above) has no free rollback once committed. "Revert the engine" without "revert the schema" can leave an old binary talking to a new schema shape.
+- Local-mode installs are unaffected by any cloud revert — they pull whatever `REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) pins on the client side. Walking local installs back to a prior engine identity requires a NEW client release that moves the pin backward, not a cloud-side action.
+- There is no automated post-revert verification today (T2 [22511] gap 2): confirm the revert landed with `nx service probe` (reads `/version` live) rather than trusting the `deployed-engine-version` T2 tracker, which is written by `nx service record-deploy` on request and is not consumed or re-checked by anything automatically.
+
+**Tag-retraction policy.** Moving, deleting, or force-pushing a published `vX.Y.Z` or `engine-service-vX.Y.Z` tag is **forbidden** except as an explicit, admin-only (Hal) decision — never a default remedy for a failed publish. Why: `.claude-plugin/marketplace.json`'s `source.ref` pins installed Claude Code plugin users to a specific, named tag as an IMMUTABLE identity; moving what a tag name resolves to after the fact is a supply-chain integrity violation, not a convenience — a user (or CI cache) that already resolved the old tag can silently diverge from one that resolves it after the move, with no way to tell from the tag name alone that this happened. `v7.6.0` is the standing lesson (2026-08-11): before the `workflow_dispatch` retry path existed, a publish failure (the twine/metadata mismatch above) was "fixed" by moving the tag, twice — `.github/workflows/release.yml`'s own header comment records it verbatim ("7.6.0 moved twice for exactly that reason") as the incident that justified building the retry path in the first place. If a tag genuinely must be retracted (e.g. a published artifact is actively harmful), it requires Hal's explicit authorization and: (a) a NEW tag carries the fix — never a reused or re-pointed old identity; (b) the bad PyPI release is yanked per the procedure above; (c) if `main`'s `source.ref` already points at the bad tag, a new release supersedes it — retracting the old tag alone does not move already-tagged users off it.
 
 ### Quick reference — files that change every release
 

@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from tests._catalog_fixture_ops import ActiveCatalog
+from tests._catalog_fixture_ops import ActiveCatalog, seed_manifest_chunks
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -77,6 +77,32 @@ _SEQ = [0]
 def _next_seq() -> int:
     _SEQ[0] += 1
     return _SEQ[0]
+
+
+# ── fk_catalog_chunks_chunk collateral (nexus-dbzxb) ─────────────────────────
+#
+# These wrappers seed a matching ``nexus.chunks`` row (via
+# ``seed_manifest_chunks``) for every chash in *chunks* before delegating to
+# the real write — idiom 1 of the RDR-191 Phase 5 Python collateral sweep.
+# Every ``cat.write_manifest(...)`` / ``cat.append_manifest_chunks(...)`` /
+# ``cat.atomic_manifest_replace(...)`` call in this file goes through one of
+# these instead of the raw catalog method, so the manifest-authored chashes
+# always have a backing chunk and the FK never rejects the fixture write.
+
+
+def _write_manifest(cat: ActiveCatalog, doc: str, chunks: list[dict], *, collection: str) -> None:
+    seed_manifest_chunks(collection, (c["chash"] for c in chunks))
+    cat.write_manifest(doc, chunks, collection=collection)
+
+
+def _append_manifest(cat: ActiveCatalog, doc: str, chunks: list[dict], *, collection: str) -> None:
+    seed_manifest_chunks(collection, (c["chash"] for c in chunks))
+    cat.append_manifest_chunks(doc, chunks, collection=collection)
+
+
+def _atomic_replace(cat: ActiveCatalog, doc: str, chunks: list[dict], *, collection: str) -> None:
+    seed_manifest_chunks(collection, (c["chash"] for c in chunks))
+    cat.atomic_manifest_replace(doc, chunks, collection=collection)
 
 
 def _make_chunk(
@@ -163,13 +189,13 @@ class TestGetManifest:
     def test_get_manifest_returns_rows_ordered_by_position(self, tmp_path):
         """Rows returned in ascending position order regardless of insert order."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
         chunks = [
             _make_chunk("b" * 64, position=1),
             _make_chunk("a" * 64, position=0),
             _make_chunk("c" * 64, position=2),
         ]
-        cat.write_manifest(d1, chunks, collection="code__test")
+        _write_manifest(cat, d1, chunks, collection="code__mtest__bge-base-en-v15-768__v1")
 
         rows = cat.get_manifest(d1)
         assert len(rows) == 3
@@ -185,8 +211,8 @@ class TestGetManifest:
         from nexus.catalog.types import ManifestRow
 
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d1, [_make_chunk("a" * 64, 0)], collection="code__mtest__bge-base-en-v15-768__v1")
 
         rows = cat.get_manifest(d1)
         assert len(rows) == 1
@@ -195,7 +221,7 @@ class TestGetManifest:
     def test_get_manifest_preserves_span_columns(self, tmp_path):
         """Span coordinates (line_start, line_end, char_start, char_end) round-trip."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
         chunks = [
             {
                 "chash": "d" * 64,
@@ -207,7 +233,7 @@ class TestGetManifest:
                 "char_end": 300,
             }
         ]
-        cat.write_manifest(d1, chunks, collection="code__test")
+        _write_manifest(cat, d1, chunks, collection="code__mtest__bge-base-en-v15-768__v1")
 
         rows = cat.get_manifest(d1)
         assert len(rows) == 1
@@ -221,8 +247,8 @@ class TestGetManifest:
     def test_get_manifest_zero_chunk_doc_returns_empty(self, tmp_path):
         """write_manifest([]) then get_manifest returns empty list."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [], collection="code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d1, [], collection="code__mtest__bge-base-en-v15-768__v1")
 
         rows = cat.get_manifest(d1)
         assert rows == []
@@ -234,22 +260,22 @@ class TestGetManifest:
         DIFFERENT one, and assert the row reports the write-time value.
         """
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__kzso5-doc-collection")
-        cat.write_manifest(
-            d1, [_make_chunk("a" * 64, 0)], collection="code__kzso5-explicit-collection",
+        d1 = _seed_doc(cat, "code__kzso5-doc__bge-base-en-v15-768__v1")
+        _write_manifest(cat, 
+            d1, [_make_chunk("a" * 64, 0)], collection="code__kzso5-explicit__bge-base-en-v15-768__v1",
         )
 
         rows = cat.get_manifest(d1)
         assert len(rows) == 1
-        assert rows[0].collection == "code__kzso5-explicit-collection"
+        assert rows[0].collection == "code__kzso5-explicit__bge-base-en-v15-768__v1"
 
     def test_get_manifest_isolates_by_doc_id(self, tmp_path):
         """get_manifest returns rows only for the requested doc_id."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
-        d2 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__test")
-        cat.write_manifest(d2, [_make_chunk("b" * 64, 0), _make_chunk("c" * 64, 1)], collection="code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
+        d2 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d1, [_make_chunk("a" * 64, 0)], collection="code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d2, [_make_chunk("b" * 64, 0), _make_chunk("c" * 64, 1)], collection="code__mtest__bge-base-en-v15-768__v1")
 
         rows = cat.get_manifest(d1)
         assert len(rows) == 1
@@ -271,8 +297,8 @@ class TestDocsForChashes:
     def test_docs_for_chashes_single_doc(self, tmp_path):
         """Returns correct doc_id for a chash that appears in one document."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d1, [_make_chunk("a" * 64, 0)], collection="code__mtest__bge-base-en-v15-768__v1")
 
         result = cat.docs_for_chashes(["a" * 64])
         assert result == {"a" * 64: [d1]}
@@ -280,11 +306,11 @@ class TestDocsForChashes:
     def test_docs_for_chashes_multi_doc(self, tmp_path):
         """A chash shared across multiple docs maps to all doc_ids."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
-        d2 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
+        d2 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
         shared_chash = "a" * 64
-        cat.write_manifest(d1, [_make_chunk(shared_chash, 0)], collection="code__test")
-        cat.write_manifest(d2, [_make_chunk(shared_chash, 0)], collection="code__test")
+        _write_manifest(cat, d1, [_make_chunk(shared_chash, 0)], collection="code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d2, [_make_chunk(shared_chash, 0)], collection="code__mtest__bge-base-en-v15-768__v1")
 
         result = cat.docs_for_chashes([shared_chash])
         assert shared_chash in result
@@ -299,8 +325,8 @@ class TestDocsForChashes:
     def test_docs_for_chashes_mixed_known_unknown(self, tmp_path):
         """Known chashes appear in result; unknown chashes are omitted."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d1, [_make_chunk("a" * 64, 0)], collection="code__mtest__bge-base-en-v15-768__v1")
 
         result = cat.docs_for_chashes(["a" * 64, "9" * 64])
         assert "a" * 64 in result
@@ -309,11 +335,11 @@ class TestDocsForChashes:
     def test_docs_for_chashes_multiple_chunks_same_doc(self, tmp_path):
         """Multiple chunks in the same doc appear as one doc_id per chash."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d1, [
             _make_chunk("a" * 64, 0),
             _make_chunk("b" * 64, 1),
-        ], collection="code__test")
+        ], collection="code__mtest__bge-base-en-v15-768__v1")
 
         result = cat.docs_for_chashes(["a" * 64, "b" * 64])
         assert result["a" * 64] == [d1]
@@ -346,28 +372,28 @@ class TestGetChunkChashes:
 
     def test_returns_ordered_chashes(self, tmp_path):
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
         chunks = [
             _make_chunk("b" * 64, position=1),
             _make_chunk("a" * 64, position=0),
             _make_chunk("c" * 64, position=2),
         ]
-        cat.write_manifest(d1, chunks, collection="code__test")
+        _write_manifest(cat, d1, chunks, collection="code__mtest__bge-base-en-v15-768__v1")
         assert cat.get_chunk_chashes(d1) == ["a" * 64, "b" * 64, "c" * 64]
 
     def test_isolates_by_doc_id(self, tmp_path):
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
-        d2 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__test")
-        cat.write_manifest(d2, [_make_chunk("b" * 64, 0), _make_chunk("c" * 64, 1)], collection="code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
+        d2 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d1, [_make_chunk("a" * 64, 0)], collection="code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d2, [_make_chunk("b" * 64, 0), _make_chunk("c" * 64, 1)], collection="code__mtest__bge-base-en-v15-768__v1")
         assert cat.get_chunk_chashes(d1) == ["a" * 64]
         assert cat.get_chunk_chashes(d2) == ["b" * 64, "c" * 64]
 
     def test_zero_chunk_doc_returns_empty(self, tmp_path):
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [], collection="code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d1, [], collection="code__mtest__bge-base-en-v15-768__v1")
         assert cat.get_chunk_chashes(d1) == []
 
 
@@ -386,15 +412,15 @@ class TestChashesForCollection:
     def test_chashes_for_collection_unknown_returns_empty(self, tmp_path):
         """Unknown collection name returns empty set, not an error."""
         cat = _make_catalog(tmp_path)
-        result = cat.chashes_for_collection("code__nonexistent")
+        result = cat.chashes_for_collection("code__mtest-none__bge-base-en-v15-768__v1")
         assert result == set()
 
     def test_chashes_for_collection_returns_set_of_strings(self, tmp_path):
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d1, [_make_chunk("a" * 64, 0)], collection="code__mtest__bge-base-en-v15-768__v1")
 
-        result = cat.chashes_for_collection("code__test")
+        result = cat.chashes_for_collection("code__mtest__bge-base-en-v15-768__v1")
         assert isinstance(result, set)
         assert all(isinstance(x, str) for x in result)
 
@@ -414,40 +440,40 @@ class TestChashesForCollection:
         fixtures to the real contract (nexus-i711w Stage 2 sub-stage C-store)
         made it fail honestly, which is how it was found."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
         full = "a" * 64
-        cat.write_manifest(d1, [_make_chunk(full, 0)], collection="code__test")
+        _write_manifest(cat, d1, [_make_chunk(full, 0)], collection="code__mtest__bge-base-en-v15-768__v1")
 
-        result = cat.chashes_for_collection("code__test")
+        result = cat.chashes_for_collection("code__mtest__bge-base-en-v15-768__v1")
         assert result == {full}, "RDR-180: never truncate or pad a chash"
 
     def test_chashes_for_collection_distinct_across_chunks(self, tmp_path):
         """Each chash appears once even if it occurs at multiple positions
         or across multiple docs in the same collection."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
-        d2 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
+        d2 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
         shared = "a" * 64
-        cat.write_manifest(d1, [
+        _write_manifest(cat, d1, [
             _make_chunk(shared, 0),
             _make_chunk(shared, 1),
             _make_chunk("b" * 64, 2),
-        ], collection="code__test")
-        cat.write_manifest(d2, [_make_chunk(shared, 0)], collection="code__test")
+        ], collection="code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d2, [_make_chunk(shared, 0)], collection="code__mtest__bge-base-en-v15-768__v1")
 
-        result = cat.chashes_for_collection("code__test")
+        result = cat.chashes_for_collection("code__mtest__bge-base-en-v15-768__v1")
         assert result == {shared, "b" * 64}
 
     def test_chashes_for_collection_isolates_by_physical_collection(self, tmp_path):
         """Only docs whose ``physical_collection`` matches contribute chashes."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__a")
-        d2 = _seed_doc(cat, "code__b")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__a")
-        cat.write_manifest(d2, [_make_chunk("b" * 64, 0)], collection="code__b")
+        d1 = _seed_doc(cat, "code__mtest-a__bge-base-en-v15-768__v1")
+        d2 = _seed_doc(cat, "code__mtest-b__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d1, [_make_chunk("a" * 64, 0)], collection="code__mtest-a__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d2, [_make_chunk("b" * 64, 0)], collection="code__mtest-b__bge-base-en-v15-768__v1")
 
-        a_set = cat.chashes_for_collection("code__a")
-        b_set = cat.chashes_for_collection("code__b")
+        a_set = cat.chashes_for_collection("code__mtest-a__bge-base-en-v15-768__v1")
+        b_set = cat.chashes_for_collection("code__mtest-b__bge-base-en-v15-768__v1")
         assert a_set == {"a" * 64}
         assert b_set == {"b" * 64}
 
@@ -455,10 +481,10 @@ class TestChashesForCollection:
         """A doc registered to the collection but with no manifest rows
         contributes no chashes (zero-chunk doc → all-deleted)."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [], collection="code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d1, [], collection="code__mtest__bge-base-en-v15-768__v1")
 
-        result = cat.chashes_for_collection("code__test")
+        result = cat.chashes_for_collection("code__mtest__bge-base-en-v15-768__v1")
         assert result == set()
 
     def test_chashes_for_collection_skips_deleted_documents(self, tmp_path):
@@ -467,14 +493,14 @@ class TestChashesForCollection:
         the only contributing doc is removed (deleted-file → all chunks
         become orphans, the GC contract)."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
-        cat.write_manifest(d1, [_make_chunk("a" * 64, 0)], collection="code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d1, [_make_chunk("a" * 64, 0)], collection="code__mtest__bge-base-en-v15-768__v1")
 
         from nexus.catalog.tumbler import Tumbler
 
         cat.delete_document(Tumbler.parse(d1))
 
-        result = cat.chashes_for_collection("code__test")
+        result = cat.chashes_for_collection("code__mtest__bge-base-en-v15-768__v1")
         assert result == set()
 
 # TestEventSourcedCollectionBackfill removed (nexus-i711w Stage 2 sub-stage
@@ -491,13 +517,13 @@ class TestWriteManifestBatching:
     def test_write_manifest_350_chunks_produces_350_rows(self, tmp_path):
         """A document with 350 chunks produces exactly 350 manifest rows."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
 
         chunks = [
             {"chash": f"{i:064x}", "position": i}
             for i in range(350)
         ]
-        cat.write_manifest(d1, chunks, collection="code__test")
+        _write_manifest(cat, d1, chunks, collection="code__mtest__bge-base-en-v15-768__v1")
 
         count = len(cat.get_manifest(d1))
         assert count == 350
@@ -505,13 +531,13 @@ class TestWriteManifestBatching:
     def test_write_manifest_350_chunks_correct_order(self, tmp_path):
         """All 350 rows are present in position order."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
 
         chunks = [
             {"chash": f"{i:064x}", "position": i}
             for i in range(350)
         ]
-        cat.write_manifest(d1, chunks, collection="code__test")
+        _write_manifest(cat, d1, chunks, collection="code__mtest__bge-base-en-v15-768__v1")
 
         rows = [(r.position, r.chash) for r in cat.get_manifest(d1)]
         assert len(rows) == 350
@@ -523,14 +549,14 @@ class TestWriteManifestBatching:
     def test_write_manifest_350_chunks_idempotent(self, tmp_path):
         """Re-writing 350 chunks produces exactly 350 rows (no duplicates)."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
 
         chunks = [
             {"chash": f"{i:064x}", "position": i}
             for i in range(350)
         ]
-        cat.write_manifest(d1, chunks, collection="code__test")
-        cat.write_manifest(d1, chunks, collection="code__test")
+        _write_manifest(cat, d1, chunks, collection="code__mtest__bge-base-en-v15-768__v1")
+        _write_manifest(cat, d1, chunks, collection="code__mtest__bge-base-en-v15-768__v1")
 
         count = len(cat.get_manifest(d1))
         assert count == 350
@@ -538,13 +564,13 @@ class TestWriteManifestBatching:
     def test_write_manifest_350_chunks_all_in_one_transaction(self, tmp_path):
         """350 chunks must all commit atomically (partial failure leaves zero rows)."""
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
 
         chunks = [
             {"chash": f"{i:064x}", "position": i}
             for i in range(350)
         ]
-        cat.write_manifest(d1, chunks, collection="code__test")
+        _write_manifest(cat, d1, chunks, collection="code__mtest__bge-base-en-v15-768__v1")
 
         # Verify atomicity: query outside of any explicit transaction
         count = len(cat.get_manifest(d1))
@@ -576,7 +602,7 @@ class TestManifestWriteBatchHook:
         from nexus.mcp_infra import manifest_write_batch_hook
 
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
 
         metadatas = [
             {
@@ -590,11 +616,12 @@ class TestManifestWriteBatchHook:
             }
         ]
 
+        seed_manifest_chunks("code__mtest__bge-base-en-v15-768__v1", (m["chunk_text_hash"] for m in metadatas))
         with patch("nexus.mcp_infra.get_catalog", return_value=object()), \
              patch("nexus.mcp_infra.get_catalog_writer", return_value=cat):
             manifest_write_batch_hook(
                 doc_ids=["chunk-id-0"],
-                collection="code__test",
+                collection="code__mtest__bge-base-en-v15-768__v1",
                 contents=["some code"],
                 embeddings=None,
                 metadatas=metadatas,
@@ -612,7 +639,7 @@ class TestManifestWriteBatchHook:
         # Should not raise even without a real catalog
         manifest_write_batch_hook(
             doc_ids=["x"],
-            collection="code__test",
+            collection="code__mtest__bge-base-en-v15-768__v1",
             contents=["x"],
             embeddings=None,
             metadatas=None,
@@ -625,7 +652,7 @@ class TestManifestWriteBatchHook:
         from nexus.mcp_infra import manifest_write_batch_hook
 
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
 
         metadatas = [
             {
@@ -648,11 +675,12 @@ class TestManifestWriteBatchHook:
             },
         ]
 
+        seed_manifest_chunks("code__mtest__bge-base-en-v15-768__v1", (m["chunk_text_hash"] for m in metadatas))
         with patch("nexus.mcp_infra.get_catalog", return_value=object()), \
              patch("nexus.mcp_infra.get_catalog_writer", return_value=cat):
             manifest_write_batch_hook(
                 doc_ids=["chunk-0", "chunk-1"],
-                collection="code__test",
+                collection="code__mtest__bge-base-en-v15-768__v1",
                 contents=["code0", "code1"],
                 embeddings=None,
                 metadatas=metadatas,
@@ -691,7 +719,7 @@ class TestManifestWriteBatchHook:
         from nexus.mcp_infra import manifest_write_batch_hook
 
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
 
         metadatas = [
             {"chunk_index": 0, "chunk_text_hash": "a" * 64},
@@ -713,7 +741,7 @@ class TestManifestWriteBatchHook:
             # MUST NOT raise — contract is best-effort.
             manifest_write_batch_hook(
                 doc_ids=["c-0"],
-                collection="code__test",
+                collection="code__mtest__bge-base-en-v15-768__v1",
                 contents=["x"],
                 embeddings=None,
                 metadatas=metadatas,
@@ -766,7 +794,7 @@ class TestManifestWriteBatchHook:
         from nexus.mcp_infra import manifest_write_batch_hook
 
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
 
         # Helper to build a metadata dict with a global chunk_index.
         def _meta(global_idx: int, chash: str) -> dict:
@@ -780,11 +808,14 @@ class TestManifestWriteBatchHook:
         # Batch 2: positions 3, 4.
         batch_2 = [_meta(3, "d" * 64), _meta(4, "e" * 64)]
 
+        seed_manifest_chunks(
+            "code__mtest__bge-base-en-v15-768__v1", (m["chunk_text_hash"] for m in [*batch_1, *batch_2]),
+        )
         with patch("nexus.mcp_infra.get_catalog", return_value=object()), \
              patch("nexus.mcp_infra.get_catalog_writer", return_value=cat):
             manifest_write_batch_hook(
                 doc_ids=["chunk-0", "chunk-1", "chunk-2"],
-                collection="code__test",
+                collection="code__mtest__bge-base-en-v15-768__v1",
                 contents=["c0", "c1", "c2"],
                 embeddings=None,
                 metadatas=batch_1,
@@ -792,7 +823,7 @@ class TestManifestWriteBatchHook:
             )
             manifest_write_batch_hook(
                 doc_ids=["chunk-3", "chunk-4"],
-                collection="code__test",
+                collection="code__mtest__bge-base-en-v15-768__v1",
                 contents=["c3", "c4"],
                 embeddings=None,
                 metadatas=batch_2,
@@ -821,7 +852,7 @@ class TestManifestWriteBatchHook:
         from nexus.mcp_infra import manifest_write_batch_hook
 
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
         # Sanity: register-time chunk_count is 0.
         assert _chunk_count(cat, d1) == 0
 
@@ -830,11 +861,12 @@ class TestManifestWriteBatchHook:
             {"chunk_index": 1, "chunk_text_hash": "b" * 64},
             {"chunk_index": 2, "chunk_text_hash": "c" * 64},
         ]
+        seed_manifest_chunks("code__mtest__bge-base-en-v15-768__v1", (m["chunk_text_hash"] for m in metadatas))
         with patch("nexus.mcp_infra.get_catalog", return_value=object()), \
              patch("nexus.mcp_infra.get_catalog_writer", return_value=cat):
             manifest_write_batch_hook(
                 doc_ids=["c-0", "c-1", "c-2"],
-                collection="code__test",
+                collection="code__mtest__bge-base-en-v15-768__v1",
                 contents=["x", "y", "z"],
                 embeddings=None,
                 metadatas=metadatas,
@@ -869,7 +901,7 @@ class TestManifestWriteBatchHook:
         from nexus.mcp_infra import manifest_write_batch_hook
 
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
 
         # First index: 5 chunks at positions 0..4.
         first = [
@@ -880,7 +912,7 @@ class TestManifestWriteBatchHook:
              patch("nexus.mcp_infra.get_catalog_writer", return_value=cat):
             manifest_write_batch_hook(
                 doc_ids=[f"c-{i}" for i in range(5)],
-                collection="code__test",
+                collection="code__mtest__bge-base-en-v15-768__v1",
                 contents=["x"] * 5,
                 embeddings=None,
                 metadatas=first,
@@ -897,7 +929,7 @@ class TestManifestWriteBatchHook:
              patch("nexus.mcp_infra.get_catalog_writer", return_value=cat):
             manifest_write_batch_hook(
                 doc_ids=[f"d-{i}" for i in range(3)],
-                collection="code__test",
+                collection="code__mtest__bge-base-en-v15-768__v1",
                 contents=["x"] * 3,
                 embeddings=None,
                 metadatas=second,
@@ -937,9 +969,9 @@ class TestManifestIsAuthoritative:
         APIs must return the manifest's view, not the metadata's.
         """
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__authoritative")
+        d1 = _seed_doc(cat, "code__mtest-auth__bge-base-en-v15-768__v1")
         manifest_chash = "a" * 64
-        cat.write_manifest(d1, [_make_chunk(manifest_chash, 0)], collection="code__authoritative")
+        _write_manifest(cat, d1, [_make_chunk(manifest_chash, 0)], collection="code__mtest-auth__bge-base-en-v15-768__v1")
 
         # The manifest API reports the manifest, NOT any conflicting
         # chunk-metadata view.
@@ -966,7 +998,7 @@ class TestManifestIsAuthoritative:
         signal, not document-existence.
         """
         cat = _make_catalog(tmp_path)
-        d1 = _seed_doc(cat, "code__test")
+        d1 = _seed_doc(cat, "code__mtest__bge-base-en-v15-768__v1")
         # NO write_manifest call.
         assert cat.get_manifest(d1) == []
         # And docs_for_chashes won't find any chash mapping to this
@@ -980,15 +1012,26 @@ class TestManifestWritesRefreshIndexedAt:
     --force backfill repaired chunk_count=0 ghosts while leaving indexed_at
     frozen at the original ghost registration date."""
 
-    _FROZEN = "2026-07-09T17:42:10+00:00"
-    # nexus-mode-lint: kept as a class attribute (not a literal inline in any
-    # individual test body) so RDR-109 Phase 1's per-function `inspect.
-    # getsource` census (tests/test_mode_declarations_are_explicit.py) never
-    # sees a "voyage-context-3" token inside a test that has nothing to do
-    # with cloud-mode embedding — this collection name is a routing label
-    # for the manifest-write/indexed_at contract under test, not an assertion
-    # about which embedder ran.
-    _COLLECTION = "rdr__x__voyage-context-3__v1"
+    # nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
+    # — CatalogRepository.utcIso reads it back in the catalog's micros+offset
+    # convention (INDEXED_AT_FMT, kept per Hal directive 2026-08-15 so a client-
+    # written stamp round-trips byte-identical). This literal already carries
+    # microseconds (.000000) so it round-trips exactly; a value without them would
+    # gain the accepted ".000000" residual on read (Python's own isoformat() omits
+    # the fraction when microsecond==0, the one shape this formatter does not echo
+    # byte-for-byte — see CatalogRepository.utcIso's javadoc).
+    _FROZEN = "2026-07-09T17:42:10.000000+00:00"
+    # nexus-dbzxb (RDR-191 Phase 5 Python collateral): was
+    # "rdr__x__voyage-context-3__v1". fk_catalog_chunks_chunk now requires a
+    # REAL nexus.chunks row backing every manifest chash, so this collection
+    # is a real T3 write target, not just a routing label — and the test
+    # substrate's engine has no NX_VOYAGE_API_KEY (local-only ONNX embedder).
+    # Repointed at the locally-embeddable model so seed_manifest_chunks's
+    # upsert_chunks call actually succeeds; the RDR-109 mode-lint rationale
+    # for keeping this a class attribute no longer applies (no cloud-mode
+    # token here anymore) but the attribute stays for the same call-site
+    # brevity.
+    _COLLECTION = "rdr__x__bge-base-en-v15-768__v1"
 
     def _doc_with_frozen_ts(self, tmp_path):
         """Seed a doc and back-date its indexed_at through the PUBLIC writer.
@@ -1014,7 +1057,7 @@ class TestManifestWritesRefreshIndexedAt:
 
     def test_append_manifest_chunks_stamps_indexed_at(self, tmp_path):
         cat, doc = self._doc_with_frozen_ts(tmp_path)
-        cat.append_manifest_chunks(doc, [
+        _append_manifest(cat, doc, [
             {"position": 0, "chash": "c" * 64, "chunk_index": 0},
         ], collection=self._COLLECTION)
         after = self._indexed_at(cat, doc)
@@ -1023,14 +1066,14 @@ class TestManifestWritesRefreshIndexedAt:
 
     def test_write_manifest_stamps_indexed_at(self, tmp_path):
         cat, doc = self._doc_with_frozen_ts(tmp_path)
-        cat.write_manifest(doc, [
+        _write_manifest(cat, doc, [
             {"position": 0, "chash": "d" * 64, "chunk_index": 0},
         ], collection=self._COLLECTION)
         assert self._indexed_at(cat, doc) != self._FROZEN
 
     def test_empty_append_does_not_stamp(self, tmp_path):
         cat, doc = self._doc_with_frozen_ts(tmp_path)
-        cat.append_manifest_chunks(doc, [], collection=self._COLLECTION)
+        _append_manifest(cat, doc, [], collection=self._COLLECTION)
         assert self._indexed_at(cat, doc) == self._FROZEN
 
     def test_atomic_manifest_replace_stamps_indexed_at(self, tmp_path):
@@ -1038,20 +1081,20 @@ class TestManifestWritesRefreshIndexedAt:
         hook calls atomic_manifest_replace directly) briefly had exactly the
         empty-clear stamping bug during review — pin both directions."""
         cat, doc = self._doc_with_frozen_ts(tmp_path)
-        cat.atomic_manifest_replace(doc, [
+        _atomic_replace(cat, doc, [
             {"position": 0, "chash": "e" * 64, "chunk_index": 0},
         ], collection=self._COLLECTION)
         assert self._indexed_at(cat, doc) != self._FROZEN
 
     def test_atomic_manifest_replace_empty_clear_does_not_stamp(self, tmp_path):
         cat, doc = self._doc_with_frozen_ts(tmp_path)
-        cat.append_manifest_chunks(doc, [
+        _append_manifest(cat, doc, [
             {"position": 0, "chash": "e" * 64, "chunk_index": 0},
         ], collection=self._COLLECTION)
         from nexus.catalog.tumbler import Tumbler
 
         cat.update(Tumbler.parse(doc), indexed_at=self._FROZEN)
-        cat.atomic_manifest_replace(doc, [], collection=self._COLLECTION)
+        _atomic_replace(cat, doc, [], collection=self._COLLECTION)
         assert self._indexed_at(cat, doc) == self._FROZEN  # a clear is not an indexing event
         count = _chunk_count(cat, doc)
         assert count == 0  # ...but the projection still re-derives

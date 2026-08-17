@@ -59,11 +59,71 @@ DROP VIEW IF EXISTS nexus.diag_chash_conformance;
         <sql>
 DROP TABLE nexus.chash_index;
         </sql>
-        <!-- The pre-image (292,230 orphans + the live rows' duplicate facts)
-             is not recoverable and never needs to be: live facts are the
-             chunks tables' rows; orphans are the bug class this RDR
-             retires. Rollback is a documented no-op. -->
-        <rollback/>
+        <!--
+            nexus-lelhx (round 3, EMPIRICALLY REQUIRED): the DATA (292,230
+            orphans + the live rows' duplicate facts) is genuinely not
+            recoverable and this rollback still does not attempt to restore
+            it — that half of the original "documented no-op" reasoning
+            stands. What changed: an EMPTY no-op rollback here left
+            nexus.chash_index permanently absent for ANY rollback shallower
+            than chash-001-baseline's own CREATE (master position ~60) but
+            deep enough to reach catalog-013-chash-checks-validate.xml's
+            catalog-013-0 (position ~207, a live consumer that DELETEs FROM
+            nexus.chash_index on every forward pass) — breaking that
+            changeset's forward re-apply with "relation nexus.chash_index
+            does not exist" the moment rdr180-3/4/5's OWN rollback fix (this
+            same nexus-lelhx bead) let a forward walk get far enough past
+            catalog-006-4 to reach it. Previously masked entirely: migrate()
+            always aborted earlier, at catalog-006-4, before ever reaching
+            this changeset. So this rollback now recreates the SCHEMA SHAPE
+            (table, both indexes, RLS + policy, the octet CHECK, the
+            collection FK) exactly as it stood immediately before this
+            changeset's own forward DROP (chash already BYTEA, since rdr180-7
+            ran forward before this changeset in master order), WITHOUT
+            attempting to repopulate the unrecoverable rows. A later,
+            earlier-executed rollback (rdr180-7, master position ~274, rolls
+            back AFTER this one in the reverse sequence since 299 > 274)
+            then converts the recreated table's chash back to TEXT exactly
+            as it does for chunks_384/768/1024 and catalog_document_chunks;
+            the two rollbacks compose correctly in sequence. Same
+            reversibility precedent as rdr180-3/4/5/6/7: identical shape to
+            chash-001-1/chash-001-2 (chash-001-baseline.xml) plus
+            rdr180-11's octet CHECK plus fk-002-4's collection FK,
+            reassembled verbatim rather than re-derived, since this is
+            exactly the union of every changeset that ever touched this
+            table's SCHEMA before this DROP.
+        -->
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.chash_index (
+    tenant_id           TEXT        NOT NULL,
+    chash               BYTEA       NOT NULL,
+    physical_collection TEXT        NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL,
+    CONSTRAINT chash_index_pk PRIMARY KEY (tenant_id, chash, physical_collection)
+);
+
+CREATE INDEX idx_chash_index_chash ON nexus.chash_index (tenant_id, chash);
+CREATE INDEX idx_chash_index_collection ON nexus.chash_index (tenant_id, physical_collection);
+
+ALTER TABLE nexus.chash_index ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chash_index FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.chash_index
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+ALTER TABLE nexus.chash_index
+    ADD CONSTRAINT chash_index_chash_octet_check CHECK (octet_length(chash) = 32) NOT VALID;
+
+ALTER TABLE nexus.chash_index
+    ADD CONSTRAINT chash_index_collection_fk
+    FOREIGN KEY (tenant_id, physical_collection)
+    REFERENCES nexus.catalog_collections (tenant_id, name)
+    ON DELETE RESTRICT
+    NOT VALID;
+ALTER TABLE nexus.chash_index VALIDATE CONSTRAINT chash_index_collection_fk;
+            </sql>
+        </rollback>
     </changeSet>
 
 </databaseChangeLog>

@@ -44,11 +44,22 @@ import static org.assertj.core.api.Assertions.assertThat;
  * measured this class of defect at ~250x when a PARTIAL index's predicate was omitted from
  * the query; the schema decision that followed (three FULL indexes, never partial — F13,
  * Decision item 1) means the omitted-predicate shape is exactly the one every production
- * query already uses (none of the three sites here add an {@code embedding_<dim> IS NOT
- * NULL} predicate — see each site's own code and javadoc). This suite proves that shape
- * still binds to the FULL index post-repoint, with NO {@code enable_seqscan=off} coercion —
- * an honest natural-planner-choice proof, matching F13's own "used in EVERY case, including
- * with no predicate and no filter" methodology, not a forced structural one.
+ * query already uses. This suite proves that shape still binds to the FULL index
+ * post-repoint, with NO {@code enable_seqscan=off} coercion — an honest natural-planner-
+ * choice proof, matching F13's own "used in EVERY case, including with no predicate and no
+ * filter" methodology, not a forced structural one.
+ *
+ * <p><strong>nexus-74zvm (F13 NULL-distance residual — GUARD chosen).</strong> All three
+ * sites now DO add an {@code embedding_<dim> IS NOT NULL} predicate — a foreign-dim row
+ * (mixed-dim collection) has a NULL value there, so its distance is NULL and, under {@code
+ * NULLS LAST}, could otherwise surface via {@code LIMIT} once live matches run out. This
+ * suite's hand-built SQL below includes that predicate, mirroring production exactly, and
+ * proves it does not defeat the FULL-index bind this class exists to verify: pgvector's
+ * HNSW index structurally never contains a NULL-valued row (there is no vector to place in
+ * the graph), so the predicate is redundant at the index and free. See {@code
+ * PgVectorRepositoryDimGuardTest}'s {@code search_foreignDimRow_neverEmittedWithNullDistance}
+ * / {@code hybridSearch_foreignDimRow_neverEmittedWithNullDistance} for the behavioral
+ * (non-EXPLAIN) proof that a foreign-dim row is actually excluded.
  *
  * <p><strong>Correction (Step G cluster-B triage, nexus-o8dil.16/.48):</strong> the
  * selective-gate branch of {@code hybridSearch} does NOT fit the "still binds to the FULL
@@ -143,6 +154,24 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 "GRANT SELECT ON nexus.catalog_document_chunks, nexus.catalog_documents TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            // nexus-gjwhu (Deliverable 2): the SQL-function-family EXPLAIN proof below
+            // (searchMetadataScoped_shape_..., searchGraphHop_shape_...,
+            // searchTopicScoped_shape_...) calls the three combined-query functions
+            // directly under this same SVC_ROLE, so grant EXECUTE plus SELECT on the
+            // extra tables those functions join (catalog_links, topics,
+            // topic_assignments — not otherwise needed by the raw-SQL sites above).
+            su.createStatement().execute(
+                "GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_1024"
+                + "(vector, text[], text, text, int, text, text, jsonb, int) TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "GRANT EXECUTE ON FUNCTION nexus.search_graph_hop_768"
+                + "(vector, text[], text[], text, int, text, jsonb, int) TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_384"
+                + "(vector, text, text, int) TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "GRANT SELECT ON nexus.catalog_links, nexus.topics, nexus.topic_assignments TO "
+                + SVC_ROLE);
         }
 
         // Second role + pool, DEDICATED to the real-call companion test (found during
@@ -293,6 +322,52 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 }
                 st.execute("ANALYZE nexus.chunks");
             }
+
+            // nexus-gjwhu (Deliverable 2): fixtures for the SQL-function-family
+            // EXPLAIN proof (searchGraphHop_/searchTopicScoped_shape_... below).
+            // Reuses the CHUNKS_PER_DIM filler rows already seeded above under
+            // COL_768/COL_384 for realistic cardinality; adds only the manifest/
+            // topic scaffolding each function's JOIN shape additionally requires
+            // beyond the raw-SQL sites' liveChunksPredicate (which tolerates
+            // manifest-less chunks; these two functions INNER JOIN and so need
+            // real rows to return anything at all).
+            st.execute(
+                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
+                + "VALUES ('" + TENANT + "', 'planshape-graphhop-doc', 'planshape graph-hop seed doc', '"
+                + COL_768 + "') ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+            st.execute(
+                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+                + "SELECT tenant_id, 'planshape-graphhop-doc', row_number() OVER (ORDER BY chash), chash, collection "
+                + "FROM nexus.chunks WHERE tenant_id = '" + TENANT + "' AND collection = '" + COL_768 + "'");
+
+            st.execute(
+                "INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) "
+                + "VALUES (900001, '" + TENANT + "', 'planshape-topic', '" + COL_384
+                + "', 0, NOW(), 'pending') ON CONFLICT (id) DO NOTHING");
+            // Deliberately SELECTIVE (~10% of the 384-dim filler, via a
+            // deterministic byte-modulo sample), NOT the full collection: with
+            // every chunk tagged, the join is non-selective and the planner
+            // correctly prefers a bulk scan+sort over per-row HNSW probes (found
+            // during Step G / this bead's own triage — an earlier all-rows-tagged
+            // revision of this fixture made the planner choose a Seq Scan on
+            // topic_assignments + Bitmap Heap Scan on chunks_pk instead of the
+            // HNSW index, since nothing narrows the candidate set and HNSW's
+            // early-stop advantage never pays off). A genuinely selective tag
+            // (most candidates do NOT qualify) is what makes the filtered-ANN
+            // early-stop strategy (hnsw.iterative_scan=relaxed_order, set by
+            // explain() below) actually cheaper than a full scan+sort.
+            // RDR-194 P3c: topic_assignments.doc_id is bytea now — select chash
+            // directly, no encode('hex').
+            st.execute(
+                "INSERT INTO nexus.topic_assignments "
+                + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
+                + "SELECT tenant_id, chash, 900001, 'planshape-seed', collection, NOW() "
+                + "FROM nexus.chunks WHERE tenant_id = '" + TENANT + "' AND collection = '" + COL_384 + "' "
+                + "AND get_byte(chash, 0) < 26");
+
+            st.execute("ANALYZE nexus.catalog_document_chunks");
+            st.execute("ANALYZE nexus.catalog_documents");
+            st.execute("ANALYZE nexus.topic_assignments");
         }
     }
 
@@ -355,8 +430,10 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
 
     // ════════════════════════════════════════════════════════════════════════
     // Site 1: PgVectorRepository#searchWithTokens (embedding_<dim> <=> ?::vector,
-    // FROM nexus.chunks c, WHERE c.collection IN (...) AND liveChunksPredicate) —
-    // no embedding_<dim> IS NOT NULL predicate, matching production exactly.
+    // FROM nexus.chunks c, WHERE c.collection IN (...) AND liveChunksPredicate AND
+    // embedding_<dim> IS NOT NULL) — nexus-74zvm guarded shape, matching production
+    // exactly (see the class-level comment above for why the guard does not defeat
+    // the FULL-index bind this suite proves).
     // ════════════════════════════════════════════════════════════════════════
 
     @Test
@@ -368,12 +445,15 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             + " FROM nexus.chunks c"
             + " WHERE c.collection IN ('" + COL_1024 + "')"
             + " AND " + liveChunksPredicate("c")
+            // nexus-74zvm: guarded shape, mirroring production exactly.
+            + " AND embedding_1024 IS NOT NULL"
             + " ORDER BY distance ASC, chash ASC LIMIT 10";
         String plan = explain(sql);
         assertThat(plan)
             .as("searchWithTokens' distance projection (1024-dim) must bind to the FULL"
-                + " idx_chunks_embedding_1024 HNSW index with NO IS NOT NULL predicate added."
-                + " Plan was:%n%s", plan)
+                + " idx_chunks_embedding_1024 HNSW index with the nexus-74zvm"
+                + " embedding_1024 IS NOT NULL guard added — the guard must not defeat"
+                + " the index bind. Plan was:%n%s", plan)
             .contains("idx_chunks_embedding_1024");
         assertThat(plan)
             .as("must not degrade to a sequential scan of the unified (mixed-dim) table's"
@@ -396,11 +476,14 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             + " FROM nexus.chunks c"
             + " WHERE c.collection IN ('" + COL_768 + "')"
             + " AND " + liveChunksPredicate("c")
+            // nexus-74zvm: guarded shape, mirroring production exactly.
+            + " AND embedding_768 IS NOT NULL"
             + " ORDER BY distance ASC, chash ASC LIMIT 10";
         String plan = explain(sql);
         assertThat(plan)
             .as("searchWithTokens' distance projection (768-dim) must bind to the FULL"
-                + " idx_chunks_embedding_768 HNSW index. Plan was:%n%s", plan)
+                + " idx_chunks_embedding_768 HNSW index with the nexus-74zvm guard added."
+                + " Plan was:%n%s", plan)
             .contains("idx_chunks_embedding_768");
         assertThat(plan)
             .as("no Seq Scan of the chunks table itself (see the 1024-dim test's assertion"
@@ -418,11 +501,14 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             + " FROM nexus.chunks c"
             + " WHERE c.collection IN ('" + COL_384 + "')"
             + " AND " + liveChunksPredicate("c")
+            // nexus-74zvm: guarded shape, mirroring production exactly.
+            + " AND embedding_384 IS NOT NULL"
             + " ORDER BY distance ASC, chash ASC LIMIT 10";
         String plan = explain(sql);
         assertThat(plan)
             .as("searchWithTokens' distance projection (384-dim) must bind to the FULL"
-                + " idx_chunks_embedding_384 HNSW index. Plan was:%n%s", plan)
+                + " idx_chunks_embedding_384 HNSW index with the nexus-74zvm guard added."
+                + " Plan was:%n%s", plan)
             .contains("idx_chunks_embedding_384");
         assertThat(plan)
             .as("no Seq Scan of the chunks table itself (see the 1024-dim test's assertion"
@@ -483,6 +569,10 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             + " WHERE collection IN ('" + COL_768 + "')"
             + " AND " + liveChunksPredicate("c")
             + " AND chash IN (decode('" + chash + "', 'hex'))"
+            // nexus-74zvm: guarded shape, mirroring production exactly. Pure correctness
+            // here (a foreign-dim row matching the text gate) — no plan-shape risk, since
+            // this branch never binds HNSW regardless (see class-level comment above).
+            + " AND embedding_768 IS NOT NULL"
             + " ORDER BY distance ASC, chash ASC LIMIT 10";
         String plan = explain(sql);
         assertThat(plan)
@@ -516,13 +606,122 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             + " WHERE collection IN ('" + COL_384 + "')"
             + " AND " + liveChunksPredicate("c")
             + " AND (chunk_tsv @@ plainto_tsquery('english', 'planshape') OR 'planshape' <% chunk_text)"
+            // nexus-74zvm: guarded shape, mirroring production exactly — the load-bearing
+            // proof for this suite's HNSW-bind claim (this is the dense-gate, HNSW-first
+            // branch; unlike Site 2 above, an index-defeat here WOULD be a regression).
+            + " AND embedding_384 IS NOT NULL"
             + " ORDER BY distance ASC, chash ASC LIMIT 10";
         String plan = explain(sql);
         assertThat(plan)
             .as("hybridSearch's dense-gate HNSW-first rank (384-dim) must bind to the FULL"
-                + " idx_chunks_embedding_384 HNSW index for its distance ORDER BY, with NO"
-                + " embedding_384 IS NOT NULL predicate added. Plan was:%n%s", plan)
+                + " idx_chunks_embedding_384 HNSW index for its distance ORDER BY, WITH the"
+                + " nexus-74zvm embedding_384 IS NOT NULL guard added — the guard must not"
+                + " defeat the index bind. Plan was:%n%s", plan)
             .contains("idx_chunks_embedding_384");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // nexus-gjwhu (Deliverable 2, RDR-191 Phase 5): NULL-distance guard
+    // EXPLAIN proof for the SQL-function family (vectors-006-null-distance-
+    // guards.xml). Mirrors this class's own Site-1/3 methodology: proves the
+    // newly-added `embedding_<dim> IS NOT NULL` predicate does not defeat the
+    // FULL idx_chunks_embedding_<dim> HNSW bind these inlinable LANGUAGE sql
+    // functions rely on (catalog-006's own header: "query vector as a plan-
+    // time argument (Finding 5a) so the HNSW index survives the join").
+    // One representative function per family, per this bead's acceptance
+    // criterion — not all nine; the guard clause and its placement are
+    // identical across each family's three dims (vectors-006's own file
+    // header), so one EXPLAIN per family is the non-redundant proof.
+    // ════════════════════════════════════════════════════════════════════════
+
+    @Test
+    void searchMetadataScoped_shape_usesFullHnswIndex_1024() throws Exception {
+        String vec = "[1" + ",0".repeat(1023) + "]";
+        String sql =
+            "SELECT * FROM nexus.search_metadata_scoped_1024("
+            + "'" + vec + "'::vector, ARRAY['" + COL_1024 + "']::text[], "
+            + "NULL, NULL, NULL, NULL, NULL, NULL, 10)";
+        String plan = explain(sql);
+        assertThat(plan)
+            .as("search_metadata_scoped_1024's embedding_1024 IS NOT NULL guard "
+                + "(vectors-006-1) must not defeat the FULL idx_chunks_embedding_1024 "
+                + "HNSW bind this inlinable LANGUAGE sql function relies on. Plan was:%n%s",
+                plan)
+            .contains("idx_chunks_embedding_1024");
+        assertThat(plan)
+            .as("must not degrade to a sequential scan of nexus.chunks. Plan was:%n%s", plan)
+            .doesNotContain("Seq Scan on chunks");
+    }
+
+    @Test
+    void searchGraphHop_shape_usesFullHnswIndex_768() throws Exception {
+        String vec = "[1" + ",0".repeat(767) + "]";
+        String sql =
+            "SELECT * FROM nexus.search_graph_hop_768("
+            + "'" + vec + "'::vector, ARRAY['planshape-graphhop-doc']::text[], "
+            + "ARRAY['" + COL_768 + "']::text[], NULL, 1, 'both', NULL, 10)";
+        String plan = explain(sql);
+        assertThat(plan)
+            .as("search_graph_hop_768's embedding_768 IS NOT NULL guard (vectors-006-2) "
+                + "must not defeat the FULL idx_chunks_embedding_768 HNSW bind for the "
+                + "outer SELECT's distance ORDER BY. Plan was:%n%s", plan)
+            .contains("idx_chunks_embedding_768");
+        assertThat(plan)
+            .as("must not degrade to a sequential scan of nexus.chunks. Plan was:%n%s", plan)
+            .doesNotContain("Seq Scan on chunks");
+    }
+
+    /**
+     * STALE-PROSE CORRECTION (RDR-194 P3c, nexus-tk070.p3c, 2026-08): this javadoc
+     * originally documented {@code search_topic_scoped}'s join to {@code
+     * topic_assignments} as {@code ta.doc_id = encode(c.chash, 'hex')} -- a function
+     * applied to the indexed side, non-sargable by construction, with the plan-driver
+     * analysis below derived from that shape. {@code taxonomy-011-doc-id-bytea.xml}
+     * (P3c) converted {@code topic_assignments.doc_id} to {@code bytea} and the join
+     * is now direct equality, {@code ta.doc_id = c.chash} -- no {@code encode}/{@code
+     * decode} on either side. RE-VERIFIED empirically (2026-08-16): the join IS now
+     * sargable -- {@code EXPLAIN} shows an {@code Index Scan using
+     * idx_chunks_tenant_chash on chunks c ... Index Cond: (chash = ta.doc_id)},
+     * replacing the old bitmap-scan-by-(tenant_id,collection)-then-residual-filter
+     * shape this paragraph originally described. Still NOT HNSW-bound (the index used
+     * is the chash btree, not the vector index -- ORDER BY still needs a Sort node
+     * over the small joined result), so the "does not bind HNSW by design" framing
+     * survives, but the "can NEVER drive an indexed... probe" claim did not: it now
+     * does, just not the vector index. The assertions below were updated accordingly
+     * (accept either {@code chunks_pk} or {@code idx_chunks_tenant_chash} for the
+     * tenant-scoping check, since the planner's chosen index changed).
+     */
+    @Test
+    void searchTopicScoped_shape_projectsCorrectDimColumn_andStaysCollectionScoped_384() throws Exception {
+        String vec = "[1" + ",0".repeat(383) + "]";
+        String sql =
+            "SELECT * FROM nexus.search_topic_scoped_384("
+            + "'" + vec + "'::vector, 'planshape-topic', '" + COL_384 + "', 10)";
+        String plan = explain(sql);
+        assertThat(plan)
+            .as("search_topic_scoped_384's distance projection must still read the CORRECT "
+                + "dim column (embedding_384) after vectors-006-3's guard was added. Plan was:%n%s",
+                plan)
+            .contains("embedding_384 <=>");
+        // RDR-194 P3c (nexus-tk070.p3c): the join to topic_assignments changed from
+        // `ta.doc_id = encode(c.chash, 'hex')` to direct bytea equality
+        // `ta.doc_id = c.chash`, which turned out to BE sargable after all (the
+        // stale javadoc paragraph above already flags this as unverified/re-derive-
+        // if-it-matters) -- the planner now drives an Index Scan on
+        // idx_chunks_tenant_chash keyed off ta.doc_id, not chunks_pk. The scoping
+        // property this assertion actually cares about (tenant_id, collection) is
+        // still enforced via that index's own Index Cond, so this checks for either
+        // scoped index rather than pinning to the specific one the planner happens
+        // to choose.
+        assertThat(plan)
+            .as("search_topic_scoped_384's embedding_384 IS NOT NULL guard (vectors-006-3) must "
+                + "not degrade the scan into an UNSCOPED sequential scan of nexus.chunks -- it must "
+                + "still be scoped by tenant_id (chunks_pk or idx_chunks_tenant_chash). Plan was:%n%s", plan)
+            .containsAnyOf("chunks_pk", "idx_chunks_tenant_chash");
+        assertThat(plan)
+            .as("must not degrade to a full sequential scan of nexus.chunks ignoring "
+                + "tenant/collection scoping. Plan was:%n%s", plan)
+            .doesNotContain("Seq Scan on chunks");
     }
 
     @Test

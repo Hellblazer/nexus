@@ -105,7 +105,7 @@ mcp__plugin_conexus_nexus__scratch(
 )
 
 # 3. Now store_put — auto-linker fires automatically
-mcp__plugin_conexus_nexus__store_put(content="...", collection="knowledge", title="...")
+mcp__plugin_conexus_nexus__store_put(content="...", collection="knowledge", title="...", agent="<your-role>")
 # → auto-linker reads link-context and creates: new_doc → 1.1.440 (relates)
 ```
 

@@ -214,8 +214,12 @@ public final class TaxonomyCentroidRepository {
      * <p>SINGLE-DIM INVARIANT (RDR-156 t1hnc Phase-1 review S2): this returns the FIRST
      * non-empty table in ascending dim order. If a tenant ever has centroids in two
      * dimensions at once — only reachable mid-migration during a model switch
-     * (e.g. MiniLM-384 -> Voyage-1024) — this reports the smaller dim and {@link #count}
-     * over-counts. The invariant the post-RDR-155 mode-switch migration MUST hold:
+     * (e.g. MiniLM-384 -> Voyage-1024) — this reports the smaller dim as the tenant's
+     * active space, which is wrong for that transient window. {@link #count} is NOT
+     * affected (nexus-evqoc, RDR-191 Phase 4 correction of this paragraph's stale claim):
+     * post-unification it runs one dim-agnostic query against the shared table and no
+     * longer sums per dim, so a two-dim overlap cannot make it over-count. The invariant
+     * the post-RDR-155 mode-switch migration MUST hold:
      * {@link #purgeByCollection} the old-dimension centroids BEFORE
      * {@link #upsertCentroids} at the new dimension. A doctor-level
      * "at most one centroid dim per tenant" check is tracked as a follow-on, not built

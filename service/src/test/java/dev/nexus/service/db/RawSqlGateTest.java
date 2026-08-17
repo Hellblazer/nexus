@@ -208,63 +208,33 @@ class RawSqlGateTest {
             // and verify-then-stamp path calls this one method.
             "acquireIndexRunLock", Map.of(
                 ".execute(\"SELECT pg_advisory_xact_lock(hashtext('indexrun:' || ? || ':' || ?))\", "
-                + "tenant, docId)", 1))),
+                + "tenant, docId)", 1),
+            // SANCTIONED RAW (RDR-191 Phase 5, nexus-o8dil.29): SET CONSTRAINTS is
+            // PostgreSQL transaction-control syntax with no jOOQ typed-DSL form —
+            // same category as SchemaMigrator's NO FORCE/FORCE ROW LEVEL SECURITY
+            // entry below. Deferred-constraint fix for deleteCollectionTxn's
+            // chunk-before-manifest ordering under fk_catalog_chunks_chunk (class-B
+            // site 2 — see the method's own javadoc for the full derivation).
+            "deferManifestChunkFk", Map.of(
+                ".execute(\"SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED\")", 1))),
         Map.entry("PoolerModeCheck.java", Map.of(
             // `SHOW CONFIG` is a PgBouncer admin-console meta-command, not SQL against any
             // table/schema — no jOOQ DSL form exists (no bind params, no fixed column set).
             "fetchShowConfig", Map.of(
                 ".fetch(\"SHOW CONFIG\")", 1))),
-        // RekeyOps.java: REMOVED (nexus-4okz4 increment 5) — rekey() itself
-        // never calls ctx.execute/fetch with a raw literal or "sql"-prefixed
-        // variable; its two raw-SQL-touching delegates (ChashSqlIdioms.
-        // refreshAliasStats' ANALYZE + privilege probe, ChashSqlIdioms.
-        // contentCollapseDelete's ctid/array_agg keeper DELETE) are METHOD
-        // CALLS into ChashSqlIdioms — their OWN single true home, already
-        // separately registered below — not literal statements inside
-        // rekey() itself. Under the OLD method-granular gate this entry
-        // sanctioned a region containing ZERO matchable statements (verified
-        // empirically: the RAW_EXECUTE pattern finds nothing anywhere in
-        // RekeyOps.java at this commit); under the new statement-granular
-        // gate a zero-statement registration is structurally identical to no
-        // registration at all, so per the same dead-entry-avoidance
-        // discipline that removed StagingHandler.java/ChashCensus.java/
-        // StagingPromoteOps.java's entries in increments 3-4, this one is
-        // removed too rather than kept as a no-op. The bead's own increment-
-        // 2 comment anticipated exactly this ("the method-level sanction
-        // remains because RawSqlGateTest is method-granular ... that
-        // tightening is a later increment") — this IS that later increment.
-        Map.entry("ChashSqlIdioms.java", Map.of(
-            // SANCTIONED RAW (rdr180-17): refreshAliasStats EXECUTES twice —
-            // a privilege-probe fetchOne (system catalogs: pg_class,
-            // has_table_privilege — outside codegen) and the ANALYZE itself
-            // (maintenance DDL, no jOOQ DSL form at all). Must run inside
-            // the caller's transaction so the planner sees that
-            // transaction's own uncommitted alias rows (F2: 101min vs 461s
-            // — see the method's own javadoc). Never serving-path.
-            "refreshAliasStats", Map.of(
-                ".fetchOne( \"SELECT current_setting('server_version_num')::int >= 170000 \" "
-                + "+ \" AND (pg_catalog.has_table_privilege('nexus.chash_alias', \" "
-                + "+ \" CASE WHEN current_setting('server_version_num')::int >= 170000 \" "
-                + "+ \" THEN 'MAINTAIN' ELSE 'SELECT' END) \" "
-                + "+ \" OR pg_catalog.pg_get_userbyid(\" "
-                + "+ \" (SELECT relowner FROM pg_class \" "
-                + "+ \" WHERE oid = 'nexus.chash_alias'::regclass)) = current_user)\" )", 1,
-                ".execute(\"ANALYZE nexus.chash_alias\")", 1),
-            // contentCollapseDelete: the ctid/array_agg ORDER BY
-            // keeper-selection idiom (an array-subscript of an ordered
-            // array_agg) has no jOOQ DSL form — genuinely raw SQL TEXT, but
-            // this method only BUILDS and RETURNS that string (a plain
-            // string-concatenation return statement); it never itself calls
-            // execute()/fetch(). The actual execution happens at RekeyOps'
-            // one call site (`ctx.execute(ChashSqlIdioms.
-            // contentCollapseDelete(d.name()))`), whose argument is a
-            // METHOD CALL, not a literal/"sql"-prefixed variable — outside
-            // this regex's detection shape at BOTH ends (definer and
-            // caller), the same structural blind spot as ChashRepository.
-            // lookup's PROBE_SQL above. EMPTY statement multiset for the
-            // same reason: registered so a future literal execute()/fetch()
-            // accidentally added to this method is caught immediately.
-            "contentCollapseDelete", Map.of())),
+        // RekeyOps.java + ChashSqlIdioms.java's refreshAliasStats/
+        // contentCollapseDelete entries: REMOVED at nexus-lgdel.l1. RekeyOps
+        // is deleted outright (its only caller, the client chash_rekey
+        // upgrade rung, is deleted in the same commit family). refreshAliasStats
+        // and contentCollapseDelete are deleted from ChashSqlIdioms.java —
+        // both existed solely to serve RekeyOps.rekey() and
+        // StagingPromoteOps.promoteCollection's now-deleted alias-stats
+        // refresh call; nothing in the surviving codebase calls either.
+        // Per the dead-entry-avoidance discipline already established here
+        // (increments 3-4 removed StagingHandler.java/ChashCensus.java/
+        // StagingPromoteOps.java's entries the same way), a registration
+        // for a deleted method is removed outright rather than kept as a
+        // no-op.
         Map.entry("SchemaMigrator.java", Map.of(
             // nexus-c4143 root fix: pg_constraint is a Postgres SYSTEM CATALOG (jOOQ
             // codegen only covers the nexus/t1 application schemas, no generated table
@@ -1149,144 +1119,146 @@ class RawSqlGateTest {
         "PgVectorRepository.java", Map.of(
             "searchWithTokens", java.util.Set.of(
                 "{ return searchWithTokens(tenant, queryText, collectionNames, nResults, where, false); }",
-                "{ if (collectionNames == null || collectionNames.isEmpty()) { return new Tokened<>(List.of"
-                + "(), 0L); } int dim = dimForCollection(collectionNames.get(0)); for (String col : collectio"
-                + "nNames) { int colDim = dimForCollection(col); if (colDim != dim) { throw new IllegalArgume"
-                + "ntException( \"mixed dimensions in one search call: '\" + collectionNames.get(0) + \"' is \" +"
-                + " dim + \"-dim but '\" + col + \"' is \" + colDim + \"-dim - one query vector cannot serve both "
-                + "spaces\"); } } // Route by the first collection - the same-dim check above guarantees the s"
-                + "et is // homogeneous, and the Python client never mixes embedder families in one call // ("
-                + "same convention as the Chroma path). EmbedResult embedResult = embedQuery(collectionNames."
-                + "get(0), queryText, dim); float[] queryVec = embedResult.embeddings().get(0); StringBuilder"
-                + " sql = new StringBuilder() // RDR-180: bytea storage — hex at the SQL seam (raw-SQL twin o"
-                + "f // the ChashHex converted type the jOOQ paths use). .append(\"SELECT encode(chash, 'hex')"
-                + " AS chash, chunk_text, collection, metadata::text AS metadata_json,\") .append(\" (\").append"
-                + "(DimTables.embeddingColumn(dim)).append(\" <=> ?::vector) AS distance\") .append(\" FROM \").a"
-                + "ppend(chunksTable(dim)).append(\" c\") .append(\" WHERE c.collection IN (\").append(placeholde"
-                + "rs(collectionNames.size())).append(\")\") // RDR-156 Decision 6 (nexus-3ck2g): live_chunks p"
-                + "redicate, inlined so the // HNSW index scan on c stays engaged (see liveChunksPredicate's "
-                + "javadoc). .append(\" AND \").append(liveChunksPredicate(\"c\")); List<Object> binds = new Arra"
-                + "yList<>(); binds.add(vectorLiteral(queryVec)); binds.addAll(collectionNames); if (where !="
-                + " null) { for (Map.Entry<String, Object> e : where.entrySet()) { appendWherePredicate(sql, "
-                + "binds, e.getKey(), e.getValue()); } } sql.append(\" ORDER BY distance ASC, chash ASC LIMIT "
-                + "?\"); binds.add(nResults); Result<Record> result = tenantScope.withTenant(tenant, ctx -> { "
-                + "// Filtered-ANN recall: keep HNSW scanning past ef_search when the RLS + // collection + m"
-                + "etadata predicates narrow the candidate set. SET LOCAL is // txn-scoped (same pool discipl"
-                + "ine as the TenantScope GUC stamp). PgSession.setLocal(ctx, \"hnsw.iterative_scan\", \"relaxed"
-                + "_order\"); return rawVectorFetch(ctx, sql.toString(), binds.toArray()); }); List<Map<String"
-                + ", Object>> rows = new ArrayList<>(result.size()); for (Record rec : result) { Map<String, "
-                + "Object> row = new LinkedHashMap<>(); row.put(\"id\", rec.get(\"chash\", String.class)); row.pu"
-                + "t(\"content\", rec.get(\"chunk_text\", String.class)); row.put(\"distance\", rec.get(\"distance\","
-                + " Double.class)); row.put(\"collection\", rec.get(\"collection\", String.class)); row.putAll(fr"
-                + "omJson(rec.get(\"metadata_json\", String.class))); rows.add(row); } // RDR-169 G5: surface a"
-                + "ddress triple additively (chash + span always; source_uri opt-in) enrichSearchRows(tenant,"
-                + " rows, includeSourceUri); return new Tokened<>(rows, embedResult.tokens()); }"),
+                "{ if (collectionNames == null || collectionNames.isEmpty()) { return new Tokened<>(List.of(), 0"
+                + "L); } int dim = dimForCollection(collectionNames.get(0)); for (String col : collectionNames) { "
+                + "int colDim = dimForCollection(col); if (colDim != dim) { throw new IllegalArgumentException( \""
+                + "mixed dimensions in one search call: '\" + collectionNames.get(0) + \"' is \" + dim + \"-dim bu"
+                + "t '\" + col + \"' is \" + colDim + \"-dim - one query vector cannot serve both spaces\"); } } /"
+                + "/ Route by the first collection - the same-dim check above guarantees the set is // homogeneous"
+                + ", and the Python client never mixes embedder families in one call // (same convention as the Ch"
+                + "roma path). EmbedResult embedResult = embedQuery(collectionNames.get(0), queryText, dim); float"
+                + "[] queryVec = embedResult.embeddings().get(0); StringBuilder sql = new StringBuilder() // RDR-1"
+                + "80: bytea storage — hex at the SQL seam (raw-SQL twin of // the ChashHex converted type the jOO"
+                + "Q paths use). .append(\"SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata:"
+                + ":text AS metadata_json,\") .append(\" (\").append(DimTables.embeddingColumn(dim)).append(\" <=>"
+                + " ?::vector) AS distance\") .append(\" FROM \").append(chunksTable(dim)).append(\" c\") .append("
+                + "\" WHERE c.collection IN (\").append(placeholders(collectionNames.size())).append(\")\") // RDR"
+                + "-156 Decision 6 (nexus-3ck2g): live_chunks predicate, inlined so the // HNSW index scan on c st"
+                + "ays engaged (see liveChunksPredicate's javadoc). .append(\" AND \").append(liveChunksPredicate("
+                + "\"c\")) // nexus-74zvm DECISION (see method javadoc): exclude foreign-dim rows so a // NULL emb"
+                + "edding_<dim> never produces a NULL-distance result under LIMIT. .append(\" AND \").append(DimTa"
+                + "bles.embeddingColumn(dim)).append(\" IS NOT NULL\"); List<Object> binds = new ArrayList<>(); bi"
+                + "nds.add(vectorLiteral(queryVec)); binds.addAll(collectionNames); if (where != null) { for (Map."
+                + "Entry<String, Object> e : where.entrySet()) { appendWherePredicate(sql, binds, e.getKey(), e.ge"
+                + "tValue()); } } sql.append(\" ORDER BY distance ASC, chash ASC LIMIT ?\"); binds.add(nResults); "
+                + "Result<Record> result = tenantScope.withTenant(tenant, ctx -> { // Filtered-ANN recall: keep HN"
+                + "SW scanning past ef_search when the RLS + // collection + metadata predicates narrow the candid"
+                + "ate set. SET LOCAL is // txn-scoped (same pool discipline as the TenantScope GUC stamp). PgSess"
+                + "ion.setLocal(ctx, \"hnsw.iterative_scan\", \"relaxed_order\"); return rawVectorFetch(ctx, sql.t"
+                + "oString(), binds.toArray()); }); List<Map<String, Object>> rows = new ArrayList<>(result.size()"
+                + "); for (Record rec : result) { Map<String, Object> row = new LinkedHashMap<>(); row.put(\"id\","
+                + " rec.get(\"chash\", String.class)); row.put(\"content\", rec.get(\"chunk_text\", String.class))"
+                + "; row.put(\"distance\", rec.get(\"distance\", Double.class)); row.put(\"collection\", rec.get("
+                + "\"collection\", String.class)); row.putAll(fromJson(rec.get(\"metadata_json\", String.class)));"
+                + " rows.add(row); } // RDR-169 G5: surface address triple additively (chash + span always; source"
+                + "_uri opt-in) enrichSearchRows(tenant, rows, includeSourceUri); return new Tokened<>(rows, embed"
+                + "Result.tokens()); }"),
             "hybridSearch", java.util.Set.of(
                 "{ return hybridSearchWithTokens(tenant, queryText, collectionNames, nResults, where, false).value();"
                 + " }",
                 "{ return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null); "
                 + "}",
-                "{ if (collectionNames == null || collectionNames.isEmpty()) { return List.of(); } // query"
-                + "Text is bound twice below as a raw text parameter (plainto_tsquery + // trgm <%); a NUL-be"
-                + "aring query would hit the same UTF8-0x00 rejection the // upsert path sanitizes (nexus-rvf"
-                + "wj sibling hole, dual-review H1). queryText = stripNul(queryText); if (nResults < 1) { // "
-                + "LIMIT -1 is \"no limit\" in Postgres - a non-positive value would silently // unbound the qu"
-                + "ery instead of capping it. throw new IllegalArgumentException(\"nResults must be >= 1, got "
-                + "\" + nResults); } if (selectiveGateMax < 1) { // A non-positive threshold routes EVERY gate"
-                + " to the HNSW-first branch // (matchCount >= 0 is always > a non-positive cutoff), silently"
-                + " re-enabling // the lcogi selective-gate collapse. Reject rather than mis-dispatch. throw "
-                + "new IllegalArgumentException( \"selectiveGateMax must be >= 1, got \" + selectiveGateMax); }"
-                + " int dim = dimForCollection(collectionNames.get(0)); for (String col : collectionNames) { "
-                + "int colDim = dimForCollection(col); if (colDim != dim) { throw new IllegalArgumentExceptio"
-                + "n( \"mixed dimensions in one hybrid-search call: '\" + collectionNames.get(0) + \"' is \" + di"
-                + "m + \"-dim but '\" + col + \"' is \" + colDim + \"-dim - one query vector cannot serve both spa"
-                + "ces\"); } } EmbedResult hybridEmbed = embedQuery(collectionNames.get(0), queryText, dim); i"
-                + "f (tokensOut != null) tokensOut[0] = hybridEmbed.tokens(); float[] queryVec = hybridEmbed."
-                + "embeddings().get(0); // Non-text scope (collection IN + metadata where). Shared by the sel"
-                + "ective // rank-by-chash query (nexus-x7z7l): that query re-applies these cheap predicates "
-                + "// but NOT the text gate - the gate's matching chashes already satisfy it, so the // expen"
-                + "sive <% trigram heap-recheck runs ONCE (in the bounded fetch below), not // again at rank "
-                + "time. (The metadata->>? predicate is kept on the rank query, not // dropped: two same-text"
-                + " rows in different collections share a chash, so chash // alone would not re-impose a per-"
-                + "row metadata filter.) StringBuilder scope = new StringBuilder() .append(\" WHERE collection"
-                + " IN (\").append(placeholders(collectionNames.size())).append(\")\"); List<Object> scopeBinds "
-                + "= new ArrayList<>(collectionNames); // RDR-156 Decision 6 (nexus-3ck2g): live_chunks predi"
-                + "cate folded into `scope` // BEFORE `gate` is derived from it below, so every downstream qu"
-                + "ery built off // either scope or gate — the bounded gate-selectivity probe, the selective "
-                + "// chash-ranked rank, and the HNSW-first fallback, all three read sites — inherits // it b"
-                + "y construction; a single fix point instead of three. Inlined (never a JOIN // to nexus.liv"
-                + "e_chunks) so the HNSW/GIN scans on `c` (the alias assigned to // `table` below) stay engag"
-                + "ed — see liveChunksPredicate's javadoc. scope.append(\" AND \").append(liveChunksPredicate(\""
-                + "c\")); // Full gate = scope AND a text signal. FTS lexeme match OR word-trigram similarity:"
-                + " // the <% operator form (word_similarity >= pg_trgm.word_similarity_threshold) is // gin_"
-                + "trgm_ops-indexable (vectors-002) where the function-call form is not; // word_similarity ("
-                + "vs plain similarity) does not dilute with chunk_text length. // The threshold GUC is pinne"
-                + "d per-transaction below. StringBuilder gate = new StringBuilder(scope) .append(\" AND (chun"
-                + "k_tsv @@ plainto_tsquery('english', ?) OR ? <% chunk_text)\"); List<Object> gateBinds = new"
-                + " ArrayList<>(scopeBinds); gateBinds.add(queryText); gateBinds.add(queryText); if (where !="
-                + " null) { for (Map.Entry<String, Object> e : where.entrySet()) { appendWherePredicate(gate,"
-                + " gateBinds, e.getKey(), e.getValue()); appendWherePredicate(scope, scopeBinds, e.getKey(),"
-                + " e.getValue()); } } final String table = chunksTable(dim) + \" c\"; final String gateSql = g"
-                + "ate.toString(); final String scopeSql = scope.toString(); final String vecLit = vectorLite"
-                + "ral(queryVec); // SELECTIVITY-AWARE DISPATCH (nexus-lcogi; single-gate-eval, nexus-x7z7l)."
-                + " ONE // bounded fetch of the gate's chashes (LIMIT SELECTIVE_GATE_MAX+1) both picks the //"
-                + " plan AND, for the selective case, IS the gate evaluation - the ranked query then // filte"
-                + "rs by chash (PK lookup), so the expensive <% trigram heap-recheck runs once, // not twice."
-                + " The prior design ran a standalone COUNT(*) probe AND re-ran the gate in // the ranked que"
-                + "ry: on a large code corpus that was two ~650ms <% heap-rechecks per // call (conexus-qsa E"
-                + "XPLAIN: count probe 700ms + materialized-CTE rank 654ms, both // dominated by the lossy gi"
-                + "n_trgm_ops recheck over ~1900 candidate rows). // // * SELECTIVE gate (matches <= SELECTIV"
-                + "E_GATE_MAX): the bounded fetch returns the // COMPLETE gate (all matches, since it did not"
-                + " hit the LIMIT). Rank those exact // chashes by cosine distance via a chash IN (...) filte"
-                + "r + the cheap non-text // scope (collection/metadata). No HNSW, no re-gate: ranks the smal"
-                + "l gated set // exactly, with NO dependence on hnsw.max_scan_tuples (the lcogi collapse fix"
-                + " is // preserved - the prior HNSW-first single-query plan starved selective gates). // // "
-                + "* NON-SELECTIVE gate (matches > SELECTIVE_GATE_MAX): the bounded fetch hit the // LIMIT (r"
-                + "eturned SELECTIVE_GATE_MAX+1 chashes) and is discarded - keep the // HNSW-first plan (gate"
-                + " as scan filter, iterative_scan). A dense gate is usually // found within the scan budget;"
-                + " materializing a huge gated set (~4 KB/row // embeddings) would spill work_mem. The bounde"
-                + "d fetch caps this probe's cost // (the prior unbounded COUNT scanned the full dense gate)."
-                + " Same SEMI-selective // caveat as before applies; P5.2's RRF fusion closes that window. //"
-                + " // matches == 0 -> empty gate -> selective branch returns an empty result (no silent // v"
-                + "ector fallback), handled explicitly (chash IN () is not valid SQL). List<Object> probeBind"
-                + "s = new ArrayList<>(gateBinds); probeBinds.add(selectiveGateMax + 1); Result<Record> resul"
-                + "t = tenantScope.withTenant(tenant, ctx -> { // Trigram gate calibration (contract anchor):"
-                + " word_similarity >= 0.6, pg_trgm's // default - typo-probe candidates sit at ~0.9 and pass"
-                + ", no-signal rows at ~0.1 // do not. Pinned per-transaction so the gate is independent of c"
-                + "luster config. PgSession.setLocal(ctx, \"pg_trgm.word_similarity_threshold\", \"0.6\"); List<S"
-                + "tring> gateChashes = rawVectorFetch( ctx, \"SELECT encode(chash, 'hex') AS chash FROM \" + t"
-                + "able + gateSql + \" LIMIT ?\", probeBinds.toArray()) .map(r -> r.get(\"chash\", String.class))"
-                + "; if (gateChashes.size() <= selectiveGateMax) { // Selective: the bounded fetch returned t"
-                + "he COMPLETE gate (the LIMIT did NOT // fire - fewer than selectiveGateMax+1 matches exist,"
-                + " so it scanned the full // GIN candidate set, same work the old COUNT(*) did). The win is "
-                + "not a // cheaper probe: this single gate scan REPLACES both the old COUNT(*) probe // AND "
-                + "the MATERIALIZED-CTE gate re-evaluation - the rank below filters by // chash with NO text "
-                + "gate, so the <% heap-recheck happens once, not twice. if (gateChashes.isEmpty()) { // Empt"
-                + "y gate: typed-empty result (chash IN () is invalid SQL). return rawVectorFetch(ctx, \"SELEC"
-                + "T NULL::text AS chash, NULL::text AS chunk_text,\" + \" NULL::text AS collection, NULL::text"
-                + " AS metadata_json,\" + \" NULL::float8 AS distance WHERE false\"); } // chash is NOT unique a"
-                + "cross collections (the table key is // (tenant_id, collection, chash)): a multi-collection"
-                + " gate can return the // same chash from N collections. Dedup the IN list - the collection "
-                + "scope in // scopeSql still yields one ranked row per (collection, chash). Dedup runs // AF"
-                + "TER the size-based dispatch so the selective/non-selective boundary stays // identical to "
-                + "the old per-row COUNT(*). List<String> inChashes = gateChashes.stream().distinct().toList("
-                + "); String sql = \"SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::t"
-                + "ext AS metadata_json,\" + \" (\" + DimTables.embeddingColumn(dim) + \" <=> ?::vector) AS dista"
-                + "nce FROM \" + table + scopeSql + \" AND chash IN (\" + decodePlaceholders(inChashes.size()) +"
-                + " \")\" + \" ORDER BY distance ASC, chash ASC LIMIT ?\"; List<Object> b = new ArrayList<>(); b."
-                + "add(vecLit); b.addAll(scopeBinds); b.addAll(inChashes); b.add(nResults); return rawVectorF"
-                + "etch(ctx, sql, b.toArray()); } // HNSW-first for a dense gate: keep HNSW scanning past ef_"
-                + "search. PgSession.setLocal(ctx, \"hnsw.iterative_scan\", \"relaxed_order\"); String sql = \"SEL"
-                + "ECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json"
-                + ",\" + \" (\" + DimTables.embeddingColumn(dim) + \" <=> ?::vector) AS distance FROM \" + table +"
-                + " gateSql + \" ORDER BY distance ASC, chash ASC LIMIT ?\"; List<Object> b = new ArrayList<>()"
-                + "; b.add(vecLit); b.addAll(gateBinds); b.add(nResults); return rawVectorFetch(ctx, sql, b.t"
-                + "oArray()); }); List<Map<String, Object>> rows = new ArrayList<>(result.size()); for (Recor"
-                + "d rec : result) { Map<String, Object> row = new LinkedHashMap<>(); row.put(\"id\", rec.get(\""
-                + "chash\", String.class)); row.put(\"content\", rec.get(\"chunk_text\", String.class)); row.put(\""
-                + "distance\", rec.get(\"distance\", Double.class)); row.put(\"collection\", rec.get(\"collection\","
-                + " String.class)); row.putAll(fromJson(rec.get(\"metadata_json\", String.class))); rows.add(ro"
-                + "w); } return rows; }")));
+                "{ if (collectionNames == null || collectionNames.isEmpty()) { return List.of(); } // queryText "
+                + "is bound twice below as a raw text parameter (plainto_tsquery + // trgm <%); a NUL-bearing quer"
+                + "y would hit the same UTF8-0x00 rejection the // upsert path sanitizes (nexus-rvfwj sibling hole"
+                + ", dual-review H1). queryText = stripNul(queryText); if (nResults < 1) { // LIMIT -1 is \"no lim"
+                + "it\" in Postgres - a non-positive value would silently // unbound the query instead of capping "
+                + "it. throw new IllegalArgumentException(\"nResults must be >= 1, got \" + nResults); } if (selec"
+                + "tiveGateMax < 1) { // A non-positive threshold routes EVERY gate to the HNSW-first branch // (m"
+                + "atchCount >= 0 is always > a non-positive cutoff), silently re-enabling // the lcogi selective-"
+                + "gate collapse. Reject rather than mis-dispatch. throw new IllegalArgumentException( \"selective"
+                + "GateMax must be >= 1, got \" + selectiveGateMax); } int dim = dimForCollection(collectionNames."
+                + "get(0)); for (String col : collectionNames) { int colDim = dimForCollection(col); if (colDim !="
+                + " dim) { throw new IllegalArgumentException( \"mixed dimensions in one hybrid-search call: '\" +"
+                + " collectionNames.get(0) + \"' is \" + dim + \"-dim but '\" + col + \"' is \" + colDim + \"-dim "
+                + "- one query vector cannot serve both spaces\"); } } EmbedResult hybridEmbed = embedQuery(collec"
+                + "tionNames.get(0), queryText, dim); if (tokensOut != null) tokensOut[0] = hybridEmbed.tokens(); "
+                + "float[] queryVec = hybridEmbed.embeddings().get(0); // Non-text scope (collection IN + metadata"
+                + " where). Shared by the selective // rank-by-chash query (nexus-x7z7l): that query re-applies th"
+                + "ese cheap predicates // but NOT the text gate - the gate's matching chashes already satisfy it,"
+                + " so the // expensive <% trigram heap-recheck runs ONCE (in the bounded fetch below), not // aga"
+                + "in at rank time. (The metadata->>? predicate is kept on the rank query, not // dropped: two sam"
+                + "e-text rows in different collections share a chash, so chash // alone would not re-impose a per"
+                + "-row metadata filter.) StringBuilder scope = new StringBuilder() .append(\" WHERE collection IN"
+                + " (\").append(placeholders(collectionNames.size())).append(\")\"); List<Object> scopeBinds = new"
+                + " ArrayList<>(collectionNames); // RDR-156 Decision 6 (nexus-3ck2g): live_chunks predicate folde"
+                + "d into `scope` // BEFORE `gate` is derived from it below, so every downstream query built off /"
+                + "/ either scope or gate — the bounded gate-selectivity probe, the selective // chash-ranked rank"
+                + ", and the HNSW-first fallback, all three read sites — inherits // it by construction; a single "
+                + "fix point instead of three. Inlined (never a JOIN // to nexus.live_chunks) so the HNSW/GIN scan"
+                + "s on `c` (the alias assigned to // `table` below) stay engaged — see liveChunksPredicate's java"
+                + "doc. scope.append(\" AND \").append(liveChunksPredicate(\"c\")); // Full gate = scope AND a tex"
+                + "t signal. FTS lexeme match OR word-trigram similarity: // the <% operator form (word_similarity"
+                + " >= pg_trgm.word_similarity_threshold) is // gin_trgm_ops-indexable (vectors-002) where the fun"
+                + "ction-call form is not; // word_similarity (vs plain similarity) does not dilute with chunk_tex"
+                + "t length. // The threshold GUC is pinned per-transaction below. StringBuilder gate = new String"
+                + "Builder(scope) .append(\" AND (chunk_tsv @@ plainto_tsquery('english', ?) OR ? <% chunk_text)\""
+                + "); List<Object> gateBinds = new ArrayList<>(scopeBinds); gateBinds.add(queryText); gateBinds.ad"
+                + "d(queryText); if (where != null) { for (Map.Entry<String, Object> e : where.entrySet()) { appen"
+                + "dWherePredicate(gate, gateBinds, e.getKey(), e.getValue()); appendWherePredicate(scope, scopeBi"
+                + "nds, e.getKey(), e.getValue()); } } final String table = chunksTable(dim) + \" c\"; final Strin"
+                + "g gateSql = gate.toString(); final String scopeSql = scope.toString(); final String vecLit = ve"
+                + "ctorLiteral(queryVec); // SELECTIVITY-AWARE DISPATCH (nexus-lcogi; single-gate-eval, nexus-x7z7"
+                + "l). ONE // bounded fetch of the gate's chashes (LIMIT SELECTIVE_GATE_MAX+1) both picks the // p"
+                + "lan AND, for the selective case, IS the gate evaluation - the ranked query then // filters by c"
+                + "hash (PK lookup), so the expensive <% trigram heap-recheck runs once, // not twice. The prior d"
+                + "esign ran a standalone COUNT(*) probe AND re-ran the gate in // the ranked query: on a large co"
+                + "de corpus that was two ~650ms <% heap-rechecks per // call (conexus-qsa EXPLAIN: count probe 70"
+                + "0ms + materialized-CTE rank 654ms, both // dominated by the lossy gin_trgm_ops recheck over ~19"
+                + "00 candidate rows). // // * SELECTIVE gate (matches <= SELECTIVE_GATE_MAX): the bounded fetch r"
+                + "eturns the // COMPLETE gate (all matches, since it did not hit the LIMIT). Rank those exact // "
+                + "chashes by cosine distance via a chash IN (...) filter + the cheap non-text // scope (collectio"
+                + "n/metadata). No HNSW, no re-gate: ranks the small gated set // exactly, with NO dependence on h"
+                + "nsw.max_scan_tuples (the lcogi collapse fix is // preserved - the prior HNSW-first single-query"
+                + " plan starved selective gates). // // * NON-SELECTIVE gate (matches > SELECTIVE_GATE_MAX): the "
+                + "bounded fetch hit the // LIMIT (returned SELECTIVE_GATE_MAX+1 chashes) and is discarded - keep "
+                + "the // HNSW-first plan (gate as scan filter, iterative_scan). A dense gate is usually // found "
+                + "within the scan budget; materializing a huge gated set (~4 KB/row // embeddings) would spill wo"
+                + "rk_mem. The bounded fetch caps this probe's cost // (the prior unbounded COUNT scanned the full"
+                + " dense gate). Same SEMI-selective // caveat as before applies; P5.2's RRF fusion closes that wi"
+                + "ndow. // // matches == 0 -> empty gate -> selective branch returns an empty result (no silent /"
+                + "/ vector fallback), handled explicitly (chash IN () is not valid SQL). List<Object> probeBinds "
+                + "= new ArrayList<>(gateBinds); probeBinds.add(selectiveGateMax + 1); Result<Record> result = ten"
+                + "antScope.withTenant(tenant, ctx -> { // Trigram gate calibration (contract anchor): word_simila"
+                + "rity >= 0.6, pg_trgm's // default - typo-probe candidates sit at ~0.9 and pass, no-signal rows "
+                + "at ~0.1 // do not. Pinned per-transaction so the gate is independent of cluster config. PgSessi"
+                + "on.setLocal(ctx, \"pg_trgm.word_similarity_threshold\", \"0.6\"); List<String> gateChashes = ra"
+                + "wVectorFetch( ctx, \"SELECT encode(chash, 'hex') AS chash FROM \" + table + gateSql + \" LIMIT "
+                + "?\", probeBinds.toArray()) .map(r -> r.get(\"chash\", String.class)); if (gateChashes.size() <="
+                + " selectiveGateMax) { // Selective: the bounded fetch returned the COMPLETE gate (the LIMIT did "
+                + "NOT // fire - fewer than selectiveGateMax+1 matches exist, so it scanned the full // GIN candid"
+                + "ate set, same work the old COUNT(*) did). The win is not a // cheaper probe: this single gate s"
+                + "can REPLACES both the old COUNT(*) probe // AND the MATERIALIZED-CTE gate re-evaluation - the r"
+                + "ank below filters by // chash with NO text gate, so the <% heap-recheck happens once, not twice"
+                + ". if (gateChashes.isEmpty()) { // Empty gate: typed-empty result (chash IN () is invalid SQL). "
+                + "return rawVectorFetch(ctx, \"SELECT NULL::text AS chash, NULL::text AS chunk_text,\" + \" NULL:"
+                + ":text AS collection, NULL::text AS metadata_json,\" + \" NULL::float8 AS distance WHERE false\""
+                + "); } // chash is NOT unique across collections (the table key is // (tenant_id, collection, cha"
+                + "sh)): a multi-collection gate can return the // same chash from N collections. Dedup the IN lis"
+                + "t - the collection scope in // scopeSql still yields one ranked row per (collection, chash). De"
+                + "dup runs // AFTER the size-based dispatch so the selective/non-selective boundary stays // iden"
+                + "tical to the old per-row COUNT(*). List<String> inChashes = gateChashes.stream().distinct().toL"
+                + "ist(); String sql = \"SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::t"
+                + "ext AS metadata_json,\" + \" (\" + DimTables.embeddingColumn(dim) + \" <=> ?::vector) AS distan"
+                + "ce FROM \" + table + scopeSql + \" AND chash IN (\" + decodePlaceholders(inChashes.size()) + \""
+                + ")\" // nexus-74zvm DECISION (see method javadoc): the text gate has no dim // awareness, so a f"
+                + "oreign-dim row can match it — exclude here rather // than rank it with a NULL embedding_<dim> d"
+                + "istance. + \" AND \" + DimTables.embeddingColumn(dim) + \" IS NOT NULL\" + \" ORDER BY distance"
+                + " ASC, chash ASC LIMIT ?\"; List<Object> b = new ArrayList<>(); b.add(vecLit); b.addAll(scopeBin"
+                + "ds); b.addAll(inChashes); b.add(nResults); return rawVectorFetch(ctx, sql, b.toArray()); } // H"
+                + "NSW-first for a dense gate: keep HNSW scanning past ef_search. PgSession.setLocal(ctx, \"hnsw.i"
+                + "terative_scan\", \"relaxed_order\"); String sql = \"SELECT encode(chash, 'hex') AS chash, chunk"
+                + "_text, collection, metadata::text AS metadata_json,\" + \" (\" + DimTables.embeddingColumn(dim)"
+                + " + \" <=> ?::vector) AS distance FROM \" + table + gateSql // nexus-74zvm DECISION (see method "
+                + "javadoc): same NULL-distance guard as // the selective-gate branch above. + \" AND \" + DimTabl"
+                + "es.embeddingColumn(dim) + \" IS NOT NULL\" + \" ORDER BY distance ASC, chash ASC LIMIT ?\"; Lis"
+                + "t<Object> b = new ArrayList<>(); b.add(vecLit); b.addAll(gateBinds); b.add(nResults); return ra"
+                + "wVectorFetch(ctx, sql, b.toArray()); }); List<Map<String, Object>> rows = new ArrayList<>(resul"
+                + "t.size()); for (Record rec : result) { Map<String, Object> row = new LinkedHashMap<>(); row.put"
+                + "(\"id\", rec.get(\"chash\", String.class)); row.put(\"content\", rec.get(\"chunk_text\", String"
+                + ".class)); row.put(\"distance\", rec.get(\"distance\", Double.class)); row.put(\"collection\", r"
+                + "ec.get(\"collection\", String.class)); row.putAll(fromJson(rec.get(\"metadata_json\", String.cl"
+                + "ass))); rows.add(row); } return rows; }")));
 
     /** Per-file scan for {@link #RAW_SQL_ASSEMBLY_SENTINELS} violations:
      * every registered method's CURRENT whole-body canonical text must

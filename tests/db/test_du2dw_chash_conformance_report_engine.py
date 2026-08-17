@@ -43,7 +43,12 @@ absent.
 """
 from __future__ import annotations
 
-from tests._catalog_fixture_ops import ActiveCatalog, active_reader
+from tests._catalog_fixture_ops import (
+    ActiveCatalog,
+    active_reader,
+    bypass_fk_seed_chunk,
+    seed_manifest_chunks,
+)
 
 _SEQ = [0]
 
@@ -124,6 +129,12 @@ class TestChashConformanceReportWiring:
         )
 
         chash = _conformant_chash(seq)
+        # nexus-dbzxb (RDR-191 Phase 5 Python collateral): fk_catalog_
+        # chunks_chunk requires a matching real nexus.chunks row; the
+        # collection's model token (bge-base-en-v15-768) is locally
+        # embeddable, so a real T3 write is idiom 1 here (this test isn't
+        # about T3 presence, just the manifest row COUNT).
+        seed_manifest_chunks(collection, [chash])
         cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
 
         after = active_reader().chash_conformance_report(768)
@@ -139,7 +150,7 @@ class TestChashConformanceReportWiring:
         assert after_row["non_conformant"] == 0
 
     def test_unrecognized_model_token_is_invisible_by_the_same_in_list_caveat(
-        self,
+        self, t2_service_env,
     ) -> None:
         """Same known routing caveat as manifest_orphans (nexus-h1zu0): a
         collection whose model token is outside every dim's IN-list is
@@ -163,6 +174,16 @@ class TestChashConformanceReportWiring:
         )
 
         chash = _conformant_chash(seq + 10_000)
+        # nexus-dbzxb: "some-unrecognized-legacy-token-9000" is not a
+        # registered model token — every real /v1/vectors/* write endpoint
+        # refuses it outright (HTTP 400: unknown embedding-model segment),
+        # regardless of the same-model passthrough (proven empirically
+        # against the real test engine). Idiom 1/2 cannot reach this
+        # state; insert the stub chunk directly (idiom 3-adjacent —
+        # unlike fk_dropped_for_dangling_seed, this row IS meant to be a
+        # real, present chunk, just one the real HTTP naming gate would
+        # reject on the way in).
+        bypass_fk_seed_chunk(t2_service_env, collection, chash)
         cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
 
         after = active_reader().chash_conformance_report(768)

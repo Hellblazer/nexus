@@ -166,15 +166,21 @@ class OnjvyReadRoutesHandlerTest {
         assertThat(topic.statusCode()).as("topic seed must succeed").isEqualTo(200);
         long topicId = ((Number) mapper.readValue(topic.body(), MAP_T).get("id")).longValue();
 
+        // nexus-tk070.p3c: doc_id is bytea now; the wire value must be genuine
+        // 64-lowercase-hex, not the old free-text "route-detail-doc" placeholder.
+        String docId = hexChash("route-detail-doc");
+        // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires
+        // a matching nexus.chunks row for this assign to succeed at all.
+        seedChunk(TENANT, "code__route_src", docId, 384);
         var assign = post("/v1/taxonomy/assignments/assign",
-            "{\"doc_id\":\"route-detail-doc\",\"topic_id\":" + topicId
+            "{\"doc_id\":\"" + docId + "\",\"topic_id\":" + topicId
             + ",\"assigned_by\":\"projection\",\"similarity\":0.8712345,"
             + "\"source_collection\":\"code__route_src\","
             + "\"assigned_at\":\"2026-04-14T10:00:00Z\"}");
         assertThat(assign.statusCode()).isEqualTo(200);
 
         var resp = post("/v1/taxonomy/assignments/details",
-            "{\"doc_ids\":[\"route-detail-doc\"]}");
+            "{\"doc_ids\":[\"" + docId + "\"]}");
 
         assertThat(resp.statusCode()).isEqualTo(200);
         var rows = mapper.readValue(resp.body(), LIST_T);
@@ -192,9 +198,14 @@ class OnjvyReadRoutesHandlerTest {
         var topic = post("/v1/taxonomy/topics/insert",
             "{\"label\":\"route-hub\",\"collection\":\"code__routes\",\"doc_count\":0}");
         long topicId = ((Number) mapper.readValue(topic.body(), MAP_T).get("id")).longValue();
+        // nexus-tk070.p3c: doc_id is bytea now; the wire value must be genuine
+        // 64-lowercase-hex, not the old free-text "hub-doc-<src>" placeholder.
         for (String src : List.of("code__route_a", "code__route_b")) {
+            // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now
+            // requires a matching nexus.chunks row for each assign to succeed.
+            seedChunk(TENANT, src, hexChash("hub-doc-" + src), 384);
             post("/v1/taxonomy/assignments/assign",
-                "{\"doc_id\":\"hub-doc-" + src + "\",\"topic_id\":" + topicId
+                "{\"doc_id\":\"" + hexChash("hub-doc-" + src) + "\",\"topic_id\":" + topicId
                 + ",\"assigned_by\":\"projection\",\"similarity\":0.5,"
                 + "\"source_collection\":\"" + src + "\","
                 + "\"assigned_at\":\"2026-04-10T13:04:00Z\"}");
@@ -277,6 +288,40 @@ class OnjvyReadRoutesHandlerTest {
     void tierWritesList_rejectsWrongMethod() throws Exception {
         var resp = post("/v1/telemetry/tier_writes/list", "{}");
         assertThat(resp.statusCode()).isNotEqualTo(200);
+    }
+
+    /**
+     * Insert a minimal nexus.chunks row (RDR-194 P3d, nexus-tk070.p3d): every
+     * topic_assignments row now requires a matching (tenant_id, source_collection,
+     * doc_id) -> chunks(tenant_id, collection, chash) parent via
+     * topic_assignments_chunk_fk. Also registers the collection (ON CONFLICT DO
+     * NOTHING), and both statements are idempotent for reuse across tests.
+     */
+    private void seedChunk(String tenant, String collection, String chashHex, int dim) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '"
+                + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+            String embeddingCol = "embedding_" + dim;
+            su.createStatement().execute(
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embeddingCol + ") VALUES " +
+                "('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), 'routes-test chunk', " +
+                "('[" + "0.1,".repeat(dim - 1) + "0.1]')::vector) " +
+                "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+        }
+    }
+
+    /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
+     *  (bytea since nexus-tk070.p3c). */
+    private static String hexChash(String seed) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private HttpResponse<String> post(String path, String body) throws Exception {

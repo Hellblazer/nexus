@@ -155,6 +155,9 @@ class CatalogHandlerManifestFkTest {
         repo.upsertDocument(TENANT, java.util.Map.of(
             "tumbler", "5.1", "title", "FK test doc", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", "knowledge__fk__v1"));
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for this manifest write to succeed.
+        stubChunk("knowledge__fk__v1", "c".repeat(64));
         CapturingExchange ex = post("/v1/catalog/manifest/write",
             "{\"doc_id\":\"5.1\",\"collection\":\"knowledge__fk__v1\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + "c".repeat(64) + "\"}]}");
@@ -174,6 +177,9 @@ class CatalogHandlerManifestFkTest {
             "tumbler", "5.1b", "title", "full64 accept doc", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", "knowledge__fk__v1"));
         String full64 = "a".repeat(64);
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for this manifest write to succeed.
+        stubChunk("knowledge__fk__v1", full64);
         CapturingExchange ex = post("/v1/catalog/manifest/write",
             "{\"doc_id\":\"5.1b\",\"collection\":\"knowledge__fk__v1\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + full64 + "\"}]}");
@@ -184,8 +190,9 @@ class CatalogHandlerManifestFkTest {
     @Test
     void manifestWrite_legacy32CharChash_rejected400() throws Exception {
         // THE INVERSION: a bare 32-hex value was the canonical accept pre-flip;
-        // it is now a legacy reference that must resolve through chash_alias,
-        // never accepted fresh at this boundary.
+        // it is now a legacy reference with no resolution route left
+        // (nexus-lgdel.l1: chash_alias is retired) — never accepted fresh at
+        // this boundary.
         CapturingExchange ex = post("/v1/catalog/manifest/write",
             "{\"doc_id\":\"5.1\",\"collection\":\"knowledge__fk__v1\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + "a".repeat(32) + "\"}]}");
@@ -309,6 +316,41 @@ class CatalogHandlerManifestFkTest {
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    /**
+     * RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+     * matching nexus.chunks row for every catalog_document_chunks insert. Stub a
+     * minimal chunk (single embedding_384 vector, arbitrary text).
+     */
+    private void stubChunk(String collection, String chashHex) throws Exception {
+        // SVC_ROLE's grants (startAll) are scoped to catalog_owners/documents/
+        // document_chunks/collections only -- superuser connection bypasses RLS
+        // and the missing GRANT alike for this fixture-only insert.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
+            // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+            // (tenant_id, name) — stub-register the collection first, mirroring
+            // PgVectorRepository#upsertChunks' own ensure-registered step.
+            try (var regPs = su.prepareStatement(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
+                    + "ON CONFLICT (tenant_id, name) DO NOTHING")) {
+                regPs.setString(1, TENANT);
+                regPs.setString(2, collection);
+                regPs.execute();
+            }
+            try (var ps = su.prepareStatement(
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
+                    + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::vector) "
+                    + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
+                ps.setString(1, TENANT);
+                ps.setString(2, collection);
+                ps.setString(3, chashHex);
+                ps.setString(4, "[" + "0.1,".repeat(383) + "0.1]");
+                ps.execute();
+            }
+        }
+    }
 
     private void handleWithTenant(CapturingExchange ex) throws Exception {
         RequestContext.set(new RequestContext.Principal(TENANT, null, false, false, "tenant", "test-credential-hash"));

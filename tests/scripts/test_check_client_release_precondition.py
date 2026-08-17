@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -177,6 +178,163 @@ class TestStalePreconditionRowsDoNotOutliveTheFloor:
         assert gate.stale_precondition_rows() == gate.stale_precondition_rows(
             table=gate.ENGINE_CLIENT_PRECONDITIONS, floor=REQUIRED_ENGINE_VERSION,
         )
+
+
+class TestWireContractLedger:
+    """Gap 1 fix (protocol-audit [22511], 2026-08-14): the mechanized
+    both-halves wire-contract ledger is consulted from the UNPAIRED deploy
+    path too, not only from check_engine_release_floor.py's --paired-deploy
+    branch. Mirrors tests/scripts/test_check_engine_release_floor.py's
+    ledger test shape (same ledger format, same DEFAULT_LEDGER_PATH patch
+    idiom) but exercised through check_client_release_precondition's own
+    entry points.
+    """
+
+    _FAKE_ENTRY = (
+        "- `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` -- bead nexus-fake -- "
+        "engine tag `engine-service-v9.9.9` -- test fixture\n"
+    )
+
+    @staticmethod
+    def _write_ledger(tmp_path, entry: str | None = None):
+        ledger = tmp_path / "wire-contract-pending.md"
+        body = entry or "(none)\n"
+        ledger.write_text(f"## Unshipped\n\n{body}\n## Shipped\n")
+        return ledger
+
+    def test_refuses_on_synthetic_unshipped_entry(self, tmp_path, capsys):
+        ledger = self._write_ledger(tmp_path, self._FAKE_ENTRY)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
+            rc = gate.check("engine-service-v0.0.0-nonexistent")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "BLOCKED" in err
+        assert "nexus-fake" in err
+        assert "deadbeef" in err
+
+    def test_ack_path_passes(self, tmp_path):
+        ledger = self._write_ledger(tmp_path, self._FAKE_ENTRY)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
+            rc = gate.check(
+                "engine-service-v0.0.0-nonexistent", ack_client_lag=["nexus-fake"]
+            )
+        assert rc == 0
+
+    def test_wrong_ack_still_blocks(self, tmp_path):
+        ledger = self._write_ledger(tmp_path, self._FAKE_ENTRY)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
+            rc = gate.check(
+                "engine-service-v0.0.0-nonexistent", ack_client_lag=["nexus-other"]
+            )
+        assert rc == 1
+
+    def test_both_sources_empty_prints_distinct_combined_message(
+        self, tmp_path, capsys
+    ):
+        """The core Gap 1 non-vacuity requirement: when BOTH
+        ENGINE_CLIENT_PRECONDITIONS and the ledger are empty, the message
+        must name BOTH sources -- not just repeat the old hand-table-only
+        VACUOUS wording, which would now be a false claim (the ledger WAS
+        checked)."""
+        ledger = self._write_ledger(tmp_path)  # empty ## Unshipped
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
+            rc = gate.check("engine-service-v0.0.0-nonexistent")
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "VACUOUS" in out
+        assert "0 preconditions registered" in out
+        assert "0 entries" in out
+        assert str(ledger) in out
+        assert "verified NOTHING from EITHER source" in out
+
+    def test_hand_table_non_empty_ledger_empty_no_combined_vacuous_message(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """When the hand table DID verify something, the combined
+        both-empty VACUOUS banner must not fire -- it would misrepresent a
+        real check as having verified nothing."""
+        ledger = self._write_ledger(tmp_path)  # empty ## Unshipped
+        monkeypatch.setattr(gate, "latest_release_tag", lambda: "v0.0.1")
+        monkeypatch.setattr(gate, "is_ancestor", lambda commit, tag: True)
+        monkeypatch.setitem(
+            gate.ENGINE_CLIENT_PRECONDITIONS, "engine-service-vTEST",
+            {"deadbeef": "test precondition"},
+        )
+        monkeypatch.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
+        rc = gate.check("engine-service-vTEST")
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "BOTH sources are empty" not in out
+        assert "verified NOTHING from EITHER source" not in out
+
+    def test_check_wire_contract_ledger_reports_vacuous_flag(self, tmp_path):
+        ledger = self._write_ledger(tmp_path)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
+            rc, vacuous = gate.check_wire_contract_ledger()
+        assert (rc, vacuous) == (0, True)
+
+    def test_check_wire_contract_ledger_non_vacuous_when_populated_and_clean(
+        self, tmp_path
+    ):
+        ledger = self._write_ledger(tmp_path, self._FAKE_ENTRY)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
+            rc, vacuous = gate.check_wire_contract_ledger(["nexus-fake"])
+        assert (rc, vacuous) == (0, False)
+
+
+@pytest.mark.real_ledger
+class TestWireContractLedgerNonVacuitySelfTest:
+    """Proves the ``import check_wire_contract_pairing as _wire_ledger``
+    wiring actually reaches the REAL checked-in ledger, not a stub or a
+    dead path -- a test that only ever monkeypatches DEFAULT_LEDGER_PATH
+    could pass even if production code imported the wrong module.
+
+    ``real_ledger`` opts this class out of tests/scripts/conftest.py's
+    autouse empty-ledger isolation; without the marker the fixture would
+    silently vacuate exactly the contract this class exists to prove."""
+
+    def test_default_ledger_path_is_the_real_checked_in_file(self):
+        assert gate._wire_ledger.DEFAULT_LEDGER_PATH.is_file()
+        assert gate._wire_ledger.DEFAULT_LEDGER_PATH.name == "wire-contract-pending.md"
+
+    def test_unpatched_ledger_check_parses_real_file_content(self):
+        """Without any monkeypatch, check_wire_contract_ledger() must reach
+        the exact same Ledger the sibling module's own parser produces for
+        the real file -- proving the import is live, not vacuous."""
+        direct = gate._wire_ledger.parse_ledger(gate._wire_ledger.DEFAULT_LEDGER_PATH)
+        rc, vacuous = gate.check_wire_contract_ledger()
+        assert vacuous == (not direct.unshipped)
+        # rc can only be 1 (blocked) if direct.unshipped is non-empty and
+        # unacknowledged -- exercise the real relationship, not a mock.
+        if not direct.unshipped:
+            assert rc == 0
+
+
+class TestMainAckClientLagFlag:
+    def test_main_accepts_and_threads_ack_client_lag(self):
+        with patch.object(gate, "check", return_value=0) as mock_check:
+            rc = gate.main(
+                [
+                    "--engine-tag", "engine-service-vTEST",
+                    "--ack-client-lag", "nexus-fake",
+                    "--ack-client-lag", "nexus-other",
+                ]
+            )
+        assert rc == 0
+        mock_check.assert_called_once_with(
+            "engine-service-vTEST", ["nexus-fake", "nexus-other"]
+        )
+
+    def test_main_defaults_ack_client_lag_to_none(self):
+        with patch.object(gate, "check", return_value=0) as mock_check:
+            gate.main(["--engine-tag", "engine-service-vTEST"])
+        mock_check.assert_called_once_with("engine-service-vTEST", None)
 
 
 class TestWiring:

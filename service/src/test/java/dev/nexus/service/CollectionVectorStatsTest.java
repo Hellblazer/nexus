@@ -349,9 +349,12 @@ class CollectionVectorStatsTest {
             su.setAutoCommit(true);
             insertCollection(su, TENANT_A, COLL_A_TOMB);
             insertCatalogDocument(su, TENANT_A, docId, COLL_A_TOMB);
-            insertManifestRow(su, TENANT_A, docId, 0, chashDoc, COLL_A_TOMB);
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires
+            // the chunk row to land BEFORE the manifest row (previously
+            // order-independent).
             insertChunk(su, 384, TENANT_A, COLL_A_TOMB, chashDoc, "doc-backed chunk", T1);
             insertChunk(su, 384, TENANT_A, COLL_A_TOMB, chashNote, "manifest-less note chunk", T2);
+            insertManifestRow(su, TENANT_A, docId, 0, chashDoc, COLL_A_TOMB);
         }
 
         // Direction 1: both live

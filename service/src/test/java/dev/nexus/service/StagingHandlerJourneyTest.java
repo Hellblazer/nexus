@@ -211,9 +211,14 @@ class StagingHandlerJourneyTest {
                 + "VALUES (?, '9.9.1', 'journey-doc', ?) ON CONFLICT DO NOTHING", TENANT, COLL);
             return null;
         });
+        // nexus-lgdel.l1: the staged manifest pointer's chash must be the
+        // CANONICAL 64-hex digest, not the legacy32-truncated ref — finalize's
+        // manifest promote is direct-64-hex-only now (chash_alias is retired),
+        // so a legacy-shaped chash here would never resolve and Order(2)'s
+        // manifest_promoted assertion would see 0, not 1.
         postOk("/v1/staging/load/document_chunks", Map.of("rows", List.of(
             Map.of("doc_id", "9.9.1", "position", 0,
-                   "chash", digestHex(TEXT_REUSE).substring(0, 32)))));
+                   "chash", digestHex(TEXT_REUSE)))));
         // RDR-187 nexus-piwya.11: the chash_index staging store is retired —
         // an old client's landing attempt answers 400 unknown-store, and the
         // counts envelope no longer carries the key.
@@ -277,9 +282,11 @@ class StagingHandlerJourneyTest {
         assertThat(((Number) fill.get("filled")).intValue()).isEqualTo(1);
         assertThat(((Number) fill.get("remaining")).intValue()).isEqualTo(0);
 
+        // nexus-lgdel.l1: "alias_rows" no longer exists in the promote
+        // envelope — chash_alias and the C1 guard/alias-fact recording it
+        // fed are retired.
         Map<String, Object> promoted = postOk("/v1/staging/promote", Map.of("collection", COLL));
         assertThat(((Number) promoted.get("promoted")).intValue()).isEqualTo(2);
-        assertThat(((Number) promoted.get("alias_rows")).intValue()).isEqualTo(2);
 
         Map<String, Object> fin = postOk("/v1/staging/finalize", Map.of("orphan_policy", "drop"));
         assertThat(((Number) fin.get("manifest_promoted")).intValue()).isEqualTo(1);

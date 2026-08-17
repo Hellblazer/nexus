@@ -73,35 +73,12 @@ class TestRerankEnvelopePositiveAck:
         assert meta["error"] == "no reranker configured"
 
 
-# ── 2. manifest/orphans: count is REQUIRED (feeds a migration gate) ──────────
-
-
-class TestManifestOrphansCountRequired:
-    def _client_with(self, monkeypatch: pytest.MonkeyPatch, response: Any):
-        from nexus.catalog.http_catalog_client import HttpCatalogClient
-
-        c = object.__new__(HttpCatalogClient)
-        monkeypatch.setattr(
-            c, "_get", lambda path, **params: response, raising=False,
-        )
-        return c
-
-    def test_missing_count_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The P3 validation gate sums count; a stripped field defaulting to 0
-        would be a vacuous PASS (sibling relation_counts already fails
-        closed — this makes the pair consistent)."""
-        c = self._client_with(monkeypatch, {"dim": 768, "orphans": []})
-        with pytest.raises(RuntimeError, match="count"):
-            c.manifest_orphans(768)
-
-    def test_intact_response_passes_through(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        c = self._client_with(
-            monkeypatch, {"dim": 768, "count": 3, "orphans": [{"chash": "x"}]},
-        )
-        result = c.manifest_orphans(768)
-        assert result["count"] == 3
+# TestManifestOrphansCountRequired DELETED (RDR-191 Phase 6, nexus-o8dil.33):
+# manifest_orphans (client method + route + SQL function) is retired
+# entirely — the manifest-chunk FK makes the dangling state it detected
+# unreachable. The response-shape-trust class this pinned ("a stripped
+# `count` field defaulting to 0 would be a vacuous PASS") no longer has a
+# subject: there is no method left to strip a field from.
 
 
 # ── 3. manifest/chashes: count reconciled before orphan classification ───────

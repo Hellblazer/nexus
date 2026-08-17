@@ -78,8 +78,9 @@ def to_storage_bytes(value: str | bytes) -> bytes:
 def _require_canonical_hex(value: str) -> None:
     if len(value) != CHUNK_ID_LEN:
         hint = (
-            " — a legacy 32-hex (pre-RDR-180 half-digest) id? resolve it "
-            "through the chash_alias map first; never truncate or pad"
+            " — a legacy 32-hex (pre-RDR-180 half-digest) id? there is no "
+            "alias resolver any more (nexus-lgdel.l1 retired chash_alias); "
+            "re-index the source. Never truncate or pad"
             if len(value) == 32 else ""
         )
         raise ValueError(

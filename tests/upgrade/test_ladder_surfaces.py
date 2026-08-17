@@ -324,16 +324,24 @@ def test_dry_run_reports_and_writes_nothing(
     assert rung.converge_calls == 0
 
 
-def test_empty_registry_walk_is_silent(
+def test_empty_registry_walk_states_convergence_out_loud(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An empty registry adds zero output to `nx upgrade`. (Monkeypatched
-    empty since P1 — the production registry now holds the t2-schema rung,
-    whose real walk would touch the environment's memory.db.)"""
+    """An empty registry (every rung retired — true in production since
+    nexus-lgdel.l1 deleted the last rung) must STATE convergence, never be
+    silent: the fresh-install MVV's nexus-9xfx5 assert greps for the literal
+    "converged and verified", and silence-as-converged is exactly the vacuity
+    that assert bans. (This test previously pinned the SILENCE — the 7.8.0
+    release battery's MVV run is what proved that pin wrong.)"""
     monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry(()))
     _run_ladder(dry_run=False, auto_mode=False, _ledger_fn=InMemoryLedger)
     _run_ladder(dry_run=True, auto_mode=False, _ledger_fn=_must_not_construct)
-    assert capsys.readouterr().out == ""
+    out = capsys.readouterr().out
+    # The real walk states it once; --dry-run exits on its own earlier
+    # reporting path before the runner and stays silent for an empty
+    # registry (its per-rung listing has nothing to list).
+    assert out.count("converged and verified (no rungs registered)") == 1
+    assert "rung '" not in out
 
 
 def test_dry_run_survives_a_rung_whose_detect_raises(

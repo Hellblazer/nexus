@@ -100,10 +100,14 @@ class TestDryRunDefault:
         assert "dry-run" in result.output.lower()
         assert "no catalog/t3 rows purged" in result.output.lower()
 
-    def test_default_invocation_prints_population_disjointness_note(self, monkeypatch):
-        """nexus-heizf / nexus-h1zu0 code-review fix round (2026-08-05): the
-        stranded-chunk vs dangling-manifest disjointness caveat must be in
-        the LIVE text output, not docstring/help only."""
+    def test_default_invocation_prints_population_note(self, monkeypatch):
+        """nexus-heizf / nexus-h1zu0 code-review fix round (2026-08-05):
+        originally the stranded-chunk vs dangling-manifest disjointness
+        caveat, retired RDR-191 Phase 6 (nexus-o8dil.33) alongside the
+        dangling-manifest census/manifest-verify it disambiguated against
+        (the manifest-chunk FK makes that population unreachable). The
+        population note itself must still be in the LIVE text output, not
+        docstring/help only."""
         writer = _FakeWriter()
         _patch_writer(monkeypatch, writer)
 
@@ -111,8 +115,8 @@ class TestDryRunDefault:
         result = runner.invoke(main, ["catalog", "purge-trash"])
 
         assert result.exit_code == 0, result.output
-        assert "disjoint" in result.output
-        assert "doctor" in result.output or "manifest-verify" in result.output
+        assert "population:" in result.output
+        assert "tombstoned-doc chunks" in result.output
 
     def test_default_invocation_labels_age_gated_and_age_independent_counts_separately(self, monkeypatch):
         """nexus-3ck2g code-review Important / nexus-8j1zx fix round: the
@@ -339,19 +343,21 @@ class TestJsonOutput:
         assert data["chunks_1024_stranded"] == 0
         assert data["dry_run"] is True
 
-    def test_json_carries_population_disjointness_note(self, monkeypatch):
-        """nexus-heizf / nexus-h1zu0 code-review fix round (2026-08-05): the
-        stranded-chunk vs dangling-manifest disjointness caveat must be in
-        the LIVE --json output, not docstring/help only — the exact
-        instrument an agent parses during a shakedown."""
+    def test_json_carries_population_note(self, monkeypatch):
+        """nexus-heizf / nexus-h1zu0 code-review fix round (2026-08-05):
+        originally the stranded-chunk vs dangling-manifest disjointness
+        caveat, retired RDR-191 Phase 6 (nexus-o8dil.33) alongside its
+        counterpart (see the text-mode sibling test above). The population
+        note itself must still be in the LIVE --json output, not
+        docstring/help only — the exact instrument an agent parses during a
+        shakedown."""
         writer = _FakeWriter()
         _patch_writer(monkeypatch, writer)
 
         result = CliRunner().invoke(main, ["catalog", "purge-trash", "--json"])
         assert result.exit_code == 0, result.output
         data = json.loads(result.stdout)
-        assert "doctor" in data["population"] or "manifest-verify" in data["population"]
-        assert "disjoint" in data["population"]
+        assert "tombstoned-doc chunks" in data["population"]
 
     def test_json_refused_with_no_dry_run(self, monkeypatch):
         _patch_writer(monkeypatch, _writer_factory_raises())

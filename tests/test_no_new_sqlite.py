@@ -84,8 +84,9 @@ PG_ALTER_TABLE_ALLOWLIST: dict[str, int] = {
     "src/nexus/db/admin_sql.py": 2,
     # PG/Liquibase RLS syntax in a comment (near _check_rls_present).
     "src/nexus/health.py": 1,
-    # RDR-180 .6: PG `ALTER TABLE ... VALIDATE CONSTRAINT` statement text.
-    "src/nexus/upgrade_ladder/rungs/chash_rekey.py": 1,
+    # RDR-180 .6: PG `ALTER TABLE ... VALIDATE CONSTRAINT` statement text —
+    # WAS src/nexus/upgrade_ladder/rungs/chash_rekey.py, deleted whole-file
+    # at nexus-lgdel.l1 (the rung it implemented retired with it).
 }
 
 

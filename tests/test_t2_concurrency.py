@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from nexus.db.t2 import T2Database
+from tests._t2_fixture_ops import canonical_chunk_id as _cid
 from tests.conftest import make_vector_test_client
 
 
@@ -70,7 +71,7 @@ def test_concurrent_domain_writes_no_contention(tmp_path: Path) -> None:
                 for i in range(n):
                     db.log_relevance(
                         query=f"q{i}",
-                        chunk_id=f"c{i}",
+                        chunk_id=_cid(f"c{i}"),
                         action="click",
                         session_id="s",
                         collection="knowledge__conc",
@@ -392,7 +393,7 @@ def test_memory_get_under_concurrent_write_load(tmp_path: Path) -> None:
                 while not stop_writers.is_set():
                     db.log_relevance(
                         query=f"q{i}",
-                        chunk_id=f"c{i}",
+                        chunk_id=_cid(f"c{i}"),
                         action="click",
                         session_id="load",
                         collection="knowledge__load",
@@ -559,7 +560,7 @@ def test_memory_search_under_concurrent_write_load(tmp_path: Path) -> None:
                 while not stop_writers.is_set():
                     db.log_relevance(
                         query=f"q{i}",
-                        chunk_id=f"c{i}",
+                        chunk_id=_cid(f"c{i}"),
                         action="click",
                         session_id="load",
                         collection="knowledge__load",

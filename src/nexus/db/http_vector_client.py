@@ -466,6 +466,18 @@ def _request_once(
     import urllib.request  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     base_url, token = _resolve_endpoint()
+    # nexus-wrwb7 (RDR-005 2a self-minting): when a mint_token credential is
+    # configured, present the manager's self-minted data token instead of
+    # the static service_token/lease token resolved above. Inert (returns
+    # None) when unconfigured -- zero behavior change for every install that
+    # has not opted in. A mint failure raises DataTokenMintError, which
+    # propagates uncaught -- a half-provisioned install must surface, never
+    # silently fall back to the static token.
+    from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+
+    data_token = get_data_token_manager().bearer_for(base_url, tenant)
+    if data_token is not None:
+        token = data_token
     headers = {
         "Authorization": f"Bearer {token}",
         "X-Nexus-Tenant": tenant,
@@ -889,6 +901,20 @@ def _request(
             path=path,
             reason=type(exc).__name__,
         )
+        # nexus-wrwb7: drop any cached self-minted data token for the
+        # endpoint this failed request just used, BEFORE _invalidate_endpoint
+        # clears the module lease cache -- otherwise the retry's
+        # get_data_token_manager().bearer_for() call in _request_once would
+        # just hand back the same (possibly 401-rejected) cached token
+        # instead of re-minting. Best-effort: a resolution failure here must
+        # not block the pre-existing endpoint retry below.
+        try:
+            _stale_base_url, _ = _resolve_endpoint()
+            from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+
+            get_data_token_manager().invalidate(_stale_base_url, tenant)
+        except Exception as data_token_exc:  # noqa: BLE001 — best-effort; the endpoint retry below is what must proceed
+            _log.debug("vector_data_token_invalidate_skipped", error=str(data_token_exc))
         _invalidate_endpoint()
         # nexus-7dsgp: give a not-yet-republished lease a bounded chance to
         # appear before the retry re-reads it — see _wait_for_lease_republication's
@@ -1414,6 +1440,7 @@ class HttpVectorClient:
         force_re_embed: bool | None = None,
         embeddings: list[list[float]] | None = None,
         skip_existing: bool | None = None,
+        retry: bool = True,
     ) -> None:
         """Embed + write via the Java service.
 
@@ -1449,6 +1476,24 @@ class HttpVectorClient:
         batch — the whole batch is always sent — and only triggers a
         one-time deprecation log line (see
         :func:`_warn_skip_existing_deprecated`).
+
+        ``retry`` (nexus-cy9u7 round-3 CRITICAL C2): defaults True — every
+        page's POST is wrapped in :func:`nexus.retry._vector_with_retry`,
+        the client-boundary retry every OTHER caller of this method relies
+        on (indexers: code/prose/doc indexers, pipeline_stages, the
+        ChunkBatcher). Pass ``retry=False`` for a caller that ALREADY owns
+        its own retry/backoff stack and would otherwise get THREE nested
+        retry layers on the same failure: ``db/reconcile.py``'s verify-fill
+        path wraps this call in ``_etl_batch_with_breaker`` ->
+        ``_etl_with_retry``, which — stacked on this method's own
+        ``_vector_with_retry`` PLUS ``_request``'s inner gateway retry — put
+        worst-case latency far beyond any documented ceiling and tripped/
+        escalated the shared rate-limit brake independently at two layers
+        for one failure. ``retry=False`` skips ONLY this method's own
+        wrapper (single-attempt POST per page); the caller's own retry
+        stack still runs, and ``_request``'s inner gateway retry is
+        untouched either way (it lives below both layers). This keeps
+        exactly ONE retry owner per call site.
 
         ``force_re_embed`` (RDR-181, bead nexus-f0r8p.3; or the deprecated
         env escape ``NX_UPSERT_SKIP_EXISTING=0``): tells the SERVER to bypass
@@ -1525,9 +1570,33 @@ class HttpVectorClient:
                 distinct_chash_count=len(set(page_ids)),
                 force_re_embed=force_re_embed,
             )
-            result = _post(
-                "/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600,
-            )
+            # nexus-cy9u7 CRITICAL-1: this is "the ONE choke point" (see the
+            # method docstring above) — every production write call site
+            # (code_indexer.py, prose_indexer.py, pipeline_stages.py, and
+            # doc_indexer.py's PDF path, none of which route through
+            # ChunkBatcher) reaches this same POST via
+            # upsert_chunks/upsert_chunks_with_embeddings, so wrapping it
+            # HERE covers every caller without touching any call site.
+            # Pre-fix this POST had no retry wrapper at all; a 429/502/503/
+            # 504 propagated raw on the first attempt (never even reaching
+            # the shared rate-limit brake), which is the 2026-08-15
+            # incident's literal failure mode on this path.
+            #
+            # nexus-cy9u7 round-3 CRITICAL C2: this wrap is skipped when
+            # ``retry=False`` (see the method docstring's ``retry`` param) —
+            # db/reconcile.py's verify-fill path opts out because it already
+            # owns its own retry/breaker stack; wrapping here TOO gave that
+            # call site three nested retry layers on one failure.
+            if retry:
+                from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred import: avoids a module-load-time httpx dependency for this otherwise-urllib-only module (matches the deferred-import convention every other _vector_with_retry caller uses)
+
+                result = _vector_with_retry(
+                    _post, "/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600,
+                )
+            else:
+                result = _post(
+                    "/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600,
+                )
             # nexus-znwc2 / nexus-ir6eh: the engine echoes ids.length as
             # `upserted` unconditionally (VectorHandler), so any deviation —
             # missing field or wrong count — means something interposed on
@@ -2236,12 +2305,12 @@ class HttpVectorClient:
         """True if *name* has ANY physical chunk row for this tenant — LIVE or TOMBSTONED.
 
         Hits ``GET /v1/vectors/collections`` directly — a bare ``SELECT
-        DISTINCT collection`` union over ``chunks_384``/``chunks_768``/
-        ``chunks_1024`` (:meth:`PgVectorRepository.listCollections` on the
+        DISTINCT collection`` scan over the unified ``nexus.chunks`` table
+        (:meth:`PgVectorRepository.listCollections` on the
         Java side), NOT the tombstone-filtered ``collection_vector_stats``
         view :meth:`collection_exists` reads. Trashing a document
         (catalog-003) only sets ``catalog_documents.deleted_at`` — it never
-        deletes rows from the physical chunk tables (that is ``purge_trash``'s
+        deletes rows from the physical chunk table (that is ``purge_trash``'s
         job, a separate later step) — so a collection whose every document is
         trashed still appears in this raw listing even though
         :meth:`collection_exists` reads it as absent.

@@ -846,3 +846,89 @@ class TestCheckT1:
         result = runner.invoke(main, ["doctor", "--check-t1"])
         assert result.exit_code == 0, result.output
         assert "is fresh" in result.output
+
+
+# ── --check-wal-retention (nexus-bb5c8) ──────────────────────────────────────
+
+
+class TestCheckWalRetention:
+    """nexus_svc holds pg_monitor MEMBERSHIP (grants-004), but that alone is
+    not necessarily usable privilege — cloud is measured NOINHERIT, local
+    provisioning currently keeps PG's INHERIT default (nexus-v80f2 tracks
+    the divergence). nexus.db.svc_monitor.wal_retention_report is the one
+    product-side place the SET-ROLE escalation happens; these tests exercise
+    the CLI wiring only (flag registered, dispatch reaches the check,
+    measured vs UNMEASURED rendering) via a monkeypatched report function —
+    the real escalation mechanism is proven live in
+    tests/db/test_svc_monitor_role_live.py.
+    """
+
+    def test_flag_dispatches_to_the_check(
+        self, runner: CliRunner, monkeypatch,
+    ) -> None:
+        calls = {"n": 0}
+
+        def _fake_report() -> str:
+            calls["n"] += 1
+            return "WAL retention (local service): 42 bytes retained"
+
+        monkeypatch.setattr("nexus.db.svc_monitor.wal_retention_report", _fake_report)
+        result = runner.invoke(main, ["doctor", "--check-wal-retention"])
+        assert result.exit_code == 0, result.output
+        assert calls["n"] == 1  # dispatch really reached _run_check_wal_retention
+
+    def test_measured_sample_renders_check_mark_and_exits_zero(
+        self, runner: CliRunner, monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "nexus.db.svc_monitor.wal_retention_report",
+            lambda: "WAL retention (local service): 8388608 bytes retained",
+        )
+        result = runner.invoke(main, ["doctor", "--check-wal-retention"])
+        assert result.exit_code == 0, result.output
+        assert "[✓]" in result.output
+        assert "WAL retention (local service): 8388608 bytes retained" in result.output
+
+    def test_unmeasured_no_credentials_renders_informational_and_exits_zero(
+        self, runner: CliRunner, monkeypatch,
+    ) -> None:
+        """Absent local nexus_svc credentials (managed/BYO deployment, or a
+        pre-provision install) must render UNMEASURED, never a false clean
+        — and must NOT fail the check (informational only)."""
+        monkeypatch.setattr(
+            "nexus.db.svc_monitor.wal_retention_report",
+            lambda: (
+                "WAL retention: UNMEASURED (no local nexus_svc credentials "
+                "-- managed/BYO deployment with nothing local to probe, or "
+                "a pre-provision install; this is a local-service-only "
+                "sample, not a missing-privilege signal)"
+            ),
+        )
+        result = runner.invoke(main, ["doctor", "--check-wal-retention"])
+        assert result.exit_code == 0, result.output
+        assert "[ ]" in result.output
+        assert "UNMEASURED" in result.output
+        assert "[✓]" not in result.output
+
+    def test_unmeasured_set_role_refusal_renders_informational_and_exits_zero(
+        self, runner: CliRunner, monkeypatch,
+    ) -> None:
+        """A SET ROLE refusal (grants-004 never applied) must also degrade
+        to UNMEASURED rather than propagating an exception through the CLI
+        — the check is informational, never a hard failure."""
+        monkeypatch.setattr(
+            "nexus.db.svc_monitor.wal_retention_report",
+            lambda: (
+                "WAL retention: UNMEASURED (svc_monitor: SET ROLE "
+                "pg_monitor refused for nexus_svc. nexus_svc must hold "
+                "pg_monitor MEMBERSHIP before this call can succeed "
+                "(grants-004-monitor-wal-visibility, "
+                "service/src/main/resources/db/changelog/"
+                "grants-nexus-svc.xml).)"
+            ),
+        )
+        result = runner.invoke(main, ["doctor", "--check-wal-retention"])
+        assert result.exit_code == 0, result.output
+        assert "[ ]" in result.output
+        assert "UNMEASURED" in result.output
+        assert "grants-004-monitor-wal-visibility" in result.output

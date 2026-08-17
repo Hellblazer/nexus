@@ -27,13 +27,12 @@ import java.util.HexFormat;
  * 128 bits = HALF the digest — while the citation grammar advertised the
  * full 64. This type was byte[16]-backed and its hints steered callers to
  * truncate deliberately. Post-flip that advice is actively wrong: 64-hex is
- * the canonical accept, and a bare 32-hex value is a LEGACY REFERENCE that
- * must be resolved through the persisted {@code nexus.chash_alias} map
- * (RDR-180 Item6) — never silently truncated, padded, or guessed. The
- * type itself never consults the DB, so {@link #fromHex} REJECTS 32-hex
- * with a message that names the alias-resolution path; read seams that
- * accept legacy references do the alias lookup first and construct the
- * Chash from the resolved value.
+ * the canonical accept, and a bare 32-hex value is a LEGACY REFERENCE with
+ * no resolution route left — the persisted {@code nexus.chash_alias} map
+ * that used to resolve it (RDR-180 Item6) was DROPPED at nexus-lgdel.l1 (its
+ * beneficiary population reached zero). The type itself never consults the
+ * DB, so {@link #fromHex} REJECTS 32-hex with a message that names the only
+ * remaining remedy: re-index the source.
  *
  * <p>The former two-tier boundary ({@code requireLength32}'s length-only
  * tolerance for Chroma-era non-hex 32-char ids) is COLLAPSED: post-rekey
@@ -59,9 +58,10 @@ public final class Chash {
     /**
      * Parse the canonical 64-lowercase-hex form. The single validation
      * chokepoint — error messages carry the ACTUAL length, and the classic
-     * legacy mistake (a 32-hex pre-RDR-180 chunk id) is self-diagnosing:
-     * it names the chash_alias resolution path instead of inviting
-     * truncation or padding.
+     * legacy mistake (a 32-hex pre-RDR-180 chunk id) is self-diagnosing: it
+     * names the only remaining remedy (re-index the source) instead of
+     * inviting truncation, padding, or a resolution route that no longer
+     * exists (nexus-lgdel.l1: {@code nexus.chash_alias} is dropped).
      *
      * @throws IllegalArgumentException on null, wrong length, uppercase or
      *         non-hex input.
@@ -75,10 +75,9 @@ public final class Chash {
         }
         if (hex.length() != HEX_LENGTH) {
             String hint = hex.length() == 32
-                ? " — a legacy 32-hex (pre-RDR-180 half-digest) chunk id? for a"
-                    + " READ, resolve it through the chash_alias map first; for a"
-                    + " WRITE, the sending client predates RDR-180 — upgrade it"
-                    + " (never truncate or pad)"
+                ? " — a legacy 32-hex (pre-RDR-180 half-digest) chunk id? there is"
+                    + " no resolution route left (the chash_alias map is retired) —"
+                    + " re-index the source to mint a canonical 64-hex chash"
                 : "";
             throw new IllegalArgumentException(
                 "invalid chash: expected " + HEX_LENGTH

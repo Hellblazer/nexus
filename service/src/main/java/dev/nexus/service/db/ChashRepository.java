@@ -39,12 +39,15 @@ import java.util.Set;
  *
  * <p>WRITES ARE GONE: the router was the only thing written. The chunks
  * tables are written by the vector ingest paths ({@code PgVectorRepository});
- * {@code ChashHandler} accepts the old write shapes as deprecated no-ops for
- * one release (mixed-version window, RDR-187 finding 3). The exceptions:
+ * {@code ChashHandler} answers the old write shapes with 410 Gone (the
+ * one-release deprecated-no-op mixed-version window, RDR-187 finding 3,
+ * closed at nexus-piwya.11; {@code delete_collection} joined the 410 group
+ * separately at nexus-lgdel.l2, an orphan with zero callers). The exception:
  * {@link #renameCollection} stays REAL (rerouted to re-home
  * {@code chunks_<dim>.collection}; idempotent when the RDR-164 catalog
- * cascade already did the work), and {@link #resolveLegacyRef} reads the
- * PERMANENT {@code chash_alias} map (out of RDR-187's scope by design).
+ * cascade already did the work). {@code resolveLegacyRef}, which read the
+ * {@code chash_alias} legacy-reference map, was DELETED at nexus-lgdel.l1 —
+ * the map's beneficiary population reached zero and the table is dropped.
  *
  * <p>All methods route through {@link TenantScope#withTenant} so every row
  * access is stamped with the tenant GUC and enforced by RLS.
@@ -114,30 +117,12 @@ public final class ChashRepository {
            .execute();
     }
 
-    // ── legacy-reference resolution (RDR-180 Item3 read seam) ─────────────────
-
-    /**
-     * Resolve a LEGACY reference (pre-RDR-180 32-hex chunk id, or an ETL-era
-     * external id) to its canonical chash via the permanent
-     * ``nexus.chash_alias`` map (nexus-jxizy.6). Returns null when the map
-     * holds no fact for *oldRef* — the caller treats that as chash-not-found
-     * (empty rows), never an error: the alias map is the collision-free
-     * resolver, and an unmapped legacy reference is simply dangling.
-     *
-     * <p>PERMANENT: chash_alias is explicitly out of RDR-187's scope; this
-     * read seam outlives the router.
-     */
-    public Chash resolveLegacyRef(String tenant, String oldRef) {
-        if (oldRef == null || oldRef.isBlank()) return null;
-        return tenantScope.withTenant(tenant, ctx -> {
-            var row = ctx.select(dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS.NEW_CHASH)
-                         .from(dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS)
-                         .where(dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS.OLD_REF.eq(oldRef))
-                         .fetchOne();
-            if (row == null || row.value1() == null) return null;
-            return Chash.fromSha256Bytes(row.value1());
-        });
-    }
+    // ── legacy-reference resolution: RETIRED at nexus-lgdel.l1 ────────────────
+    // resolveLegacyRef read the permanent nexus.chash_alias map (RDR-180
+    // Item3 read seam, nexus-jxizy.6). The table is DROPPED — its
+    // beneficiary population reached zero (Hal directive 2026-08-16, T2
+    // nexus/plan-legacy-retirement-2026-08-16). See git history for the
+    // deleted implementation.
 
     // ── lookup ─────────────────────────────────────────────────────────────────
 

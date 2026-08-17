@@ -22,45 +22,29 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * RDR-156 bead nexus-70r3c.8 — TDD-RED suite for P2 manifest functions (Decision 3).
+ * RDR-156 bead nexus-70r3c.8 — originally a TDD-RED suite for P2 manifest
+ * functions (Decision 3): {@code nexus.manifest_orphans(dim int)},
+ * {@code nexus.manifest_backfill()}, and {@code nexus.document_text(doc_id
+ * text)}.
  *
- * <p><strong>Scope (Decision 3):</strong>
- * Promote the RDR-155 generated-SQL artifacts to first-class stored functions:
+ * <p><strong>RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15:</strong> the
+ * {@code manifest_orphans}/{@code manifest_backfill} coverage (formerly
+ * GROUP 1-6b) was DELETED here — the manifest-chunk FK (catalog-029) makes
+ * the dangling state those functions detected unreachable, and
+ * catalog-030-retire-manifest-verify.xml drops both SQL functions outright.
+ * This file's remaining scope is {@code nexus.document_text(doc_id text)}
+ * only — ordered manifest⋈chunk_text reconstruction, tombstone-aware
+ * (tombstoned doc returns empty set) — which Decision item 4 does not name
+ * and which stays live.
+ *
+ * <p><strong>Remaining coverage:</strong>
  * <ul>
- *   <li>{@code nexus.manifest_orphans(dim int)} — manifest rows with no corresponding chunk
- *       row in {@code chunks_<dim>}; tombstone-aware (deleted_at IS NULL on parent doc).</li>
- *   <li>{@code nexus.manifest_backfill()} — idempotent collection-stamping backfill;
- *       stamps {@code catalog_document_chunks.collection} from the owning doc's
- *       {@code physical_collection} where NULL.</li>
- *   <li>{@code nexus.document_text(doc_id text)} — ordered manifest⋈chunk_text reconstruction,
- *       tombstone-aware (tombstoned doc returns empty set).</li>
- * </ul>
- *
- * <p><strong>Call protocol note (documented in function comments):</strong>
- * Run {@code manifest_backfill()} BEFORE {@code manifest_orphans(dim)} —
- * rows with {@code collection IS NULL} are pre-backfill state, not orphans.
- *
- * <p><strong>Non-vacuity guarantee:</strong>
- * Each test that asserts N &gt; 0 orphans ALSO asserts the count drops to 0 after the
- * missing chunk is inserted. Both directions are tested so empty-table vacuity cannot
- * pass silently (Gap 4 evidence from the RDR-155 first production cutover run).
- *
- * <p><strong>Expected RED/GREEN before catalog-004 lands:</strong>
- * <ul>
- *   <li>GROUP 1 (manifest_orphans basic): RED — function absent</li>
- *   <li>GROUP 2 (manifest_orphans non-vacuity): RED — function absent</li>
- *   <li>GROUP 3 (manifest_orphans tombstone exclusion): RED — function absent</li>
- *   <li>GROUP 4 (manifest_backfill basic): RED — function absent</li>
- *   <li>GROUP 5 (manifest_backfill idempotent): RED — function absent</li>
- *   <li>GROUP 6 (manifest_backfill tombstone-aware): RED — function absent</li>
- *   <li>GROUP 6b (manifest_backfill restore-cycle idempotency): RED — function absent</li>
- *   <li>GROUP 7 (document_text ordering): RED — function absent</li>
- *   <li>GROUP 8 (document_text tombstone-aware): RED — function absent</li>
- *   <li>GROUP 9 (document_text manifest gap contract): RED — function absent</li>
- *   <li>GROUP 10 (SECURITY INVOKER / grants): RED — function absent</li>
- *   <li>GROUP 11 (RLS isolation — svc role sees only its tenant): RED — function absent</li>
- *   <li>GROUP 11b (document_text missing GUC returns empty set): RED — function absent</li>
- *   <li>All CONTROL paths (fixture inserts, schema presence checks): GREEN always</li>
+ *   <li>GROUP 7 (document_text ordering)</li>
+ *   <li>GROUP 8 (document_text tombstone-aware)</li>
+ *   <li>GROUP 9 (document_text manifest gap contract)</li>
+ *   <li>GROUP 10 (SECURITY INVOKER / grants — document_text only)</li>
+ *   <li>GROUP 11 (RLS isolation — svc role sees only its tenant)</li>
+ *   <li>GROUP 11b (document_text missing GUC returns empty set)</li>
  * </ul>
  *
  * <p>Mirror conventions from SoftDeleteTest: PgContainerHelper, Liquibase master, PER_CLASS,
@@ -80,22 +64,12 @@ class ManifestFunctionsTest {
     private static final String SVC_PASS = "svc_mf_test_pass";
 
     // ── Function names (pinned contract for catalog-004 to honor) ─────────────
-    /**
-     * Returns manifest rows whose chash has no chunk row in {@code chunks_<dim>} for
-     * that tenant+collection. Tombstone-aware: orphan manifest rows whose parent doc
-     * has {@code deleted_at IS NOT NULL} are excluded.
-     * {@code nexus.manifest_orphans(dim int) RETURNS TABLE(...)}.
-     * SECURITY INVOKER; no GUC scoping — admin/superuser cross-tenant function.
-     */
-    private static final String FN_ORPHANS   = "nexus.manifest_orphans";
-
-    /**
-     * Stamps {@code catalog_document_chunks.collection} from the owning doc's
-     * {@code physical_collection} where NULL. Idempotent.
-     * {@code nexus.manifest_backfill() RETURNS bigint}.
-     * SECURITY INVOKER; no GUC scoping — admin/superuser maintenance function.
-     */
-    private static final String FN_BACKFILL  = "nexus.manifest_backfill";
+    // FN_ORPHANS ("nexus.manifest_orphans") and FN_BACKFILL ("nexus.manifest_
+    // backfill") REMOVED here (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+    // both SQL functions are DROPPED (catalog-030-retire-manifest-verify.xml);
+    // the manifest-chunk FK makes the dangling state they detected/fixed
+    // unreachable by construction. See this file's class javadoc for the full
+    // scope-down (this file's remaining coverage is nexus.document_text only).
 
     /**
      * Ordered manifest⋈chunk_text reconstruction for a document.
@@ -108,8 +82,8 @@ class ManifestFunctionsTest {
     // ── Test collections (must be registered in catalog_collections per fk-002) ─
     // Collection names follow the conformant shape: <type>__<owner>__<model>__<version>
     // The model segment (split_part(name, '__', 3)) must match the _MODEL_DIMS tokens
-    // used by manifest_orphans to route to the correct embedding_<dim> column of the
-    // unified nexus.chunks table (RDR-191 Phase 4; formerly a chunks_<dim> table).
+    // this file's fixtures route against the unified nexus.chunks table's
+    // embedding_<dim> columns (RDR-191 Phase 4; formerly a chunks_<dim> table).
     // 384: model token = 'minilm-l6-v2-384' (maps embedding_384)
     // 1024: model token = 'voyage-context-3' (maps embedding_1024)
     private static final String COLLECTION_384  = "knowledge__mf-owner-a__minilm-l6-v2-384__v1";
@@ -196,382 +170,6 @@ class ManifestFunctionsTest {
     void stopAll() {
         if (svcDs != null) svcDs.close();
         if (pg != null)    pg.stop();
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // GROUP 1 — manifest_orphans: basic operation (dim=384)
-    //
-    // EXPECTED RED: nexus.manifest_orphans function absent until catalog-004.
-    //
-    // Fixture: 1 live doc, 2 manifest rows:
-    //   - chash_present: has a nexus.chunks row (embedding_384)    → NOT an orphan
-    //   - chash_missing:  NO nexus.chunks row                       → IS an orphan
-    //
-    // Assert: manifest_orphans(384) returns exactly 1 row (chash_missing).
-    // ══════════════════════════════════════════════════════════════════════════
-
-    @Test @Order(10)
-    void manifestOrphans_basic_returnsOrphanRows_dim384() throws Exception {
-        // RED until catalog-004 adds nexus.manifest_orphans(int).
-        String docId        = "mf-orphans-doc-1";
-        String chashPresent = validChash("mf-present-chunk1");
-        String chashMissing = validChash("mf-missing-chunk1");
-
-        // Fixture: doc + 2 manifest rows; only one has a chunk row
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, COLLECTION_384);
-            insertCatalogDocument(su, TENANT_A, docId, COLLECTION_384);
-            insertManifestRowWithCollection(su, TENANT_A, docId, 0, chashPresent, COLLECTION_384);
-            insertManifestRowWithCollection(su, TENANT_A, docId, 1, chashMissing, COLLECTION_384);
-            // Only insert the chunk for chashPresent
-            insertChunk384(su, TENANT_A, COLLECTION_384, chashPresent, "chunk present text");
-            // chashMissing has NO chunk row — it IS an orphan
-        }
-
-        // CONTROL: verify fixture state
-        try (Connection su = pg.createConnection("")) {
-            assertThat(countManifest(su, TENANT_A, docId))
-                .as("CONTROL: 2 manifest rows must exist")
-                .isEqualTo(2);
-            assertThat(countChunks384(su, TENANT_A, COLLECTION_384))
-                .as("CONTROL: 1 chunk row must exist (chashPresent only)")
-                .isEqualTo(1);
-        }
-
-        // Call manifest_orphans(384) — RED trigger: function absent
-        try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM " + FN_ORPHANS + "(384)");
-            rs.next();
-            assertThat(rs.getLong(1))
-                .as("manifest_orphans(384) must return exactly 1 orphan row (chash_missing has no chunk)")
-                .isEqualTo(1L);
-        }
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // GROUP 2 — manifest_orphans: NON-VACUITY (the Gap 4 evidence property)
-    //
-    // EXPECTED RED: nexus.manifest_orphans function absent until catalog-004.
-    //
-    // Two-direction test: first assert N orphans returned (non-vacuous),
-    // then insert the missing chunk and assert 0 orphans (repair validates).
-    // An empty-table / vacuous implementation cannot pass both directions.
-    // ══════════════════════════════════════════════════════════════════════════
-
-    @Test @Order(20)
-    void manifestOrphans_nonVacuity_bothDirections() throws Exception {
-        // RED until catalog-004 adds nexus.manifest_orphans(int).
-        String docId       = "mf-nonvac-doc-1";
-        String chashOrphan = validChash("mf-nonvac-orphan1");
-
-        // Fixture: doc + manifest row for chashOrphan; NO chunk row yet
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, COLLECTION_384);
-            insertCatalogDocument(su, TENANT_A, docId, COLLECTION_384);
-            insertManifestRowWithCollection(su, TENANT_A, docId, 0, chashOrphan, COLLECTION_384);
-            // Intentionally NO chunk row — chashOrphan IS an orphan
-        }
-
-        // Direction 1: manifest_orphans must return >= 1 (non-vacuous — there IS an orphan)
-        try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM " + FN_ORPHANS + "(384) " +
-                "WHERE doc_id = '" + docId + "'");
-            rs.next();
-            assertThat(rs.getLong(1))
-                .as("manifest_orphans(384) must return >= 1 for the seeded orphan " +
-                    "(non-vacuity: function must not vacuously return 0 against populated data)")
-                .isGreaterThanOrEqualTo(1L);
-        }
-
-        // Repair: insert the missing chunk
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            insertChunk384(su, TENANT_A, COLLECTION_384, chashOrphan, "repaired chunk text");
-        }
-
-        // Direction 2: after repair, manifest_orphans must return 0 for this doc
-        try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM " + FN_ORPHANS + "(384) " +
-                "WHERE doc_id = '" + docId + "'");
-            rs.next();
-            assertThat(rs.getLong(1))
-                .as("manifest_orphans(384) must return 0 after the missing chunk is inserted " +
-                    "(repair validates: the function detects repair, not just presence of any rows)")
-                .isEqualTo(0L);
-        }
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // GROUP 3 — manifest_orphans: tombstone exclusion
-    //
-    // EXPECTED RED: nexus.manifest_orphans function absent until catalog-004.
-    //
-    // A manifest row whose parent doc is TOMBSTONED (deleted_at IS NOT NULL)
-    // must be EXCLUDED from manifest_orphans output.
-    // Rationale: orphan sweep is a forward-migration health check; tombstoned
-    // documents are being retired, not migrated — they should not appear.
-    // ══════════════════════════════════════════════════════════════════════════
-
-    @Test @Order(30)
-    void manifestOrphans_excludesTombstonedDocRows() throws Exception {
-        // RED until catalog-004 adds nexus.manifest_orphans(int).
-        String docTombstoned = "mf-tomb-orphan-doc-1";
-        String docLive       = "mf-live-orphan-doc-1";
-        String chashTomb     = validChash("mf-tomb-orphan-chsh");
-        String chashLive     = validChash("mf-live-orphan-chsh");
-
-        // Fixture:
-        //   - Tombstoned doc with an orphan manifest row (no chunk)
-        //   - Live doc with an orphan manifest row (no chunk)
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, COLLECTION_384);
-            insertCatalogDocument(su, TENANT_A, docTombstoned, COLLECTION_384);
-            insertManifestRowWithCollection(su, TENANT_A, docTombstoned, 0, chashTomb, COLLECTION_384);
-            insertCatalogDocument(su, TENANT_A, docLive, COLLECTION_384);
-            insertManifestRowWithCollection(su, TENANT_A, docLive, 0, chashLive, COLLECTION_384);
-            // Neither chash has a chunk row — both are orphans if the function is tombstone-naive
-        }
-
-        // Tombstone the first doc via document_trash
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NOW() " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docTombstoned + "'");
-        }
-
-        // manifest_orphans must exclude the tombstoned doc's manifest row
-        try (Connection su = pg.createConnection("")) {
-            // tombstoned doc must NOT appear
-            ResultSet tombRs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM " + FN_ORPHANS + "(384) " +
-                "WHERE doc_id = '" + docTombstoned + "'");
-            tombRs.next();
-            assertThat(tombRs.getLong(1))
-                .as("manifest_orphans(384) must EXCLUDE orphan rows for tombstoned docs " +
-                    "(tombstone-aware: deleted_at IS NULL join on parent doc)")
-                .isEqualTo(0L);
-
-            // live doc MUST still appear (confirms the function is not returning 0 vacuously)
-            ResultSet liveRs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM " + FN_ORPHANS + "(384) " +
-                "WHERE doc_id = '" + docLive + "'");
-            liveRs.next();
-            assertThat(liveRs.getLong(1))
-                .as("manifest_orphans(384) must INCLUDE orphan rows for live docs " +
-                    "(non-vacuity: live orphan must be returned even while tombstoned is excluded)")
-                .isEqualTo(1L);
-        }
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // GROUP 4 — manifest_backfill: basic collection stamping
-    //
-    // EXPECTED RED: nexus.manifest_backfill function absent until catalog-004.
-    //
-    // Fixture: doc with physical_collection set; manifest row with collection = NULL.
-    // After manifest_backfill(): manifest row's collection is stamped with physical_collection.
-    // ══════════════════════════════════════════════════════════════════════════
-
-    @Test @Order(40)
-    void manifestBackfill_insertingNullCollectionThrows_backfillIsAPermanentNoOp() throws Exception {
-        // RDR-191 (nexus-71gw2) rebase: catalog_document_chunks.collection is
-        // NOT NULL as of catalog-025-collection-not-null.xml, with NO sentinel
-        // and NO DEFAULT (Hal's ruling killed the sentinel design). The
-        // pre-71gw2 fixture here inserted a manifest row with `collection`
-        // OMITTED (landing NULL) to exercise manifest_backfill()'s stamp --
-        // that state is now UNREPRESENTABLE. Assert the unrepresentability
-        // directly (the INSERT throws), not merely a row count of 0.
-        String docId = "mf-backfill-doc-1";
-        String chash = validChash("mf-backfill-chsh01");
-
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, docId, COLLECTION_384);
-
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks " +
-                    "  (tenant_id, doc_id, position, chash) " +
-                    "VALUES ('" + TENANT_A + "', '" + docId + "', 0, '" + chash + "') " +
-                    "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING"));
-            assertThat(ex.getSQLState())
-                .as("omitting collection must fail the NOT NULL constraint, not silently land NULL")
-                .isEqualTo("23502");
-        }
-
-        // manifest_backfill() is now VESTIGIAL (RDR-191 plan §7.2 item 3): no
-        // row can ever carry collection IS NULL, so its own
-        // WHERE collection IS NULL predicate matches nothing. Still callable
-        // (not deleted -- Phase 6 retires it), permanently a 0-row no-op.
-        try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery("SELECT " + FN_BACKFILL + "()");
-            rs.next();
-            assertThat(rs.getLong(1))
-                .as("manifest_backfill() is a permanent 0-row no-op once NULL collection is unrepresentable")
-                .isEqualTo(0L);
-        }
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // GROUP 5 — manifest_backfill: idempotent (second call no-op)
-    //
-    // EXPECTED RED: nexus.manifest_backfill function absent until catalog-004.
-    //
-    // Second call on already-backfilled rows must return 0 rows affected.
-    // The function should only UPDATE rows WHERE collection IS NULL.
-    // ══════════════════════════════════════════════════════════════════════════
-
-    @Test @Order(50)
-    void manifestBackfill_idempotent_secondCallReturnsZero() throws Exception {
-        // RDR-191 (nexus-71gw2) rebase: no fresh NULL row can be seeded any
-        // more (see Order(40)), so idempotency is now UNCONDITIONAL rather
-        // than "0 the second time" -- both calls return 0.
-        try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery("SELECT " + FN_BACKFILL + "()");
-            rs.next();
-            assertThat(rs.getLong(1)).as("first call: nothing to stamp").isEqualTo(0L);
-        }
-        try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery("SELECT " + FN_BACKFILL + "()");
-            rs.next();
-            assertThat(rs.getLong(1)).as("second call: still nothing to stamp").isEqualTo(0L);
-        }
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // GROUP 6 — manifest_backfill: tombstone-aware (skips tombstoned doc rows)
-    //
-    // EXPECTED RED: nexus.manifest_backfill function absent until catalog-004.
-    //
-    // Per the bead spec: manifest_backfill is tombstone-aware.
-    // A manifest row whose parent doc is tombstoned should NOT be stamped
-    // (the doc is being retired, not migrated).
-    // ══════════════════════════════════════════════════════════════════════════
-
-    @Test @Order(60)
-    void manifestBackfill_insertingNullCollectionForTombstonedDocAlsoThrows() throws Exception {
-        // RDR-191 (nexus-71gw2) rebase: the NOT NULL constraint is
-        // unconditional -- a tombstoned parent document does not exempt a
-        // manifest row from it. This subsumes the original tombstone-SKIP
-        // scenario: there is no longer a NULL row for manifest_backfill() to
-        // (correctly) skip in the first place.
-        String docTombed = "mf-bf-tomb-doc-1";
-        String chash     = validChash("mf-bf-tomb-chsh01");
-
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, docTombed, COLLECTION_384);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NOW() " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docTombed + "'");
-
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks " +
-                    "  (tenant_id, doc_id, position, chash) " +
-                    "VALUES ('" + TENANT_A + "', '" + docTombed + "', 0, '" + chash + "') " +
-                    "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING"));
-            assertThat(ex.getSQLState())
-                .as("NOT NULL is unconditional -- a tombstoned parent must not exempt the row")
-                .isEqualTo("23502");
-        }
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // GROUP 6b — manifest_backfill: restore-cycle idempotency
-    //
-    // EXPECTED RED: nexus.manifest_backfill function absent until catalog-004.
-    //
-    // Scenario: backfill a doc, tombstone it, restore it (clear deleted_at via
-    // nexus.document_restore), run manifest_backfill() again — the already-stamped
-    // collection value must be UNCHANGED and the call returns 0 for it.
-    // Validates that restore does not create a second wave of NULL-collection rows.
-    // ══════════════════════════════════════════════════════════════════════════
-
-    @Test @Order(61)
-    void manifestBackfill_restoreCycle_backfillRemainsANoOpThroughout() throws Exception {
-        // RDR-191 (nexus-71gw2) rebase: the row can no longer start NULL, so
-        // seed it with its REAL collection directly and prove the
-        // tombstone/restore cycle neither perturbs the stamped value nor
-        // gives manifest_backfill() anything to do -- it stays the
-        // permanent no-op Order(40)/(50) establish.
-        String docId = "mf-restore-doc-1";
-        String chash = validChash("mf-restore-chsh01");
-
-        // Step 1: live doc with manifest row, stamped with its real collection.
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, docId, COLLECTION_384);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks " +
-                "  (tenant_id, doc_id, position, chash, collection) " +
-                "VALUES ('" + TENANT_A + "', '" + docId + "', 0, '" + chash + "', '" + COLLECTION_384 + "') " +
-                "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
-        }
-
-        // Step 2: backfill — nothing to stamp, must be a no-op.
-        try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery("SELECT " + FN_BACKFILL + "()");
-            rs.next();
-            assertThat(rs.getLong(1)).as("nothing to stamp before the restore cycle either").isEqualTo(0L);
-        }
-
-        // Verify stamped
-        try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT collection FROM nexus.catalog_document_chunks " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND doc_id = '" + docId + "' AND position = 0");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("collection"))
-                .as("collection must be stamped after first backfill")
-                .isEqualTo(COLLECTION_384);
-        }
-
-        // Step 3: tombstone the doc (simulates a delete)
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NOW() " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
-        }
-
-        // Step 4: restore the doc (clear deleted_at — simulates nexus.document_restore)
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NULL " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
-        }
-
-        // Step 5: second backfill — must return 0 for the already-stamped row
-        try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery("SELECT " + FN_BACKFILL + "()");
-            rs.next();
-            long count = rs.getLong(1);
-            assertThat(count)
-                .as("manifest_backfill() after restore cycle must return 0 " +
-                    "(restore-safe: already-stamped rows keep their collection; second call is idempotent)")
-                .isEqualTo(0L);
-        }
-
-        // Step 6: collection value must be unchanged (still COLLECTION_384, not overwritten)
-        try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT collection FROM nexus.catalog_document_chunks " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND doc_id = '" + docId + "' AND position = 0");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("collection"))
-                .as("collection must remain COLLECTION_384 after restore cycle and second backfill " +
-                    "(restore-safe: row already stamped, collection IS NOT NULL, backfill skips it)")
-                .isEqualTo(COLLECTION_384);
-        }
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -765,7 +363,7 @@ class ManifestFunctionsTest {
     void allFunctions_existInNexusSchema() throws Exception {
         // RED until catalog-004 creates the functions.
         try (Connection su = pg.createConnection("")) {
-            for (String fn : List.of("manifest_orphans", "manifest_backfill", "document_text")) {
+            for (String fn : List.of("document_text")) {
                 ResultSet rs = su.createStatement().executeQuery(
                     "SELECT count(*) FROM information_schema.routines " +
                     "WHERE routine_schema = 'nexus' AND routine_name = '" + fn + "'");
@@ -782,7 +380,7 @@ class ManifestFunctionsTest {
         // RED until catalog-004 creates SECURITY INVOKER functions.
         try (Connection su = pg.createConnection("")) {
             // pg_proc.prosecdef = true means SECURITY DEFINER; false means SECURITY INVOKER
-            for (String fn : List.of("manifest_orphans", "manifest_backfill", "document_text")) {
+            for (String fn : List.of("document_text")) {
                 ResultSet rs = su.createStatement().executeQuery(
                     "SELECT prosecdef FROM pg_proc p " +
                     "JOIN pg_namespace n ON n.oid = p.pronamespace " +
@@ -802,7 +400,7 @@ class ManifestFunctionsTest {
     void allFunctions_nexusSvcHasExecuteGrant() throws Exception {
         // RED until catalog-004 grants EXECUTE to nexus_svc.
         try (Connection su = pg.createConnection("")) {
-            for (String fn : List.of("manifest_orphans(integer)", "manifest_backfill()", "document_text(text)")) {
+            for (String fn : List.of("document_text(text)")) {
                 ResultSet rs = su.createStatement().executeQuery(
                     "SELECT has_function_privilege('nexus_svc', 'nexus." + fn + "', 'EXECUTE')");
                 rs.next();
@@ -929,11 +527,27 @@ class ManifestFunctionsTest {
                                                          String docId, int position,
                                                          String chash, String collection)
             throws Exception {
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for every catalog_document_chunks insert. This
+        // file exercises manifest_orphans/document_text/manifest_backfill, whose
+        // whole point is detecting/handling a chash with NO matching chunk -- a
+        // state the FK now prevents in normal operation (these functions are named
+        // in RDR-191 Decision item 4 as retiring in a LATER phase, out of this
+        // bead's scope). Bypass locally: drop the constraint, insert, then re-add
+        // it NOT VALID (catalog-029-0's exact shape) so it is live again
+        // (unvalidated) for every subsequent statement in this container.
+        su.createStatement().execute(
+            "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks " +
             "  (tenant_id, doc_id, position, chash, collection) " +
             "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", '" + chash + "', '" + collection + "') " +
             "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        su.createStatement().execute(
+            "ALTER TABLE nexus.catalog_document_chunks " +
+            "ADD CONSTRAINT fk_catalog_chunks_chunk " +
+            "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) " +
+            "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
     }
 
     /**

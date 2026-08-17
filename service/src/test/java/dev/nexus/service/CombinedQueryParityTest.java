@@ -317,13 +317,12 @@ class CombinedQueryParityTest {
             COLL_EXPLAIN + "' FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         // RDR-180: chash is bytea(32) now — the lpad'd decimal string is still valid
         // hex (digits 0-9 only), padded to the full 64-hex canonical width and
-        // decoded at the seam. topic_assignments.doc_id stays TEXT (mixed identity
-        // space) but is padded to the SAME 64-hex width so it matches
-        // encode(c.chash,'hex') at topic-scoped join time.
-        su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-            "SELECT '" + TENANT_A + "', 'ex'||g, 0, decode(lpad(g::text, 64, '0'), 'hex'), '" + COLL_EXPLAIN + "' " +
-            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        // decoded at the seam. topic_assignments.doc_id stays TEXT but is a chunk
+        // chash end to end (RDR-180 Item6/Item6a, never a memory-note title and not
+        // a mixed identity space — nexus-79box correction), padded to the SAME
+        // 64-hex width so it matches encode(c.chash,'hex') at topic-scoped join time.
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // nexus.chunks row before the manifest row below -- chunk insert first.
         // Embedding: 2-D direction (g%100/100, 1) padded to 1024 — varied enough that
         // HNSW is exercised, dense in the (x,1) plane.
         su.createStatement().execute(
@@ -332,8 +331,14 @@ class CombinedQueryParityTest {
             "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::vector " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         su.createStatement().execute(
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
+            "SELECT '" + TENANT_A + "', 'ex'||g, 0, decode(lpad(g::text, 64, '0'), 'hex'), '" + COLL_EXPLAIN + "' " +
+            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        // RDR-194 P3c: topic_assignments.doc_id is bytea now — decode(lpad(...), 'hex').
+        su.createStatement().execute(
             "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, source_collection, assigned_at) " +
-            "SELECT '" + TENANT_A + "', lpad(g::text, 64, '0'), " + topicId + ", '" + COLL_EXPLAIN + "', " +
+            "SELECT '" + TENANT_A + "', decode(lpad(g::text, 64, '0'), 'hex'), " + topicId + ", '"
+            + COLL_EXPLAIN + "', " +
             "'2026-01-01T00:00:00+00'::timestamptz FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
     }
 
@@ -938,7 +943,9 @@ class CombinedQueryParityTest {
             "SELECT encode(c.chash, 'hex') AS id " +
             "  FROM " + DimTables.CHUNKS_TABLE_NAME + " c " +
             "  JOIN nexus.topic_assignments ta " +
-            "    ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex') " +
+            // RDR-194 P3c: doc_id is bytea now -- direct equality, no encode(),
+            // matching search_topic_scoped_<dim>'s own post-P3c join predicate.
+            "    ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash " +
             "  JOIN nexus.topics t " +
             "    ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id " +
             " WHERE c.collection = '" + collection + "' " +
@@ -971,8 +978,10 @@ class CombinedQueryParityTest {
         String chash = validChash(tumbler);
         insertCatalogDocumentFull(su, tenant, tumbler, collection, contentType, author,
                                   year, corpus);
-        insertManifestRow(su, tenant, tumbler, 0, chash, collection);
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // chunk row to land BEFORE the manifest row (previously order-independent).
         insertChunk(su, dim, tenant, collection, chash, tumbler, x, y);
+        insertManifestRow(su, tenant, tumbler, 0, chash, collection);
     }
 
     /**
@@ -984,12 +993,14 @@ class CombinedQueryParityTest {
         String tenant = tenantFor(collection);
         String chash = validChash(tumbler);
         insertCatalogDocumentFull(su, tenant, tumbler, collection, "paper", "wa", 2024, "research");
-        insertManifestRow(su, tenant, tumbler, 0, chash, collection);
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // chunk row to land BEFORE the manifest row (previously order-independent).
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ", metadata)"
             + " VALUES ('" + tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + tumbler + "', "
             + vec2(1024, x, y) + "::vector, '" + metaJson.replace("'", "''") + "'::jsonb)"
             + " ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+        insertManifestRow(su, tenant, tumbler, 0, chash, collection);
     }
 
     /**
@@ -1002,8 +1013,10 @@ class CombinedQueryParityTest {
         String tenant = tenantFor(collection);
         insertCatalogDocumentFull(su, tenant, tumbler, collection,
                                   "paper", "topicauthor", 2024, "research");
-        insertManifestRow(su, tenant, tumbler, 0, chash, collection);
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // chunk row to land BEFORE the manifest row (previously order-independent).
         insertChunk(su, dim, tenant, collection, chash, tumbler, x, y);
+        insertManifestRow(su, tenant, tumbler, 0, chash, collection);
         // Topic membership is CHUNK-level: topic_assignments.doc_id is the chunk chash
         // (nexus-sa14p), NOT the document tumbler.
         insertTopicAssignment(su, tenant, chash, topicId, collection);
@@ -1059,10 +1072,11 @@ class CombinedQueryParityTest {
 
     private static void insertTopicAssignment(Connection su, String tenantId, String docId,
                                               long topicId, String collection) throws Exception {
+        // RDR-194 P3c: topic_assignments.doc_id is bytea now — decode('hex').
         su.createStatement().execute(
             "INSERT INTO nexus.topic_assignments " +
             "  (tenant_id, doc_id, topic_id, source_collection, assigned_at) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + topicId + ", '" + collection + "', " +
+            "VALUES ('" + tenantId + "', decode('" + docId + "', 'hex'), " + topicId + ", '" + collection + "', " +
             "'2026-01-01T00:00:00+00'::timestamptz) " +
             "ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING");
     }

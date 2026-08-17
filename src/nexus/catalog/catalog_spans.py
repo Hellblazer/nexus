@@ -92,9 +92,12 @@ def parse_chash_span(span: str) -> tuple[str, tuple[int, int] | None]:
     if re.fullmatch(r"[0-9a-f]{64}", body):
         return body, None
     # RDR-180 Failure Modes: legacy 32-hex references (old bead comments,
-    # T2 memories, prose citations) stay RESOLVABLE — accepted here as a
-    # legacy reference; the resolution layer routes them through the
-    # chash_alias map (the engine lookup echoes the canonical identity).
+    # T2 memories, prose citations) are still PARSED here — a bare 32-hex
+    # span shape does not raise. nexus-lgdel.l1 retired the alias-resolution
+    # route (chash_alias) this used to hand off to, so resolution downstream
+    # now MISSes on a legacy ref rather than succeeding; parsing stays
+    # permissive only so an old citation fails at resolve-time with a clear
+    # not-found, not at parse-time with a malformed-span error.
     # WRITE grammars (catalog.py link spans) remain strictly 64-hex.
     m = re.match(r"^([0-9a-f]{32}):(\d+)-(\d+)$", body)
     if m:
@@ -378,22 +381,15 @@ def resolve_chash_globally(
          parallel T3 scan across all collections (pre-migration
          installs whose SQLite router was never populated).
 
+    A legacy 32-hex reference (nexus-lgdel.l1: the chash_alias-backed
+    alias-chaining route this used to rewrite through is retired) is no
+    longer special-cased — it flows through the same lookup + fallback-scan
+    path as any other identifier and simply MISSes, since nothing in the
+    store is keyed at that width.
+
     Accepts the same input forms as :func:`parse_chash_span`.
     """
     hex_chash, char_range = parse_chash_span(chash)
-
-    if len(hex_chash) == 32:
-        # Legacy reference (RDR-180): the chash_index lookup alias-chains
-        # engine-side and echoes the resolved CANONICAL 64-hex — rewrite
-        # and resolve canonically. An unmapped legacy ref is dangling:
-        # no T3 fallback scan can succeed at the retired width.
-        legacy_rows = chash_index.lookup(hex_chash)
-        canonical = next(
-            (r.get("chash") for r in legacy_rows or [] if r.get("chash")), None,
-        )
-        if canonical is None or len(canonical) != 64:
-            return None
-        hex_chash = canonical
 
     # Reconstruct the span form that resolve_span_in_t3 expects.
     span = f"chash:{hex_chash}"

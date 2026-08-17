@@ -59,6 +59,88 @@ class CatalogRepositoryTest {
         return dev.nexus.service.db.Chash.ofText(seed).toHex();
     }
 
+    /**
+     * RDR-191 Phase 5 (nexus-o8dil.29): {@code fk_catalog_chunks_chunk} now requires
+     * every {@code catalog_document_chunks} row's {@code (tenant_id, collection,
+     * chash)} to have a matching {@code nexus.chunks} row. This suite exercises the
+     * MANIFEST bookkeeping layer in isolation from real vector content, so every
+     * manifest-write call site below is routed through one of the {@code *Seeded}
+     * wrappers, which stub a minimal {@code nexus.chunks} row (single
+     * {@code embedding_384} vector, arbitrary text) for each row's chash first. A
+     * chash that is null, not valid hex, or not EXACTLY 64 hex chars (32 bytes) is
+     * left unstubbed on purpose — several tests deliberately exercise chash-shaped
+     * CHECK-constraint violations (missing chash, wrong octet length), and
+     * nexus.chunks carries the SAME {@code chunks_chash_octet_check} (octet_length=32)
+     * as catalog_document_chunks (vectors-004-unify-chunks.xml), so a wrong-length
+     * stub would itself violate that check rather than reaching the manifest-side
+     * violation the test is actually after.
+     */
+    private static final String STUB_VECTOR_384 =
+        "[" + "0.1,".repeat(383) + "0.1]";
+
+    private void stubChunk(String tenant, String collection, Object chashObj) {
+        if (!(chashObj instanceof String chashHex) || chashHex.length() != 64) {
+            return;
+        }
+        if (!chashHex.matches("(?i)^[0-9a-f]+$")) {
+            return;
+        }
+        tenantScope.withTenant(tenant, ctx -> {
+            // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
+            // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+            // (tenant_id, name) — stub-register the collection first, mirroring
+            // PgVectorRepository#upsertChunks' own ensure-registered step.
+            ctx.execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
+                + "ON CONFLICT (tenant_id, name) DO NOTHING",
+                tenant, collection);
+            ctx.execute(
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
+                + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::vector) "
+                + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
+                tenant, collection, chashHex, STUB_VECTOR_384);
+            return null;
+        });
+    }
+
+    private void writeManifestSeeded(String tenant, String docId, String collection,
+                                      List<Map<String, Object>> rows) {
+        for (var row : rows) {
+            stubChunk(tenant, collection, row.get("chash"));
+        }
+        repo.writeManifest(tenant, docId, collection, rows);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> writeManifestManySeeded(String tenant, List<Map<String, Object>> docs,
+                                                          String collection) {
+        for (var doc : docs) {
+            var rows = (List<Map<String, Object>>) doc.get("rows");
+            if (rows != null) {
+                for (var row : rows) {
+                    stubChunk(tenant, collection, row.get("chash"));
+                }
+            }
+        }
+        return repo.writeManifestMany(tenant, docs, collection);
+    }
+
+    private void importChunkSeeded(String tenant, String docId, String collection,
+                                    Map<String, Object> row) {
+        stubChunk(tenant, collection, row.get("chash"));
+        repo.importChunk(tenant, docId, collection, row);
+    }
+
+    private int importChunksBatchSeeded(String tenant, String docId, String collection,
+                                         List<Map<String, Object>> rows) {
+        if (rows != null) {
+            for (var row : rows) {
+                stubChunk(tenant, collection, row.get("chash"));
+            }
+        }
+        return repo.importChunksBatch(tenant, docId, collection, rows);
+    }
+
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     CatalogRepository repo;
@@ -108,12 +190,10 @@ class CatalogRepositoryTest {
             // Grant sequence for catalog_links BIGSERIAL
             su.createStatement().execute(
                 "GRANT USAGE ON SEQUENCE nexus.catalog_links_id_seq TO " + SVC_ROLE);
-            // RDR-159 P-1b: manifest functions (catalog-004) + nexus.chunks read so the
-            // svc role can invoke manifestBackfill/manifestOrphans (SECURITY INVOKER).
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.manifest_backfill() TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.manifest_orphans(int) TO " + SVC_ROLE);
+            // RDR-159 P-1b GRANTs for manifest_backfill()/manifest_orphans(int) REMOVED
+            // here (RDR-191 Phase 6, nexus-o8dil.33) -- both functions are DROPPED
+            // (catalog-030-retire-manifest-verify.xml); granting EXECUTE on a
+            // nonexistent function fails the fixture outright.
             // RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into ONE
             // nexus.chunks -- a single GRANT now covers what three did.
             su.createStatement().execute(
@@ -784,9 +864,17 @@ class CatalogRepositoryTest {
         // pointing at tumblers with no document anywhere in the same pg_dump.
         // catalog_links has a PK and a UNIQUE but NO foreign key to
         // catalog_documents (catalog-001-baseline.xml), so nothing structurally
-        // prevents this — detection has to exist regardless of whether tk070
-        // later adds enforcement, because an FK does not retroactively clean
-        // rows that are already orphaned.
+        // prevented this at the time — nexus-tk070.p1 (RDR-194 § D2) closed
+        // exactly that gap with fk_catalog_links_from_document /
+        // fk_catalog_links_to_document, so this test's damage-seed no longer
+        // fits: a link to a tumbler with NO catalog_documents row at all now
+        // 400s (SQLSTATE 23503 mapped to dangling_endpoint), even under
+        // allow_dangling=true. orphanedLinks() itself is unchanged and its
+        // remaining, narrower job — per its own updated javadoc — is exactly
+        // the TOMBSTONED-endpoint case the FK deliberately does not cover
+        // (soft delete does not fire ON DELETE CASCADE), so the seed below
+        // creates real documents and TOMBSTONES them (repo.deleteDocument)
+        // rather than pointing at tumblers that never existed.
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "orph.live", "title", "Live",
             "content_type", "paper", "corpus", "knowledge"));
 
@@ -799,11 +887,19 @@ class CatalogRepositoryTest {
             "link_type", "relates", "from_span", "", "to_span", "",
             "created_by", "user", "created_at", "2026-06-01T00:00:00Z"));
 
-        // nexus-9ssih: upsertLink now REFUSES dangling endpoints by default, so
-        // seeding the damage this detector exists to find is exactly the
-        // allow_dangling case. The flag is on the SEED only — orphanedLinks
-        // itself is unchanged, and the three shapes below are still written
-        // into the table byte-for-byte as before.
+        // Endpoints that WILL be tombstoned (row exists, satisfies the FK;
+        // deleted_at set, so orphanedLinks' LIVE-only predicate still flags
+        // them). allow_dangling=true is still required — requireLiveEndpoints
+        // rejects a tombstoned target the same as a missing one.
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "orph.gone", "title", "Will be tombstoned (target)",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "orph.vanished", "title", "Will be tombstoned (source)",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "orph.x", "title", "Will be tombstoned (both x)",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "orph.y", "title", "Will be tombstoned (both y)",
+            "content_type", "paper", "corpus", "knowledge"));
+
         // Dangling TARGET (the document-deletion shape Steve hit).
         repo.upsertLink(TENANT_A, Map.of("from_tumbler", "orph.live", "to_tumbler", "orph.gone",
             "link_type", "cites", "from_span", "", "to_span", "",
@@ -814,11 +910,20 @@ class CatalogRepositoryTest {
             "link_type", "cites", "from_span", "", "to_span", "",
             "created_by", "user", "created_at", "2026-06-01T00:00:00Z",
             "allow_dangling", true));
-        // BOTH endpoints gone.
+        // BOTH endpoints eventually gone.
         repo.upsertLink(TENANT_A, Map.of("from_tumbler", "orph.x", "to_tumbler", "orph.y",
             "link_type", "cites", "from_span", "", "to_span", "",
             "created_by", "user", "created_at", "2026-06-01T00:00:00Z",
             "allow_dangling", true));
+
+        // Tombstone the four endpoints AFTER the links are written (the FK
+        // only needs the row to exist at write time; ON DELETE CASCADE does
+        // not fire for a soft delete, so the links survive pointing at now-
+        // tombstoned documents — exactly the case orphanedLinks still reports).
+        repo.deleteDocument(TENANT_A, "orph.gone");
+        repo.deleteDocument(TENANT_A, "orph.vanished");
+        repo.deleteDocument(TENANT_A, "orph.x");
+        repo.deleteDocument(TENANT_A, "orph.y");
 
         var orphans = repo.orphanedLinks(TENANT_A);
 
@@ -992,26 +1097,40 @@ class CatalogRepositoryTest {
 
     /**
      * nexus-t7m8e leg (a): structural invariant — every edge's endpoints must
-     * appear in the returned node set. A dangling reference (an edge naming a
-     * tumbler that was never registered at all, not merely tombstoned) is the
-     * other half of the same defect class the tombstone-relay test covers.
+     * appear in the returned node set. A dangling reference used to mean "an
+     * edge naming a tumbler that was never registered at all" (the other half
+     * of the same defect class the tombstone-relay test covers), reachable
+     * via the {@code import}/ETL family or legacy pre-9ssih data even after
+     * {@code upsertLink} started rejecting it at write time.
      *
-     * <p>{@code upsertLink} itself now rejects a dangling endpoint at write
-     * time (nexus-9ssih) unless {@code allow_dangling=true} is passed — the
-     * import/ETL family and legacy pre-9ssih data are exactly the paths that
-     * can still leave one in the table, so graphBFS must defend independently
-     * rather than relying on the write-time guard alone. {@code allow_dangling}
-     * here exercises that defense-in-depth, not a live production write path.
+     * <p><strong>nexus-tk070.p1 (RDR-194 § D2) narrows what this test can even
+     * seed.</strong> {@code fk_catalog_links_from_document}/{@code
+     * _to_document} now make "an edge naming a tumbler with no
+     * catalog_documents row at all" physically impossible in Postgres,
+     * through EVERY write path (upsertLink, import*, raw SQL) — there is no
+     * longer a way to construct that state to test against. What survives is
+     * the TOMBSTONED case (D2: a row exists, so the FK is satisfied, but it
+     * is not LIVE), which this test now seeds instead — {@link #graphBFS}'s
+     * {@code deleted_at IS NULL} INNER JOIN on both endpoints (leg a/b,
+     * comment at the join site) excludes a tombstoned-endpoint edge exactly
+     * the same way it excluded the now-unreachable fully-missing case, so
+     * the structural invariant below is still exercised against a real state.
      */
     @Test
     void graphBFS_everyEdgeEndpoint_appearsInNodes() {
         String tenant = "bfs-dangle-" + System.nanoTime();
         String live = "dg.live";
+        String tombstoned = "dg.ghost";
         repo.upsertDocument(tenant, Map.of("tumbler", live,
             "title", "Live", "content_type", "paper", "corpus", "knowledge"));
-        // "dg.ghost" is never registered as a document — a dangling reference.
-        repo.upsertLink(tenant, Map.of("from_tumbler", live, "to_tumbler", "dg.ghost",
-            "link_type", "cites", "created_by", "test", "allow_dangling", true));
+        repo.upsertDocument(tenant, Map.of("tumbler", tombstoned,
+            "title", "Will be tombstoned", "content_type", "paper", "corpus", "knowledge"));
+        repo.upsertLink(tenant, Map.of("from_tumbler", live, "to_tumbler", tombstoned,
+            "link_type", "cites", "created_by", "test"));
+        // Tombstone AFTER the write — the FK only needs the row to exist at
+        // write time; soft delete does not cascade (D2), so the link survives
+        // pointing at a now-tombstoned document.
+        assertThat(repo.deleteDocument(tenant, tombstoned)).isEqualTo(1);
 
         var result = repo.graphBFS(tenant, List.of(live), List.of("cites"), "out", 1);
         @SuppressWarnings("unchecked")
@@ -1165,7 +1284,7 @@ class CatalogRepositoryTest {
             Map.<String, Object>of("position", 1, "chash", ch("bbbb"), "chunk_index", 1,
                 "line_start", 11, "line_end", 20, "char_start", 100, "char_end", 200)
         );
-        repo.writeManifest(TENANT_A, "mfst.1", "knowledge__mfst1__v1", rows);
+        writeManifestSeeded(TENANT_A, "mfst.1", "knowledge__mfst1__v1", rows);
 
         var got = repo.getManifest(TENANT_A, "mfst.1");
         assertThat(got).hasSize(2);
@@ -1187,11 +1306,11 @@ class CatalogRepositoryTest {
             "content_type", "paper", "corpus", "knowledge",
             "physical_collection", "knowledge__mfst2__v1"));
         // Write initial
-        repo.writeManifest(TENANT_A, "mfst.2", "knowledge__mfst2__v1", List.of(
+        writeManifestSeeded(TENANT_A, "mfst.2", "knowledge__mfst2__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("old"), "chunk_index", 0)
         ));
         // Replace with new set
-        repo.writeManifest(TENANT_A, "mfst.2", "knowledge__mfst2__v1", List.of(
+        writeManifestSeeded(TENANT_A, "mfst.2", "knowledge__mfst2__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("new0"), "chunk_index", 0),
             Map.<String, Object>of("position", 1, "chash", ch("new1"), "chunk_index", 1)
         ));
@@ -1208,7 +1327,7 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.3", "title", "Purge Doc",
             "content_type", "paper", "corpus", "knowledge",
             "physical_collection", "knowledge__mfst3__v1"));
-        repo.writeManifest(TENANT_A, "mfst.3", "knowledge__mfst3__v1", List.of(
+        writeManifestSeeded(TENANT_A, "mfst.3", "knowledge__mfst3__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("purge"), "chunk_index", 0)
         ));
         assertThat(repo.getManifest(TENANT_A, "mfst.3")).hasSize(1);
@@ -1224,7 +1343,7 @@ class CatalogRepositoryTest {
         // behind it. The zero must land in the SAME transaction as the purge.
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.purge2", "title", "Purge Count Doc",
             "content_type", "paper", "corpus", "knowledge", "chunk_count", 2));
-        repo.writeManifest(TENANT_A, "mfst.purge2", "knowledge__mfst-purge2__v1", List.of(
+        writeManifestSeeded(TENANT_A, "mfst.purge2", "knowledge__mfst-purge2__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("pg0"), "chunk_index", 0),
             Map.<String, Object>of("position", 1, "chash", ch("pg1"), "chunk_index", 1)
         ));
@@ -1256,7 +1375,7 @@ class CatalogRepositoryTest {
         // regardless of the document's own physical_collection.
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.wcnt", "title", "Write Count Doc",
             "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
-        repo.writeManifest(TENANT_A, "mfst.wcnt", "knowledge__mfst-wcnt__voyage-context-3__v1", List.of(
+        writeManifestSeeded(TENANT_A, "mfst.wcnt", "knowledge__mfst-wcnt__voyage-context-3__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("wc0"), "chunk_index", 0),
             Map.<String, Object>of("position", 1, "chash", ch("wc1"), "chunk_index", 1),
             Map.<String, Object>of("position", 2, "chash", ch("wc2"), "chunk_index", 2)
@@ -1270,7 +1389,7 @@ class CatalogRepositoryTest {
                 + "the exact assertion the original vacuous version omitted")
             .hasSize(3);
         // And the REPLACE shrink folds too.
-        repo.writeManifest(TENANT_A, "mfst.wcnt", "knowledge__mfst-wcnt__voyage-context-3__v1", List.of(
+        writeManifestSeeded(TENANT_A, "mfst.wcnt", "knowledge__mfst-wcnt__voyage-context-3__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("wc9"), "chunk_index", 0)
         ));
         assertThat(((Number) repo.getDocument(TENANT_A, "mfst.wcnt").get("chunk_count")).intValue())
@@ -1283,7 +1402,7 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.4", "title", "Chash For Collection",
             "content_type", "paper", "corpus", "knowledge",
             "physical_collection", "knowledge__chash_test"));
-        repo.writeManifest(TENANT_A, "mfst.4", "knowledge__chash_test", List.of(
+        writeManifestSeeded(TENANT_A, "mfst.4", "knowledge__chash_test", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("cfccc0"), "chunk_index", 0),
             Map.<String, Object>of("position", 1, "chash", ch("cfccc1"), "chunk_index", 1)
         ));
@@ -1298,7 +1417,7 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.5", "title", "Resync Doc",
             "content_type", "paper", "corpus", "knowledge", "chunk_count", 0,
             "physical_collection", "knowledge__mfst5__v1"));
-        repo.writeManifest(TENANT_A, "mfst.5", "knowledge__mfst5__v1", List.of(
+        writeManifestSeeded(TENANT_A, "mfst.5", "knowledge__mfst5__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("rsync0"), "chunk_index", 0),
             Map.<String, Object>of("position", 1, "chash", ch("rsync1"), "chunk_index", 1),
             Map.<String, Object>of("position", 2, "chash", ch("rsync2"), "chunk_index", 2)
@@ -1323,14 +1442,14 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "gmm.1", "title", "GMM Doc1",
             "content_type", "paper", "corpus", "knowledge",
             "physical_collection", "knowledge__gmm1__v1"));
-        repo.writeManifest(TENANT_A, "gmm.1", "knowledge__gmm1__v1", List.of(
+        writeManifestSeeded(TENANT_A, "gmm.1", "knowledge__gmm1__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("gmm1aa"), "chunk_index", 0),
             Map.<String, Object>of("position", 1, "chash", ch("gmm1bb"), "chunk_index", 1)
         ));
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "gmm.2", "title", "GMM Doc2",
             "content_type", "paper", "corpus", "knowledge",
             "physical_collection", "knowledge__gmm2__v1"));
-        repo.writeManifest(TENANT_A, "gmm.2", "knowledge__gmm2__v1", List.of(
+        writeManifestSeeded(TENANT_A, "gmm.2", "knowledge__gmm2__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("gmm2cc"), "chunk_index", 0)
         ));
 
@@ -1357,7 +1476,7 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.kzso5", "title", "Kzso5 Doc",
             "content_type", "paper", "corpus", "knowledge",
             "physical_collection", "knowledge__mfst-kzso5-doc__v1"));
-        repo.writeManifest(TENANT_A, "mfst.kzso5", "knowledge__mfst-kzso5-explicit__v1", List.of(
+        writeManifestSeeded(TENANT_A, "mfst.kzso5", "knowledge__mfst-kzso5-explicit__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("kzso5row"), "chunk_index", 0)
         ));
         var got = repo.getManifest(TENANT_A, "mfst.kzso5");
@@ -1381,7 +1500,7 @@ class CatalogRepositoryTest {
         // resolveMany_tenantIsolation @Order 59).
         repo.upsertDocument(TENANT_B, Map.of("tumbler", "gmmiso.1", "title", "Tenant B Doc",
             "content_type", "paper", "corpus", "knowledge"));
-        repo.writeManifest(TENANT_B, "gmmiso.1", "knowledge__gmmiso1__v1", List.of(
+        writeManifestSeeded(TENANT_B, "gmmiso.1", "knowledge__gmmiso1__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("gmmisob"), "chunk_index", 0)
         ));
         var result = repo.getManifestMany(TENANT_A, List.of("gmmiso.1"));
@@ -1437,6 +1556,29 @@ class CatalogRepositoryTest {
         assertThat(coll).isNotNull();
         assertThat(coll.get("content_type")).isEqualTo("code");
         assertThat(coll.get("embedding_model")).isEqualTo("voyage-code-3");
+        // nexus-cefa1.2: legacy_grandfathered is boolean now (catalog-031-3-collections-
+        // legacy-bool); the DEFAULT false round-trips as a real Boolean, not 0.
+        assertThat(coll.get("legacy_grandfathered")).isEqualTo(Boolean.FALSE);
+    }
+
+    /**
+     * nexus-cefa1.2: legacy_grandfathered=true (a real JSON boolean, matching the
+     * only shape Python clients send — nexus-cecqy) round-trips through
+     * catalog_collections.legacy_grandfathered's boolean column exactly.
+     */
+    @Test @Order(60)
+    void collection_legacyGrandfathered_trueRoundTrips() {
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", "legacy__nexus__voyage-code-3__v1",
+            "content_type", "code",
+            "owner_id", "nexus-1-1",
+            "embedding_model", "voyage-code-3",
+            "model_version", "v1",
+            "legacy_grandfathered", true
+        ));
+        var coll = repo.getCollection(TENANT_A, "legacy__nexus__voyage-code-3__v1");
+        assertThat(coll).isNotNull();
+        assertThat(coll.get("legacy_grandfathered")).isEqualTo(Boolean.TRUE);
     }
 
     @Test @Order(61)
@@ -1853,7 +1995,7 @@ class CatalogRepositoryTest {
         String chashV2 = ch("chashV2"); // different
 
         // Initial chunk import
-        repo.importChunk(etlTenant, docId, "knowledge__etl-chunk-conv__v1", Map.of(
+        importChunkSeeded(etlTenant, docId, "knowledge__etl-chunk-conv__v1", Map.of(
             "position", 0, "chash", chashV1, "chunk_index", 0,
             "line_start", 1, "line_end", 10, "char_start", 0, "char_end", 200
         ));
@@ -1862,7 +2004,7 @@ class CatalogRepositoryTest {
         assertThat(before.get(0).get("chash")).isEqualTo(chashV1);
 
         // Re-import same (tenant, doc, position) with a DIFFERENT chash — convergence
-        repo.importChunk(etlTenant, docId, "knowledge__etl-chunk-conv__v1", Map.of(
+        importChunkSeeded(etlTenant, docId, "knowledge__etl-chunk-conv__v1", Map.of(
             "position", 0, "chash", chashV2, "chunk_index", 0,
             "line_start", 1, "line_end", 10, "char_start", 0, "char_end", 200
         ));
@@ -1891,8 +2033,8 @@ class CatalogRepositoryTest {
             "position", 0, "chash", chashStable, "chunk_index", 0,
             "line_start", 5, "line_end", 15, "char_start", 10, "char_end", 300
         );
-        repo.importChunk(etlTenant, docId, "knowledge__etl-chunk-idem__v1", chunk);
-        repo.importChunk(etlTenant, docId, "knowledge__etl-chunk-idem__v1", chunk); // exact same values — must be stable
+        importChunkSeeded(etlTenant, docId, "knowledge__etl-chunk-idem__v1", chunk);
+        importChunkSeeded(etlTenant, docId, "knowledge__etl-chunk-idem__v1", chunk); // exact same values — must be stable
 
         var manifest = repo.getManifest(etlTenant, docId);
         assertThat(manifest).hasSize(1);
@@ -2288,8 +2430,15 @@ class CatalogRepositoryTest {
 
         var meta = repo.collectionHealthMeta(chmTenant, chmColl);
 
-        // last_indexed = MAX("2026-01-01", "2026-06-01", "2026-03-15") = "2026-06-01..."
-        assertThat(meta.get("last_indexed")).isEqualTo("2026-06-01T12:00:00");
+        // last_indexed = MAX("2026-01-01", "2026-06-01", "2026-03-15") = "2026-06-01...".
+        // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal);
+        // the wire value is CatalogRepository.utcIso's micros+offset rendering
+        // (INDEXED_AT_FMT, the catalog convention — kept, not the coarser "...Z" shape, so a
+        // stamp written by the published client round-trips byte-identical). The seed value
+        // above has no microsecond/offset component, so it gains the accepted
+        // ".000000+00:00" residual on read (see utcIso's javadoc) rather than echoing verbatim
+        // the way the pre-migration TEXT column did.
+        assertThat(meta.get("last_indexed")).isEqualTo("2026-06-01T12:00:00.000000+00:00");
         // orphan_count = 2 (chm.1 and chm.3 have no incoming links)
         assertThat(meta.get("orphan_count")).isEqualTo(2L);
     }
@@ -2321,14 +2470,15 @@ class CatalogRepositoryTest {
             "indexed_at", "2026-06-07T10:00:00"
         ));
 
-        // TENANT_X must see only its own rows: last_indexed="2026-05-01T00:00:00", orphan_count=2
+        // TENANT_X must see only its own rows: last_indexed, orphan_count=2
+        // (nexus-cefa1.2: micros+offset — see collectionHealthMeta_exactValues comment above.)
         var metaX = repo.collectionHealthMeta(tenantX, sharedColl);
-        assertThat(metaX.get("last_indexed")).isEqualTo("2026-05-01T00:00:00");
+        assertThat(metaX.get("last_indexed")).isEqualTo("2026-05-01T00:00:00.000000+00:00");
         assertThat(metaX.get("orphan_count")).isEqualTo(2L);
 
-        // TENANT_Y must see only its own rows: last_indexed="2026-06-07T10:00:00", orphan_count=1
+        // TENANT_Y must see only its own rows: last_indexed, orphan_count=1
         var metaY = repo.collectionHealthMeta(tenantY, sharedColl);
-        assertThat(metaY.get("last_indexed")).isEqualTo("2026-06-07T10:00:00");
+        assertThat(metaY.get("last_indexed")).isEqualTo("2026-06-07T10:00:00.000000+00:00");
         assertThat(metaY.get("orphan_count")).isEqualTo(1L);
     }
 
@@ -2992,124 +3142,6 @@ class CatalogRepositoryTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // RDR-159 P-1b (nexus-avjdd): manifest backfill + orphans callables
-    // ══════════════════════════════════════════════════════════════════════════
-
-    // Dedicated tenant so counts are EXACT (== N): no other test writes here.
-    private static final String TENANT_MIG = "mig-tenant-iso";
-    private static final String MIG_COLLECTION_384 =
-        "knowledge__mig-owner__minilm-l6-v2-384__v1";
-
-    @Test @Order(200)
-    void migration_manifestBackfill_stamps_null_collection_then_orphans_detected() {
-        // A 384-model doc with ONE manifest row whose collection is NULL and
-        // NO chunk row (RDR-191: nexus.chunks, embedding_384). nexus-x6kdz: writeManifest now stamps
-        // collection AT WRITE TIME, so the legacy NULL shape backfill exists
-        // for must be seeded directly (the pre-fix writer's output).
-        repo.upsertDocument(TENANT_MIG, Map.of(
-            "tumbler", "mforph.1",
-            "title", "Orphan Source",
-            "content_type", "knowledge",
-            "corpus", "knowledge",
-            "physical_collection", MIG_COLLECTION_384
-        ));
-        repo.writeManifest(TENANT_MIG, "mforph.1", MIG_COLLECTION_384, List.of(
-            Map.<String, Object>of(
-                "position", 0, "chash", ch("f00d"),
-                "chunk_index", 0)
-        ));
-        // The write-time stamp is the new contract:
-        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
-            var rs = st.executeQuery(
-                "SELECT collection FROM nexus.catalog_document_chunks "
-                + "WHERE tenant_id = '" + TENANT_MIG + "' AND doc_id = 'mforph.1'");
-            rs.next();
-            assertThat(rs.getString(1))
-                .as("nexus-x6kdz: writer stamps collection at write time")
-                .isEqualTo(MIG_COLLECTION_384);
-
-            // nexus-7nrvr Judgment Call 1 (coordinator ruling 2026-08-12): this
-            // test's ORIGINAL premise — reset the row to "the legacy NULL shape
-            // the pre-nexus-x6kdz writer would have left, so manifestBackfill
-            // has real work" — is now categorically IMPOSSIBLE to construct.
-            // catalog_document_chunks.collection is NOT NULL with no sentinel
-            // and no DEFAULT (catalog-025-collection-not-null.xml), so this
-            // exact UPDATE is precisely the state manifestBackfill exists to
-            // repair, made unrepresentable. Converting the test to assert
-            // THAT — a live guard on the constraint — is more valuable than
-            // the dead scenario it replaces, which can no longer happen
-            // anywhere outside the one-time RDR-191 migration changeset.
-            assertThatThrownBy(() -> st.execute(
-                    "UPDATE nexus.catalog_document_chunks SET collection = NULL "
-                    + "WHERE tenant_id = '" + TENANT_MIG + "' AND doc_id = 'mforph.1'"))
-                .as("the legacy NULL-collection shape manifestBackfill was written to "
-                    + "repair must be UNREPRESENTABLE now, not merely absent from this fixture")
-                .isInstanceOf(PSQLException.class)
-                .hasMessageContaining("null value in column \"collection\"")
-                .hasMessageContaining("violates not-null constraint");
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-
-        // The rejected UPDATE means the row's collection is UNCHANGED — still
-        // real, never NULL. manifestBackfill must honestly report ZERO rows
-        // to repair: the population it exists to stamp can no longer exist,
-        // so "nothing to do" is the only truthful answer left for it to give.
-        assertThat(repo.manifestBackfill(TENANT_MIG))
-            .as("no NULL-collection row can exist any more — manifestBackfill must find none")
-            .isEqualTo(0L);
-
-        // Orphan detection is independent of the NULL-collection axis: this
-        // row's chash was never written to nexus.chunks (embedding_384), so it is still a
-        // genuine 384 orphan even though its collection was real (write-time
-        // stamped, RDR-191-compliant) the entire time — this coverage
-        // survives the premise change untouched.
-        var report = repo.manifestOrphanReport(TENANT_MIG, 384, 100);
-        assertThat(report.get("count")).isEqualTo(1L);
-        @SuppressWarnings("unchecked")
-        var orphans = (List<Map<String, Object>>) report.get("orphans");
-        assertThat(orphans).hasSize(1);
-        assertThat(orphans.get(0).get("doc_id")).isEqualTo("mforph.1");
-
-        // count-only gate form agrees with the report.
-        assertThat(repo.manifestOrphanCount(TENANT_MIG, 384)).isEqualTo(1L);
-    }
-
-    @Test @Order(201)
-    void migration_manifestOrphans_tenant_isolated_via_rls() {
-        // The orphan seeded for TENANT_MIG must be INVISIBLE to another tenant:
-        // SECURITY INVOKER + FORCE RLS scopes the function to the GUC tenant
-        // (refutes the 'cross-tenant scan' reading — the tenant arg is real).
-        var report = repo.manifestOrphanReport(TENANT_B, 384, 100);
-        assertThat(report.get("count")).isEqualTo(0L);
-        assertThat(repo.manifestOrphanCount(TENANT_B, 384)).isEqualTo(0L);
-    }
-
-    @Test @Order(202)
-    void migration_manifestOrphans_rejects_unsupported_dim_and_bad_limit() {
-        // dim + limit validated in the repo (clean error, not a PL/pgSQL RAISE)
-        org.assertj.core.api.Assertions.assertThatThrownBy(
-            () -> repo.manifestOrphanReport(TENANT_MIG, 999, 100)
-        ).isInstanceOf(IllegalArgumentException.class)
-         .hasMessageContaining("unsupported dim");
-        org.assertj.core.api.Assertions.assertThatThrownBy(
-            () -> repo.manifestOrphanCount(TENANT_MIG, 512)
-        ).isInstanceOf(IllegalArgumentException.class);
-        org.assertj.core.api.Assertions.assertThatThrownBy(
-            () -> repo.manifestOrphanReport(TENANT_MIG, 384, 0)
-        ).isInstanceOf(IllegalArgumentException.class)
-         .hasMessageContaining("limit");
-    }
-
-    @Test @Order(203)
-    void migration_manifestBackfill_is_idempotent() {
-        // Second backfill stamps nothing new — the function's WHERE collection
-        // IS NULL guard never re-stamps an already-stamped row.
-        long second = repo.manifestBackfill(TENANT_MIG);
-        assertThat(second).isEqualTo(0L);
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
     // SPAN / CHASH RESOLUTION  (nexus-njrcn.4)
     // ══════════════════════════════════════════════════════════════════════════
 
@@ -3193,7 +3225,7 @@ class CatalogRepositoryTest {
             "corpus",       "knowledge",
             "physical_collection", SPAN_COLLECTION
         ));
-        repo.writeManifest(SPAN_TENANT, SPAN_DOC_ID, SPAN_COLLECTION, List.of(
+        writeManifestSeeded(SPAN_TENANT, SPAN_DOC_ID, SPAN_COLLECTION, List.of(
             Map.<String, Object>of("position", 0, "chash", SPAN_CHASH, "chunk_index", 0)
         ));
 
@@ -3303,7 +3335,7 @@ class CatalogRepositoryTest {
             "corpus", "code",
             "physical_collection", "code__nexus__voyage-code-3__v1"
         ));
-        repo.writeManifest(TENANT_A, tumbler, "code__nexus__voyage-code-3__v1", List.of(
+        writeManifestSeeded(TENANT_A, tumbler, "code__nexus__voyage-code-3__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("np0"), "chunk_index", 0),
             Map.<String, Object>of("position", 1, "chash", ch("np1"), "chunk_index", 1),
             Map.<String, Object>of("position", 2, "chash", ch("np2"), "chunk_index", 2),
@@ -3436,7 +3468,7 @@ class CatalogRepositoryTest {
         String chashV2 = ch("bchV2");
         String chashV3 = ch("bchV3");
 
-        int n = repo.importChunksBatch(tenant, docId, "knowledge__etl-batch-chunk__v1", List.of(
+        int n = importChunksBatchSeeded(tenant, docId, "knowledge__etl-batch-chunk__v1", List.of(
             Map.of("position", 0, "chash", chashV1, "chunk_index", 0,
                    "line_start", 1, "line_end", 5, "char_start", 0, "char_end", 100),
             Map.of("position", 1, "chash", chashV2, "chunk_index", 1,
@@ -3453,7 +3485,7 @@ class CatalogRepositoryTest {
         assertThat(pos0.get().get("chash")).as("intra-batch dedupe: last wins").isEqualTo(chashV3);
 
         // Re-import position 0 with yet another chash — convergent DO UPDATE.
-        repo.importChunksBatch(tenant, docId, "knowledge__etl-batch-chunk__v1", List.of(
+        importChunksBatchSeeded(tenant, docId, "knowledge__etl-batch-chunk__v1", List.of(
             Map.of("position", 0, "chash", chashV2, "chunk_index", 0,
                    "line_start", 1, "line_end", 5, "char_start", 0, "char_end", 100)));
         var afterReimport = repo.getManifest(tenant, docId).stream()
@@ -3497,9 +3529,9 @@ class CatalogRepositoryTest {
 
     @Test @Order(226)
     void importChunksBatch_emptyAndNull_returnZero() {
-        assertThat(repo.importChunksBatch("etl-batch-chunk-tenant", "bch.1",
+        assertThat(importChunksBatchSeeded("etl-batch-chunk-tenant", "bch.1",
             "knowledge__etl-batch-chunk__v1", List.of())).isZero();
-        assertThat(repo.importChunksBatch("etl-batch-chunk-tenant", "bch.1",
+        assertThat(importChunksBatchSeeded("etl-batch-chunk-tenant", "bch.1",
             "knowledge__etl-batch-chunk__v1", null)).isZero();
     }
 
@@ -3516,7 +3548,7 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.2", "title", "WMM Doc2",
             "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
 
-        var result = repo.writeManifestMany(TENANT_A, List.of(
+        var result = writeManifestManySeeded(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "wmm.1", "rows", List.<Map<String, Object>>of(
                 Map.<String, Object>of("position", 0, "chash", ch("wmm1aa"), "chunk_index", 0),
                 Map.<String, Object>of("position", 1, "chash", ch("wmm1bb"), "chunk_index", 1))),
@@ -3548,7 +3580,7 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.3", "title", "WMM Doc3",
             "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
         // Seed 5 rows.
-        repo.writeManifestMany(TENANT_A, List.of(
+        writeManifestManySeeded(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "wmm.3", "rows", List.<Map<String, Object>>of(
                 Map.<String, Object>of("position", 0, "chash", ch("wmm3a"), "chunk_index", 0),
                 Map.<String, Object>of("position", 1, "chash", ch("wmm3b"), "chunk_index", 1),
@@ -3559,7 +3591,7 @@ class CatalogRepositoryTest {
         assertThat(repo.getDocument(TENANT_A, "wmm.3").get("chunk_count")).isEqualTo(5);
 
         // Replace with only 2 rows — REPLACE shrinks; exactly 2 remain, chunk_count 2.
-        repo.writeManifestMany(TENANT_A, List.of(
+        writeManifestManySeeded(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "wmm.3", "rows", List.<Map<String, Object>>of(
                 Map.<String, Object>of("position", 0, "chash", ch("wmm3new0"), "chunk_index", 0),
                 Map.<String, Object>of("position", 1, "chash", ch("wmm3new1"), "chunk_index", 1)))), coll);
@@ -3592,7 +3624,7 @@ class CatalogRepositoryTest {
         badRow.put("position", 0);
         badRow.put("chunk_index", 0); // chash intentionally absent -> null
 
-        var result = repo.writeManifestMany(TENANT_A, List.of(
+        var result = writeManifestManySeeded(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "wmm.good", "rows", List.<Map<String, Object>>of(
                 Map.<String, Object>of("position", 0, "chash", ch("wmmgood"), "chunk_index", 0))),
             Map.<String, Object>of("doc_id", "wmm.bad", "rows", List.<Map<String, Object>>of(badRow))), coll);
@@ -3611,7 +3643,7 @@ class CatalogRepositoryTest {
 
     @Test @Order(233)
     void writeManifestMany_emptyDocsList_noOp() {
-        var result = repo.writeManifestMany(TENANT_A, List.of(), "knowledge__wmm-empty__v1");
+        var result = writeManifestManySeeded(TENANT_A, List.of(), "knowledge__wmm-empty__v1");
         assertThat(result.get("docs")).isEqualTo(0);
         assertThat(result.get("rows")).isEqualTo(0);
         assertThat((List<?>) result.get("failed_doc_ids")).isEmpty();
@@ -3656,7 +3688,7 @@ class CatalogRepositoryTest {
         String prefix = "fhhwf-check";
         var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(
             regDoc("ok doc", "ok.py"), regDoc("bad doc", "bad.py")));
-        var result = repo.writeManifestMany(TENANT_A, List.of(
+        var result = writeManifestManySeeded(TENANT_A, List.of(
             Map.of("doc_id", tumblers.get(0), "rows", List.of(
                 Map.of("position", 0, "chash", "b".repeat(64)))),
             Map.of("doc_id", tumblers.get(1), "rows", List.of(

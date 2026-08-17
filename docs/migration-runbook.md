@@ -390,13 +390,35 @@ copy-not-move).
 
 ## 5. Cutover validation
 
+**RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: `nexus.manifest_backfill()`
+and `nexus.manifest_orphans(dim)` — the two stored functions this section's
+psql commands call — are DROPPED from every engine tag cut after
+`catalog-030-retire-manifest-verify.xml` shipped.** The manifest-chunk FK
+(`catalog_document_chunks -> nexus.chunks`, RDR-191 Phase 5, VALIDATEd)
+now REJECTS a dangling manifest row at write time, making the orphan class
+these functions detected unreachable by construction — there is no
+equivalent live check to substitute; the guarantee is now structural, not
+something a validation step needs to run.
+
+**This section remains valid ONLY within its documented historical
+context — §0 above.** These commands run against whatever engine tag was
+current when `conexus==6.18.1` (`LAST_MIGRATION_CAPABLE`) was cut, which
+predates catalog-030 by many releases; that pinned install's own engine
+still carries both functions and always will (an already-published engine
+binary is never retroactively edited). This section is NOT valid against
+any engine tag cut after catalog-030 — do not run these commands against a
+current/`develop`-tip engine, and do not expect them to exist once the
+6.18.1-pinned leg of the two-hop migration completes and the install
+returns to 7.x.
+
 After BOTH the catalog ETL and both vector legs are clean, run the
 manifest checks. These are direct SQL by design (P2.1 constraint, recorded
 on nexus-unp61): never `PgVectorRepository.fetchDocumentChunks`, which
 fails loud on partially-migrated documents.
 
 The checks are now **stored functions** in the `nexus` schema (catalog-004,
-RDR-156 P2, bead nexus-70r3c.9), callable directly via psql. Connection
+RDR-156 P2, bead nexus-70r3c.9), callable directly via psql — on the
+6.18.1-pinned engine tag ONLY, see above. Connection
 details come from `~/.config/nexus/pg_credentials`; the port is also shown
 by `nx daemon service status`.
 

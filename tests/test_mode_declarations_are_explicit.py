@@ -493,9 +493,18 @@ def test_mode_lint_exclude_files_all_resolve() -> None:
 _HOISTED_TOKEN_MARKER = "nexus-mode-lint"
 
 _HOISTED_TOKEN_SITES: frozenset[str] = frozenset({
-    # nexus-p5qk8 class fixture: class-level `_COLLECTION` used by every
-    # method via `self._COLLECTION`. Marker present since authoring.
-    "tests/test_catalog_manifest_read_api.py::TestManifestWritesRefreshIndexedAt",
+    # nexus-p5qk8's TestManifestWritesRefreshIndexedAt site RETIRED
+    # (nexus-dbzxb, RDR-191 Phase 5 Python collateral, 2026-08-14):
+    # fk_catalog_chunks_chunk needed the class's `_COLLECTION` to be a
+    # REAL, locally-writable T3 target (the test substrate's engine has
+    # no NX_VOYAGE_API_KEY), so it was repointed from
+    # "rdr__x__voyage-context-3__v1" to "rdr__x__bge-base-en-v15-768__v1"
+    # -- a local model. The class no longer hoists any cloud-mode token
+    # at all (`self._COLLECTION` carries no voyage-* literal anymore),
+    # so it is no longer a site `_scan_offenders` needs a registry entry
+    # to see around; re-audited per this registry's own "deliberately
+    # listed, not grandfathered" contract, not blind-bumped forward.
+    #
     # nexus-71gw2 / nexus-j862l ghost-doc rebase: module-level helper
     # `_ghost_write_collection()` called directly by four test bodies.
     "tests/db/test_c2_manifest_null_collection_engine.py::_ghost_write_collection",

@@ -24,10 +24,10 @@ def _lint():
 
 _MUTATING = [
     "INSERT INTO nexus.memory (id) VALUES (1)",
-    "UPDATE nexus.chunks_768 SET chash = 'x'",
+    "UPDATE nexus.chunks SET chash = 'x'",
     "DELETE FROM nexus.documents WHERE 1=1",
-    "DROP TABLE nexus.chunks_768",
-    "ALTER TABLE nexus.chunks_768 DROP CONSTRAINT chk_chash_len",
+    "DROP TABLE nexus.chunks",
+    "ALTER TABLE nexus.chunks DROP CONSTRAINT chk_chash_len",
     "TRUNCATE nexus.topic_assignments",
     "CREATE TABLE nexus.evil (id int)",
     "GRANT ALL ON nexus.memory TO PUBLIC",
@@ -61,10 +61,10 @@ _READ_ONLY = [
     "SELECT table_name FROM information_schema.tables WHERE table_schema = 'nexus'",
     "SELECT relname, reltuples FROM pg_catalog.pg_class",
     # counts over store tables are allowed — aggregate-only select list:
-    "SELECT count(*) FROM nexus.chunks_768 WHERE length(chash) <> 32",
-    "SELECT COUNT(*), MIN(length(chash)), MAX(length(chash)) FROM nexus.chunks_768",
+    "SELECT count(*) FROM nexus.chunks WHERE length(chash) <> 32",
+    "SELECT COUNT(*), MIN(length(chash)), MAX(length(chash)) FROM nexus.chunks",
     # CTE composed purely of SELECTs:
-    "WITH bad AS (SELECT count(*) AS n FROM nexus.chunks_768 WHERE length(chash) <> 32) SELECT n FROM bad",
+    "WITH bad AS (SELECT count(*) AS n FROM nexus.chunks WHERE length(chash) <> 32) SELECT n FROM bad",
 ]
 
 
@@ -79,8 +79,8 @@ def test_read_only_metadata_statement_passes(stmt):
 _CONTENT_LEAKS = [
     # non-aggregate select over a store table pulls row content:
     "SELECT content FROM nexus.memory",
-    "SELECT * FROM nexus.chunks_768",
-    "SELECT chash, document FROM nexus.chunks_768 LIMIT 5",
+    "SELECT * FROM nexus.chunks",
+    "SELECT chash, document FROM nexus.chunks LIMIT 5",
     "SELECT title, content FROM t1.scratch",
 ]
 
@@ -96,9 +96,9 @@ def test_store_content_reference_fails(stmt):
 
 _UNQUALIFIED_LEAKS = [
     # No schema prefix — must NOT slip past just because it lacks 'nexus.'
-    "SELECT content FROM chunks_768",
+    "SELECT content FROM chunks",
     "SELECT * FROM memory",
-    "SELECT chash, document FROM chunks_1024 LIMIT 5",
+    "SELECT chash, document FROM chunks LIMIT 5",
     # Unknown/unqualified target with a non-aggregate projection:
     "SELECT title FROM some_future_table",
 ]
@@ -113,12 +113,12 @@ def test_unqualified_unknown_target_fails_closed(stmt):
 
 _UNQUALIFIED_OK = [
     # Aggregate-only over an unqualified target is still fine (count-safe).
-    "SELECT count(*) FROM chunks_768 WHERE length(chash) <> 32",
+    "SELECT count(*) FROM chunks WHERE length(chash) <> 32",
     # Bare catalog objects stay unrestricted.
     "SELECT conname FROM pg_constraint WHERE conname LIKE 'chk_%'",
     "SELECT relname FROM pg_class",
     # CTE name (unqualified) whose body is aggregate-only.
-    "WITH bad AS (SELECT count(*) AS n FROM chunks_768) SELECT n FROM bad",
+    "WITH bad AS (SELECT count(*) AS n FROM chunks) SELECT n FROM bad",
 ]
 
 
@@ -134,7 +134,7 @@ def test_assert_batch_raises_on_first_violation():
     lint = _lint()
     with pytest.raises(lint.DiagnosticSqlViolation) as exc:
         lint.assert_read_only_diagnostics([
-            "SELECT count(*) FROM nexus.chunks_768",
+            "SELECT count(*) FROM nexus.chunks",
             "DELETE FROM nexus.memory",
         ])
     assert "DELETE FROM nexus.memory" in str(exc.value)
@@ -168,7 +168,7 @@ def test_emitter_passes_a_clean_diagnostic_playbook(monkeypatch):
     def _clean_topic(store_state):
         pb = pb_mod._chash_poison(store_state)
         object.__setattr__(pb, "diagnostic_sql",
-                           ("SELECT count(*) FROM nexus.chunks_768 WHERE length(chash) <> 32",))
+                           ("SELECT count(*) FROM nexus.chunks WHERE length(chash) <> 32",))
         return pb
 
     monkeypatch.setitem(pb_mod._TOPICS, "clean-diag", _clean_topic)
@@ -183,7 +183,7 @@ def test_diagnostic_sql_renders_in_tool_return(monkeypatch):
     from nexus.remediation import StoreState, emit_playbook
     from nexus.remediation import playbook as pb_mod
 
-    stmt = "SELECT count(*) FROM nexus.chunks_768 WHERE length(chash) <> 32"
+    stmt = "SELECT count(*) FROM nexus.chunks WHERE length(chash) <> 32"
 
     def _clean_topic(store_state):
         pb = pb_mod._chash_poison(store_state)

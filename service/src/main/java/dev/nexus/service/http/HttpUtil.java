@@ -309,6 +309,38 @@ public final class HttpUtil {
         return null;
     }
 
+    /**
+     * Reject a caller-supplied JSON-string field that fails to parse. Shared by every
+     * handler writing a jsonb-typed column (schema type-hygiene arc, epic nexus-cefa1)
+     * so the same malformed body 400s at the handler instead of reaching the repository
+     * and aborting mid-write as a class-22 SQLSTATE 422.
+     *
+     * <p>Originated as a private method in {@code AspectHandler} (nexus-cefa1.4, P3) for
+     * {@code extras}/{@code salient_sentences}; extracted here when {@code PlanHandler}
+     * (nexus-cefa1.5, P4) needed the identical check for {@code plan_json}/{@code
+     * default_bindings} — ONE shared helper, not a second copy.
+     *
+     * <p>A blank/null value is fine (either the column's own {@code NULLIF(...,'')
+     * ::jsonb} USING clause maps it to SQL NULL, or the caller's own required-field
+     * check already rejected a blank required value); a non-blank value that fails
+     * {@code ObjectMapper#readTree} is not valid JSON and throws here.
+     *
+     * @param mapper the calling handler's Jackson {@code ObjectMapper}
+     * @param field  the field name, for the error message
+     * @param value  the caller-supplied value (only a non-blank {@code String} is checked)
+     * @throws IllegalArgumentException if value is a non-blank String that is not valid JSON
+     */
+    public static void rejectMalformedJson(com.fasterxml.jackson.databind.ObjectMapper mapper,
+                                            String field, Object value) {
+        if (!(value instanceof String s) || s.isBlank()) return;
+        try {
+            mapper.readTree(s);
+        } catch (Exception e) {
+            throw new IllegalArgumentException(
+                "field '" + field + "' must be valid JSON: " + e.getMessage());
+        }
+    }
+
     /** PostgreSQL SQLSTATE for insufficient_privilege — what an RLS refusal raises. */
     private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
 

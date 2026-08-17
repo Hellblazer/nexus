@@ -55,6 +55,29 @@ def _no_op(*args, **kwargs):
     pass
 
 
+def _seed_for_store_put(content: str, collection: str = "knowledge") -> None:
+    """Pre-seed a REAL ``nexus.chunks`` row for what MCP ``store_put`` is
+    about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral).
+
+    ``local_t3``/``inject_local_t3`` inject a FAKE in-memory T3 client
+    (this file's whole design — see the module docstring), but the
+    manifest write always goes through the REAL engine catalog (autouse
+    ``_pin_t2_substrate``). ``fk_catalog_chunks_chunk`` now requires the
+    manifest's chash to have a matching REAL ``nexus.chunks`` row, which
+    the fake T3 client can never provide. Computes the exact
+    ``(collection, chash)`` production will use via the same derivation
+    production code uses, then seeds a real stub chunk.
+    """
+    import hashlib
+
+    from nexus.corpus import t3_collection_name
+    from tests._catalog_fixture_ops import seed_manifest_chunks
+
+    col_name = t3_collection_name(collection)
+    chash = hashlib.sha256(content.encode()).hexdigest()
+    seed_manifest_chunks(col_name, [chash])
+
+
 @pytest.fixture
 def inject_local_t3(local_t3: T3Database):
     """Inject ``local_t3`` into the mcp_infra ``_t3_instance`` singleton
@@ -86,6 +109,9 @@ def test_mcp_store_put_writes_catalog_doc_id_into_t3_chunk_metadata(
     from nexus.mcp.core import store_put
     local_t3 = inject_local_t3
 
+    _seed_for_store_put(
+        "# MCP finding: nexus-mcp-doc-id\n\nSubagents need catalog backref.",
+    )
     # Patch the process-local HookRegistry methods so the test focuses on
     # the doc_id stamping contract rather than running real hook chains.
     with patch("nexus.mcp.core._get_t3", return_value=local_t3), \
@@ -165,6 +191,7 @@ def test_mcp_store_put_forwards_catalog_tumbler_as_fire_document_doc_id(
     local_t3 = inject_local_t3
 
     content = "# Paper: BFT consensus\n\nIntroduces a new approach to consensus."
+    _seed_for_store_put(content)
     captured: dict[str, str] = {}
 
     def _capture_fire_document(
@@ -306,6 +333,7 @@ def test_mcp_store_put_ghost_reconciliation_and_manifest_linkage(
     )
     assert cat.resolve(ghost).chunk_count == 0, "fixture must be a ghost"
 
+    _seed_for_store_put("# Real content for the ghost\n\nFinally has a body.")
     with patch("nexus.mcp.core._get_t3", return_value=local_t3), \
          patch("nexus.mcp.core._hooks.fire_document", side_effect=_no_op), \
          patch("nexus.mcp.core._catalog_auto_link", return_value=0):
@@ -350,6 +378,7 @@ def test_mcp_store_put_doc_id_absent_when_catalog_uninitialized(
 
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "no-catalog"))
 
+    _seed_for_store_put("# MCP finding without catalog\n\nNo-catalog path test.")
     with patch("nexus.mcp.core._get_t3", return_value=local_t3), \
          patch("nexus.mcp.core._hooks.fire_single", side_effect=_no_op), \
          patch("nexus.mcp.core._hooks.fire_batch", side_effect=_no_op), \

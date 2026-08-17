@@ -364,13 +364,27 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   catalog-025-0 nexus-71gw2
                 //   vectors-004-1 nexus-o8dil.12
                 //   taxonomy-007-1 nexus-jv3ue
+                //   catalog-029-1 nexus-o8dil.29
+                //   fk-004-0-reconcile-precount nexus-iq0qr
+                //   fk-004-1-reconcile nexus-o8dil.49
+                //   catalog-032-1 nexus-tk070.p1
+                //   legacy-001-1 nexus-lgdel.l1
+                //   legacy-001-2 nexus-lgdel.l1
+                //   taxonomy-010-1 nexus-tk070.p3b
+                //   taxonomy-011-1 nexus-tk070.p3c
+                //   taxonomy-012-2 nexus-tk070.p3d
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
                     // FK parents (fk-002/fk-003's NOT VALID FKs, applied by the
                     // old leg, enforce on new writes).
                     for (String[] tc : new String[][]{
-                        {"t1", "code__x"}, {"t1", "code__y"}, {"t2", "code__z"}}) {
+                        {"t1", "code__x"}, {"t1", "code__y"}, {"t2", "code__z"},
+                        // nexus-tk070.p3b: two collections DEDICATED to taxonomy-010-1's
+                        // ambiguous-arm seed below, distinct from code__x/code__y so its
+                        // fresh chunks_384/768 rows don't perturb vectors-004-1's own
+                        // per-collection row-count assertions further down.
+                        {"t1", "code__p3ba"}, {"t1", "code__p3bb"}}) {
                         registerCollection(su, tc[0], tc[1]);
                     }
                     // Legacy 64-char chash_index rows — Catalog013RlsReplayTest's
@@ -463,6 +477,103 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     seedTaxonomyCentroidLegacyContent(su, 768, "t1", "code__y", 901L, "centroid-768");
                     seedTaxonomyCentroidLegacyContent(su, 1024, "t2", "code__z", 902L, "centroid-1024");
 
+                    // catalog-032-1 (nexus-tk070.p1, RDR-194 § D2): catalog_links carries
+                    // NO FK on the old leg's tree, so both rows below write freely.
+                    // KEEP arm -- a real edge between two documents that both exist and
+                    // survive the whole hop (1.1.100/1.1.101 are already seeded above for
+                    // catalog-014-0/catalog-025-0; catalog-025-0's dangling-row cleanup
+                    // only removes 1.1.101's MANIFEST row, never its catalog_documents
+                    // row, so it remains a valid link target throughout).
+                    seedLink(su, "t1", "1.1.100", "1.1.101", "cites");
+                    // DELETE arm -- an edge whose to_tumbler was NEVER registered as a
+                    // document, modeling the real aged-fleet population (277 rows,
+                    // nexus-ysrwi, 2026-07-25) catalog-032-1's anti-join must clean up.
+                    seedLink(su, "t1", "1.1.100", "1.1.999-ghost", "cites");
+
+                    // legacy-001-1/legacy-001-2 (nexus-lgdel.l1, THE DELETE): a
+                    // legacy-width (non-64-hex) chunk_id row per table -- the DELETE
+                    // arm -- plus a canonical-width row -- the KEEP arm, proving the
+                    // shape-agnostic `!~ '^[0-9a-f]{64}$'` predicate is selective, not
+                    // a blanket wipe. "e" x32 / "9" x32 are legacy-width by construction
+                    // (32 hex chars, never matches ^[0-9a-f]{64}$); "d" x64 / "f" x64 are
+                    // canonical-width (64 hex chars, all valid hex digits) -- same
+                    // repeat-char-literal style this file already uses for chash_index's
+                    // seed values above.
+                    seedFrecencyRow(su, "t1", "e".repeat(32));
+                    seedFrecencyRow(su, "t1", "d".repeat(64));
+                    seedRelevanceLogRow(su, "t1", "9".repeat(32), "legacy-001-seed-query");
+                    seedRelevanceLogRow(su, "t1", "f".repeat(64), "legacy-001-seed-query");
+
+                    // taxonomy-010-1 (nexus-tk070.p3b, RDR-194 § D1 steps b/c/d):
+                    // topic_assignments.source_collection remediation. THREE
+                    // source_collection-NULL assignments, one per DELETE arm,
+                    // plus a FOURTH, non-NULL-source_collection assignment
+                    // added 2026-08-17 (critical fix round, nexus-i3k3e -- the
+                    // cc4 wedge class), under a shared topic (PK is (tenant_id, doc_id, topic_id),
+                    // so sharing topic_id across distinct doc_id values is
+                    // fine). The positive (b) UNIQUE-RESOLUTION backfill arm is
+                    // NOT exercisable in THIS old-tag hop: chunks_384/768/1024
+                    // (the ONLY pre-hop route into nexus.chunks -- it does not
+                    // exist until vectors-004-1 copies these tables, mid-hop)
+                    // carry a `length(chash) = 32` CHECK inherited from the OLD
+                    // leg's tree (catalog-002-hygiene), so every chash this
+                    // fixture CAN seed is legacy-width (16 bytes post-decode)
+                    // and therefore EXCLUDED from backfill candidacy by
+                    // taxonomy-010-1's own `doc_id ~ '^[0-9a-f]{64}$'` shape
+                    // guard -- exactly the LEGACY-SHAPE-COINCIDENTAL-MATCH arm
+                    // below, not a KEEP arm. The KEEP arm is proven separately,
+                    // free of that legacy-schema constraint, by
+                    // Taxonomy010BackfillDirectIntegrationTest (fresh 64-hex
+                    // content seeded straight into nexus.chunks post-HEAD).
+                    long p3bTopicId = seedTopic(su, "t1", "code__x", "rehearsal-p3b-topic");
+                    // (c) AMBIGUOUS arm: the SAME (legacy-width) chash exists
+                    // under TWO distinct collections (code__p3ba via
+                    // chunks_384, code__p3bb via chunks_768 -- dedicated
+                    // collections registered above so these fresh rows don't
+                    // perturb vectors-004-1's own per-collection row-count
+                    // assertions on code__x/code__y further down) -- must be
+                    // DELETED, unattributable. The ambiguous-DELETE predicate
+                    // does not gate on doc_id shape, so 32-hex content
+                    // exercises it exactly as well as 64-hex would.
+                    seedChunk384LegacyContent(su, "t1", "code__p3ba", "b".repeat(32), "p3b ambiguous chunk a");
+                    seedChunkDimLegacyContent(su, 768, "t1", "code__p3bb", "b".repeat(32), "p3b ambiguous chunk b");
+                    seedTopicAssignment(su, "t1", "b".repeat(32), p3bTopicId);
+                    // (c) UNRESOLVABLE (anti-join) arm: doc_id is canonical
+                    // 64-hex SHAPE but has NO backing chunk anywhere -- must be
+                    // DELETED, proving the anti-join arm fires independently of
+                    // the shape predicate (this doc_id passes the shape check).
+                    seedTopicAssignment(su, "t1", "c".repeat(64), p3bTopicId);
+                    // (c) LEGACY-SHAPE-COINCIDENTAL-MATCH arm (the cc4/HAL
+                    // no-wedge proof): doc_id = "1"x32, the SAME legacy 32-hex
+                    // chash already seeded above for the j862l chunks_384
+                    // fixture (tenant t1, collection code__x) -- an anti-join
+                    // alone WOULD find a match here (encode(chash,'hex') round-
+                    // trips to "1"x32), but taxonomy-010-1's backfill excludes
+                    // it on shape ALONE (never reaches the anti-join), and the
+                    // explicit doc_id !~ '^[0-9a-f]{64}$' arm of the
+                    // UNRESOLVABLE delete catches it regardless of the
+                    // (irrelevant here) anti-join outcome. This is the exact
+                    // shape cc4's 5,896-row cloud population takes (T2
+                    // nexus/rdr194-cc4-census-2026-08-16): a non-conformant
+                    // doc_id that happens to text-match real chunk content
+                    // must still be treated as unresolvable garbage, never
+                    // silently backfilled or left behind.
+                    seedTopicAssignment(su, "t1", "1".repeat(32), p3bTopicId);
+                    // (c) UNRESOLVABLE (shape-invalid, NON-NULL
+                    // source_collection) arm — the cc4/nexus-i3k3e cloud
+                    // wedge fixture (critical fix round, 2026-08-17). The
+                    // cc4 census's exact 1,262-row class: a legacy 32-hex
+                    // (non-canonical-shape) doc_id whose source_collection
+                    // was ALREADY set by the pre-P3a projection/
+                    // cross-collection writer branch. Before the
+                    // 2026-08-17 fix, this row's non-NULL source_collection
+                    // would have made it SURVIVE taxonomy-010-1's
+                    // NULL-scoped delete untouched, then deterministically
+                    // RAISE EXCEPTION on taxonomy-011-1's guard a few
+                    // changesets later in this SAME migration walk — this
+                    // fixture proves the full walk now survives that row.
+                    seedTopicAssignment(su, "t1", "8".repeat(32), p3bTopicId, "code__x");
+
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("superuser ground truth after seeding").isEqualTo(5);
                     assertThat(count(su,
@@ -487,6 +598,22 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     assertThat(count(admin, "SELECT count(*) FROM nexus.catalog_documents"))
                         .as("FORCE RLS must hide the seeded document from the non-BYPASSRLS owner "
                             + "— the join side of catalog-014-0's stamp, the both-tables lesson")
+                        .isEqualTo(0);
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.catalog_links"))
+                        .as("FORCE RLS must hide both seeded catalog_links rows from the "
+                            + "non-BYPASSRLS owner — catalog-032-1's own toggle-wrap target")
+                        .isEqualTo(0);
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.frecency"))
+                        .as("FORCE RLS must hide both seeded frecency rows from the "
+                            + "non-BYPASSRLS owner — legacy-001-1's own toggle-wrap target")
+                        .isEqualTo(0);
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.relevance_log"))
+                        .as("FORCE RLS must hide both seeded relevance_log rows from the "
+                            + "non-BYPASSRLS owner — legacy-001-2's own toggle-wrap target")
+                        .isEqualTo(0);
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.topic_assignments"))
+                        .as("FORCE RLS must hide all five seeded topic_assignments rows from "
+                            + "the non-BYPASSRLS owner — taxonomy-010-1's own toggle-wrap target")
                         .isEqualTo(0);
                 }
 
@@ -678,6 +805,362 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     assertThat(changesetExecType(su, "catalog-013-2", "nexus-e0hd2"))
                         .as("with all five constraints present, catalog-013-2 must EXECUTE for real")
                         .isEqualTo("EXECUTED");
+
+                    // catalog-029-1 leg (nexus-o8dil.29, RDR-191 Phase 5, seed-coverage
+                    // lint follow-up): fk_catalog_chunks_chunk's own NO FORCE/FORCE
+                    // toggle around the anti-join DELETE (catalog-029-1) is the SAME
+                    // toggle-wrap shape catalog-013-1b/catalog-014-0/catalog-025-0
+                    // already prove work under the real NOBYPASSRLS hop -- this
+                    // reuses the 1.1.100 KEEP-arm fixture already seeded above for
+                    // catalog-014-0/catalog-025-0 rather than adding a fresh dangling
+                    // row of its own: a manifest row that would be dangling by
+                    // catalog-029-1's (tenant, collection, chash) anti-join is, by
+                    // construction, ALSO dangling under catalog-025-0's structurally
+                    // identical anti-join (against the pre-unify chunks_384/768/1024
+                    // tables that vectors-004-1 copies verbatim into nexus.chunks a
+                    // few changesets later in this SAME hop) -- so any row that would
+                    // exercise catalog-029-1's DELETE arm is necessarily removed by
+                    // catalog-025-0 first, and a fresh dangling seed here would be
+                    // dead by the time catalog-029-1 runs. The KEEP-arm proof is the
+                    // one this hop CAN carry end to end: if the toggle silently failed
+                    // to turn FORCE off (the nexus-1wjmq/nexus-php10 failure class),
+                    // the anti-join would see zero rows in nexus.chunks and WRONGLY
+                    // delete the two content-backed 1.1.100 rows too (over-delete),
+                    // and/or catalog-029-2's VALIDATE would fail against whatever
+                    // survived -- either failure mode is caught below.
+                    assertThat(constraintExists(su, "fk_catalog_chunks_chunk"))
+                        .as("fk_catalog_chunks_chunk must exist at HEAD (catalog-029-0)")
+                        .isTrue();
+                    assertThat(constraintValidated(su, "fk_catalog_chunks_chunk"))
+                        .as("fk_catalog_chunks_chunk must be VALIDATED at HEAD -- catalog-029-2's "
+                            + "VALIDATE only succeeds if catalog-029-1's anti-join DELETE actually "
+                            + "ran (toggle correctly off) and left no dangling row behind")
+                        .isTrue();
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.catalog_document_chunks "
+                        + "WHERE tenant_id = 't1' AND doc_id = '1.1.100'"))
+                        .as("the two content-backed 1.1.100 manifest rows must still exist at HEAD -- "
+                            + "a broken catalog-029-1 toggle (FORCE never turned off) would see zero "
+                            + "nexus.chunks rows and wrongly delete these two as false-dangling")
+                        .isEqualTo(2);
+
+                    // fk-004-0-reconcile-precount leg (nexus-iq0qr, RDR-191 Phase 5
+                    // follow-up, seed-coverage lint follow-up): this READ-ONLY audit
+                    // changeset runs BEFORE fk-004-1-reconcile in file order, in this
+                    // SAME walk, and RAISE NOTICEs the anti-join pre-count of
+                    // unregistered (tenant_id, collection) pairs fk-004-1-reconcile is
+                    // about to insert. By the identical structural reasoning as the
+                    // fk-004-1-reconcile leg immediately below (fk-002, already applied
+                    // at OLD_TAG, enforces collection registration on every per-dim
+                    // chunk write from before this hop even starts, and vectors-004-1
+                    // only COPIES already-FK-compliant rows into nexus.chunks) this
+                    // pre-count is ALWAYS zero in this hop too -- an
+                    // observation-count assertion on it would prove nothing (a broken
+                    // toggle would ALSO see zero, indistinguishably -- the exact reason
+                    // this pre-count changeset's own header rejects a POST-count re-run:
+                    // that shape can NEVER observe a nonzero count on ANY install,
+                    // structurally, not merely in this hop's fixture). What IS
+                    // observable and load-bearing here: (a) the changeset EXECUTES
+                    // cleanly under its own RLS toggle; (b) that toggle correctly
+                    // RESTORES FORCE ROW LEVEL SECURITY on both nexus.chunks and
+                    // nexus.catalog_collections before it ends, proven the same way as
+                    // the catalog-029-1 leg above proves it for its own two tables.
+                    assertThat(changesetExecType(su, "fk-004-0-reconcile-precount", "nexus-iq0qr"))
+                        .as("fk-004-0-reconcile-precount must EXECUTE at HEAD")
+                        .isEqualTo("EXECUTED");
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.chunks'::regclass, 'nexus.catalog_collections'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables "
+                            + "fk-004-0-reconcile-precount toggled")
+                        .isEqualTo(2);
+
+                    // fk-004-1-reconcile leg (nexus-o8dil.49, RDR-191 Phase 5, seed-coverage
+                    // lint follow-up): fk-002 (already applied at OLD_TAG -- the "FK parents"
+                    // registerCollection calls above exist BECAUSE of this) enforces
+                    // collection registration on every chunks_384/768/1024 write from before
+                    // this hop even starts, and vectors-004-1 only COPIES already-FK-compliant
+                    // rows into nexus.chunks. So by construction NO row this hop can produce
+                    // ever has an unregistered collection -- fk-004-1-reconcile's additive
+                    // INSERT...SELECT...ON CONFLICT DO NOTHING therefore always registers ZERO
+                    // new rows here (there is nothing left for it to find), the honest
+                    // structural fact fk-004-chunks-collection-registry.xml's own file header
+                    // and this bead's T2 write-back both record -- an observation-count
+                    // assertion on it would prove nothing (a broken toggle would ALSO see zero
+                    // inserts, indistinguishably). What IS observable and load-bearing: (a) the
+                    // chunks_collection_fk VALIDATE (fk-004-2) actually succeeds at HEAD, which
+                    // requires fk-004-1-reconcile to have run without throwing under its own
+                    // RLS toggle; (b) that toggle correctly RESTORES FORCE ROW LEVEL SECURITY on
+                    // both nexus.chunks and nexus.catalog_collections before it ends, rather
+                    // than leaving either NO FORCE (the nexus-1wjmq/nexus-php10 failure class) --
+                    // proven the same way as the catalog-029-1 leg above proves it for its own
+                    // two tables.
+                    assertThat(constraintExists(su, "chunks_collection_fk"))
+                        .as("chunks_collection_fk must exist at HEAD (fk-004-0)")
+                        .isTrue();
+                    assertThat(constraintValidated(su, "chunks_collection_fk"))
+                        .as("chunks_collection_fk must be VALIDATED at HEAD -- fk-004-2's VALIDATE "
+                            + "only succeeds if fk-004-1-reconcile ran to completion under its own "
+                            + "RLS toggle without erroring")
+                        .isTrue();
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.chunks'::regclass, 'nexus.catalog_collections'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables fk-004-1-reconcile toggled")
+                        .isEqualTo(2);
+
+                    // catalog-032-1 leg (nexus-tk070.p1, RDR-194 § D2, seed-coverage lint
+                    // follow-up): the anti-join DELETE removes the dangling seed row
+                    // (from=1.1.100, to=1.1.999-ghost — never a registered document) and
+                    // leaves the KEEP-arm row (from=1.1.100, to=1.1.101, both real
+                    // documents) intact. A broken toggle (FORCE never turned off) would
+                    // see zero nexus.catalog_documents rows and WRONGLY delete BOTH seeded
+                    // links as false-dangling — either failure mode is caught below,
+                    // mirroring the catalog-029-1 leg's KEEP/DELETE dual-arm shape.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.catalog_links "
+                        + "WHERE tenant_id = 't1' AND to_tumbler = '1.1.999-ghost'"))
+                        .as("catalog-032-1's anti-join DELETE must actually remove the "
+                            + "never-registered-endpoint link under FORCE-RLS, proving the "
+                            + "DELETE arm fires, not just the KEEP arm")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.catalog_links "
+                        + "WHERE tenant_id = 't1' AND from_tumbler = '1.1.100' AND to_tumbler = '1.1.101'"))
+                        .as("the real edge between two live documents must survive catalog-032-1's "
+                            + "remediation — a broken toggle would wrongly delete this too")
+                        .isEqualTo(1);
+                    assertThat(constraintExists(su, "fk_catalog_links_from_document"))
+                        .as("fk_catalog_links_from_document must exist at HEAD (catalog-032-0)")
+                        .isTrue();
+                    assertThat(constraintExists(su, "fk_catalog_links_to_document"))
+                        .as("fk_catalog_links_to_document must exist at HEAD (catalog-032-0)")
+                        .isTrue();
+                    assertThat(constraintValidated(su, "fk_catalog_links_from_document"))
+                        .as("fk_catalog_links_from_document must be VALIDATED at HEAD — catalog-032-2's "
+                            + "VALIDATE only succeeds if the anti-join DELETE actually ran and left no "
+                            + "dangling from_tumbler behind")
+                        .isTrue();
+                    assertThat(constraintValidated(su, "fk_catalog_links_to_document"))
+                        .as("fk_catalog_links_to_document must be VALIDATED at HEAD — catalog-032-3's "
+                            + "VALIDATE only succeeds if the anti-join DELETE actually ran and left no "
+                            + "dangling to_tumbler behind")
+                        .isTrue();
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.catalog_links'::regclass, 'nexus.catalog_documents'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables catalog-032-1 toggled")
+                        .isEqualTo(2);
+
+                    // legacy-001-1/legacy-001-2 leg (nexus-lgdel.l1, THE DELETE,
+                    // seed-coverage lint follow-up): the shape-agnostic DELETE removes
+                    // the legacy-width seed row from EACH table and leaves the
+                    // canonical-width row intact — the DELETE/KEEP dual-arm proof,
+                    // mirroring catalog-032-1's own shape immediately above. A CHECK
+                    // constraint (added in the SAME migration walk, legacy-001-3) then
+                    // makes the deleted shape unwritable going forward; VALIDATE-free
+                    // (a plain CHECK, not a VALIDATE CONSTRAINT), so no separate
+                    // constraint-existence assertion is needed the way catalog-032's
+                    // FK VALIDATEs required one — the row-level effect below is the
+                    // whole proof.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.frecency WHERE tenant_id = 't1' AND chunk_id = '"
+                        + "e".repeat(32) + "'"))
+                        .as("legacy-001-1's shape-agnostic DELETE must actually remove the "
+                            + "legacy-width frecency row under FORCE-RLS, proving the DELETE "
+                            + "arm fires, not just the KEEP arm")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.frecency WHERE tenant_id = 't1' AND chunk_id = '"
+                        + "d".repeat(64) + "'"))
+                        .as("the canonical-width frecency row must survive legacy-001-1's "
+                            + "remediation — a shape-agnostic-gone-wrong DELETE would wrongly "
+                            + "remove this too")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.relevance_log WHERE tenant_id = 't1' AND chunk_id = '"
+                        + "9".repeat(32) + "'"))
+                        .as("legacy-001-2's shape-agnostic DELETE must actually remove the "
+                            + "legacy-width relevance_log row under FORCE-RLS, proving the "
+                            + "DELETE arm fires, not just the KEEP arm")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.relevance_log WHERE tenant_id = 't1' AND chunk_id = '"
+                        + "f".repeat(64) + "'"))
+                        .as("the canonical-width relevance_log row must survive legacy-001-2's "
+                            + "remediation — a shape-agnostic-gone-wrong DELETE would wrongly "
+                            + "remove this too")
+                        .isEqualTo(1);
+
+                    // taxonomy-010-1 leg (nexus-tk070.p3b, RDR-194 § D1 steps b/c/d,
+                    // seed-coverage lint follow-up): all three DELETE arms,
+                    // effect-asserted -- every seeded row is gone (none of the
+                    // four text-match a UNIQUE collection: the ambiguous arm
+                    // matches two, the unresolvable arm matches none, the
+                    // legacy-shape arm is excluded by shape before matching is
+                    // even attempted, and the fourth -- non-NULL source_collection,
+                    // shape-invalid, the cc4/nexus-i3k3e wedge fixture added
+                    // 2026-08-17 -- is excluded by shape UNCONDITIONALLY on
+                    // source_collection). GET DIAGNOSTICS ROW_COUNT drives each
+                    // RAISE NOTICE 1:1 from the same DELETE statements these
+                    // row-state assertions observe, so proving the row set is
+                    // exactly this shape is equivalent evidence to the NOTICE
+                    // counts themselves (JDBC has no listener attached to
+                    // Liquibase's own internal migration connection to capture
+                    // the NOTICE text directly). The positive (b) backfill arm
+                    // is proven separately by
+                    // Taxonomy010BackfillDirectIntegrationTest -- see the SEED
+                    // block's own comment for why this old-tag-hop fixture
+                    // structurally cannot construct that arm.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_assignments "
+                        + "WHERE tenant_id = 't1' AND source_collection IS NULL"))
+                        .as("no source_collection-NULL row may survive taxonomy-010-1 -- SET NOT "
+                            + "NULL would otherwise have failed the whole migration walk")
+                        .isEqualTo(0);
+                    // RDR-194 P3c (nexus-tk070.p3c): doc_id is bytea at HEAD now (this
+                    // leg runs the FULL hop, which includes taxonomy-011-1's ALTER) --
+                    // these three comparisons use encode(doc_id,'hex') rather than a
+                    // bare string literal. A raw `doc_id = '<64-char-string>'` against a
+                    // bytea column is NOT a type error (Postgres accepts it as legacy
+                    // "escape format" input, silently reinterpreting the hex-looking
+                    // characters as their own raw ASCII bytes) -- it would compile and
+                    // ALWAYS evaluate false regardless of the row's real content, making
+                    // an isEqualTo(0) assertion vacuously true even if the targeted
+                    // DELETE had a bug and left the row behind. encode(doc_id,'hex')
+                    // keeps the comparison on the TEXT side, so it fails loud if a row
+                    // this arm was supposed to delete unexpectedly survives.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_assignments "
+                        + "WHERE tenant_id = 't1' AND encode(doc_id, 'hex') = '" + "b".repeat(32) + "'"))
+                        .as("the ambiguous arm's row must be DELETED by taxonomy-010-1 -- its chash "
+                            + "resolves to two distinct collections and cannot be attributed")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_assignments "
+                        + "WHERE tenant_id = 't1' AND encode(doc_id, 'hex') = '" + "c".repeat(64) + "'"))
+                        .as("the unresolvable (anti-join) arm's row must be DELETED -- its doc_id is "
+                            + "canonical 64-hex SHAPE but no nexus.chunks row matches it at all, "
+                            + "proving the anti-join arm fires independently of the shape predicate")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_assignments "
+                        + "WHERE tenant_id = 't1' AND encode(doc_id, 'hex') = '" + "1".repeat(32) + "'"))
+                        .as("the legacy-shape-coincidental-match arm's row must be DELETED despite "
+                            + "a real chunk existing at the same text-matched chash -- the "
+                            + "doc_id !~ '^[0-9a-f]{64}$' shape predicate must win over a coincidental "
+                            + "anti-join match, the exact cc4/HAL no-wedge proof")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_assignments "
+                        + "WHERE tenant_id = 't1' AND encode(doc_id, 'hex') = '" + "8".repeat(32) + "'"))
+                        .as("RDR-194 critical fix round (nexus-i3k3e, 2026-08-17): the "
+                            + "non-NULL-source_collection shape-invalid row (the cc4 census's "
+                            + "1,262-row wedge class) must be DELETED DESPITE its already-set "
+                            + "source_collection -- direct proof the fixed UNRESOLVABLE delete's "
+                            + "shape branch is unconditional on source_collection. Before the fix "
+                            + "this row would have survived taxonomy-010-1 and this test would "
+                            + "never have reached this assertion at all -- taxonomy-011-1's guard, "
+                            + "a few changesets later in this SAME migration walk, would have "
+                            + "RAISE EXCEPTIONed the whole walk first")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.topic_assignments'::regclass, 'nexus.chunks'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-010-1 toggled")
+                        .isEqualTo(2);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM information_schema.columns "
+                        + "WHERE table_schema = 'nexus' AND table_name = 'topic_assignments' "
+                        + "AND column_name = 'source_collection' AND is_nullable = 'NO'"))
+                        .as("source_collection must be SET NOT NULL at HEAD -- taxonomy-010-1's "
+                            + "final DDL step, only reachable if all three DML steps ahead of it "
+                            + "left no NULL row behind")
+                        .isEqualTo(1);
+
+                    // taxonomy-011-1 leg (nexus-tk070.p3c, RDR-194 § D1 step (e), seed-
+                    // coverage lint follow-up). This changeset carries NO INSERT/UPDATE/
+                    // DELETE -- its own guard is a read-only SELECT COUNT(*) wrapped in
+                    // the SAME NO FORCE/FORCE toggle shape as fk-004-0-reconcile-precount
+                    // (nexus-iq0qr, see that entry's own comment in the Python
+                    // DECLARED_SEED_COVERAGE for the identical structural reasoning),
+                    // which trips this lint's rule (b) regardless of carrying no literal
+                    // DML. No NEW seed data is needed: taxonomy-010-1's own seeded rows
+                    // (asserted immediately above) are EXACTLY the population the guard
+                    // walks, and by construction every surviving row is canonical 64-hex
+                    // (the three DELETE arms just proven above removed everything that
+                    // was not) -- so the guard is expected to find zero bad rows and let
+                    // the ALTER proceed, which is what "this test reaches this line at
+                    // all" already proves (a RAISE EXCEPTION here would abort the whole
+                    // migration walk before Liquibase's UPDATE SUMMARY, well before this
+                    // JDBC connection could run a single assertion). The two checks below
+                    // are the POSITIVE, independently-verifiable proof the ALTER itself
+                    // (not just the guard) actually ran, matching fk-004-0-reconcile-
+                    // precount's own "changeset EXECUTES" bar.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM information_schema.columns "
+                        + "WHERE table_schema = 'nexus' AND table_name = 'topic_assignments' "
+                        + "AND column_name = 'doc_id' AND udt_name = 'bytea'"))
+                        .as("topic_assignments.doc_id must be bytea at HEAD -- taxonomy-011-1's "
+                            + "ALTER COLUMN TYPE, only reachable if the guard above found zero "
+                            + "non-canonical rows")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity "
+                        + "AND oid = 'nexus.topic_assignments'::regclass"))
+                        .as("FORCE ROW LEVEL SECURITY restored on nexus.topic_assignments after "
+                            + "taxonomy-011-1's own NO FORCE/FORCE toggle around its guard")
+                        .isEqualTo(1);
+
+                    // taxonomy-012-2 leg (nexus-tk070.p3d, RDR-194 § D1, seed-coverage
+                    // lint follow-up): the composite-FK anti-join DELETE on
+                    // nexus.topic_assignments (tenant_id, source_collection, doc_id) ->
+                    // nexus.chunks (tenant_id, collection, chash), the SAME NO FORCE/
+                    // FORCE toggle-wrap shape as catalog-013-1b/catalog-014-0/
+                    // catalog-025-0/catalog-029-1/catalog-032-1/legacy-001-1/
+                    // legacy-001-2. No NEW seed data is needed: taxonomy-010-1's own
+                    // seed above is EXACTLY the population that would exercise this
+                    // arm, and it is ALREADY DRAINED by the time this changeset runs --
+                    // all four seeded rows were removed by taxonomy-010-1's own three
+                    // DELETE arms (asserted above: the ambiguous, unresolvable, and
+                    // both shape-invalid rows are all isEqualTo(0)), so
+                    // nexus.topic_assignments for tenant t1 is already empty. This
+                    // mirrors catalog-029-1's own reasoning verbatim (its own entry in
+                    // the Python DECLARED_SEED_COVERAGE): "any row that would exercise
+                    // the DELETE arm is, by construction, ALREADY dangling under a
+                    // structurally identical anti-join earlier in this same hop" --
+                    // here that earlier anti-join is taxonomy-010-1's own
+                    // source_collection-IS-NULL-scoped unresolvable arm, which (once
+                    // combined with the two shape-unconditional arms) leaves nothing a
+                    // later, source_collection-agnostic anti-join could still catch.
+                    // Effect-asserted the same minimal way as fk-004-0-reconcile-
+                    // precount / taxonomy-011-1: the changeset EXECUTES (a dangling row
+                    // surviving into VALIDATE would instead abort the whole migration
+                    // walk with SQLSTATE 23503, well before this JDBC connection could
+                    // run a single assertion), the population it would have deleted is
+                    // still (independently) zero, the FK it makes possible to VALIDATE
+                    // exists and IS validated at HEAD, and FORCE ROW LEVEL SECURITY is
+                    // restored on both tables its own toggle-wrap covers.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_assignments WHERE tenant_id = 't1'"))
+                        .as("taxonomy-012-2's own anti-join population is empty -- every row "
+                            + "this fixture seeded was already removed by taxonomy-010-1's three "
+                            + "DELETE arms above, so taxonomy-012-2 by construction deletes nothing "
+                            + "new in this hop")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'topic_assignments_chunk_fk' AND convalidated"))
+                        .as("topic_assignments_chunk_fk must exist and be VALIDATED at HEAD -- "
+                            + "only reachable if taxonomy-012-1's NOT VALID add, taxonomy-012-2's "
+                            + "remediation, and taxonomy-012-3's VALIDATE all ran in this same walk")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.topic_assignments'::regclass, 'nexus.chunks'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-012-2's own "
+                            + "toggle-wrap covers")
+                        .isEqualTo(2);
                 }
             }
         } finally {
@@ -1040,6 +1523,118 @@ class SchemaUpgradeRehearsalIntegrationTest {
             ps.setString(2, docId);
             ps.setInt(3, position);
             ps.setString(4, chash);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A catalog_links row, written pre-catalog-032 (no FK exists on the old
+     * leg's tree) so {@code toTumbler} need not resolve to a
+     * catalog_documents row — the shape catalog-032-1's anti-join remediation
+     * (nexus-tk070.p1, RDR-194 § D2) must clean up on a real aged fleet box.
+     */
+    private static void seedLink(Connection c, String tenant, String fromTumbler,
+                                 String toTumbler, String linkType) throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by) "
+            + "VALUES (?, ?, ?, ?, 'rehearsal-seed')")) {
+            ps.setString(1, tenant);
+            ps.setString(2, fromTumbler);
+            ps.setString(3, toTumbler);
+            ps.setString(4, linkType);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A legacy- or canonical-width {@code nexus.frecency} row (nexus-lgdel.l1,
+     * legacy-001-1). {@code chunkId} is passed through verbatim — the caller
+     * chooses legacy-width (a 32-hex string) or canonical (64-hex) to exercise
+     * either the DELETE or the KEEP arm of legacy-001-1's anti-shape DELETE.
+     */
+    private static void seedFrecencyRow(Connection c, String tenant, String chunkId) throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.frecency (tenant_id, chunk_id) VALUES (?, ?)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, chunkId);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A legacy- or canonical-width {@code nexus.relevance_log} row
+     * (nexus-lgdel.l1, legacy-001-2) — same DELETE/KEEP-arm choice as
+     * {@link #seedFrecencyRow}.
+     */
+    private static void seedRelevanceLogRow(Connection c, String tenant, String chunkId, String query)
+            throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, action, timestamp) "
+            + "VALUES (?, ?, ?, 'view', now())")) {
+            ps.setString(1, tenant);
+            ps.setString(2, query);
+            ps.setString(3, chunkId);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A {@code nexus.topics} row (nexus-tk070.p3b, taxonomy-010-1's FK parent
+     * -- {@code topic_assignments.topic_id} REFERENCES {@code topics(id)} ON
+     * DELETE CASCADE). Returns the generated {@code id} for
+     * {@link #seedTopicAssignment} to reference.
+     */
+    private static long seedTopic(Connection c, String tenant, String collection, String label)
+            throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
+            + "VALUES (?, ?, ?, now()) RETURNING id")) {
+            ps.setString(1, tenant);
+            ps.setString(2, label);
+            ps.setString(3, collection);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    /**
+     * A {@code nexus.topic_assignments} row with {@code source_collection}
+     * deliberately NULL (nexus-tk070.p3b, taxonomy-010-1's remediation input
+     * shape) -- the pre-P3a writer state every arm of taxonomy-010-1's
+     * backfill/delete resolves.
+     */
+    private static void seedTopicAssignment(Connection c, String tenant, String docId, long topicId)
+            throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by) "
+            + "VALUES (?, ?, ?, 'rehearsal-seed')")) {
+            ps.setString(1, tenant);
+            ps.setString(2, docId);
+            ps.setLong(3, topicId);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A {@code nexus.topic_assignments} row with an EXPLICIT, non-NULL
+     * {@code source_collection} (RDR-194 critical fix round, 2026-08-17,
+     * nexus-i3k3e) -- the cc4 census's 1,262-row wedge class. See
+     * {@link Taxonomy010BackfillDirectIntegrationTest}'s identical overload
+     * for the full derivation.
+     */
+    private static void seedTopicAssignment(
+            Connection c, String tenant, String docId, long topicId, String sourceCollection)
+            throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.topic_assignments "
+            + "(tenant_id, doc_id, topic_id, assigned_by, source_collection) "
+            + "VALUES (?, ?, ?, 'rehearsal-seed', ?)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, docId);
+            ps.setLong(3, topicId);
+            ps.setString(4, sourceCollection);
             ps.executeUpdate();
         }
     }

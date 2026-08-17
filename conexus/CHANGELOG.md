@@ -4,6 +4,17 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.8.0] - 2026-08-17
+
+- T2 context injection (SessionStart/SubagentStart) repointed from the dead
+  SQLite `memory.db` to the engine's T2 HTTP endpoints, with a loud two-arm
+  freshness assert (unreachable / stale), per-namespace isolation, a
+  5-namespace cap and an 8s scan budget. The frozen-injection era ends with
+  this pin advance.
+- MCP `store_put` gains `agent`/`session` attribution; agent and skill
+  guidance passes `agent="<role>"` so contradiction detection can fire on
+  MCP-written content.
+
 ## [7.7.0] - 2026-08-14
 
 Plugin version aligned with conexus 7.7.0. One plugin-side change goes live

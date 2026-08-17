@@ -192,7 +192,38 @@ public final class AspectHandler implements HttpHandler {
                 out.put(field, MAPPER.writeValueAsString(v));
             }
         }
+        // nexus-cefa1.4: extras/salient_sentences now write into jsonb columns
+        // (aspects-003-type-hygiene.xml). serializeAspectBody is the ONE call site
+        // shared by both write paths that reach these two fields (/upsert and
+        // /import — see handleUpsert/handleImportAspect below), so validating here
+        // covers both with one check. A malformed JSON string 400s HERE rather than
+        // reaching the repository and aborting mid-transaction as a class-22
+        // SQLSTATE — the decision recorded on the bead ("400 at the handler, not a
+        // 422 from the SQLSTATE branch"). Any write path that bypasses this method
+        // (e.g. a direct repository call from a test, or the StagingPromoteOps
+        // staged-row promote, which has its own fail-loud cast at promote time)
+        // still falls back to the existing class-22 SQLSTATE 422 branch
+        // (HttpUtil.sendTypedDbError) as documented there — this handler check is
+        // the primary signal, not the only one.
+        for (String field : List.of("extras", "salient_sentences")) {
+            rejectMalformedJson(field, out.get(field));
+        }
         return out;
+    }
+
+    /**
+     * nexus-cefa1.4: {@code extras} and {@code salient_sentences} write into jsonb
+     * columns now. A blank/null value is fine (the changeset's own {@code
+     * NULLIF(...,'')::jsonb} USING clause maps it to SQL NULL); a non-blank value
+     * that fails {@code Jackson#readTree} is not valid JSON and 400s here.
+     *
+     * <p>nexus-cefa1.5: delegates to the shared {@link HttpUtil#rejectMalformedJson}
+     * (extracted here when {@code PlanHandler} needed the identical check for
+     * {@code plan_json}/{@code default_bindings}) rather than each handler carrying
+     * its own copy.
+     */
+    private static void rejectMalformedJson(String field, Object value) {
+        HttpUtil.rejectMalformedJson(MAPPER, field, value);
     }
 
     private void handleUpsert(HttpExchange ex, String tenant, String method) throws IOException {
@@ -318,7 +349,16 @@ public final class AspectHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         if (body.containsKey("rows")) {  // RDR-176 P3: GUC-once batch
             List<Map<String, Object>> rows = new ArrayList<>();
-            for (Map<String, Object> r : castRows(body.get("rows"))) rows.add(serializeAspectBody(r));
+            int i = 0;
+            for (Map<String, Object> r : castRows(body.get("rows"))) {
+                try {
+                    rows.add(serializeAspectBody(r));
+                } catch (IllegalArgumentException e) {
+                    // nexus-cefa1.4 (critique): a bulk caller needs the failing row.
+                    throw new IllegalArgumentException("rows[" + i + "]: " + e.getMessage(), e);
+                }
+                i++;
+            }
             HttpUtil.send(ex, 200, "{\"imported\":" + repo.importAspectsBatch(tenant, rows) + "}");
             return;
         }

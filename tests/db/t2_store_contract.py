@@ -92,7 +92,6 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
     },
     'chash_index': {
         'count_for_collection': ['collection'],
-        'delete_collection': ['collection'],
         'delete_stale': ['chash', 'collection'],
         'distinct_collections': [],
         'is_empty': [],
@@ -418,7 +417,6 @@ T2_STORE_RETURNS: dict[str, dict[str, str]] = {
     },
     'chash_index': {
         'count_for_collection': 'int',
-        'delete_collection': 'int',
         'delete_stale': 'int',
         'distinct_collections': 'set[str]',
         'is_empty': 'bool',

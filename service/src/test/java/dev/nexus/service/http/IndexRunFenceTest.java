@@ -57,12 +57,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>Hermetic: Testcontainers PG, full master changelog, the real
  * {@code nexus_svc} role (mirrors {@link ManifestVerifyTest} — the grants
- * this bead depends on, including catalog-020-5's EXECUTE on
- * {@code manifest_verify}/{@code manifest_verify_all}, are already wired to
- * that role by the master changelog rather than a hand-rolled test role).
- * Drives {@link CatalogHandler#handle} and {@link VectorHandler#handle}
- * directly via a capturing {@link HttpExchange} (same pattern as
- * {@code CatalogHandlerUpdateManyDeleteManyTest}).
+ * this bead depends on, including catalog-020-5's EXECUTE on {@code
+ * manifest_verify}, are already wired to that role by the master changelog
+ * rather than a hand-rolled test role). Drives {@link CatalogHandler#handle}
+ * and {@link VectorHandler#handle} directly via a capturing {@link
+ * HttpExchange} (same pattern as {@code CatalogHandlerUpdateManyDeleteManyTest}).
+ *
+ * <p>RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: {@code
+ * manifest_verify_all()} is DROPPED (catalog-030) and its GET
+ * /manifest/verify_all route retired; the two HTTP-layer route smoke tests
+ * for it and for the also-retired GET /manifest/verify route were removed
+ * from this file. {@code nexus.manifest_verify(text)} itself is KEPT —
+ * {@code completeIndexRun}, exercised throughout this file, depends on it.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class IndexRunFenceTest {
@@ -229,7 +235,7 @@ class IndexRunFenceTest {
         String docId = "irf-complete-missing-doc-1";
         registerDoc(docId);
         // Manifest row with NO matching nexus.chunks row -> missing = 1.
-        repo.writeManifest(TENANT, docId, COLLECTION, List.of(
+        writeManifestBypassingFk(docId, List.of(
             Map.<String, Object>of("position", 0, "chash", chash("irf-missing-chunk"), "chunk_index", 0)));
 
         beginViaHttp(docId, "h", "run-missing-1");
@@ -263,7 +269,7 @@ class IndexRunFenceTest {
         registerDoc(docId);
         String missingChash = chash("irf-missing-logged-chunk");
         // Manifest row with NO matching nexus.chunks row -> missing = 1.
-        repo.writeManifest(TENANT, docId, COLLECTION, List.of(
+        writeManifestBypassingFk(docId, List.of(
             Map.<String, Object>of("position", 0, "chash", missingChash, "chunk_index", 0)));
 
         beginViaHttp(docId, "h", "run-missing-logged-1");
@@ -512,34 +518,13 @@ class IndexRunFenceTest {
         }
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // manifest/verify + manifest/verify_all route wiring (logic already covered
-    // by ManifestVerifyTest — this is the HTTP-layer smoke test)
-    // ══════════════════════════════════════════════════════════════════════════
-
-    @Test
-    void manifestVerify_httpRoute_returnsCounts() throws Exception {
-        String docId = "irf-verify-route-doc-1";
-        registerDoc(docId);
-        writeOneRowManifestWithMatchingChunk(docId, "irf-verify-route-chash");
-
-        var ex = getCatalog("/v1/catalog/manifest/verify?doc_id=" + docId);
-        handleCatalog(ex);
-        assertThat(ex.status).as(ex.bodyString()).isEqualTo(200);
-        assertThat(ex.bodyString()).contains("\"referenced\":1").contains("\"missing\":0");
-    }
-
-    @Test
-    void manifestVerifyAll_httpRoute_returnsPerCollectionAggregates() throws Exception {
-        String docId = "irf-verifyall-route-doc-1";
-        registerDoc(docId);
-        writeOneRowManifestWithMatchingChunk(docId, "irf-verifyall-route-chash");
-
-        var ex = getCatalog("/v1/catalog/manifest/verify_all");
-        handleCatalog(ex);
-        assertThat(ex.status).as(ex.bodyString()).isEqualTo(200);
-        assertThat(ex.bodyString()).contains("\"collection\"");
-    }
+    // RDR-191 Phase 6 (nexus-o8dil.33): manifestVerify_httpRoute_returnsCounts
+    // and manifestVerifyAll_httpRoute_returnsPerCollectionAggregates (the
+    // GET /manifest/verify and GET /manifest/verify_all route smoke tests)
+    // were DELETED here — both routes are retired; the manifest-chunk FK
+    // makes the dangling state they diagnosed unreachable. completeIndexRun's
+    // own use of nexus.manifest_verify(text), exercised throughout this
+    // file's other tests, is untouched.
 
     // ══════════════════════════════════════════════════════════════════════════
     // write_manifest_many's optional "complete" map
@@ -571,11 +556,28 @@ class IndexRunFenceTest {
         registerDoc(docId);
         String chash = chash("irf-wmm-refused-chash");
         // NO matching nexus.chunks row inserted -> missing = 1.
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
+        // a matching nexus.chunks row -- this test's whole point is a manifest
+        // row with a missing chunk, so bypass the FK locally (same
+        // drop/insert/re-add-NOT-VALID idiom used elsewhere in this file).
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+        }
 
         Map<String, Object> doc = Map.of(
             "doc_id", docId,
             "rows", List.of(Map.of("position", 0, "chash", chash, "chunk_index", 0)));
         var result = repo.writeManifestMany(TENANT, List.of(doc), COLLECTION, Map.of(docId, "wmm-refused-hash"));
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks "
+                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+        }
         assertThat(result.get("docs"))
             .as("the manifest write itself must still succeed — over-work, never under-work")
             .isEqualTo(1);
@@ -622,12 +624,36 @@ class IndexRunFenceTest {
         String docId = "irf-wmm-http-refused-doc-1";
         registerDoc(docId);
         String chash = chash("irf-wmm-http-refused-chash");
-        // Deliberately NO matching nexus.chunks row -> missing = 1 -> refused.
+        // NO matching nexus.chunks row -> missing = 1 -> refused.
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
+        // a matching nexus.chunks row -- this test's whole point (like its
+        // repo-level sibling writeManifestMany_completeMap_refusedWhenMissing_
+        // reportsCompleteRefused above) is a manifest row with a missing chunk,
+        // which the production write path can no longer create by itself.
+        // Bypass the FK locally for the duration of the HTTP call (same
+        // drop/insert/re-add-NOT-VALID idiom the repo-level sibling uses) so
+        // this test keeps proving the SAME refusal behavior is reachable over
+        // the wire, not just at the repo layer.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+        }
 
         var ex = postCatalog("/v1/catalog/manifest/write_many",
             "{\"collection\":\"" + COLLECTION + "\",\"docs\":[{\"doc_id\":\"" + docId + "\",\"rows\":[{\"position\":0,\"chash\":\""
                 + chash + "\",\"chunk_index\":0}]}],\"complete\":{\"" + docId + "\":\"http-refused-hash\"}}");
         handleCatalog(ex);
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks "
+                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+        }
+
         assertThat(ex.status).as(ex.bodyString()).isEqualTo(200);
         assertThat(ex.bodyString())
             .as("the manifest write succeeds (200) even though the completion stamp is refused")
@@ -790,12 +816,41 @@ class IndexRunFenceTest {
             "physical_collection", COLLECTION));
     }
 
+    /**
+     * RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+     * matching nexus.chunks row for every catalog_document_chunks insert. The
+     * two call sites below deliberately test manifest_verify's "missing" chash
+     * detection, whose premise (a manifest row with no matching chunk) the FK
+     * now makes unrepresentable via the normal write path. Bypasses the FK
+     * LOCALLY around the one writeManifest call: drop the constraint, write,
+     * then re-add it NOT VALID (catalog-029-0's exact shape) so it is live
+     * again (unvalidated) for every subsequent statement in this container.
+     */
+    private void writeManifestBypassingFk(String docId, List<Map<String, Object>> rows) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+        }
+        repo.writeManifest(TENANT, docId, COLLECTION, rows);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks "
+                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+        }
+    }
+
     /** Writes a single manifest row for docId AND a matching nexus.chunks row (present, not missing). */
     private String writeOneRowManifestWithMatchingChunk(String docId, String chashSeed) {
         String chash = chash(chashSeed);
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // chunk row to land BEFORE the manifest row (previously order-independent).
+        insertChunk1024(chash);
         repo.writeManifest(TENANT, docId, COLLECTION, List.of(
             Map.<String, Object>of("position", 0, "chash", chash, "chunk_index", 0)));
-        insertChunk1024(chash);
         return chash;
     }
 

@@ -236,8 +236,8 @@ def test_raise_identity_drop_exception_default_wording_matches_index_repo_cmd():
     assert msg == (
         "one or more documents had manifest write failures, "
         "identity drops, or completion refusals this run — see "
-        "the WARNING lines above. Run 'nx catalog manifest-verify "
-        "<tumbler>' to inspect a specific document, or re-index "
+        "the WARNING lines above. Run 'nx catalog show <tumbler>' to "
+        "inspect a specific document's index_state, or re-index "
         "with --force."
     )
 
@@ -249,8 +249,8 @@ def test_raise_identity_drop_exception_record_wording_matches_dt_index_cmd():
     assert msg == (
         "one or more records had manifest write failures, "
         "identity drops, or completion refusals this run — see "
-        "the WARNING lines above. Run 'nx catalog manifest-verify "
-        "<tumbler>' to inspect a specific record, or re-index "
+        "the WARNING lines above. Run 'nx catalog show <tumbler>' to "
+        "inspect a specific record's index_state, or re-index "
         "with --force."
     )
 
@@ -263,7 +263,10 @@ def test_raise_identity_drop_exception_record_wording_matches_dt_index_cmd():
 # (superseded_sweep_skipped) to the same fail-loud gate made that
 # inaccurate for the new class: a run tripping ONLY the sweep skip would
 # exit non-zero pointing an operator at manifest-verify for a document
-# whose manifest write never failed.
+# whose manifest write never failed. (RDR-191 Phase 6, nexus-o8dil.33:
+# `nx catalog manifest-verify` itself is now retired; the write-class
+# remedy points at `nx catalog show <tumbler>` instead — the per-cause
+# accuracy this section describes is unaffected by that rewording.)
 
 
 def test_raise_identity_drop_exception_sweep_skip_only_names_the_right_cause_and_remedy():
@@ -294,7 +297,7 @@ def test_raise_identity_drop_exception_write_failure_only_does_not_mention_sweep
     msg = str(exc_info.value)
 
     assert "manifest write failures" in msg
-    assert "manifest-verify" in msg
+    assert "nx catalog show" in msg
     assert "t3 gc" not in msg
     assert "sweep" not in msg
 
@@ -311,7 +314,7 @@ def test_raise_identity_drop_exception_mixed_cause_names_both_remedies():
 
     assert "manifest write failures" in msg
     assert "a superseded-chunk sweep skip" in msg
-    assert "manifest-verify" in msg
+    assert "nx catalog show" in msg
     assert "t3 gc -c COLLECTION" in msg
 
 

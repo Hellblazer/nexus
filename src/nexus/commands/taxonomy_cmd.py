@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -880,6 +881,13 @@ def review_cmd(
 # ── Manual operations (RDR-070, nexus-c3w) ──────────────────────────────────
 
 
+# RDR-194 D1 (nexus-tk070.p3a): topic_assignments.doc_id is a chunk chash
+# end to end (RDR-180 Item6/Item6a). The CLI boundary validates the shape
+# so a malformed DOC_ID gets a named error here instead of an opaque
+# Postgres decode failure once D1's bytea conversion lands (P3c).
+_DOC_ID_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
 @taxonomy.command("assign")
 @click.argument("doc_id")
 @click.argument("topic_label")
@@ -887,15 +895,40 @@ def review_cmd(
 def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
     """Assign a document to a topic by label."""
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
+    if not _DOC_ID_HEX_RE.match(doc_id):
+        raise click.UsageError(
+            f"DOC_ID {doc_id!r} is not a valid chunk chash: expected 64 lowercase "
+            "hex characters (RDR-194 D1). topic_assignments.doc_id is a chunk "
+            "chash, not a free-form identifier; pass the chash reported by "
+            "`nx search` / `nx query`, not a title or tumbler."
+        )
     with _T2Database(_default_db_path()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
             return
+        # RDR-194 D1/P3b (nexus-11pe7): source_collection resolved from the
+        # RESOLVED topic's own row, not the (possibly empty/unscoped)
+        # --collection flag -- --collection is a lookup FILTER, not
+        # guaranteed to be supplied (default ""), whereas the topic's own
+        # "collection" field is always authoritative and matches the same
+        # own-pass identity assign_from_chashes_<dim>'s centroid branch and
+        # TaxonomyRepository.assignOne's non-projection branch rely on.
+        topic_row = db.taxonomy.get_topic_by_id(topic_id)
+        source_collection = topic_row.get("collection") if topic_row else None
+        if not source_collection:
+            raise click.UsageError(
+                f"Resolved topic id={topic_id} for label '{topic_label}' has no "
+                "collection on record — cannot assign without a source_collection "
+                "(RDR-194 D1). This indicates a corrupt topics row, not a normal "
+                "user error."
+            )
         # RDR-151 Phase 3 (nexus-uzay8): route via daemon.
         _did = doc_id
         _tid = topic_id
-        t2_index_write(lambda db, _d=_did, _t=_tid: db.taxonomy.assign_topic(_d, _t, assigned_by="manual"))
+        _sc = source_collection
+        t2_index_write(lambda db, _d=_did, _t=_tid, _s=_sc: db.taxonomy.assign_topic(
+            _d, _t, assigned_by="manual", source_collection=_s))
         click.echo(f"Assigned '{doc_id}' to topic '{topic_label}' (id={topic_id}).")
 
 

@@ -131,7 +131,7 @@ class TestDtIndexSummaryTruthful:
         # silently double-counted with no stated overlap.
         assert "1 of the 1 indexed above had completion refused" in result.output
         assert "NOT fully indexed" in result.output
-        assert "manifest-verify" in result.output
+        assert "nx catalog show" in result.output
 
     def test_refused_subset_wording_is_not_hardcoded_to_one_of_one(self, runner, monkeypatch):
         """Pins the N/M relationship for a non-trivial ratio — a test that
@@ -183,7 +183,7 @@ class TestDtIndexSummaryTruthful:
         )
         assert result.exit_code != 0, result.output
         assert "manifest write failed" in result.output
-        assert "manifest-verify" in result.output
+        assert "nx catalog show" in result.output
 
     def test_manifest_identity_drop_alone_exits_nonzero(self, runner, monkeypatch):
         """nexus-tp8yk D2b: an identity DROP (GH #1397 class — a batch
@@ -430,7 +430,7 @@ class TestIndexRepoSummaryTruthful:
         # already counted among the "1 indexed" (chunks genuinely landed;
         # not restructured) — must state the overlap explicitly.
         assert "1 of the 1 indexed above had completion refused" in result.output
-        assert "manifest-verify" in result.output
+        assert "nx catalog show" in result.output
 
     def test_complete_refusals_subset_wording_is_not_hardcoded_to_one_of_one(
         self, runner, repo_dir, mock_reg, monkeypatch,
@@ -475,7 +475,7 @@ class TestIndexRepoSummaryTruthful:
         )
         assert result.exit_code != 0, result.output
         assert "manifest write failed" in result.output
-        assert "manifest-verify" in result.output
+        assert "nx catalog show" in result.output
 
     def test_manifest_identity_drop_alone_exits_nonzero(
         self, runner, repo_dir, mock_reg, monkeypatch,

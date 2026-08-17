@@ -1,11 +1,11 @@
 ---
 name: release
-description: Use when cutting a release, bumping version, tagging, or publishing to PyPI. Enforces the full release checklist from CLAUDE.md § Release Process. Also surfaces as /conexus:release.
+description: Use when cutting a release, bumping version, tagging, or publishing to PyPI. Enforces the full release checklist from AGENTS.md § Cutting a release. Also surfaces as /conexus:release.
 ---
 
 # Release Checklist
 
-Follow every step in order. Do not skip or reorder. Authority: CLAUDE.md § Release Process (`docs/contributing.md#release-process` is the long form).
+Follow every step in order. Do not skip or reorder. Authority: AGENTS.md § Cutting a release (`docs/contributing.md#release-process` is the long form; T2 [22511] gap 11 — this line previously cited a "CLAUDE.md § Release Process" heading that does not exist in CLAUDE.md/AGENTS.md, only in `docs/contributing.md`).
 
 ## Steps
 
@@ -42,6 +42,27 @@ git log --oneline <last-engine-tag>..HEAD -- service/        # cloud-relevant dr
 3. The engine cut itself: full `service/` suite green on the tagged commit (confirm the `service/` tree equals a green-`service-ci` commit — the Java CI is advisory and does not block auto-merge, so verify), then the **human** pushes `engine-service-vX.Y.Z`.
 
 This gate exists because the engine silently drifted 22 `service/` commits / 4 days behind the cloud (2026-06-26); the PyPI checklist had no step that would have caught it.
+
+### 0b. Remediation-commit gate (open beads whose fix must ride this release)
+
+nexus-fix9t: nexus-3n7pr's remediation was sequenced "after the client release ships" — 7.7.0 shipped, but the commit its plan depended on (5f59ede70, nexus-gvmbo / nexus-b91tv) was NOT an ancestor of v7.7.0, so the installed `nx` at 7.7.0 carried the pre-fix DESTRUCTIVE `manifest_backfill` module the plan assumed was already safe. Nothing checked this at release time.
+
+```bash
+uv run python scripts/check_remediation_commits_ride_release.py --release-ref vX.Y.Z
+```
+
+Run it against the **release tag** (or the branch tip about to be tagged). Non-zero exit = **STOP** — a red line names the bead and the missing commit; the remedy is one of:
+
+- re-sequence the named bead to run after a release that DOES carry the commit, or
+- include the commit in this release before cutting it.
+
+**Bead-authoring convention this gate reads**: when sequencing a remediation bead behind a specific commit ("do not run this until commit X has shipped"), write a line anywhere in the bead's description or a comment:
+
+```
+requires-commit: <sha>
+```
+
+one sha per line (7-40 hex chars). This is the structured form the gate scans for first. It also nets two free-text phrasings ("requires commit `<sha>`", "must include `<sha>`") for beads written before this convention existed, but the marker is the reliable form — prefer it. Closed beads are never scanned.
 
 ### 1. Run unit + integration suite
 
@@ -144,7 +165,7 @@ Update any drift before bumping version. Doc audit is what catches "we changed t
 CI enforces parity. Missing any one of these fails the marketplace-version-matches-pyproject test, the marketplace-source-ref-matches-pyproject test, or the mcpb-manifest-version-matches-pyproject test.
 
 - `pyproject.toml`: `version = "X.Y.Z"` (canonical source of truth)
-- `mcpb/pyproject.toml`: `version` **and** the `conexus>=X.Y.Z` dependency pin
+- `mcpb/pyproject.toml`: `version` **and** the `conexus[local]>=X.Y.Z` dependency pin (the `[local]` extra is required — without it the .mcpb's venv resolves without `fastembed` and `LocalEmbeddingFunction` silently falls back to the 384-dim ONNX MiniLM against 768/1024-dim collections; `tests/test_plugin_structure.py::test_mcpb_pins_conexus_local_extra` enforces the pin tracks the version. T2 [22511] gap 11 — this line previously said `conexus>=X.Y.Z`, missing the extra.)
 - `mcpb/manifest.json`: `version`
 - `.claude-plugin/marketplace.json`: **both `version` fields** (one for conexus, one for sn)
 - `.claude-plugin/marketplace.json`: **both `plugins[].source.ref` fields** — must be `"vX.Y.Z"` (the tag form). Easy to forget. This is what decouples installed users from main HEAD: plugin installs follow the pinned tag, not whatever main currently is. **CRITICAL: nexus-mkj6u 2026-05-23**
@@ -203,6 +224,24 @@ Required on every release (nexus-6xkdu: a diff-based trigger list was rejected �
 ```
 
 Smoke (step 6) never calls `nx index pdf`; this is the only pre-tag gate that exercises MinerU end-to-end through the production indexing path (step 3b of 11, the `bft-to-smr.pdf` formula fixture) — the slow-marked `test_mineru_path_preserves_formulas` pytest test runs in no default or scheduled suite (nexus-6xkdu). Must end `SHAKEDOWN PASSED`; a `SHAKEDOWN FAILED` verdict or non-zero exit halts the release. All four indexing steps (2, 3a, 3b, 4) can now fail the run — the `|| true` that previously made them unable to redden the run was removed at nexus-6xkdu.
+
+### 6d. Migration-release branch (CONDITIONAL — this release ships a data migration)
+
+Trigger: this release carries a schema or data migration — a new `upgrade_ladder` rung (`src/nexus/upgrade_ladder/registry.py`), or any client-side change to a shape data already has to conform to (T2 [22511] gap 9). Skip this step entirely when the release carries no such change.
+
+1. **Representative-scale rehearsal.** Run the populated-store upgrade rehearsal against a corpus seeded ABOVE a stated floor, not the harness's default toy seed (10-30 docs across `rehearse_cold.sh` / `rehearse_acquire.sh` / `rehearse_shakeout.sh` / `rehearse_hole_punch.sh`). Pre-tag, that is the worktree `--package-upgrade` run in Step 1; post-publish, close the loop with Step 11c's published-bytes run:
+   ```bash
+   NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade
+   ```
+   Name the floor and the actual seed count used in the release relay. RDR-191's cloud 385,484-row unify-chunks migration (T2 [22485]) remains the only at-scale proof this project has produced for a comparable change — and it ran in PRODUCTION. If the rehearsal cannot be brought to a genuinely representative scale before tagging, say so explicitly rather than letting a toy-scale pass stand in for one.
+
+2. **Rollback decision point, settled before the release branch is committed.** Determine whether this migration can be rolled back on an already-upgraded install. When the answer is no, write **IRREVERSIBLE** in the release notes / relay verbatim, and have the substitute in hand: a written rollback/abort runbook with exact statements and named abort criteria — the RDR-191 `nexus-o8dil.22` pattern.
+
+3. **Freeze-window derivation.** Only applies when this migration is coupled to a server-side schema change (an engine tag deploying alongside this release). If so, do not re-derive the window math here — it lives in `.claude/skills/engine-release/SKILL.md` Step 5b; confirm that step ran and its threshold/abort condition are recorded before this release's tag pushes.
+
+4. **Post-deploy data-integrity verification, beyond version identity.** Once Step 11c's published-bytes rehearsal lands, verify data integrity beyond a version match: exact row-count reconciliation, not just `/version` naming X.Y.Z — the T2 [22485] pattern ("ROW INVARIANT EXACT: 385,484 pre == post ... ANALYZE fired").
+
+Full rationale and evidence citations: `docs/contributing.md` § Schema/data-migration releases.
 
 ### 7. Commit on a release branch + PR to main (nexus-mkj6u: replaces direct-to-main)
 
@@ -301,6 +340,8 @@ git push origin vX.Y.Z
 
 Tag-push must follow the commit on origin in tight succession (seconds). marketplace.json's `source.ref` points at `vX.Y.Z`; if any user runs `/plugin install` between commit-push and tag-push, the install would fail.
 
+Tag-immediately is safe even though the merge commit's own check-runs have not arrived yet at that point (main has no push CI; the merge commit only gets its own `pytest-gate` check-run from the develop-push CI fired by step 11b's back-merge, ~15 min later). The nexus-jvhsw evidence gate (`scripts/check_release_ci_evidence.py`) accepts evidence from the merge commit's second parent — the PR head, whose checks already ran and completed at PR-merge time — when the merge commit's own evidence is still missing (nexus-au8zz). It only does this after confirming, via GitHub's own PR-association record, that the parent is genuinely the head of a merged PR whose `merge_commit_sha` is the tagged commit — never on the two-parent shape alone. A publish run that reds citing "no check-run named 'pytest-gate'" on a genuinely fresh tag now indicates a real problem (e.g. a broken/renamed required check, or a merge commit with no PR-head parent), not this race — investigate it rather than assuming a retry will clear it. A run that instead prints `CANNOT VERIFY` (exit 2, distinct from the red `BLOCKED` exit 1) means the gate could not reach the GitHub API to resolve the parent, its check-runs, or its PR association — a transient network/API issue, not evidence the release is broken; retry once connectivity is confirmed.
+
 Do NOT use `gh release create`: the Release workflow at `.github/workflows/release.yml` creates the GitHub release automatically from the tag and extracts notes from CHANGELOG.md. Running `gh release create` produces a duplicate.
 
 Do NOT run `uv publish` or `twine upload` manually: the Release workflow handles this via OIDC trusted publisher.
@@ -350,6 +391,44 @@ tag-push is the moment the merge is conflict-free by construction; skipping
 it re-opens the divergence that Step 7 then has to re-resolve under
 pressure. Do it every release, zero-change releases included.
 
+### 11c. Post-publish: published-bytes UPGRADE journey (nexus-86mx2, 2026-08-14)
+
+Both commands below drive the just-published PyPI bytes, not the working
+tree — "identical tree" is an argument that the pre-tag battery already ran
+this; it is not a run of the actual published artifact. Run them once Step
+11 confirms PyPI shows the new version.
+
+```bash
+tests/e2e/fresh-install-mvv.sh --published X.Y.Z    # FRESH-install axis, published bytes
+NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade   # UPGRADE axis, published bytes
+```
+
+The first (nexus-796zn) is the post-publish shakedown for a box that has
+never run conexus before — see its description near Step 1 above; it
+belongs here, not in the pre-tag battery, because nothing is on PyPI yet at
+that point in the checklist.
+
+The second (nexus-86mx2) closes the loop the pre-tag `--package-upgrade` run
+(Step 1) cannot: that run always upgrades to the WORKING-TREE wheel, which
+proves the code but not the actual bytes PyPI now serves — a difference in
+wheel packaging, MANIFEST.in, or dependency resolution at the real
+`uv tool install`/`pip install` layer (the exact nexus-l2ku5 shape) is
+invisible to a worktree-wheel run by construction. Setting
+`NEXUS_TARGET_RELEASE=X.Y.Z` makes `run.sh` download the real published
+wheel from PyPI (sha256-verified against PyPI's own JSON API) and upgrade
+to THAT instead — same GH #1402 convergence assertions, now against bytes
+a real user would actually install. Must end
+`PACKAGE-UPGRADE CONVERGENCE MVV PASSED — ... -> published conexus X.Y.Z ->
+...` — the verdict line always names which target ran; a plain
+`-> working tree` here on a post-publish run means `NEXUS_TARGET_RELEASE`
+was not set and the loop was NOT actually closed.
+
+Coordinate with (do not duplicate) `tests/e2e/published-client-write-gate.sh`
+(nexus-86mx2, wired into the `engine-release` skill's pre-tag battery): that
+gate owns the FRESH-WRITE axis against a CANDIDATE engine, pre-deploy; this
+step owns the UPGRADE axis against the REAL published engine identity,
+post-publish. See either script's header for the full ownership split.
+
 ### 12. Reinstall local tool and verify
 
 ```bash
@@ -374,8 +453,8 @@ nx --version                 # must print X.Y.Z
 
 ## See also
 
-- `CLAUDE.md` § Release Process (canonical; defer to it on any discrepancy)
-- `docs/contributing.md#release-process` (long form with rollback / one-time setup)
+- `AGENTS.md` § Cutting a release (canonical; defer to it on any discrepancy)
+- `docs/contributing.md#release-process` (long form — Step-by-step checklist, and the Break-glass subsection for retry / yank / revert / tag-retraction procedures, and the Schema/data-migration releases subsection Step 6d above draws its rationale from)
 - `feedback_invoke_release_skill.md` (memory entry: invoke this skill, do not freehand)
 - `feedback_post_release_reinstall.md` (memory entry: reinstall after tag)
 - `feedback_release_discipline.md` (memory entry: full suite before tag, not after)

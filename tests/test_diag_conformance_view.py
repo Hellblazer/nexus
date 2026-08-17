@@ -46,6 +46,12 @@ def test_the_authoritative_set_is_column_aware_and_complete():
     assert not by_table["nexus.topic_assignments"].poison
     assert not by_table["nexus.frecency"].poison
     assert not by_table["nexus.relevance_log"].poison
+    # RDR-194 P3c (nexus-tk070.p3c): doc_id is bytea now; the other two debt
+    # columns stay TEXT (nexus-lgdel.l1's canonical-only CHECK covers them
+    # directly).
+    assert by_table["nexus.topic_assignments"].bytea
+    assert not by_table["nexus.frecency"].bytea
+    assert not by_table["nexus.relevance_log"].bytea
     assert tuple(t.table for t in POISON_CHASH_TABLES) == (
         "nexus.chunks",
         "nexus.catalog_document_chunks",
@@ -69,10 +75,17 @@ def test_view_ddl_covers_exactly_the_chash_tables():
     # references that miss every chunk-table join; titles/non-hex identities
     # are excluded by the hex guard (not chash debt). RDR-191: the anti-join
     # used to be a 3-way AND (one per dim shard) and is now ONE NOT EXISTS
-    # against the unified nexus.chunks relation.
+    # against the unified nexus.chunks relation. RDR-194 P3c: debt columns
+    # are no longer uniformly TEXT -- a bytea debt column (topic_assignments.
+    # doc_id) skips the hex-shape guard entirely (direct bytea equality);
+    # only the still-TEXT debt columns (frecency/relevance_log) keep it.
     for t in DEBT_CHASH_TABLES:
         assert f"'{t.table}' AS table_name" in ddl
-        assert f"t.{t.column} ~ '^[0-9a-f]+$'" in ddl
+        if t.bytea:
+            assert f"c.chash = t.{t.column})" in ddl
+            assert f"t.{t.column} ~ '^[0-9a-f]+$'" not in ddl
+        else:
+            assert f"t.{t.column} ~ '^[0-9a-f]+$'" in ddl
     assert ddl.count("NOT EXISTS") == len(DEBT_CHASH_TABLES)
     # One UNION arm per table, no extras.
     assert ddl.count("UNION ALL") == len(CHASH_BEARING_TABLES) - 1
@@ -162,6 +175,41 @@ def test_docs_rendered_copy_matches_the_generator():
     )
 
 
+def test_liquibase_owned_view_matches_the_generator():
+    """RDR-194 P3c critical fix round (2026-08-17, critic Sig-2 / bead
+    nexus-i3k3e): ``taxonomy-011-doc-id-bytea.xml``'s ``taxonomy-011-8``
+    changeset embeds a LITERAL SQL copy of ``diag_conformance_view_ddl()``'s
+    output (a static XML changelog cannot import the Python generator) —
+    pin the two copies to each other, same containment-check pattern as
+    :func:`test_docs_rendered_copy_matches_the_generator`, so a
+    ``CHASH_BEARING_TABLES`` change regenerates BOTH the docs block and the
+    changelog's embedded copy, not just one of them silently drifting from
+    the other."""
+    xml = (
+        _REPO
+        / "service/src/main/resources/db/changelog/taxonomy-011-doc-id-bytea.xml"
+    ).read_text()
+    # The changeset's SQL is nested inside a `DO $$ BEGIN ... BEGIN ... END;`
+    # block (2026-08-17 defensive fix, critic Sig-1/-2: a foreign-owned
+    # pre-existing view must degrade gracefully, not abort the migration),
+    # so its lines carry an 8-space indent the bare generator output does
+    # not — normalize that away the same way
+    # test_docs_rendered_copy_matches_the_generator normalizes the docs'
+    # 3-space markdown indent.
+    xml_flat = re.sub(r"\n {8}", "\n", xml)
+    ddl = diag_conformance_view_ddl()
+    # The XML changelog escapes the two XML-special characters this DDL text
+    # contains (`<>` in the poison legs' octet_length inequality) as entity
+    # references — everything else in the DDL (single quotes, `~`, `$`) is
+    # XML-legal as bare text content and needs no escaping.
+    xml_escaped_ddl = ddl.replace("<", "&lt;").replace(">", "&gt;")
+    assert xml_escaped_ddl in xml_flat, (
+        "taxonomy-011-doc-id-bytea.xml's taxonomy-011-8 changeset's embedded "
+        "CREATE VIEW SQL drifted from nexus.db.chash_tables."
+        "diag_conformance_view_ddl() — regenerate the changeset's SQL"
+    )
+
+
 def test_poison_detail_token_couples_probe_and_gates():
     """The convergence gate (upgrade_finish.py) distinguishes REAL poison
     from probe-degraded WARNs by substring-matching the health detail
@@ -198,14 +246,19 @@ def test_grants_changeset_view_era_revokes_tables():
     OWNER-RESTRICTED (nexus-46yy3, live-reproduced P0: the bulk
     ALL-TABLES-IN-SCHEMA form hard-errors on the superuser-owned view from
     the NOSUPERUSER nexus_admin migration connection, crash-looping every
-    boot once the view exists). The changeset must NOT grant the view either
-    — only the view's owner (the superuser provisioning path) can."""
+    boot once the view exists). The REVOKE changeset (-2) must NOT grant the
+    view — since nexus-lhuhe the view grant lives in grants-nexus-diag-3,
+    the boot's LAST word (foreign-owner tolerant), because -2's own revoke
+    loop strips whatever taxonomy-011-8 granted earlier the same boot."""
     xml = (_REPO / "service/src/main/resources/db/changelog/grants-nexus-diag.xml").read_text()
     assert "grants-nexus-diag-2" in xml
     # 2x in-body era guard (nexus-ixsxa moved these out of <preConditions>,
     # which INSERTED a changelog row per boot on a runAlways changeset — see
-    # tests/test_changelog_markran_lint.py) + 5 prose mentions.
-    assert xml.count("diag_chash_conformance") == 7
+    # tests/test_changelog_markran_lint.py) + 5 prose mentions, + 4 from the
+    # nexus-lhuhe view re-grant in -3 (1 GRANT target + 3 comment/NOTICE
+    # mentions). Exact pin so a NEW writer of this name is a conscious edit
+    # here, not silent drift.
+    assert xml.count("diag_chash_conformance") == 11
     # Both changesets must stay runAlways with the era test in the BODY. Parsed,
     # not substring-matched: this file's header documents the rejected
     # alternatives verbatim, so `"runOnChange" not in xml` would fail on the
@@ -221,6 +274,10 @@ def test_grants_changeset_view_era_revokes_tables():
     assert [cs.get("id") for cs in diag_sets] == [
         "grants-nexus-diag-1",
         "grants-nexus-diag-2",
+        # nexus-8yz1p (2026-08-16): third, era-independent staging-schema
+        # SELECT changeset -- deliberately its own changeset, not folded
+        # into -1's era-gated body (see that changeset's own comment).
+        "grants-nexus-diag-3",
     ]
     for cs in diag_sets:
         assert cs.get("runAlways") == "true", (
@@ -238,5 +295,14 @@ def test_grants_changeset_view_era_revokes_tables():
     assert "REVOKE SELECT ON %I.%I FROM nexus_diag" in xml
     # The bulk form must never come back.
     assert "REVOKE SELECT ON ALL TABLES IN SCHEMA" not in xml
-    # No cross-owner grant on the view (a non-owner GRANT hard-errors too).
-    assert "GRANT SELECT ON nexus.diag_chash_conformance" not in xml
+    # Exactly ONE view grant, in grants-nexus-diag-3 (nexus-lhuhe: the boot's
+    # last word re-grants what -2's revoke loop stripped from taxonomy-011-8),
+    # and it MUST be insufficient_privilege-wrapped — a bare non-owner GRANT
+    # hard-errors (the nexus-46yy3 crash-loop class this test originally
+    # pinned; the wrap is what makes the grant safe where the ban used to be).
+    assert xml.count("GRANT SELECT ON nexus.diag_chash_conformance") == 1
+    grant_at = xml.index("GRANT SELECT ON nexus.diag_chash_conformance")
+    assert "EXCEPTION WHEN insufficient_privilege" in xml[grant_at : grant_at + 400], (
+        "the view grant must be insufficient_privilege-wrapped (foreign-owner "
+        "tolerant) or it reintroduces the nexus-46yy3 boot crash-loop"
+    )

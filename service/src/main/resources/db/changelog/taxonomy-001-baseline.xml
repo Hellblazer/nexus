@@ -33,6 +33,23 @@
       topic_links.*             -> GREATEST for link_count; link_types merged JSON
       taxonomy_meta.last_discover_doc_count -> GREATEST(EXCLUDED, existing)
       taxonomy_meta.last_discover_at        -> GREATEST(EXCLUDED, existing) lexicographic ISO-8601
+
+    STALE-PROSE CORRECTION (RDR-194 D1, nexus-tk070.p3a, nexus-yo9mi,
+    2026-08): the "Soft FK note" above ("columns referencing catalog doc
+    tumblers (doc_id in topic_assignments)") is corrected: `doc_id` never
+    referenced catalog doc tumblers; it is a chunk chash (RDR-180 Item6
+    `:80`, Item6a `:82`; RDR-180 itself flagged this exact header's
+    "tumblers" wording as stale at `:80`). The taxonomy-001-3 changeset
+    below carries the identical claim in its OWN inline SQL comment ("NOTE:
+    doc_id is a plain TEXT column referencing catalog doc tumblers.", a
+    line-comment inside the changeset's SQL body starting at its own
+    two-dash marker); that comment is inside the changeset's checksummed
+    `<sql>` body and is
+    NOT edited here (D0.2); this header correction is the record of its
+    supersession. FK tightening does not land at `nexus-b7v6i` as the
+    original note said; it lands at RDR-194 D1 (P3a-P3d): `doc_id` converts
+    to `bytea` with a composite FK `(tenant_id, source_collection, doc_id)`
+    REFERENCING `nexus.chunks (tenant_id, collection, chash)`.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"

@@ -184,6 +184,17 @@ def test_prune_misclassified_real_engine_no_dangling_manifest_row(t2_service_env
         physical_collection=_RIGHT_COLL, meta={},
     )
     doc_id = str(tumbler)
+    # RDR-194 P3d / catalog-029-manifest-chunk-fk.xml: the manifest write
+    # below needs a matching nexus.chunks row under _RIGHT_COLL FIRST -- the
+    # doc's real, correctly-classified copy (what a proper re-index would
+    # have produced). The _WRONG_COLL copy seeded further down is the STALE
+    # misclassified duplicate this prune exists to clean up; both copies
+    # coexisting is exactly the "stale write into the wrong collection that
+    # a later re-index never swept" scenario this test's own docstring names.
+    client.upsert_chunks_with_embeddings(
+        _RIGHT_COLL, ids=[chash], documents=[content], embeddings=[],
+        metadatas=[{"title": "o8dil7-prune-doc", "chunk_text_hash": chash}],
+    )
     cat.append_manifest_chunks(
         doc_id, [{"chash": chash, "position": 0}], collection=_RIGHT_COLL,
     )
@@ -288,6 +299,12 @@ def test_prune_misclassified_shared_chash_second_live_document_protected(t2_serv
     )
     doc_a = str(tumbler_a)
     doc_b = str(tumbler_b)
+    # RDR-194 P3d / catalog-029-manifest-chunk-fk.xml: the chunk must exist
+    # under _SHARED_COLL BEFORE either manifest write below.
+    client.upsert_chunks_with_embeddings(
+        _SHARED_COLL, ids=[chash], documents=[content], embeddings=[],
+        metadatas=[{"title": "o8dil7-tbj48-shared", "chunk_text_hash": chash}],
+    )
     cat.append_manifest_chunks(
         doc_a, [{"chash": chash, "position": 0}], collection=_SHARED_COLL,
     )
@@ -296,11 +313,6 @@ def test_prune_misclassified_shared_chash_second_live_document_protected(t2_serv
     )
     cat.resync_chunk_count_cache(doc_a)
     cat.resync_chunk_count_cache(doc_b)
-
-    client.upsert_chunks_with_embeddings(
-        _SHARED_COLL, ids=[chash], documents=[content], embeddings=[],
-        metadatas=[{"title": "o8dil7-tbj48-shared", "chunk_text_hash": chash}],
-    )
 
     assert _manifest_chashes(state, tenant, doc_a) == {chash}, (
         "precondition: doc A's manifest references the shared chash"
@@ -406,7 +418,7 @@ def test_negative_control_tombstoned_owner_genuine_ghost_row_excluded(t2_service
     exactly the scheduled coverage the critic's Critical existed to
     restore).
     """
-    from tests._catalog_fixture_ops import ActiveCatalog
+    from tests._catalog_fixture_ops import ActiveCatalog, fk_dropped_for_dangling_seed
     from tests._engine_substrate import ensure_engine
 
     state = ensure_engine()
@@ -427,10 +439,17 @@ def test_negative_control_tombstoned_owner_genuine_ghost_row_excluded(t2_service
     doc_id = str(tumbler)
     # Genuinely a class-(b) ghost: ghost_chash resolves in NO chunk table
     # anywhere (never uploaded to T3) -- same construction as the positive
-    # control below, except this owner is tombstoned next.
-    cat.append_manifest_chunks(
-        doc_id, [{"chash": ghost_chash, "position": 0}], collection=coll,
-    )
+    # control below, except this owner is tombstoned next. RDR-194 P3d /
+    # catalog-029-manifest-chunk-fk.xml now refuses exactly this write
+    # through the real API, so the constraint is dropped for the duration
+    # of this ONE call (tests/_catalog_fixture_ops.fk_dropped_for_dangling_
+    # seed) -- the write still goes through the REAL production path
+    # (append_manifest_chunks), matching this test's own "not a raw SQL
+    # UPDATE" discipline; only the FK itself is transiently absent.
+    with fk_dropped_for_dangling_seed():
+        cat.append_manifest_chunks(
+            doc_id, [{"chash": ghost_chash, "position": 0}], collection=coll,
+        )
     cat.resync_chunk_count_cache(doc_id)
 
     assert _manifest_row_count(state, tenant, doc_id) == 1, (
@@ -490,6 +509,7 @@ def test_inverted_control_handseeded_dangling_row_detected(t2_service_env):
     ``integration``-marked so the nightly local-service-gate sweep collects
     it (coordinator correction, nexus-7ygt0 fallout round 2).
     """
+    from tests._catalog_fixture_ops import fk_dropped_for_dangling_seed
     from tests._engine_substrate import ensure_engine
 
     state = ensure_engine()
@@ -519,11 +539,15 @@ def test_inverted_control_handseeded_dangling_row_detected(t2_service_env):
         "ON CONFLICT DO NOTHING"
     ))
     # Genuinely dangling: ghost_chash resolves in no chunk table, and the
-    # owning document is LIVE (no deleted_at set above).
-    _psql(state, (
-        "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-        f"VALUES ('{tenant}', '{doc_id}', 0, decode('{ghost_chash}', 'hex'), '{coll}')"
-    ))
+    # owning document is LIVE (no deleted_at set above). RDR-194 P3d /
+    # catalog-029-manifest-chunk-fk.xml now refuses this INSERT at the DB
+    # level -- transiently drop the FK for this one hand-seeded row, exactly
+    # what tests/_catalog_fixture_ops.fk_dropped_for_dangling_seed exists for.
+    with fk_dropped_for_dangling_seed():
+        _psql(state, (
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+            f"VALUES ('{tenant}', '{doc_id}', 0, decode('{ghost_chash}', 'hex'), '{coll}')"
+        ))
 
     dangling_after = _dangling_count(state, tenant)
     assert dangling_after == dangling_before + 1, (

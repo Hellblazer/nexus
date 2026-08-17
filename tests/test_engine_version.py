@@ -332,11 +332,15 @@ class TestRequiredEngineVersion:
         # CANDIDATE SHAKEOUT PASSED, post-publish --acquire PASSED
         # (263 migrations, 0 failed), DEPLOYED and cloud-gated 2026-08-14
         # (conexus [22485]: STEP-6 green, client-path gate green, row
-        # invariant exact). This floor bump rides conexus 7.7.0 per the
-        # paired-release choreography — the same release that ships the
-        # three unshipped client wire-halves (498c92953 / b361a8106 /
-        # 8c75a61a3; nexus-sh9v2).
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 75)
+        # invariant exact). This floor bump rides conexus 7.8.0 per the
+        # paired-release choreography — engine-service-v0.1.79 (published,
+        # acquire-gated, TWICE rehearsed against a forked production cluster:
+        # walk CLEAN 58s, diag surface verified restored as nexus_diag; the
+        # v0.1.77/v0.1.78 tags were burned/superseded en route — 77 by a
+        # stale native-smoke probe, 78 by the diag-grants strip, both fixed
+        # and gated at 79). The same release ships the catalog-030 client
+        # half (3b2901141, nexus-o8dil.33) per the wire-contract ledger.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 79)
 
 
 class TestParseEngineVersion:
@@ -499,11 +503,16 @@ class TestMvvAllowlistDoesNotOutliveItsTrigger:
     has already been deleted from ``fresh-install-mvv.sh`` in the SAME
     change that bumps the floor.
 
-    GREP-LEVEL PARITY (comment both sides): the matching comment lives at
+    GREP-LEVEL PARITY (comment both sides): the matching comment lived at
     ``tests/e2e/fresh-install-mvv.sh``'s ``ALLOWLIST_REGEX`` definition and
-    at ``health.py::_check_dangling_manifests``'s ``status == 404`` branch
-    — all three must name each other so an edit to any one is legible
-    against the others.
+    at ``health.py::_check_dangling_manifests``'s ``status == 404`` branch.
+    RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: ``_check_dangling_manifests``
+    itself is DELETED (the manifest-chunk FK makes the dangling state it
+    detected unreachable) — this test's assertion (the allowlist entry stays
+    absent) is now permanently true independent of that removal, since the
+    entry was already gone at the v0.1.62 floor bump this class pins. Kept
+    as a historical regression guard, not because the parity it names still
+    has three live sides.
     """
 
     def test_floor_below_fence_or_allowlist_entry_removed(self) -> None:

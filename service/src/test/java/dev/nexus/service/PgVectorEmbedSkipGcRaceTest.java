@@ -154,6 +154,21 @@ class PgVectorEmbedSkipGcRaceTest {
                 "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT ON nexus.catalog_documents, nexus.catalog_document_chunks TO " + SVC_ROLE);
+            // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk's ON DELETE
+            // CASCADE means a DELETE on nexus.chunks can now cascade-delete matching
+            // nexus.topic_assignments rows -- Postgres's own FK/RI cascade mechanism
+            // is privilege-exempt, but the EXISTING taxonomy-003 doc_count triggers
+            // (trg_topic_assignments_doc_count_del, deliberately SECURITY INVOKER,
+            // never DEFINER -- taxonomy-003-doc-count-trigger.xml) fire as part of
+            // that SAME cascade and run an ordinary UPDATE nexus.topics under the
+            // INVOKING role's own privileges. This role never touched topic_
+            // assignments/topics before this FK existed, so it needs the grants
+            // that trigger's body requires: SELECT on topic_assignments (the
+            // recount subquery) and SELECT, UPDATE on topics (the recount itself).
+            su.createStatement().execute(
+                "GRANT SELECT ON nexus.topic_assignments TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "GRANT SELECT, UPDATE ON nexus.topics TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }

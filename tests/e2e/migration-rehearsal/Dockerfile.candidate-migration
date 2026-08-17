@@ -1,0 +1,67 @@
+# syntax=docker/dockerfile:1
+# nexus-z0ylb — CANDIDATE-MIGRATION rehearsal box: the locally-built
+# CANDIDATE engine's full Liquibase walk over a POPULATED store.
+#
+# No leg in this harness exercised a locally-built candidate's changeset
+# walk against genuinely populated data. --shakeout drives the candidate,
+# but only on a FRESH install with no pre-existing data. This box closes
+# that gap: provision the PUBLISHED FLOOR engine for real, populate a
+# store through it (content + catalog manifests + taxonomy — the leg's
+# soul), then hand-swap in the CANDIDATE binary and boot it against that
+# same populated store.
+#
+# Same quarantine posture as Dockerfile.era-hop (no system PostgreSQL, no
+# engine pre-staged at the well-known config location) PLUS the
+# candidate-staging shape of the default Dockerfile (--shakeout): the
+# locally-built native binary travels in under /opt/nexus-service-native,
+# positioned by the driver only at Stage 4 (the hand-swap), never before.
+# The FLOOR engine is acquired at RUNTIME by the product's own code
+# (`nx daemon service install-binary`), triggered explicitly here rather
+# than via converge_engine's auto-transition (this leg never swaps client
+# packages, so there is no version transition to trigger it).
+#
+# NO pre-installed conexus. The driver `uv tool install`s the WORKING-TREE
+# wheel directly (no old release involved — this leg tests the ENGINE
+# delta, not a client upgrade axis) into a `uv tool install` venv (not a
+# plain pip venv) purely for staging-convention parity with the other
+# runtime-acquisition legs; nothing here actually depends on the
+# tool-install/venv distinction.
+FROM debian:trixie-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    PYTHONUNBUFFERED=1
+
+# ca-certificates (PyPI + GitHub release downloads), git (Catalog.init),
+# python for the /version JSON probe helper + the sidecar-rewrite step +
+# uv bootstrap, libgomp1 (the native binary's bundled ONNX runtime dlopens
+# OpenMP). NO postgresql — the relocatable PG bundle is cold-acquired +
+# provisioned by nx itself (nexus-5qefg).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git \
+        python3 python3-venv python3-pip \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user — initdb (run by `nx init --service`) refuses to run as root.
+RUN useradd -m -s /bin/bash nexus
+# ~/.local/bin is where `uv tool install` links the nx executable.
+ENV PATH="/home/nexus/.local/bin:${PATH}"
+
+RUN pip3 install --no-cache-dir --break-system-packages uv
+
+USER nexus
+WORKDIR /home/nexus
+
+# The working-tree wheel (real PEP 427 name preserved) and the driver.
+COPY --chown=nexus:nexus worktree-wheel/ /home/nexus/worktree-wheel/
+# The locally-built CANDIDATE binary + its native-image .so siblings
+# (run.sh's -Ob quick build, stamped with the floor version by the
+# --candidate-migration RELEASE_PROPS stamp so its own /version self-
+# reports the floor tag it is hand-swapped in under). Positioned here,
+# NOT at the well-known config-dir location — the driver stages it only
+# at Stage 4, after the floor engine has already populated the store.
+COPY --chown=nexus:nexus native/ /opt/nexus-service-native/
+COPY --chown=nexus:nexus rehearse_candidate_migration.sh /home/nexus/rehearse_candidate_migration.sh
+
+ENTRYPOINT ["/bin/bash", "/home/nexus/rehearse_candidate_migration.sh"]

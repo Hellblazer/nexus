@@ -71,12 +71,20 @@ CREATE POLICY tenant_isolation ON nexus.chash_index
     USING      (tenant_id = current_setting('nexus.tenant', true))
     WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
         </sql>
-        <!-- nexus-a0m60: guarded because rdr187-2-drop-chash-index DROPs
-             nexus.chash_index later in master order with a deliberate no-op
-             rollback, so on the way back down the table is already gone.
-             IF EXISTS guards the POLICY, not the TABLE — unguarded, these
-             three statements raise `relation "nexus.chash_index" does not
-             exist` and kill the whole chain. -->
+        <!-- nexus-a0m60: guarded because IF EXISTS guards the POLICY, not
+             the TABLE — unguarded, these three statements raise `relation
+             "nexus.chash_index" does not exist` and kill the whole chain if
+             the table happens to be absent when this rollback runs.
+             UPDATED (nexus-lelhx round 2, code-review-expert finding): the
+             original premise here (rdr187-2-drop-chash-index's rollback was
+             a deliberate no-op, so the table is already gone by the time
+             the chain rolls back this far) no longer holds — rdr187-2 now
+             carries a real rollback that recreates the table's schema shape
+             (rdr187-001-drop-chash-index.xml), and it always rolls back
+             BEFORE this changeset in the reverse sequence, so on any
+             reachable chain the table is present again here. The guard is
+             kept as a defensive measure, not because the table is
+             currently expected to be missing. -->
         <rollback>
             <sql splitStatements="false" stripComments="false">
 DO $$

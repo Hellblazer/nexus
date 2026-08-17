@@ -232,6 +232,76 @@ class CatalogDeleteCollectionCascadeTest {
         }
     }
 
+    // ── catalog_links cascade via the PRODUCTION call path (nexus-tk070.p1 ──
+    // review fix 2, RDR-194 § D2, critic S2): existing cascade coverage
+    // above deletes via raw superuser SQL (bypassing the tenantScope
+    // GUC/RLS context deleteCollectionTxn runs under); this seeds and reads
+    // through the repository API instead, and drives the delete through
+    // repo.deleteCollection -- the SAME production call path deleteCollectionTxn
+    // is invoked from -- so the fk_catalog_links_from_document/_to_document
+    // cascade is exercised under real RLS, not just raw SQL.
+
+    private static final String TENANT_LINK = "del-casc-links";
+    private static final String COLL_LINK_HOME  = "knowledge__del-casc-links-home__voyage-context-3__v1";
+    private static final String COLL_LINK_OTHER = "knowledge__del-casc-links-other__voyage-context-3__v1";
+
+    @Test @Order(50)
+    void deleteCollection_cascadesCatalogLinks_viaProductionCallPath() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                + "VALUES ('" + TENANT_LINK + "', '" + COLL_LINK_HOME + "')");
+            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                + "VALUES ('" + TENANT_LINK + "', '" + COLL_LINK_OTHER + "')");
+        }
+
+        // dl-src is homed in the collection about to be deleted; dl-dst and
+        // dl-survivor2 are homed elsewhere and must survive.
+        repo.upsertDocument(TENANT_LINK, Map.of(
+            "tumbler", "dl-src", "title", "src", "content_type", "paper",
+            "corpus", "knowledge", "physical_collection", COLL_LINK_HOME));
+        repo.upsertDocument(TENANT_LINK, Map.of(
+            "tumbler", "dl-dst", "title", "dst", "content_type", "paper",
+            "corpus", "knowledge", "physical_collection", COLL_LINK_OTHER));
+        repo.upsertDocument(TENANT_LINK, Map.of(
+            "tumbler", "dl-survivor2", "title", "survivor2", "content_type", "paper",
+            "corpus", "knowledge", "physical_collection", COLL_LINK_OTHER));
+
+        // One link FROM the doomed doc, one link TO it (both directions of the
+        // FK exercised), and one link entirely OUTSIDE the deleted collection
+        // that must survive.
+        assertThat(repo.upsertLink(TENANT_LINK, Map.of(
+            "from_tumbler", "dl-src", "to_tumbler", "dl-dst",
+            "link_type", "cites", "created_by", "test"))).isTrue();
+        assertThat(repo.upsertLink(TENANT_LINK, Map.of(
+            "from_tumbler", "dl-dst", "to_tumbler", "dl-src",
+            "link_type", "relates", "created_by", "test"))).isTrue();
+        assertThat(repo.upsertLink(TENANT_LINK, Map.of(
+            "from_tumbler", "dl-dst", "to_tumbler", "dl-survivor2",
+            "link_type", "cites", "created_by", "test"))).isTrue();
+
+        // Non-vacuous: confirm there is actually something to cascade before
+        // the delete runs.
+        assertThat(repo.linksFrom(TENANT_LINK, "dl-src", (List<String>) null))
+            .as("pre-delete: link FROM the doomed doc exists").hasSize(1);
+        assertThat(repo.linksTo(TENANT_LINK, "dl-src", (List<String>) null))
+            .as("pre-delete: link TO the doomed doc exists").hasSize(1);
+        assertThat(repo.linksFrom(TENANT_LINK, "dl-dst", (List<String>) null))
+            .as("pre-delete: both of dl-dst's links (to the doomed doc, and to a "
+                + "surviving doc) exist").hasSize(2);
+
+        // The production call path: deleteCollection -> deleteCollectionTxn.
+        repo.deleteCollection(TENANT_LINK, COLL_LINK_HOME);
+
+        assertThat(repo.linksFrom(TENANT_LINK, "dl-src", (List<String>) null))
+            .as("link FROM the deleted doc cascaded via fk_catalog_links_from_document").isEmpty();
+        assertThat(repo.linksTo(TENANT_LINK, "dl-src", (List<String>) null))
+            .as("link TO the deleted doc cascaded via fk_catalog_links_to_document").isEmpty();
+        assertThat(repo.linksFrom(TENANT_LINK, "dl-dst", (List<String>) null))
+            .as("the link between the two SURVIVING documents (both outside the "
+                + "deleted collection) remains").hasSize(1);
+    }
+
     // ── fixture ──────────────────────────────────────────────────────────────
 
     /** Seed one full collection (all lifecycle tables) for {@code tenant}. Superuser; bypasses RLS. */
@@ -241,16 +311,33 @@ class CatalogDeleteCollectionCascadeTest {
         // catalog_documents + manifest
         st.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
             + "VALUES ('" + tenant + "', 'dc-doc-1', 'Doc 1', '" + COLL + "')");
+        // chunks: 2/1/1 across three dims, one unified nexus.chunks table (RDR-191).
+        st.execute(chunkInsert(tenant, 384, "dc384a"));
+        // RDR-194 P3d (nexus-tk070.p3d): dc384b and dc768a below are REPURPOSED
+        // (decode(hexChash(...),'hex') identity, not the file's own chash(seed)
+        // escape-format shape) to ALSO back the two topic_assignments rows
+        // further down via topic_assignments_chunk_fk -- reusing two of the
+        // four already-seeded chunks rather than minting two more, so the
+        // "chunks (unified, 2+1+1)" count assertion stays exactly 4. The two
+        // encodings are NOT interchangeable (chash(seed) stores raw ASCII bytes
+        // of a hex-digit-shaped string via bytea "escape format"; decode(...,
+        // 'hex') stores the genuine hex-decoded bytes), so this chunk's chash
+        // is no longer chash("dc384b") -- nothing else in this file references
+        // it by that name (unlike dc384a, reused by the manifest INSERT below).
+        st.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
+            + "VALUES ('" + tenant + "', '" + COLL + "', decode('" + hexChash("dc-doc-1") + "', 'hex'), 'text', " + vec(384) + "::vector)");
+        st.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768) "
+            + "VALUES ('" + tenant + "', '" + COLL + "', decode('" + hexChash("dc-doc-2") + "', 'hex'), 'text', " + vec(768) + "::vector)");
+        st.execute(chunkInsert(tenant, 1024, "dc1024a"));
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for the manifest insert below -- reuse dc384a's
+        // chash (rather than minting a fifth, distinct chunk) so the "chunks
+        // (unified, 2+1+1)" count assertion above stays exactly 4.
         // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
         // (catalog-025-collection-not-null.xml) — the document above is
         // already registered under COLL, so stamp the manifest row the same.
         st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-            + "VALUES ('" + tenant + "', 'dc-doc-1', 0, '" + chash("dcman1") + "', '" + COLL + "')");
-        // chunks: 2/1/1 across three dims, one unified nexus.chunks table (RDR-191).
-        st.execute(chunkInsert(tenant, 384, "dc384a"));
-        st.execute(chunkInsert(tenant, 384, "dc384b"));
-        st.execute(chunkInsert(tenant, 768, "dc768a"));
-        st.execute(chunkInsert(tenant, 1024, "dc1024a"));
+            + "VALUES ('" + tenant + "', 'dc-doc-1', 0, '" + chash("dc384a") + "', '" + COLL + "')");
         // (chash_index seeds removed — RDR-187/nexus-piwya.9: router dropped)
         // topics: 1 (explicit id)
         long topicId = Math.abs((long) (tenant + COLL).hashCode());
@@ -259,10 +346,20 @@ class CatalogDeleteCollectionCascadeTest {
         // taxonomy_meta: 1 (fk-003-4 RESTRICT — must be purged before the registry row)
         st.execute("INSERT INTO nexus.taxonomy_meta (tenant_id, collection) VALUES ('" + tenant + "', '" + COLL + "')");
         // topic_assignments: 2, both with source_collection=COLL, referencing the topic
+        // nexus-tk070.p3c: doc_id is bytea now — a genuine 64-hex chash, not the
+        // catalog tumbler string (topic_assignments.doc_id is independent of
+        // catalog_documents.tumbler; see the class javadoc / nexus-sa14p).
+        // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires a
+        // matching nexus.chunks row for each of these two INSERTs -- decode(...,
+        // 'hex') here (NOT a bare string literal, which would store the ASCII bytes
+        // of the hex STRING via bytea "escape format", never matching a real
+        // decode()'d chunks row) so both rows resolve against the two REPURPOSED
+        // chunks seeded above (dc384b's and dc768a's slots, now carrying
+        // hexChash("dc-doc-1")/hexChash("dc-doc-2") identities).
         st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', 'dc-doc-1', " + topicId + ", 'projection', '" + COLL + "', NOW())");
+            + "VALUES ('" + tenant + "', decode('" + hexChash("dc-doc-1") + "', 'hex'), " + topicId + ", 'projection', '" + COLL + "', NOW())");
         st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', 'dc-doc-2', " + topicId + ", 'projection', '" + COLL + "', NOW())");
+            + "VALUES ('" + tenant + "', decode('" + hexChash("dc-doc-2") + "', 'hex'), " + topicId + ", 'projection', '" + COLL + "', NOW())");
         // centroids: one per dim (cugrk), one unified nexus.taxonomy_centroids table
         // (RDR-191). PK is (tenant_id, collection, topic_id) -- three DIFFERENT
         // topic_ids, not the shared `topicId` above (which would collide on the
@@ -302,6 +399,19 @@ class CatalogDeleteCollectionCascadeTest {
 
     private static String chash(String seed) {
         return (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
+    }
+
+    /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
+     *  (bytea since nexus-tk070.p3c), unlike {@link #chash} above which is a 32-char
+     *  synthetic id used only for the chunks/manifest {@code chash} column. */
+    private static String hexChash(String seed) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private static int rows(Connection su, String sql) throws Exception {

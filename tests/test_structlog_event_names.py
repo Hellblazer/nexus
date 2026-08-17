@@ -116,7 +116,7 @@ _SEGMENT = re.compile(r"^[a-z][a-z0-9_]*$")
 
 # Grandfathered prose-message events as of nexus-whh61.3 (AST count over src/).
 # Ratchet DOWN as sites are fixed; never UP (a new prose event must fail CI).
-SNAKE_CASE_EVENT_BASELINE = 43  # 80 -> 78: RDR-188 .9/.19 deleted both prose-style client-rerank log sites; 78 -> 77: nexus-i711w Stage 2 sub-stage A3 deleted the SQLite T2 stores (a prose-style site went with the deleted src); 77 -> 45: RDR-158 P4 Stage 4 (nexus-i711w) deleted db/migrations.py, whose migration-step bodies carried 32 grandfathered prose-style events — LOWERED per this file's own ratchet rule, never bumped up; 45 -> 43: nexus-sghyo (2026-08-06) deleted client-side Voyage embedding code (doc_indexer.py's _embed_with_fallback and related helpers), which carried 2 prose-style log sites
+SNAKE_CASE_EVENT_BASELINE = 41  # 80 -> 78: RDR-188 .9/.19 deleted both prose-style client-rerank log sites; 78 -> 77: nexus-i711w Stage 2 sub-stage A3 deleted the SQLite T2 stores (a prose-style site went with the deleted src); 77 -> 45: RDR-158 P4 Stage 4 (nexus-i711w) deleted db/migrations.py, whose migration-step bodies carried 32 grandfathered prose-style events — LOWERED per this file's own ratchet rule, never bumped up; 45 -> 43: nexus-sghyo (2026-08-06) deleted client-side Voyage embedding code (doc_indexer.py's _embed_with_fallback and related helpers), which carried 2 prose-style log sites; 43 -> 41: RDR-191 Phase 6 (nexus-o8dil.33, 2026-08-15) deleted indexer.py's _prune_deleted_files client-side fallback, which carried 2 prose-style log sites ("skipped chunks without chunk_text_hash", "pruned orphan chunks")
 
 
 def _event_is_snake_case(event: str) -> bool:

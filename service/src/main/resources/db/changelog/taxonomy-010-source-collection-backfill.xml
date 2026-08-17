@@ -1,0 +1,357 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-194 Phase P3b (Decision D1, bead nexus-tk070.p3b): remediate
+    `nexus.topic_assignments.source_collection` and promote it to NOT NULL.
+    Prerequisite for P3d's composite FK `(tenant_id, source_collection,
+    doc_id)` REFERENCES `nexus.chunks (tenant_id, collection, chash)`: a NULL
+    `source_collection` row escapes that FK through MATCH SIMPLE, the
+    vacuous-VALIDATE failure mode this commit exists to close. P3a (already
+    landed, `taxonomy-009-assign-source-collection.xml`) closed every writer
+    that could still PRODUCE a NULL `source_collection` row; this commit
+    remediates the rows that already exist.
+
+    D1's own remediation order, steps (b)/(c)/(d) (step (a) is P3a, steps
+    (e)/(f) are P3c/P3d): (b) unique-resolution backfill, (c) counted DELETE
+    of the ambiguous and unresolvable remainders, (d) SET NOT NULL. All three
+    land in ONE changeset here (design intent: EXPECT_NEW_CHANGESETS=1),
+    executed in that fixed order so the three DML steps partition the NULL
+    population exhaustively and SET NOT NULL cannot fail (HAL directive
+    2026-08-16 item 4: "SET NOT NULL comes after the deletes in the same
+    walk, so it cannot fail").
+
+    HARD-STOP GATE cloud-count-4 (nexus-tk070.cc4) ran FIRST and is
+    DISPOSITIONED (T2 nexus/rdr194-cc4-census-2026-08-16 [22731]): cloud
+    carries 469,986 conformant 64-hex rows and 5,896 legacy 32-hex rows,
+    single tenant `nexus`, zero 16-hex, zero non-hex. Hal's re-decision: the
+    32-hex rows decode to 16 bytes and can never match `nexus.chunks`' 32-byte
+    `chash` key, and the only historical resolution path (`chash_alias`) held
+    none of them and was already deleted (nexus-lgdel). They are deleted here
+    as unrecomputable derived garbage, by construction, in this changeset's
+    UNRESOLVABLE arm — no plan change was needed; the disposition was that
+    P3b's original design already handles the population cc4 found. The
+    unresolvable-remainder RAISE NOTICE on the cloud walk is expected to read
+    approximately 5,896 (plus any genuinely ambiguous rows from the
+    conformant 64-hex population).
+
+    CRITICAL FIX (2026-08-17, critical fix round, critic CRITICAL / bead
+    nexus-i3k3e): the disposition paragraph above was WRONG about "P3b's
+    original design already handles the population cc4 found." cc4's own
+    per-row breakdown (same T2 entry) shows only 4,634 of the 5,896 legacy
+    32-hex rows have `source_collection IS NULL`; the remaining 1,262
+    already carry a non-NULL `source_collection` (the pre-P3a
+    projection/cross-collection writer branch always persisted
+    `source_collection`, even for a non-canonical `doc_id`). The
+    UNRESOLVABLE arm's original predicate scoped its ENTIRE OR-clause
+    (shape check AND anti-join) to `source_collection IS NULL`, so those
+    1,262 rows were never touched by this changeset, surviving into
+    `taxonomy-011-1`'s guard where they deterministically `RAISE
+    EXCEPTION` with a remedy ("re-run taxonomy-010-1") that changes
+    nothing for a row this changeset already ran over and skipped — a
+    real cloud wedge, not a hypothetical, caught before it shipped. Fixed
+    below: the shape-invalid branch of the UNRESOLVABLE delete is now
+    UNCONDITIONAL on `source_collection`, matching Hal's own no-wedge
+    wording verbatim ("a non-canonical doc_id row is unrecomputable
+    garbage REGARDLESS of its source_collection") rather than the
+    NULL-scoped reading this changeset originally implemented. See the
+    UNRESOLVABLE bullet below and the DELETE's own inline comment for the
+    corrected predicate and the reasoning for what stays NULL-scoped.
+
+    WHY EDITING THIS ALREADY-COMMITTED CHANGESET IN PLACE IS LEGITIMATE
+    (D0.2 exception, recorded per the coordinator's explicit instruction):
+    `taxonomy-010-1` is committed on `develop` (`6c3917769`), which
+    normally means D0.2 forbids editing its body (only CREATE OR REPLACE
+    layering or a header-prose correction is allowed on an APPLIED
+    changeset). But D0.2 exists to protect changesets that have ALREADY
+    RUN against a REAL install — editing the body of a changeset some
+    user's database has already executed would desync that database's
+    checksum/state from a re-derivation of the same id. `taxonomy-010-1`
+    has never been in that position: no `engine-service` tag has ever
+    shipped it (the floor at the time of this fix predates P3b entirely),
+    so it has only ever executed against EPHEMERAL rehearsal/test
+    containers that are torn down at the end of each run, never a real
+    install's persistent database. There is no real checksum to desync
+    and no real state to strand. Editing the body here is therefore the
+    correct fix — NOT a new changeset layered on top (which would still
+    leave the original, wrong DELETE as the FIRST thing any install ever
+    executes) and NOT a separate pre-`taxonomy-011` cleanup changeset
+    (which would run the correct logic a second time, redundantly, for
+    every install going forward, for a bug that never actually shipped).
+    This exception does not generalize: the moment ANY `engine-service`
+    tag carries this changeset, this same edit would require the
+    CREATE-OR-REPLACE-layering or new-changeset treatment D0.2 normally
+    mandates.
+
+    NO-WEDGE DISCIPLINE (Hal directive 2026-08-16, binding, bead notes):
+    every DELETE below is SHAPE-AGNOSTIC — it never assumes a particular
+    doc_id shape and never fails the walk on an unexpected one. The backfill
+    and both deletes resolve `doc_id` against `nexus.chunks` via TEXT
+    comparison against `encode(chash, 'hex')`, never `decode(doc_id, 'hex')`
+    — a malformed or odd-length doc_id (32-hex, non-hex, empty, anything a
+    user install accumulated) simply cannot text-equal a 64-lowercase-hex
+    `encode()` output, so it never raises and is picked up by the
+    unresolvable arm exactly like any other non-matching row. The
+    unresolvable DELETE's predicate additionally ORs in the literal
+    `doc_id !~ '^[0-9a-f]{64}$'` shape check (the same idiom
+    `legacy-001-drop-chash-alias.xml`'s `legacy-001-1`/`legacy-001-2` use for
+    `nexus.frecency`/`nexus.relevance_log`) so a non-conformant row is caught
+    by an explicit, human-legible predicate as well as the anti-join — the
+    two conditions are logically overlapping (a non-conformant doc_id can
+    never match any chunk) but both are asserted so the shape rule is visible
+    on its own, not merely an emergent property of the anti-join. CORRECTED
+    2026-08-17 (see "CRITICAL FIX" above): the shape predicate is now a
+    TOP-LEVEL OR branch, unconditional on `source_collection`, not nested
+    inside the `source_collection IS NULL` scoping the anti-join branch
+    keeps — a non-conformant `doc_id` is deleted no matter what its
+    `source_collection` already holds. SET NOT
+    NULL is a plain constraint promotion (a catalog-level scan, not RLS-gated
+    DML), so it cannot raise once the three DML steps ahead of it have run:
+    no residual-guard branch is added that could RAISE on an unexpected row —
+    if the impossible ever happened, the fix is a re-run of this changeset's
+    DML, never a migration-time exception.
+
+    THE THREE STEPS, in order, all set-based (never a count comparison, F17):
+
+    (b) Unique-resolution backfill. For every `source_collection IS NULL`
+        row whose `doc_id` is CANONICAL 64-hex shape (the shape every live
+        writer emits — a non-conformant doc_id is never a backfill
+        candidate even if it happens to text-match a chunk by coincidence;
+        it always falls to the UNRESOLVABLE arm below instead, D0.9's
+        no-silent-fallback rule), find every `nexus.chunks` row in the SAME
+        tenant whose `encode(chash,'hex')` text-equals `doc_id`; if that set
+        names EXACTLY ONE distinct `collection`, set `source_collection` to
+        it. Set-based via `GROUP BY tenant_id, doc_id HAVING COUNT(*) = 1`,
+        applied through `UPDATE ... FROM`, never a per-row loop.
+
+    (c) Counted DELETE of BOTH remainders, both RAISE NOTICE'd:
+        - AMBIGUOUS: `source_collection IS NULL` and the doc_id's chash is
+          present under MORE THAN ONE distinct collection for the tenant — it
+          cannot be attributed after the fact (self-join semi-join against
+          `nexus.chunks`, never a count comparison).
+        - UNRESOLVABLE: the doc_id is shape-non-conformant (checked
+          REGARDLESS of `source_collection` — CORRECTED 2026-08-17, see
+          "CRITICAL FIX" above), OR `source_collection IS NULL` and the
+          doc_id has no matching `nexus.chunks` row at all (anti-join,
+          still NULL-scoped — a shape-valid dangling reference is a
+          different failure mode this changeset does not additionally
+          widen scope to chase). This arm is what absorbs ALL of cc4's
+          5,896 legacy 32-hex rows (4,634 NULL-scoped + 1,262 non-NULL),
+          and any other non-conformant-shape row a user install
+          accumulated, unconditionally.
+        Priced as safe (D1's own trade-off, taken deliberately): topic
+        assignments are DERIVED data, recomputable by re-running assignment,
+        and the writers' own `ON CONFLICT DO NOTHING` makes recomputation
+        idempotent.
+
+    (d) `ALTER COLUMN source_collection SET NOT NULL` — closes P3d's
+        composite FK MATCH SIMPLE exemption. Without this, the FK's VALIDATE
+        goes green over a mostly-exempt table.
+
+    RLS DISCIPLINE (nexus-1wjmq / catalog-029-1 shape): `nexus.
+    topic_assignments` (`taxonomy-001-baseline.xml:182-183`) and `nexus.
+    chunks` (`vectors-004-unify-chunks.xml:301-302`) both carry FORCE ROW
+    LEVEL SECURITY, and Liquibase's `nexus_admin` owner is not BYPASSRLS —
+    under FORCE RLS with no `nexus.tenant` GUC set at migration time, an
+    untoggled statement against either table sees zero rows for every
+    tenant, which would make the backfill and both deletes silent no-ops
+    (the identical trap catalog-013-1b/catalog-014-0/catalog-025-0/
+    catalog-029-1/catalog-032-1/legacy-001-1/legacy-001-2 all document). Both
+    tables are toggled `NO FORCE` immediately before the three DML
+    statements and restored to `FORCE` immediately after, inside this
+    changeset's own `<sql>` element (nexus-1wjmq toggle-wrapped shape,
+    `splitStatements="false"` so the `$$`-quoted `DO` body is not split on
+    `;` — `tests/test_changelog_rollback_lint.py`'s sibling rule for
+    forward SQL). `SET NOT NULL` runs in a separate, later `<sql>` element
+    after RLS is restored — it needs no toggle (ALTER TABLE's NOT NULL
+    validation scan is a catalog-level operation, not RLS-gated DML, the
+    same reasoning `catalog-029-2`'s VALIDATE CONSTRAINT relies on).
+
+    Placed after `legacy-002-drop-remap-membership.xml` (current tail) and
+    before the `grants-nexus-svc.xml` runAlways block, matching the
+    established late-append convention (D0.1; see catalog-031's /
+    telemetry-004's / aspects-003's / plans-002's / taxonomy-008's /
+    catalog-032's / remap-003's / taxonomy-009's / legacy-001's / legacy-002's
+    own `<include>` comments for the identical reasoning).
+
+    ROLLBACK (D0.6): `SET NOT NULL` is reversed via `DROP NOT NULL` — always
+    safe, no data lost. The backfill and both deletes are NOT reversed: the
+    backfilled `source_collection` values are correct derived data (nothing
+    to undo), and the deleted ambiguous/unresolvable rows are unrecomputable
+    derived garbage by design (D1's own remediation trade-off) — there is no
+    recorded source of truth to reconstruct which exact rows were deleted or
+    what their `source_collection` "should" have been. Rolling the column
+    back to nullable is what actually restores the pre-migration SCHEMA
+    baseline; the pre-migration DATA baseline is not restorable and is not
+    attempted, per D0.6 and the identical precedent in
+    `legacy-001-drop-chash-alias.xml`'s own rollback comments.
+
+    Test-suite debt, in scope for this commit (RDR-194 D1's own "test-suite
+    debt" callout): fixtures that wrote a non-hex or legacy-width `doc_id`
+    into `topic_assignments` expecting it to survive a migration walk are
+    fixed here, not deferred — a fixture that could not be written after this
+    change is the point of the change.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset taxonomy-010-1: backfill + counted delete + SET NOT NULL ── -->
+    <changeSet id="taxonomy-010-1" author="nexus-tk070.p3b">
+        <comment>
+            (b) Unique-resolution backfill of source_collection; (c) counted
+            DELETE of the ambiguous remainder (NULL-scoped) and the
+            unresolvable remainder (shape-invalid branch UNCONDITIONAL on
+            source_collection, anti-join branch NULL-scoped — CORRECTED
+            2026-08-17, critical fix round / bead nexus-i3k3e), both RAISE
+            NOTICE'd; (d) SET NOT NULL. RLS toggle-wrapped around the
+            three DML statements (nexus.topic_assignments and nexus.chunks
+            both carry FORCE ROW LEVEL SECURITY); SET NOT NULL runs after RLS
+            is restored, needing no toggle of its own. See this file's header
+            for the full D1 remediation trace, the shape-agnostic no-wedge
+            discipline, the cc4 disposition, and the CRITICAL FIX paragraph
+            explaining both the correction and why editing this
+            already-committed-but-never-deployed changeset in place is
+            legitimate.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.topic_assignments NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_backfilled_count   BIGINT;
+    v_ambiguous_count    BIGINT;
+    v_unresolvable_count BIGINT;
+BEGIN
+    -- (b) Unique-resolution backfill: set source_collection for NULL rows
+    -- whose doc_id text-matches encode(chash,'hex') for EXACTLY ONE distinct
+    -- collection in the same tenant. Never decode(doc_id,'hex') — a
+    -- non-conformant doc_id simply cannot text-equal a 64-lowercase-hex
+    -- encode() output, so this can never raise regardless of doc_id shape.
+    -- Restricted to CANONICAL 64-hex doc_id candidates only (the shape every
+    -- live writer emits, D1's own "structurally 64-hex" finding): a
+    -- non-conformant doc_id is NEVER a backfill candidate, even if it
+    -- happens to text-match a chunk by coincidence (a stray legacy-width
+    -- nexus.chunks row that predates its own octet-width remediation) --
+    -- resolving a garbage doc_id into a real-looking FK-satisfying row would
+    -- be exactly the silent-widening-to-admit-a-bad-row fallback D0.9
+    -- forbids. Every such row instead falls through to the UNRESOLVABLE
+    -- arm below, unconditionally.
+    UPDATE nexus.topic_assignments ta
+    SET source_collection = ur.collection
+    FROM (
+        SELECT tenant_id, doc_id, MIN(collection) AS collection
+        FROM (
+            SELECT DISTINCT ta2.tenant_id, ta2.doc_id, c.collection
+            FROM nexus.topic_assignments ta2
+            JOIN nexus.chunks c
+              ON c.tenant_id = ta2.tenant_id
+             AND encode(c.chash, 'hex') = ta2.doc_id
+            WHERE ta2.source_collection IS NULL
+              AND ta2.doc_id ~ '^[0-9a-f]{64}$'
+        ) candidate
+        GROUP BY tenant_id, doc_id
+        HAVING COUNT(*) = 1
+    ) ur
+    WHERE ta.tenant_id = ur.tenant_id
+      AND ta.doc_id = ur.doc_id
+      AND ta.source_collection IS NULL;
+    GET DIAGNOSTICS v_backfilled_count = ROW_COUNT;
+    RAISE NOTICE 'RDR-194 P3b source_collection backfill (nexus-tk070.p3b): backfilled % row(s) with a unique-resolution collection', v_backfilled_count;
+
+    -- (c) Counted DELETE of the AMBIGUOUS remainder: the doc_id's chash is
+    -- present under MORE THAN ONE distinct collection for the tenant, so it
+    -- cannot be attributed after the fact. Semi-join via self-join, never a
+    -- count comparison.
+    DELETE FROM nexus.topic_assignments ta
+    WHERE ta.source_collection IS NULL
+      AND EXISTS (
+          SELECT 1
+            FROM nexus.chunks c1
+            JOIN nexus.chunks c2
+              ON c2.tenant_id  = c1.tenant_id
+             AND c2.chash      = c1.chash
+             AND c2.collection != c1.collection
+           WHERE c1.tenant_id = ta.tenant_id
+             AND encode(c1.chash, 'hex') = ta.doc_id
+      );
+    GET DIAGNOSTICS v_ambiguous_count = ROW_COUNT;
+    RAISE NOTICE 'RDR-194 P3b source_collection backfill (nexus-tk070.p3b): deleted % ambiguous row(s) (doc_id chash present under more than one collection)', v_ambiguous_count;
+
+    -- (c) Counted DELETE of the UNRESOLVABLE remainder: shape-agnostic by
+    -- construction (HAL directive 2026-08-16). CORRECTED 2026-08-17
+    -- (critical fix round, critic CRITICAL / bead nexus-i3k3e): the
+    -- SHAPE-INVALID branch below is UNCONDITIONAL on source_collection —
+    -- it is NOT scoped by `ta.source_collection IS NULL` — because Hal's
+    -- own no-wedge directive is unambiguous on this point: "a
+    -- non-canonical doc_id row is unrecomputable garbage REGARDLESS of
+    -- its source_collection." The original version of this DELETE scoped
+    -- BOTH the shape check and the anti-join to `source_collection IS
+    -- NULL`, which the cc4 census (T2 nexus/rdr194-cc4-census-2026-08-16)
+    -- proved wrong on real cloud data: of cc4's 5,896 legacy 32-hex rows,
+    -- only 4,634 have source_collection IS NULL — the remaining 1,262
+    -- ALREADY carry a non-NULL source_collection (set by the pre-P3a
+    -- projection/cross-collection writer branch, which always persisted
+    -- source_collection even for a non-canonical doc_id) and were
+    -- silently skipped by the NULL-scoped predicate, surviving
+    -- unremediated into taxonomy-011-1's guard where they deterministically
+    -- RAISE EXCEPTION with a remedy ("re-run taxonomy-010-1") that changes
+    -- nothing for them — a genuine wedge, not a hypothetical.
+    --
+    -- The ANTI-JOIN branch (a canonical-64-hex doc_id with no backing
+    -- nexus.chunks row) stays NULL-scoped, deliberately NOT widened: a
+    -- shape-VALID doc_id with a missing chunk match is a DIFFERENT failure
+    -- mode (a dangling reference, not a malformed identifier) that
+    -- taxonomy-011-1's guard does not even check (the guard is a pure
+    -- regex shape test) — widening it would delete rows this phase has
+    -- no wedge-risk reason to touch, silent scope creep beyond the fix
+    -- this round exists to make. Likewise the AMBIGUOUS delete arm above
+    -- and the (b) backfill arm stay NULL-scoped as originally designed —
+    -- neither can ever match a shape-invalid doc_id in the first place (a
+    -- 32-hex value cannot text-equal any encode(chash,'hex') of a 32-byte
+    -- chash, which is always exactly 64 hex characters), so widening
+    -- either would be a no-op for THIS bug and is not attempted.
+    --
+    -- Never decodes, so it never raises on ANY doc_id shape a user install
+    -- accumulated — absorbs ALL of cc4's 5,896 legacy 32-hex rows (T2
+    -- nexus/rdr194-cc4-census-2026-08-16), 4,634 NULL-scoped plus 1,262
+    -- non-NULL, unconditionally, along with every other unresolvable
+    -- shape.
+    DELETE FROM nexus.topic_assignments ta
+    WHERE ta.doc_id !~ '^[0-9a-f]{64}$'
+       OR (
+           ta.source_collection IS NULL
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM nexus.chunks c
+                WHERE c.tenant_id = ta.tenant_id
+                  AND encode(c.chash, 'hex') = ta.doc_id
+           )
+       );
+    GET DIAGNOSTICS v_unresolvable_count = ROW_COUNT;
+    RAISE NOTICE 'RDR-194 P3b source_collection backfill (nexus-tk070.p3b): deleted % unresolvable row(s) (non-conformant doc_id shape, REGARDLESS of source_collection, OR a NULL-source_collection row with no matching nexus.chunks row)', v_unresolvable_count;
+END $$;
+
+ALTER TABLE nexus.chunks FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.topic_assignments FORCE ROW LEVEL SECURITY;
+        </sql>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topic_assignments ALTER COLUMN source_collection SET NOT NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topic_assignments ALTER COLUMN source_collection DROP NOT NULL;
+            </sql>
+            <!-- The backfill and both deletes are NOT reversed: backfilled
+                 values are correct derived data (nothing to undo), and the
+                 deleted ambiguous/unresolvable rows are unrecomputable
+                 derived garbage by design (D0.6; same precedent as
+                 legacy-001-drop-chash-alias.xml's legacy-001-1/legacy-001-2
+                 rollbacks). Dropping NOT NULL restores the pre-migration
+                 SCHEMA baseline; the pre-migration DATA baseline is not
+                 restorable and is not attempted. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

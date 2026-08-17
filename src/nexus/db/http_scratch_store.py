@@ -116,6 +116,13 @@ class HttpScratchStore:
         _token: str | None = None,
         _session_token: str | None = None,
     ) -> None:
+        # nexus-wrwb7: whether the CALLER explicitly pinned the bearer (a
+        # test fixture pointing at a fake server) -- tracked BEFORE the
+        # env/lease-resolution fallback below overwrites the local, same
+        # contract as RefreshableHttpStoreMixin's _token_pinned. A pinned
+        # token is never silently swapped for a self-minted data token.
+        self._token_pinned = _token is not None
+
         if base_url is not None:
             if _token is None:
                 _token = os.environ.get("NX_SERVICE_TOKEN", "")
@@ -153,6 +160,11 @@ class HttpScratchStore:
             _HEADER_T1_SESSION: self._session_token,
             "Content-Type": "application/json",
         }
+        # nexus-wrwb7 (RDR-005 2a self-minting): substitute a self-minted
+        # data token for the Authorization header above when a mint_token
+        # credential is configured. No-op (byte-identical to pre-existing
+        # behavior) when unconfigured or the bearer was explicitly pinned.
+        self._apply_data_token_override()
         self._client = self._build_client()
         # nexus-g5hzk review H1: guards the 401 self-heal's read-check-
         # mutate-rebuild sequence. Latent under the current single-event-loop
@@ -183,6 +195,103 @@ class HttpScratchStore:
         self._client.close()
         _log.debug("http_scratch_store.closed")
 
+    def _apply_data_token_override(self) -> None:
+        """nexus-wrwb7: substitute a self-minted data token for
+        ``self._headers["Authorization"]`` when a ``mint_token`` credential
+        is configured. See ``RefreshableHttpStoreMixin._apply_data_token_override``
+        (the T2 twin of this method) for the full rationale; this store does
+        not ride that mixin (bespoke bearer-header caching), so the same
+        treatment is applied directly here.
+
+        Skipped when the bearer was explicitly pinned at construction. A
+        mint failure (``DataTokenMintError``) propagates uncaught -- a
+        half-provisioned install must surface, never silently keep the
+        static/lease token as though nothing were configured.
+        """
+        # getattr default True (not False): an instance constructed via
+        # __new__() bypassing __init__ (a real test pattern in this
+        # codebase, e.g. tests/test_scratch_cmd_service_errors.py) has no
+        # _token_pinned attribute at all -- treat that as "pinned" (do
+        # nothing) rather than crash with AttributeError or, worse, silently
+        # assume unpinned and attempt a mint against whatever partial state
+        # such an instance happens to carry.
+        if getattr(self, "_token_pinned", True):
+            return
+        from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+
+        token = get_data_token_manager().bearer_for(self._base_url, self._tenant)
+        if token is not None:
+            self._headers["Authorization"] = f"Bearer {token}"
+
+    def _current_authorization_header(self) -> str:
+        """Return the CURRENT ``Authorization`` header value, resolved
+        FRESH on every call (critic S4, nexus-ssqk9) rather than only the
+        construction-time-cached ``self._headers["Authorization"]``.
+
+        Mirrors ``http_vector_client._request_once``'s per-request
+        ``bearer_for()`` call (T3) -- the design of record's <20%-TTL
+        PROACTIVE refresh is otherwise vestigial for this store: without
+        this, a live long-running ``HttpScratchStore`` only ever refreshes
+        REACTIVELY, after a 401 (:meth:`_remint_data_token_and_rebuild`),
+        which stays as a fallback below for the case a token is rejected
+        between two calls to this method (an out-of-band revoke).
+
+        Cheap when unconfigured or pinned: ``DataTokenManager.bearer_for``
+        returns ``None`` immediately with zero network call in that case
+        (or is never invoked at all here), so this adds no per-request cost
+        for the ~every install that has not opted into self-minting.
+        """
+        # getattr defaults (not direct attribute access): an instance built
+        # via HttpScratchStore.__new__(HttpScratchStore) bypassing __init__
+        # (the exact pattern tests/test_scratch_cmd_service_errors.py uses,
+        # setting ONLY self._client) has neither _token_pinned NOR _headers
+        # -- default to pinned/no-op (True) and an empty header dict rather
+        # than crash with AttributeError, mirroring
+        # _apply_data_token_override's identical defensive contract.
+        static_headers = getattr(self, "_headers", {})
+        if getattr(self, "_token_pinned", True):
+            return static_headers.get("Authorization", "")
+        from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+
+        token = get_data_token_manager().bearer_for(self._base_url, self._tenant)
+        if token is not None:
+            return f"Bearer {token}"
+        return static_headers.get("Authorization", "")
+
+    def _remint_data_token_and_rebuild(self) -> bool:
+        """On a 401 that the session-token refresh did not resolve, try
+        invalidating + re-minting the self-minted data token (RDR-005 2a)
+        and rebuild the client with the fresh header.
+
+        Returns ``False`` (nothing to do, the original 401 stands) when no
+        ``mint_token`` credential is configured or the bearer was pinned.
+        A configured-but-failing mint raises ``DataTokenMintError`` --
+        fail loud, never leave the caller with a misleading
+        ``SESSION_UNAUTHORIZED_MARKER`` when the real problem is a bad or
+        revoked mint credential.
+        """
+        # See _apply_data_token_override's matching getattr for why the
+        # default is True (pinned/no-op), not False.
+        if getattr(self, "_token_pinned", True):
+            return False
+        from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+
+        manager = get_data_token_manager()
+        if not manager.is_configured():
+            return False
+        manager.invalidate(self._base_url, self._tenant)
+        token = manager.bearer_for(self._base_url, self._tenant)
+        if token is None:
+            return False
+        self._headers["Authorization"] = f"Bearer {token}"
+        try:
+            self._client.close()
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
+            pass
+        self._client = self._build_client()
+        _log.warning("http_scratch_store.data_token_remint_on_401")
+        return True
+
     def _rebind_from_lease(self) -> bool:
         """nexus-om64x: on connection-refused (supervisor restarted on a new
         port; our env port is stale), re-resolve the endpoint from the
@@ -212,6 +321,11 @@ class HttpScratchStore:
         self._base_url = new_url
         if new_token:
             self._headers["Authorization"] = f"Bearer {new_token}"
+        # nexus-wrwb7: re-apply AFTER the static-token half above -- when a
+        # mint_token credential is configured, the data token takes
+        # precedence over whatever the lease republished, exactly as at
+        # construction.
+        self._apply_data_token_override()
         try:
             self._client.close()
         except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
@@ -537,8 +651,12 @@ class HttpScratchStore:
         Raises RuntimeError on non-2xx responses.
         """
         sent_token = getattr(self, "_session_token", "")
+        # critic S4 (nexus-ssqk9): resolve the Authorization header FRESH
+        # for this request rather than the client's construction-time
+        # default -- see _current_authorization_header's docstring.
+        request_headers = {"Authorization": self._current_authorization_header()}
         try:
-            resp = self._client.post(path, json=payload)
+            resp = self._client.post(path, json=payload, headers=request_headers)
         except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):
             # nexus-om64x: stale endpoint after a supervisor restart (connect-refused
             # OR TCP RST on a pooled in-flight connection) — re-resolve from the lease
@@ -546,20 +664,28 @@ class HttpScratchStore:
             if not self._rebind_from_lease():
                 raise RuntimeError(f"HttpScratchStore: connect failed on {path}")
             try:
-                resp = self._client.post(path, json=payload)
+                resp = self._client.post(path, json=payload, headers={"Authorization": self._current_authorization_header()})
             except httpx.HTTPError as exc:
                 raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
             raise RuntimeError(f"HttpScratchStore: network error on {path}: {exc}") from exc
-        if resp.status_code == 401 and self._refresh_session_token_from_lease(sent_token):
-            # nexus-g5hzk: the owner rotated the token; ours went stale. The
-            # fresh one was just adopted from the lease — retry ONCE.
-            try:
-                resp = self._client.post(path, json=payload)
-            except httpx.HTTPError as exc:
-                raise RuntimeError(
-                    f"HttpScratchStore: network error on token-refresh retry {path}: {exc}"
-                ) from exc
+        if resp.status_code == 401:
+            # nexus-g5hzk: the owner rotated the SESSION token; ours went
+            # stale. Try that self-heal FIRST (unchanged precedence).
+            healed = self._refresh_session_token_from_lease(sent_token)
+            if not healed:
+                # nexus-wrwb7: the session-token refresh didn't resolve it --
+                # if a mint_token credential is configured, the AUTHORIZATION
+                # bearer (a self-minted data token) may be what actually went
+                # stale. Try re-minting before giving up.
+                healed = self._remint_data_token_and_rebuild()
+            if healed:
+                try:
+                    resp = self._client.post(path, json=payload)
+                except httpx.HTTPError as exc:
+                    raise RuntimeError(
+                        f"HttpScratchStore: network error on token-refresh retry {path}: {exc}"
+                    ) from exc
         if not resp.is_success:
             if resp.status_code == 401:
                 raise RuntimeError(
@@ -573,27 +699,35 @@ class HttpScratchStore:
     def _post_raw(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """POST *payload* to *path* and return parsed JSON without raising on 404-class."""
         sent_token = getattr(self, "_session_token", "")
+        # critic S4 (nexus-ssqk9): see _post's matching comment.
+        request_headers = {"Authorization": self._current_authorization_header()}
         try:
-            resp = self._client.post(path, json=payload)
+            resp = self._client.post(path, json=payload, headers=request_headers)
         except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):
             # nexus-om64x: stale endpoint after a supervisor restart (connect-refused
             # OR TCP RST on a pooled in-flight connection) — re-resolve + retry once.
             if not self._rebind_from_lease():
                 raise RuntimeError(f"HttpScratchStore: connect failed on {path}")
             try:
-                resp = self._client.post(path, json=payload)
+                resp = self._client.post(path, json=payload, headers={"Authorization": self._current_authorization_header()})
             except httpx.HTTPError as exc:
                 raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
             raise RuntimeError(f"HttpScratchStore: network error on {path}: {exc}") from exc
-        if resp.status_code == 401 and self._refresh_session_token_from_lease(sent_token):
-            # nexus-g5hzk: rotated token — retry ONCE with the lease's fresh one.
-            try:
-                resp = self._client.post(path, json=payload)
-            except httpx.HTTPError as exc:
-                raise RuntimeError(
-                    f"HttpScratchStore: network error on token-refresh retry {path}: {exc}"
-                ) from exc
+        if resp.status_code == 401:
+            # nexus-g5hzk: rotated SESSION token — try that self-heal first.
+            healed = self._refresh_session_token_from_lease(sent_token)
+            if not healed:
+                # nexus-wrwb7: fall back to a data-token re-mint (see _post's
+                # matching comment for the full rationale).
+                healed = self._remint_data_token_and_rebuild()
+            if healed:
+                try:
+                    resp = self._client.post(path, json=payload)
+                except httpx.HTTPError as exc:
+                    raise RuntimeError(
+                        f"HttpScratchStore: network error on token-refresh retry {path}: {exc}"
+                    ) from exc
         if resp.status_code == 404:
             return {"found": False}
         if not resp.is_success:

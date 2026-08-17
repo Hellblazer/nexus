@@ -10,6 +10,20 @@
     seam is the SQL-level expression of the RDR-180 Item1 boundary
     discipline. Join predicates stay native bytea (both sides flipped
     together in rdr180-001).
+
+    STALE-PROSE CORRECTION (RDR-194 D1, nexus-tk070.p3a, nexus-yo9mi,
+    2026-08): the `rdr180-17-topic-scoped` changeset's own `<comment>`
+    element below (checksummed, not editable per D0.2) says "doc_id STAYS
+    TEXT (mixed identity space: chunk chashes AND memory-note titles; see
+    rdr180-001 header)". That is corrected here rather than there:
+    `topic_assignments.doc_id` is NOT a mixed identity space and does NOT
+    hold memory-note titles: every live writer emits a chunk chash
+    (RDR-180 Item6 `:80`, Item6a `:82`, Failure Modes `:135`); see
+    rdr180-001-bytea-chash.xml's own STALE-PROSE CORRECTION for the full
+    argument and provenance. `doc_id` DOES stay TEXT in THIS changeset
+    (correct as shipped); it converts to `bytea` later, at RDR-194 D1
+    (P3a-P3d); only the identity-space reason given for staying TEXT was
+    wrong.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"

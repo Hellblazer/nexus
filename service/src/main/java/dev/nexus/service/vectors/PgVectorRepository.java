@@ -324,6 +324,53 @@ public final class PgVectorRepository {
      *   <li>{@code minilm-l6-v2-384}: 384
      * </ul>
      *
+     * <p><strong>DECISION — dim-scoping contract for reads (nexus-hz89h [T2 22539/22540],
+     * nexus-3rprg).</strong> Since the chunks_384/768/1024 unification a collection's rows
+     * CAN legitimately span two dims at once mid-migration (mirrors {@code
+     * TaxonomyCentroidRepository}'s documented centroid-side stance; RDR-191 D1 hazard),
+     * so "dispatched dim" (what this method resolves) and "every row currently under this
+     * collection" are no longer the same set. That does NOT mean every read should be
+     * scoped to the dispatched dim — the rule, settled once here rather than re-derived
+     * per call site:
+     * <ul>
+     *   <li><strong>Reads of the {@code embedding_<dim>} column itself ARE dim-guarded</strong>
+     *       ({@code .and(embedding().isNotNull())} / {@code embedding_<dim> IS NOT NULL}) —
+     *       a foreign-dim row's embedding column is NULL there, and treating it as present
+     *       is a genuine shape/correctness bug (an empty-but-present vector; a NULL-distance
+     *       search result). Worked examples: {@link #getEmbeddings}; {@link #searchWithTokens}
+     *       and {@link #hybridSearch} (nexus-74zvm, same guard applied to the raw-SQL rank
+     *       queries).
+     *   <li><strong>Every other read is deliberately DIM-AGNOSTIC</strong> — chash/text/
+     *       metadata lookups, existence checks, row counts ({@link #get}, {@link #getWhere},
+     *       {@link #getAllMetadata}, {@link #list}, {@link #delete}, {@link #count}). A
+     *       chunk's text/metadata is collection content regardless of which dim populates
+     *       it, and this agrees by construction with {@link #listCollections} (dim-agnostic
+     *       DISTINCT scan) and {@link #collectionStats} (grouped by dim, then SUMMED across
+     *       dim by the Python {@code list_collections()} for one name). Worked example —
+     *       including the regression this reverses — at {@link #count}'s own DECISION.
+     * </ul>
+     * <p>Cross-method coherence a caller must still preserve: a list-then-getEmbeddings
+     * pairing (e.g. {@code chunk_quarantine.py}) sees a SUPERSET of ids from the
+     * dim-agnostic list call and a SUBSET back from the dim-guarded getEmbeddings call —
+     * the alignment guard on that length mismatch is load-bearing, not a leftover.
+     *
+     * <p><strong>RESIDUAL DISCLOSURE, CLOSED (nexus-gjwhu, RDR-191 Phase 5).</strong> The
+     * Java raw-SQL embedding-read sites in THIS class ({@link #getEmbeddings}, {@link
+     * #searchWithTokens}, {@link #hybridSearch}) are guarded as of nexus-74zvm. The NINE
+     * combined-query SQL functions this class delegates to ({@code
+     * search_metadata_scoped_<dim>}, {@code search_graph_hop_<dim>}, {@code
+     * search_topic_scoped_<dim>} — originally {@code
+     * vectors-005-repoint-functions-views.xml}, called from {@link #searchMetadataScoped}/
+     * {@link #searchGraphHop}/{@link #searchTopicScoped} and their token-aware siblings)
+     * carried the SAME NULL-distance defect this class's own raw SQL had before
+     * nexus-74zvm: no {@code embedding_<dim> IS NOT NULL} predicate on their distance
+     * ORDER BY. Closed by {@code vectors-006-null-distance-guards.xml} (bead nexus-gjwhu,
+     * a NEW Liquibase changeset layering the same guard onto each function via
+     * {@code CREATE OR REPLACE FUNCTION} — the applied vectors-005 bodies are
+     * checksum-frozen and were never edited in place). The dim-scoping contract above now
+     * covers these nine functions too, end to end across every embedding-read surface in
+     * this class's own SQL and its delegated functions.
+     *
      * @param collection four-segment conformant collection name
      *                   ({@code <content_type>__<owner>__<model>__v<n>})
      * @return 384, 768, or 1024
@@ -620,7 +667,7 @@ public final class PgVectorRepository {
             if (vec.length != dim) {
                 throw new IllegalArgumentException(
                     "embedder produced a " + vec.length + "-dim vector for collection '"
-                    + collection + "' which dispatches to chunks_" + dim);
+                    + collection + "' which dispatches to embedding_" + dim);
             }
         }
 
@@ -862,7 +909,7 @@ public final class PgVectorRepository {
         if (embedding.length != dim) {
             throw new IllegalArgumentException(
                 "upsertReferenceOnlyChunk: " + embedding.length + "-dim vector for collection '"
-                + collection + "' which dispatches to chunks_" + dim
+                + collection + "' which dispatches to embedding_" + dim
                 + " (dim mismatch — no silent truncation)");
         }
 
@@ -974,8 +1021,22 @@ public final class PgVectorRepository {
      * column would still parse (all three exist on the table) but silently seq-scan
      * instead of using that dim's FULL HNSW index (F13: measured ~250x, deployment-
      * dependent on which dim is adopted) - see {@code PgVectorRepositoryRawSqlPlanShapeTest}
-     * for the EXPLAIN-based proof that this shape, with no
-     * {@code embedding_<dim> IS NOT NULL} predicate, still binds to the full index.
+     * for the EXPLAIN-based proof that the guarded shape below (next paragraph) still
+     * binds to the full index.
+     *
+     * <p><strong>DECISION (nexus-74zvm, F13 NULL-distance residual — GUARD chosen).</strong>
+     * A foreign-dim row (mixed-dim collection; see {@link #dimForCollection}'s DECISION
+     * for the general dim-scoping contract) has a NULL {@code embedding_<dim>} value, so
+     * its computed distance is NULL; Postgres' default {@code NULLS LAST} means it sorts
+     * after every real match and could still be emitted under {@code LIMIT} once live
+     * (same-dim) matches run out — a distance-null search result, wrong regardless of
+     * which plan the planner happened to pick. The WHERE clause below now adds
+     * {@code embedding_<dim> IS NOT NULL}. This does not defeat the FULL
+     * {@code idx_chunks_embedding_<dim>} bind above: pgvector's HNSW index structurally
+     * never contains a NULL-valued row (there is no vector to place in the graph), so the
+     * predicate is redundant AT THE INDEX and free — verified, not assumed, by
+     * {@code PgVectorRepositoryRawSqlPlanShapeTest}'s guarded-shape EXPLAIN proof, and by
+     * that suite's companion behavioral test that a foreign-dim row is never returned.
      *
      * @param includeSourceUri when true, resolves source_uri via catalog JOIN (opt-in, RDR-169 G5)
      */
@@ -1013,7 +1074,10 @@ public final class PgVectorRepository {
             .append(" WHERE c.collection IN (").append(placeholders(collectionNames.size())).append(")")
             // RDR-156 Decision 6 (nexus-3ck2g): live_chunks predicate, inlined so the
             // HNSW index scan on c stays engaged (see liveChunksPredicate's javadoc).
-            .append(" AND ").append(liveChunksPredicate("c"));
+            .append(" AND ").append(liveChunksPredicate("c"))
+            // nexus-74zvm DECISION (see method javadoc): exclude foreign-dim rows so a
+            // NULL embedding_<dim> never produces a NULL-distance result under LIMIT.
+            .append(" AND ").append(DimTables.embeddingColumn(dim)).append(" IS NOT NULL");
         List<Object> binds = new ArrayList<>();
         binds.add(vectorLiteral(queryVec));
         binds.addAll(collectionNames);
@@ -1204,9 +1268,18 @@ public final class PgVectorRepository {
      * dense-gate distance projections below name {@code embedding_<dim>} explicitly
      * via {@link DimTables#embeddingColumn(int)} rather than a bare {@code embedding}
      * column, for the same reason as {@link #searchWithTokens} — see that method's
-     * javadoc and {@code PgVectorRepositoryRawSqlPlanShapeTest} for the EXPLAIN-based
-     * proof that this shape (no {@code embedding_<dim> IS NOT NULL} predicate) still
-     * binds to the dispatched dim's FULL HNSW index.
+     * javadoc for the F13 name-resolution hazard and the EXPLAIN-based proof that this
+     * shape still binds to the dispatched dim's FULL HNSW index.
+     *
+     * <p><strong>DECISION (nexus-74zvm, F13 NULL-distance residual — GUARD chosen).</strong>
+     * Same rationale as {@link #searchWithTokens}'s javadoc: both branches below now add
+     * {@code embedding_<dim> IS NOT NULL} so a foreign-dim row (whose text CAN legitimately
+     * match the FTS/trigram gate — the gate has no dim awareness) is excluded rather than
+     * ranked with a NULL distance. For the dense-gate branch this is verified not to defeat
+     * the FULL HNSW bind, same as {@link #searchWithTokens} ({@code
+     * PgVectorRepositoryRawSqlPlanShapeTest}'s guarded-shape EXPLAIN proof); the
+     * selective-gate branch never binds HNSW by design (see its own comment below), so
+     * its guard is pure correctness with no plan-shape risk to prove.
      */
     private List<Map<String, Object>> hybridSearch(String tenant, String queryText,
                                            List<String> collectionNames,
@@ -1350,6 +1423,10 @@ public final class PgVectorRepository {
                 String sql = "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
                     + " (" + DimTables.embeddingColumn(dim) + " <=> ?::vector) AS distance FROM " + table + scopeSql
                     + " AND chash IN (" + decodePlaceholders(inChashes.size()) + ")"
+                    // nexus-74zvm DECISION (see method javadoc): the text gate has no dim
+                    // awareness, so a foreign-dim row can match it — exclude here rather
+                    // than rank it with a NULL embedding_<dim> distance.
+                    + " AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL"
                     + " ORDER BY distance ASC, chash ASC LIMIT ?";
                 List<Object> b = new ArrayList<>();
                 b.add(vecLit);
@@ -1362,6 +1439,9 @@ public final class PgVectorRepository {
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             String sql = "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
                 + " (" + DimTables.embeddingColumn(dim) + " <=> ?::vector) AS distance FROM " + table + gateSql
+                // nexus-74zvm DECISION (see method javadoc): same NULL-distance guard as
+                // the selective-gate branch above.
+                + " AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL"
                 + " ORDER BY distance ASC, chash ASC LIMIT ?";
             List<Object> b = new ArrayList<>();
             b.add(vecLit);
@@ -1501,7 +1581,17 @@ public final class PgVectorRepository {
             ctx.select(ch.chash(), ch.embedding())
                .from(ch.table())
                // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6).
+               // nexus-oizh7 D1 hazard (see dimForCollection's DECISION for the general
+               // dim-scoping contract this guard instantiates — embedding-column reads
+               // ARE dim-guarded): without ch.embedding().isNotNull(), a foreign-dim row
+               // matches this predicate, rec.value2() (the un-dispatched embedding
+               // column) is null, and the hydration loop below stored an EMPTY list for
+               // that chash rather than omitting it -- violating this method's own
+               // Chroma-parity "ids not present are OMITTED" contract. Pre-unification
+               // the row simply did not exist in this dim's table, so it was never a
+               // candidate at all.
                .where(ch.collection().eq(collection).and(ch.chash().in(ids))
+                      .and(ch.embedding().isNotNull())
                       .and(liveChunksCondition(ctx, ch)))
                .fetch());
 
@@ -2022,7 +2112,7 @@ public final class PgVectorRepository {
         if (queryVec.length != dim) {
             throw new IllegalArgumentException(
                 "query embedder produced a " + queryVec.length
-                + "-dim vector but the collection dispatches to chunks_" + dim);
+                + "-dim vector but the collection dispatches to embedding_" + dim);
         }
         return result;
     }
@@ -2350,6 +2440,42 @@ public final class PgVectorRepository {
 
     /**
      * Count chunks in a collection visible to {@code tenant}.
+     *
+     * <p><strong>DECISION (nexus-hz89h, reversing an nexus-oizh7 regression):</strong> see
+     * {@link #dimForCollection}'s DECISION for the general dim-scoping contract (embedding-
+     * column reads guarded, everything else dim-agnostic) this reversal instantiates as its
+     * canonical worked example. {@code count()} is deliberately DIM-AGNOSTIC — the collection's total row count
+     * across all dims, NOT scoped to the collection's dispatched dim. An earlier
+     * revision of this method added an {@code embedding_<dim> IS NOT NULL} guard by
+     * analogy with {@link #getEmbeddings}; that guard was a CRITICAL regression,
+     * caught by substantive-critic review before merge (T2
+     * {@code nexus/critique-nexus-oizh7-dim-guard-count-cross-endpoint-break.md}
+     * [22539]).
+     *
+     * <p>The break: {@code GET /v1/vectors/stats} ({@code collection_vector_stats},
+     * grouped by dim) and the Python {@code list_collections()} that sums across dims
+     * for a name stay dim-agnostic regardless of what this method does, so a
+     * dim-scoped {@code count()} disagrees with them for a mixed-dim collection —
+     * exactly the state this class's own D1-hazard commentary calls "a real
+     * reachable state, not just a corrupted-data hypothetical" (RDR-191 mid-
+     * migration). At the 100%-foreign-dim extreme (start of a re-embed, before any
+     * new-dim row has landed) a dim-scoped {@code count()} returns 0 for a
+     * collection that plainly exists, which breaks {@code
+     * HttpVectorClient._count_or_key_error}'s documented invariant that a
+     * {@code list_collections}-enumerated name can never hit its zero-count
+     * KeyError branch, and in turn makes {@code nx collection reindex <name>}
+     * (its existence check calls {@code collection_info()} first) refuse to find a
+     * collection it exists specifically to repair.
+     *
+     * <p>The analogy to {@link #getEmbeddings} does not hold: that method READS the
+     * embedding column, so returning a foreign-dim row there is a genuine shape bug
+     * (a same-length-but-empty vector). {@code count()} reads no embedding column at
+     * all — it answers "how many chunks does this collection have", the same
+     * question {@code stats}/{@code list_collections} answer, and must keep
+     * agreeing with them. {@link TaxonomyCentroidRepository#count} already settled
+     * this exact question for centroids the same way, verbatim: "this method counts
+     * centroids, not centroids-at-a-dim" — the correct precedent for THIS method,
+     * not the one the reverted revision cited.
      */
     public int count(String tenant, String collection) {
         int dim = dimForCollection(collection);
@@ -3552,18 +3678,11 @@ public final class PgVectorRepository {
     /** Precompiled hex pattern for chunk_text_hash validation (fix #M1-cr: length+charset). */
     private static final Pattern HEX64 = Pattern.compile("[0-9a-f]{64}");
 
-    /** Legacy pre-RDR-180 chunk id shape: 32 lowercase hex (the [:32] truncation era). */
-    private static final Pattern HEX32 = Pattern.compile("[0-9a-f]{32}");
-
-    /**
-     * True when {@code s} is a legacy 32-lowercase-hex chunk id — the shape every
-     * pre-RDR-180 row carries (as a 16-byte key post-conversion) until the
-     * chash-rekey rung runs. Read paths tolerate this width in the auto-converge
-     * window; WRITE boundaries reject it ({@link dev.nexus.service.db.Chash}).
-     */
-    private static boolean isLegacyHex32(String s) {
-        return s != null && HEX32.matcher(s).matches();
-    }
+    // nexus-lgdel.l1: HEX32 / isLegacyHex32 (the auto-converge-window 32-hex
+    // admission predicate) are RETIRED WITH nexus.chash_alias — the window
+    // this tolerated (cohort engine booted, chash-rekey rung not yet run)
+    // cannot occur once the rung and RekeyOps are both deleted. See
+    // enrichSearchRows below for the tightened guard.
 
     /**
      * Compute a span string from chunk metadata (RDR-169 G5, bead nexus-jkv85).
@@ -3641,23 +3760,18 @@ public final class PgVectorRepository {
         for (Map<String, Object> row : rows) {
             Object idVal = row.get("id");
             // Fail loud if id is not chash-shaped (RDR-180) — document-level
-            // callers (tumbler ids) must not reach here. LEGACY 32-hex ids
-            // are chunk rows too (nexus-p78a0 rehearsal catch, run 3): in the
-            // auto-converge window — cohort engine booted, chash-rekey rung
-            // not yet run — every pre-existing row still carries its 16-byte
-            // legacy key, and a hard 64-only guard here 422'd EVERY search of
-            // pre-existing content, making an un-rekeyed store unreadable.
-            // The window contract is degrade-per-row, never fail-the-read:
-            // serve the row (chash = the legacy hex; the client's dual-width
-            // read seam resolves it via the alias route once rekeyed); the
-            // span still derives from metadata chunk_text_hash, which has
-            // carried the FULL 64-hex in every era.
-            if (!(idVal instanceof String chashStr)
-                    || !(chashStr.length() == 64 || isLegacyHex32(chashStr))) {
+            // callers (tumbler ids) must not reach here. The nexus-p78a0
+            // auto-converge-window tolerance for legacy 16-byte-key rows
+            // (cohort engine booted, chash-rekey rung not yet run) is
+            // RETIRED at nexus-lgdel.l1 along with the rung and RekeyOps:
+            // that window cannot occur once nothing ever writes a
+            // legacy-width row and nothing rekeys one, so a 64-only guard
+            // no longer risks 422ing a live store — a shorter id here is
+            // now genuine corruption, not an expected transient shape.
+            if (!(idVal instanceof String chashStr) || chashStr.length() != 64) {
                 throw new IllegalStateException(
                     "enrichSearchRows: id '" + idVal + "' is not a 64-hex chash "
-                    + "(or a legacy 32-hex window row) — only chunk-level search "
-                    + "rows may be enriched");
+                    + "— only chunk-level search rows may be enriched");
             }
             row.put("chash", chashStr);
             if (includeSourceUri) {

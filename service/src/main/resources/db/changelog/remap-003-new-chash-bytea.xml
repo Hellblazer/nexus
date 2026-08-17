@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-194 Phase P2 (Decision D3, bead nexus-tk070.p2) — `chash_remap.new_chash`
+    TEXT -> `bytea`. `chash_remap` is NOT retired: it is a live, served rekey
+    membership index (`RemapRepository.java`, `RemapHandler.java`,
+    `remap-002-membership-function.xml`, and a `ChashCensus` input). Do not
+    re-litigate D3 here; see
+    `docs/rdr/rdr-194-fk-census-structural-schema-warts.md` § D3 for the full
+    argument.
+
+    GATE PRECONDITION (cloud-count-2, sharpened, T2
+    `nx memory get -p nexus -t rdr194-cloud-count-2-2026-08-15`, [22670]):
+    `nexus.chash_remap` is EMPTY on the live store — 0 rows, all tenants,
+    BYPASSRLS-verified against multi-tenant visibility on sibling FORCE-RLS
+    tables in the same session. Both required queries ran: the per-length
+    census (`SELECT length(new_chash), count(*) ... GROUP BY 1`) returned no
+    rows, and the non-hex census (`WHERE new_chash !~ '^[0-9a-f]+$' OR
+    length(new_chash) % 2 = 1`) returned 0. There is no 32-char legacy-ref
+    population and no non-hex corruption to resolve through `chash_alias` or
+    `POST /v1/remap/clear_leg` (D3's two named remedies) before this file's
+    conversion runs — the live estate has nothing for either remedy to act
+    on. changeset 1 therefore carries no anti-join remediation step and no
+    RLS toggle-wrap (D0's three-step FK shape does not apply here: there is
+    no FK, no NOT VALID, no VALIDATE — this is a plain rewrite, matching the
+    "pure ALTER TYPE" carve-out `test_rehearsal_seed_coverage_lint.py`
+    documents; there is also no top-level DML for
+    `test_changelog_rls_lint.py` to flag).
+
+    An install with a NON-EMPTY `chash_remap` (a legacy install this file has
+    not observed) gets the fail-loud behavior D0.9 requires: `USING
+    decode(new_chash,'hex')` raises on any row whose stored text is not
+    even-length hex (any residual non-hex corruption, per D3's second named
+    remedy), and a row that decodes to a width other than 32 bytes (a
+    32-hex-char legacy ref decodes to 16, per D3's first named remedy) is
+    rejected by constraint validation — mechanically the not-yet-dropped
+    widened length CHECK is re-evaluated against the converted values
+    during the ALTER itself, so it fires before the new
+    `octet_length(new_chash) = 32` CHECK is even added; both paths are the
+    same fail-loud outcome, the distinction is only which error text the
+    operator sees. Either
+    failure names the offending state rather than silently coercing or
+    admitting it — the operator resolves the flagged rows through
+    `chash_alias` (a legacy 16-byte ref that already has a canonical 32-byte
+    mapping) or `POST /v1/remap/clear_leg` (an unresolvable or corrupt leg)
+    and re-runs the migration. This changeset does not widen the target
+    CHECK to admit either case (D0.9).
+
+    Two changesets (`EXPECT_NEW_CHANGESETS=2`, re-pinned to this file as
+    authored):
+
+      1. remap-003-1: `ALTER COLUMN new_chash TYPE bytea USING
+         decode(new_chash,'hex')`; DROP the widened
+         `chash_remap_new_chash_len` CHECK (`rdr180-001-bytea-chash.xml:339-351`,
+         changeset `rdr180-13-widen-remap-new-chash`,
+         `length(new_chash) IN (32, 64)`); ADD
+         `CHECK (octet_length(new_chash) = 32)`; ANALYZE in the same pass
+         (D0.5, `tests/test_changelog_analyze_lint.py`).
+      2. remap-003-2: layered `CREATE OR REPLACE FUNCTION
+         nexus.remap_membership` on top of the applied
+         `vectors-005-8` body (D0.2 — never editing the applied changeset;
+         precedent `catalog-029-3` on `vectors-005-15`). The CASE hex/UTF8
+         decode branch
+         (`vectors-005-repoint-functions-views.xml:780-812`, changeset
+         `vectors-005-8`) is gone, not narrowed: with `new_chash` itself
+         bytea there is nothing left to decode, so the `fact` CTE that
+         computed `key_bytes` is deleted outright and the `resolved` CTE
+         joins `nexus.chash_alias` directly on `r.new_chash`. Signature and
+         return contract (`RETURNS TABLE(mapped_total bigint, present_count
+         bigint)`, `SECURITY INVOKER`, `STABLE`) and the alias-chaining
+         semantics (`COALESCE(a.new_chash, r.new_chash)`) are preserved
+         verbatim.
+
+    ROLLBACK ORDERING (read before touching either <rollback> block). Forward
+    order is 1-then-2 (the function body requires the column already be
+    bytea), so Liquibase's reverse walk undoes 2 THEN 1 — changeset 2's
+    rollback runs FIRST, while the column is STILL bytea (changeset 1 has not
+    rolled back yet). A literal restoration of the pre-P2 CASE/TEXT function
+    body at that point would fail to CREATE: the regex operator `~` and
+    `convert_to(..., 'UTF8')` do not typecheck against a bytea argument, and
+    `LANGUAGE sql` bodies are validated against the catalog immediately, not
+    deferred like `plpgsql` (the same reversibility lemma `rdr180-6`'s and
+    `rdr180-7`'s own comments derive). So changeset 2's rollback is a
+    deliberate no-op (D0.6: empty rollback, reason inline) — restoring a
+    function body that only typechecks once the column is TEXT again cannot
+    happen here. changeset 1's rollback, which always runs LAST in a reverse
+    walk regardless of whether changeset 2's rollback ran first, does BOTH
+    reversions together in one pass: column back to TEXT via `encode`, the
+    old widened CHECK restored, ANALYZE, and `CREATE OR REPLACE FUNCTION
+    nexus.remap_membership` restored to the exact `vectors-005-8` body. That
+    ordering is correct whether the two changesets roll back together (one
+    operation, 2 then 1) or changeset 1 rolls back on its own in a later,
+    separate operation (the column and function are still bytea/new at that
+    point either way, so the combined restoration is unconditionally safe to
+    run there too).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: new_chash TEXT -> bytea, CHECK swap, ANALYZE ──────── -->
+    <changeSet id="remap-003-1" author="nexus-tk070.2">
+        <comment>
+            chash_remap.new_chash TEXT -> bytea (RDR-194 D3). Fails loud
+            (USING decode) on any non-hex row rather than coercing; the
+            octet_length=32 CHECK replaces the widened length(32,64) CHECK.
+            Precondition verified empty on the live store (cloud-count-2,
+            T2 [22670]) — see this file's header for the full gate record
+            and the fail-loud behavior on a non-empty legacy install.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chash_remap
+    ALTER COLUMN new_chash TYPE bytea USING decode(new_chash, 'hex');
+
+ALTER TABLE nexus.chash_remap DROP CONSTRAINT IF EXISTS chash_remap_new_chash_len;
+
+ALTER TABLE nexus.chash_remap
+    ADD CONSTRAINT chash_remap_new_chash_octet_check CHECK (octet_length(new_chash) = 32);
+
+ANALYZE nexus.chash_remap;
+
+COMMENT ON COLUMN nexus.chash_remap.new_chash IS
+  'Canonical 32-byte chunk chash (RDR-194 D3). DELIBERATELY no FK to nexus.chunks: a remap fact asserts a claim whose target may legitimately not be present yet -- that absence is the exact measurement remap_membership performs (present_count vs mapped_total); an FK would make the function tautological (RDR-194 D3/D7). The sibling old_id stays unconstrained TEXT because it names a foreign identity space (its own COMMENT lands in RDR-194 P4).';
+        </sql>
+        <rollback>
+            <!-- Combined reversion (D0.6 note): column back to TEXT, old
+                 CHECK restored, ANALYZE, AND the pre-P2 remap_membership
+                 body restored verbatim to vectors-005-8's CASE/TEXT form —
+                 all in this ONE changeset's rollback rather than split
+                 across both, because this changeset always rolls back LAST
+                 in a reverse walk (see the file header's "ROLLBACK
+                 ORDERING" section and changeset remap-003-2's own rollback
+                 comment): by the time this runs, restoring a TEXT-typed
+                 function body is safe regardless of what remap-003-2's
+                 rollback did (nothing). -->
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chash_remap DROP CONSTRAINT IF EXISTS chash_remap_new_chash_octet_check;
+
+ALTER TABLE nexus.chash_remap
+    ALTER COLUMN new_chash TYPE TEXT USING encode(new_chash, 'hex');
+
+ALTER TABLE nexus.chash_remap
+    ADD CONSTRAINT chash_remap_new_chash_len CHECK (length(new_chash) IN (32, 64));
+
+ANALYZE nexus.chash_remap;
+            </sql>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.remap_membership(
+    p_source_collection text,
+    p_target_collection text
+) RETURNS TABLE(mapped_total bigint, present_count bigint)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $fn$
+    WITH fact AS (
+        SELECT CASE WHEN r.new_chash ~ '^[0-9a-f]+$' AND length(r.new_chash) % 2 = 0
+                    THEN decode(r.new_chash, 'hex')
+                    ELSE convert_to(r.new_chash, 'UTF8') END AS key_bytes
+        FROM nexus.chash_remap r
+        WHERE r.source_collection = p_source_collection
+          AND r.target_collection = p_target_collection
+    ),
+    resolved AS (
+        SELECT COALESCE(a.new_chash, f.key_bytes) AS chash
+        FROM fact f
+        LEFT JOIN nexus.chash_alias a
+          ON a.old_bytes = f.key_bytes
+    )
+    SELECT
+        count(*)::bigint AS mapped_total,
+        count(*) FILTER (WHERE
+            EXISTS (SELECT 1 FROM nexus.chunks c
+                     WHERE c.collection = p_target_collection
+                       AND c.chash = resolved.chash)
+        )::bigint AS present_count
+    FROM resolved
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: remap_membership layered CREATE OR REPLACE ────────── -->
+    <changeSet id="remap-003-2" author="nexus-tk070.2">
+        <comment>
+            nexus.remap_membership: the CASE hex/UTF8 decode branch
+            (vectors-005-8) is deleted, not narrowed — new_chash is bytea
+            now, so there is nothing left to decode. Direct LEFT JOIN
+            nexus.chash_alias on r.new_chash, preserving alias-chaining
+            (COALESCE(a.new_chash, r.new_chash)) verbatim. Signature and
+            return contract unchanged.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.remap_membership(
+    p_source_collection text,
+    p_target_collection text
+) RETURNS TABLE(mapped_total bigint, present_count bigint)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $fn$
+    WITH resolved AS (
+        SELECT COALESCE(a.new_chash, r.new_chash) AS chash
+        FROM nexus.chash_remap r
+        LEFT JOIN nexus.chash_alias a
+          ON a.old_bytes = r.new_chash
+        WHERE r.source_collection = p_source_collection
+          AND r.target_collection = p_target_collection
+    )
+    SELECT
+        count(*)::bigint AS mapped_total,
+        count(*) FILTER (WHERE
+            EXISTS (SELECT 1 FROM nexus.chunks c
+                     WHERE c.collection = p_target_collection
+                       AND c.chash = resolved.chash)
+        )::bigint AS present_count
+    FROM resolved
+$fn$;
+        </sql>
+        <rollback>
+            <!-- Deliberately empty (D0.6) — see changeset remap-003-1's
+                 rollback comment and the file header's "ROLLBACK ORDERING"
+                 section. This rollback runs FIRST in a reverse walk, while
+                 new_chash is still bytea; the pre-P2 CASE/TEXT function
+                 body cannot typecheck against a bytea column at this point,
+                 so restoring it here would fail. remap-003-1's rollback,
+                 which always runs after this one, restores both the column
+                 type and this function body together. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

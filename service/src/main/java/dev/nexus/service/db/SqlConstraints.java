@@ -5,8 +5,11 @@ package dev.nexus.service.db;
 import java.sql.SQLException;
 
 /**
- * Which unique key a PostgreSQL integrity violation actually named (nexus-0ehwe
- * arbiter class: nexus-pbawi / nexus-jq53b / nexus-z3ssg).
+ * Which constraint a PostgreSQL integrity violation actually named — originally
+ * scoped to unique-key arbiters (nexus-0ehwe arbiter class: nexus-pbawi /
+ * nexus-jq53b / nexus-z3ssg), extended to foreign-key violations
+ * ({@link #violatesAnyFk}, nexus-tk070.p1 / RDR-194 § D2) rather than
+ * duplicating the same cause-chain walk in a second file.
  *
  * <p><strong>Why this exists.</strong> An {@code INSERT ... ON CONFLICT} takes
  * exactly ONE conflict target — verified against PostgreSQL 17, where naming two
@@ -30,6 +33,9 @@ public final class SqlConstraints {
 
     /** PostgreSQL SQLSTATE for {@code unique_violation}. */
     public static final String UNIQUE_VIOLATION = "23505";
+
+    /** PostgreSQL SQLSTATE for {@code foreign_key_violation}. */
+    public static final String FOREIGN_KEY_VIOLATION = "23503";
 
     private SqlConstraints() {
     }
@@ -83,6 +89,37 @@ public final class SqlConstraints {
      */
     public static boolean violatesAny(Throwable t, String... constraints) {
         if (!isUniqueViolation(t)) return false;
+        String actual = violated(t);
+        if (actual == null) return false;
+        for (String c : constraints) {
+            if (actual.equals(c)) return true;
+        }
+        return false;
+    }
+
+    /** True if a {@code 23503} foreign-key violation appears anywhere in {@code t}'s cause chain. */
+    public static boolean isForeignKeyViolation(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof SQLException se && FOREIGN_KEY_VIOLATION.equals(se.getSQLState())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True if {@code t} is a {@code 23503} naming one of {@code constraints}
+     * (nexus-tk070.p1, RDR-194 § D2: {@code CatalogRepository.upsertLink}
+     * maps a dangling-tumbler FK violation to the client-visible
+     * {@code dangling_endpoint} 400).
+     *
+     * <p>Both halves are load-bearing, mirroring {@link #violatesAny}: matching the
+     * SQLSTATE alone would also catch a violation of some OTHER FK on the table;
+     * matching the name alone would catch a non-FK class-23 failure that happens to
+     * name the same relation.
+     */
+    public static boolean violatesAnyFk(Throwable t, String... constraints) {
+        if (!isForeignKeyViolation(t)) return false;
         String actual = violated(t);
         if (actual == null) return false;
         for (String c : constraints) {

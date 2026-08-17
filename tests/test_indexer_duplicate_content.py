@@ -116,9 +116,36 @@ def mock_voyage_client():
 def _do_index(
     repo: Path, registry: RepoRegistry, t3: T3Database, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Run the real ``index_repository`` pipeline against *t3* (the
+    ``local_t3`` conftest fixture — a FAKE in-memory T3 client).
+
+    nexus-dbzxb (RDR-191 Phase 5 Python collateral): the catalog manifest
+    write this pipeline performs always goes through the REAL engine
+    catalog (autouse ``_pin_t2_substrate``), so ``fk_catalog_chunks_chunk``
+    now requires each manifest chash to have a matching REAL
+    ``nexus.chunks`` row — which the fake T3 client can never provide.
+    Rather than duplicate the real chunker's chash derivation here, wrap
+    ``t3._write_batch`` (the ONE choke point both ``upsert_chunks`` and
+    ``upsert_chunks_with_embeddings`` funnel through — see
+    ``T3Database._write_batch``) so every real write the indexer performs
+    ALSO seeds the real engine with the SAME ``(collection, ids)`` it just
+    used. This is idiom 1/2's spirit applied at the choke point instead of
+    per-call-site, since the indexer computes the chashes internally.
+    """
     from nexus.indexer import index_repository
+    from tests._catalog_fixture_ops import seed_manifest_chunks
 
     monkeypatch.setenv("NX_LOCAL", "1")
+    orig_write_batch = t3._write_batch
+
+    def _seeding_write_batch(col, collection_name, ids, documents, metadatas,
+                              embeddings=None, **kwargs):
+        orig_write_batch(col, collection_name, ids, documents, metadatas,
+                          embeddings, **kwargs)
+        seed_manifest_chunks(collection_name, ids)
+
+    monkeypatch.setattr(t3, "_write_batch", _seeding_write_batch)
+
     with patch("nexus.db.make_t3", return_value=t3), patch(
         "nexus.config.get_credential", side_effect=fake_credentials()
     ):
@@ -560,6 +587,26 @@ def test_pdf_indexer_handles_duplicate_chunks_within_document(
     # process state across fixtures, so ``list_collections`` returns
     # collections from earlier tests in the same session).
     pinned_collection = "docs__dupdocs__voyage-context-3__v1"
+
+    # nexus-dbzxb (RDR-191 Phase 5 Python collateral): local_t3 is a fake
+    # in-memory T3 client (see the comment on the RUNFENCE stub above),
+    # but index_pdf's manifest write goes through the REAL engine catalog
+    # unconditionally. fk_catalog_chunks_chunk now requires a matching
+    # real nexus.chunks row per manifest chash; wrap the ONE write choke
+    # point (_write_batch — see _do_index's identical trick above) so the
+    # real ids this pipeline computes are also seeded into the real
+    # engine.
+    from tests._catalog_fixture_ops import seed_manifest_chunks
+
+    _orig_write_batch = local_t3._write_batch
+
+    def _seeding_write_batch(col, collection_name, ids, documents, metadatas,
+                              embeddings=None, **kwargs):
+        _orig_write_batch(col, collection_name, ids, documents, metadatas,
+                           embeddings, **kwargs)
+        seed_manifest_chunks(collection_name, ids)
+
+    monkeypatch.setattr(local_t3, "_write_batch", _seeding_write_batch)
 
     with patch("nexus.doc_indexer.PDFExtractor") as ext_cls, patch(
         "nexus.doc_indexer.PDFChunker"

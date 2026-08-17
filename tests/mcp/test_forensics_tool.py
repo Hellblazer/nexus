@@ -54,9 +54,17 @@ def test_creds_present_runs_diagnostics_and_embeds_results(
 
     result = core.forensics("chash-poison")
     assert ran, "diagnostics were not executed"
+    # nexus-rpw6u CRITICAL-2: live_store_detail now runs a one-statement
+    # connectivity preflight before the real per-statement loop (so a
+    # connection-level failure degrades to ONE aggregate message instead of
+    # N copies of the same error) — the first recorded call is that probe,
+    # not a topic statement.
+    assert ran[0] == ("SELECT 1",)
+    executed = [stmt for (stmt,) in ran[1:]]
+    assert executed, "no topic statements were executed past the preflight"
     # Every executed statement appears in the returned playbook alongside its
     # live result, so the agent sees actual store state, not placeholders.
-    for stmt in ran[0]:
+    for stmt in executed:
         assert stmt in result
     assert "= 0" in result or "-> 0" in result or ": 0" in result
     # The playbook carries the read-only framing and the runbook URL.
@@ -111,10 +119,13 @@ def test_forensics_topic_sql_is_lint_clean():
     # emit_forensics_playbook already ran the lint (it raises on violation);
     # assert the statements are the aggregate shape — Amendment A6
     # (nexus-9bufb): per-table sums AGAINST THE COUNTS VIEW (structural
-    # content boundary), plus the pg_constraint state read.
+    # content boundary), the pg_constraint state read, and — nexus-rpw6u
+    # (RDR-191 straddle handling) — the grant-free to_regclass era probe
+    # (no FROM clause, so it is exempt from the aggregate-only content
+    # guard by construction; see chash_era_probe_statement's docstring).
     for stmt in pb.diagnostic_sql:
         assert (
-            stmt.upper().startswith(("SELECT SUM", "SELECT CONNAME"))
+            stmt.upper().startswith(("SELECT SUM", "SELECT CONNAME", "SELECT (TO_REGCLASS"))
             or "diag_chash_conformance" in stmt
         ), stmt
 

@@ -289,8 +289,10 @@ class PgVectorCombinedQueryContractTest {
             "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, content_type, physical_collection) "
             + "VALUES ('" + tenant + "', '" + tumbler + "', 'Doc', '" + contentType + "', '" + collection + "') "
             + "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
-        insertManifest(su, tenant, tumbler, chash, collection);
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // chunk row to land BEFORE the manifest row (previously order-independent).
         insertChunk(su, tenant, dim, collection, chash, tumbler, x, y);
+        insertManifest(su, tenant, tumbler, chash, collection);
     }
 
     private void seedTopicChunk(Connection su, String tenant, int dim, String collection,
@@ -300,12 +302,15 @@ class PgVectorCombinedQueryContractTest {
             "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, content_type, physical_collection) "
             + "VALUES ('" + tenant + "', '" + tumbler + "', 'Doc', 'paper', '" + collection + "') "
             + "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
-        insertManifest(su, tenant, tumbler, chash, collection);
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // chunk row to land BEFORE the manifest row (previously order-independent).
         insertChunk(su, tenant, dim, collection, chash, tumbler, x, y);
-        // chunk-level topic membership: topic_assignments.doc_id = chash (nexus-sa14p)
+        insertManifest(su, tenant, tumbler, chash, collection);
+        // chunk-level topic membership: topic_assignments.doc_id = chash (nexus-sa14p).
+        // RDR-194 P3c: doc_id is bytea now — decode('hex').
         su.createStatement().execute(
             "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', '" + chash + "', " + topicId + ", '" + collection + "', "
+            + "VALUES ('" + tenant + "', decode('" + chash + "', 'hex'), " + topicId + ", '" + collection + "', "
             + "'2026-01-01T00:00:00+00'::timestamptz) ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING");
     }
 

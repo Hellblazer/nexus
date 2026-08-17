@@ -4,16 +4,25 @@
 
 RDR-155 P4b reshaped the edge set: the t2-schema and substrate-etl rungs
 (and their co-resident chunk-identity / embedder-era axes) died with the
-Chroma + client-SQLite migration machinery. What remains:
+Chroma + client-SQLite migration machinery, leaving the RDR-180 chash-rekey
+rung as the ladder's sole data rung. nexus-lgdel.l1 retired THAT rung too
+(RDR-180's legacy-identity era it converged installs out of is itself gone
+— the rung's own detect() had already read as permanently converged on
+every current and fresh install; see the file's own git history for the
+deletion). What remains:
 
 1. package → everything            (:data:`PRECONDITION_PACKAGE` → ``*``)
-2. engine → chash rekey            (:data:`PRECONDITION_ENGINE` → chash-rekey)
 
 Package/engine/process are STATELESS preconditions (RDR-185 Constraints):
 re-derived from ON-DISK state at every invocation, converged before the
 ladder walks (wired in P3, nexus-n7u38.23) — they are NOT rungs and never
 appear in :data:`RUNG_ORDER`. Their edges here document the walk contract;
 the registry can only mechanically enforce rung-to-rung order.
+
+:data:`RUNG_ORDER` is intentionally EMPTY — the ladder is rung-less until a
+future data transition needs one. Inserting a new rung means adding both a
+:data:`RUNG_ORDER` entry and its edges in :data:`HARD_EDGES`; the order is
+validated against the edges at import/construction time.
 
 The hooks/config axis has NO assigned position: that is the P3 decision
 spike (nexus-n7u38.22, the gate's one genuine ambiguity — chicken-and-egg
@@ -28,12 +37,11 @@ from nexus.upgrade_ladder.protocol import Rung
 
 # ── Canonical node names ─────────────────────────────────────────────────────
 
-#: RDR-180 chash rekey rung (nexus-jxizy.6): the freeze-gated full-digest
-#: cutover — needs the bytea schema + /v1/remap/rekey (ENGINE precondition).
-#: RDR-155 P4b: the t2-schema and substrate-etl rungs died with the
-#: migration machinery; the rekey rung is RDR-185's standing convergence
-#: mechanism and the ladder's sole data rung.
-RUNG_CHASH_REKEY = "chash-rekey"
+#: RDR-180 chash rekey rung (nexus-jxizy.6) — RETIRED nexus-lgdel.l1. The
+#: freeze-gated full-digest cutover it performed is done on every current
+#: and fresh install; the canonical name is retired with the rung rather
+#: than kept as a dead reservation (directive of record, T2
+#: nexus/plan-legacy-retirement-2026-08-16: "no preservation campaign").
 
 #: Stateless preconditions — NOT rungs (see module docstring).
 PRECONDITION_PACKAGE = "precondition:package"
@@ -46,14 +54,14 @@ ALL_RUNGS = "*"
 #: Canonical total order over the known DATA rungs. New rungs are inserted
 #: here (with their edges in :data:`HARD_EDGES`) — the order is validated
 #: against the edges at import/construction time, so an inconsistent insert
-#: fails immediately rather than walking in a wrong order.
-RUNG_ORDER: tuple[str, ...] = (RUNG_CHASH_REKEY,)
+#: fails immediately rather than walking in a wrong order. EMPTY since
+#: nexus-lgdel.l1 retired the sole surviving rung (chash-rekey).
+RUNG_ORDER: tuple[str, ...] = ()
 
 #: RQ2 hard edges as ``(before, after)`` pairs; ``after == ALL_RUNGS`` means
 #: the source precedes every rung.
 HARD_EDGES: tuple[tuple[str, str], ...] = (
     (PRECONDITION_PACKAGE, ALL_RUNGS),
-    (PRECONDITION_ENGINE, RUNG_CHASH_REKEY),
 )
 
 #: RQ2 edges 4–5 (chunk-identity / embedder-era co-residency inside the
@@ -173,10 +181,11 @@ def default_registry() -> LadderRegistry:
     """The production ladder.
 
     RDR-155 P4b: the t2-schema and substrate-etl rungs died with the
-    migration machinery (Chroma + client-SQLite retirement) — the ladder
-    is rekey-only. The RDR-180 chash-rekey rung SURVIVES (D-D): it is
-    RDR-185's standing convergence mechanism, not migration plumbing.
+    migration machinery (Chroma + client-SQLite retirement), leaving the
+    RDR-180 chash-rekey rung as the ladder's sole data rung. nexus-lgdel.l1
+    retired that rung too — the legacy-identity era it converged installs
+    out of is gone, and its detect() had already read as permanently
+    converged on every current and fresh install. The ladder is rung-less
+    until a future data transition needs one (see :data:`RUNG_ORDER`).
     """
-    from nexus.upgrade_ladder.rungs.chash_rekey import default_chash_rekey_rung  # noqa: PLC0415 — deferred to avoid import cycle
-
-    return LadderRegistry((default_chash_rekey_rung(),))  # type: ignore[arg-type]
+    return LadderRegistry(())

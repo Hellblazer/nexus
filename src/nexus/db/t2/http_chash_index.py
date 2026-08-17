@@ -15,15 +15,17 @@ All methods send ``Authorization: Bearer <token>`` and
 ``X-Nexus-Tenant: default`` (``DEFAULT_TENANT``) on every request.
 
 Interface parity (bead nexus-gmiaf.16, RDR-152 P2.6):
-    upsert, upsert_many, lookup, delete_collection, distinct_collections,
+    upsert, upsert_many, lookup, distinct_collections,
     rename_collection, delete_stale, is_empty, count_for_collection,
     registered_chashes_for_collection, close
+    (delete_collection DELETED at nexus-lgdel.l2 — orphaned deprecated
+    no-op, zero production callers; see the method's own former-location
+    comment below)
 
 Method-by-method parity vs ChashIndex (SQLite):
     upsert(*, chash, collection) -> None
     upsert_many(*, chashes, collection) -> None
     lookup(chash) -> list[dict[str, Any]]
-    delete_collection(collection) -> int
     distinct_collections() -> set[str]
     rename_collection(*, old, new) -> int
     delete_stale(*, chash, collection) -> int
@@ -162,10 +164,11 @@ class HttpChashIndex(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         data = self._get("/v1/chash/lookup", params={"chash": chash})
         rows = (data or {}).get("rows", [])
-        # RDR-180: the engine echoes the CANONICAL 64-hex it resolved
-        # (identity-mapped for canonical input; alias-resolved for legacy
-        # 32-hex refs) — surfaced per-row so the citation resolver can
-        # rewrite a legacy reference to its canonical identity.
+        # RDR-180: the engine echoes the canonical 64-hex it resolved
+        # (identity-mapped for canonical input) — surfaced per-row so
+        # callers get a consistent shape. nexus-lgdel.l1 retired the
+        # alias-resolution route this endpoint used to fall back to for a
+        # legacy 32-hex ref; only direct 64-hex lookups resolve now.
         canonical = (data or {}).get("chash")
         if canonical:
             for r in rows:
@@ -173,15 +176,13 @@ class HttpChashIndex(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                     r.setdefault("chash", canonical)
         return rows
 
-    # ── delete_collection ──────────────────────────────────────────────────────
-
-    def delete_collection(self, collection: str) -> int:
-        """Drop all rows for ``collection``. Returns deleted row count.
-
-        Idempotent: absent collection yields 0.
-        """
-        data = self._post("/v1/chash/delete_collection", {"collection": collection})
-        return int((data or {}).get("deleted", 0))
+    # delete_collection DELETED at nexus-lgdel.l2: POST /v1/chash/delete_collection
+    # was a deprecated no-op (deleted:0) with zero production callers — the
+    # marker sweep found it orphaned (vector/catalog delete has always owned
+    # content deletion; this route never routed to anything). The engine route
+    # is now 410 Gone alongside its RDR-187 siblings (upsert/upsert_many/
+    # delete_stale/import); this client wrapper is deleted outright rather
+    # than left calling a route that no longer exists.
 
     # ── distinct_collections ───────────────────────────────────────────────────
 

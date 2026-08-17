@@ -261,11 +261,16 @@ class TestViewEraChangesetLive:
             Path(__file__).resolve().parents[2]
             / "service/src/main/resources/db/changelog/grants-nexus-diag.xml"
         ).read_text()
-        # The second changeset's <sql> body (grants-nexus-diag-2).
+        # The second changeset's <sql> body (grants-nexus-diag-2). bead
+        # nexus-lhuhe (2026-08-17) added a THIRD changeset,
+        # grants-nexus-diag-3 (era-independent staging grants + the
+        # taxonomy-011-8 content-boundary re-grant fix) — appended AFTER
+        # -1/-2 in file order, so blocks[1] is still changeset-2's body
+        # unchanged; only the expected total block count moved 2 -> 3.
         blocks = re.findall(
             r"<sql\s[^>]*>(.*?)</sql>", xml, re.DOTALL,
         )
-        assert len(blocks) == 2, "expected exactly the two era changesets"
+        assert len(blocks) == 3, "expected exactly the three grants-nexus-diag changesets"
         return blocks[1]
 
     def test_revoke_changeset_survives_superuser_owned_view(self, diag_cluster):

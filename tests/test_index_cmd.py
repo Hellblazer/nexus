@@ -513,7 +513,7 @@ def test_manifest_write_failure_summary_surfaces_failures(runner, repo_dir, mock
     assert result.exit_code != 0, result.output
     assert "WARNING: catalog manifest write failed for 2 document(s)" in result.output
     assert "nx catalog reconcile" in result.output
-    assert "manifest-verify" in result.output
+    assert "nx catalog show" in result.output
 
 
 # ── nexus-u8n4r: ephemeral-path registration-skip summary ───────────────────
@@ -1328,7 +1328,7 @@ def test_identity_drop_summary_surfaces_drops(runner, repo_dir, mock_reg, monkey
         "were indexed WITHOUT a catalog document identity" in result.output
     )
     assert "nx catalog reconcile" in result.output
-    assert "manifest-verify" in result.output
+    assert "nx catalog show" in result.output
 
 
 # ── nexus-7f5qj: identity-drop / manifest-write-failure / completion-

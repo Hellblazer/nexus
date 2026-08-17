@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cefa1.6 — schema type-hygiene pass, Tier B, P5 (epic nexus-cefa1;
+    plan of record T2 nexus/plan-schema-type-hygiene-2026-08-12 [22360]).
+    Template: telemetry-004-type-hygiene.xml (nexus-cefa1.3, P2) — the
+    closest sibling for a DROP DEFAULT -> TYPE ... USING -> SET DEFAULT
+    bracket shape on a NOT NULL DEFAULT column (there applied to boolean;
+    here to jsonb), because unlike plans-002's plan_json (nexus-cefa1.5, P4,
+    NOT NULL with NO default) topic_links.link_types carries a literal
+    DEFAULT '[]' (taxonomy-001-baseline.xml:135) that must be dropped before
+    the TYPE change and re-set afterward in the new type's own syntax.
+
+    Retires the LAST still-TEXT Tier-B column of the arc: topic_links.
+    link_types TEXT NOT NULL DEFAULT '[]' -> jsonb NOT NULL DEFAULT '[]'::jsonb,
+    in ONE changeset (ONE ALTER TABLE, one table rewrite):
+
+ALTER TABLE nexus.topic_links
+    ALTER COLUMN link_types DROP DEFAULT,
+    ALTER COLUMN link_types TYPE jsonb USING link_types::jsonb,
+    ALTER COLUMN link_types SET DEFAULT '[]'::jsonb;
+
+    The USING clause is a PLAIN cast (link_types::jsonb, no NULLIF) — NOT
+    NULL is preserved automatically across ALTER COLUMN TYPE (never
+    touched), and the P0 pre-flight found empty_string_count=0 on the only
+    populated deployment (see Data-safety evidence below), so there is no
+    '' value that a NULLIF step would need to catch; a plain ::jsonb cast on
+    an empty string would abort the ALTER with "invalid input syntax for
+    type json" — this column is safe without a NULLIF guard because that
+    value never occurs, confirmed by the count, not assumed (identical
+    reasoning to plans-002-jsonb.xml's plan_json branch, which is also NOT
+    NULL with a plain cast).
+
+    ALTER COLUMN TYPE is ordinary DDL (an ACCESS EXCLUSIVE table rewrite),
+    not RLS-filtered DML — no FORCE RLS toggle needed, and the changeset
+    touches no row via INSERT/UPDATE/DELETE.
+
+    Data-safety evidence: T2 nexus/schema-hygiene-p0-preflight-2026-08-15
+    [22588] (nexus-cefa1.1), cloud (the only populated deployment; this
+    box's local substrate is a fresh hermetic pytest engine with no seeded
+    data): topic_links.link_types total_rows=9749, null_count=0,
+    empty_string_count=0, invalid_cast_count=0 — every row already holds
+    valid JSON, confirming the plain ::jsonb cast above is safe on live
+    data, not merely reasoned from the writers.
+
+    Consumer audit (nexus-cefa1.6, mirroring nexus-cefa1.2/.3/.4/.5's
+    sweeps): swept every Java and Python write/read path touching
+    topic_links.link_types.
+    - Java writes: TaxonomyRepository.upsertTopicLink (live-compute,
+      EXCLUDED-overwrite conflict policy), .importTopicLink (ETL,
+      GREATEST-on-count conflict policy), the private static
+      importLinksBatch (multi-row ETL import), .generateCooccurrenceLinks
+      (hardcoded "[\"cooccurrence\"]" literal), and .refreshProjectionLinks
+      (the one path with real merge logic, see below) all now route the
+      Java String through JsonbSupport.jsonbRequired (link_types is NOT
+      NULL, same shape as plans.plan_json — the required-field variant, not
+      jsonbOrNull) before binding it as the jOOQ-generated JSONB field type;
+      every hand-built `field("EXCLUDED.link_types", ...)` conflict-target
+      fragment is retyped from String.class to JSONB.class to match.
+    - Java reads: refreshProjectionLinks SELECTs TOPIC_LINKS.LINK_TYPES to
+      decide whether an existing link pair already carries the
+      "projection" type; the fetched value is now a JSONB, unwrapped via
+      .data() to recover the raw JSON-array text before the SAME crude
+      substring-merge algorithm as before (`.contains("\"projection\"")`,
+      then a bracket-replace to splice the new type into the array) runs
+      UNCHANGED — this changeset does not alter that algorithm's behaviour
+      in any way, only the plumbing that gets a Java String in and a JSONB
+      out. Postgres's jsonb canonicalization only reorders/reformats OBJECT
+      keys; JSON ARRAY element order (what link_types is) is preserved
+      verbatim, so the substring check and the bracket-splice both continue
+      to see the same array contents they always did, merely re-spaced.
+    - getTopicLinkPairs never selects LINK_TYPES at all (only
+      FROM_TOPIC_ID/TO_TOPIC_ID/LINK_COUNT) — no read-side change there.
+    - Python: src/nexus/db/t2/http_taxonomy_store.py's upsert_topic_links
+      and import_topic_link always `json.dumps(...)` before sending over
+      the wire (never a bare unquoted string); getTopicLinkPairs's HTTP
+      response never includes link_types, so no Python reader ever parses
+      it back. The retired taxonomy_etl.py (RDR-158 SQLite retirement) is
+      the only historical writer that shaped link_types payloads for the
+      ETL import path; it no longer exists in src/nexus (grepped — only a
+      stale __pycache__/*.pyc remains). No text-equality, hash, or dedup
+      consumer of link_types exists in either language; the topic_links
+      identity is the (tenant_id, from_topic_id, to_topic_id) primary key,
+      never link_types content.
+    - Test literals: a handful of TaxonomyRepositoryTest.java call sites
+      passed BARE, non-JSON-encoded strings ("projection", "co-occurrence",
+      "co-occur") straight through upsertTopicLink/importTopicLink/
+      importBatch("link", ...) — tolerated only because the column was
+      untyped TEXT with no server-side JSON validation. A plain ::jsonb
+      column rejects those literals outright (unquoted bareword is not
+      valid JSON), so every such literal is updated to a valid JSON array
+      (e.g. "[\"co-occur\"]") in the corresponding Java test changes; this
+      was always incidental to TEXT typing, never a real production shape
+      (every production writer already emitted a JSON-encoded array).
+
+    Handler-side validation (nexus-cefa1.6): TaxonomyHandler.handleUpsertLink,
+    .handleImportLink, and the "link" branch of .handleImportBatch's per-row
+    loop now validate an optional, present link_types value with the shared
+    HttpUtil.rejectMalformedJson helper (AspectHandler/PlanHandler's
+    extraction, nexus-cefa1.4/.5) — malformed JSON 400s at the handler,
+    naming rows[i] in the batch path; class-22 SQLSTATE 422
+    (HttpUtil.sendTypedDbError) remains the backstop for any write path
+    that bypasses the handler (e.g. a direct repository call).
+
+    ANALYZE after the rewrite (BUG-0148 invariant, rdr180-16-analyze-
+    rewritten-tables precedent, mechanically enforced by
+    tests/test_changelog_analyze_lint.py) — the ALTER COLUMN ... TYPE above
+    resets nexus.topic_links's planner statistics.
+
+    Rollback: mirrors telemetry-004's is_batch rollback shape (a NOT NULL
+    DEFAULT column) applied to jsonb-to-TEXT instead of boolean-to-INTEGER —
+    DROP DEFAULT -> TYPE TEXT USING link_types::text -> SET DEFAULT '[]',
+    restoring the exact pre-migration TEXT NOT NULL DEFAULT '[]' shape
+    (taxonomy-001-baseline.xml:135).
+
+    Ordering: registered after plans-002-jsonb.xml (P4) and before the
+    grants-nexus-svc.xml runAlways block, NOT back in the taxonomy-00N
+    family's own section near the top of the changelog — matches the
+    master changelog's established convention for every new changeset
+    since RDR-156 (catalog-031, telemetry-004, aspects-003, plans-002 all
+    append near the current tail rather than splicing back into their
+    family's original block; see those files' own <include> comments in
+    db.changelog-master.xml for the identical reasoning). This is the FINAL
+    phase of the schema type-hygiene arc (epic nexus-cefa1) — after this
+    changeset ships, all 10 audited columns (4 Tier A timestamp/boolean, 6
+    Tier B jsonb) are converted; nexus-cefa1.7 runs the arc's final gate.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset taxonomy-008-1-link-types-jsonb ───────────────────────────── -->
+    <changeSet id="taxonomy-008-1-link-types-jsonb" author="nexus-cefa1.6">
+        <comment>
+            topic_links.link_types TEXT NOT NULL DEFAULT '[]' -> jsonb NOT NULL DEFAULT
+            '[]'::jsonb (DROP DEFAULT -> TYPE ... USING plain cast -> SET DEFAULT).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topic_links
+    ALTER COLUMN link_types DROP DEFAULT,
+    ALTER COLUMN link_types TYPE jsonb USING link_types::jsonb,
+    ALTER COLUMN link_types SET DEFAULT '[]'::jsonb;
+
+-- BUG-0148 invariant (rdr180-16-analyze-rewritten-tables precedent, mechanically
+-- enforced by tests/test_changelog_analyze_lint.py): the ALTER COLUMN ... TYPE
+-- above rewrites nexus.topic_links and resets its planner statistics.
+ANALYZE nexus.topic_links;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+ALTER TABLE nexus.topic_links
+    ALTER COLUMN link_types DROP DEFAULT,
+    ALTER COLUMN link_types TYPE TEXT USING link_types::text,
+    ALTER COLUMN link_types SET DEFAULT '[]';
+
+ANALYZE nexus.topic_links;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

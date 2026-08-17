@@ -13,10 +13,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import static dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS;
 import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
 import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
-import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 
 /**
  * RDR-180 COLUMN CENSUS (nexus-jxizy.10.5, Hal directive 2026-07-19):
@@ -64,9 +62,10 @@ import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
  * public.databasechangelog} (outside jOOQ's {@code nexus}/{@code t1}
  * codegen scope for a different reason: cross-schema, not runtime-unknown).
  * {@code information_schema.columns}/{@code .tables} get the same
- * treatment. The three FIXED hex-keyed pointer tables in {@link
- * #danglingPointers} ({@code topic_assignments}, {@code frecency}, {@code
- * relevance_log}) are not runtime-discovered at all — they are compile-time
+ * treatment. The hex-keyed pointer tables in {@link #danglingPointers}
+ * ({@code frecency}, {@code relevance_log} — {@code topic_assignments}
+ * retired at RDR-194 P3d, nexus-tk070.p3d, D0.10, see that method's own
+ * javadoc) are not runtime-discovered at all — they are compile-time
  * known and DO have generated {@code Tables} constants, so that leg
  * converts to fully typed DSL via {@link ChashSqlIdioms#existsInAnyDim}.
  * Zero raw string-SQL execute/fetch sites remain in this class; the
@@ -92,12 +91,23 @@ public final class ChashCensus {
     // differing only by table name) collapse to the one physical column that
     // now exists.
     public static final List<Exclusion> TEXT_EXCLUSIONS = List.of(
-        new Exclusion("chash_alias", "old_ref",
-            "THE legacy-reference registry — holding old ids is its purpose"),
+        // chash_alias.old_ref LEFT this list at nexus-lgdel.l1: the table is
+        // DROPPED (RDR-180's "legacy references stay resolvable forever"
+        // promise had a beneficiary population that reached zero — Hal
+        // directive 2026-08-16, T2 nexus/plan-legacy-retirement-2026-08-16).
         new Exclusion("chash_remap", "old_id",
             "remap facts: old_id is free-form by design (RDR-180 Item6a)"),
-        new Exclusion("chash_remap", "new_chash",
-            "widened era facts: 32-hex pre-flip rows stay readable (rdr180-13)"),
+        // chash_remap.new_chash LEFT this list at RDR-194 P2 (bead
+        // nexus-tk070.p2, remap-003-new-chash-bytea.xml): the column is
+        // bytea now, so the schema-derived TEXT scan no longer discovers it
+        // at all (assertDiscoversKnownInventory would fail on a stale entry
+        // here) and the widened 32-hex-era tolerance this exclusion named
+        // is gone WITH the column (cloud-count-2, T2 [22670]: the live
+        // chash_remap measured zero rows, so there was nothing to widen
+        // for). It is not moved to BYTEA_EXCLUSIONS either: the new
+        // octet_length(new_chash)=32 CHECK makes every stored value
+        // conformant by construction, so the bytea residue scan (width !=
+        // 32) can never find anything there to exclude.
         new Exclusion("chunks", "chunk_text",
             "free content — a note BODY may legitimately be a bare hash string"),
         new Exclusion("relevance_log", "query", "free content (user query text)"),
@@ -106,9 +116,9 @@ public final class ChashCensus {
             "sha256 of source CONTENT (a document identity, not a chunk id) — "
             + "legacy-width source hashes are historical facts, not pointers"));
 
-    public static final List<Exclusion> BYTEA_EXCLUSIONS = List.of(
-        new Exclusion("chash_alias", "old_bytes",
-            "the byte carrier of old_ref — any width by design"));
+    // BYTEA_EXCLUSIONS' sole entry (chash_alias.old_bytes) LEFT the list at
+    // nexus-lgdel.l1 along with the table (see TEXT_EXCLUSIONS' comment).
+    public static final List<Exclusion> BYTEA_EXCLUSIONS = List.of();
 
     /** The known chash-bearing inventory the enumeration MUST rediscover. */
     // chash_index.chash left the inventory WITH the table (RDR-187 DROP,
@@ -116,6 +126,13 @@ public final class ChashCensus {
     // RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-o8dil.41 item 5):
     // chunks_384/768/1024.chash (three BYTEA-discovered entries) collapsed to
     // the single chunks.chash entry the unified table now carries.
+    //
+    // RDR-194 P3d (nexus-tk070.p3d): topic_assignments.doc_id KEEPS its
+    // entry here — this set tracks the schema-DERIVED column enumeration
+    // (columns(ctx, "text"|"bytea") rediscovering every known chash-bearing
+    // column), which is independent of the dangling-POINTER scan below. The
+    // column itself is unaffected by C1's retirement (it is FK-enforced now,
+    // not dropped) and remains bytea-discovered exactly as it was at P3c.
     static final Set<String> KNOWN_INVENTORY = Set.of(
         "catalog_document_chunks.chash",
         "topic_assignments.doc_id", "frecency.chunk_id", "relevance_log.chunk_id",
@@ -191,32 +208,43 @@ public final class ChashCensus {
         return residue;
     }
 
-    /** EITHER era's chash shape — the 64-only filter was the blindness. */
-    private static final String EITHER_ERA_SHAPE = "^([0-9a-f]{32}|[0-9a-f]{64})$";
+    /**
+     * Canonical-only shape — {@code frecency}/{@code relevance_log}'s
+     * dangling leg (nexus-lgdel.l1). RDR-194 P3d (nexus-tk070.p3d): the
+     * former {@code EITHER_ERA_SHAPE} width tolerance this constant was
+     * documented against — {@code topic_assignments.doc_id}'s "32- or
+     * 64-hex" carve-out — RETIRED with leg C1 below: the {@code
+     * topic_assignments_chunk_fk} composite FK
+     * ({@code taxonomy-012-doc-id-chunk-fk.xml}) makes a dangling
+     * {@code topic_assignments.doc_id} structurally impossible from this
+     * migration forward (ON DELETE CASCADE removes the assignment the
+     * instant its chunk is gone), so there is no wider shape left to
+     * tolerate anywhere in this class. {@code frecency}/{@code
+     * relevance_log} carry no such FK and stay on this shape alone.
+     */
+    private static final String CANONICAL_SHAPE = "^[0-9a-f]{64}$";
 
     /**
      * Count rows of one hex-keyed pointer table (nexus-4okz4 increment 4)
-     * whose {@code hexCol} value is shaped like a chash of either era AND
-     * resolves to a live chunk by NO route — neither directly nor through
-     * {@code chash_alias}. Fully typed DSL: {@code topic_assignments},
-     * {@code frecency}, {@code relevance_log} are compile-time-known
-     * tables (unlike the runtime-discovered columns above), so this reuses
-     * the generated {@code Tables} constants and {@link
-     * ChashSqlIdioms#existsInAnyDim} rather than string-formatting a
-     * template. {@code decode(hexCol, 'hex')}/{@code 'hex'} occurrences
-     * below are each in their OWN independent {@code NOT EXISTS}/{@code
-     * EXISTS} clause (no DISTINCT-ON/GROUP-BY structural-match requirement
-     * across them), so plain binds (not {@code DSL.inline}) are safe per
-     * the INLINE-VS-BIND rule ({@link ChashSqlIdioms} class javadoc).
+     * whose {@code hexCol} value is shaped like {@code shape} AND resolves
+     * to a live chunk by NO route. Fully typed DSL: {@code
+     * topic_assignments}, {@code frecency}, {@code relevance_log} are
+     * compile-time-known tables (unlike the runtime-discovered columns
+     * above), so this reuses the generated {@code Tables} constants and
+     * {@link ChashSqlIdioms#existsInAnyDim} rather than string-formatting a
+     * template.
+     *
+     * <p>nexus-lgdel.l1: the {@code chash_alias} fallback-resolution arm
+     * (a row unresolvable directly but resolvable through the legacy-ref
+     * map) is REMOVED with the table — the map is gone, there is no second
+     * route left to check. A row this predicate now finds dangling is
+     * dangling by the direct-content-existence test alone.
      */
-    private static Integer unresolvableHexCount(DSLContext ctx, TableField<?, String> hexCol) {
+    private static Integer unresolvableHexCount(DSLContext ctx, TableField<?, String> hexCol, String shape) {
         Field<byte[]> decoded = DSL.function("decode", byte[].class, hexCol, DSL.val("hex"));
         return ctx.selectCount().from(hexCol.getTable())
-            .where(hexCol.likeRegex(EITHER_ERA_SHAPE))
+            .where(hexCol.likeRegex(shape))
             .and(DSL.not(ChashSqlIdioms.existsInAnyDim(ctx, decoded)))
-            .and(DSL.notExists(ctx.selectOne().from(CHASH_ALIAS)
-                    .where(CHASH_ALIAS.OLD_REF.eq(hexCol))
-                    .and(ChashSqlIdioms.existsInAnyDim(ctx, CHASH_ALIAS.NEW_CHASH))))
             .fetchOne(0, Integer.class);
     }
 
@@ -235,25 +263,47 @@ public final class ChashCensus {
      * for, whose "all clear" is evidence of a blind query, not a clean store.
      *
      * <p>DANGLING now means what it says: the pointer resolves to a live chunk
-     * by NO route — neither directly nor through the permanent {@code
-     * chash_alias} map, which is the whole point of that map (RDR-180: legacy
-     * references stay resolvable forever). A legacy-width pointer WITH an
-     * alias entry is therefore resolvable and not counted; one without is
-     * genuine debt and is.
+     * by NO route. RDR-180's "legacy references stay resolvable forever"
+     * promise (the {@code chash_alias} fallback route) was RETIRED at
+     * nexus-lgdel.l1 — the beneficiary population it was written for reached
+     * zero, so a legacy-width pointer is now dangling on the direct-existence
+     * test alone, with no second route to check.
      *
-     * <p>The TEXT columns keep a shape filter, but widened to "a chash of
-     * EITHER era" (32- or 64-hex): {@code topic_assignments.doc_id} is a mixed
-     * identity space that also holds memory-note titles (RDR-180 Item2), and
-     * dropping the filter entirely would flag every title as dangling.
+     * <p>RDR-194 P3d (nexus-tk070.p3d, D0.10): leg C1
+     * ({@code dangling.topic_assignments}) is RETIRED HERE, in the same
+     * commit as the {@code topic_assignments_chunk_fk} composite FK's
+     * VALIDATE ({@code taxonomy-012-doc-id-chunk-fk.xml}). The FK's
+     * {@code ON DELETE CASCADE} makes the population this leg scanned for
+     * — a {@code topic_assignments} row whose chunk no longer exists —
+     * structurally impossible from this migration forward: PostgreSQL
+     * removes the assignment in the SAME statement that deletes its chunk,
+     * rather than leaving a pointer for this leg to find later. Retiring
+     * the leg NARROWS what {@code StagingPromoteOps.finalizeTenant}'s FATAL
+     * census check refuses on (D0.10's own reasoning for why the leg could
+     * not retire before the FK existed) — safe now that the FK is the
+     * thing enforcing what the leg used to only report. {@code
+     * topic_assignments.doc_id} is NOT a mixed identity space and does NOT
+     * hold memory-note titles (RDR-194 D1, nexus-tk070.p3a, nexus-yo9mi):
+     * every live writer emits a chunk chash (RDR-180 Item6 / Item6a,
+     * {@code docs/rdr/rdr-180-content-address-chash-binary-32byte.md:80,82,135}).
+     *
+     * <p>The remaining TEXT columns (frecency/relevance_log, legs C2/C3)
+     * keep their CANONICAL-ONLY shape filter (nexus-lgdel.l1) UNCHANGED —
+     * they carry no FK to nexus.chunks and are explicitly out of this
+     * phase's scope (RDR-194 D7, by grain). Leg C4 (the manifest leg,
+     * below) is untouched.
      */
     private static Map<String, Integer> danglingPointers(DSLContext ctx) {
         Map<String, Integer> out = new LinkedHashMap<>();
-        Map<String, TableField<?, String>> hexKeyed = Map.of(
-            "topic_assignments", TOPIC_ASSIGNMENTS.DOC_ID,
-            "frecency", FRECENCY.CHUNK_ID,
-            "relevance_log", RELEVANCE_LOG.CHUNK_ID);
+        // frecency/relevance_log stay TEXT, CANONICAL_SHAPE only
+        // (nexus-lgdel.l1). topic_assignments (leg C1) retired above
+        // (RDR-194 P3d, nexus-tk070.p3d, D0.10) — see this method's own
+        // javadoc.
+        Map<String, TableField<?, String>> hexKeyed = new LinkedHashMap<>();
+        hexKeyed.put("frecency", FRECENCY.CHUNK_ID);
+        hexKeyed.put("relevance_log", RELEVANCE_LOG.CHUNK_ID);
         for (Map.Entry<String, TableField<?, String>> e : hexKeyed.entrySet()) {
-            Integer n = unresolvableHexCount(ctx, e.getValue());
+            Integer n = unresolvableHexCount(ctx, e.getValue(), CANONICAL_SHAPE);
             if (n != null && n > 0) out.put("dangling." + e.getKey(), n);
         }
         // RDR-187 (nexus-piwya.5): the dangling.chash_index leg is RETIRED

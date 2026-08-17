@@ -215,7 +215,21 @@ class SoftDeleteTest {
                     "catalog_document_chunks",
                     "document_aspects",
                     "document_highlights",
-                    "aspect_extraction_queue")) {
+                    "aspect_extraction_queue",
+                    // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk's
+                    // ON DELETE CASCADE means a DELETE on nexus.chunks can now
+                    // cascade-delete matching nexus.topic_assignments rows --
+                    // Postgres's own FK/RI cascade mechanism is privilege-exempt,
+                    // but the EXISTING taxonomy-003 doc_count triggers
+                    // (trg_topic_assignments_doc_count_del, deliberately SECURITY
+                    // INVOKER, never DEFINER -- taxonomy-003-doc-count-trigger.xml)
+                    // fire as part of that SAME cascade and run an ordinary UPDATE
+                    // nexus.topics under the INVOKING role's own privileges. This
+                    // role never touched topic_assignments/topics before this FK
+                    // existed, so both need the same DML grant shape as every
+                    // other table in this list.
+                    "topic_assignments",
+                    "topics")) {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
             }
@@ -322,6 +336,11 @@ class SoftDeleteTest {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, tumbler);
             insertCollection(su, TENANT_A, "knowledge__sd-tomb__v1");
+
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires a
+            // matching nexus.chunks row for every manifest insert below.
+            insertChunk384(su, TENANT_A, "knowledge__sd-tomb__v1", validChash("tomb-chunk-0"), "tomb chunk 0");
+            insertChunk384(su, TENANT_A, "knowledge__sd-tomb__v1", validChash("tomb-chunk-1"), "tomb chunk 1");
 
             // 2 manifest rows — post-P0: needs 32-char chash
             insertManifestRow(su, TENANT_A, tumbler, 0, validChash("tomb-chunk-0"), "knowledge__sd-tomb__v1");
@@ -461,6 +480,12 @@ class SoftDeleteTest {
             // Register collection so fk-002 NOT VALID FK is satisfied for new inserts
             insertCollection(su, TENANT_A, COLLECTION_A);
 
+            // Insert the actual chunk rows into nexus.chunks (embedding_384) FIRST —
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires a
+            // matching nexus.chunks row before any manifest row can reference it.
+            insertChunk384(su, TENANT_A, COLLECTION_A, chashA,      "text for chunk A only");
+            insertChunk384(su, TENANT_A, COLLECTION_A, chashShared, "shared chunk text");
+
             // Doc A (will be tombstoned)
             insertCatalogDocument(su, TENANT_A, tumblerA);
             insertManifestRow(su, TENANT_A, tumblerA, 0, chashA, COLLECTION_A);
@@ -469,10 +494,6 @@ class SoftDeleteTest {
             // Doc B (live — keeps chash_shared alive)
             insertCatalogDocument(su, TENANT_A, tumblerB);
             insertManifestRow(su, TENANT_A, tumblerB, 0, chashShared, COLLECTION_A);
-
-            // Insert the actual chunk rows into nexus.chunks (embedding_384)
-            insertChunk384(su, TENANT_A, COLLECTION_A, chashA,      "text for chunk A only");
-            insertChunk384(su, TENANT_A, COLLECTION_A, chashShared, "shared chunk text");
         }
 
         // CONTROL: verify fixture
@@ -594,6 +615,9 @@ class SoftDeleteTest {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, tumbler);
             insertCollection(su, TENANT_A, "knowledge__sd-age__v1");
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires a
+            // matching nexus.chunks row before the manifest insert below.
+            insertChunk384(su, TENANT_A, "knowledge__sd-age__v1", validChash("age-filter-chunk0"), "age filter chunk 0");
             insertManifestRow(su, TENANT_A, tumbler, 0, validChash("age-filter-chunk0"), "knowledge__sd-age__v1");
             insertAspectRow(su, TENANT_A, tumbler, "knowledge__sd-age__v1", "sd-age-asp-path-1");
         }
@@ -661,15 +685,17 @@ class SoftDeleteTest {
             su.setAutoCommit(true);
             insertCollection(su, TENANT_A, COLLECTION_B);
 
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires a
+            // matching nexus.chunks row before any manifest row can reference it.
+            insertChunk384(su, TENANT_A, COLLECTION_B, chashOrphan, "orphan chunk text");
+            insertChunk384(su, TENANT_A, COLLECTION_B, chashLive,   "live shared chunk text");
+
             insertCatalogDocument(su, TENANT_A, tumblerX);
             insertManifestRow(su, TENANT_A, tumblerX, 0, chashOrphan, COLLECTION_B);
             insertManifestRow(su, TENANT_A, tumblerX, 1, chashLive, COLLECTION_B);
 
             insertCatalogDocument(su, TENANT_A, tumblerY);
             insertManifestRow(su, TENANT_A, tumblerY, 0, chashLive, COLLECTION_B);
-
-            insertChunk384(su, TENANT_A, COLLECTION_B, chashOrphan, "orphan chunk text");
-            insertChunk384(su, TENANT_A, COLLECTION_B, chashLive,   "live shared chunk text");
         }
 
         // CONTROL: both chunks present before tombstone

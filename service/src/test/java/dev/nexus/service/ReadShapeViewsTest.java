@@ -87,8 +87,18 @@ class ReadShapeViewsTest {
             // Fixtures chosen so EVERY catalog_stats scalar differs A vs B (non-vacuous
             // per-subquery RLS scoping) AND every grouped view has rows for both
             // tenants. TENANT_A: 2 docs, 1 link, 2 owners, 2 collections, 2 chunks,
-            // 1 topic. TENANT_B: 1 doc, 2 links (dangling tumblers, links are not
-            // FK-enforced), 1 owner, 1 collection, 1 chunk, 1 topic.
+            // 1 topic. TENANT_B: 1 doc, 2 links, 1 owner, 1 collection, 1 chunk, 1 topic.
+            //
+            // nexus-tk070.p1 (RDR-194 § D2): TENANT_B's two links used to point at
+            // "dangling tumblers" (b.x1/b.x2, never registered as documents) on the
+            // strength of the pre-FK comment "links are not FK-enforced" — that is no
+            // longer true (fk_catalog_links_from_document/_to_document), so a link to a
+            // nonexistent tumbler is a hard INSERT failure now, even via raw SQL. Fixed
+            // by self-linking b.1 -> b.1 under two different link_types (the unique key
+            // is (tenant_id, from_tumbler, to_tumbler, link_type), so two rows are still
+            // distinct) rather than registering b.x1/b.x2 as real documents, which would
+            // have inflated TENANT_B's doc_count from 1 to 3 and broken
+            // catalogStats_scopesScalarCountsToGucTenant's GUC=B doc_count==1 pin below.
             seedDoc(su, TENANT_A, "a.1", "paper", "c_a");
             seedDoc(su, TENANT_A, "a.2", "code",  "c_a");
             su.createStatement().execute(
@@ -105,8 +115,8 @@ class ReadShapeViewsTest {
             seedDoc(su, TENANT_B, "b.1", "paper", "c_b");
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by) "
-                + "VALUES ('" + TENANT_B + "', 'b.1', 'b.x1', 'cites', 'test'), "
-                + "       ('" + TENANT_B + "', 'b.1', 'b.x2', 'cites', 'test')");
+                + "VALUES ('" + TENANT_B + "', 'b.1', 'b.1', 'cites', 'test'), "
+                + "       ('" + TENANT_B + "', 'b.1', 'b.1', 'relates', 'test')");
             seedTopic(su, TENANT_B, "topic-b", "c_b");
             seedOwner(su, TENANT_B, "b-own-1");
             seedColl(su, TENANT_B, "c_b");
@@ -168,6 +178,50 @@ class ReadShapeViewsTest {
             assertThat(rs.next()).isTrue();
             assertThat(rs.getDouble("stale_source_ratio"))
                 .as("1 of 2 dated docs is > 30 days old").isEqualTo(0.5d);
+        }
+    }
+
+    /**
+     * nexus-cefa1.2: collection_health_meta PARITY test for catalog-031-1-documents-
+     * temporal's DROP/CREATE (regex-guard + to_char lexicographic hacks retired to plain
+     * timestamptz comparisons). Asserts the view's MAX(indexed_at)/last_indexed and
+     * orphan_count semantics are UNCHANGED against the same shape of fixture the
+     * pre-migration view handled: an undated (NULL indexed_at) document must be excluded
+     * from both last_indexed and the stale_source_ratio denominator — mirroring the old
+     * regex guard's exclusion of a non-ISO-prefixed indexed_at — while still counting
+     * toward orphan_count (orphan-ness is independent of indexed_at entirely).
+     */
+    @Test @Order(41)
+    void collectionHealthMeta_parity_maxIndexedAtAndUndatedDocExclusion() throws Exception {
+        final String col = "c_chm_parity";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            seedDocIndexed(su, TENANT_A, "chmp.1", col, "2026-01-01T08:00:00Z");
+            seedDocIndexed(su, TENANT_A, "chmp.2", col, "2026-06-01T12:00:00Z");
+            seedDocIndexed(su, TENANT_A, "chmp.3", col, "2026-03-15T00:00:00Z");
+            // Undated doc (NULL indexed_at, the '' -> NULL post-migration shape) — must
+            // NOT win the MAX and must NOT count toward the stale_source_ratio denominator.
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
+                + "VALUES ('" + TENANT_A + "', 'chmp.4', 'T', '" + col + "')");
+
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT last_indexed, orphan_count, stale_source_ratio FROM nexus.collection_health_meta "
+                + "WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + col + "'");
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getTimestamp("last_indexed").toInstant())
+                .as("MAX(indexed_at) over {01-01, 06-01, 03-15, NULL} must be 06-01, "
+                    + "the NULL undated doc must not participate")
+                .isEqualTo(java.time.Instant.parse("2026-06-01T12:00:00Z"));
+            assertThat(rs.getLong("orphan_count"))
+                .as("all 4 docs (dated and undated alike) have no inbound link — orphan-ness "
+                    + "does not depend on indexed_at")
+                .isEqualTo(4L);
+            // 3 dated docs, all far in the past relative to any real test-run clock — all
+            // stale; the undated 4th doc excluded from BOTH numerator and denominator.
+            assertThat(rs.getDouble("stale_source_ratio"))
+                .as("3/3 dated docs are stale; the undated 4th doc must not water down the ratio")
+                .isEqualTo(1.0d);
         }
     }
 
@@ -399,6 +453,18 @@ class ReadShapeViewsTest {
                                    String collection) throws Exception {
         // chash must be exactly 32 chars (catalog_document_chunks_chash_len_check).
         String c = (chash + "00000000000000000000000000000000").substring(0, 32);
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for every manifest write below.
+        // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now ALSO carries
+        // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+        // (tenant_id, name) — stub-register the collection first (idempotent,
+        // mirrors seedColl above) rather than relying on every call site to have
+        // already called it for this exact collection.
+        seedColl(su, tenant, collection);
+        su.createStatement().execute(
+            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES ("
+            + "'" + tenant + "', '" + collection + "', '" + c + "', 'stub', "
+            + "('[" + "0.1,".repeat(383) + "0.1]')::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
             + "VALUES ('" + tenant + "', '" + docId + "', " + pos + ", '" + c + "', '" + collection + "')");

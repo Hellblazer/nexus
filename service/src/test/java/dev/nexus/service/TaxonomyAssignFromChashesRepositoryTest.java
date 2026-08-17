@@ -50,11 +50,20 @@ import static org.assertj.core.api.Assertions.within;
  *   <li>{@code if not c_embs or not embeddings: return []} — an empty centroid set
  *       (or empty query batch) short-circuits to NO assignments, silently. This is
  *       a normal empty-taxonomy state, not an error and not an "unmatched" input.</li>
- *   <li>own pass ({@code cross_collection=False}): the dict carries
- *       {@code "similarity": None, "source_collection": None} — {@code assignOne}'s
- *       non-projection branch persists {@code assigned_by='centroid'} with similarity/
- *       source_collection/assigned_at all NULL, {@code ON CONFLICT DO NOTHING}
- *       (first-write-wins, idempotent).</li>
+ *   <li>own pass ({@code cross_collection=False}): the Python-side dict this test's
+ *       fixtures were originally derived from carries {@code "similarity": None,
+ *       "source_collection": None}. {@code assignFromChashesOnePass}'s non-projection
+ *       (centroid) branch persists {@code assigned_by='centroid'} with similarity/
+ *       assigned_at NULL and {@code ON CONFLICT DO NOTHING} (first-write-wins,
+ *       idempotent) exactly as derived. CORRECTED (RDR-194 D1, nexus-tk070.p3a):
+ *       {@code source_collection} is NO LONGER NULL on this branch. It now persists
+ *       {@code p_collection} (the collection the chash came from, the same value
+ *       already used three lines above as this branch's own WHERE filter), a
+ *       prerequisite for D1's composite FK from {@code topic_assignments} to
+ *       {@code chunks}: a NULL {@code source_collection} escapes that FK through
+ *       MATCH SIMPLE, which is exactly the vacuous-VALIDATE failure mode D1 exists
+ *       to close. This is a deliberate divergence from the pre-P3a Python dict this
+ *       parity derivation otherwise still holds for.</li>
  *   <li>cross pass ({@code cross_collection=True}): the dict carries the REAL
  *       computed similarity and {@code source_collection=collection_name} (the
  *       collection the chashes came FROM, not the foreign collection the matched
@@ -194,7 +203,9 @@ class TaxonomyAssignFromChashesRepositoryTest {
             assertThat(r.get("assigned_by")).isEqualTo("centroid");
             assertThat(r.get("similarity")).as("own pass: similarity always NULL (compute_assignments"
                 + " else-branch: \"similarity\": None)").isNull();
-            assertThat(r.get("source_collection")).isNull();
+            assertThat(r.get("source_collection")).as("RDR-194 D1 (nexus-tk070.p3a): the centroid"
+                + " branch now persists source_collection = p_collection instead of NULL,"
+                + " the D1 composite-FK prerequisite").isEqualTo(col);
         });
         assertThat(details).anySatisfy(r -> {
             assertThat(r.get("doc_id")).isEqualTo(c2);
@@ -370,10 +381,11 @@ class TaxonomyAssignFromChashesRepositoryTest {
             "2026-01-01T00:00:00Z", null);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // RDR-194 P3c: doc_id is bytea now -- decode('hex') the bind parameter.
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.topic_assignments"
                     + " (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)"
-                    + " VALUES (?, ?, ?, 'projection', 0.999, now(), ?)")) {
+                    + " VALUES (?, decode(?, 'hex'), ?, 'projection', 0.999, now(), ?)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, c1);
                 ps.setLong(3, tStrong);
@@ -490,6 +502,39 @@ class TaxonomyAssignFromChashesRepositoryTest {
             assertThat((Double) r.get("similarity")).as("dim " + dim
                 + ": cosine((1,0),(0.6,0.8)) = 0.6 exactly").isCloseTo(0.6, within(1e-4));
             assertThat(r.get("source_collection")).as("dim " + dim).isEqualTo(col);
+        });
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {384, 768, 1024})
+    void ownPass_allDims_persistsSourceCollectionOnCentroidBranch(int dim) throws Exception {
+        // RDR-194 P3a (nexus-tk070.p3a), sequential-thinking-planned falsification:
+        // the centroid (own-pass, cross_collection=false) branch of
+        // assign_from_chashes_{384,768,1024} must persist source_collection on ALL
+        // THREE dims, not just the projection branch. Falsify by removing
+        // "source_collection" from taxonomy-009's centroid-branch INSERT column
+        // list (and its SELECT value) for any one dim: this test goes red for
+        // exactly that dim, proving per-dim coverage rather than a single
+        // DIM=1024 assertion that a copy-paste miss on 384/768 could hide.
+        String model = modelTokenForDim(dim);
+        String tenant = "afc-tenant-srccoll-" + dim;
+        String col = "code__afc_sc" + dim + "__" + model + "__v1";
+        String c1 = hexChash("afc-chash-srccoll-" + dim);
+        seedChunk(tenant, col, c1, unit(dim, 1.0f, 0.0f), dim);
+        long t = seedTopic(tenant, col, "srccoll-topic-" + dim);
+        seedCentroid(tenant, col, t, unit(dim, 1.0f, 0.0f), dim);
+
+        Map<String, Object> out = repo.assignFromChashes(tenant, col, List.of(c1), false);
+        assertThat(out.get("assigned")).as("dim " + dim).isEqualTo(1);
+
+        List<Map<String, Object>> details = repo.getAssignmentDetails(tenant, List.of(c1));
+        assertThat(details).singleElement().satisfies(r -> {
+            assertThat(r.get("topic_id")).as("dim " + dim).isEqualTo(t);
+            assertThat(r.get("assigned_by")).as("dim " + dim).isEqualTo("centroid");
+            assertThat(r.get("source_collection")).as("dim " + dim + ": centroid branch must"
+                + " persist source_collection = p_collection (RDR-194 D1 prerequisite for"
+                + " the composite FK; a NULL here escapes it through MATCH SIMPLE)")
+                .isEqualTo(col);
         });
     }
 

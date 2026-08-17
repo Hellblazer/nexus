@@ -292,8 +292,13 @@ class AspectRepositoryTest {
         assertThat(n).as("setSalientSentences must update 1 row").isEqualTo(1);
 
         String val = repo.getSalientSentences(TENANT_A, "3.1.4");
+        // nexus-cefa1.4: salient_sentences is jsonb now — PostgreSQL's jsonb
+        // canonical text output inserts a space after each array-element comma
+        // (matching Python's json.dumps default separators exactly), so the
+        // multi-element array written without a space no longer round-trips
+        // byte-identical; assert the canonical shape instead.
         assertThat(val).as("getSalientSentences must return stored JSON")
-            .isEqualTo("[\"sentence one\",\"sentence two\"]");
+            .isEqualTo("[\"sentence one\", \"sentence two\"]");
     }
 
     @Test @Order(8)
@@ -410,6 +415,84 @@ class AspectRepositoryTest {
                     .isEqualTo(0);
             }
         }).doesNotThrowAnyException();
+    }
+
+    // ── document_aspects type-hygiene (nexus-cefa1.4) ──────────────────────────
+
+    @Test @Order(16)
+    void upsertAspect_extras_wireRoundTrip_preservesJsonObjectShape() {
+        // nexus-cefa1.4: extras TEXT -> jsonb. The real write path (upsertAspect)
+        // with the real production shape -- a JSON-encoded object string -- must
+        // read back with the same keys/values (not byte-identical text, since
+        // PostgreSQL's jsonb canonical output can reorder/respace).
+        var body = makeAspect("extras-wire-coll", "extras-wire.pdf");
+        body.put("extras", "{\"venue\": \"VLDB\", \"year\": \"2023\"}");
+        repo.upsertAspect(TENANT_A, body);
+
+        Optional<Map<String, Object>> rec = repo.getAspect(TENANT_A, "extras-wire-coll", "extras-wire.pdf");
+        assertThat(rec).isPresent();
+        Object raw = rec.get().get("extras");
+        assertThat(raw).isInstanceOf(String.class);
+        try {
+            var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            @SuppressWarnings("unchecked")
+            Map<String, Object> parsed = mapper.readValue((String) raw, Map.class);
+            assertThat(parsed).containsEntry("venue", "VLDB").containsEntry("year", "2023");
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AssertionError("extras must remain parseable JSON after the wire round trip: " + raw, e);
+        }
+    }
+
+    @Test @Order(17)
+    void upsertAspect_extras_nullAndBlank_bothRoundTripAsNull() {
+        // The migration's own USING NULLIF(extras, '')::jsonb clause maps '' to
+        // NULL; the live write path must keep doing that going forward too (a
+        // blank string is not valid jsonb input).
+        var nullBody = makeAspect("extras-null-coll", "extras-null.pdf");
+        repo.upsertAspect(TENANT_A, nullBody);
+        var blankBody = makeAspect("extras-blank-coll", "extras-blank.pdf");
+        blankBody.put("extras", "");
+        repo.upsertAspect(TENANT_A, blankBody);
+
+        assertThat(repo.getAspect(TENANT_A, "extras-null-coll", "extras-null.pdf").get().get("extras"))
+            .as("absent extras must round-trip as null").isNull();
+        assertThat(repo.getAspect(TENANT_A, "extras-blank-coll", "extras-blank.pdf").get().get("extras"))
+            .as("blank-string extras must round-trip as null (NULLIF semantics)").isNull();
+    }
+
+    @Test @Order(18)
+    void recordPromotion_columnAddedAndPruned_wireRoundTrip_booleanIdentityPreserved() {
+        // nexus-cefa1.4: column_added/pruned INTEGER -> boolean. The wire was
+        // already boolean (AspectHandler passes body values straight through);
+        // this pins that the live write path (recordPromotion) still round-trips
+        // true/false as real Java Booleans, not truthy ints/strings, through the
+        // read path (listPromotions).
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("field_name",      "th-column-added-true");
+        body.put("sql_type",        "TEXT");
+        body.put("column_added",    true);
+        body.put("pruned",          true);
+        body.put("promoted_at",     "2026-08-15T09:00:00.000000Z");
+        repo.recordPromotion(TENANT_A, body);
+
+        var body2 = new java.util.LinkedHashMap<String, Object>();
+        body2.put("field_name",      "th-column-added-false");
+        body2.put("sql_type",        "TEXT");
+        body2.put("column_added",    false);
+        body2.put("pruned",          false);
+        body2.put("promoted_at",     "2026-08-15T09:01:00.000000Z");
+        repo.recordPromotion(TENANT_A, body2);
+
+        List<Map<String, Object>> promotions = repo.listPromotions(TENANT_A);
+        var trueRow = promotions.stream()
+            .filter(p -> "th-column-added-true".equals(p.get("field_name"))).findFirst().orElseThrow();
+        var falseRow = promotions.stream()
+            .filter(p -> "th-column-added-false".equals(p.get("field_name"))).findFirst().orElseThrow();
+
+        assertThat(trueRow.get("column_added")).isInstanceOf(Boolean.class).isEqualTo(Boolean.TRUE);
+        assertThat(trueRow.get("pruned")).isInstanceOf(Boolean.class).isEqualTo(Boolean.TRUE);
+        assertThat(falseRow.get("column_added")).isInstanceOf(Boolean.class).isEqualTo(Boolean.FALSE);
+        assertThat(falseRow.get("pruned")).isInstanceOf(Boolean.class).isEqualTo(Boolean.FALSE);
     }
 
     // ── document_highlights ─────────────────────────────────────────────────────

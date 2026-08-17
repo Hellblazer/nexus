@@ -73,6 +73,50 @@ class TaxonomyRepositoryTest {
     TaxonomyRepository repo;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
+    /** Deterministic 64-lowercase-hex chash from a readable seed (RDR-194 P3c:
+     *  topic_assignments.doc_id is bytea now, requiring real hex). */
+    private static String hexChash(String seed) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** RDR-194 P3d (nexus-tk070.p3d): seed a real nexus.chunks row (and its
+     *  nexus.catalog_collections parent) so a topic_assignments write for
+     *  (tenant, collection, chashHex) satisfies the composite
+     *  topic_assignments_chunk_fk FOREIGN KEY (tenant_id, source_collection,
+     *  doc_id) REFERENCES nexus.chunks (tenant_id, collection, chash). This
+     *  class's tests are pure taxonomy-repository-logic tests, independent of
+     *  real content — the chunk row here is a MINIMAL FK-satisfying stub
+     *  (one non-null embedding column, per chunks' own exactly_one_embedding
+     *  CHECK), not a content fixture. Idempotent (ON CONFLICT DO NOTHING on
+     *  both inserts) so callers can seed the same (tenant, collection,
+     *  chashHex) tuple more than once across a test's several assignments. */
+    private void seedChunk(String tenant, String collection, String chashHex) {
+        StringBuilder zeroVec = new StringBuilder("[");
+        for (int i = 0; i < 384; i++) {
+            if (i > 0) zeroVec.append(',');
+            zeroVec.append('0');
+        }
+        zeroVec.append(']');
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                + tenant + "', '" + collection + "') ON CONFLICT DO NOTHING");
+            su.createStatement().execute(
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
+                + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "
+                + "'seed', '" + zeroVec + "'::vector) ON CONFLICT DO NOTHING");
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     @BeforeAll
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
@@ -269,7 +313,8 @@ class TaxonomyRepositoryTest {
     @Test @Order(10)
     void deleteTopic_returnsCollectionAndCascades() {
         long topicId = repo.insertTopic(TENANT_A, "doomed-topic", null, COL_A, 0, null, null);
-        repo.assignTopic(TENANT_A, "doc-del-1", topicId, "manual", null, null, null);
+        seedChunk(TENANT_A, COL_A, hexChash("doc-del-1"));
+        repo.assignTopic(TENANT_A, hexChash("doc-del-1"), topicId, "manual", null, COL_A, null);
 
         Optional<String> col = repo.deleteTopic(TENANT_A, topicId);
         assertThat(col).isPresent().contains(COL_A);
@@ -286,8 +331,9 @@ class TaxonomyRepositoryTest {
         long tgt = repo.insertTopic(TENANT_A, "tgt-topic-merge", null, COL_A, 0, null, null);
 
         // src has similarity 0.8, tgt already has 0.9 for same doc
-        repo.assignTopic(TENANT_A, "doc-merge", src, "projection", 0.8, COL_A, null);
-        repo.assignTopic(TENANT_A, "doc-merge", tgt, "projection", 0.9, COL_A, null);
+        seedChunk(TENANT_A, COL_A, hexChash("doc-merge"));
+        repo.assignTopic(TENANT_A, hexChash("doc-merge"), src, "projection", 0.8, COL_A, null);
+        repo.assignTopic(TENANT_A, hexChash("doc-merge"), tgt, "projection", 0.9, COL_A, null);
 
         Optional<String> col = repo.mergeTopics(TENANT_A, src, tgt);
         assertThat(col).isPresent().contains(COL_A);
@@ -297,7 +343,7 @@ class TaxonomyRepositoryTest {
 
         // tgt should still have the doc, with max similarity preserved (0.9)
         List<String> docIds = repo.getTopicDocIds(TENANT_A, tgt, 0);
-        assertThat(docIds).contains("doc-merge");
+        assertThat(docIds).contains(hexChash("doc-merge"));
     }
 
     // ── Assignments ────────────────────────────────────────────────────────────
@@ -305,25 +351,27 @@ class TaxonomyRepositoryTest {
     @Test @Order(12)
     void assignTopic_nonProjection_insertOrIgnore() {
         long topicId = repo.insertTopic(TENANT_A, "assign-manual-topic", null, COL_A, 0, null, null);
-        repo.assignTopic(TENANT_A, "doc-manual", topicId, "manual", null, null, null);
-        repo.assignTopic(TENANT_A, "doc-manual", topicId, "manual", null, null, null); // idempotent
+        seedChunk(TENANT_A, COL_A, hexChash("doc-manual"));
+        repo.assignTopic(TENANT_A, hexChash("doc-manual"), topicId, "manual", null, COL_A, null);
+        repo.assignTopic(TENANT_A, hexChash("doc-manual"), topicId, "manual", null, COL_A, null); // idempotent
 
         List<String> docs = repo.getTopicDocIds(TENANT_A, topicId, 0);
-        assertThat(docs).containsExactly("doc-manual");
+        assertThat(docs).containsExactly(hexChash("doc-manual"));
     }
 
     @Test @Order(13)
     void assignTopic_projection_greatestSimilarity() {
         long topicId = repo.insertTopic(TENANT_A, "assign-proj-topic", null, COL_A, 0, null, null);
-        repo.assignTopic(TENANT_A, "doc-proj", topicId, "projection", 0.5, COL_A, null);
-        repo.assignTopic(TENANT_A, "doc-proj", topicId, "projection", 0.8, COL_A, null); // higher wins
-        repo.assignTopic(TENANT_A, "doc-proj", topicId, "projection", 0.3, COL_A, null); // lower ignored
+        seedChunk(TENANT_A, COL_A, hexChash("doc-proj"));
+        repo.assignTopic(TENANT_A, hexChash("doc-proj"), topicId, "projection", 0.5, COL_A, null);
+        repo.assignTopic(TENANT_A, hexChash("doc-proj"), topicId, "projection", 0.8, COL_A, null); // higher wins
+        repo.assignTopic(TENANT_A, hexChash("doc-proj"), topicId, "projection", 0.3, COL_A, null); // lower ignored
 
         List<String> docs = repo.getTopicDocIds(TENANT_A, topicId, 0);
-        assertThat(docs).containsExactly("doc-proj");
+        assertThat(docs).containsExactly(hexChash("doc-proj"));
 
         // Verify the max sim row is what we get via chunkGroundedIn
-        Optional<Double> sim = repo.chunkGroundedIn(TENANT_A, "doc-proj", COL_A);
+        Optional<Double> sim = repo.chunkGroundedIn(TENANT_A, hexChash("doc-proj"), COL_A);
         assertThat(sim).isPresent();
         assertThat(sim.get()).isEqualTo(0.8, offset(0.001));
     }
@@ -331,27 +379,57 @@ class TaxonomyRepositoryTest {
     @Test @Order(14)
     void getAssignmentsForDocs_andByLabel() {
         long topicId = repo.insertTopic(TENANT_A, "label-search-topic", null, COL_A, 0, null, null);
-        repo.assignTopic(TENANT_A, "doc-label-1", topicId, "manual", null, null, null);
-        repo.assignTopic(TENANT_A, "doc-label-2", topicId, "manual", null, null, null);
+        seedChunk(TENANT_A, COL_A, hexChash("doc-label-1"));
+        seedChunk(TENANT_A, COL_A, hexChash("doc-label-2"));
+        repo.assignTopic(TENANT_A, hexChash("doc-label-1"), topicId, "manual", null, COL_A, null);
+        repo.assignTopic(TENANT_A, hexChash("doc-label-2"), topicId, "manual", null, COL_A, null);
 
         List<Map<String, Object>> assignments = repo.getAssignmentsForDocs(
-            TENANT_A, List.of("doc-label-1", "doc-label-2", "doc-label-missing"));
+            TENANT_A, List.of(hexChash("doc-label-1"), hexChash("doc-label-2"), hexChash("doc-label-missing")));
         assertThat(assignments).hasSizeGreaterThanOrEqualTo(2);
 
         List<String> byLabel = repo.getDocIdsForLabel(TENANT_A, "label-search-topic");
-        assertThat(byLabel).containsExactlyInAnyOrder("doc-label-1", "doc-label-2");
+        assertThat(byLabel).containsExactlyInAnyOrder(hexChash("doc-label-1"), hexChash("doc-label-2"));
     }
 
     @Test @Order(15)
     void purgeAssignmentsForDoc_removesEmptyTopics() {
         long topicId = repo.insertTopic(TENANT_A, "purge-only-topic", null, COL_A, 0, null, null);
-        repo.assignTopic(TENANT_A, "doc-purge-only", topicId, "manual", null, null, null);
+        seedChunk(TENANT_A, COL_A, hexChash("doc-purge-only"));
+        repo.assignTopic(TENANT_A, hexChash("doc-purge-only"), topicId, "manual", null, COL_A, null);
 
-        int removed = repo.purgeAssignmentsForDoc(TENANT_A, COL_A, "doc-purge-only");
+        int removed = repo.purgeAssignmentsForDoc(TENANT_A, COL_A, hexChash("doc-purge-only"));
         assertThat(removed).isEqualTo(1);
 
         // Empty topic must be pruned
         assertThat(repo.getTopicById(TENANT_A, topicId)).isEmpty();
+    }
+
+    /**
+     * RDR-194 P3c (nexus-tk070.p3c), found by {@code tests/test_t2.py::test_delete}
+     * going red: {@code T2Database.delete}'s memory-to-taxonomy cascade
+     * ({@code src/nexus/db/t2/__init__.py:556}) calls this method UNCONDITIONALLY
+     * on every memory delete with the memory entry's own TITLE (e.g.
+     * {@code "doomed.md"}), never a chash, on the defensive theory that a
+     * topic_assignments row might reference it — a theory D1's own finding makes
+     * structurally impossible (every live writer emits a 64-hex chunk chash; no
+     * row can EVER have a non-canonical doc_id). Pre-P3c this was a harmless
+     * TEXT no-op; post-P3c a naive {@code docIdBytes(title)} would throw and
+     * abort the caller's ENTIRE memory delete. Falsifiable: removing the shape
+     * guard in {@link TaxonomyRepository#purgeAssignmentsForDoc} makes this throw
+     * {@code IllegalArgumentException} instead of returning 0.
+     */
+    @Test @Order(151)
+    void purgeAssignmentsForDoc_nonHexTitle_isNoOpNotException() {
+        // Empty-topics sweep must still run for a non-matching title (matches
+        // this method's pre-P3c behavior: unconditional, not gated on removed > 0).
+        long staleTopicId = repo.insertTopic(TENANT_A, "purge-nonhex-stale", null, COL_A, 0, null, null);
+
+        int removed = repo.purgeAssignmentsForDoc(TENANT_A, COL_A, "doomed.md");
+        assertThat(removed).as("a non-hex title structurally cannot match any doc_id row").isEqualTo(0);
+        assertThat(repo.getTopicById(TENANT_A, staleTopicId))
+            .as("the empty-topics sweep still runs for a non-matching title")
+            .isEmpty();
     }
 
     // ── Collection ops ─────────────────────────────────────────────────────────
@@ -360,7 +438,8 @@ class TaxonomyRepositoryTest {
     void purgeCollection_removesAllRows() {
         String tempCol = "knowledge__purge-temp";
         long id = repo.insertTopic(TENANT_A, "purge-col-topic", null, tempCol, 0, null, null);
-        repo.assignTopic(TENANT_A, "doc-purge-col", id, "manual", null, tempCol, null);
+        seedChunk(TENANT_A, tempCol, hexChash("doc-purge-col"));
+        repo.assignTopic(TENANT_A, hexChash("doc-purge-col"), id, "manual", null, tempCol, null);
         repo.recordDiscoverCount(TENANT_A, tempCol, 5, null);
 
         Map<String, Integer> counts = repo.purgeCollection(TENANT_A, tempCol);
@@ -413,15 +492,18 @@ class TaxonomyRepositoryTest {
         long lonely    = repo.insertTopic(TENANT_A, "lonely-proj", null, COL_A, 0, null, null);
 
         // (1) LINKABLE: projection + non-projection on one doc, no link row.
-        repo.assignTopic(TENANT_A, "doc-drift", drifted, "projection", 0.9, COL_A, null);
-        repo.assignTopic(TENANT_A, "doc-drift", partner, "centroid",   0.8, COL_A, null);
+        seedChunk(TENANT_A, COL_A, hexChash("doc-drift"));
+        repo.assignTopic(TENANT_A, hexChash("doc-drift"), drifted, "projection", 0.9, COL_A, null);
+        repo.assignTopic(TENANT_A, hexChash("doc-drift"), partner, "centroid",   0.8, COL_A, null);
 
         // (2) NOT linkable: two projection assignments produce no link at all.
-        repo.assignTopic(TENANT_A, "doc-bothproj", bothProj1, "projection", 0.9, COL_A, null);
-        repo.assignTopic(TENANT_A, "doc-bothproj", bothProj2, "projection", 0.8, COL_A, null);
+        seedChunk(TENANT_A, COL_A, hexChash("doc-bothproj"));
+        repo.assignTopic(TENANT_A, hexChash("doc-bothproj"), bothProj1, "projection", 0.9, COL_A, null);
+        repo.assignTopic(TENANT_A, hexChash("doc-bothproj"), bothProj2, "projection", 0.8, COL_A, null);
 
         // (3) NOT linkable: a lone assignment has nothing to pair with.
-        repo.assignTopic(TENANT_A, "doc-lonely", lonely, "projection", 0.7, COL_A, null);
+        seedChunk(TENANT_A, COL_A, hexChash("doc-lonely"));
+        repo.assignTopic(TENANT_A, hexChash("doc-lonely"), lonely, "projection", 0.7, COL_A, null);
 
         var report = repo.linkDrift(TENANT_A, 50);
         @SuppressWarnings("unchecked")
@@ -433,7 +515,10 @@ class TaxonomyRepositoryTest {
         assertThat(ids).doesNotContain(bothProj1, bothProj2, lonely);
 
         // and once the link exists, the drift clears
-        repo.upsertTopicLink(TENANT_A, drifted, partner, 1, "projection");
+        // nexus-cefa1.6: link_types is jsonb now — every literal below is a
+        // valid JSON array (previously a bare unquoted string, tolerated
+        // only because the column was untyped TEXT).
+        repo.upsertTopicLink(TENANT_A, drifted, partner, 1, "[\"projection\"]");
         var after = repo.linkDrift(TENANT_A, 50);
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> afterRows = (List<Map<String, Object>>) after.get("rows");
@@ -449,8 +534,9 @@ class TaxonomyRepositoryTest {
         long partner = repo.insertTopic(TENANT_A, "cap-partner", null, COL_A, 0, null, null);
         for (int i = 0; i < 4; i++) {
             long t = repo.insertTopic(TENANT_A, "cap-" + i, null, COL_A, 0, null, null);
-            repo.assignTopic(TENANT_A, "doc-cap-" + i, t, "projection", 0.9, COL_A, null);
-            repo.assignTopic(TENANT_A, "doc-cap-" + i, partner, "centroid", 0.8, COL_A, null);
+            seedChunk(TENANT_A, COL_A, hexChash("doc-cap-" + i));
+            repo.assignTopic(TENANT_A, hexChash("doc-cap-" + i), t, "projection", 0.9, COL_A, null);
+            repo.assignTopic(TENANT_A, hexChash("doc-cap-" + i), partner, "centroid", 0.8, COL_A, null);
         }
         var report = repo.linkDrift(TENANT_A, 2);
         @SuppressWarnings("unchecked")
@@ -467,8 +553,8 @@ class TaxonomyRepositoryTest {
         // upsertTopicLink is the LIVE-COMPUTE path: EXCLUDED (overwrite), NOT
         // GREATEST. A decremented recompute must lower the stored count (RDR-152
         // nexus-1di3r.4). Contrast importTopicLink (ETL) below, which keeps GREATEST.
-        repo.upsertTopicLink(TENANT_A, t1, t2, 5, "co-occurrence");
-        repo.upsertTopicLink(TENANT_A, t1, t2, 3, "co-occurrence"); // EXCLUDED overwrites -> 3
+        repo.upsertTopicLink(TENANT_A, t1, t2, 5, "[\"co-occurrence\"]");
+        repo.upsertTopicLink(TENANT_A, t1, t2, 3, "[\"co-occurrence\"]"); // EXCLUDED overwrites -> 3
 
         List<Map<String, Object>> pairs = repo.getTopicLinkPairs(TENANT_A, List.of(t1, t2));
         assertThat(pairs).isNotEmpty();
@@ -480,6 +566,77 @@ class TaxonomyRepositoryTest {
         assertThat(((Number) link.get().get("link_count")).intValue()).isEqualTo(3);
     }
 
+    /**
+     * nexus-cefa1.6: link_types is jsonb now (taxonomy-008-link-types-jsonb.xml)
+     * — dedicated coverage for the documented behaviour change, mirroring
+     * PlanRepositoryTest.savePlan_planJson_jsonbCanonicalizesWhitespaceAndKeyOrder
+     * (nexus-cefa1.5). link_types holds a JSON ARRAY, not an object: PostgreSQL's
+     * jsonb canonicalization only reorders OBJECT keys (shorter-first, ties
+     * broken bytewise) — array ELEMENT ORDER is preserved verbatim. Whitespace
+     * still normalizes to the canonical form (a space after every comma)
+     * regardless of what was submitted. {@code getTopicLinkPairs} never
+     * projects link_types, so this reads the raw column back via JDBC.
+     */
+    @Test @Order(193)
+    void upsertTopicLink_linkTypesJsonbCanonicalizesWhitespace_arrayOrderPreserved() throws Exception {
+        long t1 = repo.insertTopic(TENANT_A, "canon-link-t1", null, COL_A, 0, null, null);
+        long t2 = repo.insertTopic(TENANT_A, "canon-link-t2", null, COL_A, 0, null, null);
+
+        // Non-canonical spacing (no space after the comma); "zeta" written before
+        // "alpha" — arrays are not reordered the way object keys are.
+        repo.upsertTopicLink(TENANT_A, t1, t2, 1, "[\"zeta\",\"alpha\"]");
+
+        try (java.sql.Connection su = pg.createConnection("")) {
+            var rs = su.createStatement().executeQuery(
+                "SELECT link_types::text AS lt FROM nexus.topic_links "
+                + "WHERE tenant_id = '" + TENANT_A + "' "
+                + "AND from_topic_id = " + t1 + " AND to_topic_id = " + t2);
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getString("lt"))
+                .as("jsonb array canonical text inserts a space after each comma but "
+                    + "preserves element order — zeta stays before alpha")
+                .isEqualTo("[\"zeta\", \"alpha\"]");
+        }
+    }
+
+    /**
+     * nexus-cefa1.6: {@code refreshProjectionLinks}'s string-merge algorithm
+     * (splice "projection" into an existing link_types JSON array via crude
+     * bracket-replace string surgery) is UNCHANGED by the jsonb conversion —
+     * only the plumbing that gets a Java String in and a JSONB out changed
+     * (JSONB.data() unwrap on read, jsonbRequired wrap on write). This proves
+     * the merge still lands both types when a cooccurrence link already
+     * exists and a projection assignment later makes the same pair eligible
+     * for refreshProjectionLinks.
+     */
+    @Test @Order(194)
+    void refreshProjectionLinks_mergesIntoExistingLinkTypes_preservingBothTypes() throws Exception {
+        long t1 = repo.insertTopic(TENANT_A, "merge-link-t1", null, COL_A, 0, null, null);
+        long t2 = repo.insertTopic(TENANT_A, "merge-link-t2", null, COL_A, 0, null, null);
+
+        // Seed an existing cooccurrence-only link (as generateCooccurrenceLinks would).
+        repo.upsertTopicLink(TENANT_A, t1, t2, 1, "[\"cooccurrence\"]");
+
+        // Make (t1, t2) eligible for refreshProjectionLinks: t1 gets a projection
+        // assignment on a doc t2 also holds via a non-projection assigned_by.
+        seedChunk(TENANT_A, COL_A, hexChash("merge-doc"));
+        repo.assignTopic(TENANT_A, hexChash("merge-doc"), t1, "projection", 0.9, COL_A, null);
+        repo.assignTopic(TENANT_A, hexChash("merge-doc"), t2, "hdbscan", 0.8, COL_A, null);
+
+        repo.refreshProjectionLinks(TENANT_A);
+
+        try (java.sql.Connection su = pg.createConnection("")) {
+            var rs = su.createStatement().executeQuery(
+                "SELECT link_types::text AS lt FROM nexus.topic_links "
+                + "WHERE tenant_id = '" + TENANT_A + "' "
+                + "AND from_topic_id = " + Math.min(t1, t2) + " AND to_topic_id = " + Math.max(t1, t2));
+            assertThat(rs.next()).isTrue();
+            String lt = rs.getString("lt");
+            assertThat(lt).as("original cooccurrence type must survive the merge").contains("cooccurrence");
+            assertThat(lt).as("projection type must be spliced in by the merge").contains("projection");
+        }
+    }
+
     // ── ICF ────────────────────────────────────────────────────────────────────
 
     @Test @Order(20)
@@ -487,8 +644,10 @@ class TaxonomyRepositoryTest {
         String srcColA = "src__col-a-icf";
         String srcColB = "src__col-b-icf";
         long topic = repo.insertTopic(TENANT_A, "icf-test-topic", null, COL_A, 0, null, null);
-        repo.assignTopic(TENANT_A, "icf-doc-1", topic, "projection", 0.8, srcColA, null);
-        repo.assignTopic(TENANT_A, "icf-doc-2", topic, "projection", 0.7, srcColB, null);
+        seedChunk(TENANT_A, srcColA, hexChash("icf-doc-1"));
+        seedChunk(TENANT_A, srcColB, hexChash("icf-doc-2"));
+        repo.assignTopic(TENANT_A, hexChash("icf-doc-1"), topic, "projection", 0.8, srcColA, null);
+        repo.assignTopic(TENANT_A, hexChash("icf-doc-2"), topic, "projection", 0.7, srcColB, null);
 
         int n = repo.countDistinctSourceCollections(TENANT_A);
         assertThat(n).isGreaterThanOrEqualTo(2);
@@ -644,14 +803,15 @@ class TaxonomyRepositoryTest {
     void importAssignment_fidelityAndIdempotent() {
         long topicId = repo.importTopic(TENANT_A, 9900002L, "assign-import-topic", null, COL_A,
                                         null, 0, PAST_TS, "pending", null);
-        repo.importAssignment(TENANT_A, "imp-doc-1", topicId, "projection", 0.7, PAST_TS, COL_A);
+        seedChunk(TENANT_A, COL_A, hexChash("imp-doc-1"));
+        repo.importAssignment(TENANT_A, hexChash("imp-doc-1"), topicId, "projection", 0.7, PAST_TS, COL_A);
 
         List<String> docs = repo.getTopicDocIds(TENANT_A, topicId, 0);
-        assertThat(docs).contains("imp-doc-1");
+        assertThat(docs).contains(hexChash("imp-doc-1"));
 
         // Re-import with same data — idempotent (GREATEST similarity)
-        repo.importAssignment(TENANT_A, "imp-doc-1", topicId, "projection", 0.7, PAST_TS, COL_A);
-        assertThat(repo.getTopicDocIds(TENANT_A, topicId, 0)).containsExactly("imp-doc-1");
+        repo.importAssignment(TENANT_A, hexChash("imp-doc-1"), topicId, "projection", 0.7, PAST_TS, COL_A);
+        assertThat(repo.getTopicDocIds(TENANT_A, topicId, 0)).containsExactly(hexChash("imp-doc-1"));
     }
 
     @Test @Order(23)
@@ -661,8 +821,8 @@ class TaxonomyRepositoryTest {
         long t2 = repo.importTopic(TENANT_A, 9900004L, "link-import-t2", null, COL_A,
                                    null, 0, PAST_TS, "pending", null);
 
-        repo.importTopicLink(TENANT_A, t1, t2, 7, "co-occur");
-        repo.importTopicLink(TENANT_A, t1, t2, 3, "co-occur"); // GREATEST 7 preserved
+        repo.importTopicLink(TENANT_A, t1, t2, 7, "[\"co-occur\"]");
+        repo.importTopicLink(TENANT_A, t1, t2, 3, "[\"co-occur\"]"); // GREATEST 7 preserved
 
         List<Map<String, Object>> pairs = repo.getTopicLinkPairs(TENANT_A, List.of(t1, t2));
         var link = pairs.stream()
@@ -770,8 +930,10 @@ class TaxonomyRepositoryTest {
         long t2 = repo.insertTopic(TENANT_A, "os-topic-2", null, COL_OS, 0, PAST_TS, "[\"b\"]");
         repo.markTopicReviewed(TENANT_A, t2, "accepted");
         // One manual assignment (must surface) + one hdbscan (must NOT surface).
-        repo.assignTopic(TENANT_A, "os-doc-manual", t1, "manual", null, null, null);
-        repo.assignTopic(TENANT_A, "os-doc-hdbscan", t1, "hdbscan", null, null, null);
+        seedChunk(TENANT_A, COL_OS, hexChash("os-doc-manual"));
+        seedChunk(TENANT_A, COL_OS, hexChash("os-doc-hdbscan"));
+        repo.assignTopic(TENANT_A, hexChash("os-doc-manual"), t1, "manual", null, COL_OS, null);
+        repo.assignTopic(TENANT_A, hexChash("os-doc-hdbscan"), t1, "hdbscan", null, COL_OS, null);
 
         Map<String, Object> state = repo.readRebuildOldState(TENANT_A, COL_OS);
 
@@ -789,7 +951,7 @@ class TaxonomyRepositoryTest {
         var manual = (List<Map<String, Object>>) state.get("manual_assignments");
         assertThat(manual).hasSize(1);
         assertThat(manual.get(0)).containsOnlyKeys("doc_id", "topic_id");
-        assertThat(manual.get(0).get("doc_id")).isEqualTo("os-doc-manual");
+        assertThat(manual.get(0).get("doc_id")).isEqualTo(hexChash("os-doc-manual"));
         assertThat(((Number) manual.get(0).get("topic_id")).longValue()).isEqualTo(t1);
     }
 
@@ -798,17 +960,20 @@ class TaxonomyRepositoryTest {
     void persistRebuildTopics_replaceSemanticsClearsOldInsertsNewAppliesManual() {
         // Seed an "old" topic + assignment that the rebuild must clear.
         long oldId = repo.insertTopic(TENANT_A, "rb-old", null, COL_RB, 1, PAST_TS, null);
-        repo.assignTopic(TENANT_A, "rb-doc-1", oldId, "hdbscan", null, null, null);
+        seedChunk(TENANT_A, COL_RB, hexChash("rb-doc-1"));
+        seedChunk(TENANT_A, COL_RB, hexChash("rb-doc-2"));
+        seedChunk(TENANT_A, COL_RB, hexChash("rb-doc-manual"));
+        repo.assignTopic(TENANT_A, hexChash("rb-doc-1"), oldId, "hdbscan", null, COL_RB, null);
 
         var specs = List.of(
             m("label", "rb-new-0", "doc_count", 2, "terms", "[\"x\"]",
               "review_status", "pending", "assigned_by", "hdbscan",
-              "doc_ids", List.of("rb-doc-1", "rb-doc-2")),
+              "doc_ids", List.of(hexChash("rb-doc-1"), hexChash("rb-doc-2"))),
             m("label", "rb-new-1", "doc_count", 0, "terms", "[\"y\"]",
               "review_status", "pending", "assigned_by", "hdbscan",
               "doc_ids", List.of()));
         // Transfer the manual doc to spec index 1.
-        Map<String, Object> manualTransfers = m("rb-doc-manual", 1);
+        Map<String, Object> manualTransfers = m(hexChash("rb-doc-manual"), 1);
 
         List<Long> ids = repo.persistRebuildTopics(TENANT_A, COL_RB, specs, manualTransfers);
 
@@ -824,7 +989,7 @@ class TaxonomyRepositoryTest {
         var manual = (List<Map<String, Object>>)
             repo.readRebuildOldState(TENANT_A, COL_RB).get("manual_assignments");
         assertThat(manual).hasSize(1);
-        assertThat(manual.get(0).get("doc_id")).isEqualTo("rb-doc-manual");
+        assertThat(manual.get(0).get("doc_id")).isEqualTo(hexChash("rb-doc-manual"));
         assertThat(((Number) manual.get(0).get("topic_id")).longValue()).isEqualTo(ids.get(1));
     }
 
@@ -842,9 +1007,11 @@ class TaxonomyRepositoryTest {
 
     @Test @Order(31)
     void persistDiscoveredTopics_insertsTopicsAndAssignmentsReturnsAlignedIds() {
+        seedChunk(TENANT_A, COL_DISC, hexChash("disc-doc-1"));
+        seedChunk(TENANT_A, COL_DISC, hexChash("disc-doc-2"));
         var specs = List.of(
             m("label", "disc-0", "doc_count", 2, "terms", "[\"p\"]",
-              "assigned_by", "hdbscan", "doc_ids", List.of("disc-doc-1", "disc-doc-2")),
+              "assigned_by", "hdbscan", "doc_ids", List.of(hexChash("disc-doc-1"), hexChash("disc-doc-2"))),
             m("label", "disc-1", "doc_count", 0, "terms", "[\"q\"]",
               "assigned_by", "hdbscan", "doc_ids", List.of()));
 
@@ -857,7 +1024,7 @@ class TaxonomyRepositoryTest {
         // review_status defaults to 'pending' for discovered topics.
         assertThat(topics).allSatisfy(m -> assertThat(m.get("review_status")).isEqualTo("pending"));
         assertThat(repo.getTopicDocIds(TENANT_A, ids.get(0), 0))
-            .containsExactlyInAnyOrder("disc-doc-1", "disc-doc-2");
+            .containsExactlyInAnyOrder(hexChash("disc-doc-1"), hexChash("disc-doc-2"));
     }
 
     @Test @Order(315)
@@ -871,9 +1038,10 @@ class TaxonomyRepositoryTest {
         // for maximal overlap; assert NO exception, exactly one winner, and
         // exactly the winner's rows in the DB.
         final String col = "docs__disc_race__bge-base-en-v15-768__v1";
+        seedChunk(TENANT_A, col, hexChash("race-doc-1"));
         var specs = List.of(
             m("label", "race-topic-a", "doc_count", 1, "terms", "[\"r\"]",
-              "assigned_by", "hdbscan", "doc_ids", List.of("race-doc-1")),
+              "assigned_by", "hdbscan", "doc_ids", List.of(hexChash("race-doc-1"))),
             m("label", "race-topic-b", "doc_count", 0, "terms", "[\"s\"]",
               "assigned_by", "hdbscan", "doc_ids", List.of()));
 
@@ -912,11 +1080,13 @@ class TaxonomyRepositoryTest {
         // the second insert and reuses the first topic's id, keeping topic_ids
         // aligned with specs order; assignments union onto the shared topic.
         final String col = "docs__disc_duplabel__bge-base-en-v15-768__v1";
+        seedChunk(TENANT_A, col, hexChash("dup-doc-1"));
+        seedChunk(TENANT_A, col, hexChash("dup-doc-2"));
         var specs = List.of(
             m("label", "dup-topic", "doc_count", 1, "terms", "[\"t\"]",
-              "assigned_by", "hdbscan", "doc_ids", List.of("dup-doc-1")),
+              "assigned_by", "hdbscan", "doc_ids", List.of(hexChash("dup-doc-1"))),
             m("label", "dup-topic", "doc_count", 1, "terms", "[\"u\"]",
-              "assigned_by", "hdbscan", "doc_ids", List.of("dup-doc-2")));
+              "assigned_by", "hdbscan", "doc_ids", List.of(hexChash("dup-doc-2"))));
 
         List<Long> ids = repo.persistDiscoveredTopics(TENANT_A, col, specs);
 
@@ -928,7 +1098,7 @@ class TaxonomyRepositoryTest {
         // dropped (documented behavior, matches the client-side dedup).
         assertThat(topics.get(0).get("terms")).isEqualTo("[\"t\"]");
         assertThat(repo.getTopicDocIds(TENANT_A, ids.get(0), 0))
-            .containsExactlyInAnyOrder("dup-doc-1", "dup-doc-2");
+            .containsExactlyInAnyOrder(hexChash("dup-doc-1"), hexChash("dup-doc-2"));
     }
 
     @Test @Order(317)
@@ -938,13 +1108,15 @@ class TaxonomyRepositoryTest {
         // labels in one rebuild plan must merge (first wins, doc_ids union),
         // not 23505 → 409.
         final String col = "docs__rb_duplabel__bge-base-en-v15-768__v1";
+        seedChunk(TENANT_A, col, hexChash("rb-dup-doc-1"));
+        seedChunk(TENANT_A, col, hexChash("rb-dup-doc-2"));
         var specs = List.of(
             m("label", "rb-dup", "doc_count", 1, "terms", "[\"a\"]",
               "review_status", "pending", "assigned_by", "hdbscan",
-              "doc_ids", List.of("rb-dup-doc-1")),
+              "doc_ids", List.of(hexChash("rb-dup-doc-1"))),
             m("label", "rb-dup", "doc_count", 1, "terms", "[\"b\"]",
               "review_status", "pending", "assigned_by", "hdbscan",
-              "doc_ids", List.of("rb-dup-doc-2")));
+              "doc_ids", List.of(hexChash("rb-dup-doc-2"))));
 
         List<Long> ids = repo.persistRebuildTopics(TENANT_A, col, specs, Map.of());
 
@@ -954,7 +1126,7 @@ class TaxonomyRepositoryTest {
         assertThat(topics).hasSize(1);
         assertThat(topics.get(0).get("terms")).isEqualTo("[\"a\"]");
         assertThat(repo.getTopicDocIds(TENANT_A, ids.get(0), 0))
-            .containsExactlyInAnyOrder("rb-dup-doc-1", "rb-dup-doc-2");
+            .containsExactlyInAnyOrder(hexChash("rb-dup-doc-1"), hexChash("rb-dup-doc-2"));
     }
 
     @Test @Order(32)
@@ -981,14 +1153,16 @@ class TaxonomyRepositoryTest {
         // topic's assignments must recompute doc_count on the surviving row.
         final String col = "knowledge__dctrg_purge";
         long t = repo.insertTopic(TENANT_A, "purge-recount", null, col, 0, PAST_TS, null);
-        repo.assignTopic(TENANT_A, "pd-doc-1", t, "manual", null, col, null);
-        repo.assignTopic(TENANT_A, "pd-doc-2", t, "manual", null, col, null);
+        seedChunk(TENANT_A, col, hexChash("pd-doc-1"));
+        seedChunk(TENANT_A, col, hexChash("pd-doc-2"));
+        repo.assignTopic(TENANT_A, hexChash("pd-doc-1"), t, "manual", null, col, null);
+        repo.assignTopic(TENANT_A, hexChash("pd-doc-2"), t, "manual", null, col, null);
         // AFTER INSERT trigger set the live count.
         assertThat(((Number) repo.getTopicById(TENANT_A, t).get().get("doc_count")).intValue())
             .isEqualTo(2);
 
         // Purge one doc's assignment; topic survives (still has pd-doc-2).
-        repo.purgeAssignmentsForDoc(TENANT_A, col, "pd-doc-1");
+        repo.purgeAssignmentsForDoc(TENANT_A, col, hexChash("pd-doc-1"));
 
         // AFTER DELETE trigger recomputed: exactly 1 remains.
         assertThat(((Number) repo.getTopicById(TENANT_A, t).get().get("doc_count")).intValue())
@@ -1001,9 +1175,12 @@ class TaxonomyRepositoryTest {
         // on the same row MUST NOT overwrite doc_count (RDR-154 Decision 1).
         final String col = "knowledge__dctrg_etl";
         long t = repo.insertTopic(TENANT_A, "etl-nostomp", null, col, 0, PAST_TS, null);
-        repo.assignTopic(TENANT_A, "es-doc-1", t, "manual", null, col, null);
-        repo.assignTopic(TENANT_A, "es-doc-2", t, "manual", null, col, null);
-        repo.assignTopic(TENANT_A, "es-doc-3", t, "manual", null, col, null);
+        seedChunk(TENANT_A, col, hexChash("es-doc-1"));
+        seedChunk(TENANT_A, col, hexChash("es-doc-2"));
+        seedChunk(TENANT_A, col, hexChash("es-doc-3"));
+        repo.assignTopic(TENANT_A, hexChash("es-doc-1"), t, "manual", null, col, null);
+        repo.assignTopic(TENANT_A, hexChash("es-doc-2"), t, "manual", null, col, null);
+        repo.assignTopic(TENANT_A, hexChash("es-doc-3"), t, "manual", null, col, null);
         assertThat(((Number) repo.getTopicById(TENANT_A, t).get().get("doc_count")).intValue())
             .isEqualTo(3);
 
@@ -1037,7 +1214,11 @@ class TaxonomyRepositoryTest {
             .isEqualTo(7);
 
         // Tenant A inserts an assignment pointing at tenant B's topic id.
-        repo.assignTopic(TENANT_A, "xt-doc-a", bTopicId, "manual", null, col, null);
+        // topic_assignments_chunk_fk is keyed on the ASSIGNMENT's own tenant_id
+        // (TENANT_A here), not the referenced topic's tenant — orthogonal to
+        // what this test proves about the doc_count trigger's tenant scoping.
+        seedChunk(TENANT_A, col, hexChash("xt-doc-a"));
+        repo.assignTopic(TENANT_A, hexChash("xt-doc-a"), bTopicId, "manual", null, col, null);
 
         // Tenant B's row is untouched (trigger scoped to the session tenant).
         assertThat(((Number) repo.getTopicById(TENANT_B, bTopicId).get().get("doc_count")).intValue())
@@ -1052,10 +1233,13 @@ class TaxonomyRepositoryTest {
         // assignments. The AFTER INSERT trigger must recompute doc_count from the
         // actual doc_ids, overriding any (here deliberately wrong) seed.
         final String col = "knowledge__dctrg_disc";
+        seedChunk(TENANT_A, col, hexChash("dr-doc-1"));
+        seedChunk(TENANT_A, col, hexChash("dr-doc-2"));
+        seedChunk(TENANT_A, col, hexChash("dr-doc-3"));
         var specs = List.of(
             m("label", "disc-recount", "doc_count", 999, "terms", "[\"p\"]",
               "assigned_by", "hdbscan",
-              "doc_ids", List.of("dr-doc-1", "dr-doc-2", "dr-doc-3")));
+              "doc_ids", List.of(hexChash("dr-doc-1"), hexChash("dr-doc-2"), hexChash("dr-doc-3"))));
         List<Long> ids = repo.persistDiscoveredTopics(TENANT_A, col, specs);
         assertThat(ids).hasSize(1);
 
@@ -1071,7 +1255,11 @@ class TaxonomyRepositoryTest {
         // confirm the doc_count trigger computes the exact live count.
         final String col = "knowledge__batch_large";
         List<String> docIds = new java.util.ArrayList<>();
-        for (int i = 0; i < 50; i++) docIds.add("bl-doc-" + i);
+        for (int i = 0; i < 50; i++) {
+            String d = hexChash("bl-doc-" + i);
+            docIds.add(d);
+            seedChunk(TENANT_A, col, d);
+        }
         var specs = List.of(
             m("label", "batch-large", "doc_count", 0, "terms", "[\"p\"]",
               "assigned_by", "hdbscan", "doc_ids", docIds));
@@ -1149,25 +1337,27 @@ class TaxonomyRepositoryTest {
                                    null, 0, PAST_TS, "pending", null);
         long t1 = repo.importTopic(TENANT_A, 9900211L, "batch-assign-t1", null, "knowledge__batch_assign",
                                    null, 0, PAST_TS, "pending", null);
+        seedChunk(TENANT_A, "knowledge__batch_assign", hexChash("batch-a-doc-1"));
+        seedChunk(TENANT_A, "knowledge__batch_assign", hexChash("batch-a-doc-2"));
 
         int n = repo.importBatch(TENANT_A, "assignment", List.of(
-            m("doc_id", "batch-a-doc-1", "topic_id", t0, "assigned_by", "projection",
+            m("doc_id", hexChash("batch-a-doc-1"), "topic_id", t0, "assigned_by", "projection",
               "similarity", 0.5, "assigned_at", PAST_TS, "source_collection", "knowledge__batch_assign"),
-            m("doc_id", "batch-a-doc-2", "topic_id", t1, "assigned_by", "manual",
+            m("doc_id", hexChash("batch-a-doc-2"), "topic_id", t1, "assigned_by", "manual",
               "similarity", null, "assigned_at", PAST_TS, "source_collection", "knowledge__batch_assign")));
         assertThat(n).isEqualTo(2);
-        assertThat(repo.getTopicDocIds(TENANT_A, t0, 0)).contains("batch-a-doc-1");
-        assertThat(repo.getTopicDocIds(TENANT_A, t1, 0)).contains("batch-a-doc-2");
+        assertThat(repo.getTopicDocIds(TENANT_A, t0, 0)).contains(hexChash("batch-a-doc-1"));
+        assertThat(repo.getTopicDocIds(TENANT_A, t1, 0)).contains(hexChash("batch-a-doc-2"));
 
         // Re-import same (doc_id, topic_id) with assigned_by='hdbscan' + lower similarity —
         // never downgrade projection, GREATEST similarity.
         repo.importBatch(TENANT_A, "assignment", List.of(
-            m("doc_id", "batch-a-doc-1", "topic_id", t0, "assigned_by", "hdbscan",
+            m("doc_id", hexChash("batch-a-doc-1"), "topic_id", t0, "assigned_by", "hdbscan",
               "similarity", 0.2, "assigned_at", PAST_TS, "source_collection", "knowledge__batch_assign")));
         // chunkGroundedIn only matches assigned_by='projection' rows — if the CASE
         // logic had downgraded assigned_by to 'hdbscan' this would come back empty.
         // GREATEST(0.5, 0.2) also confirms similarity was not clobbered downward.
-        assertThat(repo.chunkGroundedIn(TENANT_A, "batch-a-doc-1", "knowledge__batch_assign"))
+        assertThat(repo.chunkGroundedIn(TENANT_A, hexChash("batch-a-doc-1"), "knowledge__batch_assign"))
             .contains(0.5);
     }
 
@@ -1181,8 +1371,8 @@ class TaxonomyRepositoryTest {
                                    null, 0, PAST_TS, "pending", null);
 
         int n = repo.importBatch(TENANT_A, "link", List.of(
-            m("from_topic_id", t0, "to_topic_id", t1, "link_count", 7, "link_types", "co-occur"),
-            m("from_topic_id", t0, "to_topic_id", t2, "link_count", 4, "link_types", "co-occur")));
+            m("from_topic_id", t0, "to_topic_id", t1, "link_count", 7, "link_types", "[\"co-occur\"]"),
+            m("from_topic_id", t0, "to_topic_id", t2, "link_count", 4, "link_types", "[\"co-occur\"]")));
         assertThat(n).isEqualTo(2);
 
         var pairs = repo.getTopicLinkPairs(TENANT_A, List.of(t0, t1, t2));
@@ -1190,7 +1380,7 @@ class TaxonomyRepositoryTest {
 
         // Re-import with a LOWER link_count for (t0,t1) — GREATEST(7,3) keeps 7.
         repo.importBatch(TENANT_A, "link", List.of(
-            m("from_topic_id", t0, "to_topic_id", t1, "link_count", 3, "link_types", "co-occur")));
+            m("from_topic_id", t0, "to_topic_id", t1, "link_count", 3, "link_types", "[\"co-occur\"]")));
         var updated = repo.getTopicLinkPairs(TENANT_A, List.of(t0, t1, t2)).stream()
             .filter(p -> ((Number) p.get("from_topic_id")).longValue() == t0
                       && ((Number) p.get("to_topic_id")).longValue() == t1)
@@ -1254,23 +1444,26 @@ class TaxonomyRepositoryTest {
     void assignMany_mixedCentroidAndProjection_matchesSequentialAssignTopic() {
         long tBatch = repo.insertTopic(TENANT_A, "am-batch-topic", null, COL_A, 0, null, null);
         long tSeq   = repo.insertTopic(TENANT_A, "am-seq-topic", null, COL_A, 0, null, null);
+        seedChunk(TENANT_A, COL_A, hexChash("am-doc-1"));
+        seedChunk(TENANT_A, COL_A, hexChash("am-doc-2"));
 
         int persisted = repo.assignMany(TENANT_A, List.of(
-            m("doc_id", "am-doc-1", "topic_id", tBatch, "assigned_by", "centroid"),
-            m("doc_id", "am-doc-2", "topic_id", tBatch, "assigned_by", "projection",
+            m("doc_id", hexChash("am-doc-1"), "topic_id", tBatch, "assigned_by", "centroid",
+              "source_collection", COL_A),
+            m("doc_id", hexChash("am-doc-2"), "topic_id", tBatch, "assigned_by", "projection",
               "similarity", 0.7, "source_collection", COL_A)));
         assertThat(persisted).isEqualTo(2);
 
         // Equivalent sequence of single-row assignTopic calls to a sibling topic.
-        repo.assignTopic(TENANT_A, "am-doc-1", tSeq, "centroid", null, null, null);
-        repo.assignTopic(TENANT_A, "am-doc-2", tSeq, "projection", 0.7, COL_A, null);
+        repo.assignTopic(TENANT_A, hexChash("am-doc-1"), tSeq, "centroid", null, COL_A, null);
+        repo.assignTopic(TENANT_A, hexChash("am-doc-2"), tSeq, "projection", 0.7, COL_A, null);
 
         assertThat(repo.getTopicDocIds(TENANT_A, tBatch, 0))
-            .containsExactlyInAnyOrder("am-doc-1", "am-doc-2");
+            .containsExactlyInAnyOrder(hexChash("am-doc-1"), hexChash("am-doc-2"));
         assertThat(repo.getTopicDocIds(TENANT_A, tSeq, 0))
-            .containsExactlyInAnyOrder("am-doc-1", "am-doc-2");
+            .containsExactlyInAnyOrder(hexChash("am-doc-1"), hexChash("am-doc-2"));
 
-        Optional<Double> sim = repo.chunkGroundedIn(TENANT_A, "am-doc-2", COL_A);
+        Optional<Double> sim = repo.chunkGroundedIn(TENANT_A, hexChash("am-doc-2"), COL_A);
         assertThat(sim).isPresent();
         assertThat(sim.get()).isEqualTo(0.7, offset(0.001));
     }
@@ -1278,27 +1471,31 @@ class TaxonomyRepositoryTest {
     @Test @Order(61)
     void assignMany_duplicateNonProjectionRowsInBatch_dupSafe() {
         long t = repo.insertTopic(TENANT_A, "am-dup-topic", null, COL_A, 0, null, null);
+        seedChunk(TENANT_A, COL_A, hexChash("am-doc-dup"));
         // Two identical (doc_id, topic_id) non-projection rows in ONE call: the
         // second hits ON CONFLICT DO NOTHING (separate INSERT statements) — no error.
         int persisted = repo.assignMany(TENANT_A, List.of(
-            m("doc_id", "am-doc-dup", "topic_id", t, "assigned_by", "centroid"),
-            m("doc_id", "am-doc-dup", "topic_id", t, "assigned_by", "centroid")));
+            m("doc_id", hexChash("am-doc-dup"), "topic_id", t, "assigned_by", "centroid",
+              "source_collection", COL_A),
+            m("doc_id", hexChash("am-doc-dup"), "topic_id", t, "assigned_by", "centroid",
+              "source_collection", COL_A)));
         assertThat(persisted).isEqualTo(2);
-        assertThat(repo.getTopicDocIds(TENANT_A, t, 0)).containsExactly("am-doc-dup");
+        assertThat(repo.getTopicDocIds(TENANT_A, t, 0)).containsExactly(hexChash("am-doc-dup"));
     }
 
     @Test @Order(62)
     void assignMany_projectionBestSimilarityWins_withinBatch() {
         long t = repo.insertTopic(TENANT_A, "am-proj-topic", null, COL_A, 0, null, null);
+        seedChunk(TENANT_A, COL_A, hexChash("am-doc-proj"));
         repo.assignMany(TENANT_A, List.of(
-            m("doc_id", "am-doc-proj", "topic_id", t, "assigned_by", "projection",
+            m("doc_id", hexChash("am-doc-proj"), "topic_id", t, "assigned_by", "projection",
               "similarity", 0.4, "source_collection", COL_A),
-            m("doc_id", "am-doc-proj", "topic_id", t, "assigned_by", "projection",
+            m("doc_id", hexChash("am-doc-proj"), "topic_id", t, "assigned_by", "projection",
               "similarity", 0.9, "source_collection", COL_A),
-            m("doc_id", "am-doc-proj", "topic_id", t, "assigned_by", "projection",
+            m("doc_id", hexChash("am-doc-proj"), "topic_id", t, "assigned_by", "projection",
               "similarity", 0.6, "source_collection", COL_A)));
 
-        Optional<Double> sim = repo.chunkGroundedIn(TENANT_A, "am-doc-proj", COL_A);
+        Optional<Double> sim = repo.chunkGroundedIn(TENANT_A, hexChash("am-doc-proj"), COL_A);
         assertThat(sim).isPresent();
         assertThat(sim.get()).isEqualTo(0.9, offset(0.001));
     }
@@ -1318,8 +1515,10 @@ class TaxonomyRepositoryTest {
     private long seedHub(String tenant, String label, String assignedAt,
                          String sourceA, String sourceB) {
         long topicId = repo.insertTopic(tenant, label, null, COL_A, 0, null, null);
-        repo.assignTopic(tenant, label + "-doc-a", topicId, "projection", 0.5, sourceA, assignedAt);
-        repo.assignTopic(tenant, label + "-doc-b", topicId, "projection", 0.5, sourceB, assignedAt);
+        seedChunk(tenant, sourceA, hexChash(label + "-doc-a"));
+        seedChunk(tenant, sourceB, hexChash(label + "-doc-b"));
+        repo.assignTopic(tenant, hexChash(label + "-doc-a"), topicId, "projection", 0.5, sourceA, assignedAt);
+        repo.assignTopic(tenant, hexChash(label + "-doc-b"), topicId, "projection", 0.5, sourceB, assignedAt);
         return topicId;
     }
 
@@ -1398,14 +1597,15 @@ class TaxonomyRepositoryTest {
         // doc_id + topic_id only, which is asserted here so the two stay distinct.
         final String tenant = "tax-detail-" + System.nanoTime();
         long topicId = repo.insertTopic(tenant, "detail-topic", null, COL_A, 0, null, null);
-        repo.assignTopic(tenant, "detail-doc", topicId, "projection",
+        seedChunk(tenant, "code__detail_src", hexChash("detail-doc"));
+        repo.assignTopic(tenant, hexChash("detail-doc"), topicId, "projection",
             0.8712345, "code__detail_src", "2026-04-14T10:00:00Z");
 
-        var details = repo.getAssignmentDetails(tenant, List.of("detail-doc"));
+        var details = repo.getAssignmentDetails(tenant, List.of(hexChash("detail-doc")));
 
         assertThat(details).hasSize(1);
         var row = details.get(0);
-        assertThat(row.get("doc_id")).isEqualTo("detail-doc");
+        assertThat(row.get("doc_id")).isEqualTo(hexChash("detail-doc"));
         assertThat(((Number) row.get("topic_id")).longValue()).isEqualTo(topicId);
         assertThat(row.get("assigned_by")).isEqualTo("projection");
         assertThat(((Number) row.get("similarity")).doubleValue()).isEqualTo(0.8712345);
@@ -1414,7 +1614,7 @@ class TaxonomyRepositoryTest {
 
         // The cheap map read is deliberately NOT widened: callers destructure it as
         // {doc_id: topic_id}, so widening would change a return type they depend on.
-        var map = repo.getAssignmentsForDocs(tenant, List.of("detail-doc"));
+        var map = repo.getAssignmentsForDocs(tenant, List.of(hexChash("detail-doc")));
         assertThat(map).hasSize(1);
         assertThat(map.get(0).keySet())
             .as("for_docs stays a two-key projection")
@@ -1427,15 +1627,17 @@ class TaxonomyRepositoryTest {
         final String other  = "tax-detail-other-" + System.nanoTime();
         long mine = repo.insertTopic(tenant, "mine-topic", null, COL_A, 0, null, null);
         long theirs = repo.insertTopic(other, "their-topic", null, COL_A, 0, null, null);
-        repo.assignTopic(tenant, "shared-doc-id", mine, "projection", 0.1, "code__mine", null);
-        repo.assignTopic(other, "shared-doc-id", theirs, "projection", 0.9, "code__theirs", null);
+        seedChunk(tenant, "code__mine", hexChash("shared-doc-id"));
+        seedChunk(other, "code__theirs", hexChash("shared-doc-id"));
+        repo.assignTopic(tenant, hexChash("shared-doc-id"), mine, "projection", 0.1, "code__mine", null);
+        repo.assignTopic(other, hexChash("shared-doc-id"), theirs, "projection", 0.9, "code__theirs", null);
 
-        var out = repo.getAssignmentDetails(tenant, List.of("shared-doc-id"));
+        var out = repo.getAssignmentDetails(tenant, List.of(hexChash("shared-doc-id")));
 
         assertThat(out).as("the other tenant's row for the same doc_id must not leak")
             .hasSize(1);
         assertThat(out.get(0).get("source_collection")).isEqualTo("code__mine");
-        assertThat(repo.getAssignmentDetails(tenant, List.of("no-such-doc"))).isEmpty();
+        assertThat(repo.getAssignmentDetails(tenant, List.of(hexChash("no-such-doc")))).isEmpty();
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

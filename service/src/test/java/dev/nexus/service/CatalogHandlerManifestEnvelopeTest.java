@@ -130,6 +130,32 @@ class CatalogHandlerManifestEnvelopeTest {
     }
 
     private void writeManifestRow(String docId, String collection, String chash) throws Exception {
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for this manifest write to succeed.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
+            // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+            // (tenant_id, name) — stub-register the collection first, mirroring
+            // PgVectorRepository#upsertChunks' own ensure-registered step.
+            try (var regPs = su.prepareStatement(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
+                    + "ON CONFLICT (tenant_id, name) DO NOTHING")) {
+                regPs.setString(1, TENANT);
+                regPs.setString(2, collection);
+                regPs.execute();
+            }
+            try (var ps = su.prepareStatement(
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
+                    + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::vector) "
+                    + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
+                ps.setString(1, TENANT);
+                ps.setString(2, collection);
+                ps.setString(3, chash);
+                ps.setString(4, "[" + "0.1,".repeat(383) + "0.1]");
+                ps.execute();
+            }
+        }
         // RDR-191 (Hal ruling 2026-08-12): 'collection' is required, caller-
         // supplied, and stamped verbatim -- pass the SAME value the owning
         // doc was registered under (registerDoc's physical_collection), no

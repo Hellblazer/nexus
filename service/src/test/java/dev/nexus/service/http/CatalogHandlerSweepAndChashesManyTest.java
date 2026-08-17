@@ -140,6 +140,9 @@ class CatalogHandlerSweepAndChashesManyTest {
     void chashesMany_multiDoc_returnsChashesAndCount() throws Exception {
         String col = "code__httpcm1__minilm-l6-v2-384__v1";
         registerDoc("hcm.1", col);
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for this manifest write to succeed.
+        seedChunk384(col, ch("hcm1a"));
         CapturingExchange w = post("/v1/catalog/manifest/write",
             "{\"doc_id\":\"hcm.1\",\"collection\":\"" + col + "\",\"rows\":[{\"position\":0,\"chash\":\"" + ch("hcm1a") + "\"}]}");
         handleWithTenant(w);
@@ -199,6 +202,9 @@ class CatalogHandlerSweepAndChashesManyTest {
         handleWithTenant(seed);
         assertThat(seed.status).isEqualTo(200);
 
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for the REPLACE write below too.
+        seedChunk384(col, ch("hwm1-y"));
         // No "sweep" key at all — must behave exactly as before this feature.
         CapturingExchange ex = post("/v1/catalog/manifest/write_many",
             "{\"collection\":\"" + col + "\",\"docs\":[{\"doc_id\":\"hwm.1\",\"rows\":[{\"position\":0,\"chash\":\"" + ch("hwm1-y") + "\"}]}]}");
@@ -221,6 +227,9 @@ class CatalogHandlerSweepAndChashesManyTest {
         handleWithTenant(seed);
         assertThat(seed.status).isEqualTo(200);
 
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for the REPLACE write below too.
+        seedChunk384(col, ch("hwm2-y"));
         CapturingExchange ex = post("/v1/catalog/manifest/write_many",
             "{\"sweep\":true,\"collection\":\"" + col + "\",\"docs\":[{\"doc_id\":\"hwm.2\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + ch("hwm2-y") + "\"}]}]}");
@@ -236,6 +245,9 @@ class CatalogHandlerSweepAndChashesManyTest {
     void writeMany_sweepNonBooleanValue_treatedAsFalse() throws Exception {
         String col = "code__httpwm3__minilm-l6-v2-384__v1";
         registerDoc("hwm.3", col);
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for this manifest write to succeed.
+        seedChunk384(col, ch("hwm3-a"));
         // "sweep":"true" (a STRING, not a JSON boolean) must NOT be truthy —
         // same "explicit true only" idiom as handleAssignMany's cross_collection.
         CapturingExchange ex = post("/v1/catalog/manifest/write_many",

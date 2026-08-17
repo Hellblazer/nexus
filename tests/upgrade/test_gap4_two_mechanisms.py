@@ -241,6 +241,13 @@ _ENGINE_MECHANISM_CALLERS = frozenset({
     "upgrade_ladder/preconditions.py",  # the ladder's precondition stage
     "health.py",                      # doctor read-only convergence check
     "engine_version.py",              # docstring/derivation home (no live call)
+    "db/pg_provision.py",             # RDR-194 P3c companion (nexus-v5lk3):
+                                      # docstring cross-references to
+                                      # converge_engine (the function this
+                                      # module's own reassign_diag_view_owner_
+                                      # before_restart is WIRED INTO, from the
+                                      # upgrade_finish.py side) — no live call
+                                      # from this module itself.
 })
 
 
@@ -343,24 +350,38 @@ def test_rung_convergence_is_re_derived_live_never_cached() -> None:
     replaces the paged probe, with NO stored verdict anywhere (the map rows
     are inert inputs a live computation interprets; the answer tracks the
     world in both directions exactly as this test demands).
-    """
-    # RDR-155 P4b re-ground: the substrate-etl rung died with the migration
-    # machinery; the surviving chash-rekey rung carries the same
-    # level-triggered contract — detect() reads the LIVE store probes, never
-    # a remembered verdict.
-    from nexus.upgrade_ladder.rungs.chash_rekey import ChashRekeyRung  # noqa: PLC0415 — test-local fixture construction
 
-    from nexus.db.chash_tables import ConformanceProbe  # noqa: PLC0415 — test-local
+    nexus-lgdel.l1: the chash-rekey rung that used to exercise this property
+    with a real production Rung retired along with the ladder's last data
+    rung (RUNG_ORDER is now empty). The property under test is generic to
+    the Rung protocol, not specific to that rung's SQL shape, so a minimal
+    Protocol-conformant fixture rung stands in for it here.
+    """
+    from nexus.upgrade_ladder.protocol import ConvergeOutcome, ConvergeResult, RungStatus  # noqa: PLC0415 — test-local
+
+    class _LiveWorldRung:
+        """Minimal Rung whose detect() re-derives from *world* every call,
+        never caching a verdict — the property this test pins."""
+
+        name = "live-world-fixture"
+
+        def __init__(self, world: dict) -> None:
+            self._world = world
+
+        def detect(self) -> RungStatus:
+            converged = self._world["nonconformant"] == 0 and self._world["validated"]
+            return RungStatus(applicable=True, converged=converged)
+
+        def converge(self, report) -> ConvergeResult:  # noqa: ARG002 — protocol conformance only
+            return ConvergeResult(ConvergeOutcome.COMPLETED)
+
+        def verify(self) -> bool:
+            return self._world["nonconformant"] == 0 and self._world["validated"]
 
     world = {"nonconformant": 5, "validated": False}
-    rung = ChashRekeyRung(
-        rekey_fn=lambda _policy: {},
-        detect_probe_fn=lambda: ConformanceProbe.measured(world["nonconformant"]),
-        validated_probe_fn=lambda: world["validated"],
-        applicable_fn=lambda: True,
-    )
+    rung = _LiveWorldRung(world)
 
-    assert rung.detect().pending is True, "nothing rekeyed yet — must read pending"
+    assert rung.detect().pending is True, "nothing converged yet — must read pending"
     world["nonconformant"] = 0  # the world converges underneath the rung
     world["validated"] = True
     assert rung.detect().pending is False, (

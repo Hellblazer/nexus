@@ -218,3 +218,114 @@ def test_topic_registries_expose_legacy_ids_on_both_verbs():
 
     assert "migration-legacy-ids" in remediate_topics()
     assert "migration-legacy-ids" in forensics_topics()
+
+
+# ── nexus-rpw6u: chash-poison forensics leg carries RDR-191 straddle handling ─
+#
+# The two sibling consumers of the chash-conformance probe (health.py's
+# _check_migration_state and chash_rekey.py's era-aware conformance probe)
+# both got RDR-191 straddle handling — a to_regclass era discriminator plus
+# a legacy-era (pre-unify per-dim table names) statement set filtered through
+# the SAME diag_chash_conformance view — because a store whose engine has not
+# yet run the RDR-191 unify migration can still have a LIVE, queryable view
+# that simply carries no row for the unified 'nexus.chunks' table_name filter
+# (a legitimate NULL aggregate, not evidence of a clean store). The forensics
+# playbook's diagnostic_sql is a STATIC tuple handed to an agent (there is no
+# live Python fallback loop like the siblings have), so the fix here is
+# shape (a): carry the era probe plus BOTH statement sets so a straddle
+# store's rows are actually measured by whichever leg matches its era.
+
+
+def test_chash_poison_forensics_diagnostic_sql_carries_era_probe_and_legacy_leg():
+    from nexus.db.chash_tables import (
+        chash_conformance_statements,
+        chash_era_probe_statement,
+        legacy_era_chash_conformance_statements,
+    )
+    from nexus.remediation import StoreState, emit_forensics_playbook
+
+    sql = emit_forensics_playbook("chash-poison", StoreState(detail="")).diagnostic_sql
+
+    era_probe = chash_era_probe_statement()
+    legacy_stmts = legacy_era_chash_conformance_statements()
+    assert era_probe in sql
+    for stmt in legacy_stmts:
+        assert stmt in sql
+
+    # Drift guard unchanged (health.py / chash_rekey.py share this table
+    # set): the unified statements still lead the tuple.
+    shared = chash_conformance_statements()
+    assert sql[: len(shared)] == shared
+
+    # The era probe precedes the legacy-era leg so a top-to-bottom reader
+    # sees the discriminator before the era-specific counts it explains.
+    assert sql.index(era_probe) < sql.index(legacy_stmts[0])
+
+
+def test_chash_poison_forensics_diagnostic_sql_passes_the_read_only_lint():
+    from nexus.remediation import StoreState, emit_forensics_playbook
+    from nexus.remediation.sql_lint import assert_read_only_diagnostics
+
+    sql = emit_forensics_playbook("chash-poison", StoreState(detail="")).diagnostic_sql
+    assert_read_only_diagnostics(sql)  # raises on a violation
+
+
+def test_chash_poison_forensics_steps_explain_the_era_probe():
+    """The agent reading the rendered playbook needs the interpretation
+    spelled out — a bare extra SQL line with no explanation is exactly the
+    kind of silent gap nexus-rpw6u's audit flagged elsewhere in this file."""
+    from nexus.remediation import StoreState, emit_forensics_playbook
+
+    pb = emit_forensics_playbook("chash-poison", StoreState(detail=""))
+    joined = " ".join(pb.steps)
+    assert "to_regclass" in joined or "era probe" in joined.lower()
+    assert "straddle" in joined.lower() or "legacy-era" in joined.lower()
+
+
+def test_chash_poison_forensics_diagnostic_sql_has_no_duplicate_statements():
+    """critic round 1 SIGNIFICANT-1: nexus.catalog_document_chunks' view-
+    filtered statement is byte-identical between the unified and legacy-era
+    sets (its name is unaffected by the RDR-191 unify) — assembly must
+    dedupe order-preserving so the agent never pays a redundant round-trip
+    or misreads the duplicate as a copy-paste bug."""
+    from nexus.db.chash_tables import (
+        chash_conformance_statements,
+        legacy_era_chash_conformance_statements,
+    )
+    from nexus.remediation import StoreState, emit_forensics_playbook
+
+    sql = emit_forensics_playbook("chash-poison", StoreState(detail="")).diagnostic_sql
+    assert len(sql) == len(set(sql)), f"duplicate statement(s) in diagnostic_sql: {sql}"
+
+    # The specific duplicate pair the fix targets really would collide
+    # absent the dedupe — confirm the source functions still produce it
+    # (a non-vacuity check: if a future chash_tables change removes the
+    # overlap, this assertion should be revisited, not silently pass).
+    catalog_stmt_unified = chash_conformance_statements()[1]
+    catalog_stmt_legacy = legacy_era_chash_conformance_statements()[3]
+    assert catalog_stmt_unified == catalog_stmt_legacy
+    assert sql.count(catalog_stmt_unified) == 1
+
+
+def test_chash_poison_forensics_steps_route_missing_view_to_escape():
+    """code-review suggestion: the era probe can say a leg SHOULD measure
+    while that leg is UNMEASURED/FAILED (the counts view absent) — the
+    steps text must route the agent to the escape clause, not let it read
+    that combination as a clean store."""
+    from nexus.remediation import StoreState, emit_forensics_playbook
+
+    pb = emit_forensics_playbook("chash-poison", StoreState(detail=""))
+    joined = " ".join(pb.steps).lower()
+    assert "escape" in joined
+    assert "evidence the store is clean" in joined
+
+
+def test_chash_poison_forensics_emits_via_the_lint_gate_unchanged():
+    """Non-regression: emit_forensics_playbook still runs the pre-emission
+    lint (nexus.remediation.playbook._emit) over the now-larger statement
+    tuple — a straddle-handling regression that reintroduced non-read-only
+    SQL would still be caught here, not just in the dedicated lint test."""
+    from nexus.remediation import StoreState, emit_forensics_playbook
+
+    pb = emit_forensics_playbook("chash-poison", StoreState(detail="x"))
+    assert pb.diagnostic_sql  # non-vacuity: the leg still carries SQL

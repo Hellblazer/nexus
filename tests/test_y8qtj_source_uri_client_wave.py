@@ -29,7 +29,7 @@ from click.testing import CliRunner
 from structlog.testing import capture_logs
 
 from nexus.cli import main
-from tests._catalog_fixture_ops import ActiveCatalog
+from tests._catalog_fixture_ops import ActiveCatalog, seed_manifest_chunks
 
 # Every test in this suite is routed to a real per-test-tenant engine
 # catalog by the autouse `_pin_t2_substrate` fixture (tests/conftest.py) —
@@ -50,6 +50,16 @@ def _chunk(chash: str, position: int) -> dict[str, Any]:
     }
 
 
+def _write_manifest(cat: ActiveCatalog, doc: str, chunks: list[dict], *, collection: str) -> None:
+    """``cat.write_manifest`` preceded by a real ``nexus.chunks`` stub for
+    every chash (nexus-dbzxb, RDR-191 Phase 5 Python collateral sweep,
+    idiom 1) — every direct ``write_manifest`` call in this file (the
+    document-fork-check tests) goes through this instead of the raw
+    method."""
+    seed_manifest_chunks(collection, (c["chash"] for c in chunks))
+    cat.write_manifest(doc, chunks, collection=collection)
+
+
 # ── _register_or_lookup_doc_id: --source-uri identity resolution ────────────
 
 
@@ -67,7 +77,7 @@ class TestSourceUriConvergence:
         corpus_name = f"dt-papers-{_next_seq()}"
         owner = cat.register_owner(corpus_name, "curator")
         dt_uri = f"x-devonthink-item://{_next_seq():0>8}-CAFE-BABE-0000-000000000000"
-        collection = "knowledge__dt-papers__bge-768__v1"
+        collection = "knowledge__dt-papers__bge-base-en-v15-768__v1"
         original_tumbler = cat.register(
             owner, "Zoology Paper",
             content_type="paper",
@@ -114,7 +124,7 @@ class TestSourceUriConvergence:
             _register_or_lookup_doc_id(
                 path, "dt-papers-orphan",
                 content_type="paper",
-                physical_collection="knowledge__dt-papers__bge-768__v1",
+                physical_collection="knowledge__dt-papers__bge-base-en-v15-768__v1",
                 source_uri="x-devonthink-item://NEVER-REGISTERED-0000",
             )
 
@@ -131,7 +141,7 @@ class TestSourceUriConvergence:
         cat = ActiveCatalog()
         owner = cat.register_owner(f"dt-papers-mismatch-{_next_seq()}", "curator")
         dt_uri = f"x-devonthink-item://MISMATCH-{_next_seq():0>8}"
-        home_collection = "knowledge__dt-papers__bge-768__v1"
+        home_collection = "knowledge__dt-papers__bge-base-en-v15-768__v1"
         cat.register(
             owner, "Mismatch Paper",
             content_type="paper",
@@ -147,7 +157,7 @@ class TestSourceUriConvergence:
             _register_or_lookup_doc_id(
                 path, "dt-papers-mismatch",
                 content_type="paper",
-                physical_collection="docs__default__bge-768__v1",
+                physical_collection="docs__default__bge-base-en-v15-768__v1",
                 source_uri=dt_uri,
             )
 
@@ -191,6 +201,21 @@ def _mock_t3() -> MagicMock:
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     t3 = MagicMock()
     t3.get_or_create_collection.return_value = mock_col
+    # nexus-dbzxb (RDR-191 Phase 5 Python collateral): this mock stands in
+    # for T3 so doc_indexer's write never reaches a real vector store — by
+    # design, per the module comment on every call site below ("this test
+    # proves source_uri doc_id CONVERGENCE, not fence/T3 integration").
+    # fk_catalog_chunks_chunk now requires the manifest write that DOES go
+    # through the real catalog (hooks.fire_batch -> manifest_write_batch_
+    # hook, unmocked) to have a matching real nexus.chunks row. The chash
+    # ids are computed by real production chunking logic (sha256 of each
+    # mock chunk's text) and are not reproducible here without duplicating
+    # that logic, so intercept the mock's write call itself and mirror its
+    # REAL ids/collection into the real engine (idiom 1/2: the production
+    # code's own arguments seed the stub, nothing here re-derives them).
+    t3.upsert_chunks_with_embeddings.side_effect = (
+        lambda collection, ids, *a, **kw: seed_manifest_chunks(collection, ids)
+    )
     return t3
 
 
@@ -208,7 +233,7 @@ class TestIndexPdfIncrementalDocIdReuse:
         corpus_name = f"dt-incr-{_next_seq()}"
         owner = cat.register_owner(corpus_name, "curator")
         dt_uri = f"x-devonthink-item://{_next_seq():0>8}-INCR-0000-0000-000000000000"
-        collection = f"docs__{corpus_name.replace('_', '-')}__bge-768__v1"
+        collection = f"docs__{corpus_name.replace('_', '-')}__bge-base-en-v15-768__v1"
         original_tumbler = cat.register(
             owner, "Zoology Class",
             content_type="paper",
@@ -284,7 +309,7 @@ class TestIndexMarkdownDocIdReuse:
         corpus_name = f"dt-md-{_next_seq()}"
         owner = cat.register_owner(corpus_name, "curator")
         dt_uri = f"x-devonthink-item://{_next_seq():0>8}-MD00-0000-0000-000000000000"
-        collection = f"docs__{corpus_name.replace('_', '-')}__bge-768__v1"
+        collection = f"docs__{corpus_name.replace('_', '-')}__bge-base-en-v15-768__v1"
         original_tumbler = cat.register(
             owner, "Zoology Notes",
             content_type="prose",
@@ -346,7 +371,7 @@ class TestDocumentForkCheck:
 
         cat = ActiveCatalog()
         owner = cat.register_owner(f"fork-test-{_next_seq()}", "curator")
-        coll = "knowledge__fork-test__bge-768__v1"
+        coll = "knowledge__fork-test__bge-base-en-v15-768__v1"
         old_doc = cat.register(
             owner, "Old Doc", content_type="paper",
             file_path=f"old-{_next_seq()}.pdf", physical_collection=coll,
@@ -360,11 +385,11 @@ class TestDocumentForkCheck:
         unique_old = "5" * 64
         unique_new = "4" * 64
 
-        cat.write_manifest(
+        _write_manifest(cat, 
             str(old_doc), [_chunk(c, i) for i, c in enumerate([*shared, unique_old])],
             collection=coll,
         )
-        cat.write_manifest(
+        _write_manifest(cat, 
             str(new_doc), [_chunk(c, i) for i, c in enumerate([*shared, unique_new])],
             collection=coll,
         )
@@ -391,7 +416,7 @@ class TestDocumentForkCheck:
 
         cat = ActiveCatalog()
         owner = cat.register_owner(f"fork-disjoint-{_next_seq()}", "curator")
-        coll = "knowledge__fork-disjoint__bge-768__v1"
+        coll = "knowledge__fork-disjoint__bge-base-en-v15-768__v1"
         doc_a = cat.register(
             owner, "Doc A", content_type="paper",
             file_path=f"a-{_next_seq()}.pdf", physical_collection=coll,
@@ -401,8 +426,8 @@ class TestDocumentForkCheck:
             file_path=f"b-{_next_seq()}.pdf", physical_collection=coll,
         )
 
-        cat.write_manifest(str(doc_a), [_chunk("6" * 64, 0)], collection=coll)
-        cat.write_manifest(str(doc_b), [_chunk("7" * 64, 0)], collection=coll)
+        _write_manifest(cat, str(doc_a), [_chunk("6" * 64, 0)], collection=coll)
+        _write_manifest(cat, str(doc_b), [_chunk("7" * 64, 0)], collection=coll)
 
         with capture_logs() as cap:
             forks = _check_document_fork(str(doc_b), coll)
@@ -421,7 +446,7 @@ class TestDocumentForkCheck:
 
         cat = ActiveCatalog()
         owner = cat.register_owner(f"fork-belowthresh-{_next_seq()}", "curator")
-        coll = "knowledge__fork-belowthresh__bge-768__v1"
+        coll = "knowledge__fork-belowthresh__bge-base-en-v15-768__v1"
         old_doc = cat.register(
             owner, "Old Doc", content_type="paper",
             file_path=f"old-bt-{_next_seq()}.pdf", physical_collection=coll,
@@ -435,8 +460,8 @@ class TestDocumentForkCheck:
         shared = ["8" * 64]
         unique_new = ["9" * 64, "a" * 64, "b" * 64, "c" * 64]
 
-        cat.write_manifest(str(old_doc), [_chunk(c, i) for i, c in enumerate(shared)], collection=coll)
-        cat.write_manifest(
+        _write_manifest(cat, str(old_doc), [_chunk(c, i) for i, c in enumerate(shared)], collection=coll)
+        _write_manifest(cat, 
             str(new_doc), [_chunk(c, i) for i, c in enumerate([*shared, *unique_new])],
             collection=coll,
         )
@@ -462,7 +487,7 @@ class TestCatalogUpdateFilePath:
 
         cat = ActiveCatalog()
         owner = cat.register_owner(f"fork-hist-{_next_seq()}", "curator")
-        coll = "knowledge__fork-hist__bge-768__v1"
+        coll = "knowledge__fork-hist__bge-base-en-v15-768__v1"
         old_doc = cat.register(
             owner, "Old Doc", content_type="paper",
             file_path=f"old-h-{_next_seq()}.pdf", physical_collection=coll,
@@ -474,8 +499,8 @@ class TestCatalogUpdateFilePath:
         # 2 of 6 shared = 0.333... — the historical fraction, above >0.25.
         shared = ["8" * 64, "9" * 64]
         unique_new = ["a" * 64, "b" * 64, "c" * 64, "d" * 64]
-        cat.write_manifest(str(old_doc), [_chunk(c, i) for i, c in enumerate(shared)], collection=coll)
-        cat.write_manifest(
+        _write_manifest(cat, str(old_doc), [_chunk(c, i) for i, c in enumerate(shared)], collection=coll)
+        _write_manifest(cat, 
             str(new_doc), [_chunk(c, i) for i, c in enumerate([*shared, *unique_new])],
             collection=coll,
         )

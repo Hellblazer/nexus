@@ -51,6 +51,33 @@ def _make_stub_t3():
     return lambda: _StubT3()
 
 
+def _seed_for_store_put(content: str, collection: str = "knowledge") -> None:
+    """Pre-seed a REAL ``nexus.chunks`` row for what a store_put-shaped
+    write (CLI ``nx store put``, MCP ``store_put``, ``nx memory promote``)
+    is about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral).
+
+    This file's ``_StubT3``/``_make_stub_t3`` is a pure stub (``put()``
+    returns a deterministic id, touches no vector substrate at all — see
+    the class docstring), but the manifest write (``store_put_manifest_
+    direct``, independent of the stubbed T3 write) always goes through
+    the REAL engine catalog (autouse ``_pin_t2_substrate``).
+    ``fk_catalog_chunks_chunk`` now requires the manifest's chash to have
+    a matching REAL ``nexus.chunks`` row, which the stub can never
+    provide. Computes the exact ``(collection, chash)`` production will
+    use via the same derivation production code uses (``t3_collection_
+    name`` / ``sha256(content)``, full digest — RDR-180), then seeds a
+    real stub chunk. Nothing under test reads this row's content.
+    """
+    import hashlib
+
+    from nexus.corpus import t3_collection_name
+    from tests._catalog_fixture_ops import seed_manifest_chunks
+
+    col_name = t3_collection_name(collection)
+    chash = hashlib.sha256(content.encode()).hexdigest()
+    seed_manifest_chunks(col_name, [chash])
+
+
 def _install_recording_registry(monkeypatch):
     """Patch ``HookRegistry`` to record every dispatch on test-side lists.
 
@@ -108,6 +135,7 @@ class TestStorePutCli:
 
         f = tmp_path / "doc.md"
         f.write_text("body for store put parity")
+        _seed_for_store_put("body for store put parity")
 
         with patch("nexus.commands.store._t3", _make_stub_t3()):
             runner = CliRunner()
@@ -150,6 +178,7 @@ class TestMemoryPromoteCli:
             project="proj-test", title="m-1", content="memory body",
             tags="", ttl=None,
         )
+        _seed_for_store_put("memory body", "knowledge__memory")
 
         # RDR-120 P6 follow-up (nexus-w6txl): ``memory promote`` (and
         # every other nx memory command) now routes through
@@ -267,6 +296,7 @@ class TestCrossCallerIdentityParity:
         # 1. CLI `nx store put`.
         f = tmp_path / "doc.md"
         f.write_text("cli body")
+        _seed_for_store_put("cli body")
         with patch("nexus.commands.store._t3", _make_stub_t3()):
             cli_result = CliRunner().invoke(main, [
                 "store", "put", str(f),
@@ -275,6 +305,7 @@ class TestCrossCallerIdentityParity:
         assert cli_result.exit_code == 0, cli_result.output
 
         # 2. MCP `store_put` — different content, same (collection, title).
+        _seed_for_store_put("mcp body (different content)")
         with (
             patch("nexus.mcp.core._get_t3", _make_stub_t3()),
             patch("nexus.mcp.core._hooks.fire_single", return_value=None),
@@ -294,6 +325,7 @@ class TestCrossCallerIdentityParity:
             project="proj", title=title,
             content="promote body (different content again)", ttl=None,
         )
+        _seed_for_store_put("promote body (different content again)")
         with (
             patch("nexus.db.make_t3", _make_stub_t3()),
             patch("nexus.commands.memory.t2_handle", return_value=db),
@@ -334,6 +366,7 @@ class TestStorePutManifestReplace:
 
         f = tmp_path / "doc.md"
         f.write_text("original body")
+        _seed_for_store_put("original body")
         with patch("nexus.commands.store._t3", _make_stub_t3()):
             first_result = CliRunner().invoke(main, [
                 "store", "put", str(f),
@@ -349,6 +382,7 @@ class TestStorePutManifestReplace:
         assert manifest == {old_chash}, "fixture: first put must manifest exactly its own chash"
 
         f.write_text("replaced body with entirely different content")
+        _seed_for_store_put("replaced body with entirely different content")
         with patch("nexus.commands.store._t3", _make_stub_t3()):
             second_result = CliRunner().invoke(main, [
                 "store", "put", str(f),

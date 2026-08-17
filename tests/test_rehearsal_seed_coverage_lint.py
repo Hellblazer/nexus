@@ -139,6 +139,8 @@ _SEED_COVERAGE_LINE_RE = re.compile(r"//\s+(\S+)\s+(\S+)\s*$", re.MULTILINE)
 #:   vectors-004-1 / taxonomy-007-1 — RDR-191 Phase 4 unify: straddling
 #:                                     per-dim chunks_384/768/1024 and
 #:                                     taxonomy_centroids_384/768/1024 content
+#:   catalog-032-1                  — RDR-194 P1 (D2): catalog_links dangling
+#:                                     tumbler-endpoint anti-join DELETE
 DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
     {
         ("catalog-013-0", "nexus-e0hd2"),
@@ -173,6 +175,137 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # straddling-seed/effect-assert shape as vectors-004-1 (all three
         # dims freshly seeded here, no chunks-style reuse available).
         ("taxonomy-007-1", "nexus-jv3ue"),
+        # nexus-o8dil.29 (RDR-191 Phase 5): catalog-029-1's anti-join DELETE
+        # runs inside the same NO FORCE/FORCE toggle-wrap shape as
+        # catalog-013-1b/catalog-014-0/catalog-025-0. Reuses the 1.1.100
+        # KEEP-arm fixture rather than a fresh dangling row: any row that
+        # would exercise catalog-029-1's DELETE arm is, by construction,
+        # ALSO dangling under catalog-025-0's structurally identical
+        # anti-join (against the pre-unify per-dim tables vectors-004-1
+        # copies verbatim into nexus.chunks earlier in this same hop), so
+        # catalog-025-0 would remove it first; effect-asserted via the
+        # KEEP-arm survival (1.1.100's two content-backed rows still present)
+        # plus fk_catalog_chunks_chunk existing and VALIDATED at HEAD.
+        ("catalog-029-1", "nexus-o8dil.29"),
+        # nexus-o8dil.49 (RDR-191 Phase 5): fk-004-1-reconcile's additive
+        # stub-register, same NO FORCE/FORCE toggle-wrap shape as
+        # catalog-029-1. Structurally always finds zero unregistered rows in
+        # this hop (fk-002, already applied at OLD_TAG, enforces collection
+        # registration on every chunks_384/768/1024 write before this hop
+        # even starts, and vectors-004-1 only copies already-FK-compliant
+        # rows into nexus.chunks) -- effect-asserted via chunks_collection_fk
+        # existing+VALIDATED at HEAD plus FORCE ROW LEVEL SECURITY restored
+        # on both nexus.chunks and nexus.catalog_collections.
+        ("fk-004-1-reconcile", "nexus-o8dil.49"),
+        # nexus-iq0qr (RDR-191 Phase 5 follow-up): fk-004-0-reconcile-precount
+        # is a READ-ONLY audit changeset, positioned in FILE ORDER immediately
+        # BEFORE fk-004-1-reconcile, that RAISE NOTICEs the anti-join
+        # pre-count of unregistered (tenant_id, collection) pairs
+        # fk-004-1-reconcile is about to insert (adding the auditability
+        # fk-004-1-reconcile's own frozen body can never carry, conexus
+        # deploy receipt [22579]). It carries no INSERT/UPDATE/DELETE, but
+        # its own NO FORCE/FORCE toggle (needed so the SELECT can see real
+        # rows under FORCE RLS, the identical trap fk-004-1-reconcile's own
+        # header documents for its INSERT...SELECT) trips this lint's rule
+        # (b) regardless. By the identical structural reasoning as
+        # fk-004-1-reconcile's own entry immediately above, the pre-count is
+        # ALWAYS zero in this hop -- effect-asserted the same way (changeset
+        # EXECUTES; FORCE restored on both toggled tables), no new seed data
+        # needed.
+        ("fk-004-0-reconcile-precount", "nexus-iq0qr"),
+        # nexus-tk070.p1 (RDR-194 Phase P1, Decision D2): catalog-032-1's
+        # anti-join DELETE on nexus.catalog_links, the SAME NO FORCE/FORCE
+        # toggle-wrap shape as catalog-013-1b/catalog-014-0/catalog-025-0/
+        # catalog-029-1. UNLIKE catalog-029-1 (which could reuse the 1.1.100
+        # KEEP-arm fixture because any row exercising its DELETE arm was
+        # ALREADY dead via catalog-025-0's identical anti-join earlier in the
+        # hop), catalog_links carries NO prior FK-backed remediation anywhere
+        # in this hop -- catalog-032-1 is the FIRST FK ever added to this
+        # table -- so a fresh dangling-row seed is required to exercise the
+        # DELETE arm at all. Seeded as two catalog_links rows sharing
+        # from_tumbler=1.1.100 (already registered above): one to 1.1.101 (a
+        # real, already-seeded document -- the KEEP arm) and one to
+        # 1.1.999-ghost (never registered -- the DELETE arm, modeling the
+        # real aged-fleet population, 277 rows, nexus-ysrwi 2026-07-25);
+        # effect-asserted (the ghost-endpoint row is gone, the real edge
+        # survives, both FKs exist+VALIDATED at HEAD, FORCE restored on both
+        # toggled tables).
+        ("catalog-032-1", "nexus-tk070.p1"),
+        # nexus-o8dil.37 (RDR-191 Phase 7): NO changeset here -- a dedicated
+        # catalog-030 changeset was drafted and DROPPED (2026-08-15, standing
+        # convergence directive) once found structurally vestigial:
+        # catalog-025-collection-not-null.xml (nexus-71gw2) already closes the
+        # entire NULL-collection population and promotes SET NOT NULL,
+        # strictly earlier in db.changelog-master.xml's include order, on
+        # every real deployment. Phase 7 is closed on catalog-025's own
+        # evidence.
+        # nexus-lgdel.l1 (epic nexus-lgdel, THE DELETE): legacy-001-1/
+        # legacy-001-2's shape-agnostic DELETE (chunk_id !~ '^[0-9a-f]{64}$')
+        # on nexus.frecency/nexus.relevance_log, the SAME NO FORCE/FORCE
+        # toggle-wrap shape as catalog-013-1b/catalog-014-0/catalog-025-0/
+        # catalog-029-1/catalog-032-1. Seeded as one legacy-width (32-hex)
+        # and one canonical-width (64-hex) row per table -- the DELETE/KEEP
+        # dual-arm proof; effect-asserted (the legacy-width row is gone
+        # post-hop, the canonical-width row survives, FORCE restored on
+        # both tables).
+        ("legacy-001-1", "nexus-lgdel.l1"),
+        ("legacy-001-2", "nexus-lgdel.l1"),
+        # nexus-tk070.p3b (RDR-194 § D1 steps b/c/d): taxonomy-010-1's
+        # source_collection backfill + counted delete of the ambiguous/
+        # unresolvable remainders + SET NOT NULL, all in one changeset,
+        # RLS toggle-wrapped around the three DML statements (nexus.
+        # topic_assignments and nexus.chunks both FORCE RLS). Seeded as
+        # three topic_assignments rows sharing one topic, all DELETE arms:
+        # an ambiguous row (chash under two collections, deleted), an
+        # unresolvable row (conformant 64-hex shape, no matching chunk at
+        # all, deleted -- proves the anti-join arm independently of the
+        # shape predicate), and a legacy-shape-coincidental-match row
+        # (32-hex doc_id that DOES text-match a real chunk, deleted anyway
+        # -- the cc4/HAL no-wedge proof that the shape predicate wins over
+        # a coincidental anti-join match); effect-asserted (all three
+        # gone, FORCE restored on both toggled tables, source_collection is
+        # SET NOT NULL at HEAD). The positive unique-resolution BACKFILL
+        # arm cannot be constructed in this old-tag-hop fixture (the OLD
+        # leg's chunks_384/768/1024 carry a length(chash)=32 CHECK, so
+        # every chash seedable pre-hop is legacy-width and therefore
+        # excluded from backfill candidacy by taxonomy-010-1's own shape
+        # guard) -- it is proven separately by a dedicated HEAD-schema
+        # integration test (Taxonomy010BackfillDirectIntegrationTest),
+        # outside the seed-coverage lint's scope (that lint only covers
+        # the hop's own toggle-wrapped row-DML changesets).
+        ("taxonomy-010-1", "nexus-tk070.p3b"),
+        # nexus-tk070.p3c (RDR-194 § D1 step (e)): taxonomy-011-1's doc_id
+        # TEXT -> bytea ALTER carries NO INSERT/UPDATE/DELETE of its own --
+        # its guard is a read-only SELECT COUNT(*) wrapped in the SAME NO
+        # FORCE/FORCE toggle shape as fk-004-0-reconcile-precount
+        # (nexus-iq0qr, above), which trips rule (b) regardless of carrying
+        # no literal DML. No NEW seed data needed: taxonomy-010-1's own
+        # seeded rows (immediately above in the same hop) ARE the
+        # population the guard walks, and by construction every surviving
+        # row is canonical 64-hex once taxonomy-010-1's three DELETE arms
+        # have run -- the guard is expected to find zero bad rows, exactly
+        # mirroring fk-004-0-reconcile-precount's "always zero in this hop"
+        # reasoning. Effect-asserted the same minimal way: the changeset
+        # EXECUTES (a RAISE EXCEPTION would abort the whole migration walk
+        # before any assertion could run), doc_id is bytea at HEAD, and
+        # FORCE ROW LEVEL SECURITY is restored on topic_assignments.
+        ("taxonomy-011-1", "nexus-tk070.p3c"),
+        # nexus-tk070.p3d (RDR-194 § D1): taxonomy-012-2's composite-FK
+        # anti-join DELETE on nexus.topic_assignments (tenant_id,
+        # source_collection, doc_id) -> nexus.chunks (tenant_id, collection,
+        # chash), the same NO FORCE/FORCE toggle-wrap shape as
+        # catalog-013-1b/catalog-014-0/catalog-025-0/catalog-029-1/
+        # catalog-032-1/legacy-001-1/legacy-001-2. Reuses taxonomy-010-1's
+        # seed rather than a fresh fixture: by the time this changeset runs,
+        # taxonomy-010-1's own three DELETE arms have already removed every
+        # row the fixture seeded (the ambiguous, unresolvable, and both
+        # shape-invalid rows), so taxonomy-012-2's anti-join finds zero
+        # dangling rows in this hop by construction -- the same
+        # already-dead-by-an-earlier-identical-anti-join reasoning as
+        # catalog-029-1's own entry above; effect-asserted (the population
+        # is independently still zero, topic_assignments_chunk_fk exists and
+        # is VALIDATED at HEAD, FORCE restored on both toggled tables).
+        ("taxonomy-012-2", "nexus-tk070.p3d"),
     }
 )
 

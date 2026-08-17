@@ -49,6 +49,16 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * assign_from_chashes_384/768/1024) is therefore CALLED at least once
  * below, not merely proven to compile.
  *
+ * <p><strong>RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15:</strong> {@code
+ * manifest_verify_all} and {@code manifest_orphans} coverage below was
+ * DELETED — both functions are DROPPED (catalog-030-retire-manifest-
+ * verify.xml), which {@link SchemaMigrator#migrate} applies to HEAD before
+ * {@link #applyFullBatch} re-chains vectors-004/taxonomy-007/vectors-005 as
+ * a (now-no-op, already-recorded) standalone sequence — so by the time this
+ * file's assertions run, both functions are already gone from the fixture
+ * database. {@code manifest_verify} coverage is KEPT — that function is
+ * NOT dropped (completeIndexRun depends on it).
+ *
  * <p><strong>Statement-level coverage (2026-08-13 round 2, substantive-critic
  * finding, T2 nexus/rdr-191-repoint-batch-step-a-critique-2026-08-13
  * [22454]):</strong> a CALLED function is not the same as an EXECUTED
@@ -199,16 +209,9 @@ class VectorsRepointFunctionsIntegrationTest {
                 ps.executeUpdate();
             }
 
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.catalog_document_chunks "
-                        + "(tenant_id, doc_id, position, chash, collection) VALUES (?, ?, 0, ?, ?)")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, docTumbler);
-                ps.setBytes(3, chash);
-                ps.setString(4, collection);
-                ps.executeUpdate();
-            }
-
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+            // nexus.chunks row to exist before the manifest row referencing it is
+            // inserted — chunk insert MUST precede the manifest insert below.
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
                         + "VALUES (?, ?, ?, ?, ?::vector)")) {
@@ -217,6 +220,16 @@ class VectorsRepointFunctionsIntegrationTest {
                 ps.setBytes(3, chash);
                 ps.setString(4, "vectors-005 repoint fixture chunk text");
                 ps.setString(5, vectorLiteral(384, 0.01));
+                ps.executeUpdate();
+            }
+
+            try (PreparedStatement ps = su.prepareStatement(
+                    "INSERT INTO nexus.catalog_document_chunks "
+                        + "(tenant_id, doc_id, position, chash, collection) VALUES (?, ?, 0, ?, ?)")) {
+                ps.setString(1, TENANT);
+                ps.setString(2, docTumbler);
+                ps.setBytes(3, chash);
+                ps.setString(4, collection);
                 ps.executeUpdate();
             }
 
@@ -239,9 +252,18 @@ class VectorsRepointFunctionsIntegrationTest {
             }
 
             try (Statement st = su.createStatement()) {
+                // RDR-194 P3c (nexus-tk070.p3c): doc_id is bytea now -- decode('hex')
+                // explicitly. A bare '<hex-string>' literal against a bytea column is
+                // NOT a type error (Postgres accepts it as legacy "escape format"
+                // input, silently reinterpreting the hex characters as their own raw
+                // ASCII bytes), so this would have silently written garbage bytes and
+                // made every search_topic_scoped_<dim> assertion below fail to find
+                // the seeded row for the wrong reason.
                 st.execute(
-                    "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by) "
-                        + "SELECT '" + TENANT + "', '" + chashHex + "', t.id, 'centroid' "
+                    "INSERT INTO nexus.topic_assignments "
+                        + "(tenant_id, doc_id, topic_id, assigned_by, source_collection) "
+                        + "SELECT '" + TENANT + "', decode('" + chashHex + "', 'hex'), t.id, 'centroid', '"
+                        + collection + "' "
                         + "FROM nexus.topics t WHERE t.tenant_id = '" + TENANT + "' AND t.label = 'alpha'");
             }
 
@@ -295,8 +317,13 @@ class VectorsRepointFunctionsIntegrationTest {
                         "search_metadata_scoped_384", "search_metadata_scoped_768", "search_metadata_scoped_1024",
                         "search_topic_scoped_384", "search_topic_scoped_768", "search_topic_scoped_1024",
                         "search_graph_hop_384", "search_graph_hop_768", "search_graph_hop_1024",
-                        "document_text", "remap_membership", "manifest_verify", "manifest_verify_all",
-                        "manifest_orphans", "chash_conformance_report",
+                        // manifest_verify_all/manifest_orphans REMOVED here (RDR-191
+                        // Phase 6, nexus-o8dil.33) — both dropped by catalog-030,
+                        // already applied to HEAD by SchemaMigrator.migrate above.
+                        // remap_membership REMOVED here (nexus-lgdel.l2) — dropped by
+                        // legacy-002-drop-remap-membership.xml, same reason.
+                        "document_text", "manifest_verify",
+                        "chash_conformance_report",
                         "gc_quarantine_orphans", "gc_restore_rereferenced", "gc_expire_quarantine",
                         "purge_trash",
                         "assign_from_chashes_384", "assign_from_chashes_768", "assign_from_chashes_1024"}) {
@@ -396,9 +423,64 @@ class VectorsRepointFunctionsIntegrationTest {
         }
     }
 
-    // ── Test 3: document_text / remap_membership / manifest_verify family /
-    //    manifest_orphans / chash_conformance_report -- the "dim collapses
-    //    to one reference" and "dim stays branched for routing" buckets. ────
+    // ── Test 2b: the nine combined-query functions still number NINE ────────
+    //
+    // RDR-191 Phase 6 (nexus-o8dil.33) mechanical-exclusion pin, Decision
+    // item 4 / F7 risk 4: "the 9 combined-query stored functions do not
+    // disappear... write a TEST asserting they still number 9." Distinct
+    // from nineTypedFacades_eachCallableAgainstSeededData above (which calls
+    // each by NAME and would not itself notice a 10th appearing or one of
+    // the nine vanishing) — this counts pg_proc rows matching the naming
+    // pattern directly, on the SAME post-catalog-030 HEAD schema (Class B/
+    // manifest_orphans/manifest_verify_all/manifest_backfill are dropped by
+    // that changeset; these nine are explicitly NOT).
+
+    @Test
+    void combinedQueryFunctions_stillNumberNine() throws Exception {
+        Rig rig = newRig("ninecount");
+        try {
+            SchemaMigrator.migrate(rig.adminDs());
+            applyFullBatch(rig.adminDs());
+
+            try (Connection conn = rig.pg().createConnection("")) {
+                try (var rs = conn.createStatement().executeQuery(
+                        "SELECT p.proname FROM pg_proc p "
+                            + "JOIN pg_namespace n ON n.oid = p.pronamespace "
+                            + "WHERE n.nspname = 'nexus' AND ("
+                            + "p.proname LIKE 'search_metadata_scoped_%' "
+                            + "OR p.proname LIKE 'search_topic_scoped_%' "
+                            + "OR p.proname LIKE 'search_graph_hop_%') "
+                            + "ORDER BY p.proname")) {
+                    var names = new java.util.ArrayList<String>();
+                    while (rs.next()) names.add(rs.getString("proname"));
+                    assertThat(names)
+                        .as("the 9 combined-query facades (3 verbs x 3 dims) must "
+                            + "still number 9 post-RDR-191-Phase-6 — the dim "
+                            + "COUNT does not collapse (F7 risk 4), only "
+                            + "manifest_orphans/manifest_verify_all/"
+                            + "manifest_backfill are dropped by catalog-030: %s",
+                            names)
+                        .hasSize(9)
+                        .containsExactlyInAnyOrder(
+                            "search_metadata_scoped_384", "search_metadata_scoped_768",
+                            "search_metadata_scoped_1024",
+                            "search_topic_scoped_384", "search_topic_scoped_768",
+                            "search_topic_scoped_1024",
+                            "search_graph_hop_384", "search_graph_hop_768",
+                            "search_graph_hop_1024");
+                }
+            }
+        } finally {
+            rig.close();
+        }
+    }
+
+    // ── Test 3: document_text / manifest_verify /
+    //    chash_conformance_report -- the "dim collapses to one reference"
+    //    and "dim stays branched for routing" buckets. (manifest_orphans
+    //    coverage DELETED, RDR-191 Phase 6 nexus-o8dil.33 — function
+    //    dropped. remap_membership coverage DELETED, nexus-lgdel.l2 — function
+    //    dropped, legacy-002-drop-remap-membership.xml.) ─────────────────
 
     @Test
     void collapsedAndBranchedReaders_eachCallableAgainstSeededData() throws Exception {
@@ -431,45 +513,16 @@ class VectorsRepointFunctionsIntegrationTest {
                     assertThat(rs.getLong("missing")).isEqualTo(0L);
                 }
 
-                // manifest_verify_all: same fixture, grouped by collection.
-                try (var rs = conn.createStatement().executeQuery(
-                        "SELECT * FROM nexus.manifest_verify_all()")) {
-                    assertThat(rs.next()).as("manifest_verify_all must return a row for the seeded collection").isTrue();
-                }
+                // manifest_verify_all coverage DELETED (RDR-191 Phase 6,
+                // nexus-o8dil.33) — the function is dropped.
 
-                // remap_membership: no chash_remap facts seeded -> mapped_total=0,
-                // present_count=0. The point is that it does not throw (the
-                // three-EXISTS-collapses-to-one rewrite) not the row content.
-                try (PreparedStatement ps = conn.prepareStatement(
-                        "SELECT * FROM nexus.remap_membership(?, ?)")) {
-                    ps.setString(1, "some-source-collection");
-                    ps.setString(2, fx.collection());
-                    var rs = ps.executeQuery();
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getLong("mapped_total")).isEqualTo(0L);
-                }
+                // remap_membership coverage DELETED (nexus-lgdel.l2) — the
+                // function is dropped (legacy-002-drop-remap-membership.xml);
+                // the orphaned GET /v1/remap/membership read surface is gone
+                // with it.
 
-                // manifest_orphans(384): seeded chunk IS referenced, so it must
-                // NOT appear as an orphan for dim 384.
-                try (PreparedStatement ps = conn.prepareStatement(
-                        "SELECT * FROM nexus.manifest_orphans(384)")) {
-                    var rs = ps.executeQuery();
-                    boolean sawFixtureChash = false;
-                    while (rs.next()) {
-                        if (fx.chashHex().equals(rs.getString("chash"))) sawFixtureChash = true;
-                    }
-                    assertThat(sawFixtureChash)
-                        .as("the seeded, manifest-and-chunk-present chash must NOT be reported as an orphan")
-                        .isFalse();
-                }
-                for (int dim : new int[] {768, 1024}) {
-                    try (PreparedStatement ps = conn.prepareStatement(
-                            "SELECT * FROM nexus.manifest_orphans(?)")) {
-                        ps.setInt(1, dim);
-                        assertThatCode(ps::executeQuery).as("manifest_orphans(%d) must not throw", dim)
-                            .doesNotThrowAnyException();
-                    }
-                }
+                // manifest_orphans coverage DELETED (RDR-191 Phase 6,
+                // nexus-o8dil.33) — the function is dropped.
 
                 // chash_conformance_report(384): the seeded chunk's chash is a
                 // real 32-byte sha256 digest, so non_conformant must be 0 for the
@@ -651,6 +704,22 @@ class VectorsRepointFunctionsIntegrationTest {
 
                 // ── gc_restore_rereferenced: re-reference the orphan at
                 //    origin, then it MUST come back. ─────────────────────
+                //
+                // RDR-191 Phase 5 (nexus-o8dil.29) / nexus-zlv38: at this exact
+                // instant the orphan's nexus.chunks row sits ONLY in the
+                // quarantine collection (moved by gc_quarantine_orphans above)
+                // -- NOT at origin. fk_catalog_chunks_chunk now rejects a
+                // manifest write that re-references a chash before
+                // gc_restore_rereferenced has copied it back to origin; that
+                // production-behavior gap is tracked by nexus-zlv38, out of
+                // scope for this changeset. Bypass the FK locally for this one
+                // insert so the test can keep proving gc_restore_rereferenced's
+                // own copy-back + delete-from-quarantine behavior.
+                try (Connection ddl = rig.pg().createConnection("")) {
+                    ddl.setAutoCommit(true);
+                    ddl.createStatement().execute(
+                        "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+                }
                 try (PreparedStatement ps = conn.prepareStatement(
                         "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
                             + "VALUES (?, ?, 1, ?, ?)")) {
@@ -659,6 +728,14 @@ class VectorsRepointFunctionsIntegrationTest {
                     ps.setBytes(3, orphanChash);
                     ps.setString(4, origin);
                     ps.executeUpdate();
+                }
+                try (Connection ddl = rig.pg().createConnection("")) {
+                    ddl.setAutoCommit(true);
+                    ddl.createStatement().execute(
+                        "ALTER TABLE nexus.catalog_document_chunks "
+                        + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                        + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                        + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
                 }
                 try (PreparedStatement ps = conn.prepareStatement(
                         "SELECT nexus.gc_restore_rereferenced(384, ?, ?, ?)")) {
@@ -759,6 +836,12 @@ class VectorsRepointFunctionsIntegrationTest {
 
             try (Connection su = rig.pg().createConnection("")) {
                 su.setAutoCommit(true);
+                // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
+                // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+                // (tenant_id, name) — register the quarantine target first.
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                    + TENANT + "', '" + quarantineShared + "') ON CONFLICT (tenant_id, name) DO NOTHING");
                 // Pre-existing quarantined row under dim 768, at the SHARED
                 // quarantine target, same chash.
                 try (PreparedStatement ps = su.prepareStatement(
@@ -839,6 +922,12 @@ class VectorsRepointFunctionsIntegrationTest {
 
             try (Connection su = rig.pg().createConnection("")) {
                 su.setAutoCommit(true);
+                // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
+                // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+                // (tenant_id, name) — register the quarantine target first.
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                    + TENANT + "', '" + quarantineCollection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
                 // Pre-existing row ALREADY at the origin collection, under a
                 // DIFFERENT dim (1024) than the row being restored (384).
                 try (PreparedStatement ps = su.prepareStatement(
@@ -935,6 +1024,12 @@ class VectorsRepointFunctionsIntegrationTest {
 
             try (Connection su = rig.pg().createConnection("")) {
                 su.setAutoCommit(true);
+                // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
+                // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+                // (tenant_id, name) — register the collection first.
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                    + TENANT + "', '" + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
                 for (var doc : new Object[][] {{"relay-a", chashA}, {"relay-b", chashB}, {"relay-c", chashC}}) {
                     String tumbler = (String) doc[0];
                     byte[] chash = (byte[]) doc[1];
@@ -948,15 +1043,8 @@ class VectorsRepointFunctionsIntegrationTest {
                         ps.setString(4, collection);
                         ps.executeUpdate();
                     }
-                    try (PreparedStatement ps = su.prepareStatement(
-                            "INSERT INTO nexus.catalog_document_chunks "
-                                + "(tenant_id, doc_id, position, chash, collection) VALUES (?, ?, 0, ?, ?)")) {
-                        ps.setString(1, TENANT);
-                        ps.setString(2, tumbler);
-                        ps.setBytes(3, chash);
-                        ps.setString(4, collection);
-                        ps.executeUpdate();
-                    }
+                    // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk
+                    // requires the nexus.chunks row before the manifest row below.
                     try (PreparedStatement ps = su.prepareStatement(
                             "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
                                 + "VALUES (?, ?, ?, ?, ?::vector)")) {
@@ -965,6 +1053,15 @@ class VectorsRepointFunctionsIntegrationTest {
                         ps.setBytes(3, chash);
                         ps.setString(4, tumbler + " chunk text");
                         ps.setString(5, vectorLiteral(384, 0.09));
+                        ps.executeUpdate();
+                    }
+                    try (PreparedStatement ps = su.prepareStatement(
+                            "INSERT INTO nexus.catalog_document_chunks "
+                                + "(tenant_id, doc_id, position, chash, collection) VALUES (?, ?, 0, ?, ?)")) {
+                        ps.setString(1, TENANT);
+                        ps.setString(2, tumbler);
+                        ps.setBytes(3, chash);
+                        ps.setString(4, collection);
                         ps.executeUpdate();
                     }
                 }

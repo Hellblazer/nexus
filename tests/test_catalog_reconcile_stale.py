@@ -116,6 +116,7 @@ def _blank_report(**overrides) -> dict:
         "zero_count_reindex_candidate": [],
         "zero_count_orphaned_path": [],
         "zero_count_unresolvable_provenance": [],
+        "zero_count_store_put_origin": [],
         "dishonest": [],
     }
     base.update(overrides)
@@ -260,6 +261,13 @@ class TestClassification:
             "1.50.1", "42", "1.12.20", "1.12.21",
         }
         assert {r["tumbler"] for r in report["dishonest"]} == {"1.13.1"}
+        # nexus-0y0gk: dishonest rows now carry an `origin` (same
+        # provenance split as zero_count_*). "1.13.1" has neither
+        # file_path nor source_uri and its collection is knowledge__ ->
+        # unresolvable_provenance / no_provenance, same as "1.12.21".
+        dishonest_row = report["dishonest"][0]
+        assert dishonest_row["origin"] == "unresolvable_provenance"
+        assert dishonest_row["reason"] == "no_provenance"
 
         reindex_by_tumbler = {r["tumbler"]: r for r in report["zero_count_reindex_candidate"]}
         assert reindex_by_tumbler["1.12.1"]["resolved_path"].endswith("src/real.py")
@@ -322,19 +330,70 @@ class TestClassification:
         assert reconcile_stale_mod._classify_never_chunked(not_exempt_wrong_prefix) == "unclassified"
         assert reconcile_stale_mod._classify_never_chunked(not_exempt_has_path) == "unclassified"
 
-    def test_post_sdp0u_store_put_doc_classifies_unresolvable_not_exempt(self, tmp_path):
-        """nexus-sdp0u fix-round (round-1 critique SIGNIFICANT #4): a
-        post-fix ``store_put`` document carries a synthesized
-        ``chroma://<collection>/<title>`` ``source_uri`` — so a zero-count
-        one of these can no longer satisfy ``_classify_never_chunked``'s
-        ``rdr145_exempt`` predicate (which requires BOTH file_path and
-        source_uri empty). This pins the DELIBERATE resulting
-        classification: ``unresolvable_provenance``/``source_uri_only``,
-        not ``rdr145_exempt`` — a post-fix store_put doc still at
-        chunk_count==0 is anomalous (manifests write synchronously at put
-        time; failures surface loudly) and should be investigated, not
-        waved through as legitimate. Converts the silent coupling this
-        critique flagged into a pinned contract."""
+    def test_store_put_signature_reason_predicate(self):
+        """nexus-0y0gk critique fix-round: unit-level pin of
+        ``_store_put_signature_reason`` in isolation, independent of the
+        full classification pipeline."""
+        chroma = _FakeEntry(
+            "3.1.1", "Chroma", physical_collection="knowledge__x", chunk_count=9,
+            source_uri="chroma://knowledge__x/Chroma",
+        )
+        assert reconcile_stale_mod._store_put_signature_reason(chroma) == "chroma_uri"
+
+        single_chunk = _FakeEntry(
+            "3.1.2", "Single Chunk", physical_collection="knowledge__x", chunk_count=1,
+        )
+        assert (
+            reconcile_stale_mod._store_put_signature_reason(single_chunk)
+            == "knowledge_single_chunk_no_path"
+        )
+
+        # file_path always wins -- never silently reclassified, even when
+        # the rest of the signature (knowledge__, chunk_count==1) matches.
+        file_backed = _FakeEntry(
+            "3.1.3", "File Backed", physical_collection="knowledge__x", chunk_count=1,
+            file_path="notes/x.md",
+        )
+        assert reconcile_stale_mod._store_put_signature_reason(file_backed) is None
+
+        # chunk_count != 1 with no file_path/source_uri: not the
+        # single-chunk-by-construction signature.
+        wrong_chunk_count = _FakeEntry(
+            "3.1.4", "Wrong Count", physical_collection="knowledge__x", chunk_count=3,
+        )
+        assert reconcile_stale_mod._store_put_signature_reason(wrong_chunk_count) is None
+
+        # code__ collection: the single-chunk-no-path signature is
+        # knowledge__-scoped only.
+        wrong_collection = _FakeEntry(
+            "3.1.5", "Wrong Collection", physical_collection="code__x", chunk_count=1,
+        )
+        assert reconcile_stale_mod._store_put_signature_reason(wrong_collection) is None
+
+        # non-chroma:// source_uri: not the store_put signature.
+        other_uri = _FakeEntry(
+            "3.1.6", "DEVONthink", physical_collection="knowledge__x", chunk_count=1,
+            source_uri="x-devonthink-item://ABC",
+        )
+        assert reconcile_stale_mod._store_put_signature_reason(other_uri) is None
+
+    def test_post_sdp0u_store_put_doc_classifies_store_put_origin_not_exempt(self, tmp_path):
+        """nexus-sdp0u fix-round (round-1 critique SIGNIFICANT #4), UPDATED
+        by the nexus-0y0gk critique fix-round: a post-fix ``store_put``
+        document carries a synthesized ``chroma://<collection>/<title>``
+        ``source_uri`` — so a zero-count one of these can no longer satisfy
+        ``_classify_never_chunked``'s ``rdr145_exempt`` predicate (which
+        requires BOTH file_path and source_uri empty). This pins the
+        DELIBERATE resulting classification: ``store_put_origin``/
+        ``chroma_uri`` — recognizable-but-anomalous (manifests write
+        synchronously at put time; failures surface loudly, so a post-fix
+        store_put doc still at chunk_count==0 IS worth investigating), but
+        no longer collapsed into the generic ``unresolvable_provenance``
+        catch-all a genuinely-unknown-provenance doc lands in (0y0gk:
+        lumping a recognizable signature with truly-dead docs made the
+        3n7pr triage require a hand SQL query instead of being mechanical).
+        Converts the silent coupling this critique flagged into a pinned
+        contract."""
         entry = _FakeEntry(
             "5.1.1", "Post-Fix Note", physical_collection="knowledge__sdp0u",
             chunk_count=0,
@@ -348,9 +407,10 @@ class TestClassification:
 
         assert unreadable == []
         assert report["zero_count_rdr145_exempt"] == []
-        unresolvable = report["zero_count_unresolvable_provenance"]
-        assert {r["tumbler"] for r in unresolvable} == {"5.1.1"}
-        assert unresolvable[0]["reason"] == "source_uri_only"
+        assert report["zero_count_unresolvable_provenance"] == []
+        store_put_origin = report["zero_count_store_put_origin"]
+        assert {r["tumbler"] for r in store_put_origin} == {"5.1.1"}
+        assert store_put_origin[0]["reason"] == "chroma_uri"
 
     def test_dishonest_never_appears_in_any_action_list(self, tmp_path):
         cat, t3 = _mixed_cat(tmp_path)
@@ -362,6 +422,94 @@ class TestClassification:
             + report["zero_count_orphaned_path"]
         )
         assert dishonest_tumblers.isdisjoint({r["tumbler"] for r in action_lists})
+
+    def test_dishonest_bucket_origin_covers_all_four_provenance_outcomes(self, tmp_path):
+        """nexus-0y0gk (critique fix-round): the 3n7pr triage splits the
+        dishonest population (chunk_count > 0, empty manifest) by origin --
+        file-backed re-index vs. store_put-origin (FK-safe backfill) vs.
+        can't-tell-at-all, in that priority order. Exercise all FOUR
+        ``_resolve_dishonest_origin`` outcomes on dishonest rows
+        specifically, mirroring the zero_count_* coverage above. Critique
+        finding: 4 of the 5 live dishonest docs at fix time carried the
+        store_put signature and were being lumped into
+        unresolvable_provenance -- this pins that they no longer are."""
+        (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src" / "present.py").write_text("# present\n")
+
+        entries = [
+            # dishonest / reindex_candidate: file_path resolves and exists
+            _FakeEntry(
+                "9.1.1", "Dishonest Reindexable", physical_collection="code__d",
+                chunk_count=4, file_path="src/present.py",
+            ),
+            # dishonest / orphaned_path (file_missing): file_path resolves,
+            # confirmed absent
+            _FakeEntry(
+                "9.1.2", "Dishonest Orphaned", physical_collection="code__d",
+                chunk_count=2, file_path="src/absent.py",
+            ),
+            # dishonest / unresolvable_provenance: no file_path, no
+            # source_uri, non-knowledge__ collection -> no_provenance
+            _FakeEntry(
+                "9.1.3", "Dishonest Unresolvable", physical_collection="code__d",
+                chunk_count=1,
+            ),
+            # dishonest / store_put_origin (chroma_uri): the nexus-sdp0u
+            # synthesized source_uri signature, regardless of chunk_count.
+            _FakeEntry(
+                "9.1.4", "Dishonest Store-Put Chroma", physical_collection="knowledge__d",
+                chunk_count=5, source_uri="chroma://knowledge__d/Dishonest Store-Put Chroma",
+            ),
+            # dishonest / store_put_origin (knowledge_single_chunk_no_path):
+            # chunk_count==1, knowledge__*, neither file_path nor source_uri.
+            _FakeEntry(
+                "9.1.5", "Dishonest Store-Put Single Chunk", physical_collection="knowledge__d",
+                chunk_count=1,
+            ),
+            # NOT store_put_origin, despite chunk_count==1 + knowledge__:
+            # a real file_path always wins as reindex_candidate ("do not
+            # silently move file-backed docs").
+            _FakeEntry(
+                "9.1.6", "Dishonest File-Backed Single Chunk", physical_collection="knowledge__d",
+                chunk_count=1, file_path="src/present.py",
+            ),
+        ]
+        doc_counts = {"code__d": 3, "knowledge__d": 3}
+        owners = {"9.1": str(tmp_path)}
+        cat = _FakeCat(entries, doc_counts=doc_counts, owners_with_roots=owners)
+        t3 = _FakeT3({"code__d", "knowledge__d"})
+
+        report, unreadable = reconcile_stale_mod._classify(cat, t3)
+
+        assert unreadable == []
+        dishonest_by_tumbler = {r["tumbler"]: r for r in report["dishonest"]}
+        assert set(dishonest_by_tumbler) == {"9.1.1", "9.1.2", "9.1.3", "9.1.4", "9.1.5", "9.1.6"}
+
+        reindex_row = dishonest_by_tumbler["9.1.1"]
+        assert reindex_row["origin"] == "reindex_candidate"
+        assert reindex_row["resolved_path"].endswith("src/present.py")
+        assert "reason" not in reindex_row
+
+        orphaned_row = dishonest_by_tumbler["9.1.2"]
+        assert orphaned_row["origin"] == "orphaned_path"
+        assert orphaned_row["reason"] == "file_missing"
+        assert orphaned_row["file_path"] == "src/absent.py"
+
+        unresolvable_row = dishonest_by_tumbler["9.1.3"]
+        assert unresolvable_row["origin"] == "unresolvable_provenance"
+        assert unresolvable_row["reason"] == "no_provenance"
+
+        chroma_row = dishonest_by_tumbler["9.1.4"]
+        assert chroma_row["origin"] == "store_put_origin"
+        assert chroma_row["reason"] == "chroma_uri"
+
+        single_chunk_row = dishonest_by_tumbler["9.1.5"]
+        assert single_chunk_row["origin"] == "store_put_origin"
+        assert single_chunk_row["reason"] == "knowledge_single_chunk_no_path"
+
+        file_backed_row = dishonest_by_tumbler["9.1.6"]
+        assert file_backed_row["origin"] == "reindex_candidate"
+        assert file_backed_row["resolved_path"].endswith("src/present.py")
 
     def test_unresolvable_provenance_never_appears_in_any_action_list(self, tmp_path):
         cat, t3 = _mixed_cat(tmp_path)
@@ -493,6 +641,7 @@ class TestJsonOutput:
         assert data["summary"]["zero_count_rdr145_exempt"] == 1
         assert data["summary"]["zero_count_reindex_candidate"] == 2
         assert data["summary"]["zero_count_orphaned_path"] == 3
+        assert data["summary"]["zero_count_store_put_origin"] == 0
         assert data["summary"]["zero_count_unresolvable_provenance"] == 4
         assert data["summary"]["dishonest"] == 1
 
@@ -524,6 +673,8 @@ class TestJsonOutput:
         # never platform-dependent and always counts.
         assert expected_worktree_count >= 1
         assert data["zero_count_live"]["orphaned_path_worktree_count"] == expected_worktree_count
+        assert data["zero_count_live"]["store_put_origin"] == []
+        assert data["zero_count_live"]["store_put_origin_by_reason"] == {}
         assert {r["tumbler"] for r in data["zero_count_live"]["unresolvable_provenance"]} == {
             "1.50.1", "42", "1.12.20", "1.12.21",
         }
@@ -534,6 +685,11 @@ class TestJsonOutput:
         assert len(data["dishonest"]) == 1
         assert data["dishonest"][0]["tumbler"] == "1.13.1"
         assert data["dishonest"][0]["chunk_count"] == 7
+        # nexus-0y0gk: dishonest rows carry an origin from the same
+        # provenance split zero_count_* uses, plus a by-origin summary.
+        assert data["dishonest"][0]["origin"] == "unresolvable_provenance"
+        assert data["dishonest"][0]["reason"] == "no_provenance"
+        assert data["dishonest_by_origin"] == {"unresolvable_provenance": 1}
 
         assert data["incomplete"] == []
 
@@ -606,6 +762,20 @@ class TestHumanReport:
         assert "malformed_tumbler" in result.output
         assert "source_uri_only" in result.output
         assert "no_provenance" in result.output
+
+    def test_dishonest_by_origin_reported(self, tmp_path, monkeypatch):
+        """nexus-0y0gk: the dishonest section's human report shows a
+        by-origin breakdown, mirroring the by-reason lines the
+        zero_count_* sections already print."""
+        cat, t3 = _mixed_cat(tmp_path)
+        _patch(monkeypatch, cat, t3, writer=_writer_factory_raises())
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "reconcile-stale"])
+
+        assert result.exit_code == 0, result.output
+        assert "by origin: unresolvable_provenance=1" in result.output
+        assert "origin=unresolvable_provenance" in result.output
 
 
 # ── Gates ───────────────────────────────────────────────────────────────

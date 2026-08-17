@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cefa1.2 — schema type-hygiene pass, Tier A, P1 (epic nexus-cefa1;
+    plan of record T2 nexus/plan-schema-type-hygiene-2026-08-12 [22360]).
+
+    Retires three RDR-152 SQLite-port TEXT columns to their real Postgres
+    types. Template: catalog-002-hygiene.xml (RDR-156). ALTER COLUMN TYPE is
+    ordinary DDL (an ACCESS EXCLUSIVE table rewrite), not RLS-filtered DML —
+    no FORCE RLS toggle is needed for any changeset in this file, and none of
+    them touches a row via INSERT/UPDATE/DELETE.
+
+    Data-safety evidence: T2 nexus/schema-hygiene-p0-preflight-2026-08-15
+    [22588] (nexus-cefa1.1). The LOCAL half (fresh pytest engine substrate,
+    no seeded data) reported all-zero malformed/non-ISO counts for the four
+    Tier-A timestamp columns touched here, confirmed non-vacuous by a
+    seeded-fixture regression test (exact deltas). The CLOUD half landed
+    clean: T2 nexus/conexus-to-nexus-RESULT-cefa1.1-P0-preflight-cloud-2026-08-15
+    [22591] — invalid_cast_count=0 and non_iso_prefix_count=0 across all 10
+    audited columns on the live cloud cluster, so every NULLIF(..,'')::
+    timestamptz USING clause below is confirmed safe against production data,
+    no remediation required. That same cloud run also sized the ''-sentinel
+    population each USING clause maps to NULL: bib_enriched_at 20,305/20,334
+    rows (99.86% — nearly the entire table has never been bib-enriched),
+    index_started_at 3,048 rows (15%), catalog_links.created_at 174 rows
+    (3.65%), indexed_at 148 rows (0.73%). Given that scale, every '' vs NULL
+    distinction on these four columns across the Java service, the Python
+    client, and this changelog tree was swept explicitly (nexus-cefa1.2
+    consumer audit) rather than assumed: the only genuine ''-sentinel guard
+    found was CatalogRepository's CREATED_AT.ne("") pair, removed in this
+    bead's Java changes (NULL is unmatchable by a createdAtBefore filter for
+    free, replacing the guard's intent exactly); every other consumer
+    (Python's http_catalog_client.py CatalogEntry construction, Java's
+    docRowFromRecord/linkRow wire builders) already normalizes a missing/NULL
+    value to "" at the read boundary and was never comparing against the raw
+    ''/NULL sentinel directly, so no other fix was required.
+
+    Three changesets:
+
+    1. catalog-031-1-documents-temporal — catalog_documents.indexed_at
+       (nullable TEXT, no default), .bib_enriched_at (TEXT NOT NULL DEFAULT
+       ''), .index_started_at (TEXT NOT NULL DEFAULT '', added by
+       catalog-020-index-run-fence.xml) all become timestamptz NULL, in ONE
+       ALTER TABLE statement (one table-rewrite pass covering all three
+       columns, not three separate rewrites). VIEW LANDMINE:
+       nexus.collection_health_meta (current body: catalog-019-4's
+       tombstone-aware CREATE OR REPLACE) references d.indexed_at with a
+       lexicographic-string regex guard (`~ '^[0-9]{4}-'`) and a to_char
+       hack to compare against a 30-day-ago cutoff — both retired to plain
+       timestamptz comparisons once indexed_at is a real timestamptz. The
+       view is DROPped before the ALTER and CREATEd after with the
+       simplified body; DROP VIEW strips its PUBLIC SELECT grant
+       (catalog-009-6), so the new CREATE re-grants it explicitly. No other
+       view, function, index, or CHECK constraint anywhere in this changelog
+       tree references these three columns (verified: grep across
+       service/src/main/resources/db for indexed_at / bib_enriched_at /
+       index_started_at — the only other hits are catalog-016's one-time,
+       already-applied dedup-backfill DML, which ran once against the old
+       TEXT values and never runs again, and a plain header comment in
+       db.changelog-master.xml).
+
+    2. catalog-031-2-links-created-at — catalog_links.created_at (nullable
+       TEXT, no default) becomes timestamptz NULL via
+       NULLIF(created_at,'')::timestamptz. Per nexus-4j80w: the ''-sentinel
+       maps to NULL, and NULL is unmatchable by a `created_at < :before`
+       filter for free (NULL comparisons are NULL, never TRUE) — exactly the
+       semantics the CatalogRepository CREATED_AT.ne("") guards were
+       hand-maintaining; this changeset lets Java delete them (see
+       CatalogRepository.java, guards near the bulkDeleteLinks /
+       createdAtBefore call sites).
+
+    3. catalog-031-3-collections-legacy-bool —
+       catalog_collections.legacy_grandfathered (INTEGER NOT NULL DEFAULT 0)
+       becomes boolean NOT NULL DEFAULT false via USING
+       (legacy_grandfathered <> 0). NOT NULL is preserved automatically
+       across ALTER COLUMN TYPE (not touched); only DEFAULT is dropped and
+       re-set because a numeric DEFAULT 0 is not valid input for a boolean
+       column.
+
+    Rollbacks mirror catalog-002-hygiene.xml: TYPE TEXT USING
+    to_char(col AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"')
+    (fixed-width microseconds so a restored lexicographic MAX/comparison
+    stays sound), COALESCE'd to '' and NOT NULL/DEFAULT '' restored ONLY for
+    the two columns that had NOT NULL DEFAULT '' before this file
+    (bib_enriched_at, index_started_at) — indexed_at and catalog_links
+    .created_at were plain nullable TEXT with no default, so their rollback
+    leaves NULL as NULL rather than forcing it to ''. legacy_grandfathered
+    rolls back via CASE WHEN col THEN 1 ELSE 0 END with DEFAULT 0. The
+    collection_health_meta rollback recreates catalog-019-4's body verbatim,
+    including its own PUBLIC SELECT re-grant (DROP VIEW strips it there too).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset catalog-031-1-documents-temporal ────────────────────────── -->
+    <changeSet id="catalog-031-1-documents-temporal" author="nexus-cefa1.2">
+        <comment>
+            catalog_documents.indexed_at/.bib_enriched_at/.index_started_at TEXT -> timestamptz NULL
+            (ONE ALTER TABLE, one rewrite); collection_health_meta DROP/CREATE around it with the
+            regex-guard/to_char hacks retired to plain timestamptz comparisons.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+DROP VIEW IF EXISTS nexus.collection_health_meta;
+
+ALTER TABLE nexus.catalog_documents
+    ALTER COLUMN bib_enriched_at DROP DEFAULT,
+    ALTER COLUMN bib_enriched_at DROP NOT NULL,
+    ALTER COLUMN index_started_at DROP DEFAULT,
+    ALTER COLUMN index_started_at DROP NOT NULL,
+    ALTER COLUMN indexed_at TYPE timestamptz USING NULLIF(indexed_at, '')::timestamptz,
+    ALTER COLUMN bib_enriched_at TYPE timestamptz USING NULLIF(bib_enriched_at, '')::timestamptz,
+    ALTER COLUMN index_started_at TYPE timestamptz USING NULLIF(index_started_at, '')::timestamptz;
+
+CREATE VIEW nexus.collection_health_meta
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       d.physical_collection AS collection,
+       max(d.indexed_at) AS last_indexed,
+       count(*) FILTER (
+           WHERE NOT EXISTS (
+               SELECT 1 FROM nexus.catalog_links l
+                WHERE l.to_tumbler = d.tumbler
+           )
+       ) AS orphan_count,
+       (count(*) FILTER (WHERE d.indexed_at IS NOT NULL AND d.indexed_at &lt; now() - interval '30 days'))::double precision
+       / NULLIF(count(*) FILTER (WHERE d.indexed_at IS NOT NULL), 0)
+       AS stale_source_ratio
+  FROM nexus.catalog_documents d
+ WHERE d.physical_collection IS NOT NULL
+   AND d.deleted_at IS NULL
+ GROUP BY d.tenant_id, d.physical_collection;
+
+GRANT SELECT ON nexus.collection_health_meta TO PUBLIC;
+
+-- BUG-0148 invariant (rdr180-16-analyze-rewritten-tables precedent, mechanically
+-- enforced by tests/test_changelog_analyze_lint.py): the ALTER COLUMN ... TYPE
+-- above rewrites catalog_documents and resets its planner statistics — ANALYZE
+-- it in the same pass so a stale-stats plan flip cannot silently degrade
+-- collection_health_meta / hybrid-search queries the way BUG-0148 did.
+ANALYZE nexus.catalog_documents;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+DROP VIEW IF EXISTS nexus.collection_health_meta;
+
+ALTER TABLE nexus.catalog_documents
+    ALTER COLUMN indexed_at TYPE TEXT
+        USING to_char(indexed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'),
+    ALTER COLUMN bib_enriched_at TYPE TEXT
+        USING COALESCE(to_char(bib_enriched_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'), ''),
+    ALTER COLUMN index_started_at TYPE TEXT
+        USING COALESCE(to_char(index_started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'), ''),
+    ALTER COLUMN bib_enriched_at SET NOT NULL,
+    ALTER COLUMN bib_enriched_at SET DEFAULT '',
+    ALTER COLUMN index_started_at SET NOT NULL,
+    ALTER COLUMN index_started_at SET DEFAULT '';
+
+CREATE VIEW nexus.collection_health_meta
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       d.physical_collection AS collection,
+       max(d.indexed_at) AS last_indexed,
+       count(*) FILTER (
+           WHERE NOT EXISTS (
+               SELECT 1 FROM nexus.catalog_links l
+                WHERE l.to_tumbler = d.tumbler
+           )
+       ) AS orphan_count,
+       (count(*) FILTER (
+           WHERE d.indexed_at ~ '^[0-9]{4}-'
+             AND d.indexed_at &lt; to_char(
+                     (now() - interval '30 days') AT TIME ZONE 'UTC',
+                     'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+        ))::double precision
+        / NULLIF(count(*) FILTER (WHERE d.indexed_at ~ '^[0-9]{4}-'), 0)
+        AS stale_source_ratio
+  FROM nexus.catalog_documents d
+ WHERE d.physical_collection IS NOT NULL
+   AND d.deleted_at IS NULL
+ GROUP BY d.tenant_id, d.physical_collection;
+
+GRANT SELECT ON nexus.collection_health_meta TO PUBLIC;
+
+-- Same BUG-0148 discipline as the forward SQL above — the rollback's own
+-- ALTER COLUMN ... TYPE rewrites catalog_documents again.
+ANALYZE nexus.catalog_documents;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset catalog-031-2-links-created-at ───────────────────────────── -->
+    <changeSet id="catalog-031-2-links-created-at" author="nexus-cefa1.2">
+        <comment>
+            catalog_links.created_at TEXT -> timestamptz NULL. ''-sentinel maps to NULL
+            (nexus-4j80w): NULL is unmatchable by a `created_at &lt; :before` filter for free.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_links
+    ALTER COLUMN created_at TYPE timestamptz
+    USING NULLIF(created_at, '')::timestamptz;
+ANALYZE nexus.catalog_links;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+ALTER TABLE nexus.catalog_links
+    ALTER COLUMN created_at TYPE TEXT
+    USING to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"');
+ANALYZE nexus.catalog_links;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset catalog-031-3-collections-legacy-bool ────────────────────── -->
+    <changeSet id="catalog-031-3-collections-legacy-bool" author="nexus-cefa1.2">
+        <comment>
+            catalog_collections.legacy_grandfathered INTEGER -> boolean (NOT NULL preserved
+            automatically across the TYPE change; only DEFAULT is dropped/re-set since a
+            numeric DEFAULT 0 is not valid input for boolean).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_collections
+    ALTER COLUMN legacy_grandfathered DROP DEFAULT;
+ALTER TABLE nexus.catalog_collections
+    ALTER COLUMN legacy_grandfathered TYPE boolean
+    USING (legacy_grandfathered &lt;&gt; 0);
+ALTER TABLE nexus.catalog_collections
+    ALTER COLUMN legacy_grandfathered SET DEFAULT false;
+ANALYZE nexus.catalog_collections;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+ALTER TABLE nexus.catalog_collections
+    ALTER COLUMN legacy_grandfathered DROP DEFAULT;
+ALTER TABLE nexus.catalog_collections
+    ALTER COLUMN legacy_grandfathered TYPE INTEGER
+    USING (CASE WHEN legacy_grandfathered THEN 1 ELSE 0 END);
+ALTER TABLE nexus.catalog_collections
+    ALTER COLUMN legacy_grandfathered SET DEFAULT 0;
+ANALYZE nexus.catalog_collections;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

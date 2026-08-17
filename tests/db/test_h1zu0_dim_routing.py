@@ -3,19 +3,22 @@
 
 ``nexus.db.reconcile.dim_for_model_token`` is promoted from the
 pre-existing private ``_MODEL_DIMS`` (already documented as mirroring the
-Java authority ``PgVectorRepository.MODEL_DIMS``) into a public function so
-both the doctor dangling-manifest census (``nexus.health``) and the new
-``nx catalog manifest-verify --list`` enumeration route collections to a
-dim the exact same way — the fix for the census/enumeration model-token
-routing divergence the bead names (client-side; see the module docstring
-in ``nexus/db/reconcile.py`` for why an engine-side SQL change was not
-chosen).
+Java authority ``PgVectorRepository.MODEL_DIMS``) into a public function
+used by several client-side dim-routing consumers (``nexus.health``'s
+chash-conformance unroutable-collection probe, ``commands/collection.py``,
+``commands/catalog_cmds/doctor.py``) — originally including the doctor
+dangling-manifest census and the ``nx catalog manifest-verify --list``
+enumeration, both RETIRED (RDR-191 Phase 6, nexus-o8dil.33): the
+manifest-chunk FK makes the dangling state they diagnosed unreachable, so
+neither reads this table any more, but the routing function itself remains
+live for its other callers.
 
 Unlike ``nexus.corpus``'s ``CANONICAL_EMBEDDING_MODELS``/
 ``LOCAL_EMBEDDING_MODELS`` pair (a collection-NAMING-policy registry that
 deliberately omits the legacy ``voyage-3`` token), this table answers a
-storage-ROUTING question and must recognize every token the engine's
-``nexus.manifest_orphans(dim)`` IN-lists recognize — ``voyage-3`` included.
+storage-ROUTING question and must recognize every token the (now-retired)
+``nexus.manifest_orphans(dim)`` IN-lists recognized — ``voyage-3``
+included; the same tokens still route ``chash_conformance_report`` today.
 """
 from __future__ import annotations
 
@@ -31,8 +34,9 @@ class TestDimForModelToken:
 
     def test_legacy_voyage_3_routes_to_1024(self) -> None:
         """The token corpus.py's CANONICAL_EMBEDDING_MODELS deliberately
-        omits — this routing table must still recognize it (it is in the
-        engine's manifest_orphans(1024) IN-list)."""
+        omits — this routing table must still recognize it (it was in the
+        now-retired engine manifest_orphans(1024) IN-list, and remains in
+        chash_conformance_report(1024)'s)."""
         assert dim_for_model_token("voyage-3") == 1024
 
     def test_bge_base_en_v15_768_routes_to_768(self) -> None:

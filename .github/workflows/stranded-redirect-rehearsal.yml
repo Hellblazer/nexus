@@ -15,7 +15,7 @@ name: Stranded-redirect rehearsal (weekly)
 # proving the wiring survives a real `pip install` + real CLI invocation,
 # and that the redirect it prints is genuinely followable): a box seeded
 # with real pre-PG artifacts (via seed_legacy.py, the same raw-sqlite/
-# chromadb seeder era-hop/chash-window/fullstack already use) package-
+# chromadb seeder era-hop/fullstack already use) package-
 # upgrades straight to the working tree, must trip the armed detector with
 # the exact message, then downgrades BACK to the pin the message names and
 # runs `nx init` + `nx upgrade` there for real — the RDR-185 ladder's

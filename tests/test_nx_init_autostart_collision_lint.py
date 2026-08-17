@@ -79,7 +79,6 @@ CONTAINER_ALLOWLIST: dict[str, int] = {
     "tests/e2e/migration-rehearsal/rehearse_acquire.sh": 1,
     "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh": 2,
     "tests/e2e/migration-rehearsal/rehearse_stranded.sh": 3,
-    "tests/e2e/migration-rehearsal/rehearse_chash_window.sh": 1,
     "tests/e2e/migration-rehearsal/rehearse_cold.sh": 1,
     "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh": 1,
 }

@@ -93,8 +93,12 @@ def test_the_pin_is_not_vacuous() -> None:
     scanned = {path.name for _, _, path, _ in
                ((c.values[0], c.values[1], c.values[2], c.values[3]) for c in _CASES)}
     # RDR-155 P4b: substrate_etl.py (the original anchor) died with the
-    # migration machinery; the surviving rung anchors the non-vacuity pin.
-    assert "chash_rekey.py" in scanned, (
-        "chash_rekey.py contributes no deferred imports to the census — "
+    # migration machinery; nexus-lgdel.l1 then retired chash_rekey.py (the
+    # rung that anchored this pin next) along with the ladder's last data
+    # rung. preconditions.py carries the package's heaviest concentration
+    # of deferred imports (import-cycle avoidance on the precondition
+    # checks) and is not going anywhere, so it anchors the pin now.
+    assert "preconditions.py" in scanned, (
+        "preconditions.py contributes no deferred imports to the census — "
         "the module moved or the walk stopped seeing it"
     )

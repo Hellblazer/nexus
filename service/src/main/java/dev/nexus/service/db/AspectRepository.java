@@ -2,6 +2,7 @@ package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
 import org.jooq.Field;
+import org.jooq.JSONB;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,6 +17,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static dev.nexus.service.db.JsonbSupport.jsonbOrNull;
 import static dev.nexus.service.jooq.nexus.Tables.*;
 import static org.jooq.impl.DSL.*;
 
@@ -63,19 +65,19 @@ public final class AspectRepository {
     private static final Field<String>          EX_EXPERIMENTAL_DATASETS  = excluded(DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS);
     private static final Field<String>          EX_EXPERIMENTAL_BASELINES = excluded(DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES);
     private static final Field<String>          EX_EXPERIMENTAL_RESULTS   = excluded(DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS);
-    private static final Field<String>          EX_EXTRAS                 = excluded(DOCUMENT_ASPECTS.EXTRAS);
+    private static final Field<JSONB>           EX_EXTRAS                 = excluded(DOCUMENT_ASPECTS.EXTRAS);
     private static final Field<Double>          EX_CONFIDENCE             = excluded(DOCUMENT_ASPECTS.CONFIDENCE);
     private static final Field<OffsetDateTime>  EX_EXTRACTED_AT           = excluded(DOCUMENT_ASPECTS.EXTRACTED_AT);
     private static final Field<String>          EX_MODEL_VERSION          = excluded(DOCUMENT_ASPECTS.MODEL_VERSION);
     private static final Field<String>          EX_EXTRACTOR_NAME         = excluded(DOCUMENT_ASPECTS.EXTRACTOR_NAME);
     private static final Field<String>          EX_SOURCE_URI             = excluded(DOCUMENT_ASPECTS.SOURCE_URI);
-    private static final Field<String>          EX_SALIENT_SENTENCES      = excluded(DOCUMENT_ASPECTS.SALIENT_SENTENCES);
+    private static final Field<JSONB>           EX_SALIENT_SENTENCES      = excluded(DOCUMENT_ASPECTS.SALIENT_SENTENCES);
     private static final Field<String>          EX_DOC_ID                 = excluded(DOCUMENT_ASPECTS.DOC_ID);
 
     // COALESCE(EXCLUDED.x, table.x) fields for importAspect path
     private static final Field<String>          EX_SOURCE_URI_COALESCE =
         coalesce(excluded(DOCUMENT_ASPECTS.SOURCE_URI), DOCUMENT_ASPECTS.SOURCE_URI);
-    private static final Field<String>          EX_SALIENT_COALESCE =
+    private static final Field<JSONB>           EX_SALIENT_COALESCE =
         coalesce(excluded(DOCUMENT_ASPECTS.SALIENT_SENTENCES), DOCUMENT_ASPECTS.SALIENT_SENTENCES);
     private static final Field<String>          EX_DOC_ID_COALESCE =
         coalesce(excluded(DOCUMENT_ASPECTS.DOC_ID), DOCUMENT_ASPECTS.DOC_ID);
@@ -219,13 +221,13 @@ public final class AspectRepository {
                     (String) body.get("experimental_datasets"),
                     (String) body.get("experimental_baselines"),
                     (String) body.get("experimental_results"),
-                    (String) body.get("extras"),
+                    jsonbOrNull((String) body.get("extras")),
                     confidence,
                     extractedAtTs,
                     modelVersion,
                     extractorName,
                     (String) body.get("source_uri"),
-                    (String) body.get("salient_sentences"),
+                    jsonbOrNull((String) body.get("salient_sentences")),
                     nullIfBlank((String) body.get("doc_id")))
                 .onConflict(
                     DOCUMENT_ASPECTS.TENANT_ID,
@@ -414,7 +416,7 @@ public final class AspectRepository {
         if (docId == null || docId.isBlank()) return 0;
         return tenantScope.withTenant(tenant, ctx ->
             ctx.update(DOCUMENT_ASPECTS)
-               .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, sentencesJson)
+               .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, jsonbOrNull(sentencesJson))
                .where(DOCUMENT_ASPECTS.DOC_ID.eq(docId))
                .execute());
     }
@@ -425,7 +427,7 @@ public final class AspectRepository {
     public int setSalientSentencesByKey(String tenant, String collection, String sourcePath, String sentencesJson) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.update(DOCUMENT_ASPECTS)
-               .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, sentencesJson)
+               .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, jsonbOrNull(sentencesJson))
                .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection)
                    .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(sourcePath)))
                .execute());
@@ -442,8 +444,8 @@ public final class AspectRepository {
                 .where(DOCUMENT_ASPECTS.DOC_ID.eq(docId))
                 .fetch();
             if (rows.isEmpty()) return null;
-            Object val = rows.get(0).get(0);
-            return val == null ? null : val.toString();
+            JSONB val = rows.get(0).get(DOCUMENT_ASPECTS.SALIENT_SENTENCES);
+            return val == null ? null : val.data();
         });
     }
 
@@ -534,13 +536,13 @@ public final class AspectRepository {
                             (String) body.get("experimental_datasets"),
                             (String) body.get("experimental_baselines"),
                             (String) body.get("experimental_results"),
-                            (String) body.get("extras"),
+                            jsonbOrNull((String) body.get("extras")),
                             confidence,
                             extractedAtTs,
                             (String) body.get("model_version"),
                             (String) body.get("extractor_name"),
                             (String) body.get("source_uri"),
-                            (String) body.get("salient_sentences"),
+                            jsonbOrNull((String) body.get("salient_sentences")),
                             nullIfBlank((String) body.get("doc_id")));
                 }
                 insert.onConflict(
@@ -604,13 +606,13 @@ public final class AspectRepository {
                     (String) body.get("experimental_datasets"),
                     (String) body.get("experimental_baselines"),
                     (String) body.get("experimental_results"),
-                    (String) body.get("extras"),
+                    jsonbOrNull((String) body.get("extras")),
                     confidence,
                     extractedAtTs,
                     (String) body.get("model_version"),
                     (String) body.get("extractor_name"),
                     (String) body.get("source_uri"),
-                    (String) body.get("salient_sentences"),
+                    jsonbOrNull((String) body.get("salient_sentences")),
                     nullIfBlank((String) body.get("doc_id")))
                 .onConflict(
                     DOCUMENT_ASPECTS.TENANT_ID,
@@ -1442,10 +1444,10 @@ public final class AspectRepository {
         if (fieldName == null || sqlType == null) throw new IllegalArgumentException("field_name and sql_type required");
         OffsetDateTime promotedAtTs = parseTs(promotedAt);
 
-        int columnAdded    = body.containsKey("column_added") && Boolean.TRUE.equals(body.get("column_added")) ? 1 : 0;
+        boolean columnAdded = Boolean.TRUE.equals(body.get("column_added"));
         int rowsBackfilled = body.containsKey("rows_backfilled") ? ((Number) body.get("rows_backfilled")).intValue() : 0;
         int rowsPruned     = body.containsKey("rows_pruned") ? ((Number) body.get("rows_pruned")).intValue() : 0;
-        int pruned         = body.containsKey("pruned") && Boolean.TRUE.equals(body.get("pruned")) ? 1 : 0;
+        boolean pruned      = Boolean.TRUE.equals(body.get("pruned"));
 
         tenantScope.withTenant(tenant, ctx -> {
             ctx.insertInto(ASPECT_PROMOTION_LOG,
@@ -1484,10 +1486,15 @@ public final class AspectRepository {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("field_name",       r.get(ASPECT_PROMOTION_LOG.FIELD_NAME));
                 m.put("sql_type",         r.get(ASPECT_PROMOTION_LOG.SQL_TYPE));
-                m.put("column_added",     r.get(ASPECT_PROMOTION_LOG.COLUMN_ADDED) != 0);
+                // nexus-cefa1.4: column_added/pruned are boolean now (the wire was
+                // already boolean; this retires the `!= 0` integer shim). Defensive
+                // null-guard mirrors CatalogRepository's legacy_grandfathered convention.
+                Boolean columnAdded = r.get(ASPECT_PROMOTION_LOG.COLUMN_ADDED);
+                m.put("column_added",     columnAdded != null ? columnAdded : Boolean.FALSE);
                 m.put("rows_backfilled",  r.get(ASPECT_PROMOTION_LOG.ROWS_BACKFILLED));
                 m.put("rows_pruned",      r.get(ASPECT_PROMOTION_LOG.ROWS_PRUNED));
-                m.put("pruned",           r.get(ASPECT_PROMOTION_LOG.PRUNED) != 0);
+                Boolean pruned = r.get(ASPECT_PROMOTION_LOG.PRUNED);
+                m.put("pruned",           pruned != null ? pruned : Boolean.FALSE);
                 OffsetDateTime ts = r.get(ASPECT_PROMOTION_LOG.PROMOTED_AT);
                 m.put("promoted_at", ts == null ? null : formatTs(ts));
                 out.add(m);
@@ -1543,10 +1550,10 @@ public final class AspectRepository {
                 for (var body : batch) {
                     String fieldName = (String) body.get("field_name");
                     OffsetDateTime promotedAtTs = parseTs((String) body.get("promoted_at"));
-                    int columnAdded    = body.containsKey("column_added") && Boolean.TRUE.equals(body.get("column_added")) ? 1 : 0;
+                    boolean columnAdded = Boolean.TRUE.equals(body.get("column_added"));
                     int rowsBackfilled = body.containsKey("rows_backfilled") ? ((Number) body.get("rows_backfilled")).intValue() : 0;
                     int rowsPruned     = body.containsKey("rows_pruned") ? ((Number) body.get("rows_pruned")).intValue() : 0;
-                    int pruned         = body.containsKey("pruned") && Boolean.TRUE.equals(body.get("pruned")) ? 1 : 0;
+                    boolean pruned      = Boolean.TRUE.equals(body.get("pruned"));
                     insert = insert.values(tenant, fieldName, (String) body.getOrDefault("sql_type", "TEXT"),
                             columnAdded, rowsBackfilled, rowsPruned, pruned, promotedAtTs);
                 }
@@ -1566,10 +1573,10 @@ public final class AspectRepository {
         String promotedAt = (String) body.get("promoted_at");
         if (fieldName == null || promotedAt == null) return 0;
         OffsetDateTime promotedAtTs = parseTs(promotedAt);
-        int columnAdded    = body.containsKey("column_added") && Boolean.TRUE.equals(body.get("column_added")) ? 1 : 0;
+        boolean columnAdded = Boolean.TRUE.equals(body.get("column_added"));
         int rowsBackfilled = body.containsKey("rows_backfilled") ? ((Number) body.get("rows_backfilled")).intValue() : 0;
         int rowsPruned     = body.containsKey("rows_pruned") ? ((Number) body.get("rows_pruned")).intValue() : 0;
-        int pruned         = body.containsKey("pruned") && Boolean.TRUE.equals(body.get("pruned")) ? 1 : 0;
+        boolean pruned      = Boolean.TRUE.equals(body.get("pruned"));
 
         return
             ctx.insertInto(ASPECT_PROMOTION_LOG,
@@ -1898,7 +1905,12 @@ public final class AspectRepository {
         m.put("experimental_datasets",   r.get(4));
         m.put("experimental_baselines",  r.get(5));
         m.put("experimental_results",    r.get(6));
-        m.put("extras",                  r.get(7));
+        // nexus-cefa1.4: extras is jsonb now — JSONB.data() renders the raw JSON
+        // text on the wire, unchanged shape (a caller-supplied JSON object string,
+        // or null when the column is NULL — matching the prior TEXT column's null
+        // passthrough exactly).
+        Object extrasRaw = r.get(7);
+        m.put("extras", extrasRaw instanceof JSONB extrasJ ? extrasJ.data() : extrasRaw);
         m.put("confidence",              r.get(8));
         Object eatRaw = r.get(9);
         m.put("extracted_at", eatRaw instanceof OffsetDateTime
@@ -1906,7 +1918,9 @@ public final class AspectRepository {
         m.put("model_version",           r.get(10));
         m.put("extractor_name",          r.get(11));
         m.put("source_uri",              r.get(12));
-        m.put("salient_sentences",       r.get(13));
+        // nexus-cefa1.4: salient_sentences is jsonb now — same JSONB.data() unwrap.
+        Object salientRaw = r.get(13);
+        m.put("salient_sentences", salientRaw instanceof JSONB salientJ ? salientJ.data() : salientRaw);
         m.put("doc_id",                  r.get(14) == null ? "" : r.get(14).toString());
         return m;
     }

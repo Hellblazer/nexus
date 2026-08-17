@@ -178,6 +178,40 @@ class PgVectorRepositoryGcQuarantineTest {
         ));
     }
 
+    /**
+     * RDR-191 Phase 5 (nexus-o8dil.29) finding: fk_catalog_chunks_chunk now
+     * structurally blocks a real, pre-existing production race this file's
+     * "re-reference before restore" tests deliberately construct — a manifest
+     * write naming {@code originCollection} for a chash whose physical chunk
+     * currently sits ONLY in {@code quarantineCollection} (gc_quarantine_orphans
+     * already ran; gc_restore_rereferenced has not yet). Under the FK such a
+     * write is now REJECTED at write time rather than silently landing (the
+     * pre-existing behavior these tests exist to verify {@code
+     * gc_restore_rereferenced}/{@code gc_expire_quarantine} handle correctly
+     * once the row exists). This is flagged as a genuine follow-up finding (not
+     * silently absorbed) — see the o8dil.29 completion report. Bypasses the FK
+     * LOCALLY, the same drop/insert/re-add-NOT-VALID idiom used elsewhere in
+     * this suite, so the SQL functions' own handling of an already-existing
+     * re-referenced row stays covered.
+     */
+    private void seedManifestBypassingFk(String tenant, String docId, String chash, String collection)
+            throws Exception {
+        try (var conn = pg.createConnection("")) {
+            conn.setAutoCommit(true);
+            conn.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+        }
+        seedManifest(tenant, docId, chash, collection);
+        try (var conn = pg.createConnection("")) {
+            conn.setAutoCommit(true);
+            conn.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks "
+                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+        }
+    }
+
     private void seedChunk(String tenant, String collection, String chash, String text, String title) {
         vectorRepo.upsertChunks(tenant, collection,
             List.of(chash), List.of(text), List.of(Map.of("title", title)));
@@ -341,7 +375,7 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(q.moved()).isEqualTo(1L);
 
         // A heal re-references the chash for the origin collection.
-        seedManifest(TENANT_A, "gcq.doc.heal1", chash, originCol);
+        seedManifestBypassingFk(TENANT_A, "gcq.doc.heal1", chash, originCol);
 
         long restored = vectorRepo.restoreRereferenced(TENANT_A, quarantineCol, originCol);
 
@@ -447,7 +481,7 @@ class PgVectorRepositoryGcQuarantineTest {
         // Manifest references chash for originCol — originCol itself is NEVER
         // written to by seedChunk/upsertChunks, so its catalog_collections row
         // does not pre-exist: this is the first-ever-restore case.
-        seedManifest(TENANT_A, "gcq.doc.reg4", chash, originCol);
+        seedManifestBypassingFk(TENANT_A, "gcq.doc.reg4", chash, originCol);
         assertThat(collectionRegistered(TENANT_A, originCol))
             .as("precondition: this is the FIRST-EVER restore into this origin — "
                 + "the FK-satisfying row does not pre-exist")
@@ -539,7 +573,7 @@ class PgVectorRepositoryGcQuarantineTest {
         // quarantine -- simulating gc_restore_rereferenced not having run yet, or a
         // heal landing between quarantine and expire. This is the ordering-violation
         // case the guard exists for.
-        seedManifest(TENANT_A, "gcq.doc.guard9", chash, originCol);
+        seedManifestBypassingFk(TENANT_A, "gcq.doc.guard9", chash, originCol);
 
         var outcome = vectorRepo.expireQuarantine(
             TENANT_A, quarantineCol, originCol,
@@ -585,7 +619,7 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(q.moved()).isEqualTo(2L);
 
         // Only chashHeld gets re-referenced; chashFree stays genuinely orphaned.
-        seedManifest(TENANT_A, "gcq.doc.guard10", chashHeld, originCol);
+        seedManifestBypassingFk(TENANT_A, "gcq.doc.guard10", chashHeld, originCol);
 
         var outcome = vectorRepo.expireQuarantine(
             TENANT_A, quarantineCol, originCol,

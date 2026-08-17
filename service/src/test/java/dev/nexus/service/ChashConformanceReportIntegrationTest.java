@@ -65,7 +65,8 @@ class ChashConformanceReportIntegrationTest {
     private static final String TENANT_B = "t-chashconf-b";
     // A routable (bge-768) collection name, so catalog_document_chunks rows
     // for it are ALSO counted (matches nexus.chash_conformance_report's
-    // dim=768 IN-list, same routing as manifest_orphans).
+    // dim=768 IN-list, the same routing the now-retired manifest_orphans
+    // used, RDR-191 Phase 6 nexus-o8dil.33).
     private static final String COLLECTION = "knowledge__chashconf__bge-base-en-v15-768__v1";
 
     PostgreSQLContainer<?> pg;
@@ -245,9 +246,9 @@ class ChashConformanceReportIntegrationTest {
     void poison_is_tenant_isolated_via_rls() throws Exception {
         // TENANT_B has seeded NOTHING -- SECURITY INVOKER + FORCE RLS scopes
         // the function to the request tenant GUC (refutes the 'cross-tenant
-        // scan' reading, same falsification RekeyOpsIntegrationTest's
-        // migration_manifestOrphans_tenant_isolated_via_rls proves for
-        // manifest_orphans).
+        // scan' reading; the SAME class of falsification the now-retired
+        // manifest_orphans coverage used to demonstrate, RDR-191 Phase 6
+        // nexus-o8dil.33).
         List<Map<String, Object>> report = repo.chashConformanceReport(TENANT_B, 768);
         Map<String, Object> chunksRow = tableRow(report, "nexus.chunks_768");
         assertThat(((Number) chunksRow.get("total")).longValue()).isZero();

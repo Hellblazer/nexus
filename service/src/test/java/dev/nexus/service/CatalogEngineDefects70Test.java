@@ -58,6 +58,75 @@ class CatalogEngineDefects70Test {
         return m;
     }
 
+    /**
+     * RDR-191 Phase 5 (nexus-o8dil.29): {@code fk_catalog_chunks_chunk} now requires
+     * every {@code catalog_document_chunks} row's {@code (tenant_id, collection,
+     * chash)} to have a matching {@code nexus.chunks} row. Every manifest-write call
+     * site below is routed through one of the {@code *Seeded} wrappers, which stub a
+     * minimal {@code nexus.chunks} row (single {@code embedding_384} vector,
+     * arbitrary text) for each row's chash first. A chash that is null, not valid
+     * hex, or not EXACTLY 64 hex chars (32 bytes) is left unstubbed on purpose:
+     * nexus.chunks carries the SAME {@code chunks_chash_octet_check} (octet_length=32)
+     * as catalog_document_chunks, so a wrong-length stub would itself violate that
+     * check rather than reaching whatever violation a given test is actually after.
+     */
+    private static final String STUB_VECTOR_384 =
+        "[" + "0.1,".repeat(383) + "0.1]";
+
+    private void stubChunk(String tenant, String collection, Object chashObj) {
+        if (!(chashObj instanceof String chashHex) || chashHex.length() != 64) {
+            return;
+        }
+        if (!chashHex.matches("(?i)^[0-9a-f]+$")) {
+            return;
+        }
+        tenantScope.withTenant(tenant, ctx -> {
+            // RDR-191 Phase 5 (nexus-o8dil.49): nexus.chunks now carries
+            // chunks_collection_fk (tenant_id, collection) -> catalog_collections
+            // (tenant_id, name) — stub-register the collection first, mirroring
+            // PgVectorRepository#upsertChunks' own ensure-registered step.
+            ctx.execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
+                + "ON CONFLICT (tenant_id, name) DO NOTHING",
+                tenant, collection);
+            return ctx.execute(
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
+                + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::vector) "
+                + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
+                tenant, collection, chashHex, STUB_VECTOR_384);
+        });
+    }
+
+    private void writeManifestSeeded(String tenant, String docId, String collection,
+                                      List<Map<String, Object>> rows) {
+        for (var row : rows) {
+            stubChunk(tenant, collection, row.get("chash"));
+        }
+        repo.writeManifest(tenant, docId, collection, rows);
+    }
+
+    private void appendManifestChunksSeeded(String tenant, String docId, String collection,
+                                             List<Map<String, Object>> rows) {
+        for (var row : rows) {
+            stubChunk(tenant, collection, row.get("chash"));
+        }
+        repo.appendManifestChunks(tenant, docId, collection, rows);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> writeManifestManySeeded(String tenant, List<Map<String, Object>> docs,
+                                                          String collection) {
+        for (var doc : docs) {
+            var rows = (List<Map<String, Object>>) doc.get("rows");
+            if (rows != null) {
+                for (var row : rows) {
+                    stubChunk(tenant, collection, row.get("chash"));
+                }
+            }
+        }
+        return repo.writeManifestMany(tenant, docs, collection);
+    }
+
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     CatalogRepository repo;
@@ -148,7 +217,7 @@ class CatalogEngineDefects70Test {
             "physical_collection", coll,
             "source_uri", "file:///defects70/gc1/doc.md"));
         String h = ch("defects70-gc1-chunk");
-        repo.writeManifest(TENANT, t, coll, List.of(row(0, h)));
+        writeManifestSeeded(TENANT, t, coll, List.of(row(0, h)));
 
         // NON-VACUITY: visible while live.
         assertThat(repo.chashesForCollection(TENANT, coll)).contains(h);
@@ -171,7 +240,7 @@ class CatalogEngineDefects70Test {
             "physical_collection", coll,
             "source_uri", "file:///defects70/gc2/doc.md"));
         String h = ch("defects70-gc2-chunk");
-        repo.writeManifest(TENANT, t, coll, List.of(row(0, h)));
+        writeManifestSeeded(TENANT, t, coll, List.of(row(0, h)));
 
         assertThat(repo.docsForChashes(TENANT, List.of(h))).containsExactly(t);
 
@@ -200,7 +269,7 @@ class CatalogEngineDefects70Test {
             "physical_collection", coll,
             "source_uri", "file:///defects70/rchash/doc.md"));
         String h = ch("defects70-rchash-chunk");
-        repo.writeManifest(TENANT, t, coll, List.of(row(0, h)));
+        writeManifestSeeded(TENANT, t, coll, List.of(row(0, h)));
         seedChunkRow(coll, h, "resolve-chash body");
 
         var before = repo.resolveChash(TENANT, h, coll);
@@ -227,7 +296,7 @@ class CatalogEngineDefects70Test {
         String t = repo.registerDocument(TENANT, owner, Map.of(
             "title", "resync-dead", "content_type", "prose", "chunk_count", 0,
             "source_uri", "file:///defects70/resyncdead/doc.md"));
-        repo.appendManifestChunks(TENANT, t, "knowledge__defects70-resyncdead__v1",
+        appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-resyncdead__v1",
             List.of(row(0, ch("defects70-rs-0"))));
         assertThat(repo.deleteDocument(TENANT, t)).isEqualTo(1);
 
@@ -245,7 +314,7 @@ class CatalogEngineDefects70Test {
             "title", "man1", "content_type", "code",
             "physical_collection", "code__defects70-man1__voyage-code-3__v1",
             "source_uri", "file:///defects70/man1/doc.md"));
-        repo.appendManifestChunks(TENANT, t, "code__defects70-man1__voyage-code-3__v1", List.of(
+        appendManifestChunksSeeded(TENANT, t, "code__defects70-man1__voyage-code-3__v1", List.of(
             row(0, ch("defects70-man1-0")),
             row(1, ch("defects70-man1-1")),
             row(2, ch("defects70-man1-2"))));
@@ -276,8 +345,8 @@ class CatalogEngineDefects70Test {
         String dead = repo.registerDocument(TENANT, owner, Map.of(
             "title", "many-dead", "content_type", "code",
             "source_uri", "file:///defects70/many/dead.md"));
-        repo.writeManifest(TENANT, live, coll, List.of(row(0, ch("defects70-many-live"))));
-        repo.writeManifest(TENANT, dead, coll, List.of(row(0, ch("defects70-many-dead"))));
+        writeManifestSeeded(TENANT, live, coll, List.of(row(0, ch("defects70-many-live"))));
+        writeManifestSeeded(TENANT, dead, coll, List.of(row(0, ch("defects70-many-dead"))));
 
         assertThat(repo.getManifestMany(TENANT, List.of(live, dead)))
             .containsKeys(live, dead);
@@ -354,7 +423,7 @@ class CatalogEngineDefects70Test {
         String t = repo.registerDocument(TENANT, owner, Map.of(
             "title", "rederive", "content_type", "prose", "chunk_count", 0,
             "source_uri", "file:///defects70/rederive/doc.md"));
-        repo.appendManifestChunks(TENANT, t, "knowledge__defects70-rederive__voyage-context-3__v1", List.of(
+        appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-rederive__voyage-context-3__v1", List.of(
             row(0, ch("defects70-rd-0")), row(1, ch("defects70-rd-1")),
             row(2, ch("defects70-rd-2")), row(3, ch("defects70-rd-3")),
             row(4, ch("defects70-rd-4"))));
@@ -377,7 +446,7 @@ class CatalogEngineDefects70Test {
         String t = repo.registerDocument(TENANT, owner, Map.of(
             "title", "caller-count", "content_type", "prose", "chunk_count", 0,
             "source_uri", "file:///defects70/callercount/doc.md"));
-        repo.appendManifestChunks(TENANT, t, "knowledge__defects70-callercount__v1", List.of(
+        appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-callercount__v1", List.of(
             row(0, ch("defects70-cc-0")), row(1, ch("defects70-cc-1")),
             row(2, ch("defects70-cc-2"))));
 
@@ -437,13 +506,13 @@ class CatalogEngineDefects70Test {
             "title", "append-fold", "content_type", "prose", "chunk_count", 0,
             "source_uri", "file:///defects70/appendfold/doc.md"));
 
-        repo.appendManifestChunks(TENANT, t, "knowledge__defects70-appendfold__voyage-context-3__v1", List.of(
+        appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-appendfold__voyage-context-3__v1", List.of(
             row(0, ch("defects70-af-0")), row(1, ch("defects70-af-1"))));
         assertThat(repo.getDocument(TENANT, t).get("chunk_count"))
             .as("append must fold the count in the same transaction")
             .isEqualTo(2);
 
-        repo.appendManifestChunks(TENANT, t, "knowledge__defects70-appendfold__voyage-context-3__v1",
+        appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-appendfold__voyage-context-3__v1",
             List.of(row(2, ch("defects70-af-2"))));
         assertThat(repo.getDocument(TENANT, t).get("chunk_count")).isEqualTo(3);
     }
@@ -460,7 +529,7 @@ class CatalogEngineDefects70Test {
         String t = repo.registerDocument(TENANT, owner, Map.of(
             "title", "batch-rederive", "content_type", "prose", "chunk_count", 0,
             "source_uri", "file:///defects70/batchrederive/doc.md"));
-        repo.appendManifestChunks(TENANT, t, "knowledge__defects70-batchrederive__voyage-context-3__v1", List.of(
+        appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-batchrederive__voyage-context-3__v1", List.of(
             row(0, ch("defects70-br-0")), row(1, ch("defects70-br-1"))));
         forceStaleChunkCount(t, 77);
         assertThat(repo.getDocument(TENANT, t).get("chunk_count"))
@@ -486,6 +555,10 @@ class CatalogEngineDefects70Test {
             "source_uri", "file:///defects70/idxatchanged/doc.md"));
         repo.updateDocument(TENANT, t, Map.of("indexed_at", "2020-01-01T00:00:00.000000+00:00"));
         String original = (String) repo.getDocument(TENANT, t).get("indexed_at");
+        // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal) —
+        // the wire read is CatalogRepository.utcIso's micros+offset rendering (INDEXED_AT_FMT,
+        // kept as the catalog convention). The written value above already carries
+        // microseconds + an explicit offset, so it round-trips byte-identical.
         assertThat(original)
             .as("precondition: a known, controlled original value")
             .isEqualTo("2020-01-01T00:00:00.000000+00:00");
@@ -530,6 +603,8 @@ class CatalogEngineDefects70Test {
         repo.updateDocument(TENANT, t, Map.of(
             "head_hash", "rev-explicit", "indexed_at", "2021-06-01T00:00:00.000000+00:00"));
 
+        // nexus-cefa1.2: see mo927_updateStampsIndexedAtWhenHeadHashChanges's comment —
+        // micros+offset round-trips byte-identical since the written value already carries both.
         assertThat(repo.getDocument(TENANT, t).get("indexed_at"))
             .isEqualTo("2021-06-01T00:00:00.000000+00:00");
     }
@@ -563,7 +638,7 @@ class CatalogEngineDefects70Test {
         repo.updateDocument(TENANT, t, Map.of("indexed_at", "2020-01-01T00:00:00.000000+00:00"));
         assertThat(repo.deleteDocument(TENANT, t)).isEqualTo(1);
 
-        assertThatThrownBy(() -> repo.appendManifestChunks(TENANT, t, "knowledge__defects70-stampidx__v1",
+        assertThatThrownBy(() -> appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-stampidx__v1",
                 List.of(row(0, ch("defects70-eldyi-stampidx-0")))))
             .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
 
@@ -577,12 +652,22 @@ class CatalogEngineDefects70Test {
             .isEqualTo("2020-01-01T00:00:00.000000+00:00");
     }
 
-    /** Raw read of indexed_at bypassing RLS/tombstone filtering (nexus-eldyi). */
+    /**
+     * Raw read of indexed_at bypassing RLS/tombstone filtering (nexus-eldyi).
+     *
+     * <p>nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
+     * — a bare {@code getString()} on a timestamptz column returns the JDBC driver's own
+     * default rendering (space-separated, offset without a colon), not the ISO string
+     * this test wrote. Render explicitly via the SAME fixed-width-micros to_char shape
+     * catalog-031's rollback USING clause uses, so this raw-SQL probe stays byte-exact
+     * against the ISO strings this file writes through updateDocument.
+     */
     private String rawIndexedAt(String tumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             try (var ps = su.prepareStatement(
-                "SELECT indexed_at FROM nexus.catalog_documents WHERE tenant_id = ? AND tumbler = ?")) {
+                "SELECT to_char(indexed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"+00:00\"') "
+                + "FROM nexus.catalog_documents WHERE tenant_id = ? AND tumbler = ?")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, tumbler);
                 try (var rs = ps.executeQuery()) {
@@ -598,7 +683,7 @@ class CatalogEngineDefects70Test {
     @Test
     void eldyi_writeManifest_refusesTombstonedDoc() {
         String t = tombstonedDoc("writemanifest");
-        assertThatThrownBy(() -> repo.writeManifest(TENANT, t, "knowledge__defects70-writemanifest__v1",
+        assertThatThrownBy(() -> writeManifestSeeded(TENANT, t, "knowledge__defects70-writemanifest__v1",
                 List.of(row(0, ch("defects70-eldyi-wm-0")))))
             .as("writeManifest must refuse a tombstoned target, not silently write orphan chunks")
             .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
@@ -610,7 +695,7 @@ class CatalogEngineDefects70Test {
     @Test
     void eldyi_appendManifestChunks_refusesTombstonedDoc() {
         String t = tombstonedDoc("appendmanifest");
-        assertThatThrownBy(() -> repo.appendManifestChunks(TENANT, t, "knowledge__defects70-appendmanifest__v1",
+        assertThatThrownBy(() -> appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-appendmanifest__v1",
                 List.of(row(0, ch("defects70-eldyi-am-0")))))
             .as("appendManifestChunks must refuse a tombstoned target")
             .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
@@ -626,7 +711,7 @@ class CatalogEngineDefects70Test {
         String t = repo.registerDocument(TENANT, owner, Map.of(
             "title", "purgemanifest", "content_type", "prose",
             "source_uri", "file:///defects70/eldyi/purgemanifest/doc.md"));
-        repo.appendManifestChunks(TENANT, t, "knowledge__defects70-purgemanifest__v1",
+        appendManifestChunksSeeded(TENANT, t, "knowledge__defects70-purgemanifest__v1",
             List.of(row(0, ch("defects70-eldyi-pm-0"))));
         assertThat(repo.deleteDocument(TENANT, t)).isEqualTo(1);
 
@@ -839,14 +924,41 @@ class CatalogEngineDefects70Test {
     }
 
     @Test
-    void ssih_allowDanglingOptInStillWrites() {
+    void ssih_allowDanglingOptInWritesToTombstonedTarget() {
+        // nexus-tk070.p1 (RDR-194 § D2): allow_dangling=true still writes to a
+        // TOMBSTONED document — the row exists, so fk_catalog_links_to_document
+        // is satisfied even though requireLiveEndpoints would have refused it.
+        // This is the narrowed (not disappeared) half of allow_dangling's
+        // contract; see ssih_allowDanglingStillRejectsNonexistentTumbler below
+        // for the other half.
         var p = linkPair("dangle-allow");
-        String ghost = p[1] + "0999";
+        assertThat(repo.deleteDocument(TENANT, p[1])).isEqualTo(1);
         assertThat(repo.upsertLink(TENANT, Map.of(
-            "from_tumbler", p[0], "to_tumbler", ghost,
+            "from_tumbler", p[0], "to_tumbler", p[1],
             "link_type", "cites", "created_by", "importer",
             "allow_dangling", true))).isTrue();
         assertThat(repo.linksFrom(TENANT, p[0], List.of("cites"))).hasSize(1);
+    }
+
+    @Test
+    void ssih_allowDanglingStillRejectsNonexistentTumbler() {
+        // nexus-tk070.p1 (RDR-194 § D2): allow_dangling narrows rather than
+        // disappears now that fk_catalog_links_from_document /
+        // fk_catalog_links_to_document exist — a tumbler with NO
+        // catalog_documents row at ALL (never registered, unlike the
+        // tombstoned case above) provokes the REAL SQLSTATE 23503 from
+        // Postgres, which upsertLink maps to the SAME DanglingEndpointException
+        // requireLiveEndpoints throws, so CatalogHandler's existing 400
+        // {"code":"dangling_endpoint"} covers both paths with no handler change.
+        var p = linkPair("dangle-allow-ghost");
+        String ghost = p[1] + "0999";
+        var ex = assertThrows(CatalogRepository.DanglingEndpointException.class, () ->
+            repo.upsertLink(TENANT, Map.of(
+                "from_tumbler", p[0], "to_tumbler", ghost,
+                "link_type", "cites", "created_by", "importer",
+                "allow_dangling", true)));
+        assertThat(ex.missing()).containsExactly("to_tumbler");
+        assertThat(repo.linksFrom(TENANT, p[0], List.of("cites"))).isEmpty();
     }
 
     @Test
@@ -857,13 +969,27 @@ class CatalogEngineDefects70Test {
             "link_type", "cites", "created_by", "auto-linker"))).isTrue();
     }
 
-    /** The ETL/import leg must stay unguarded: it legitimately writes edges for
-     *  documents whose live state it does not yet control. */
+    /**
+     * The ETL/import leg must stay unguarded at the JAVA level: it legitimately
+     * writes edges for documents whose LIVE state it does not yet control (a
+     * tombstoned-but-still-registered target here). nexus-tk070.p1 (RDR-194 §
+     * D2): unlike {@code requireLiveEndpoints}, the real
+     * {@code fk_catalog_links_from_document}/{@code _to_document} FK applies
+     * to EVERY insert path — including {@code importLink} — regardless of any
+     * Java-level guard, so this test uses a tumbler that EXISTS (tombstoned,
+     * not deleted outright) rather than one that was never registered; a
+     * genuinely nonexistent tumbler through the import path now fails the FK
+     * exactly as it does through {@code upsertLink}'s allow_dangling path
+     * (see {@code ssih_allowDanglingStillRejectsNonexistentTumbler} above) —
+     * there was never a production caller relying on importing a link to a
+     * tumbler with no document row at all.
+     */
     @Test
     void ssih_importLinkPathIsExempt() {
         var p = linkPair("dangle-import");
+        assertThat(repo.deleteDocument(TENANT, p[1])).isEqualTo(1);
         repo.importLink(TENANT, Map.of(
-            "from_tumbler", p[0], "to_tumbler", p[1] + "0999",
+            "from_tumbler", p[0], "to_tumbler", p[1],
             "link_type", "cites", "created_by", "etl"));
         assertThat(repo.linksFrom(TENANT, p[0], List.of("cites"))).hasSize(1);
     }
@@ -1137,7 +1263,11 @@ class CatalogEngineDefects70Test {
                 "INSERT INTO nexus.catalog_documents "
                 + "(tenant_id, tumbler, title, content_type, physical_collection, "
                 + " chunk_count, metadata, file_path, corpus, head_hash, indexed_at, source_uri) "
-                + "VALUES (?, ?, ?, 'code', ?, ?, CAST(? AS jsonb), '', '', '', '', ?)")) {
+                // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
+                // — '' is invalid input for that type (PSQLException); NULL is the correct
+                // "unset" representation. file_path/corpus/head_hash stay TEXT NOT NULL
+                // DEFAULT '' (untouched by this migration), so '' remains correct for those.
+                + "VALUES (?, ?, ?, 'code', ?, ?, CAST(? AS jsonb), '', '', '', NULL, ?)")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, tumbler);
                 ps.setString(3, "damaged-" + tumbler);
@@ -1223,7 +1353,7 @@ class CatalogEngineDefects70Test {
             .doesNotContainKey(tumbler);
 
         // The repair path the verb drives.
-        repo.writeManifest(TENANT, tumbler, coll, List.of(
+        writeManifestSeeded(TENANT, tumbler, coll, List.of(
             row(0, ch("recon1-0")), row(1, ch("recon1-1"))));
         assertThat(repo.getManifest(TENANT, tumbler)).hasSize(2);
         assertThat(repo.getDocument(TENANT, tumbler).get("chunk_count"))
@@ -1302,7 +1432,7 @@ class CatalogEngineDefects70Test {
         injectDamagedDoc("9004.1", coll, 5, "{}");
         injectDamagedDoc("9004.2", coll, 5, "{}");
 
-        var result = repo.writeManifestMany(TENANT, List.of(
+        var result = writeManifestManySeeded(TENANT, List.of(
             Map.of("doc_id", "9004.1", "rows", List.of(row(0, ch("recon4-a")))),
             // No such document — the FK on catalog_document_chunks rejects it.
             Map.of("doc_id", "9004.404", "rows", List.of(row(0, ch("recon4-x")))),
@@ -1388,15 +1518,22 @@ class CatalogEngineDefects70Test {
             "from_tumbler", p[0], "to_tumbler", p[1], "link_type", "cites",
             "created_by", "j80w-test", "created_at", explicit));
 
+        // nexus-cefa1.2: created_at is timestamptz now (catalog-031-2-links-created-at) —
+        // CatalogRepository.utcIso's micros+offset rendering (the catalog convention, kept)
+        // round-trips this caller-supplied value byte-identical since it already carries
+        // both microseconds and an explicit offset.
         assertThat(onlyEdge(p[0], p[1], "cites").get("created_at")).isEqualTo(explicit);
     }
 
     @Test
     void j80w_emptyCreatedAtRowIsUnmatchableByBeforeFilter() {
         var p = linkPair("j80w-empty-unmatchable");
-        // importLink is the ETL leg — out of scope for this fix — and still
-        // writes '' when the caller supplies no created_at, giving a realistic
-        // pre-fix-shaped row to probe the guard against.
+        // importLink is the ETL leg and, since catalog-031 (nexus-cefa1.2), writes
+        // NULL created_at when the caller supplies none (tsOrNull; the pre-031
+        // '' sentinel rows became NULL under NULLIF in the migration). This is the
+        // undated-row shape nexus-4j80w requires to be UNMATCHABLE by a before-
+        // filter — now by natural SQL NULL semantics (NULL < ts is NULL), with the
+        // old CREATED_AT.ne("") guards deleted.
         repo.importLink(TENANT, Map.of(
             "from_tumbler", p[0], "to_tumbler", p[1], "link_type", "cites",
             "created_by", "j80w-test"));
@@ -1404,7 +1541,7 @@ class CatalogEngineDefects70Test {
         var results = repo.queryLinks(TENANT, p[0], null, null, null,
             "9999-12-31T00:00:00+00:00", 100, 0, "both", null);
         assertThat(results)
-            .as("a '' created_at row must be UNMATCHABLE by a before-filter (fail-safe)")
+            .as("a NULL created_at row must be UNMATCHABLE by a before-filter (fail-safe)")
             .isEmpty();
 
         int deleted = repo.bulkDeleteLinks(TENANT, p[0], null, null, null, "9999-12-31T00:00:00+00:00");
@@ -1424,6 +1561,31 @@ class CatalogEngineDefects70Test {
         assertThat(results)
             .as("a link with a real timestamp before the cutoff must still match")
             .hasSize(1);
+    }
+
+    /**
+     * nexus-cefa1.2: created_at is timestamptz now (catalog-031-2-links-created-at) —
+     * a caller-supplied createdAtBefore filter that fails to parse must 400 (via
+     * CatalogRepository.parseCreatedAtBeforeStrict -> IllegalArgumentException ->
+     * CatalogHandler's generic 400 ladder), not silently fall back to a raw TEXT
+     * comparison the pre-migration TEXT column tolerated regardless of shape.
+     */
+    @Test
+    void j80w_garbageCreatedAtBeforeIsRejected() {
+        var p = linkPair("j80w-garbage-before");
+        repo.upsertLink(TENANT, Map.of(
+            "from_tumbler", p[0], "to_tumbler", p[1], "link_type", "cites",
+            "created_by", "j80w-test"));
+
+        assertThatThrownBy(() -> repo.queryLinks(TENANT, p[0], null, null, null,
+            "not-a-timestamp-at-all", 100, 0, "both", null))
+            .isInstanceOf(IllegalArgumentException.class);
+
+        assertThatThrownBy(() -> repo.bulkDeleteLinks(TENANT, p[0], null, null, null, "not-a-timestamp-at-all"))
+            .isInstanceOf(IllegalArgumentException.class);
+
+        // the link must survive both rejected calls — a 400 must not have partially applied.
+        assertThat(repo.linksFrom(TENANT, p[0], List.of("cites"))).hasSize(1);
     }
 
     @Test

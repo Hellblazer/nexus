@@ -254,6 +254,24 @@ safe value across all owners in one call.
 
 ### Dangling manifest row: the definition of record
 
+**RDR-191 Phase 6 update (bead nexus-o8dil.33), 2026-08-15.** The
+manifest-chunk FK this section originally described as "planned" is
+SHIPPED and VALIDATEd (`catalog-029-manifest-chunk-fk.xml`, deployed
+engine-service-v0.1.76) — shape **(a)** below (the real defect class) is
+now REJECTED by the database at write time, not merely detected. The
+detection apparatus this section names —
+`nexus.manifest_verify(doc_id)`/`manifest_verify_all()`,
+`nexus.manifest_orphans(dim)`, and `health._check_dangling_manifests()` —
+is RETIRED as a consequence (`catalog-030-retire-manifest-verify.xml`
+drops `manifest_verify_all()`/`manifest_orphans(dim)`/`manifest_backfill()`
+outright). `nexus.manifest_verify(text)` itself is the ONE exception: it
+stays, because `CatalogRepository.completeIndexRun` depends on it
+internally for a *different* completeness question (referenced == the
+caller's claimed chunk_count) the FK does not answer. The three-shape
+taxonomy below remains the correct conceptual model of the row — it is
+retained for that reason — but the specific instruments named throughout
+this section are historical except where noted.
+
 "Dangling manifest row" has three distinct shapes, only one of which is a
 defect. A `catalog_document_chunks` row `c` is examined against its owning
 document `d` (`d.tenant_id = c.tenant_id AND d.tumbler = c.doc_id`) and
@@ -338,11 +356,13 @@ agree at the full 256 bits, by construction.
 **Migration status:** the flip SHIPPED (RDR-180 closed 2026-07-20; epic
 `nexus-jxizy`): the producer emits the full digest, the engine stores bytea,
 and the `chash-rekey` ladder rung rekeyed existing stores (254,846
-production rows, zero loss). For every rehashable
-row the legacy 32-hex is the strict prefix of the new 64-hex (same text, same
-digest); the persisted `chash_alias` table is the collision-free resolver for
-legacy references thereafter (prefix matching only *builds* the map, it is not
-the resolver).
+production rows, zero loss). For every rehashable row the legacy 32-hex was
+the strict prefix of the new 64-hex (same text, same digest); the
+`chash_alias` table was the collision-free resolver for legacy references in
+that window. **Retired (nexus-lgdel.l1, 2026-08-16):** the beneficiary
+population reached zero, so `chash_alias` and the whole legacy-reference
+resolution route are DROPPED — a legacy 32-hex reference is no longer
+resolvable at all; re-index the source to mint a canonical 64-hex chash.
 
 ### Metadata field semantics (chunk vs document level)
 
@@ -352,7 +372,7 @@ Two hash fields look similar but mean very different things. Confusing them prod
 |---|---|---|---|---|
 | `content_hash` | document | `sha256(file_bytes)` | every indexer at register time (`indexer.py:1198`) | document-level dedup; staleness comparison — paired with the index-run fence's three-way state, see [Index-run fence (RUNFENCE)](#index-run-fence-runfence) below; backup-snapshot identity |
 | `chunk_text_hash` | chunk | `sha256(chunk_text)` (full 64 chars) | every indexer per chunk; healed on an upgraded store by the ladder (`nx upgrade`) | content-addressed link spans (`chash:<hex>`); `nx t3 reidentify` natural-ID source (first 32 chars); cross-collection chunk dedup |
-| `chunk_text_hash` (as chunk id) | chunk | the full SHA (RDR-180) | every indexer via `chunk_identity.chunk_id` | the chunk natural ID and the `document_chunks.chash` join key; the pre-RDR-180 `[:32]` truncation is retired (legacy 32-hex references resolve via `chash_alias`) |
+| `chunk_text_hash` (as chunk id) | chunk | the full SHA (RDR-180) | every indexer via `chunk_identity.chunk_id` | the chunk natural ID and the `document_chunks.chash` join key; the pre-RDR-180 `[:32]` truncation is retired, and so (nexus-lgdel.l1) is the `chash_alias` legacy-reference resolver that used to bridge it — a legacy 32-hex reference is unresolvable now, re-index the source |
 | `source_uri` | document | `file://...` or `x-devonthink-item://<uuid>` etc. | indexer / MCP write paths | persistent URI identity; aspect-extraction routing; audit-membership home detection |
 | `source_path` | document | absolute or repo-relative file path | indexer | display + grep targets; legacy path predating `source_uri` |
 | `chunk_start_char` / `chunk_end_char` | chunk | char offsets in the source file | indexer per chunk | `chunk:char` span resolution; UI highlight |
@@ -461,13 +481,17 @@ rides the existing flush-grain manifest write, at zero extra round trips:
   (`manifest_complete_claim_on_continuation_slice`), never silently
   accepted.
 
-**Reads.** `HttpCatalogClient.manifest_verify(doc_id)` (one document — also
+**Reads — RETIRED, RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15.**
+`HttpCatalogClient.manifest_verify(doc_id)` (one document — formerly also
 `nx catalog manifest-verify`) and `manifest_verify_all()` (every live
-document, grouped by collection — the `nx doctor` sweep primitive) are
-plain reads that PROPAGATE on failure, unlike the advisory begin/fail
-calls above; the one caller that must fail open on any verify failure
-(`doc_indexer._manifest_is_fully_present`) implements that fail-open
-contract itself, around the call.
+document, grouped by collection — the former `nx doctor` sweep primitive)
+are both retired: the manifest-chunk FK makes the dangling state they
+diagnosed unreachable. `doc_indexer._manifest_is_fully_present` is now an
+unconditional `return True` (the FK makes its underlying question
+provably always-false) — see that function's own docstring for the full
+argument, including why `CatalogRepository.completeIndexRun`'s still-live
+write-path use of the SAME underlying `nexus.manifest_verify(text)` SQL
+function answers a *different* question the FK does not.
 
 **Doctor axis.** `nx doctor` separately flags documents stranded in
 `index_state='indexing'` past a threshold (`health.py
@@ -477,10 +501,12 @@ a rolling engine deploy that straddles one multi-batch run's begin/complete
 pair, stranding the document in `'indexing'` until a future full re-index
 happens to route both calls through upgraded pods).
 
-**CLI.** `nx catalog manifest-verify TUMBLER_OR_TITLE` reports one
-document's `referenced`/`present`/`missing` chunk counts plus its fence
-state without a full corpus scan; see
-[cli-reference.md § nx catalog manifest-verify](cli-reference.md#nx-catalog-manifest-verify).
+**CLI — RETIRED, RDR-191 Phase 6 (nexus-o8dil.33).** `nx catalog
+manifest-verify TUMBLER_OR_TITLE` used to report one document's
+`referenced`/`present`/`missing` chunk counts plus its fence state without
+a full corpus scan; see
+[cli-reference.md § nx catalog manifest-verify — retired](cli-reference.md#nx-catalog-manifest-verify--retired)
+for the current remedy (`nx catalog show TUMBLER_OR_TITLE`'s `index_state`).
 
 ### Catalog manifest and migration
 
@@ -491,10 +517,11 @@ Tumbler comparison semantics and the two graph-traversal views
 The `document_chunks` manifest schema is covered above (§ Metadata field
 semantics, § Index-run fence), not separately in catalog.md. The
 `ChashIndex` routing table is **retired** (RDR-187): the PG table
-`nexus.chash_index` was dropped as of engine v0.1.51, and `chash_alias` is
-the surviving legacy-reference resolver (see
+`nexus.chash_index` was dropped as of engine v0.1.51. `chash_alias`, the
+legacy-reference resolver that briefly survived it, is itself **retired**
+(nexus-lgdel.l1, 2026-08-16 — see
 [Chunk identity](#chunk-identity-the-canonical-chash-rdr-180) above) —
-catalog.md's own ChashIndex/migration-runbook material predates the drop.
+catalog.md's own ChashIndex/migration-runbook material predates both drops.
 `nx t3 reidentify` (still a live command, `commands/t3.py`) walks a
 collection's chunks to backfill/normalize legacy chunk ids; it is retained
 for the chunk-identity history
@@ -658,7 +685,7 @@ dispatch retry of [RDR-129](rdr/rdr-129-t2-daemon-serving-path-cross-store-conte
 | Plans             | `HttpPlanLibrary`           | `db.plans`             | Plan templates, plan search, plan TTL                                      |
 | Taxonomy          | `HttpTaxonomyStore`         | `db.taxonomy`          | HDBSCAN topic discovery, centroid ANN assignment, merge strategy, review workflow ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)) |
 | Telemetry         | `HttpTelemetryStore`        | `db.telemetry`         | Relevance log (query/chunk/action triples), retention-based expiry         |
-| Chash index       | `HttpChashIndex`            | `db.chash_index`       | **RETIRED (RDR-187)**: the PG table `nexus.chash_index` is DROPPED as of engine v0.1.51 — it was the router remnant of the split-store architecture; `chash_alias` is the surviving resolver. The client store class remains only as a shim until the final `/v1/chash/*` 410 flip (nexus-piwya.11). Historical: global chash → (collection, doc_id) lookup, dual-written at every T3 upsert site ([RDR-086](rdr/rdr-086-chash-span-resolution.md) Phase 1) |
+| Chash index       | `HttpChashIndex`            | `db.chash_index`       | **RETIRED (RDR-187)**: the PG table `nexus.chash_index` is DROPPED as of engine v0.1.51 — it was the router remnant of the split-store architecture. `chash_alias`, the legacy-reference resolver that briefly succeeded it, is itself **retired** (nexus-lgdel.l1, 2026-08-16) — a legacy 32-hex reference is no longer resolvable at all. The client store class remains only as a shim until the final `/v1/chash/*` 410 flip (nexus-piwya.11) — its own `delete_collection` method was deleted at nexus-lgdel.l2, the last remaining no-op that route ever served. Historical: global chash → (collection, doc_id) lookup, dual-written at every T3 upsert site ([RDR-086](rdr/rdr-086-chash-span-resolution.md) Phase 1) |
 | Document aspects  | `HttpDocumentAspectsStore`  | `db.document_aspects`  | Per-document structured aspects (problem, method, datasets, baselines, results, extras) keyed by `(collection, source_path)`; populated by the async aspect-extraction worker ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) P1.1) |
 | Aspect queue      | `HttpAspectQueue`           | `db.aspect_queue`      | Durable queue feeding the aspect-extraction worker; FIFO `claim_next` with cross-process compare-and-swap atomicity; `reclaim_stale` recovers rows from crashed workers ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) follow-up) |
 | Document highlights | `HttpDocumentHighlightsStore` | `db.document_highlights` | Per-document DEVONthink highlight / mention markdown notes, keyed by catalog tumbler (`doc_id`); populated by `nx dt index --highlights` ([RDR-139](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md) Layer E). Deliberately separate from `document_aspects`: free-text highlights must not contend with the aspect worker's whole-row overwrite or its confidence gate |
@@ -684,6 +711,107 @@ db.telemetry.log_relevance(query, ...)             # domain method
 
 Existing call sites that use `db.search(...)`, `db.save_plan(...)`,
 etc. continue to work via facade delegation -- no migration required.
+
+### Authentication: static token vs self-minted data tokens (conexus RDR-005 2a)
+
+Every HTTP storage client (T1 `HttpScratchStore`, the eight T2 `Http*Store`
+classes via `RefreshableHttpStoreMixin`, T3 `HttpVectorClient`, and the
+catalog client) presents an `Authorization: Bearer <token>` header on every
+call. By default that token is the static `service_token` credential
+(`nx config set service_token`) or a supervisor-published lease token —
+unchanged since RDR-152. When a `mint_token` credential is configured
+(`nx config set mint_token`, a `scope=mint`/`scope=mint-locked` bearer),
+`nexus.db.data_token.DataTokenManager` self-mints a short-TTL `scope=data`
+token per `(base_url, tenant)` (`POST /v1/data-tokens/mint`, cached and
+refreshed below a 20%-of-TTL threshold or on a 401) and every client
+presents THAT instead — a client-held resolution seam, not a per-call-site
+change. This is the client half of RDR-005's staged cutover: conexus's edge
+today still JIT-injects a shared per-tenant credential and strips whatever
+`Authorization` the client sends (RDR-005 2a's variant-3 posture); once the
+edge flips to pure pass-through, a `mint_token`-configured client presents
+its OWN credential's data token end-to-end instead of riding the edge's
+injected one. Unconfigured installs (the default, local mode included) see
+zero behavior change. A mint failure with `mint_token` configured never
+falls back silently to the static token — it fails loud
+(`DataTokenMintError`), since a half-provisioned install must surface.
+
+**`mint_token` and `mint_tenant` travel as a pair** (nexus-ssqk9). Every
+`Http*Store` defaults its own `tenant` constructor kwarg to
+`DEFAULT_TENANT = "default"` — but a real `scope=mint-locked` credential is
+bound server-side to whatever tenant the operator issued it under (e.g.
+`"nexus"`), and `DataTokenHandler` 403s the mint the instant the request
+body's `tenant` field differs from that bound tenant. `mint_tenant`
+(`nx config set mint_tenant <tenant>` / `NX_MINT_TENANT`) lets an operator
+name the credential's real bound tenant once; `DataTokenManager._mint` then
+sends `mint_tenant` (when configured) as the mint body's `tenant` field
+INSTEAD OF the caller-passed tenant — every store's own tenant-scoped cache
+key and `X-Nexus-Tenant` header convention are unaffected, only the wire-level
+mint body changes. A 403 from a mint-locked credential names both the
+configured/requested tenant and the remedy (`nx config set mint_tenant
+<tenant>`) in the raised `DataTokenMintError`, rather than only relaying the
+server's own error text. `mint_tenant` is not itself a secret (a tenant
+slug, not a bearer) — it displays unmasked from `nx config get`/`nx config
+list`, unlike every other `CREDENTIALS`-registry entry.
+
+The mint round trip additionally carries a small bounded retry (max 3
+attempts, 1s/2s backoff, honoring a server `Retry-After` when present) on
+the transient gateway/rate-limit statuses `{429, 502, 503, 504}` —
+`MintRateLimiter` genuinely 429s under load — deliberately never touching
+the shared `nexus.rate_brake` brake (that brake coordinates bulk-write
+workers; a mint is a single infrequent auth round trip). `nx doctor`'s
+mint_token check routes through `DataTokenManager`'s process-wide singleton
+(never a throwaway instance), and its success line reports which of three
+things happened (minted a fresh token, reused an in-process cached one, or
+reused one borrowed from the cross-process lease file — see below) plus
+the granted TTL.
+
+**Cross-process lease-file cache (nexus-9c7t9).** The in-process cache
+above solves residue/rate-limit pressure only WITHIN one long-lived
+process (the MCP server); every short-lived `nx` CLI subprocess used to
+start with an empty cache and mint fresh, so five or more back-to-back `nx`
+invocations in one minute exhausted the engine's `MintRateLimiter` default
+burst (5 per credential+tenant per minute) and failed loud. Fixed by
+mirroring the lease-file precedent in `nexus.db.t1`
+(`publish_t1_session_lease` / `read_t1_session_lease`): every successful
+mint also (best-effort) persists the short-TTL DATA TOKEN — never the mint
+credential — to `~/.config/nexus/data_token_lease.<key>`, where `<key>` is
+a filesystem-safe digest of `(base_url host:port, tenant)`. Mode `0600`,
+atomic temp-file + `os.replace` publish. On a genuine in-process cache MISS
+(never on a refresh-due-but-still-cached entry), `DataTokenManager.
+bearer_for` reads the lease file BEFORE minting, accepting it only when its
+format version, tenant, and base-url digest all match AND its remaining
+TTL exceeds the same 20% refresh threshold the in-process cache enforces;
+any other state (absent, corrupt, foreign, stale) is a clean miss and the
+manager mints as before. A lease-write failure is logged as a warning and
+NEVER fails the mint — the lease is an optimization, the mint is the
+source of truth. `invalidate()` (the 401 self-heal path) removes the lease
+file alongside the in-process entry, best-effort. `nx uninstall` removes
+every `data_token_lease.*` file unconditionally (not gated on
+`--remove-data`), alongside the managed credentials.
+
+Concurrency is deliberately NOT `flock`/`O_EXCL`-guarded: two cold
+processes racing to fill an empty/stale cache slot may both mint and both
+publish — last writer wins on the file, and the loser's own in-process
+token is still perfectly valid, just not the one on disk any more. This is
+accepted, not a bug: the race window is bounded to once per TTL-refresh
+boundary per `(base_url, tenant)`, and `MintRateLimiter`'s burst=5 absorbs
+a handful of concurrent cold starts — a double mint produces two
+independently valid tokens, never corruption, so there is no correctness
+reason (only an efficiency one) to add cross-process locking here.
+
+Practical effect: a real `nx` CLI subprocess always has an empty
+in-process cache, so it either mints fresh (the very first invocation
+after boot, or after the lease has gone stale) or borrows the lease file a
+prior invocation published — `nx doctor`'s success line distinguishes
+"reused the cached (lease file)" from "reused the cached (in-process)"
+(observable only inside one long-lived process, e.g. the MCP server) and
+"minted a fresh". Consequences of the residual scope, measured at
+nexus-rftfs and narrowed by nexus-9c7t9: the engine still sees roughly one
+short-TTL `scope=data` row per (endpoint, tenant) per TTL window rather
+than per invocation (the nexus-lgiqw residue class shrinks accordingly),
+and `MintRateLimiter`'s burst ceiling now only binds a genuine COLD-START
+STORM (many `nx` processes launched concurrently before any lease exists)
+rather than ordinary sequential CLI usage.
 
 ### Concurrency Model ([RDR-063](rdr/rdr-063-t2-domain-split.md) Phase 2) — HISTORICAL
 

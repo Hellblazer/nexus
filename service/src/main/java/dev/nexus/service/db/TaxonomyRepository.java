@@ -1,6 +1,7 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
+import org.jooq.JSONB;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static dev.nexus.service.db.JsonbSupport.jsonbRequired;
 import static dev.nexus.service.jooq.nexus.Tables.*;
 import static org.jooq.impl.DSL.*;
 
@@ -57,6 +59,27 @@ public final class TaxonomyRepository {
 
     public TaxonomyRepository(TenantScope tenantScope) {
         this.tenantScope = tenantScope;
+    }
+
+    // ── doc_id hex/bytes boundary (RDR-194 P3c, nexus-tk070.p3c) ────────────────
+
+    /**
+     * Hex -> the {@code topic_assignments.doc_id} bytea storage form
+     * (RDR-194 P3c). Mirrors {@code RemapRepository}'s {@code
+     * newChashBytes} idiom exactly (RDR-194 P2 precedent): this repository
+     * is the hex/bytes seam, never a jOOQ Converter/forcedType override
+     * (D0.7 — compilation failure is the intended call-site census).
+     * Callers everywhere else in the public API keep passing/receiving the
+     * 64-hex wire form (D0.8); only the two INSERT/WHERE boundary sites
+     * touch this.
+     */
+    private static byte[] docIdBytes(String docIdHex) {
+        return Chash.fromHex(docIdHex).toBytes();
+    }
+
+    /** Bytea -> the wire-hex form (D0.8: the wire contract stays 64-hex). */
+    private static String docIdHex(byte[] docIdBytes) {
+        return Chash.fromSha256Bytes(docIdBytes).toHex();
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -467,10 +490,14 @@ public final class TaxonomyRepository {
         // already rolled back → safe.
         return DeadlockRetry.run("taxonomy.assignMany", () -> tenantScope.withTenant(tenant, ctx -> {
             // Review #5: register each distinct source_collection ONCE per
-            // batch instead of one idempotent INSERT per projection row
-            // (batches routinely share a single collection).
+            // batch instead of one idempotent INSERT per row (batches
+            // routinely share a single collection). RDR-194 D1/P3b
+            // (nexus-tk070.p3b): no longer projection-only -- assignOne's
+            // non-projection branch now persists source_collection too
+            // (mirrors P3a's plpgsql centroid-branch fix), so ANY row
+            // carrying a non-blank source_collection needs the same
+            // auto-stub, not just "assigned_by": "projection" rows.
             ordered.stream()
-                .filter(r -> "projection".equals(r.get("assigned_by")))
                 .map(r -> optS(r, "source_collection"))
                 .filter(c -> c != null && !c.isBlank())
                 .distinct()
@@ -519,7 +546,7 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.SIMILARITY,
                     TOPIC_ASSIGNMENTS.ASSIGNED_AT,
                     TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-               .values(tenant, docId, topicId, "projection", similarity, assignedAtTs, sourceCollection)
+               .values(tenant, docIdBytes(docId), topicId, "projection", similarity, assignedAtTs, sourceCollection)
                .onConflict(
                     TOPIC_ASSIGNMENTS.TENANT_ID,
                     TOPIC_ASSIGNMENTS.DOC_ID,
@@ -541,12 +568,29 @@ public final class TaxonomyRepository {
                .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
                .execute();
         } else {
+            // RDR-194 D1/P3b (nexus-tk070.p3b): source_collection wired through
+            // on the non-projection branch too -- the Java-side mirror of P3a's
+            // plpgsql assign_from_chashes_<dim> centroid-branch fix.
+            // `sourceCollection` is ALREADY a parameter on this method (flows in
+            // from assignTopic/assignMany's public API unconditionally, not just
+            // the projection branch above); this branch was simply discarding
+            // it. No fallback/synthesis is added here (D0.9): if a caller
+            // supplies null, this INSERT now fails loud against
+            // topic_assignments.source_collection's NOT NULL constraint rather
+            // than persisting a value the P3b migration would later have had to
+            // delete as unresolvable derived garbage. Mirrors the projection
+            // branch's own auto-stub call above (RDR-156 P0.2): a caller
+            // supplying a genuinely new collection must not need a separate
+            // pre-registration round trip just because this is the
+            // non-projection branch.
+            if (ensureCollection) ensureCollectionRegistered(ctx, tenant, sourceCollection);
             ctx.insertInto(TOPIC_ASSIGNMENTS,
                     TOPIC_ASSIGNMENTS.TENANT_ID,
                     TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID,
-                    TOPIC_ASSIGNMENTS.ASSIGNED_BY)
-               .values(tenant, docId, topicId, assignedBy)
+                    TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+               .values(tenant, docIdBytes(docId), topicId, assignedBy, sourceCollection)
                .onConflict(
                    TOPIC_ASSIGNMENTS.TENANT_ID,
                    TOPIC_ASSIGNMENTS.DOC_ID,
@@ -705,20 +749,30 @@ public final class TaxonomyRepository {
                 .from(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId));
             var rows = (limit > 0 ? q.limit(limit) : q).fetch();
-            return rows.map(r -> r.get(TOPIC_ASSIGNMENTS.DOC_ID));
+            return rows.map(r -> docIdHex(r.get(TOPIC_ASSIGNMENTS.DOC_ID)));
         });
     }
 
-    /** Return {doc_id, topic_id} pairs for given doc_ids. */
+    /**
+     * Return {doc_id, topic_id} pairs for given doc_ids.
+     *
+     * <p>RDR-194 P3c (nexus-tk070.p3c): {@code .in(docIds)} on a {@code
+     * Field<byte[]>} accepts a raw {@code Collection<?>} by jOOQ's own API
+     * shape — a {@code List<String>} keeps COMPILING here with no error,
+     * then either fails at bind time or (worse) silently matches nothing.
+     * Compiler-SILENT; hand-fixed and covered by a dedicated test per the
+     * bead's own naming of this class of site.
+     */
     public List<Map<String, Object>> getAssignmentsForDocs(String tenant, List<String> docIds) {
         if (docIds == null || docIds.isEmpty()) return List.of();
+        List<byte[]> docIdBytesList = docIds.stream().map(TaxonomyRepository::docIdBytes).toList();
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
                .from(TOPIC_ASSIGNMENTS)
-               .where(TOPIC_ASSIGNMENTS.DOC_ID.in(docIds))
+               .where(TOPIC_ASSIGNMENTS.DOC_ID.in(docIdBytesList))
                .fetch()
                .map(r -> Map.of(
-                   "doc_id",   r.get(TOPIC_ASSIGNMENTS.DOC_ID),
+                   "doc_id",   docIdHex(r.get(TOPIC_ASSIGNMENTS.DOC_ID)),
                    "topic_id", r.get(TOPIC_ASSIGNMENTS.TOPIC_ID))));
     }
 
@@ -756,6 +810,9 @@ public final class TaxonomyRepository {
      */
     public List<Map<String, Object>> getAssignmentDetails(String tenant, List<String> docIds) {
         if (docIds == null || docIds.isEmpty()) return List.of();
+        // RDR-194 P3c: compiler-silent .in(Collection<?>) site, see
+        // getAssignmentsForDocs's javadoc for why this needs hand-fixing.
+        List<byte[]> docIdBytesList = docIds.stream().map(TaxonomyRepository::docIdBytes).toList();
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(TOPIC_ASSIGNMENTS.DOC_ID,
                        TOPIC_ASSIGNMENTS.TOPIC_ID,
@@ -764,12 +821,12 @@ public final class TaxonomyRepository {
                        TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
                        TOPIC_ASSIGNMENTS.ASSIGNED_AT)
                .from(TOPIC_ASSIGNMENTS)
-               .where(TOPIC_ASSIGNMENTS.DOC_ID.in(docIds))
+               .where(TOPIC_ASSIGNMENTS.DOC_ID.in(docIdBytesList))
                .orderBy(TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
                .fetch()
                .map(r -> {
                    Map<String, Object> m = new LinkedHashMap<>();
-                   m.put("doc_id",            r.get(TOPIC_ASSIGNMENTS.DOC_ID));
+                   m.put("doc_id",            docIdHex(r.get(TOPIC_ASSIGNMENTS.DOC_ID)));
                    m.put("topic_id",          r.get(TOPIC_ASSIGNMENTS.TOPIC_ID));
                    m.put("assigned_by",       r.get(TOPIC_ASSIGNMENTS.ASSIGNED_BY));
                    m.put("similarity",        r.get(TOPIC_ASSIGNMENTS.SIMILARITY));
@@ -787,17 +844,57 @@ public final class TaxonomyRepository {
                .join(TOPICS).on(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
                .where(TOPICS.LABEL.eq(label))
                .fetch()
-               .map(r -> r.get(TOPIC_ASSIGNMENTS.DOC_ID)));
+               .map(r -> docIdHex(r.get(TOPIC_ASSIGNMENTS.DOC_ID))));
     }
 
     /**
      * Purge topic_assignments for a deleted doc. Matches purge_assignments_for_doc.
      * Returns count of removed assignment rows.
+     *
+     * <p>{@code title} IS the doc_id hex when it names a real chunk chash despite
+     * the parameter name (RDR-194 D1's own finding: {@code http_taxonomy_store.py}
+     * calls the doc_id "title" at this call site — the name is not evidence of a
+     * different identity space for a CHASH-shaped value).
+     *
+     * <p><strong>RDR-194 P3c correction (nexus-tk070.p3c, found by
+     * tests/test_t2.py::test_delete going red):</strong> this method has a SECOND,
+     * genuinely-different caller this bead's own D1 research did not audit —
+     * {@code T2Database.delete}'s memory-to-taxonomy cross-domain cascade
+     * ({@code src/nexus/db/t2/__init__.py:556}), which calls this UNCONDITIONALLY
+     * on every successful memory delete with the memory entry's OWN {@code title}
+     * (e.g. {@code "doomed.md"}), not a chunk chash, on the defensive theory that a
+     * topic_assignments row might reference it. D1's own finding — every live
+     * writer emits a 64-hex chunk chash, the memory-title-clustering read path
+     * that would have made a title a real candidate died with SQLite at commit
+     * {@code f24bdb853} — means that theory is structurally impossible for a
+     * non-canonical title: no row can EVER match it. Pre-P3c this was a harmless
+     * TEXT no-op (zero rows, no error). Post-P3c, {@link #docIdBytes} on a
+     * non-hex title would throw and abort the ENTIRE memory delete, which is not
+     * this call's contract. Guarding on the same {@code ^[0-9a-f]{64}$} shape
+     * predicate the P3b migration itself gates candidacy on (D0.9: this is
+     * recognizing a structural impossibility, not resolving/coercing a bad
+     * value) preserves the exact pre-P3c no-op behavior for a non-chash title,
+     * while a genuinely chash-shaped title still gets full delete semantics.
      */
     public int purgeAssignmentsForDoc(String tenant, String project, String title) {
+        if (!title.matches("^[0-9a-f]{64}$")) {
+            // Not a chash-shaped identifier -- structurally cannot match any
+            // topic_assignments row (see javadoc above). Still run the
+            // empty-topics sweep below, matching this method's pre-P3c
+            // behavior for a non-matching title (unconditional, not gated
+            // on removed > 0).
+            return tenantScope.withTenant(tenant, ctx -> {
+                ctx.deleteFrom(TOPICS)
+                   .where(TOPICS.COLLECTION.eq(project)
+                       .and(TOPICS.ID.notIn(
+                           selectDistinct(TOPIC_ASSIGNMENTS.TOPIC_ID).from(TOPIC_ASSIGNMENTS))))
+                   .execute();
+                return 0;
+            });
+        }
         return tenantScope.withTenant(tenant, ctx -> {
             int removed = ctx.deleteFrom(TOPIC_ASSIGNMENTS)
-                .where(TOPIC_ASSIGNMENTS.DOC_ID.eq(title)
+                .where(TOPIC_ASSIGNMENTS.DOC_ID.eq(docIdBytes(title))
                     .and(TOPIC_ASSIGNMENTS.TOPIC_ID.in(
                         select(TOPICS.ID).from(TOPICS).where(TOPICS.COLLECTION.eq(project)))))
                 .execute();
@@ -938,15 +1035,20 @@ public final class TaxonomyRepository {
      * EXCLUDED for the same reason (RDR-152 nexus-1di3r.4).
      */
     public void upsertTopicLink(String tenant, long fromId, long toId, int linkCount, String linkTypes) {
+        // nexus-cefa1.6: link_types is jsonb NOT NULL now (taxonomy-008-link-
+        // types-jsonb.xml) — jsonbRequired rejects null/blank as a
+        // repository-layer backstop (the primary gate is TaxonomyHandler's
+        // own 400, mirroring AspectHandler.rejectMalformedJson).
+        JSONB linkTypesJb = jsonbRequired(linkTypes, "link_types");
         tenantScope.withTenant(tenant, ctx -> {
             ctx.insertInto(TOPIC_LINKS,
                     TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
                     TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES)
-               .values(tenant, fromId, toId, linkCount, linkTypes)
+               .values(tenant, fromId, toId, linkCount, linkTypesJb)
                .onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
                .doUpdate()
                .set(TOPIC_LINKS.LINK_COUNT, field("EXCLUDED.link_count", Integer.class))
-               .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", String.class))
+               .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", JSONB.class))
                .execute();
             return null;
         });
@@ -1020,7 +1122,7 @@ public final class TaxonomyRepository {
             var rows = ctx.select(max(TOPIC_ASSIGNMENTS.SIMILARITY).as("ms"))
                 .from(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                    .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(docId))
+                    .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(docIdBytes(docId)))
                     .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(sourceCollection))
                     .and(TOPIC_ASSIGNMENTS.SIMILARITY.isNotNull()))
                 .fetch();
@@ -1233,7 +1335,7 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.SIMILARITY,
                     TOPIC_ASSIGNMENTS.ASSIGNED_AT,
                     TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-               .values(tenant, docId, topicId, assignedBy, similarity, assignedAtTs, sourceCollection)
+               .values(tenant, docIdBytes(docId), topicId, assignedBy, similarity, assignedAtTs, sourceCollection)
                .onConflict(
                     TOPIC_ASSIGNMENTS.TENANT_ID,
                     TOPIC_ASSIGNMENTS.DOC_ID,
@@ -1261,6 +1363,8 @@ public final class TaxonomyRepository {
     /** Fidelity-preserving import for a topic_links row. */
     public void importTopicLink(String tenant, long fromId, long toId,
                                  int linkCount, String linkTypes) {
+        // nexus-cefa1.6: see upsertTopicLink's identical comment above.
+        JSONB linkTypesJb = jsonbRequired(linkTypes, "link_types");
         tenantScope.withTenant(tenant, ctx -> {
             // GREATEST(existing.link_count, EXCLUDED.link_count) — ETL path uses GREATEST
             // to never downgrade a live PG value from a stale SQLite snapshot.
@@ -1268,12 +1372,12 @@ public final class TaxonomyRepository {
             ctx.insertInto(TOPIC_LINKS,
                     TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
                     TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES)
-               .values(tenant, fromId, toId, linkCount, linkTypes)
+               .values(tenant, fromId, toId, linkCount, linkTypesJb)
                .onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
                .doUpdate()
                .set(TOPIC_LINKS.LINK_COUNT,
                     field("GREATEST(nexus.topic_links.link_count, EXCLUDED.link_count)", Integer.class))
-               .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", String.class))
+               .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", JSONB.class))
                .execute();
             return null;
         });
@@ -1432,7 +1536,7 @@ public final class TaxonomyRepository {
                 String assignedAt = optS(r, "assigned_at");
                 OffsetDateTime assignedAtTs = (assignedAt != null && !assignedAt.isBlank())
                     ? parseTsStrict(assignedAt) : null;
-                insert = insert.values(tenant, reqS(r, "doc_id"), reqL(r, "topic_id"),
+                insert = insert.values(tenant, docIdBytes(reqS(r, "doc_id")), reqL(r, "topic_id"),
                         optS(r, "assigned_by"), optD(r, "similarity"), assignedAtTs,
                         optS(r, "source_collection"));
             }
@@ -1474,14 +1578,15 @@ public final class TaxonomyRepository {
                     TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
                     TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES);
             for (var r : batch) {
+                // nexus-cefa1.6: see upsertTopicLink's identical jsonbRequired comment.
                 insert = insert.values(tenant, reqL(r, "from_topic_id"), reqL(r, "to_topic_id"),
-                        optI(r, "link_count", 0), optS(r, "link_types"));
+                        optI(r, "link_count", 0), jsonbRequired(optS(r, "link_types"), "link_types"));
             }
             insert.onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
                   .doUpdate()
                   .set(TOPIC_LINKS.LINK_COUNT,
                        field("GREATEST(nexus.topic_links.link_count, EXCLUDED.link_count)", Integer.class))
-                  .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", String.class))
+                  .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", JSONB.class))
                   .execute();
         }
         return rows.size();
@@ -1874,6 +1979,10 @@ public final class TaxonomyRepository {
 
             if (pairs.isEmpty()) return 0;
 
+            // nexus-cefa1.6: link_types is jsonb now — a hardcoded, always-valid
+            // literal, so JSONB.valueOf directly rather than jsonbRequired's
+            // null-check (this value is never client-supplied).
+            JSONB cooccurrenceTypes = JSONB.valueOf("[\"cooccurrence\"]");
             for (var r : pairs) {
                 long fromId = r.get("from_id", Long.class);
                 long toId   = r.get("to_id",   Long.class);
@@ -1881,11 +1990,11 @@ public final class TaxonomyRepository {
                 ctx.insertInto(TOPIC_LINKS,
                         TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
                         TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES)
-                   .values(tenant, fromId, toId, cnt, "[\"cooccurrence\"]")
+                   .values(tenant, fromId, toId, cnt, cooccurrenceTypes)
                    .onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
                    .doUpdate()
                    .set(TOPIC_LINKS.LINK_COUNT, field("EXCLUDED.link_count", Integer.class))
-                   .set(TOPIC_LINKS.LINK_TYPES, "[\"cooccurrence\"]")
+                   .set(TOPIC_LINKS.LINK_TYPES, cooccurrenceTypes)
                    .execute();
             }
             log.info("cooccurrence_links generated count={}", pairs.size());
@@ -1942,7 +2051,12 @@ public final class TaxonomyRepository {
 
                 String mergedTypes;
                 if (!existing.isEmpty() && existing.get(0).get(TOPIC_LINKS.LINK_TYPES) != null) {
-                    String lt = existing.get(0).get(TOPIC_LINKS.LINK_TYPES);
+                    // nexus-cefa1.6: link_types is jsonb now — .data() recovers the
+                    // raw JSON-array text so the merge algorithm below runs UNCHANGED
+                    // (jsonb array element order survives the round trip verbatim;
+                    // only object-key canonicalization would reorder anything, and
+                    // this column never holds an object).
+                    String lt = existing.get(0).get(TOPIC_LINKS.LINK_TYPES).data();
                     if (!lt.contains("\"projection\"")) {
                         // Insert projection into the JSON array
                         mergedTypes = lt.replace("]", ", \"projection\"]")
@@ -1958,14 +2072,21 @@ public final class TaxonomyRepository {
                     mergedTypes = "[\"projection\"]";
                 }
 
+                // nexus-cefa1.6: mergedTypes is always a valid JSON array here — either
+                // a hardcoded literal above, the untouched jsonb-read-back-then-.data()
+                // value, or that value with "projection" spliced in by the same string
+                // surgery this arc did not change — jsonbRequired is the uniform write
+                // helper the rest of this class uses (this value is never null/blank).
+                JSONB mergedTypesJb = jsonbRequired(mergedTypes, "link_types");
+
                 ctx.insertInto(TOPIC_LINKS,
                         TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
                         TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES)
-                   .values(tenant, fromId, toId, entry.getValue(), mergedTypes)
+                   .values(tenant, fromId, toId, entry.getValue(), mergedTypesJb)
                    .onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
                    .doUpdate()
                    .set(TOPIC_LINKS.LINK_COUNT, field("EXCLUDED.link_count", Integer.class))
-                   .set(TOPIC_LINKS.LINK_TYPES,  field("EXCLUDED.link_types",  String.class))
+                   .set(TOPIC_LINKS.LINK_TYPES,  field("EXCLUDED.link_types",  JSONB.class))
                    .execute();
             }
 
@@ -2017,7 +2138,7 @@ public final class TaxonomyRepository {
                     .get(TOPICS.ID);
                 childIds.add(childId);
 
-                batchInsertAssignments(ctx, tenant, childId, docIds, "split");
+                batchInsertAssignments(ctx, tenant, childId, docIds, "split", collectionName);
             }
 
             // RDR-154 P0 (nexus-i7ivk): no manual parent zero-out. The parent's
@@ -2064,8 +2185,10 @@ public final class TaxonomyRepository {
                     .and(TOPICS.COLLECTION.eq(collection)))
                 .fetch()
                 .map(r -> {
+                    // RDR-194 P3c: compiler-silent Map<String,Object> put site
+                    // (byte[] type-checks as Object) -- hand-fixed.
                     Map<String, Object> m = new LinkedHashMap<>();
-                    m.put("doc_id",   r.get(TOPIC_ASSIGNMENTS.DOC_ID));
+                    m.put("doc_id",   docIdHex(r.get(TOPIC_ASSIGNMENTS.DOC_ID)));
                     m.put("topic_id", r.get(TOPIC_ASSIGNMENTS.TOPIC_ID));
                     return m;
                 });
@@ -2154,7 +2277,7 @@ public final class TaxonomyRepository {
                 }
                 topicIds.add(topicId);
 
-                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy);
+                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy, collection);
             }
 
             // Manual transfers are intentionally NOT batched (nexus-eh89h): they
@@ -2165,18 +2288,25 @@ public final class TaxonomyRepository {
             for (var e : transfers.entrySet()) {
                 int specIndex = ((Number) e.getValue()).intValue();
                 if (specIndex >= 0 && specIndex < topicIds.size()) {
+                    // RDR-194 D1/P3b (nexus-tk070.p3b): source_collection wired
+                    // through -- `collection` is this method's own rebuild-scope
+                    // parameter (already used above to resolve/insert the target
+                    // topic), the correct value since a manual transfer moves a
+                    // doc WITHIN this same rebuild's collection, never across one.
                     ctx.insertInto(TOPIC_ASSIGNMENTS,
                             TOPIC_ASSIGNMENTS.TENANT_ID,
                             TOPIC_ASSIGNMENTS.DOC_ID,
                             TOPIC_ASSIGNMENTS.TOPIC_ID,
-                            TOPIC_ASSIGNMENTS.ASSIGNED_BY)
-                       .values(tenant, e.getKey(), topicIds.get(specIndex), "manual")
+                            TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                            TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+                       .values(tenant, docIdBytes(e.getKey()), topicIds.get(specIndex), "manual", collection)
                        .onConflict(
                            TOPIC_ASSIGNMENTS.TENANT_ID,
                            TOPIC_ASSIGNMENTS.DOC_ID,
                            TOPIC_ASSIGNMENTS.TOPIC_ID)
                        .doUpdate()
                        .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "manual")
+                       .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, collection)
                        .execute();
                 }
             }
@@ -2264,7 +2394,7 @@ public final class TaxonomyRepository {
                 }
                 topicIds.add(topicId);
 
-                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy);
+                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy, collection);
             }
             log.info("persist_discovered collection={} topics={}", collection, topicIds.size());
             return topicIds;
@@ -2293,20 +2423,22 @@ public final class TaxonomyRepository {
      */
     private static void batchInsertAssignments(org.jooq.DSLContext ctx, String tenant,
                                                long topicId, List<String> docIds,
-                                               String assignedBy) {
+                                               String assignedBy, String sourceCollection) {
         if (docIds == null || docIds.isEmpty()) return;
-        // 4 bind params per row → 5000 rows = 20000 params, under PG's Int16
-        // Bind-message parameter-count limit of 32767. (A topic with >5000 docs
-        // fires the trigger ceil(N/5000) times — still vastly better than per-row;
+        // 5 bind params per row (RDR-194 D1/P3b, nexus-tk070.p3b: source_collection
+        // added) → 5000 rows = 25000 params, still under PG's Int16 Bind-message
+        // parameter-count limit of 32767. (A topic with >5000 docs fires the
+        // trigger ceil(N/5000) times — still vastly better than per-row;
         // realistic topics are hundreds to low-thousands.)
         final int MAX_ROWS = 5000;
         for (int start = 0; start < docIds.size(); start += MAX_ROWS) {
             List<String> batch = docIds.subList(start, Math.min(start + MAX_ROWS, docIds.size()));
             var insert = ctx.insertInto(TOPIC_ASSIGNMENTS,
                     TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
-                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY);
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION);
             for (String docId : batch) {
-                insert = insert.values(tenant, docId, topicId, assignedBy);
+                insert = insert.values(tenant, docIdBytes(docId), topicId, assignedBy, sourceCollection);
             }
             insert.onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                               TOPIC_ASSIGNMENTS.TOPIC_ID)

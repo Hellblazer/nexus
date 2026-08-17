@@ -72,10 +72,18 @@ ALTER TABLE nexus.chash_index
     CHECK (length(chash) = 32)
     NOT VALID;
         </sql>
-        <!-- nexus-a0m60: guarded — rdr187-2-drop-chash-index retires
-             nexus.chash_index later in master order, so this table is gone by
-             the time the chain rolls back here. IF EXISTS guards the
-             CONSTRAINT, not the TABLE. -->
+        <!-- nexus-a0m60: guarded — IF EXISTS guards the CONSTRAINT, not the
+             TABLE, so an unguarded DROP CONSTRAINT against a missing table
+             would raise `relation "nexus.chash_index" does not exist`.
+             UPDATED (nexus-lelhx round 2, code-review-expert finding): the
+             original premise (rdr187-2-drop-chash-index's rollback was a
+             deliberate no-op, so this table is gone by the time the chain
+             rolls back here) no longer holds — rdr187-2 now carries a real
+             rollback recreating the table's schema shape
+             (rdr187-001-drop-chash-index.xml) and always rolls back BEFORE
+             this changeset in the reverse sequence, so the table is present
+             again here on any reachable chain. Kept as a defensive guard,
+             not because the table is currently expected to be missing. -->
         <rollback>
             <sql splitStatements="false" stripComments="false">
 DO $$

@@ -26,7 +26,7 @@ from nexus.commands.catalog_cmds.doctor import (
     doctor_cmd,
 )
 from tests.conftest import make_vector_test_client
-from tests._catalog_fixture_ops import ActiveCatalog
+from tests._catalog_fixture_ops import ActiveCatalog, seed_manifest_chunks
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -455,16 +455,21 @@ class TestStorePutIntegrity:
         owner = cat.register_owner("knowledge", "curator", repo_hash="")
         t = cat.register(
             owner, title, content_type="knowledge",
-            physical_collection="knowledge__seeded",
+            physical_collection="knowledge__seeded__bge-base-en-v15-768__v1",
             chunk_count=chunk_count,
             meta={"doc_id": chash},
         )
         if with_manifest:
+            # nexus-dbzxb (RDR-191 Phase 5 Python collateral): fk_catalog_
+            # chunks_chunk requires a matching real nexus.chunks row; the
+            # doctor check's T3 read is separately mocked (_FakeT3), so
+            # this real chunk is bookkeeping only (idiom 1/2).
+            seed_manifest_chunks("knowledge__seeded__bge-base-en-v15-768__v1", [chash])
             cat.atomic_manifest_replace(str(t), [{
                 "chash": chash, "position": 0, "chunk_index": 0,
                 "line_start": None, "line_end": None,
                 "char_start": None, "char_end": None,
-            }], collection="knowledge__seeded")
+            }], collection="knowledge__seeded__bge-base-en-v15-768__v1")
         return str(t)
 
     class _FakeT3:
@@ -641,7 +646,7 @@ class TestStorePutIntegrity:
         cat.register(
             owner, "indexed.md", content_type="knowledge",
             file_path="notes/indexed.md",
-            physical_collection="knowledge__seeded",
+            physical_collection="knowledge__seeded__bge-base-en-v15-768__v1",
             chunk_count=5,  # drift-shaped, but out of scope
             meta={"doc_id": "e" * 64},
         )

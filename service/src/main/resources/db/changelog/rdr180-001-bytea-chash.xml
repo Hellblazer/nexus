@@ -39,6 +39,24 @@
     This whole engine generation deploys only inside the RDR-180 freeze
     window (nx upgrade rung locally; operator choreography in the cloud).
 
+    STALE-PROSE CORRECTION (RDR-194 D1, nexus-tk070.p3a, nexus-yo9mi,
+    2026-08): the "MIXED identity space" claim above (WHAT DOES NOT convert,
+    `topic_assignments.doc_id`) is corrected. `topic_assignments.doc_id` is
+    NOT a mixed identity space and does NOT hold memory-note titles. Every
+    live writer emits a chunk chash (RDR-180 Item6 `:80`, Item6a `:82`,
+    Failure Modes `:135`, the same RDR this file implements says the
+    opposite of this header, three times); the "title" the claim traces to
+    is `TaxonomyRepository.purgeAssignmentsForDoc`'s parameter NAME, a DELETE
+    predicate, not evidence of what any INSERT writes
+    (`http_taxonomy_store.py:438-452` returns `{"doc_id": d, "title": d}`,
+    the "title" IS the doc_id). The one real memory-note-clustering path
+    (`catalog_taxonomy.py`'s `LEFT JOIN memory m ON m.title = ta.doc_id`)
+    died with the SQLite store at commit `f24bdb853` and nothing replaced it.
+    The column still stayed TEXT here, and the CONVERSION EXPRESSION and
+    REVERSIBILITY LEMMA above remain accurate for the mid-migration window;
+    only the identity-space characterization is wrong. `topic_assignments.
+    doc_id` converts to `bytea` with a composite FK at RDR-194 D1 (P3a-P3d).
+
     NO DML IN THIS FILE by design: Liquibase runs as nexus_admin, a
     policy-subject role under FORCE RLS whose DML silently sees zero rows
     (recorded trap: T2 force-rls-migration-dml-noop). ALTER TABLE is DDL
@@ -95,7 +113,37 @@ ALTER TABLE nexus.chunks_384
                THEN decode(chash, 'hex')
                ELSE convert_to(chash, 'UTF8') END;
         </sql>
-        <rollback/>
+        <!--
+            nexus-lelhx: faithful inverse of the forward USING above, applying
+            this changeset's OWN file-header REVERSIBILITY LEMMA (lines 21-30)
+            rather than a naive encode(chash,'hex'): a value that took the
+            convert_to(text,'UTF8') branch forward (any non-hex-32-char input)
+            must take convert_from(bytea,'UTF8') back, not encode(...,'hex').
+            octet_length=16 is exactly the hex-decoded case (32 hex chars ->
+            16 bytes); anything else took the UTF-8 carry branch. Same CASE
+            idiom as ChashSqlIdioms.OLD_REF_LEMMA (service/src/main/java/dev/
+            nexus/service/db/ChashSqlIdioms.java), the /v1/remap/rekey
+            endpoint's own in-store reversibility formula this file's header
+            already points to; restated here as literal SQL since a
+            changelog rollback cannot invoke Java.
+
+            ALTER TABLE IF EXISTS guards the table-absence case this file's
+            header note anticipates: on the intact chain the table always
+            exists here (vectors-004's own rollback recreates chunks_384/
+            768/1024 BEFORE a rollback ever reaches this changeset, since
+            Liquibase rolls back in reverse execution order and vectors-004
+            executes AFTER rdr180-3..5), so IF EXISTS is defensive guard
+            only, not a normal-path branch; mirrors rdr180-11's rollback,
+            which guards chash_index's later rdr187-2 drop the identical way.
+        -->
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+ALTER TABLE IF EXISTS nexus.chunks_384
+    ALTER COLUMN chash TYPE TEXT
+    USING CASE WHEN octet_length(chash) = 16 THEN encode(chash, 'hex')
+               ELSE convert_from(chash, 'UTF8') END;
+            </sql>
+        </rollback>
     </changeSet>
 
     <changeSet id="rdr180-4-convert-chunks-768" author="nexus-jxizy.2">
@@ -107,7 +155,15 @@ ALTER TABLE nexus.chunks_768
                THEN decode(chash, 'hex')
                ELSE convert_to(chash, 'UTF8') END;
         </sql>
-        <rollback/>
+        <!-- nexus-lelhx: see rdr180-3's rollback comment; identical reasoning, chunks_768 -->
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+ALTER TABLE IF EXISTS nexus.chunks_768
+    ALTER COLUMN chash TYPE TEXT
+    USING CASE WHEN octet_length(chash) = 16 THEN encode(chash, 'hex')
+               ELSE convert_from(chash, 'UTF8') END;
+            </sql>
+        </rollback>
     </changeSet>
 
     <changeSet id="rdr180-5-convert-chunks-1024" author="nexus-jxizy.2">
@@ -119,7 +175,15 @@ ALTER TABLE nexus.chunks_1024
                THEN decode(chash, 'hex')
                ELSE convert_to(chash, 'UTF8') END;
         </sql>
-        <rollback/>
+        <!-- nexus-lelhx: see rdr180-3's rollback comment; identical reasoning, chunks_1024 -->
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+ALTER TABLE IF EXISTS nexus.chunks_1024
+    ALTER COLUMN chash TYPE TEXT
+    USING CASE WHEN octet_length(chash) = 16 THEN encode(chash, 'hex')
+               ELSE convert_from(chash, 'UTF8') END;
+            </sql>
+        </rollback>
     </changeSet>
 
     <changeSet id="rdr180-6-convert-manifest" author="nexus-jxizy.2">
@@ -131,7 +195,41 @@ ALTER TABLE nexus.catalog_document_chunks
                THEN decode(chash, 'hex')
                ELSE convert_to(chash, 'UTF8') END;
         </sql>
-        <rollback/>
+        <!--
+            nexus-lelhx (round 2, EMPIRICALLY REQUIRED, not merely symmetric
+            tidiness): leaving this rollback empty while rdr180-3/4/5 gained a
+            real one broke BOTH the targeted round-trip test AND the
+            PRE-EXISTING fullChangelog_rollsBackCompletely_andReappliesToTheSameSchema
+            test (full rollback-to-zero); catalog-012-graph-hop-where.xml's
+            rollback (master position ~202, well before vectors-001-baseline's
+            position ~82 rollback finally drops the table) recreates
+            search_graph_hop_{384,768,1024} joining this table's chash against
+            chunks_<dim>.chash. With chunks_<dim>.chash correctly restored to
+            TEXT (rdr180-3/4/5's fix) but this column stuck BYTEA, that join
+            became "operator does not exist: bytea = text"; a regression a
+            full rollback-to-zero had never hit before, because ALL FIVE
+            poison columns previously stayed BYTEA together, self-consistently
+            wrong. Same reversibility lemma as rdr180-3/4/5; see that
+            changeset's comment for the derivation. Pre-rdr180-6 shape:
+            catalog-001-4's CREATE TABLE (TEXT NOT NULL). CORRECTION
+            (code-review-expert, nexus-lelhx round 2): this column DID carry
+            a length CHECK, catalog_document_chunks_chash_len_check, ADDED by
+            catalog-002-hygiene.xml:112-115 and DROPPED forward by rdr180-2
+            above (same file, "the five length(chash)=32 text-era CHECKs")
+            before rdr180-6 ever runs; rdr180-2's own rollback is empty, so
+            this rollback correctly does not re-add it either (out of scope
+            for this bead; the constraint was already gone by the time this
+            changeset originally ran). No IF EXISTS guard is required by an
+            octet CHECK re-add anywhere; nothing else drops this table.
+        -->
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+ALTER TABLE IF EXISTS nexus.catalog_document_chunks
+    ALTER COLUMN chash TYPE TEXT
+    USING CASE WHEN octet_length(chash) = 16 THEN encode(chash, 'hex')
+               ELSE convert_from(chash, 'UTF8') END;
+            </sql>
+        </rollback>
     </changeSet>
 
     <changeSet id="rdr180-7-convert-chash-index" author="nexus-jxizy.2">
@@ -143,7 +241,27 @@ ALTER TABLE nexus.chash_index
                THEN decode(chash, 'hex')
                ELSE convert_to(chash, 'UTF8') END;
         </sql>
-        <rollback/>
+        <!--
+            nexus-lelhx (round 2): same reversibility lemma and same reasoning
+            as rdr180-6 above, applied to chash_index. ALTER TABLE IF EXISTS
+            is NOT merely defensive here (unlike rdr180-3/4/5, where the
+            intact chain always has the table present at this point): rdr187-2
+            DROPS nexus.chash_index later in master order and its own rollback
+            is a deliberate no-op (see rdr180-11's rollback comment above, the
+            first place this exact guard requirement was found), so on a
+            rollback walking down PAST rdr187-2's position but stopping before
+            (or landing exactly at) this changeset, the table may genuinely
+            already be absent when this rollback runs; IF EXISTS is the
+            correct behavior, not a defensive no-op.
+        -->
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+ALTER TABLE IF EXISTS nexus.chash_index
+    ALTER COLUMN chash TYPE TEXT
+    USING CASE WHEN octet_length(chash) = 16 THEN encode(chash, 'hex')
+               ELSE convert_from(chash, 'UTF8') END;
+            </sql>
+        </rollback>
     </changeSet>
 
     <changeSet id="rdr180-11-octet-checks-not-valid" author="nexus-jxizy.2">
@@ -162,14 +280,11 @@ ALTER TABLE nexus.chash_index
         </sql>
         <!--
             nexus-a0m60: the chash_index line MUST tolerate the table being
-            absent. rdr187-2-drop-chash-index DROPs nexus.chash_index later in
-            master order and declares its own rollback a deliberate no-op (the
-            pre-image is the orphan population this RDR retires and is not
-            recoverable). So on the way back DOWN the table is already gone by
-            the time this rollback runs, and `DROP CONSTRAINT IF EXISTS` does
-            NOT help — IF EXISTS guards the CONSTRAINT, not the TABLE, so
-            PostgreSQL raises `relation "nexus.chash_index" does not exist` and
-            the entire chain dies here.
+            absent. `DROP CONSTRAINT IF EXISTS` does NOT help on its own —
+            IF EXISTS guards the CONSTRAINT, not the TABLE, so an unguarded
+            statement against a missing table raises `relation
+            "nexus.chash_index" does not exist` and the entire chain dies
+            here.
 
             Found by the first execution of SchemaRollbackRoundTripIntegrationTest.
             This is precisely the class the shape lint cannot catch: the block
@@ -180,6 +295,21 @@ ALTER TABLE nexus.chash_index
             changelog — which is the supported operator path (the engine has no
             rollback path of its own, so operators drive HEAD's changelog against
             older clusters). to_regclass covers both eras in one statement.
+
+            UPDATED (nexus-lelhx round 2, code-review-expert finding): this
+            guard's ORIGINAL premise, that rdr187-2-drop-chash-index's own
+            rollback was a deliberate no-op leaving the table permanently
+            gone by the time the chain rolls back here, no longer holds.
+            rdr187-2's rollback now recreates the table's schema shape (see
+            rdr187-001-drop-chash-index.xml), and rdr187-2 always rolls back
+            BEFORE this changeset in the reverse sequence (it executes AFTER
+            this changeset in master order), so the table is present again
+            by the time this rollback runs on any reachable chain. The
+            to_regclass guard is kept anyway, now purely defensive: nothing
+            currently reachable needs it to guard against a known-absent
+            table, but it costs nothing and still protects against a FUTURE
+            re-introduction of an irreversible drop somewhere upstream of
+            this point.
         -->
         <rollback>
             <sql splitStatements="false" stripComments="false">
@@ -201,7 +331,7 @@ ALTER TABLE nexus.chunks_384  DROP CONSTRAINT IF EXISTS chunks_384_chash_octet_c
     </changeSet>
 
     <changeSet id="rdr180-12-chash-alias" author="nexus-jxizy.2">
-        <comment>The PERMANENT legacy-reference resolver (RDR-180 Item6): old_ref is the original string form (32-hex chunk ids, ETL-era external ids), old_bytes its byte carrier (the cascade join key), new_chash the canonical 32-byte digest. Survives forever — bead comments, T2 memories, plan_json step ids and prose citations hold old refs that are not remappable in place. Prefix-match only BUILDS maps; THIS resolves them, collision-free. FORCE RLS like every tenant table</comment>
+        <comment>The PERMANENT legacy-reference resolver (RDR-180 Item6): old_ref is the original string form (32-hex chunk ids, ETL-era external ids), old_bytes its byte carrier (the cascade join key), new_chash the canonical 32-byte digest. Survives forever — bead comments, T2 memories, plan_json step ids and prose citations hold old refs that are not remappable in place. Prefix-match only BUILDS maps; THIS resolves them, collision-free. FORCE RLS like every tenant table. SUPERSEDED: the beneficiary population reached zero and the table was DROPPED at nexus-lgdel.l1 (legacy-001-drop-chash-alias.xml, 2026-08-16, Hal delete directive) — this comment is historical record of the original design intent</comment>
         <sql splitStatements="true" stripComments="false">
 CREATE TABLE nexus.chash_alias (
     tenant_id  TEXT  NOT NULL DEFAULT '',

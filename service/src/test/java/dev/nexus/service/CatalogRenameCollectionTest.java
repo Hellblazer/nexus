@@ -311,6 +311,23 @@ class CatalogRenameCollectionTest {
                 + "VALUES ('" + TENANT_A + "', 'xm-doc-1', 'XM Doc', '" + src + "')");
             // target registry already exists (cross-model copy registered it)
             su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + tgt + "')");
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
+            // a matching nexus.chunks row for the manifest insert below, at BOTH
+            // ends: the pre-rename manifest row needs a chunk under src, and
+            // renameCollectionTxn's COPY branch (target pre-registered) never
+            // touches nexus.chunks itself -- only catalog_documents +
+            // catalog_document_chunks (containsOnlyKeys assertion below) -- so the
+            // post-rename manifest row (now pointing at tgt) needs its OWN
+            // same-chash chunk under tgt too, matching what the REAL cross-model
+            // copy this branch models would already have written there.
+            su.createStatement().execute("INSERT INTO nexus.chunks "
+                + "(tenant_id, collection, chash, chunk_text, embedding_384) VALUES "
+                + "('" + TENANT_A + "', '" + src + "', '" + "e".repeat(32) + "', 'text', "
+                + "('[" + "0.1,".repeat(383) + "0.1]')::vector)");
+            su.createStatement().execute("INSERT INTO nexus.chunks "
+                + "(tenant_id, collection, chash, chunk_text, embedding_768) VALUES "
+                + "('" + TENANT_A + "', '" + tgt + "', '" + "e".repeat(32) + "', 'text', "
+                + "('[" + "0.1,".repeat(767) + "0.1]')::vector)");
             // a manifest row still homed at the SOURCE (the pre-rename state)
             su.createStatement().execute("ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY");
             su.createStatement().execute("INSERT INTO nexus.catalog_document_chunks "
@@ -457,16 +474,33 @@ class CatalogRenameCollectionTest {
         st.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '" + coll + "')");
         st.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
             + "VALUES ('" + tenant + "', 'rn-doc-1', 'Doc 1', '" + coll + "')");
+        // chunks: 2/1/1 across three dims, one unified nexus.chunks table (RDR-191).
+        st.execute(chunkInsert(tenant, coll, 384, "rn384a"));
+        // RDR-194 P3d (nexus-tk070.p3d): rn384b and rn768a below are REPURPOSED
+        // (decode(hexChash(...),'hex') identity, not the file's own chash(seed)
+        // escape-format shape) to ALSO back the two topic_assignments rows
+        // further down via topic_assignments_chunk_fk -- reusing two of the four
+        // already-seeded chunks rather than minting two more, so the "chunks
+        // (unified, 2+1+1)" count assertion elsewhere stays exactly 4. The two
+        // encodings are NOT interchangeable (chash(seed) stores raw ASCII bytes
+        // of a hex-digit-shaped string via bytea "escape format"; decode(...,
+        // 'hex') stores the genuine hex-decoded bytes), so this chunk's chash is
+        // no longer chash("rn384b") -- nothing else in this file references it
+        // by that name (unlike rn384a, reused by the manifest INSERT below).
+        st.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
+            + "VALUES ('" + tenant + "', '" + coll + "', decode('" + hexChash("rn-doc-1") + "', 'hex'), 'text', " + vec(384) + "::vector)");
+        st.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768) "
+            + "VALUES ('" + tenant + "', '" + coll + "', decode('" + hexChash("rn-doc-2") + "', 'hex'), 'text', " + vec(768) + "::vector)");
+        st.execute(chunkInsert(tenant, coll, 1024, "rn1024a"));
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
+        // matching nexus.chunks row for the manifest insert below -- reuse rn384a's
+        // chash (rather than minting a fifth, distinct chunk) so the "chunks
+        // (unified, 2+1+1)" count assertion elsewhere stays exactly 4.
         // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
         // (catalog-025-collection-not-null.xml) — the document above is
         // already registered under coll, so stamp the manifest row the same.
         st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-            + "VALUES ('" + tenant + "', 'rn-doc-1', 0, '" + chash("rnman1") + "', '" + coll + "')");
-        // chunks: 2/1/1 across three dims, one unified nexus.chunks table (RDR-191).
-        st.execute(chunkInsert(tenant, coll, 384, "rn384a"));
-        st.execute(chunkInsert(tenant, coll, 384, "rn384b"));
-        st.execute(chunkInsert(tenant, coll, 768, "rn768a"));
-        st.execute(chunkInsert(tenant, coll, 1024, "rn1024a"));
+            + "VALUES ('" + tenant + "', 'rn-doc-1', 0, '" + chash("rn384a") + "', '" + coll + "')");
         // (chash_index seeds removed — RDR-187/nexus-piwya.9: router dropped)
         // topics: 1 (explicit id)
         long topicId = Math.abs((long) (tenant + coll).hashCode());
@@ -474,11 +508,17 @@ class CatalogRenameCollectionTest {
             + "VALUES (" + topicId + ", '" + tenant + "', 'topic-rn', '" + coll + "', 0, NOW(), 'pending')");
         // taxonomy_meta: 1 (fk-003-4 RESTRICT)
         st.execute("INSERT INTO nexus.taxonomy_meta (tenant_id, collection) VALUES ('" + tenant + "', '" + coll + "')");
-        // topic_assignments: 2 (source_collection=coll)
+        // topic_assignments: 2 (source_collection=coll). doc_id is bytea now
+        // (nexus-tk070.p3c) — a genuine 64-hex chash, independent of the catalog
+        // tumbler string (topic_assignments.doc_id has no FK to catalog_documents).
+        // RDR-194 P3d (nexus-tk070.p3d): decode(...,'hex') here (NOT a bare string
+        // literal, which would store the ASCII bytes of the hex STRING via bytea
+        // "escape format", never matching a real decode()'d chunks row) so both
+        // rows resolve against the two REPURPOSED chunks seeded above.
         st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', 'rn-doc-1', " + topicId + ", 'projection', '" + coll + "', NOW())");
+            + "VALUES ('" + tenant + "', decode('" + hexChash("rn-doc-1") + "', 'hex'), " + topicId + ", 'projection', '" + coll + "', NOW())");
         st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', 'rn-doc-2', " + topicId + ", 'projection', '" + coll + "', NOW())");
+            + "VALUES ('" + tenant + "', decode('" + hexChash("rn-doc-2") + "', 'hex'), " + topicId + ", 'projection', '" + coll + "', NOW())");
         // centroids: one per dim, one unified nexus.taxonomy_centroids table (RDR-191).
         // PK is (tenant_id, collection, topic_id) -- three DIFFERENT topic_ids, not
         // the shared `topicId` above (would collide on the unified PK; pre-unification
@@ -511,10 +551,18 @@ class CatalogRenameCollectionTest {
         st.execute("INSERT INTO nexus.hook_failures (tenant_id, doc_id, collection, hook_name, error, occurred_at) "
             + "VALUES ('" + tenant + "', 'rn-doc-1', '" + coll + "', 'post_store', 'boom', NOW())");
         // relevance_log: 2 (no FK, but re-homed — RDR-164 §Approach Phase 3 third audit table)
+        // nexus-lgdel.l1: chunk_id must be canonical 64-hex TEXT now
+        // (relevance_log_chunk_id_canonical_check, legacy-001-drop-chash-
+        // alias.xml) — 'ch1'/'ch2' no longer pass. NOT the chash(seed) helper
+        // below: that produces a 32-ASCII-char string relying on Postgres's
+        // bytea escape-literal cast (32 chars -> 32 bytes) for the chunks.chash
+        // BYTEA column; chunk_id here is TEXT and needs a real 64-hex STRING.
         st.execute("INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, collection, action, session_id, timestamp) "
-            + "VALUES ('" + tenant + "', 'q1', 'ch1', '" + coll + "', 'click', 's1', NOW())");
+            + "VALUES ('" + tenant + "', 'q1', '0b2ace5def2ecf1234ae0db2a062b83fe40dd330121844b37bc8bdfb6b2f3ea5', "
+            + "'" + coll + "', 'click', 's1', NOW())");
         st.execute("INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, collection, action, session_id, timestamp) "
-            + "VALUES ('" + tenant + "', 'q2', 'ch2', '" + coll + "', 'skip', 's1', NOW())");
+            + "VALUES ('" + tenant + "', 'q2', 'f7088d7f354fadfc6fe69df2f0a9f2057a715e9a62672258a88ee200e72f1c22', "
+            + "'" + coll + "', 'skip', 's1', NOW())");
     }
 
     /** RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into nexus.chunks --
@@ -530,6 +578,19 @@ class CatalogRenameCollectionTest {
 
     private static String chash(String seed) {
         return (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
+    }
+
+    /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
+     *  (bytea since nexus-tk070.p3c), unlike {@link #chash} above which is a 32-char
+     *  synthetic id used only for the chunks/manifest {@code chash} column. */
+    private static String hexChash(String seed) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private static int rows(Connection su, String sql) throws Exception {

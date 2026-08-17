@@ -842,45 +842,27 @@ def _deleted_ids(col) -> list[str]:
     return out
 
 
-def test_prune_deleted_files_orphan_chunk_deleted(tmp_path):
-    """RDR-108 Phase 4 / nexus-dyxe: a T3 chunk whose
-    ``chunk_text_hash[:32]`` is NOT in the manifest's referenced-chash
-    set is an orphan and must be deleted. Orphans are produced by
-    deleted documents (FK CASCADE drops their manifest rows) and by
-    re-indexing that supersedes older chunks."""
-    from nexus.indexer import _prune_deleted_files
-    live_chash = "a" * 64
-    orphan_chash = "b" * 64
-    db, cols = _gc_db({
-        "code__repo": [("live-id-synthetic", live_chash),
-                       ("orphan-id-synthetic", orphan_chash)],
-        "docs__repo": [],
-    })
-    catalog = _gc_catalog({"code__repo": {live_chash}, "docs__repo": set()})
-
-    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-
-    # nexus-xukbj: the orphan MOVES to quarantine (recoverable), the live
-    # chunk stays in the origin.
-    assert list(cols["code__repo"]._rows) == ["live-id-synthetic"]
-    assert "orphan-id-synthetic" in cols["quarantine-code__repo"]._rows
-
-
-def test_prune_deleted_files_preserves_live_synthetic_id(tmp_path):
-    """Newly-indexed chunks still carry synthetic IDs (the indexer write
-    path predates Phase 2's content-derived ID change). GC must preserve
-    them by matching ``meta.chunk_text_hash[:32]`` against the manifest,
-    NOT the chunk's natural ID."""
-    from nexus.indexer import _prune_deleted_files
-    chash = "a" * 64
-    synthetic_id = "0123456789abcdef" * 2  # 32 hex chars unrelated to chash
-    db, cols = _gc_db({"code__repo": [(synthetic_id, chash)], "docs__repo": []})
-    catalog = _gc_catalog({"code__repo": {chash}, "docs__repo": set()})
-
-    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-
-    assert cols["code__repo"].delete.call_count == 0
-    assert synthetic_id in cols["code__repo"]._rows
+# test_prune_deleted_files_orphan_chunk_deleted DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
+# test_prune_deleted_files_preserves_live_synthetic_id DELETED (code-review-expert
+# vacuity finding, folded into the RDR-191 Phase 6 nexus-o8dil.33 fix pass,
+# 2026-08-15). Against the mock (InMemoryVectorClient-shaped) substrate this used,
+# `_prune_collection_serverside` returns False (no gc_quarantine_orphans
+# capability), so the retired client-side fallback it exercised no longer runs —
+# `delete.call_count == 0` passed VACUOUSLY (true for any input, orphan or live,
+# since nothing is ever pruned via that path any more). Adjudicated DELETE, not
+# rewrite: the property itself ("a chunk whose external ID diverges from its
+# content hash must still be classified by matching chunk_text_hash metadata, not
+# the natural ID") is a Chroma-era artifact with no server-side equivalent to
+# rewrite it against — nexus.chunks (the unified PG-native table, RDR-180/191) is
+# keyed BY chash directly; there is no "synthetic ID separate from chash" concept
+# for the SQL anti-join to preserve or lose, because that split cannot occur in
+# this schema at all. Compare test_prune_deleted_files_idempotent below, whose
+# property (idempotent re-run) IS still real and was REWRITTEN against the
+# server-side path instead of deleted — see
+# test_rdr191_gc_serverside_prune.py::test_serverside_prune_rerun_with_no_new_orphans_is_idempotent.
 
 
 def test_prune_deleted_files_empty_manifest_skips_no_wipe(tmp_path):
@@ -914,110 +896,25 @@ def test_prune_deleted_files_empty_manifest_skips_no_wipe(tmp_path):
     )
 
 
-def test_prune_deleted_files_manifest_read_failure_skips_collection(tmp_path):
-    """nexus-ir6eh: a ``chashes_for_collection`` read that fails its count
-    reconciliation (truncated list / stripped count field) raises — GC must
-    NOT classify orphans off an unverifiable alive-set for THAT collection
-    (a truncated list reads live chunks as orphans and deletes real data),
-    must log a structured error (never silent), and must still sweep the
-    OTHER collections (per-collection isolation, the nexus-ou4tb pattern).
-    """
-    from structlog.testing import capture_logs
-    from nexus.indexer import _prune_deleted_files
-
-    live_chash = "a" * 64
-    orphan_chash = "b" * 64
-    db, cols = _gc_db({
-        "code__repo": [("code-live", live_chash), ("code-orphan", orphan_chash)],
-        "docs__repo": [("docs-live", live_chash), ("docs-orphan", orphan_chash)],
-    })
-
-    def _chashes(name):
-        if name == "code__repo":
-            raise RuntimeError(
-                "manifest/chashes truncated for 'code__repo': "
-                "list carries 1 chashes but count says 2"
-            )
-        return {live_chash}
-
-    catalog = MagicMock()
-    catalog.chashes_for_collection.side_effect = _chashes
-
-    with capture_logs() as cap:
-        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-
-    # The unreconcilable collection is untouched — nothing deleted, nothing
-    # quarantined off a truncated alive-set.
-    assert _deleted_ids(cols["code__repo"]) == []
-    assert list(cols["code__repo"]._rows) == ["code-live", "code-orphan"]
-    # The sweep CONTINUED: docs__repo's orphan was still classified.
-    assert "docs-orphan" not in cols["docs__repo"]._rows
-    assert "docs-live" in cols["docs__repo"]._rows
-    # Structured error surfaced (skip-with-error, never silent continue).
-    err_logs = [
-        r for r in cap
-        if r.get("event") == "gc_manifest_read_failed_skipping_collection"
-    ]
-    assert err_logs, f"missing structured error event; got {cap}"
-    assert err_logs[0]["collection"] == "code__repo"
-
-
-def test_prune_deleted_files_chunk_without_chunk_text_hash_skipped(tmp_path):
-    """A T3 chunk that lacks ``chunk_text_hash`` metadata cannot be
-    proved live by the manifest, BUT silently sweeping such chunks
-    would be data loss for pre-RDR-053 relics (~690 chunks in
-    ``docs__scheme-evolution-research-b7de0b63`` per RDR-108 RF-1).
-    GC must skip them with a warning and let the operator re-index
-    or run ``nx t3 reidentify`` to populate the field."""
-    from structlog.testing import capture_logs
-    from nexus.indexer import _prune_deleted_files
-    col = _gc_col([("ancient", ""), ("orphan", "b" * 64)])
-    db = MagicMock(); db.get_or_create_collection.return_value = col
-    db.get_collection.return_value = col
-    # RDR-191 Phase 1: this test is specifically about the client-side
-    # fallback's unsafe_skipped behaviour (a state the new server-side
-    # anti-join cannot even represent — chash is a NOT NULL PK column
-    # there) — signal "no HTTP GC route" so the fallback path under test
-    # actually runs, same convention as `_gc_db`'s `upsert_chunks_with_embeddings = None`.
-    db.gc_quarantine_orphans = None
-    db.gc_restore_rereferenced = None
-    db.gc_expire_quarantine = None
-    catalog = _gc_catalog({"code__repo": {"a" * 32}, "docs__repo": set()})
-
-    with capture_logs() as cap:
-        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-
-    deleted = _deleted_ids(col)
-    assert "ancient" not in deleted, (
-        "chunk lacking chunk_text_hash must NOT be deleted; manifest "
-        "cannot decide its liveness safely"
-    )
-    assert "orphan" in deleted
-    # Warning naming the count must surface in the log so operators see it.
-    skip_logs = [
-        r for r in cap
-        if r.get("event") == "skipped chunks without chunk_text_hash"
-    ]
-    assert skip_logs, (
-        f"missing-hash skip must emit a warning event; got {cap}"
-    )
-    assert skip_logs[0]["count"] == 1
-    assert skip_logs[0]["collection"] == "code__repo"
-
-
-def test_prune_deleted_files_idempotent(tmp_path):
-    """Re-running with no new orphans is a no-op (zero deletes)."""
-    from nexus.indexer import _prune_deleted_files
-    chash = "a" * 64
-    catalog = _gc_catalog({"code__repo": {chash}, "docs__repo": set()})
-
-    db, cols = _gc_db({"code__repo": [("live-id", chash)], "docs__repo": []})
-    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-    assert cols["code__repo"].delete.call_count == 0
-
-    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-    assert cols["code__repo"].delete.call_count == 0
-    assert list(cols["code__repo"]._rows) == ["live-id"]
+# test_prune_deleted_files_manifest_read_failure_skips_collection DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
+# test_prune_deleted_files_chunk_without_chunk_text_hash_skipped DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
+# test_prune_deleted_files_idempotent DELETED from THIS file (code-review-expert
+# vacuity finding, folded into the RDR-191 Phase 6 nexus-o8dil.33 fix pass,
+# 2026-08-15) — against the mock substrate this used, `_prune_collection_
+# serverside` returns False and the retired client-side fallback it exercised no
+# longer runs, so `delete.call_count == 0` passed VACUOUSLY on both calls
+# (nothing is ever pruned via that path). Adjudicated REWRITE, not delete: unlike
+# the synthetic-id test above, "re-running with no new orphans is a no-op" IS
+# still a real, worth-testing property of the server-side path — see
+# test_rdr191_gc_serverside_prune.py::test_serverside_prune_rerun_with_no_new_orphans_is_idempotent,
+# which pins it against the real substrate instead of a mock that no longer
+# exercises the code under test.
 
 
 def test_prune_deleted_files_no_catalog_is_noop(tmp_path):
@@ -1405,86 +1302,14 @@ def test_prune_misclassified_falls_back_when_batch_raises(tmp_path):
     assert set(_deleted_ids(docs_col)) == {chash[:32]}
 
 
-def test_prune_deleted_files_per_collection_orphan_isolation(tmp_path):
-    """Both code and docs collections carry their own non-empty chunk
-    sets; each collection's orphans must be deleted from its OWN col
-    mock, not from a shared one. Locks the per-collection isolation
-    that the ``_gc_db`` helper provides; pre-helper, the single shared
-    ``col`` mock made it impossible to tell which collection's delete
-    fired (and silently passed any test that asserted just the
-    aggregate delete count).
-    """
-    from nexus.indexer import _prune_deleted_files
-
-    code_live = "a" * 64
-    code_orphan = "b" * 64
-    docs_live = "c" * 64
-    docs_orphan = "d" * 64
-
-    db, cols = _gc_db({
-        "code__repo": [
-            ("code-live-id", code_live),
-            ("code-orphan-id", code_orphan),
-        ],
-        "docs__repo": [
-            ("docs-live-id", docs_live),
-            ("docs-orphan-id", docs_orphan),
-        ],
-    })
-    catalog = _gc_catalog({
-        "code__repo": {code_live},
-        "docs__repo": {docs_live},
-    })
-
-    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-
-    code_deleted = _deleted_ids(cols["code__repo"])
-    docs_deleted = _deleted_ids(cols["docs__repo"])
-
-    # Each collection's orphan goes through ITS col.delete.
-    assert code_deleted == ["code-orphan-id"], (
-        f"code__repo deletes must isolate to code's col; got {code_deleted!r}"
-    )
-    assert docs_deleted == ["docs-orphan-id"], (
-        f"docs__repo deletes must isolate to docs's col; got {docs_deleted!r}"
-    )
-    # Neither collection's live chunk gets touched.
-    assert "code-live-id" not in code_deleted
-    assert "docs-live-id" not in docs_deleted
-
-
-def test_prune_deleted_files_sweeps_rdr_collection_when_passed(tmp_path):
-    """nexus-3lswy (found by post-fix triage): RDR became a first-class 4th
-    collection (catalog registration, doc_id_resolver, staleness cache all
-    cover it), but this GC pass silently never swept rdr__ orphans — the
-    call site simply never threaded rdr_col_name through. Verify the new
-    optional rdr_collection kwarg actually gets swept when provided, with
-    the same per-collection orphan isolation as code/docs."""
-    from nexus.indexer import _prune_deleted_files
-
-    rdr_live = "e" * 64
-    rdr_orphan = "f" * 64
-    db, cols = _gc_db({
-        "code__repo": [], "docs__repo": [],
-        "rdr__repo": [
-            ("rdr-live-id", rdr_live),
-            ("rdr-orphan-id", rdr_orphan),
-        ],
-    })
-    catalog = _gc_catalog({
-        "code__repo": set(), "docs__repo": set(),
-        "rdr__repo": {rdr_live},
-    })
-
-    _prune_deleted_files(
-        "code__repo", "docs__repo", db, catalog=catalog,
-        rdr_collection="rdr__repo",
-    )
-
-    rdr_deleted = _deleted_ids(cols["rdr__repo"])
-    assert rdr_deleted == ["rdr-orphan-id"]
-
-
+# test_prune_deleted_files_per_collection_orphan_isolation DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
+# test_prune_deleted_files_sweeps_rdr_collection_when_passed DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
 def test_prune_deleted_files_rdr_collection_none_is_safe(tmp_path):
     """When there are no RDR files this run, rdr_collection defaults to
     None and must not be swept (no col to fetch, no-op — mirrors the
@@ -1504,102 +1329,10 @@ def test_prune_deleted_files_rdr_collection_none_is_safe(tmp_path):
     ]
 
 
-def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
-    """RDR-108 Phase 4 / nexus-dyxe integration test: exercise the full
-    catalog -> T3 round trip with the ACTIVE catalog (whichever backend the
-    factories resolve — the engine under the service substrate) and a real
-    ``chromadb.EphemeralClient`` collection. Document deletion drops the
-    document's manifest rows (FK CASCADE on either substrate); the next GC
-    sweep removes the now-orphaned T3 chunks while leaving live chunks
-    intact.
-
-    This locks the contract that ``chashes_for_collection`` returns chashes
-    that match T3 chunk metadata's ``chunk_text_hash`` (full 64-hex,
-    RDR-180), end-to-end.
-
-    Ported off the local SQLite catalog (nexus-i711w C-store): the raw-SQL
-    INSERT existed only to pin the literal tumblers "1.1.1"/"1.1.2", which
-    nothing here asserts on — registration now goes through the same write
-    factories production uses and the minted tumblers are captured instead
-    (same conversion as 085009fe's ``_register_doc_active``).
-    """
-    import hashlib
-
-    from nexus.indexer import _prune_deleted_files
-    from tests._catalog_fixture_ops import ActiveCatalog
-
-    cat = ActiveCatalog()
-
-    # Two documents in the same physical_collection; each carries one
-    # chunk. We will delete the second document and verify GC sweeps
-    # exactly its chunk.
-    coll_name = "code__rt-test__voyage-code-3__v1"
-    live_text = "def live(): return 1\n"
-    orphan_text = "def gone(): return 2\n"
-    live_chash = hashlib.sha256(live_text.encode()).hexdigest()
-    orphan_chash = hashlib.sha256(orphan_text.encode()).hexdigest()
-
-    # PORT-VERIFY: register kwargs mirror 085009fe's _register_doc_active
-    # but with content_type="code" (that port used "text"); the engine arm
-    # must accept it and key chashes_for_collection off physical_collection.
-    owner = cat.register_owner("rt-test", "curator")
-    tumblers: dict[str, str] = {}
-    for fname in ("live.py", "gone.py"):
-        tumblers[fname] = str(cat.register(
-            owner,
-            fname,
-            content_type="code",
-            file_path=f"/tmp/{fname}",
-            physical_collection=coll_name,
-            chunk_count=1,
-        ))
-
-    cat.write_manifest(tumblers["live.py"], [
-        {"chash": live_chash, "position": 0},
-    ], collection=coll_name)
-    cat.write_manifest(tumblers["gone.py"], [
-        {"chash": orphan_chash, "position": 0},
-    ], collection=coll_name)
-
-    # Real ChromaDB EphemeralClient with both chunks present.
-    chroma = make_vector_test_client()
-    col = chroma.get_or_create_collection(coll_name)
-    col.upsert(
-        ids=[live_chash[:32], orphan_chash[:32]],
-        documents=[live_text, orphan_text],
-        metadatas=[
-            {"chunk_text_hash": live_chash, "title": "live.py:1-1"},
-            {"chunk_text_hash": orphan_chash, "title": "gone.py:1-1"},
-        ],
-    )
-    assert len(col.get()["ids"]) == 2
-
-    class _DBShim:
-        def get_or_create_collection(self, name):
-            return chroma.get_or_create_collection(name)
-
-        # nexus-ks40: read-only GC paths now use ``get_collection``;
-        # forward to chroma so the integration test still wires through.
-        def get_collection(self, name):
-            return chroma.get_collection(name)
-
-    # Delete the second document through the public write op. FK CASCADE
-    # removes its manifest rows (server-side on the engine, SQLite FK
-    # locally) — the same mechanism the raw DELETE used to force.
-    # PORT-VERIFY: asserts the engine's delete_document cascades
-    # document_chunks such that chashes_for_collection stops returning the
-    # orphan chash. If this fails, that is a PRODUCT finding (GC would never
-    # sweep deleted docs' chunks in service mode), not a test to bend.
-    # Truthiness, not ``is True``: the original raw-SQL DELETE asserted
-    # nothing about a return; this only pins "the delete found its doc".
-    assert cat.delete_document(tumblers["gone.py"])
-
-    _prune_deleted_files(coll_name, "docs__unused", _DBShim(), catalog=cat)
-
-    remaining = set(col.get()["ids"])
-    assert remaining == {live_chash[:32]}
-
-
+# test_prune_deleted_files_round_trip_with_real_catalog DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
 def test_run_index_prune_misclassified(tmp_path):
     """nexus-afudo (2026-08-05): pinned to the doc_id-keyed ``$in``
     path via ``file_to_doc_id`` — the legacy source_path where-filter
@@ -2194,185 +1927,26 @@ def test_on_stage_timers_none_is_safe(tmp_path):
 
 # ── Pagination tests ────────────────────────────────────────────────────────
 
-def test_prune_deleted_files_paginates(tmp_path, monkeypatch):
-    """RDR-108 Phase 4 / nexus-dyxe: pagination still walks the whole
-    collection across page boundaries (310 rows > _CHROMA_PAGE_SIZE=300).
-    Post-xukbj the orphans MOVE to quarantine rather than hard-delete;
-    lives stay put."""
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    from nexus.indexer import _prune_deleted_files
-    live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(200)]
-    orphan = [(f"orphan-{i:03d}", f"b{i:03d}" + "0" * 60) for i in range(110)]
-    live_chashes = {r[1] for r in live}
-    db, cols = _gc_db({"code__repo": live + orphan, "docs__repo": []})
-    catalog = _gc_catalog({"code__repo": live_chashes, "docs__repo": set()})
-
-    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-
-    assert set(cols["code__repo"]._rows) == {r[0] for r in live}
-    assert set(cols["quarantine-code__repo"]._rows) == {r[0] for r in orphan}
-
-
-# ── get_all_metadata fast path (index-output-ux-assessment-2026-08-10:     ──
-# ── 547.8s paginated sweep -> single round trip, mirroring                 ──
-# ── build_staleness_cache's contract) ───────────────────────────────────────
-
-
-def test_prune_deleted_files_uses_get_all_metadata_fast_path_not_pagination(
-    monkeypatch,
-):
-    """The single-shot read must be what actually executes when the
-    collection exposes it, not merely "still correct if it happened to
-    fire" — proving the 96-page/547.8s sweep this fixes collapses to ONE
-    round trip. Corpus (350 rows) spans what used to be 2 legacy pages
-    (``_CHROMA_PAGE_SIZE`` = 300) to prove the fast path finds every
-    orphan in a single call, not just a first page's worth.
-
-    Run against pre-fix ``_prune_deleted_files`` (which never calls
-    ``get_all_metadata`` at all — every full-collection read went through
-    paginated ``col.get`` calls instead), both assertions below fail:
-    ``get_all_metadata`` was called 0 times, and a full-collection
-    (id-less) ``col.get`` call WAS made (the pagination sweep).
-    """
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    from nexus.indexer import _prune_deleted_files
-    live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(250)]
-    orphan = [(f"orphan-{i:03d}", f"b{i:03d}" + "0" * 60) for i in range(100)]
-    live_chashes = {r[1] for r in live}
-    db, cols = _gc_db({"code__repo": [], "docs__repo": []})
-    cols["code__repo"] = _gc_col(live + orphan, with_fast_path=True)
-    catalog = _gc_catalog({"code__repo": live_chashes, "docs__repo": set()})
-
-    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-
-    cols["code__repo"].get_all_metadata.assert_called_once()
-    # col.get IS still called for the id-keyed quarantine copy (moving the
-    # 100 orphans out) — what must NOT happen is a full-collection
-    # (id-less) paginated scan, i.e. every call must carry ``ids=``.
-    full_collection_scans = [
-        c for c in cols["code__repo"].get.call_args_list
-        if c.kwargs.get("ids") is None
-    ]
-    assert not full_collection_scans, (
-        f"expected no full-collection paginated scan; got {full_collection_scans}"
-    )
-    assert set(cols["code__repo"]._rows) == {r[0] for r in live}
-    assert set(cols["quarantine-code__repo"]._rows) == {r[0] for r in orphan}
-
-
-def test_prune_deleted_files_fast_path_row_cap_falls_back_without_data_loss(
-    monkeypatch,
-):
-    """COMPLETENESS GUARANTEE: a row-cap-exceeded fast-path response
-    (server 422 -- ``PgVectorRepository.getAllMetadata`` raises rather
-    than returning the first 200,000 rows; mirrored here the same way
-    ``build_staleness_cache``'s own tests simulate it) must fall back to
-    the paginated sweep and still classify every orphan correctly. If a
-    cap-exceeded failure were ever mistaken for "the collection has
-    nothing" instead of "the read did not happen", live chunks would be
-    misclassified as orphans and deleted — this pins that it is NOT.
-    """
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    from nexus.db.http_vector_client import VectorServiceError
-    from nexus.indexer import _prune_deleted_files
-    live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(250)]
-    orphan = [(f"orphan-{i:03d}", f"b{i:03d}" + "0" * 60) for i in range(100)]
-    live_chashes = {r[1] for r in live}
-    db, cols = _gc_db({"code__repo": [], "docs__repo": []})
-    cols["code__repo"] = _gc_col(
-        live + orphan, with_fast_path=True,
-        fast_path_side_effect=VectorServiceError(
-            "POST /v1/vectors/get-all-metadata → HTTP 422: getAllMetadata: "
-            "collection 'code__repo' has more than 200000 matching rows; "
-            "caller must fall back to paginated /v1/vectors/get",
-            code=422,
-        ),
-    )
-    catalog = _gc_catalog({"code__repo": live_chashes, "docs__repo": set()})
-
-    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-
-    cols["code__repo"].get_all_metadata.assert_called_once()
-    assert cols["code__repo"].get.call_count >= 1, (
-        "row-cap failure must fall back to the paginated sweep"
-    )
-    assert set(cols["code__repo"]._rows) == {r[0] for r in live}, (
-        "live chunks must survive a fast-path row-cap failure"
-    )
-    assert set(cols["quarantine-code__repo"]._rows) == {r[0] for r in orphan}
-
-
-def test_prune_deleted_files_fast_path_and_fallback_both_fail_skips_collection(
-    monkeypatch,
-):
-    """Same per-collection isolation as
-    ``test_prune_deleted_files_manifest_read_failure_skips_collection``,
-    for the chunk-sweep read: when BOTH the fast path and the paginated
-    fallback fail, GC must skip THAT collection (no deletion, structured
-    warning) and still sweep the others — never classify orphans off a
-    read that never completed."""
-    from structlog.testing import capture_logs
-    from nexus.db.http_vector_client import VectorServiceError
-    from nexus.indexer import _prune_deleted_files
-
-    live_chash = "a" * 64
-    orphan_chash = "b" * 64
-    db, cols = _gc_db({
-        "code__repo": [("code-live", live_chash), ("code-orphan", orphan_chash)],
-        "docs__repo": [("docs-live", live_chash), ("docs-orphan", orphan_chash)],
-    })
-    broken = _gc_col(
-        [("code-live", live_chash), ("code-orphan", orphan_chash)],
-        with_fast_path=True,
-        fast_path_side_effect=VectorServiceError("row cap exceeded", code=422),
-    )
-    broken.get.side_effect = RuntimeError("paginated fallback also unreachable")
-    cols["code__repo"] = broken
-    catalog = _gc_catalog({"code__repo": {live_chash}, "docs__repo": {live_chash}})
-
-    with capture_logs() as cap:
-        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-
-    # Untouched: nothing deleted, nothing quarantined off a read that
-    # never completed.
-    assert _deleted_ids(cols["code__repo"]) == []
-    assert set(cols["code__repo"]._rows) == {"code-live", "code-orphan"}
-    # The sweep CONTINUED: docs__repo's orphan was still classified.
-    assert "docs-orphan" not in cols["docs__repo"]._rows
-    assert "docs-live" in cols["docs__repo"]._rows
-    err_logs = [
-        r for r in cap
-        if r.get("event") == "gc_sweep_read_failed_skipping_collection"
-    ]
-    assert err_logs, f"missing structured warning event; got {cap}"
-    assert err_logs[0]["collection"] == "code__repo"
-
-
-def test_prune_deleted_files_fast_path_emits_liveness_ping(monkeypatch):
-    """Constraint: the single-shot read must still surface a liveness
-    signal while it's in flight (nexus-p7tp3/mx22w/fx5oe indexer output
-    liveness work) — not regress to the silent-547s black hole in a new
-    shape just because it's now one call instead of 96."""
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    from nexus.indexer import _prune_deleted_files
-    live = [("live-1", "a" * 64)]
-    db, cols = _gc_db({"code__repo": [], "docs__repo": []})
-    cols["code__repo"] = _gc_col(live, with_fast_path=True)
-    catalog = _gc_catalog({"code__repo": {"a" * 64}, "docs__repo": set()})
-    phases: list[str] = []
-
-    _prune_deleted_files(
-        "code__repo", "docs__repo", db, catalog=catalog, on_phase=phases.append,
-    )
-
-    code_phases = [m for m in phases if "collection 1/2 (code__repo)" in m]
-    assert code_phases, "expected at least one liveness ping for the fast path"
-    assert any("reading full collection" in m for m in code_phases)
-
-
-# ── real page progress (index-output-ux-assessment-2026-08-10 §7.2/a3) ─────
-
-
+# test_prune_deleted_files_paginates DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
+# test_prune_deleted_files_uses_get_all_metadata_fast_path_not_pagination DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
+# test_prune_deleted_files_fast_path_row_cap_falls_back_without_data_loss DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
+# test_prune_deleted_files_fast_path_and_fallback_both_fail_skips_collection DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
+# test_prune_deleted_files_fast_path_emits_liveness_ping DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
 def test_paginated_get_invokes_on_page_per_page():
     """The 427.5s black hole was this exact loop with no callback. Each
     page must fire on_page(page_num, cumulative_scanned)."""
@@ -2394,136 +1968,26 @@ def test_paginated_get_on_page_defaults_to_none_safely():
     assert result["ids"] == ["a"]
 
 
-def test_prune_deleted_files_emits_page_progress_per_collection(monkeypatch):
-    """310 rows (code__repo) / _CHROMA_PAGE_SIZE=300 = 2 pages; docs__repo
-    is empty but ``_paginated_get`` still issues its one terminating page,
-    so both collections must be represented.
-
-    RDR-191 Phase 1: docs__repo's manifest must be NON-empty here (an
-    unrelated placeholder chash) — the nexus-oqku empty-manifest guard now
-    runs BEFORE any T3 read at all (it must also gate the server-side
-    anti-join, see indexer.py), so a genuinely empty manifest short-
-    circuits before ever reaching the page-progress path this test is
-    about. That guard's own behaviour is covered separately
-    (``test_prune_deleted_files_skips_when_manifest_empty_no_wipe``); this
-    test still wants a referenced-but-T3-empty collection to reach the
-    pagination code this docstring describes."""
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    from nexus.indexer import _prune_deleted_files
-    live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(200)]
-    orphan = [(f"orphan-{i:03d}", f"b{i:03d}" + "0" * 60) for i in range(110)]
-    live_chashes = {r[1] for r in live}
-    db, cols = _gc_db({"code__repo": live + orphan, "docs__repo": []})
-    catalog = _gc_catalog({"code__repo": live_chashes, "docs__repo": {"z" * 64}})
-    phases: list[str] = []
-
-    _prune_deleted_files(
-        "code__repo", "docs__repo", db, catalog=catalog, on_phase=phases.append,
-    )
-
-    code_pages = [m for m in phases if "collection 1/2 (code__repo)" in m]
-    docs_pages = [m for m in phases if "collection 2/2 (docs__repo)" in m]
-    assert len(code_pages) == 2
-    assert "page 1" in code_pages[0]
-    assert "page 2" in code_pages[1]
-    assert len(docs_pages) == 1
-    assert "page 1" in docs_pages[0]
-    assert "0 chunks scanned" in docs_pages[0]
-
-
-def test_prune_deleted_files_page_progress_degrades_without_count(monkeypatch):
-    """``col.count()`` on a bare MagicMock returns a Mock, not an int —
-    the denominator must degrade to page-only numbering, never raise."""
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    from nexus.indexer import _prune_deleted_files
-    live = [("live-1", "a" * 64)]
-    db, cols = _gc_db({"code__repo": live, "docs__repo": []})
-    catalog = _gc_catalog({"code__repo": {"a" * 64}, "docs__repo": set()})
-    phases: list[str] = []
-
-    _prune_deleted_files(
-        "code__repo", "docs__repo", db, catalog=catalog, on_phase=phases.append,
-    )
-
-    code_pages = [m for m in phases if "collection 1/2 (code__repo)" in m]
-    assert code_pages == [
-        "Pruning deleted files: collection 1/2 (code__repo), page 1 (1 chunks scanned)"
-    ]
-
-
-def test_prune_deleted_files_page_progress_degrades_on_negative_count(monkeypatch):
-    """A corrupted ``col.count()`` returning a negative int (e.g. -300, an
-    engine/collection-metadata corruption) must degrade to page-only
-    numbering — never render a nonsensical ``page k/-1`` denominator
-    (indexer.py's ceiling-division trick ``-(-_count // _CHROMA_PAGE_SIZE)``
-    yields -1 for _count=-300, since the isinstance(int) guard alone does
-    not reject negative counts)."""
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    from nexus.indexer import _prune_deleted_files
-    live = [("live-1", "a" * 64)]
-    db, cols = _gc_db({"code__repo": live, "docs__repo": []})
-    cols["code__repo"].count.return_value = -300
-    catalog = _gc_catalog({"code__repo": {"a" * 64}, "docs__repo": set()})
-    phases: list[str] = []
-
-    _prune_deleted_files(
-        "code__repo", "docs__repo", db, catalog=catalog, on_phase=phases.append,
-    )
-
-    code_pages = [m for m in phases if "collection 1/2 (code__repo)" in m]
-    assert code_pages == [
-        "Pruning deleted files: collection 1/2 (code__repo), page 1 (1 chunks scanned)"
-    ]
-
-
-def test_prune_deleted_files_page_progress_includes_denominator_when_count_available(
-    monkeypatch,
-):
-    """When ``col.count()`` returns a real int, the message carries a real
-    ``page k/K`` denominator (137-page-total shape from the assessment)."""
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    from nexus.indexer import _prune_deleted_files
-    live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(310)]
-    live_chashes = {r[1] for r in live}
-    db, cols = _gc_db({"code__repo": live, "docs__repo": []})
-    cols["code__repo"].count.return_value = 310
-    catalog = _gc_catalog({"code__repo": live_chashes, "docs__repo": set()})
-    phases: list[str] = []
-
-    _prune_deleted_files(
-        "code__repo", "docs__repo", db, catalog=catalog, on_phase=phases.append,
-    )
-
-    code_pages = [m for m in phases if "collection 1/2 (code__repo)" in m]
-    assert code_pages == [
-        "Pruning deleted files: collection 1/2 (code__repo), page 1/2 (300 chunks scanned)",
-        "Pruning deleted files: collection 1/2 (code__repo), page 2/2 (310 chunks scanned)",
-    ]
-
-
-def test_prune_deleted_files_page_progress_no_bracket_nm_form(monkeypatch):
-    """Constraint: page-progress lines must never match ``^\\s*\\[N/M\\]``
-    (that shape is reserved for the per-file monitor lines)."""
-    import re
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    from nexus.indexer import _prune_deleted_files
-    live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(310)]
-    live_chashes = {r[1] for r in live}
-    db, cols = _gc_db({"code__repo": live, "docs__repo": []})
-    cols["code__repo"].count.return_value = 310
-    catalog = _gc_catalog({"code__repo": live_chashes, "docs__repo": set()})
-    phases: list[str] = []
-
-    _prune_deleted_files(
-        "code__repo", "docs__repo", db, catalog=catalog, on_phase=phases.append,
-    )
-
-    assert phases, "expected at least one on_phase call"
-    pattern = re.compile(r"^\s*\[[0-9]+/[0-9]+\]")
-    for msg in phases:
-        assert not pattern.match(msg)
-
-
+# test_prune_deleted_files_emits_page_progress_per_collection DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
+# test_prune_deleted_files_page_progress_degrades_without_count DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
+# test_prune_deleted_files_page_progress_degrades_on_negative_count DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
+# test_prune_deleted_files_page_progress_includes_denominator_when_count_available DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
+# test_prune_deleted_files_page_progress_no_bracket_nm_form DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.
 def test_frecency_update_paginates(tmp_path):
     """nexus-afudo (2026-08-05): pinned to the doc_id-keyed path (a
     real ``_build_frecency_doc_id_map`` patch) so this pagination
@@ -2963,161 +2427,11 @@ def test_drain_markers_prints_per_flush_not_cumulative_g2(monkeypatch):
     assert "60.0s" not in phases[2]
 
 
-class TestQuarantineLifecycle:
-    """nexus-xukbj (soft delete): orphans MOVE to the quarantine sibling
-    (never a recurring refusal warning — the mr89x nag this replaced);
-    re-referenced chashes restore; the mr89x safety floor now guards only
-    the EXPIRY hard-delete after the grace window."""
-
-    @staticmethod
-    def _setup(n_total=200, n_live=20, name="code__repo"):
-        rows = [(f"id-{i:04d}", f"{i:032d}" + "f" * 32) for i in range(n_total)]
-        live = {r[1] for r in rows[:n_live]}
-        db, cols = _gc_db({name: rows, "docs__repo": []})
-        catalog = _gc_catalog({name: live, "docs__repo": set()})
-        return rows, live, db, cols, catalog
-
-    def test_mass_orphan_verdict_quarantines_not_refuses(self, monkeypatch):
-        """The 90%-orphan shape that used to refuse forever now moves to
-        quarantine silently: origin keeps only live chunks, the sibling
-        holds the orphans with quarantined_at + origin stamped."""
-        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
-        monkeypatch.delenv("NX_GC_FORCE", raising=False)
-        rows, live, db, cols, catalog = self._setup()
-        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-        origin = cols["code__repo"]._rows
-        q = cols["quarantine-code__repo"]._rows
-        assert len(origin) == 20 and len(q) == 180
-        sample = next(iter(q.values()))
-        assert sample["origin_collection"] == "code__repo"
-        assert sample["quarantined_at"]
-
-    def test_field_incident_shape_quarantines(self, monkeypatch):
-        """154/551 = 27.9% (the 2026-07-09 incident): recoverable move,
-        no refusal, no warning."""
-        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
-        monkeypatch.delenv("NX_GC_FORCE", raising=False)
-        rows, live, db, cols, catalog = self._setup(n_total=551, n_live=397)
-        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-        assert len(cols["code__repo"]._rows) == 397
-        assert len(cols["quarantine-code__repo"]._rows) == 154
-
-    def test_rereferenced_chashes_restore_from_quarantine(self, monkeypatch):
-        """A heal that re-references quarantined chashes copies them back
-        (and strips the quarantine stamps) before orphan classification —
-        the recoverability the whole design exists for."""
-        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
-        monkeypatch.delenv("NX_GC_FORCE", raising=False)
-        rows, live, db, cols, catalog = self._setup()
-        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-        assert len(cols["quarantine-code__repo"]._rows) == 180
-        # The manifest now references EVERYTHING (heal healed the gap).
-        catalog2 = _gc_catalog({
-            "code__repo": {r[1] for r in rows}, "docs__repo": set(),
-        })
-        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog2)
-        assert len(cols["code__repo"]._rows) == 200
-        assert len(cols["quarantine-code__repo"]._rows) == 0
-        restored = cols["code__repo"]._rows["id-0150"]
-        assert "quarantined_at" not in restored
-        assert "origin_collection" not in restored
-
-    def test_expiry_hard_deletes_past_grace_and_floor_guards_mass(
-        self, monkeypatch,
-    ):
-        """Rows older than the grace window hard-delete; a MASS expiry
-        (the persisted-defect shape) is refused by the relocated mr89x
-        floor unless NX_GC_FORCE=1. Also pins the fail-safe env parse."""
-        from nexus.catalog.chunk_quarantine import expire_quarantine  # noqa: PLC0415 — file pattern: deferred imports
-        monkeypatch.delenv("NX_GC_FORCE", raising=False)
-        old = "2020-01-01T00:00:00Z"
-        rows = [(f"q-{i:04d}", f"{i:032d}" + "e" * 32) for i in range(150)]
-        db, cols = _gc_db({"quarantine-code__repo": rows})
-        for m in cols["quarantine-code__repo"]._rows.values():
-            m["quarantined_at"] = old
-        # 100% of 150 expiring >= floor -> refused.
-        expired, refused = expire_quarantine(
-            db, "code__repo", floor_fraction=0.25, floor_min_chunks=100,
-        )
-        assert (expired, refused) == (0, 150)
-        assert len(cols["quarantine-code__repo"]._rows) == 150
-        # Explicit override sweeps.
-        monkeypatch.setenv("NX_GC_FORCE", "1")
-        expired, refused = expire_quarantine(
-            db, "code__repo", floor_fraction=0.25, floor_min_chunks=100,
-        )
-        assert (expired, refused) == (150, 0)
-        assert len(cols["quarantine-code__repo"]._rows) == 0
-
-    def test_small_or_fresh_quarantine_expires_normally(self, monkeypatch):
-        """Under the floor's min-chunk gate, expiry proceeds; fresh rows
-        (inside grace) never expire; malformed NX_GC_QUARANTINE_DAYS falls
-        back safely."""
-        from nexus.catalog.chunk_quarantine import expire_quarantine  # noqa: PLC0415 — file pattern: deferred imports
-        monkeypatch.delenv("NX_GC_FORCE", raising=False)
-        monkeypatch.setenv("NX_GC_QUARANTINE_DAYS", "not-a-number")
-        rows = [(f"q-{i:02d}", f"{i:032d}" + "e" * 32) for i in range(10)]
-        db, cols = _gc_db({"quarantine-code__repo": rows})
-        items = list(cols["quarantine-code__repo"]._rows.values())
-        for m in items[:6]:
-            m["quarantined_at"] = "2020-01-01T00:00:00Z"
-        for m in items[6:]:
-            m["quarantined_at"] = "9998-01-01T00:00:00Z"
-        expired, refused = expire_quarantine(
-            db, "code__repo", floor_fraction=0.25, floor_min_chunks=100,
-        )
-        assert (expired, refused) == (6, 0)
-        assert len(cols["quarantine-code__repo"]._rows) == 4
-
-    def test_quarantine_isolated_per_collection(self, monkeypatch):
-        """A mass move in code__ never touches docs__ (the v7mn distinct-
-        collection discipline)."""
-        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
-        monkeypatch.delenv("NX_GC_FORCE", raising=False)
-        code_rows = [(f"c-{i:03d}", f"{i:032d}" + "c" * 32) for i in range(150)]
-        docs_rows = [("d-live", "a" * 64), ("d-orphan", "b" * 64)]
-        db, cols = _gc_db({"code__repo": code_rows, "docs__repo": docs_rows})
-        catalog = _gc_catalog({
-            "code__repo": {r[1] for r in code_rows[:10]},
-            "docs__repo": {"a" * 64},
-        })
-        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-        assert len(cols["code__repo"]._rows) == 10
-        # Review 4cb743be C3 fix: each origin owns a DISTINCT sibling —
-        # the code__ mass move and the docs__ single orphan land apart.
-        assert len(cols["quarantine-code__repo"]._rows) == 140
-        assert list(cols["quarantine-docs__repo"]._rows) == ["d-orphan"]
-        assert list(cols["docs__repo"]._rows) == ["d-live"]
-
-
-def test_quarantine_siblings_distinct_for_shared_owner_and_chash(monkeypatch):
-    """Critique 4cb743be Critical-1, realistic shape: docs__ and rdr__ of
-    the SAME repo share owner + embedding model (RDR-103), and identical
-    boilerplate can share a chash across both. Per-type siblings keep the
-    two moves apart, restore stays origin-faithful, and the expiry floor's
-    denominator is never cross-contaminated."""
-    from nexus.catalog.chunk_quarantine import quarantine_collection_name  # noqa: PLC0415 — file pattern: deferred imports
-    from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
-
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    docs = "docs__nexus-1-1__voyage-context-3__v1"
-    rdr = "rdr__nexus-1-1__voyage-context-3__v1"
-    assert quarantine_collection_name(docs) != quarantine_collection_name(rdr)
-
-    shared = "c" * 64  # identical boilerplate chunk in both collections
-    db, cols = _gc_db({docs: [("d-1", shared)], rdr: [("r-1", shared)]})
-    catalog = _gc_catalog({docs: set(), rdr: set()})
-    # Empty-manifest guard would skip; give each a live row + manifest ref.
-    db2, cols2 = _gc_db({
-        docs: [("d-live", "a" * 64), ("d-1", shared)],
-        rdr: [("r-live", "b" * 64), ("r-1", shared)],
-    })
-    catalog2 = _gc_catalog({
-        docs: {"a" * 64}, rdr: {"b" * 64},
-    })
-    _prune_deleted_files(docs, rdr, db2, catalog=catalog2)
-    qd = cols2[quarantine_collection_name(docs)]._rows
-    qr = cols2[quarantine_collection_name(rdr)]._rows
-    assert list(qd) == ["d-1"] and list(qr) == ["r-1"]
-    assert qd["d-1"]["origin_collection"] == docs
-    assert qr["r-1"]["origin_collection"] == rdr
+# TestQuarantineLifecycle DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested chunk_quarantine.py's client-side quarantine_orphans/restore_rereferenced/
+# expire_quarantine (all deleted): the manifest-chunk FK makes the completeness
+# apparatus this lifecycle existed to prove correct unreachable by construction.
+# test_quarantine_siblings_distinct_for_shared_owner_and_chash DELETED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) —
+# tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
+# retired: the manifest-chunk FK makes the completeness apparatus it proved
+# correct unreachable by construction.

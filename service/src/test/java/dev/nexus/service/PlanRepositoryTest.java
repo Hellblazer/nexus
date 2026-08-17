@@ -125,7 +125,14 @@ class PlanRepositoryTest {
         var row = repo.getById(TENANT_A, id);
         assertThat(row).as("getById must return the saved plan").isPresent();
         assertThat(row.get().getQuery()).isEqualTo("How to research RDRs");
-        assertThat(row.get().getPlanJson()).isEqualTo("{\"steps\":[]}");
+        // nexus-cefa1.5: plan_json is jsonb now — PostgreSQL's jsonb canonical
+        // text output inserts a space after each object-key colon (matching
+        // Python's json.dumps default separators exactly), so the written
+        // "steps":[] (no space) no longer round-trips byte-identical; assert
+        // the canonical shape and unwrap via .data() (see savePlan_planJson_
+        // jsonbCanonicalizesWhitespaceAndKeyOrder below for the dedicated
+        // whitespace + key-order canonicalization test).
+        assertThat(row.get().getPlanJson().data()).isEqualTo("{\"steps\": []}");
         assertThat(row.get().getOutcome()).isEqualTo("success");
         assertThat(row.get().getTags()).isEqualTo("research,rdr");
         assertThat(row.get().getVerb()).isEqualTo("research");
@@ -149,8 +156,37 @@ class PlanRepositoryTest {
         assertThat(id2).as("conflict save must return same id").isEqualTo(id1);
         var row = repo.getById(TENANT_A, id1);
         assertThat(row).isPresent();
-        assertThat(row.get().getPlanJson())
-            .as("plan_json must be updated on conflict").isEqualTo("{\"v\":2}");
+        // nexus-cefa1.5: jsonb canonical spacing — see Order(1)'s comment.
+        assertThat(row.get().getPlanJson().data())
+            .as("plan_json must be updated on conflict").isEqualTo("{\"v\": 2}");
+    }
+
+    /**
+     * nexus-cefa1.5: dedicated coverage for the documented behaviour change —
+     * a plan_json written with non-canonical whitespace AND non-canonical key
+     * order reads back reformatted. PostgreSQL's jsonb storage does not
+     * preserve the source text: object keys are reordered (shorter keys
+     * before longer keys, ties broken lexically) and whitespace is
+     * normalized to the canonical form, regardless of what was submitted.
+     * Verified empirically against a throwaway postgres:16-alpine container
+     * during the P4 audit (T2 nexus/schema-hygiene-p4-plan-jsonb-audit-
+     * 2026-08-15): {@code '{"alpha":1,"zeta":2}'::jsonb} renders as
+     * {@code '{"zeta": 2, "alpha": 1}'} — "zeta" (4 chars) sorts before
+     * "alpha" (5 chars) even though "alpha" was written first.
+     */
+    @Test
+    @Order(24)
+    void savePlan_planJson_jsonbCanonicalizesWhitespaceAndKeyOrder() {
+        long id = repo.savePlan(TENANT_A, "proj-canon", "Canonicalization probe",
+                                "{\"alpha\":1,\"zeta\":2}", "success", "", null,
+                                null, null, null, null, null, null, "", "");
+
+        var row = repo.getById(TENANT_A, id);
+        assertThat(row).isPresent();
+        assertThat(row.get().getPlanJson().data())
+            .as("jsonb reorders object keys (shorter-first) and normalizes whitespace — "
+                + "the source text's alpha-before-zeta order and no-space colons do not survive")
+            .isEqualTo("{\"zeta\": 2, \"alpha\": 1}");
     }
 
     @Test
@@ -631,7 +667,8 @@ class PlanRepositoryTest {
         var listed = repo.listPlans(TENANT_A, "proj-batch", 100, true);
         var q0 = listed.stream().filter(r -> "batch query 0".equals(r.getQuery())).findFirst();
         assertThat(q0).isPresent();
-        assertThat(q0.get().getPlanJson()).isEqualTo("{\"v\":0}");
+        // nexus-cefa1.5: jsonb canonical spacing — see Order(1)'s comment.
+        assertThat(q0.get().getPlanJson().data()).isEqualTo("{\"v\": 0}");
         assertThat(q0.get().getMatchCount()).isEqualTo(7);
         assertThat(q0.get().getUseCount()).isEqualTo(3);
 
@@ -706,7 +743,8 @@ class PlanRepositoryTest {
         var listed = repo.listPlans(TENANT_A, "proj-batch-dup", 100, true);
         var matches = listed.stream().filter(r -> "dup query".equals(r.getQuery())).toList();
         assertThat(matches).hasSize(1);
-        assertThat(matches.get(0).getPlanJson()).isEqualTo("{\"v\":\"b\"}");
+        // nexus-cefa1.5: jsonb canonical spacing — see Order(1)'s comment.
+        assertThat(matches.get(0).getPlanJson().data()).isEqualTo("{\"v\": \"b\"}");
     }
 
     @Test

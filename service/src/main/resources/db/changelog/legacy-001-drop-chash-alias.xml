@@ -1,0 +1,384 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-lgdel.l1 (epic nexus-lgdel, T2 nexus/plan-legacy-retirement-2026-08-16)
+    — THE DELETE. `nexus.chash_alias` (RDR-180 Item6, `rdr180-12-chash-alias`,
+    `rdr180-001-bytea-chash.xml:333-355`) is DROPPED here, along with its two
+    remaining dependents: the legacy-width rows it used to keep resolvable in
+    `nexus.frecency`/`nexus.relevance_log`, and `nexus.chash_old_bytes(text)`
+    (`rdr180-002-hex-boundary-functions.xml:526-548`), the string-to-bytes
+    lemma every alias writer used to derive `old_bytes`.
+
+    DIRECTIVE OF RECORD (Hal, 2026-08-16): "I'm tired of carrying these legacy
+    things... Delete it. I do not want a campaign to preserve every last
+    malformed disaster... this is not a corporate support issue. Ours is
+    empty and we don't care. No one cares." RDR-180's "legacy references stay
+    resolvable forever" promise had a beneficiary population; RDR-194 cc2
+    (BYPASSRLS-verified, T2 rdr194-cloud-count-2-2026-08-15 [22670]) found it
+    at zero. The burden of proof was on keeping the table; nothing met it.
+
+    CENSUS DISCIPLINE, inverted for a delete world (confirm-zero-or-delete-
+    anyway): changesets legacy-001-1 and legacy-001-2 each RAISE NOTICE their
+    deleted-row count. The count is evidence recorded after the migration
+    walk, never a gate — this changelog deletes the population it finds
+    regardless of its size, exactly as it would delete zero.
+
+    SEVEN CHANGESETS (EXPECT_NEW_CHANGESETS pinned to this file as authored):
+
+      1. legacy-001-1: DELETE non-canonical nexus.frecency rows
+         (chunk_id !~ '^[0-9a-f]{64}$'), RLS-toggle-wrapped (frecency carries
+         FORCE ROW LEVEL SECURITY, telemetry-001-baseline.xml:302; the D0.3
+         precedent is catalog-029-manifest-chunk-fk.xml's catalog-029-1).
+      2. legacy-001-2: same for nexus.relevance_log (FORCE RLS at
+         telemetry-001-baseline.xml:84).
+      3. legacy-001-3: ADD CHECK chunk_id ~ '^[0-9a-f]{64}$' on BOTH tables —
+         the structural prevention that makes the population changesets 1/2
+         just deleted impossible to regrow via direct SQL (the Java-side
+         regrowth gap — TelemetryHandler's four chunk_id entry points taking
+         bare strings with zero format enforcement — is closed in the SAME
+         commit family, TelemetryHandler.java). NOT added to the two staging
+         twins (staging.frecency, staging.relevance_log): staging is
+         typeless landing by design (StagingPromoteOps' own class javadoc —
+         "staging stays typeless... a malformed staged value fails LOUD at
+         PROMOTE time, not at land time"), so a CHECK there would reject
+         legitimate arbitrary pre-validation ETL input the promote path
+         itself is what canonicalizes or rejects.
+      4. legacy-001-4: CREATE OR REPLACE nexus.remap_membership layered on
+         remap-003-2 (RDR-194 P2, nexus-tk070.p2), with the
+         `LEFT JOIN nexus.chash_alias a ON a.old_bytes = r.new_chash` arm
+         removed — chash_remap is EMPTY on cloud (RDR-194 cc2, same gate
+         record as above), so that join was purely the alias-chaining/
+         supersession arm, and it goes with the map.
+      5. legacy-001-5: DROP TABLE nexus.chash_alias (with its two indexes
+         and RLS policy — DROP TABLE cascades all three; DDL origin
+         rdr180-001-bytea-chash.xml:333-355, changeset rdr180-12-chash-alias,
+         no later ALTERs besides the grants-nexus-svc.xml MAINTAIN grant,
+         which this same commit family removes separately in that file).
+      6. legacy-001-6: DROP FUNCTION nexus.chash_old_bytes(text)
+         (rdr180-002-hex-boundary-functions.xml:526-548). Its only
+         production caller, ChashSqlIdioms.chashOldBytesField, is deleted in
+         this same commit family (StagingPromoteOps.java) — precedent shape
+         nexus.manifest_orphans, already fully dropped (catalog-030).
+      7. legacy-001-7: ANALYZE nexus.frecency, nexus.relevance_log (D0.5,
+         tests/test_changelog_analyze_lint.py) — both tables had rows
+         deleted by changesets 1/2 above.
+
+    ROLLBACK ORDERING (read before touching any <rollback> block — same
+    discipline remap-003-new-chash-bytea.xml's own header documents; derived
+    via mcp__plugin_conexus_sequential-thinking__sequentialthinking per the
+    bead's execution note). Forward order is 1-2-3-4-5-6-7; Liquibase's
+    reverse walk undoes them 7-6-5-4-3-2-1 (most-recently-applied first):
+
+      - 7's rollback: no-op (ANALYZE has no schema/data effect to reverse).
+      - 6's rollback: CREATE OR REPLACE FUNCTION nexus.chash_old_bytes,
+        restored verbatim to its rdr180-20 body. Safe unconditionally — the
+        function references no table.
+      - 5's rollback: recreate nexus.chash_alias EMPTY (table, both indexes,
+        RLS enable+force, tenant_isolation policy — verbatim from
+        rdr180-12-chash-alias). EMPTY is the only honest recreation: the
+        rows changesets 1/2 deleted (from frecency/relevance_log, a
+        DIFFERENT pair of tables) and any alias facts that existed before
+        this migration ran are UNRECOVERABLE — deliberate, per D0.6, and the
+        reason this changelog exists at all (nexus-cck6z data-fidelity
+        lesson: a rollback that CLAIMS to restore data it cannot must say so
+        inline, never silently omit the gap).
+      - 4's rollback: CREATE OR REPLACE FUNCTION nexus.remap_membership,
+        restored to the exact remap-003-2 body (the alias-joined form). This
+        is SAFE here specifically because changeset 5's rollback runs
+        immediately before this one in the reverse walk (5 is later than 4
+        in forward order) — by the time 4's rollback executes,
+        nexus.chash_alias EXISTS again (empty), so the restored
+        `LEFT JOIN nexus.chash_alias` body typechecks. (Contrast remap-003-
+        2's OWN rollback, which is a deliberate no-op for the opposite
+        reason: at THAT rollback's position in ITS file's reverse walk, the
+        column type it depends on is not yet reverted. Two different
+        changelogs, two different orderings, two different correct answers
+        — read each file's own derivation, do not copy one into the other.)
+      - 3's rollback: DROP the two `chunk_id ~ '^[0-9a-f]{64}$'` CHECK
+        constraints from frecency/relevance_log. Nothing else to restore —
+        changeset 3 only ADDED constraints.
+      - 2's rollback: deliberately EMPTY (D0.6) — the deleted
+        nexus.relevance_log rows are UNRECOVERABLE. Reason inline in the
+        rollback itself, naming this directive.
+      - 1's rollback: deliberately EMPTY (D0.6) — the deleted
+        nexus.frecency rows are UNRECOVERABLE. Reason inline in the
+        rollback itself, naming this directive.
+
+    Exercised by SchemaRollbackRoundTripIntegrationTest (the round-trip
+    proof: apply everything, roll everything back, apply everything again,
+    same end state modulo the two named irreversible row-deletions).
+
+    Tail-appended after taxonomy-009-assign-source-collection.xml (current
+    tail, RDR-194 P3a) and before the grants-nexus-svc.xml runAlways block,
+    matching the established late-append convention (D0.1; see catalog-031's
+    / telemetry-004's / aspects-003's / plans-002's / taxonomy-008's /
+    catalog-032's / remap-003's / taxonomy-009's own <include> comments for
+    the identical reasoning).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: DELETE non-canonical nexus.frecency rows ──────────── -->
+    <changeSet id="legacy-001-1" author="nexus-lgdel.l1">
+        <comment>
+            Delete every nexus.frecency row whose chunk_id is not the
+            canonical 64-hex chash shape — the legacy-width population
+            nexus.chash_alias used to keep resolvable. Confirm-zero-or-
+            delete-anyway (nexus-lgdel.l1): the deleted count is RAISE
+            NOTICE'd, never gated on. RLS toggle-wrapped (nexus-1wjmq shape,
+            catalog-029-1 precedent): frecency carries FORCE ROW LEVEL
+            SECURITY and Liquibase's nexus_admin owner is not BYPASSRLS, so
+            an untoggled DELETE would silently match zero rows for every
+            tenant.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.frecency NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_deleted_count BIGINT;
+BEGIN
+    DELETE FROM nexus.frecency
+     WHERE chunk_id !~ '^[0-9a-f]{64}$';
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    RAISE NOTICE 'nexus-lgdel.l1: deleted % legacy-width nexus.frecency row(s) (chunk_id not canonical 64-hex)', v_deleted_count;
+END $$;
+
+ALTER TABLE nexus.frecency FORCE ROW LEVEL SECURITY;
+        </sql>
+        <rollback>
+            <!-- Deliberately EMPTY (D0.6): the deleted rows are legacy-width
+                 frecency projections with no recorded source of truth to
+                 recompute them from — unrecoverable by construction, not an
+                 oversight. Hal directive 2026-08-16 (T2 nexus/plan-legacy-
+                 retirement-2026-08-16): "I do not want a campaign to
+                 preserve every last malformed disaster." -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: DELETE non-canonical nexus.relevance_log rows ──────── -->
+    <changeSet id="legacy-001-2" author="nexus-lgdel.l1">
+        <comment>
+            Delete every nexus.relevance_log row whose chunk_id is not the
+            canonical 64-hex chash shape. Same RAISE NOTICE / RLS-toggle
+            discipline as legacy-001-1 (relevance_log carries FORCE ROW
+            LEVEL SECURITY, telemetry-001-baseline.xml:84).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.relevance_log NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_deleted_count BIGINT;
+BEGIN
+    DELETE FROM nexus.relevance_log
+     WHERE chunk_id !~ '^[0-9a-f]{64}$';
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    RAISE NOTICE 'nexus-lgdel.l1: deleted % legacy-width nexus.relevance_log row(s) (chunk_id not canonical 64-hex)', v_deleted_count;
+END $$;
+
+ALTER TABLE nexus.relevance_log FORCE ROW LEVEL SECURITY;
+        </sql>
+        <rollback>
+            <!-- Deliberately EMPTY (D0.6) — see legacy-001-1's identical
+                 rollback comment. The deleted relevance_log event rows are
+                 unrecoverable telemetry, not live content. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: structural prevention — CHECK on both tables ───────── -->
+    <changeSet id="legacy-001-3" author="nexus-lgdel.l1">
+        <comment>
+            ADD CHECK chunk_id ~ '^[0-9a-f]{64}$' on nexus.frecency and
+            nexus.relevance_log — the prevention that lands WITH the
+            deletion (never after it): makes the population legacy-001-1/2
+            just deleted structurally impossible to regrow via direct SQL.
+            Safe to validate immediately (not NOT VALID + separate
+            VALIDATE): legacy-001-1/2 already committed as separate,
+            earlier changesets in this SAME migration walk, so every
+            existing row is already conformant by the time this ALTER
+            evaluates it.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.frecency
+    ADD CONSTRAINT frecency_chunk_id_canonical_check CHECK (chunk_id ~ '^[0-9a-f]{64}$');
+
+ALTER TABLE nexus.relevance_log
+    ADD CONSTRAINT relevance_log_chunk_id_canonical_check CHECK (chunk_id ~ '^[0-9a-f]{64}$');
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.frecency DROP CONSTRAINT IF EXISTS frecency_chunk_id_canonical_check;
+ALTER TABLE nexus.relevance_log DROP CONSTRAINT IF EXISTS relevance_log_chunk_id_canonical_check;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: remap_membership layered CREATE OR REPLACE ─────────── -->
+    <changeSet id="legacy-001-4" author="nexus-lgdel.l1">
+        <comment>
+            nexus.remap_membership: the `LEFT JOIN nexus.chash_alias`
+            alias-chaining/supersession arm (remap-003-2, RDR-194 P2) is
+            deleted, not narrowed — the map it joined is dropped two
+            changesets from now. Layered CREATE OR REPLACE on remap-003-2's
+            applied body (D0.2 — never editing the applied changeset in
+            place). Signature and return contract (RETURNS TABLE
+            (mapped_total bigint, present_count bigint), SECURITY INVOKER,
+            STABLE) unchanged.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.remap_membership(
+    p_source_collection text,
+    p_target_collection text
+) RETURNS TABLE(mapped_total bigint, present_count bigint)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $fn$
+    SELECT
+        count(*)::bigint AS mapped_total,
+        count(*) FILTER (WHERE
+            EXISTS (SELECT 1 FROM nexus.chunks c
+                     WHERE c.collection = p_target_collection
+                       AND c.chash = r.new_chash)
+        )::bigint AS present_count
+    FROM nexus.chash_remap r
+    WHERE r.source_collection = p_source_collection
+      AND r.target_collection = p_target_collection
+$fn$;
+        </sql>
+        <rollback>
+            <!-- Restores the remap-003-2 body VERBATIM (the alias-joined
+                 form). Safe here — unlike remap-003-2's OWN rollback, which
+                 is a deliberate no-op for a DIFFERENT reason in THAT file's
+                 reverse-walk position — because changeset legacy-001-5's
+                 rollback (recreating nexus.chash_alias, empty) runs
+                 immediately before this one in this file's reverse walk
+                 (5 is later than 4 in forward order), so the restored
+                 LEFT JOIN nexus.chash_alias typechecks against a table that
+                 exists again by the time this runs. See this file's own
+                 header "ROLLBACK ORDERING" section. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.remap_membership(
+    p_source_collection text,
+    p_target_collection text
+) RETURNS TABLE(mapped_total bigint, present_count bigint)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $fn$
+    WITH resolved AS (
+        SELECT COALESCE(a.new_chash, r.new_chash) AS chash
+        FROM nexus.chash_remap r
+        LEFT JOIN nexus.chash_alias a
+          ON a.old_bytes = r.new_chash
+        WHERE r.source_collection = p_source_collection
+          AND r.target_collection = p_target_collection
+    )
+    SELECT
+        count(*)::bigint AS mapped_total,
+        count(*) FILTER (WHERE
+            EXISTS (SELECT 1 FROM nexus.chunks c
+                     WHERE c.collection = p_target_collection
+                       AND c.chash = resolved.chash)
+        )::bigint AS present_count
+    FROM resolved
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 5: DROP TABLE nexus.chash_alias ───────────────────────── -->
+    <changeSet id="legacy-001-5" author="nexus-lgdel.l1">
+        <comment>
+            DROP TABLE nexus.chash_alias — the PERMANENT legacy-reference
+            resolver (RDR-180 Item6, rdr180-12-chash-alias) whose
+            beneficiary population reached zero (RDR-194 cc2, T2
+            rdr194-cloud-count-2-2026-08-15 [22670]). DROP TABLE cascades
+            its two indexes (idx_chash_alias_old_bytes, idx_chash_alias_new)
+            and its tenant_isolation RLS policy — nothing survives it that
+            needs a separate DROP INDEX/DROP POLICY.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+DROP TABLE nexus.chash_alias;
+        </sql>
+        <rollback>
+            <!-- Recreates chash_alias EMPTY (verbatim from
+                 rdr180-12-chash-alias) — the only honest recreation. The
+                 alias facts that existed before this migration ran, and the
+                 legacy-width frecency/relevance_log rows legacy-001-1/2
+                 deleted, are UNRECOVERABLE (D0.6; nexus-cck6z data-fidelity
+                 lesson: name the gap inline, never silently omit it). Hal
+                 directive 2026-08-16 (T2 nexus/plan-legacy-retirement-
+                 2026-08-16): "I do not want a campaign to preserve every
+                 last malformed disaster." -->
+            <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.chash_alias (
+    tenant_id  TEXT  NOT NULL DEFAULT '',
+    old_ref    TEXT  NOT NULL,
+    old_bytes  BYTEA NOT NULL,
+    new_chash  BYTEA NOT NULL,
+    source     TEXT  NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chash_alias_pk PRIMARY KEY (tenant_id, old_ref),
+    CONSTRAINT chash_alias_new_octet_check CHECK (octet_length(new_chash) = 32)
+);
+CREATE INDEX idx_chash_alias_old_bytes ON nexus.chash_alias (tenant_id, old_bytes);
+CREATE INDEX idx_chash_alias_new ON nexus.chash_alias (tenant_id, new_chash);
+ALTER TABLE nexus.chash_alias ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chash_alias FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.chash_alias
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 6: DROP FUNCTION nexus.chash_old_bytes(text) ──────────── -->
+    <changeSet id="legacy-001-6" author="nexus-lgdel.l1">
+        <comment>
+            DROP FUNCTION nexus.chash_old_bytes(text) — the string-to-bytes
+            lemma every chash_alias.old_bytes writer used (rdr180-20). Its
+            only production caller, ChashSqlIdioms.chashOldBytesField, is
+            deleted in this same commit family. Precedent shape:
+            nexus.manifest_orphans, already fully dropped (catalog-030).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+DROP FUNCTION nexus.chash_old_bytes(text);
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.chash_old_bytes(ref text)
+RETURNS bytea
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+AS $fn$
+    SELECT CASE WHEN ref ~ '^[0-9a-f]+$' AND length(ref) % 2 = 0
+                THEN decode(ref, 'hex')
+                ELSE convert_to(ref, 'UTF8')
+           END
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 7: ANALYZE the rewritten tables (D0.5) ────────────────── -->
+    <changeSet id="legacy-001-7" author="nexus-lgdel.l1">
+        <comment>
+            ANALYZE nexus.frecency, nexus.relevance_log — both had rows
+            deleted by legacy-001-1/2 (tests/test_changelog_analyze_lint.py
+            discipline: a migration that rewrites a table ANALYZEs it in
+            the same changelog pass, BUG-0148).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ANALYZE nexus.frecency;
+ANALYZE nexus.relevance_log;
+        </sql>
+        <rollback>
+            <!-- No-op: ANALYZE has no schema or data effect to reverse. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

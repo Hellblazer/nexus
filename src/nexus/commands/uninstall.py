@@ -28,7 +28,20 @@ from nexus.config import get_credential, unset_credential
 from nexus.daemon.installer import uninstall_daemon
 
 #: The managed-client credentials cleared by the managed-only teardown branch.
-_MANAGED_CREDENTIALS = ("service_url", "service_token")
+#: nexus-ssqk9: mint_tenant travels as a PAIR with mint_token -- clearing one
+#: without the other leaves a half-torn-down config.
+_MANAGED_CREDENTIALS = ("service_url", "service_token", "mint_token", "mint_tenant")
+
+#: Cross-process data-token lease files (nexus-9c7t9): each holds a live
+#: SHORT-TTL DATA TOKEN (never the mint credential itself, but still a
+#: secret worth not leaving behind) at
+#: ``data_token_lease.<digest>`` under ``nexus_config_dir()`` -- see
+#: ``nexus.db.data_token._DATA_TOKEN_LEASE_PREFIX``. Removed unconditionally
+#: alongside the managed credentials (below), NOT gated behind
+#: ``--remove-data``: a mint_token can be configured in EITHER local or
+#: managed mode (the cross-process cache benefits both), so gating this on
+#: the managed-only branch would miss the local-mode case.
+_DATA_TOKEN_LEASE_GLOB = "data_token_lease.*"
 
 
 def _local_service_present() -> bool:
@@ -80,7 +93,7 @@ def _teardown_managed(*, confirm: bool) -> tuple[list[str], list[str]]:
     else:
         lines.append(
             "Managed client: would clear the managed endpoint config "
-            "(service_url + service_token) from config.yml."
+            f"({', '.join(_MANAGED_CREDENTIALS)}) from config.yml."
         )
     # Honesty guard: a shell-exported env var overrides config.yml and survives.
     env_overrides = [e for e in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN") if os.environ.get(e, "").strip()]
@@ -92,6 +105,40 @@ def _teardown_managed(*, confirm: bool) -> tuple[list[str], list[str]]:
             f"(e.g. `unset {' '.join(env_overrides)}`)."
         )
     return lines, warnings
+
+
+def _teardown_data_token_leases(*, confirm: bool) -> tuple[list[str], list[str]]:
+    """Remove cross-process data-token lease files (nexus-9c7t9). Returns
+    (lines, warnings). Idempotent: a no-op (empty lines) when none exist.
+
+    Unconditional -- runs regardless of local-vs-managed detection, since a
+    ``mint_token`` credential (the only thing that ever creates one of
+    these files) is not tied to either mode specifically.
+    """
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — branch-local helper import
+
+    config_dir = nexus_config_dir()
+    if not config_dir.is_dir():
+        return [], []
+    lease_files = sorted(config_dir.glob(_DATA_TOKEN_LEASE_GLOB))
+    if not lease_files:
+        return [], []
+
+    if not confirm:
+        return (
+            [f"Data-token leases: would remove {len(lease_files)} cached lease file(s)."],
+            [],
+        )
+
+    warnings: list[str] = []
+    removed = 0
+    for path in lease_files:
+        try:
+            path.unlink()
+            removed += 1
+        except OSError as exc:
+            warnings.append(f"could not remove lease file {path.name}: {exc}")
+    return [f"Data-token leases: removed {removed} cached lease file(s)."], warnings
 
 
 @click.command("uninstall")
@@ -121,6 +168,12 @@ def uninstall_cmd(assume_yes: bool, remove_data: bool) -> None:
     for line in managed_lines:
         click.echo(line)
 
+    # Cross-process data-token lease files (nexus-9c7t9) — unconditional,
+    # mode-agnostic (see _teardown_data_token_leases docstring).
+    lease_lines, lease_warnings = _teardown_data_token_leases(confirm=assume_yes)
+    for line in lease_lines:
+        click.echo(line)
+
     # Local branch (eu4u4) — stop the service stack + daemon, remove autostart +
     # marker, optionally wipe local data. GATED on local presence (auto-detect):
     # skipped entirely for a managed-only / fresh install so no spurious
@@ -128,11 +181,11 @@ def uninstall_cmd(assume_yes: bool, remove_data: bool) -> None:
     # Probe local presence ONCE — a second call could disagree under a concurrent
     # install (lease appears mid-run) and would re-pay the stat/SQLite cost.
     local_present = _local_service_present()
-    warnings: tuple[str, ...] = managed_warnings
+    warnings: tuple[str, ...] = (*managed_warnings, *lease_warnings)
     if local_present:
         report = uninstall_daemon(confirm=assume_yes, remove_data=remove_data)
         click.echo(report.message)
-        warnings = (*managed_warnings, *report.warnings)
+        warnings = (*warnings, *report.warnings)
     else:
         click.echo(
             "Local service: none detected — skipping local teardown "
@@ -144,7 +197,7 @@ def uninstall_cmd(assume_yes: bool, remove_data: bool) -> None:
                 "managed-only client; the remote tenant's data is untouched."
             )
 
-    if not managed_lines and not local_present:
+    if not managed_lines and not lease_lines and not local_present:
         click.echo("Nothing to uninstall — no managed config and no local service found.")
 
     for w in warnings:

@@ -87,6 +87,15 @@ class GrantsSvcForeignOwnedRelationTest {
             //    the migration role can never grant on. Use the real diag
             //    view name so this test documents the exact production
             //    relation.
+            //
+            //    RDR-194 critical fix round (2026-08-17, nexus-i3k3e/Sig-2):
+            //    step 1's full changelog now ALSO creates this view via
+            //    taxonomy-011-8 (Liquibase-owned, self-healing) -- owned by
+            //    ADMIN_ROLE at that point, since nothing else exists yet.
+            //    Drop it first (superuser can drop any relation regardless
+            //    of owner) so this step can still reconstruct a genuinely
+            //    FOREIGN-owned (superuser-owned) view for the replay below.
+            exec(su, "DROP VIEW nexus.diag_chash_conformance");
             exec(su, "CREATE VIEW nexus.diag_chash_conformance AS SELECT 1 AS n");
 
             // Sanity: the setup actually leaves a relation the admin role

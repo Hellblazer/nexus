@@ -35,6 +35,8 @@ from typing import Any
 import pytest
 
 from nexus.db.t2 import T2Database
+from tests._t2_fixture_ops import canonical_chunk_id
+from tests.test_taxonomy import _seed_chunk
 
 
 @pytest.fixture()
@@ -69,7 +71,8 @@ def test_assignment_quality_columns_round_trip(db: T2Database) -> None:
     """similarity / source_collection / assigned_at survive write -> read."""
     topic_id = _unique_topic_id()
     _seed_topic(db, topic_id, "code__src_a")
-    doc_id = f"onjvy-detail-{topic_id}"
+    doc_id = canonical_chunk_id(f"onjvy-detail-{topic_id}")
+    _seed_chunk(topic_id, "code__onjvy_src", doc_id)
 
     db.taxonomy.assign_topic(
         doc_id, topic_id, assigned_by="projection",
@@ -100,7 +103,9 @@ def test_prefer_higher_upsert_keeps_the_higher_similarity(db: T2Database) -> Non
     """
     topic_id = _unique_topic_id()
     _seed_topic(db, topic_id, "code__src_a")
-    doc_id = f"onjvy-upsert-{topic_id}"
+    doc_id = canonical_chunk_id(f"onjvy-upsert-{topic_id}")
+    _seed_chunk(topic_id, "code__src_a", doc_id)
+    _seed_chunk(topic_id, "code__src_b", doc_id)
 
     db.taxonomy.assign_topic(
         doc_id, topic_id, assigned_by="projection", similarity=0.9,
@@ -122,7 +127,7 @@ def test_prefer_higher_upsert_keeps_the_higher_similarity(db: T2Database) -> Non
 
 
 def test_assignment_details_is_empty_for_unknown_docs(db: T2Database) -> None:
-    assert db.taxonomy.get_assignment_details(["no-such-doc"]) == []
+    assert db.taxonomy.get_assignment_details([canonical_chunk_id("no-such-doc")]) == []
     assert db.taxonomy.get_assignment_details([]) == []
 
 
@@ -153,17 +158,22 @@ def test_hook_failure_round_trips_with_its_fields(db: T2Database) -> None:
 def test_hook_failure_batch_variant_carries_its_doc_ids(db: T2Database) -> None:
     """The batch chain's payload survives — `nx taxonomy status` counts docs
     affected from it, so losing it silently under-reports the blast radius."""
+    # nexus-cefa1.3: hook_failures.batch_doc_ids is jsonb now — must be valid
+    # JSON (this was always the real production shape: hook_registry.py writes
+    # json.dumps(doc_ids)). A raw comma-joined string is no longer valid input.
     db.telemetry.record_hook_failure(
         doc_id="onjvy-batch-doc", collection="knowledge__onjvy",
         hook_name="onjvy_batch_hook", error="batch boom", chain="batch",
-        batch_doc_ids="d1,d2,d3", is_batch=True,
+        batch_doc_ids='["d1", "d2", "d3"]', is_batch=True,
     )
 
     rows = db.telemetry.list_hook_failures(days=1, limit=50)["rows"]
 
     row = next(r for r in rows if r["doc_id"] == "onjvy-batch-doc")
     assert row["is_batch"] is True
-    assert row["batch_doc_ids"] == "d1,d2,d3"
+    # PG's jsonb canonical text output matches json.dumps' default separators
+    # (space after each comma), so the real writer round-trips byte-identical.
+    assert row["batch_doc_ids"] == '["d1", "d2", "d3"]'
     assert row["chain"] == "batch"
 
 
@@ -229,8 +239,10 @@ def _seed_hub(db: T2Database, topic_id: int, sources: tuple[str, ...],
               assigned_at: str) -> None:
     _seed_topic(db, topic_id, "code__src_a")
     for i, src in enumerate(sources):
+        doc_id = canonical_chunk_id(f"onjvy-hub-{topic_id}-{i}")
+        _seed_chunk(topic_id, src, doc_id)
         db.taxonomy.assign_topic(
-            f"onjvy-hub-{topic_id}-{i}", topic_id, assigned_by="projection",
+            doc_id, topic_id, assigned_by="projection",
             similarity=0.5, source_collection=src, assigned_at=assigned_at,
         )
 
@@ -362,8 +374,10 @@ def test_taxonomy_status_surfaces_hook_failures_in_service_mode(
     # claims to be about.
     topic_id = _unique_topic_id()
     _seed_topic(db, topic_id, "docs__status")
+    status_doc_id = canonical_chunk_id(f"status-projected-{topic_id}")
+    _seed_chunk(topic_id, "docs__status", status_doc_id)
     db.taxonomy.assign_topic(
-        f"status-projected-{topic_id}", topic_id, assigned_by="projection",
+        status_doc_id, topic_id, assigned_by="projection",
         similarity=0.5, source_collection="docs__status",
         assigned_at="2026-04-14T10:00:00Z",
     )

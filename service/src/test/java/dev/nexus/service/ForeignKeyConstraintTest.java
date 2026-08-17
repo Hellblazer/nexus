@@ -264,14 +264,21 @@ class ForeignKeyConstraintTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertTopic(su, TENANT_A, 100L, "test-topic", "col-a");
-            String chash = "7740557a279d0481db33c93fd0342464"; // 32-hex chunk chash, not a tumbler
+            String chash = hexChash("fk-topicAssignment-chashDocId"); // 64-hex chunk chash, not a tumbler
+            // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires
+            // a matching nexus.chunks row for this INSERT to succeed at all.
+            seedChunk(su, TENANT_A, "col-a", chash, 384);
+            // decode(...,'hex') (RDR-194 P3d): doc_id is bytea now (P3c) -- a bare
+            // string literal would store the ASCII bytes of the hex STRING via
+            // Postgres's bytea "escape format" input, not the 32-byte digest
+            // decode() produces, so it would never match seedChunk's chunks row.
             su.createStatement().execute(
                 "INSERT INTO nexus.topic_assignments " +
-                "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
-                "('" + TENANT_A + "', '" + chash + "', 100, 'hdbscan', NOW())");
+                "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
+                "('" + TENANT_A + "', decode('" + chash + "', 'hex'), 100, 'hdbscan', 'col-a', NOW())");
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.topic_assignments " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='" + chash + "'");
+                "WHERE tenant_id='" + TENANT_A + "' AND doc_id=decode('" + chash + "', 'hex')");
             rs.next();
             assertThat(rs.getInt(1)).isEqualTo(1);
         }
@@ -286,8 +293,8 @@ class ForeignKeyConstraintTest {
             Exception ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
                     "INSERT INTO nexus.topic_assignments " +
-                    "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
-                    "('" + TENANT_A + "', 'aabbccddeeff00112233445566778899', 999999, 'hdbscan', NOW())")
+                    "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
+                    "('" + TENANT_A + "', '" + hexChash("fk-topicAssignment-topicIdFk") + "', 999999, 'hdbscan', 'col-a', NOW())")
             );
             assertThat(ex.getMessage()).containsIgnoringCase("foreign key");
         }
@@ -301,11 +308,18 @@ class ForeignKeyConstraintTest {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "1.99");
             insertTopic(su, TENANT_A, 199L, "no-cascade-topic", "col-a");
-            String chash = "1199aabbccddeeff00112233445566ab";
+            String chash = hexChash("fk-deleteCatalogDoc-doesNotAffectTopicAssignments");
+            // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires
+            // a matching nexus.chunks row for this INSERT to succeed at all. The
+            // chunk is untouched by the catalog_documents DELETE below, so it
+            // remains a valid FK parent throughout -- consistent with what this
+            // test proves (the assignment survives independently of the catalog).
+            seedChunk(su, TENANT_A, "col-a", chash, 384);
+            // decode(...,'hex') (RDR-194 P3d): see the sibling test's identical note.
             su.createStatement().execute(
                 "INSERT INTO nexus.topic_assignments " +
-                "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
-                "('" + TENANT_A + "', '" + chash + "', 199, 'hdbscan', NOW())");
+                "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
+                "('" + TENANT_A + "', decode('" + chash + "', 'hex'), 199, 'hdbscan', 'col-a', NOW())");
 
             su.createStatement().execute(
                 "DELETE FROM nexus.catalog_documents " +
@@ -314,7 +328,7 @@ class ForeignKeyConstraintTest {
             // Assignment must SURVIVE (no cascade — chash doc_id is independent of catalog).
             ResultSet after = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.topic_assignments " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='" + chash + "'");
+                "WHERE tenant_id='" + TENANT_A + "' AND doc_id=decode('" + chash + "', 'hex')");
             after.next();
             assertThat(after.getInt(1)).as("assignment must survive catalog-doc delete").isEqualTo(1);
         }
@@ -631,6 +645,12 @@ class ForeignKeyConstraintTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES " +
                 "('" + TENANT_A + "', 'fk-chunk-coll') ON CONFLICT DO NOTHING");
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
+            // a matching nexus.chunks row for this CONTROL insert to succeed.
+            su.createStatement().execute(
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES " +
+                "('" + TENANT_A + "', 'fk-chunk-coll', 'abc123abc123abc123abc123abc12300', 'text', " +
+                "('[" + "0.1,".repeat(383) + "0.1]')::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks " +
                 "(tenant_id, doc_id, position, chash, collection) VALUES " +
@@ -670,6 +690,14 @@ class ForeignKeyConstraintTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES " +
                 "('" + TENANT_A + "', 'fk-chunk-coll') ON CONFLICT DO NOTHING");
+            // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
+            // a matching nexus.chunks row for each of these two manifest inserts.
+            su.createStatement().execute(
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES " +
+                "('" + TENANT_A + "', 'fk-chunk-coll', 'hash0000000000000000000000000000', 'text0', " +
+                "('[" + "0.1,".repeat(383) + "0.1]')::vector), " +
+                "('" + TENANT_A + "', 'fk-chunk-coll', 'hash1111111111111111111111111111', 'text1', " +
+                "('[" + "0.1,".repeat(383) + "0.1]')::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks " +
                 "(tenant_id, doc_id, position, chash, collection) VALUES " +
@@ -756,17 +784,22 @@ class ForeignKeyConstraintTest {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "rls-ta-tumbler");
             insertTopic(su, TENANT_A, 300L, "rls-topic", "col-rls");
+            // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires
+            // a matching nexus.chunks row for this INSERT to succeed at all.
+            seedChunk(su, TENANT_A, "col-rls", hexChash("rls-ta-tumbler"), 384);
+            // decode(...,'hex') (RDR-194 P3d): see topicAssignment_chashDocId_
+            // succeeds_noCatalogFk's identical note.
             su.createStatement().execute(
                 "INSERT INTO nexus.topic_assignments " +
-                "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
-                "('" + TENANT_A + "', 'rls-ta-tumbler', 300, 'hdbscan', NOW())");
+                "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) VALUES " +
+                "('" + TENANT_A + "', decode('" + hexChash("rls-ta-tumbler") + "', 'hex'), 300, 'hdbscan', 'col-rls', NOW())");
         }
 
         try (Connection svc = svcDs.getConnection()) {
             svc.createStatement().execute(
                 "SELECT set_config('nexus.tenant', '" + TENANT_B + "', true)");
             ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.topic_assignments WHERE doc_id='rls-ta-tumbler'");
+                "SELECT COUNT(*) FROM nexus.topic_assignments WHERE doc_id=decode('" + hexChash("rls-ta-tumbler") + "', 'hex')");
             rs.next();
             assertThat(rs.getInt(1))
                 .as("Tenant-B must not see Tenant-A topic_assignments after FK addition")
@@ -815,6 +848,27 @@ class ForeignKeyConstraintTest {
     }
 
     /**
+     * Insert a minimal nexus.chunks row (RDR-194 P3d, nexus-tk070.p3d): every
+     * topic_assignments row now requires a matching (tenant_id, source_collection,
+     * doc_id) -> chunks(tenant_id, collection, chash) parent via
+     * topic_assignments_chunk_fk. ON CONFLICT DO NOTHING for idempotency. Also
+     * registers the collection (ON CONFLICT DO NOTHING) since chunks_collection_fk
+     * requires it -- safe to call even when the caller already registered it.
+     */
+    private static void seedChunk(Connection su, String tenantId, String collection, String chashHex, int dim)
+            throws Exception {
+        su.createStatement().execute(
+            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenantId + "', '"
+            + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+        String embeddingCol = "embedding_" + dim;
+        su.createStatement().execute(
+            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embeddingCol + ") VALUES " +
+            "('" + tenantId + "', '" + collection + "', decode('" + chashHex + "', 'hex'), 'fk-test chunk', " +
+            "('[" + "0.1,".repeat(dim - 1) + "0.1]')::vector) " +
+            "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+    }
+
+    /**
      * Insert a topics row for use in topic_assignments FK tests.
      * Uses ON CONFLICT DO NOTHING (id is BIGSERIAL; here we supply explicit IDs to avoid
      * sequence issues across tests — tests use non-overlapping ids via @Order convention).
@@ -830,5 +884,20 @@ class ForeignKeyConstraintTest {
             "INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) " +
             "VALUES (" + id + ", '" + tenantId + "', '" + label + "', '" + collection + "', 0, NOW(), 'pending') " +
             "ON CONFLICT (id) DO NOTHING");
+    }
+
+    /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
+     *  (bytea since nexus-tk070.p3c). The pre-existing inline literals here predate
+     *  RDR-180's full-digest flip and were only 32 hex chars (a legacy half-digest
+     *  shape); topic_assignments.doc_id has no FK to catalog_documents (nexus-sa14p),
+     *  so this is independent of any tumbler value used elsewhere in the same test. */
+    private static String hexChash(String seed) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 }

@@ -92,8 +92,8 @@ that reaches for a heavier mechanism has to argue past them.
 | RDR-156 decision | Mechanism chosen | Why not heavier |
 |---|---|---|
 | chunk → collection referential integrity | **declarative FK** (`chunks_<dim>/chash_index/topic_assignments` → `catalog_collections`, `NOT VALID` until RDR-153, then `VALIDATE`) | A FK is declarative and authoritative-by-construction; no function/trigger needed. Cost is one index probe per upsert (negligible vs the embedding call). |
-| manifest → chunk integrity (orphan detection) | **stored function** `nexus.manifest_orphans(dim)` + the P2.1 fail-loud read backstop | A FK is impossible (`catalog_document_chunks.chash` can't reference chunks split across three dim tables); the orphan class is adequately served on-demand by a function — no parent table, no trigger. |
-| manifest backfill / document reconstruction | **stored functions** `manifest_backfill()`, `document_text(doc_id)` | Replace generated-SQL-string artifacts with first-class DB objects callable by doctor / migration validation; no triggers, no app round-trips. |
+| manifest → chunk integrity (orphan detection) | **declarative FK** `catalog_document_chunks (tenant_id, collection, chash) -> nexus.chunks`, `ON UPDATE CASCADE`, deferrable on delete (RDR-191 Phase 5, `catalog-029-manifest-chunk-fk.xml`, VALIDATEd) — **SUPERSEDES this row's original 2026 entry** | RDR-156's original "A FK is impossible" reasoning held only while the chunk store was split across three dim tables (`chunks_384/768/1024`); RDR-191 Phase 4 unified them into one `nexus.chunks` table first, which made the FK expressible. `nexus.manifest_orphans(dim)` and the P2.1 read backstop this row used to name are RETIRED (RDR-191 Phase 6, nexus-o8dil.33, catalog-030) — the FK rejects the dangling state at write time, making the detection function unreachable by construction. This row is the canonical "declarative FK beats a stored function" case the capability ladder above was written to produce; it took two more RDRs to actually reach it. |
+| manifest backfill / document reconstruction | **stored function** `document_text(doc_id)` (`manifest_backfill()` RETIRED, RDR-191 Phase 6) | `document_text` replaces a generated-SQL-string artifact with a first-class DB object callable by doctor / migration validation; no triggers, no app round-trips. `manifest_backfill()`'s only reason to exist — pre-stamping `collection` before the (now-retired) orphan/verify functions' `collection IS NOT NULL` filter — died with those functions, and catalog-025's later `NOT NULL` promotion means no future row can need the stamp either. |
 | per-collection stats | **`security_invoker` view** `collection_vector_stats` | Read-only aggregate; a view under the caller's RLS is exactly right — replaces remote `count()` calls. No function needed. |
 | combined-query read shapes | **set-returning `LANGUAGE sql` functions** (`search_metadata_scoped` / `search_topic_scoped` / `search_graph_hop`) | Must take the query vector as a plan-time argument (a view can't), and stay inlinable so HNSW survives the join. Functions, not views, not triggers. |
 | soft delete (tombstone) | **plain column + partial indexes + view filters** (`deleted_at`, `live_chunks`) | **Adds ZERO triggers.** Tombstoning is an `UPDATE`, so the `ON DELETE CASCADE` chains do not fire; restore clears one column. Cascade semantics are declarative. |
@@ -102,13 +102,20 @@ that reaches for a heavier mechanism has to argue past them.
 ### The `chunks_registry` trigger — recorded NOT-worth-it (this RDR's entry)
 
 A trigger-maintained `chunks_registry` parent table was considered as a real FK anchor for
-`catalog_document_chunks.chash`. **Rejected today**: it adds a trigger on the hottest write
-path (chunk upsert), couples write-ordering (chunk row before manifest row) onto the hot
-indexing path, and sits outside the "app-unfixable only" bar — the orphan class it would
-guard is already served by `manifest_orphans()` + the fail-loud read backstop. **Revisit only
-if orphan incidents recur post-RDR-153.** (Other rejected anchors: a single partitioned
-`chunks` table — impossible, `vector(n)` is fixed-dimension per column; `manifest.chash →
-chash_index` — wrong lifecycle.)
+`catalog_document_chunks.chash`, back when the chunk store was split across three dim
+tables and a direct FK was not expressible. **Rejected at the time**: it would have added a
+trigger on the hottest write path (chunk upsert) and coupled write-ordering (chunk row
+before manifest row) onto the hot indexing path, sitting outside the "app-unfixable only"
+bar — the orphan class it would guard was, at the time, adequately served by
+`manifest_orphans()` + the fail-loud read backstop. **RDR-191 (Phases 4-6) mooted this
+entirely**: unifying the dim-sharded tables into one `nexus.chunks` made a real declarative
+FK expressible (see the ladder table above), which now enforces the SAME invariant the
+rejected trigger targeted — with neither a trigger nor the stored function this row
+originally named (both retired). No trigger was ever needed; the FK was just blocked on an
+earlier decision, not on triggers being the only alternative. (Other rejected anchors: a
+single partitioned `chunks` table — impossible, `vector(n)` is fixed-dimension per column;
+`manifest.chash → chash_index` — wrong lifecycle, and `chash_index` itself is retired,
+RDR-187.)
 
 ### RDR-154 entries (the ladder's origin)
 

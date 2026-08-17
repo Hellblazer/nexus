@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
-from tests._catalog_fixture_ops import ActiveCatalog
+from tests._catalog_fixture_ops import ActiveCatalog, seed_manifest_chunks
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 
@@ -106,6 +106,7 @@ def test_chunk_char_span_resolves_via_manifest(t3_db, catalog) -> None:
         physical_collection=coll_name,
         chunk_count=2,
     )
+    seed_manifest_chunks(coll_name, [chash_a, chash_b])
     catalog.write_manifest(
         str(tumbler),
         [
@@ -164,6 +165,7 @@ def test_chunk_char_span_returns_none_when_position_out_of_range(
         owner, title="oob.md", content_type="paper", file_path="oob.md",
         physical_collection=coll_name, chunk_count=1,
     )
+    seed_manifest_chunks(coll_name, [chash])
     catalog.write_manifest(
         str(tumbler),
         [{"chash": chash, "position": 0, "char_start": 0,

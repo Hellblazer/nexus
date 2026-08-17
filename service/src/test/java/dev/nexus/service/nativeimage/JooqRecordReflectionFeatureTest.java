@@ -98,7 +98,37 @@ class JooqRecordReflectionFeatureTest {
     // type per table, so this is -6 record types for the retired shards
     // +2 for their unified replacements = a net -4. This is the
     // deliberate bump (downward, for once) the assertion message demands.
-    private static final int EXPECTED_RECORD_TYPES = 65;
+    // 65 -> 63: RDR-191 Phase 6 (nexus-o8dil.33, catalog-030-retire-manifest-
+    // verify.xml) DROPPED nexus.manifest_orphans(int) and
+    // nexus.manifest_verify_all() — both RETURNS TABLE, one generated Record
+    // type each (-2). nexus.manifest_backfill(), also dropped by the same
+    // changeset, RETURNS bigint (a scalar routine, no Record type, same
+    // shape as gc_restore_rereferenced above) — no further delta.
+    // nexus.manifest_verify(text) is DELIBERATELY KEPT (completeIndexRun
+    // depends on it), so its Record type is unaffected.
+    // 63 -> 62: nexus-lgdel.l1 (legacy-001-drop-chash-alias.xml) DROPPED
+    // nexus.chash_alias — a plain table, one generated Record type (-1).
+    // nexus.chash_old_bytes(text), also dropped by the same changelog,
+    // RETURNS bytea (a scalar routine, no Record type, same shape as
+    // gc_restore_rereferenced above) — no further delta. The layered
+    // CREATE OR REPLACE on nexus.remap_membership(text,text) (that
+    // changelog's own changeset 4) changed its body only, not its
+    // RETURNS TABLE signature — its Record type was unaffected THEN.
+    // 62 -> 61: nexus-lgdel.l2 (legacy-002-drop-remap-membership.xml)
+    // DROPPED nexus.remap_membership(text,text) outright — the orphaned
+    // GET /v1/remap/membership read surface had zero production callers.
+    // RETURNS TABLE, one generated Record type (-1).
+    // 61 -> 62: RDR-194 critical fix round (2026-08-17, critic Sig-2 /
+    // bead nexus-i3k3e's Sig-2 finding, taxonomy-011-8) — nexus.diag_
+    // chash_conformance becomes a Liquibase-OWNED CREATE OR REPLACE VIEW
+    // for the first time (previously created only out-of-band by the
+    // superuser pg_provision path, never visible to a jOOQ codegen run
+    // that boots the schema purely from the changelog). jOOQ generates
+    // one Record type per VIEW just as it does per TABLE, so this
+    // changeset existing at all is +1 (DiagChashConformanceRecord),
+    // regardless of the view's own column set never having changed.
+    // This is the deliberate bump the assertion message demands.
+    private static final int EXPECTED_RECORD_TYPES = 62;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

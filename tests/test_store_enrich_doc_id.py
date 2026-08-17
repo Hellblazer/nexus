@@ -48,6 +48,25 @@ def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return catalog_dir
 
 
+def _seed_for_store_put(content: str, collection: str = "knowledge") -> None:
+    """Pre-seed a REAL ``nexus.chunks`` row for what CLI ``nx store put``
+    is about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral).
+
+    ``local_t3`` injects a FAKE in-memory T3 client, but the manifest
+    write always goes through the REAL engine catalog (autouse
+    ``_pin_t2_substrate``). ``fk_catalog_chunks_chunk`` now requires the
+    manifest's chash to have a matching REAL ``nexus.chunks`` row.
+    """
+    import hashlib
+
+    from nexus.corpus import t3_collection_name
+    from tests._catalog_fixture_ops import seed_manifest_chunks
+
+    col_name = t3_collection_name(collection)
+    chash = hashlib.sha256(content.encode()).hexdigest()
+    seed_manifest_chunks(col_name, [chash])
+
+
 def _no_op_post_store(*args, **kwargs):
     """Disable post-store hook chains (chash, taxonomy, aspect-extraction).
     The Stage B.4 contract is just about the T3 chunk's doc_id metadata,
@@ -83,10 +102,9 @@ def test_store_put_cli_writes_catalog_doc_id_into_t3_chunk_metadata(
     from nexus.commands.store import store
 
     # Create a temp file to feed to ``nx store put``
-    (catalog_env.parent / "finding.md").write_text(
-        "# Finding: nexus-doc-id-pin\n\nT3 chunks must carry catalog tumbler.",
-        encoding="utf-8",
-    )
+    _finding_content = "# Finding: nexus-doc-id-pin\n\nT3 chunks must carry catalog tumbler."
+    (catalog_env.parent / "finding.md").write_text(_finding_content, encoding="utf-8")
+    _seed_for_store_put(_finding_content)
 
     # Patch HookRegistry's fire methods so no real hooks run for these
     # doc_id-stamping contract tests. The CLI constructs its own
@@ -159,10 +177,9 @@ def test_store_put_doc_id_absent_when_catalog_uninitialized(
     from nexus.commands.store import store
 
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "no-catalog"))
-    (tmp_path / "finding-nocat.md").write_text(
-        "# Finding without catalog backing\n\nstore put no-catalog path.",
-        encoding="utf-8",
-    )
+    _finding_content = "# Finding without catalog backing\n\nstore put no-catalog path."
+    (tmp_path / "finding-nocat.md").write_text(_finding_content, encoding="utf-8")
+    _seed_for_store_put(_finding_content)
 
     # Patch HookRegistry's fire methods so no real hooks run for these
     # doc_id-stamping contract tests. The CLI constructs its own

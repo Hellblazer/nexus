@@ -10,6 +10,7 @@ import pytest
 from nexus.db.t2 import T2Database, _sanitize_fts5
 from tests._t2_fixture_ops import (
     backdate_memory,
+    canonical_chunk_id as _cid,
     memory_row,
     rewrite_memory_row,
     seed_relevance,
@@ -526,14 +527,14 @@ def test_expire_permanent_entries_preserved(db: T2Database) -> None:
 def test_expire_relevance_log_purges_old_entries(db: T2Database) -> None:
     """expire_relevance_log() deletes entries older than the retention window."""
     # Insert rows with timestamps spanning fresh and stale
-    seed_relevance(db, query="q1", chunk_id="c1", session_id="s1", age_days=100)
-    db.log_relevance("q2", "c2", "stored", session_id="s1")
+    seed_relevance(db, query="q1", chunk_id=_cid("c1"), session_id="s1", age_days=100)
+    db.log_relevance("q2", _cid("c2"), "stored", session_id="s1")
 
     purged = db.expire_relevance_log(days=90)
     assert purged == 1
     remaining = db.get_relevance_log()
     assert len(remaining) == 1
-    assert remaining[0]["chunk_id"] == "c2"
+    assert remaining[0]["chunk_id"] == _cid("c2")
 
 
 def test_expire_relevance_log_no_op_when_empty(db: T2Database) -> None:
@@ -546,22 +547,22 @@ def test_expire_relevance_log_partial_purge(db: T2Database) -> None:
     # Rows 0 and 1 stale, rows 2 and 3 fresh
     for i in range(2):
         seed_relevance(
-            db, query=f"q{i}", chunk_id=f"c{i}", session_id="s1", age_days=100
+            db, query=f"q{i}", chunk_id=_cid(f"c{i}"), session_id="s1", age_days=100
         )
     for i in range(2, 4):
-        db.log_relevance(f"q{i}", f"c{i}", "stored", session_id="s1")
+        db.log_relevance(f"q{i}", _cid(f"c{i}"), "stored", session_id="s1")
 
     purged = db.expire_relevance_log(days=90)
     assert purged == 2
     remaining = db.get_relevance_log()
     assert len(remaining) == 2
-    assert {r["chunk_id"] for r in remaining} == {"c2", "c3"}
+    assert {r["chunk_id"] for r in remaining} == {_cid("c2"), _cid("c3")}
 
 
 def test_expire_relevance_log_days_zero_purges_all(db: T2Database) -> None:
     """days=0 cutoff is "now", so every pre-existing row is purged."""
-    db.log_relevance("q1", "c1", "stored")
-    db.log_relevance("q2", "c2", "stored")
+    db.log_relevance("q1", _cid("c1"), "stored")
+    db.log_relevance("q2", _cid("c2"), "stored")
     purged = db.expire_relevance_log(days=0)
     assert purged == 2
     assert db.get_relevance_log() == []
@@ -569,7 +570,7 @@ def test_expire_relevance_log_days_zero_purges_all(db: T2Database) -> None:
 
 def test_expire_relevance_log_days_negative_purges_all(db: T2Database) -> None:
     """Negative days means cutoff is in the future — all rows are stale."""
-    db.log_relevance("q1", "c1", "stored")
+    db.log_relevance("q1", _cid("c1"), "stored")
     purged = db.expire_relevance_log(days=-1)
     assert purged == 1
 
@@ -577,7 +578,7 @@ def test_expire_relevance_log_days_negative_purges_all(db: T2Database) -> None:
 def test_expire_also_purges_relevance_log(db: T2Database) -> None:
     """expire() calls expire_relevance_log() to purge telemetry."""
     # Stale relevance_log row
-    seed_relevance(db, query="q", chunk_id="c", session_id="s1", age_days=100)
+    seed_relevance(db, query="q", chunk_id=_cid("c"), session_id="s1", age_days=100)
 
     db.expire()  # default relevance_log_days=90
 

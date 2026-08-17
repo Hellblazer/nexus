@@ -21,10 +21,12 @@ import java.util.HexFormat;
  * writes a chash-bearing column through it — no per-site encode/decode, no
  * chance of a site forgetting one direction.
  *
- * <p>Width-agnostic BY DESIGN: not-yet-rekeyed legacy rows (16-byte decoded
- * pre-RDR-180 values, or ETL-era ids carried as UTF-8 bytes) round-trip
- * through hex faithfully; width enforcement lives in the {@link Chash}
- * boundary type and the DB {@code octet_length} CHECKs, not in this codec.
+ * <p>Width-agnostic BY DESIGN: any decoded byte width round-trips through hex
+ * faithfully (there is no live legacy-width population left to tolerate —
+ * the chash-rekey rung and {@code chash_alias} that once carried pre-RDR-180
+ * 16-byte rows are retired, nexus-lgdel.l1); width enforcement lives in the
+ * {@link Chash} boundary type and the DB {@code octet_length} CHECKs, not in
+ * this codec.
  *
  * <p>Ordering note: lowercase-hex lexicographic order equals unsigned byte
  * order, so {@code ORDER BY} / sort-for-lock-order semantics are unchanged

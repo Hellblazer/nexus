@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-cefa1.3 — schema type-hygiene pass, Tier A + Tier B, P2 (epic
+    nexus-cefa1; plan of record T2 nexus/plan-schema-type-hygiene-2026-08-12
+    [22360]). Template: catalog-031-type-hygiene.xml (nexus-cefa1.2, P1).
+
+    Retires two RDR-152 SQLite-port columns on nexus.hook_failures to their
+    real Postgres types, in ONE ALTER TABLE (one table-rewrite pass covering
+    both columns, not two separate rewrites) — mirroring catalog-031-1's
+    one-ALTER-for-three-cols shape:
+
+    - is_batch (Tier A): INTEGER NOT NULL DEFAULT 0 -> boolean NOT NULL
+      DEFAULT false, via DROP DEFAULT -> TYPE boolean USING (is_batch <> 0)
+      -> SET DEFAULT false. NOT NULL is preserved automatically across
+      ALTER COLUMN TYPE (never touched); only DEFAULT is dropped and re-set
+      because a numeric DEFAULT 0 is not valid input for a boolean column.
+      Same shape as catalog-031-3's legacy_grandfathered.
+    - batch_doc_ids (Tier B): nullable TEXT, no default -> jsonb NULL, via
+      TYPE jsonb USING NULLIF(batch_doc_ids, '')::jsonb. No DROP
+      DEFAULT/DROP NOT NULL needed — telemetry-001-baseline.xml:240 ships
+      this column as plain `batch_doc_ids TEXT,` with neither.
+
+    ALTER COLUMN TYPE is ordinary DDL (an ACCESS EXCLUSIVE table rewrite),
+    not RLS-filtered DML — no FORCE RLS toggle needed for this changeset,
+    and it does not touch a row via INSERT/UPDATE/DELETE.
+
+    Data-safety evidence: T2 nexus/schema-hygiene-p0-preflight-2026-08-15
+    [22588] (nexus-cefa1.1). Cloud (the only populated deployment; this
+    box's local substrate is a fresh hermetic pytest engine with no seeded
+    data): hook_failures.batch_doc_ids total_rows=247, null_count=247,
+    empty_string_count=0, invalid_cast_count=0 — every row is already NULL,
+    none are '' or malformed, so the NULLIF(...,'')::jsonb USING clause
+    above has nothing to convert and is confirmed safe. is_batch was NOT
+    part of the P0 probe (it is Tier A boolean, not Tier B jsonb) — its live
+    value domain was instead verified by reading the writer: every INSERT
+    that sets is_batch goes through TelemetryRepository.recordHookFailure,
+    .importHookFailureRow, or .importHookFailuresBatch, and all three write
+    `isBatch ? 1 : 0` (or the batch path's `Boolean.TRUE.equals(...) ? 1 :
+    0`) — the column's value domain is mechanically {0, 1}, never any other
+    integer, so `USING (is_batch <> 0)` is exhaustive and safe by
+    construction, independent of any live-data probe.
+
+    Consumer audit (nexus-cefa1.3, mirroring nexus-cefa1.2's sweep): the
+    wire is ALREADY boolean end to end for is_batch (TelemetryHandler.java
+    handleHookFailureRecord ~352 reads `Boolean.TRUE.equals(body.get(
+    "is_batch"))`; handleImport's hook_failures case ~504 the same;
+    TelemetryRepository.getHookFailures ~487 already emits a JSON boolean)
+    — this changeset does not change that wire shape, only the storage
+    column's own type, retiring the `isBatch ? 1 : 0` / `!= 0` integer
+    shims in TelemetryRepository. batch_doc_ids is, and remains, a raw JSON
+    string on the wire (a caller-supplied JSON-encoded array, e.g.
+    hook_registry.py's `json.dumps(doc_ids)`; taxonomy_cmd.py's status
+    command defensively `json.loads`s it back with a try/except fallback,
+    confirming JSON was always the intended shape of this "TEXT" column).
+    Two test call sites — TelemetryRepositoryTest.java
+    (hookFailures_read_returnsRowsAndExactAggregates) and Python's
+    tests/db/test_onjvy_read_routes.py
+    (test_hook_failure_batch_variant_carries_its_doc_ids) — wrote a
+    non-JSON opaque string ("d1,d2") through this field to exercise it as a
+    generic opaque-string column; that was always incidental to TEXT typing
+    and not a real production shape (no production writer ever emits
+    anything but a JSON array), so both are updated to a valid JSON array
+    in the corresponding bead's Java/Python changes rather than carried
+    forward as a genuine consumer needing a compatibility shim.
+
+    ANALYZE after the rewrite (BUG-0148 invariant, rdr180-16-analyze-
+    rewritten-tables precedent, mechanically enforced by
+    tests/test_changelog_analyze_lint.py) — the ALTER COLUMN ... TYPE above
+    resets nexus.hook_failures's planner statistics.
+
+    Rollback: is_batch mirrors catalog-031-3's legacy_grandfathered exactly
+    — TYPE INTEGER USING (CASE WHEN is_batch THEN 1 ELSE 0 END), DEFAULT 0
+    restored. batch_doc_ids mirrors catalog-031-2's created_at (nullable,
+    no default TEXT column) rather than the NOT-NULL-DEFAULT-'' columns in
+    catalog-031-1: TYPE TEXT USING batch_doc_ids::text, which casts a jsonb
+    NULL back to a TEXT NULL for free (no COALESCE-to-'' needed, since the
+    pre-migration column never had a NOT NULL/DEFAULT '' to restore in the
+    first place — telemetry-001-baseline.xml:240 confirms this precisely).
+
+    Ordering: registered after catalog-031-type-hygiene.xml and before
+    grants-nexus-svc.xml, NOT back in the telemetry-00N family's own
+    section near the top of the changelog. This matches the master
+    changelog's actual, established convention for every new changeset
+    since RDR-156 (catalog-002 through catalog-031, taxonomy-002 through
+    -007, aspects-002, etc. all append near the current tail rather than
+    splicing back into their family's original block) — see
+    db.changelog-master.xml's own header comment on the catalog-031
+    <include> for the identical reasoning applied to that file.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset telemetry-004-1-hook-failures-type-hygiene ───────────────── -->
+    <changeSet id="telemetry-004-1-hook-failures-type-hygiene" author="nexus-cefa1.3">
+        <comment>
+            hook_failures.is_batch INTEGER -> boolean; hook_failures.batch_doc_ids TEXT -> jsonb
+            NULL (ONE ALTER TABLE, one rewrite).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.hook_failures
+    ALTER COLUMN is_batch DROP DEFAULT,
+    ALTER COLUMN is_batch TYPE boolean USING (is_batch &lt;&gt; 0),
+    ALTER COLUMN is_batch SET DEFAULT false,
+    ALTER COLUMN batch_doc_ids TYPE jsonb USING NULLIF(batch_doc_ids, '')::jsonb;
+
+-- BUG-0148 invariant (rdr180-16-analyze-rewritten-tables precedent, mechanically
+-- enforced by tests/test_changelog_analyze_lint.py): the ALTER COLUMN ... TYPE
+-- above rewrites hook_failures and resets its planner statistics — ANALYZE it in
+-- the same pass so a stale-stats plan flip cannot silently degrade the
+-- `nx doctor` hook-failures read path.
+ANALYZE nexus.hook_failures;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+ALTER TABLE nexus.hook_failures
+    ALTER COLUMN is_batch DROP DEFAULT,
+    ALTER COLUMN is_batch TYPE INTEGER USING (CASE WHEN is_batch THEN 1 ELSE 0 END),
+    ALTER COLUMN is_batch SET DEFAULT 0,
+    ALTER COLUMN batch_doc_ids TYPE TEXT USING batch_doc_ids::text;
+
+ANALYZE nexus.hook_failures;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

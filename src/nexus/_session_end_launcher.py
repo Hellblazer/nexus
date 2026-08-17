@@ -161,6 +161,23 @@ def _print_service_tier_summary() -> None:
         from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
         base_url, token = resolve_service_endpoint()
+        # code-review Sig#1 (nexus-wrwb7 fix pass, nexus-ssqk9 relay): this
+        # store is constructed with BOTH base_url and _token pinned (to skip
+        # the mixin's own evidence-gated resolution entirely -- see the
+        # round-2 critique above), which also sets _token_pinned=True, so
+        # RefreshableHttpStoreMixin._apply_data_token_override() would
+        # silently no-op forever, and this SessionEnd summary would never
+        # adopt a self-minted data token even when mint_token is
+        # configured. Apply the SAME override here, BEFORE construction,
+        # so the store still gets pinned (zero wait risk) with the RIGHT
+        # token from the start -- never touching _token_pinned's skip-if-
+        # pinned contract at all.
+        from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.db.t2._refreshable_client import DEFAULT_TENANT  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+        data_token = get_data_token_manager().bearer_for(base_url, DEFAULT_TENANT)
+        if data_token is not None:
+            token = data_token
         store = HttpTelemetryStore(base_url=base_url, _token=token)
         try:
             svc_rows = store.query_tier_writes_once(

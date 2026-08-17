@@ -557,7 +557,7 @@ def search_cross_corpus(
     # collection (leftover from a prior embedder generation) can never be
     # searched — the service rejects it with an embedding-space-mismatch
     # HTTP 400 ("... produced a 1024-dim vector but the collections
-    # dispatch to chunks_384", see PgVectorRepository). Logging every such
+    # dispatch to embedding_384", see PgVectorRepository). Logging every such
     # per-collection failure at WARNING meant one orphan touched by a
     # corpus=all search spammed a WARNING on EVERY search call, even when
     # it was 1 of 80 collections and the other 79 searched fine. Collect

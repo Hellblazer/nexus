@@ -941,6 +941,45 @@ def test_reindex_self_heals_missing_manifest(
     reg = RepoRegistry(tmp_path / "repos.json")
     reg.add(rich_repo)
 
+    # RDR-194 P3d / catalog-029-manifest-chunk-fk.xml: local_t3 is an
+    # in-memory test double (this file's own _legacy_vector_backend pin) —
+    # its chunks never reach the real engine's nexus.chunks table the
+    # running (service-mode) catalog's manifest-chunk FK checks against,
+    # so the manifest-write hook that fires moments after each upsert
+    # (SAME index_repository() call, chunk-then-manifest ordering) would
+    # 409 per-doc and be silently swallowed (manifest_write_batch_hook is
+    # best-effort: any failure logged, never propagated) -- the doc's
+    # chunk_count/manifest never populate and this test's own precondition
+    # (count_before > 0) never holds. Mirror every local_t3 write into the
+    # real engine SYNCHRONOUSLY, as it happens -- a zero-vector
+    # FK-satisfying stub (tests/_catalog_fixture_ops.seed_manifest_chunks's
+    # idiom) landing before the manifest hook fires in the SAME call. This
+    # does not touch local_t3's own read side (the self-heal pass below
+    # still rebuilds the manifest FROM local_t3, matching this test's own
+    # subject); it only makes the manifest WRITE the indexer already
+    # attempts satisfiable for real.
+    from tests._catalog_fixture_ops import seed_manifest_chunks  # noqa: PLC0415
+
+    def _mirror_to_engine(collection, ids) -> None:  # noqa: ANN001
+        if ids:
+            seed_manifest_chunks(collection, list(ids))
+
+    _orig_upsert_chunks = local_t3.upsert_chunks
+    _orig_upsert_chunks_with_embeddings = local_t3.upsert_chunks_with_embeddings
+
+    def _upsert_chunks_mirrored(collection, ids, *a, **kw):  # noqa: ANN001, ANN202
+        result = _orig_upsert_chunks(collection, ids, *a, **kw)
+        _mirror_to_engine(collection, ids)
+        return result
+
+    def _upsert_chunks_with_embeddings_mirrored(collection_name, ids, *a, **kw):  # noqa: ANN001, ANN202
+        result = _orig_upsert_chunks_with_embeddings(collection_name, ids, *a, **kw)
+        _mirror_to_engine(collection_name, ids)
+        return result
+
+    local_t3.upsert_chunks = _upsert_chunks_mirrored
+    local_t3.upsert_chunks_with_embeddings = _upsert_chunks_with_embeddings_mirrored
+
     # TWO settling passes: the first index creates path-derived collection
     # names; the second triggers the nexus-7vuw legacy-rename migration,
     # which re-embeds everything and rewrites manifests — masking exactly

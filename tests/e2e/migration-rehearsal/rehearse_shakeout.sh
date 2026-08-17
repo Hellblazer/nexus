@@ -42,9 +42,33 @@
 #                                              v0.1.70 shipped it and was
 #                                              caught only by the client
 #                                              shakedown, a full day later.)
+#   Phase F  native-smoke.sh probe set        (nexus-l8xnz: the SAME script
+#                                              engine-service-release.yml
+#                                              runs, byte-for-byte, against
+#                                              this candidate over the
+#                                              already-provisioned Postgres —
+#                                              closes the release-only-
+#                                              procedures-rot gap that let a
+#                                              stale probe fixture (16-char
+#                                              doc_id vs the RDR-194 P3c
+#                                              64-hex width validation) burn
+#                                              the v0.1.77 tag with a
+#                                              perfectly good binary.)
 #
 # Exit 0 only when every phase passes: "CANDIDATE SHAKEOUT PASSED".
-set -uo pipefail
+#
+# gap-15 (T2 [22511]): `-e` added (was `set -uo pipefail`, no -e). This is
+# NOT a blanket revert — the ok/bad collect-and-continue design throughout
+# this script is intentional and must survive. Every bare command
+# substitution / pipeline this addition would otherwise turn fatal (and
+# was NOT already protected by an if/&&/|| construct that -e exempts) got
+# an explicit per-command disposition alongside this change: either
+# `|| true` (content is checked downstream, not rc) or an explicit
+# `RC=0; OUT="$(cmd)" || RC=$?` capture (rc IS the assertion). See the
+# gap-8/15 fix commit for the specific sites; genuinely fatal prelude
+# commands (binary positioning, etc.) were left bare on purpose — those
+# SHOULD abort loud.
+set -euo pipefail
 
 FAILS=0
 say()  { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
@@ -57,7 +81,9 @@ note() { printf '       %s\n' "$*"; }
 run_check() {
   local label="$1" want="$2"; shift 2
   local out
-  out="$("$@" 2>&1)"
+  # gap-15: content-checked below, not rc-gated -- a nonzero "$@" must not
+  # abort under -e (added same change) before the grep check runs.
+  out="$("$@" 2>&1)" || true
   if printf '%s' "$out" | grep -qiE "$want"; then
     ok "$label"
   else
@@ -108,7 +134,10 @@ set -a; . "$HOME/.config/nexus/pg_credentials"; set +a
 
 healthy=0
 for _ in $(seq 1 30); do
-  nx daemon service status 2>&1 | grep -qiE "health.*ok|status.*live" && { healthy=1; break; }
+  # gap-15: the poll's expected FALSE outcome (not yet healthy) is a bare
+  # && with no trailing || -- under -e this died on iteration 1 instead of
+  # polling up to 30 times. `|| true` restores the intended poll-and-wait.
+  nx daemon service status 2>&1 | grep -qiE "health.*ok|status.*live" && { healthy=1; break; } || true
   sleep 2
 done
 [ "$healthy" = 1 ] && ok "candidate serving (healthy)" || { bad "service never healthy"; exit 1; }
@@ -120,7 +149,12 @@ say "Phase B — CLI verb matrix (every verb against the served candidate)"
 nx memory put -p shakeout -t probe-1 "verb matrix probe" --ttl 1d >/dev/null 2>&1 \
   && [ "$(nx memory get -p shakeout -t probe-1 2>/dev/null)" = "verb matrix probe" ] \
   && ok "memory put/get" || bad "memory put/get"
-yes | nx memory delete -p shakeout -t probe-1 >/dev/null 2>&1
+# gap-15: `yes |` into an early-closing reader is the sanctioned
+# early-exit-consumer SIGPIPE hazard (nexus-6zxfb/i66g4 class) -- under
+# pipefail (already set) the pipeline's rc can be yes's own SIGPIPE exit,
+# not nx's. The very next line is the real assertion (row survives/gone);
+# this line's rc was never meant to gate anything.
+yes | nx memory delete -p shakeout -t probe-1 >/dev/null 2>&1 || true
 nx memory get -p shakeout -t probe-1 >/dev/null 2>&1 && bad "memory delete (row survived)" || ok "memory delete"
 
 # T1 scratch — the SANCTIONED bare-CLI path: service-backed T1 is PG-only
@@ -131,7 +165,9 @@ nx memory get -p shakeout -t probe-1 >/dev/null 2>&1 && bad "memory delete (row 
 # Also assert a STALE/bogus token fails CLEANLY (actionable
 # ClickException, not a traceback).
 run_check "scratch put"    "Stored"   nx scratch put "shakeout scratch probe" --tags shakeout
-UNMINTED_OUT="$(NX_T1_SESSION=unminted-probe nx scratch list 2>&1)"
+# gap-15: this call is EXPECTED to fail (bogus/unminted token) -- content
+# checked below, not rc-gated.
+UNMINTED_OUT="$(NX_T1_SESSION=unminted-probe nx scratch list 2>&1)" || true
 if printf '%s' "$UNMINTED_OUT" | grep -q "Traceback"; then
   bad "unminted scratch must fail cleanly (got a traceback)"
   printf '%s\n' "$UNMINTED_OUT" | sed 's/^/       | /' | tail -6
@@ -153,7 +189,9 @@ fi
 sleep 2
 nx search "amaranthine zeppelin quotient" --corpus knowledge -m 2 2>/dev/null | grep -q "shakeout-probe" \
   && ok "search finds stored note" || bad "search finds stored note"
-DEL_OUT="$(yes | nx store delete --title "shakeout-probe" --collection knowledge__shakeout 2>&1)"
+# gap-15: same yes-pipe SIGPIPE hazard as the memory-delete call above,
+# plus content (not rc) is what the check below actually gates on.
+DEL_OUT="$(yes | nx store delete --title "shakeout-probe" --collection knowledge__shakeout 2>&1)" || true
 if printf '%s' "$DEL_OUT" | grep -qiE "delet"; then
   ok "store delete --title (umvh2 regression)"
 else
@@ -168,7 +206,7 @@ nx search "amaranthine zeppelin quotient" --corpus knowledge -m 1 2>/dev/null | 
 # SQLite snapshot, leaving `nx plan` dark in service mode. reseed writes
 # builtins through HttpPlanLibrary; list must read them back from the
 # SAME live library, not echo "T2 database not found" / an empty snapshot.)
-PLAN_SEED_OUT="$(nx plan reseed 2>&1)"
+PLAN_SEED_OUT="$(nx plan reseed 2>&1)" || true  # gap-15: content-checked below, not rc-gated
 printf '%s' "$PLAN_SEED_OUT" | grep -qE "Seeded [0-9]+ new builtin row" \
   && ok "plan reseed writes through the service" \
   || { bad "plan reseed"; printf '%s\n' "$PLAN_SEED_OUT" | sed 's/^/       | /' | tail -6; }
@@ -179,7 +217,7 @@ printf '%s' "$PLAN_SEED_OUT" | grep -qE "Seeded [0-9]+ new builtin row" \
 # "plans service unavailable: ..." instead, untestable here since Phase A
 # already gates on a healthy service). No live producer for that literal
 # remains in src/; collapsed to the one real assertion below.
-PLAN_LIST_OUT="$(nx plan list 2>&1)"
+PLAN_LIST_OUT="$(nx plan list 2>&1)" || true  # gap-15: content-checked below, not rc-gated
 if printf '%s' "$PLAN_LIST_OUT" | grep -qiE "builtin"; then
   ok "plan list reads seeded builtins back from the service"
 else
@@ -191,7 +229,7 @@ fi
 nx catalog stats 2>/dev/null | grep -qE "Documents:" && ok "catalog stats" || bad "catalog stats"
 nx collection list >/dev/null 2>&1 && ok "collection list" || bad "collection list"
 nx taxonomy status >/dev/null 2>&1 && ok "taxonomy status" || bad "taxonomy status"
-DOCTOR_OUT="$(nx doctor 2>&1)"
+DOCTOR_OUT="$(nx doctor 2>&1)" || true  # gap-15: content (traceback presence) checked below, not rc-gated
 printf '%s\n' "$DOCTOR_OUT" | grep -q "Traceback" && bad "doctor raised a traceback" || ok "doctor runs traceback-free"
 
 # ── Phase C: index + staleness (incremental must work) ──────────────────────
@@ -272,8 +310,13 @@ PB=$!
 # shellcheck source=./lib/store_put_census.sh disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/store_put_census.sh"
 census_concurrent_store_puts 10 "/tmp/load-put"
-wait "$PA"; RA=$?
-wait "$PB"; RB=$?
+# gap-15: `wait PID` returns the waited process's own exit status -- a
+# bare `wait "$PA"; RA=$?` dies at `wait` under -e before RA=$? ever runs
+# if the backgrounded index job legitimately failed (exactly the class
+# this phase exists to observe, not abort past). Capture via the `||`
+# branch instead.
+RA=0; wait "$PA" || RA=$?
+RB=0; wait "$PB" || RB=$?
 [ "$RA" = 0 ] && ok "parallel index A (exit 0)" || bad "parallel index A failed"
 [ "$RB" = 0 ] && ok "parallel index B (exit 0)" || bad "parallel index B failed"
 if [ "$STORE_FAILS" = 0 ]; then
@@ -344,6 +387,51 @@ say "Phase E — collections-drift: catalog_collections projection vs T3 (nexus-
 nx catalog backfill-collections --no-dry-run >/dev/null 2>&1 || true
 run_check "collections-drift (no orphaned quarantine/projection rows, nexus-syfes class)" \
   "collections-drift: PASS" nx catalog doctor --collections-drift
+
+# ── Phase F: native-smoke.sh probe set (nexus-l8xnz) ─────────────────────────
+say "Phase F — native-smoke.sh probe set against the CANDIDATE (pre-tag, not release-workflow-only)"
+# nexus-l8xnz: native-smoke.sh's raw-curl probe set (taxonomy/assignments/
+# details' 64-hex doc_id width validation, T1's separate-jOOQ-schema
+# reflection check, memory/plans/taxonomy/chash read/write routes, the
+# bge-768 embed path, the fused-rerank stage) previously ran ONLY inside
+# engine-service-release.yml -- a stale probe fixture (the pre-fix 16-char
+# doc_id literal) burned the v0.1.77 tag on both linux release legs while
+# the binary itself was fine, and this journey (like every other local
+# gate) stayed green because nothing local exercised the script at all.
+#
+# This phase runs the IDENTICAL script byte-for-byte -- only the CALLER is
+# adapted, never the script -- against the SAME candidate binary Phases A-E
+# already proved healthy, pointed at the SAME already-provisioned Postgres
+# (NX_DB_URL / NX_DB_USER / NX_DB_PASS, sourced from pg_credentials at the
+# end of Phase A) instead of native-smoke.sh's own throwaway-docker-pgvector
+# default: this image has no Docker socket (Dockerfile header: "NOT DinD").
+# Pointing native-smoke.sh at an external NX_DB_URL is a FIRST-CLASS,
+# already-documented mode of the script (its own header: "NX_DB_URL / ... --
+# point at an existing Postgres. When unset, a throwaway ... container is
+# started."), not a fork of it -- it self-selects OWN_PG=0 and self-skips
+# its own docker-only voyage-mode-boot phase (that phase needs a resettable
+# database; accepted gap, the voyage/egress-proxy boot path has no other
+# local coverage today). The bge-768 embed section runs FOR REAL (the same
+# model this image bakes in for Phases A/C); the cross-encoder rerank
+# section takes its documented LOUD-degrade path (that model is not baked
+# into this image); the T1 / memory-plans-taxonomy-chash real-Python-client
+# blocks self-skip via native-smoke.sh's own documented WARN (no service/
+# tree or pyproject.toml in this image) -- that exact coverage (routing +
+# backend together, against this SAME candidate through this SAME real
+# client code) is already proven by Phase B's CLI verb matrix above.
+NATIVE_SMOKE_LOG=/tmp/native-smoke.log
+NATIVE_SMOKE_RC=0
+# gap-15 shape: rc captured explicitly via `||`, never left bare under -e --
+# a native-smoke.sh failure must increment FAILS and let this journey reach
+# the Verdict section, not abort the whole rehearsal mid-phase.
+BIN="$SVC_NATIVE_DIR/nexus-service" bash "$HOME/native-smoke.sh" > "$NATIVE_SMOKE_LOG" 2>&1 \
+  || NATIVE_SMOKE_RC=$?
+if [ "$NATIVE_SMOKE_RC" = 0 ] && grep -q "^NATIVE SMOKE PASS$" "$NATIVE_SMOKE_LOG"; then
+  ok "native-smoke.sh probe set (exit 0, NATIVE SMOKE PASS)"
+else
+  bad "native-smoke.sh probe set (exit $NATIVE_SMOKE_RC) -- full log follows for diagnosis:"
+  sed 's/^/       | /' "$NATIVE_SMOKE_LOG"
+fi
 
 # ── Verdict ──────────────────────────────────────────────────────────────────
 say "Verdict"

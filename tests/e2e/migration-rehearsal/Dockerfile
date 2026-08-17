@@ -113,8 +113,14 @@ COPY --chown=nexus:nexus native/ /opt/nexus-service-native/
 # Driver scripts last: editing them rebuilds only these trivial layers, not the
 # multi-minute wheel install above.
 COPY rehearse.sh /home/nexus/rehearse.sh
-COPY rehearse_guided.sh /home/nexus/rehearse_guided.sh
 COPY rehearse_shakeout.sh /home/nexus/rehearse_shakeout.sh
+# nexus-l8xnz: the SAME service/native-smoke.sh the release workflow runs,
+# byte-for-byte (no fork) -- rehearse_shakeout.sh's Phase F invokes it
+# against this candidate over the already-provisioned Postgres (NX_DB_URL
+# from pg_credentials) instead of native-smoke.sh's own throwaway-docker
+# default, since this image has no Docker socket (see the header above:
+# "NOT DinD"). Staged by run.sh from the repo's service/ tree.
+COPY native-smoke.sh /home/nexus/native-smoke.sh
 # lib/ MUST ship with the driver that sources it. rehearse_shakeout.sh sources
 # lib/store_put_census.sh for its Phase D census (nexus-xm0cp); without this
 # COPY the source fails, census_concurrent_store_puts is undefined, and
@@ -124,6 +130,7 @@ COPY rehearse_shakeout.sh /home/nexus/rehearse_shakeout.sh
 COPY lib/ /home/nexus/lib/
 COPY seed_legacy.py /home/nexus/seed_legacy.py
 
-# Default: the full manual rehearsal. run.sh --guided overrides the command to
-# /home/nexus/rehearse_guided.sh (RDR-002 ez5.13 one-command MVV).
+# Default: the full manual rehearsal. --shakeout overrides the command to
+# /home/nexus/rehearse_shakeout.sh; --guided is RETIRED (RDR-155 P4b) and
+# refused pre-build by run.sh, so this image no longer ships rehearse_guided.sh.
 ENTRYPOINT ["/bin/bash", "/home/nexus/rehearse.sh"]

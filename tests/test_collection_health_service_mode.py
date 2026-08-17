@@ -50,16 +50,39 @@ class TestCatalogCollectionHealthMeta:
         assert result["orphan_count"] == 0
 
     def test_last_indexed_is_max_indexed_at(self, cat) -> None:
-        """last_indexed = MAX(indexed_at) for documents in the collection."""
+        """last_indexed = MAX(indexed_at) for documents in the collection.
+
+        nexus-cefa1.2: a bare ``register()`` does NOT stamp indexed_at server
+        -side — catalog_documents.indexed_at is nullable with no default (both
+        before and after catalog-031-1-documents-temporal converted it to
+        timestamptz), and only a manifest write / explicit update stamps it.
+        Pre-migration this was masked: the never-set column stored '' (a
+        non-None `str`), so `cat.resolve(...).indexed_at` (CatalogEntry
+        normalizes None -> "" anyway) and the raw
+        `collection_health_meta` response (no such normalization) coincided
+        on the same empty string by accident, not because either doc was
+        genuinely dated. Post-migration the raw response honestly reports
+        `None` for an undated MAX() (see docstring: last_indexed is
+        str|None), so that coincidence no longer holds -- stamp both docs
+        with distinct, explicit indexed_at values instead, which is what
+        this test's own docstring ("last_indexed = MAX(indexed_at)") was
+        actually meant to exercise.
+        """
         owner = cat.register_owner("health-owner1", "repo", repo_hash="h1")
         a = cat.register(owner, "doc-a", physical_collection="test__coll__v1")
         b = cat.register(owner, "doc-b", physical_collection="test__coll__v1")
+        # nexus-cefa1.2: CatalogRepository.utcIso reads timestamptz back in the
+        # catalog's micros+offset convention (INDEXED_AT_FMT, kept per Hal
+        # directive 2026-08-15) — these literals already carry microseconds so
+        # they round-trip exactly.
+        cat.update(a, indexed_at="2026-01-01T00:00:00.000000+00:00")
+        cat.update(b, indexed_at="2026-06-01T00:00:00.000000+00:00")
         stamps = {cat.resolve(a).indexed_at, cat.resolve(b).indexed_at}
 
         result = cat.collection_health_meta("test__coll__v1")
-        # The aggregate must be the MAX of the per-doc stamps the catalog
-        # itself reports (register stamps indexed_at server-side).
+        # The aggregate must be the MAX of the per-doc stamps just set.
         assert result["last_indexed"] == max(stamps)
+        assert result["last_indexed"] == "2026-06-01T00:00:00.000000+00:00"
         assert result["orphan_count"] == 2  # no incoming links for either doc
 
     def test_orphan_count_excludes_linked_docs(self, cat) -> None:
@@ -85,9 +108,18 @@ class TestCatalogCollectionHealthMeta:
         assert result["orphan_count"] == 1  # only the target-collection doc
 
     def test_returns_exact_types(self, cat) -> None:
-        """last_indexed is str|None; orphan_count is int."""
+        """last_indexed is str|None; orphan_count is int.
+
+        nexus-cefa1.2: a bare register() leaves indexed_at unset (None on the
+        wire, per the docstring's own str|None contract — see
+        test_last_indexed_is_max_indexed_at's comment for why this changed
+        from the pre-migration '' placeholder). Stamp explicitly so this test
+        actually exercises the `str` branch of the documented type contract,
+        not an accidental non-empty-string default.
+        """
         owner = cat.register_owner("health-owner4", "repo", repo_hash="h4")
-        cat.register(owner, "typed-doc", physical_collection="typed__coll__v1")
+        doc = cat.register(owner, "typed-doc", physical_collection="typed__coll__v1")
+        cat.update(doc, indexed_at="2026-01-01T00:00:00Z")
 
         result = cat.collection_health_meta("typed__coll__v1")
         assert isinstance(result["last_indexed"], str)

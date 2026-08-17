@@ -58,6 +58,7 @@ from tests.db.test_http_catalog_integration import (  # noqa: F401, PLC2701 — 
     _JAR,
     _JAVA,
     _PG_CTL,
+    _seed_chunk,
     cat,
     pg_instance,
     service,
@@ -282,7 +283,7 @@ class TestItem12CatalogReadsAfterRename:
     _CHASH = _ch("i711w1-rename-probe-chunk-0")
 
     @pytest.fixture(scope="class")
-    def renamed(self, cat, owner):
+    def renamed(self, cat, owner, pg_instance):
         """Seed collection + doc + manifest under OLD via public API, then rename."""
         cat.register_collection(
             self._OLD,
@@ -299,6 +300,12 @@ class TestItem12CatalogReadsAfterRename:
             physical_collection=self._OLD,
             source_uri="file:///i711w1/rename_probe.md",
         )
+        # RDR-194 P3d: seed the backing nexus.chunks row so write_manifest
+        # satisfies catalog-029-manifest-chunk-fk.xml's composite FK. The
+        # subsequent rename_collection re-homes THIS row's collection column
+        # too (CatalogRepository.java:2411-2413), which is exactly what
+        # test_manifest_chash_attribution_follows_rename below verifies.
+        _seed_chunk(pg_instance, "default", self._OLD, self._CHASH)
         cat.write_manifest(str(t), [
             {"position": 0, "chash": self._CHASH, "line_start": 1, "line_end": 10},
         ], collection=self._OLD)

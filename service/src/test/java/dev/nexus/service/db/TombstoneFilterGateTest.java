@@ -264,7 +264,16 @@ class TombstoneFilterGateTest {
             "nexus-3ck2g E3 (/v1/catalog/purge-trash): this read's whole PURPOSE is counting "
             + "the TOMBSTONED population itself (deleted_at IS NOT NULL), mirroring "
             + "nexus.purge_trash's own Step 4 WHERE — the inverse of every other "
-            + "CATALOG_DOCUMENTS read this gate polices, which must EXCLUDE tombstones")
+            + "CATALOG_DOCUMENTS read this gate polices, which must EXCLUDE tombstones"),
+        new ExemptEntry("CatalogRepository.java", "requireImportLinkEndpointsExist",
+            "RDR-194 P1 (nexus-tk070.p1, D2): the /import/link endpoint precheck mirrors the "
+            + "catalog_links tumbler FKs (fk_catalog_links_from_document/_to_document, "
+            + "catalog-032), which test ROW EXISTENCE in catalog_documents, not liveness — a "
+            + "link to a TOMBSTONED document is still writable (soft delete does not fire ON "
+            + "DELETE CASCADE), only a tumbler with NO row is a dangling_endpoint. Adding "
+            + "DELETED_AT.isNull() here would reject rows the FK accepts, diverging the "
+            + "precheck's 400 from the constraint of record; the FK remains the enforcement, "
+            + "this SELECT only names the offending row before the INSERT would abort the tx")
     );
 
     record WidenEntry(String file, String method, String rationale) {}

@@ -82,16 +82,6 @@ class _FakeChashHandler(FakeT2HandlerBase):
                     count += 1
             self._send(200, {"upserted": count})
 
-        elif pp == "/v1/chash/delete_collection":
-            coll = body.get("collection", "")
-            with _STORE_LOCK:
-                before = len(_STORE)
-                keys = [k for k in _STORE if k[1] == coll]
-                for k in keys:
-                    del _STORE[k]
-                deleted = before - len(_STORE)
-            self._send(200, {"deleted": deleted})
-
         elif pp == "/v1/chash/rename_collection":
             old = body.get("old", "")
             new = body.get("new", "")
@@ -372,19 +362,12 @@ class TestLookup:
     def test_lookup_unknown_returns_empty(self, store):
         assert store.lookup("nosuchch") == []
 
-
-class TestDeleteCollection:
-    def test_delete_collection_removes_rows(self, store):
-        store.upsert(chash="c1", collection="col_a")
-        store.upsert(chash="c2", collection="col_a")
-        store.upsert(chash="c3", collection="col_b")
-        deleted = store.delete_collection("col_a")
-        assert deleted == 2
-        with _STORE_LOCK:
-            assert len(_STORE) == 1
-
-    def test_delete_collection_absent_returns_zero(self, store):
-        assert store.delete_collection("no_such") == 0
+    # TestDeleteCollection (test_delete_collection_removes_rows,
+    # test_delete_collection_absent_returns_zero) DELETED at nexus-lgdel.l2:
+    # HttpChashIndex.delete_collection and POST /v1/chash/delete_collection
+    # are both deleted — the orphaned deprecated no-op had zero production
+    # callers (vector/catalog delete owns content deletion; this route
+    # never had anything to route to).
 
 
 class TestDistinctCollections:

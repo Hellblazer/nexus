@@ -161,18 +161,25 @@ class PgVectorTombstoneFilterTest {
                 "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES "
                 + "('" + TENANT + "', '" + DOC_LIVE + "', 'Live Doc', '" + COLLECTION + "'), "
                 + "('" + TENANT + "', '" + DOC_DEAD + "', 'Dead Doc', '" + COLLECTION + "')");
-            insertManifestRow(su, DOC_LIVE, CHASH_LIVE);
-            insertManifestRow(su, DOC_DEAD, CHASH_DEAD);
-            // CHASH_ORPHAN deliberately gets NO catalog_document_chunks row (manifest-less
-            // RDR-145 note-chunk shape).
         }
 
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // chunk vectors to land BEFORE the manifest rows below (previously
+        // order-independent).
         // Chunk storage rows (nexus.chunks, dim=384) for all three chashes, via the repository under
         // test — same path a real store_put/index would use.
         vecRepo.upsertChunks(TENANT, COLLECTION,
             List.of(CHASH_LIVE, CHASH_DEAD, CHASH_ORPHAN),
             List.of(TEXT_LIVE, TEXT_DEAD, TEXT_ORPHAN),
             List.of(Map.of(), Map.of(), Map.of()));
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            insertManifestRow(su, DOC_LIVE, CHASH_LIVE);
+            insertManifestRow(su, DOC_DEAD, CHASH_DEAD);
+            // CHASH_ORPHAN deliberately gets NO catalog_document_chunks row (manifest-less
+            // RDR-145 note-chunk shape).
+        }
     }
 
     @AfterAll
@@ -271,14 +278,19 @@ class PgVectorTombstoneFilterTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES "
                 + "('" + TENANT + "', '" + DOC_LIVE2 + "', 'Live Doc 2', '" + COLLECTION + "')");
+        }
+        // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
+        // chunk vector to land BEFORE the manifest rows below.
+        vecRepo.upsertChunks(TENANT, COLLECTION,
+            List.of(CHASH_SHARED), List.of(TEXT_SHARED), List.of(Map.of()));
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
             // CHASH_SHARED gets TWO manifest rows: one on the already-tombstoned DOC_DEAD,
             // one on the still-live DOC_LIVE2 — proves the get-family predicate's
             // OR-semantics (live iff AT LEAST ONE manifest row's document is live).
             insertManifestRow(su, DOC_DEAD, CHASH_SHARED, 1);
             insertManifestRow(su, DOC_LIVE2, CHASH_SHARED, 0);
         }
-        vecRepo.upsertChunks(TENANT, COLLECTION,
-            List.of(CHASH_SHARED), List.of(TEXT_SHARED), List.of(Map.of()));
     }
 
     // ── Get-family (typed jOOQ reads): get, getWhere, getEmbeddings, getAllMetadata ──

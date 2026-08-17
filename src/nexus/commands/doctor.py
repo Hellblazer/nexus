@@ -410,7 +410,7 @@ def _run_check_plan_library() -> None:
         # the client resolves the endpoint, and an unresolvable one raises
         # ServiceEndpointUnresolvableError, a RuntimeError subclass that is
         # NOT an httpx.HTTPError (same trap documented on
-        # _report_aspect_queue_service / _report_dangling_links_service).
+        # _report_aspect_queue_service).
         click.echo(
             f"Plan library check: service backend unreachable ({exc}). "
             "Counts UNKNOWN — not reporting pass or fail.",
@@ -599,250 +599,6 @@ def _run_check_aspect_queue() -> None:
     with the =sqlite opt-out (RDR-158 P3, nexus-7bomn).
     """
     _report_aspect_queue_service()
-
-
-# ── --check-t3-legacy-metadata (nexus-1714) ──────────────────────────────────
-
-
-def _legacy_fields_present(collection, fields: tuple[str, ...]) -> set[str]:
-    """Return the subset of *fields* present (non-empty) on any chunk.
-
-    Chroma cannot answer "does any chunk carry key X" via a ``where`` filter:
-    ``{X: {'$ne': ''}}`` also matches chunks that *lack* the key entirely
-    (verified on chromadb 1.5.x), so it cannot distinguish a legacy chunk from
-    a Phase-3-clean one. Instead we page the collection's metadata
-    (``include=["metadatas"]``, ``limit<=300`` per the quota) and inspect the
-    keys Python-side, short-circuiting as soon as every field is found.
-    """
-    found: set[str] = set()
-    offset = 0
-    page = 300  # nexus.db.limits paging ceiling (RDR-155 P4b rehome)
-    while True:
-        res = collection.get(limit=page, offset=offset, include=["metadatas"])
-        metas = res.get("metadatas") or []
-        if not metas:
-            break
-        for m in metas:
-            for f in fields:
-                if f not in found and m.get(f):
-                    found.add(f)
-        if len(found) == len(fields) or len(metas) < page:
-            break
-        offset += page
-    return found
-
-
-def _run_check_t3_legacy_metadata(*, strict: bool = False) -> None:
-    """Report local T3 collections still carrying legacy chunk metadata.
-
-    RDR-108 Phase 3 retired ``doc_id`` / ``source_path`` from chunk metadata
-    (the catalog ``document_chunks`` manifest is authoritative). Tolerance
-    branches in ``mcp/core.py``, ``indexer_utils.py``, and ``search_engine.py``
-    still read those fields for pre-Phase-3 chunks; this check tells an operator
-    whether the corpus is fully pruned so those branches can be removed
-    (nexus-1714).
-
-    Scope (deliberate, not silent): this is a local-Chroma concern. The RDR-155
-    pgvector service path stores chunks under a different schema and does not
-    expose arbitrary-metadata ``where`` filters, so the check reports *not
-    applicable* in service mode rather than producing a misleading result.
-    """
-    # nexus-cv6jp: gate on the HANDLE, not on install mode.
-    #
-    # This was `if not is_local_mode(): return "not applicable"`. That equated
-    # "local install" with "local Chroma", which stopped being true at RDR-155:
-    # a local install now runs the bundled PG + pgvector service too. So on a
-    # MIGRATED LOCAL box is_local_mode() is True, the guard did not fire, and
-    # the survey ran against pgvector with a Chroma frame — reporting on
-    # arbitrary-metadata `where` filters that backend does not expose.
-    #
-    # is_service_backed(db) asks the question that actually matters — is this
-    # handle the HTTP client? — and is the documented instance-based guard
-    # (RDR-155 P4a.2), so injected chroma-backed T3Database test fixtures keep
-    # taking the legacy branch regardless of env state.
-    from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    try:
-        db = make_t3()
-    except Exception as exc:  # noqa: BLE001 — diagnostic: report unavailability, never crash doctor
-        click.echo(f"T3 legacy-metadata check: T3 unavailable ({exc}).")
-        return
-
-    if is_service_backed(db):
-        click.echo(
-            "T3 legacy-metadata check: not applicable — T3 is service-backed "
-            "(pgvector). Legacy doc_id/source_path chunk metadata is a "
-            "local-Chroma concern and that backend uses a different schema. "
-            "NOTE: since the RDR-155 P4b Chroma deletion this is the normal "
-            "answer on every production install, local or cloud."
-        )
-        return
-
-    cols = db.list_collections()
-    if not cols:
-        click.echo("T3 legacy-metadata check: no collections found.")
-        return
-
-    click.echo(
-        "T3 legacy-metadata check (RDR-108 Phase 3 retired doc_id + "
-        "source_path):"
-    )
-    offenders: list[str] = []
-    for c in sorted(cols, key=lambda c: c["name"]):
-        name = c["name"]
-        total = c.get("count", 0)
-        try:
-            col = db.get_collection(name)
-            present = _legacy_fields_present(col, ("doc_id", "source_path"))
-        except Exception as exc:  # noqa: BLE001 — per-collection probe failure is reported, scan continues
-            click.echo(f"  {name}: probe failed ({exc})")
-            continue
-        has_doc_id = "doc_id" in present
-        has_source_path = "source_path" in present
-        legacy = has_doc_id or has_source_path
-        marker = "  ⚠ LEGACY" if legacy else ""
-        click.echo(
-            f"  {name}: {total} chunk(s); "
-            f"doc_id={'yes' if has_doc_id else 'no'} "
-            f"source_path={'yes' if has_source_path else 'no'}{marker}"
-        )
-        if legacy:
-            offenders.append(name)
-
-    if offenders:
-        click.echo(
-            f"\n{len(offenders)} collection(s) still carry legacy chunk "
-            "metadata. These gate removal of the legacy tolerance branches "
-            "(mcp/core.py, indexer_utils.py, search_engine.py)."
-        )
-        if strict:
-            sys.exit(1)
-    else:
-        click.echo(
-            "\nAll collections are Phase-3 clean (no doc_id/source_path "
-            "chunk metadata)."
-        )
-
-
-# ── --check-dangling-links (nexus-ysrwi, GH #1419 issue 7) ──────────────────
-
-
-def _require(row: dict, field: str) -> str:
-    """Return *field* from a dangling-link row, or a LOUD marker if absent.
-
-    The endpoints are the whole content of a dangling-link report; a row
-    missing one means the engine's wire shape drifted, and printing None for
-    it would read as a successful check (nexus-ysrwi review, 2026-07-25).
-    """
-    value = row.get(field)
-    if value is None or value == "":
-        return f"<MISSING:{field}>"
-    return str(value)
-
-
-def _report_dangling_links_service(*, strict: bool) -> None:
-    """Dangling catalog_links from the LIVE PG, over HTTP (nexus-ysrwi).
-
-    ``catalog_links`` carries a PK and a UNIQUE constraint but NO foreign
-    key to ``catalog_documents`` (catalog-001-baseline.xml), so a link whose
-    endpoint's document was hard-deleted accumulates silently. The engine's
-    ``GET /v1/catalog/links/orphaned`` (v0.1.55, ``CatalogRepository
-    .orphanedLinks``) is the sole live-truth source in service mode.
-
-    Fails LOUD on a transport error rather than reporting a clean zero: an
-    unreachable service must never read identically to "zero dangling
-    links found" — the exact false-clean class nexus-ingey / nexus-k0luu
-    removed at three other doctor call sites (aspect queue, trim-telemetry,
-    T3 legacy metadata). ``HttpCatalogClient.link_audit()`` is a service-mode
-    stub returning ``{}``; that is why this check calls the dedicated
-    ``orphaned_links()`` method rather than the generic audit.
-
-    Exit-2 on unreachable (via ``click.exceptions.Exit``, the same idiom
-    ``_run_trim_telemetry`` / ``_run_check_storage_boundary`` use for
-    "could not check") rather than a bare warn-and-return: a scripted
-    caller must not be able to mistake "service down" for "zero dangling
-    links found".
-
-    Goes through :func:`nexus.catalog.factory.make_catalog_reader` rather
-    than constructing ``HttpCatalogClient`` directly — the factory seam
-    ``tests/catalog/test_http_catalog_client.py::TestFactorySeam
-    .test_no_production_bypass_of_factory`` greps ``src/`` and fails on any
-    bare construction outside ``factory.py``/``http_catalog_client.py``, and
-    the factory shares one process-lifetime client (nexus-5en9j) rather than
-    opening a fresh connection per doctor invocation.
-    """
-    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
-
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    try:
-        reader = make_catalog_reader()
-        links = reader.orphaned_links()
-    except (httpx.HTTPError, RuntimeError) as exc:
-        # RuntimeError is not redundant with httpx.HTTPError: constructing
-        # the client resolves the endpoint, and an unresolvable one raises
-        # ServiceEndpointUnresolvableError, a RuntimeError subclass that is
-        # NOT an httpx.HTTPError (same trap documented on
-        # _report_aspect_queue_service above).
-        click.echo(
-            f"dangling catalog_links check: service backend unreachable "
-            f"({exc}). Dangling-link count UNKNOWN — not reporting a count.",
-            err=True,
-        )
-        raise click.exceptions.Exit(2)
-
-    count = len(links)
-    if count == 0:
-        click.echo(
-            "dangling catalog_links: 0 found (service backend) — clean."
-        )
-        return
-
-    click.echo(
-        f"dangling catalog_links: {count} link(s) point at a tumbler with "
-        "no document (service backend)."
-    )
-    click.echo(f"\nSample (showing up to {min(count, 20)}):")
-    for row in links[:20]:
-        click.echo(
-            # NOT silent .get() defaults. With them, a drifted engine shape
-            # degrades to "[?] None --None--> None" -- a check that looks like
-            # it ran and found nothing wrong, which is the precise failure mode
-            # this whole family of doctor checks was rewritten to remove
-            # (nexus-ingey / k0luu, 2026-07-25). Missing endpoints are a
-            # CONTRACT break, so name them.
-            f"  [{row.get('side') or '?'}] {_require(row, 'from_tumbler')} "
-            f"--{_require(row, 'link_type')}--> {_require(row, 'to_tumbler')} "
-            f"(created_by={row.get('created_by') or '?'})"
-        )
-    click.echo(
-        "\nNot write-time preventable client-side: catalog_links has no FK "
-        "to catalog_documents, and the only production hard-delete of "
-        "document rows (CatalogRepository.deleteCollectionTxn, a per-"
-        "collection cascade) is engine-side. Closing the write-time gap "
-        "needs an engine change + tag (nexus-ysrwi)."
-    )
-    if strict:
-        import sys as _sys  # noqa: PLC0415 — deferred to keep CLI startup fast
-
-        _sys.exit(1)
-
-
-def _run_check_dangling_links(*, strict: bool = False) -> None:
-    """Report catalog_links rows whose from_tumbler or to_tumbler resolves
-    to no document (nexus-ysrwi, GH #1419 issue 7 / Steve postmortem).
-
-    Steve Harris's backup held 5 of 52 links pointing at tumblers with no
-    document anywhere in the same pg_dump — orphans left by document
-    deletion without link cleanup. This is the DETECTION half; enforcement
-    (an FK with ON DELETE, or delete-time cleanup) is nexus-tk070's
-    Hal-gated FK-census decision.
-
-    Service-only since nexus-i711w: the sqlite branch died with the local
-    catalog — the catalog is service-backed in every mode.
-    """
-    _report_dangling_links_service(strict=strict)
 
 
 # ── --check-tier-discipline (nexus-a52i) ─────────────────────────────────────
@@ -1364,42 +1120,20 @@ def _run_check_mineru() -> None:
          "is informational (a bare CLI legitimately has none).",
 )
 @click.option(
-    "--check-t3-legacy-metadata",
-    "check_t3_legacy_metadata",
+    "--check-wal-retention",
+    "check_wal_retention",
     is_flag=True,
     default=False,
-    help="Survey local (Chroma) T3 collections for chunks still carrying "
-         "legacy doc_id / source_path metadata (RDR-108 Phase 3 retired "
-         "both). Gates removal of the tolerance branches in mcp/core.py, "
-         "indexer_utils.py, search_engine.py. Not applicable in service "
-         "mode. nexus-1714.",
-)
-@click.option(
-    "--strict-legacy-metadata",
-    "strict_legacy_metadata",
-    is_flag=True,
-    default=False,
-    help="Make --check-t3-legacy-metadata exit non-zero when any "
-         "collection still carries legacy metadata (default: warn only).",
-)
-@click.option(
-    "--check-dangling-links",
-    "check_dangling_links",
-    is_flag=True,
-    default=False,
-    help="Report catalog_links rows whose from_tumbler or to_tumbler "
-         "resolves to no document (GH #1419 issue 7). Service-mode aware: "
-         "calls the engine's GET /v1/catalog/links/orphaned in service "
-         "mode, runs a real local link_audit() in sqlite mode. "
-         "nexus-ysrwi.",
-)
-@click.option(
-    "--strict-dangling-links",
-    "strict_dangling_links",
-    is_flag=True,
-    default=False,
-    help="Make --check-dangling-links exit non-zero when any dangling "
-         "link is found (default: warn only).",
+    help="Sample retained WAL bytes (local service only) via "
+         "pg_ls_waldir(), escalating a nexus_svc session to pg_monitor "
+         "with SET ROLE first — unconditionally, since nexus_svc is "
+         "NOINHERIT in every deployment posture (cloud measured, local "
+         "provisioning aligned nexus-v80f2), so pg_monitor's privileges "
+         "are never ambient without it. Reports UNMEASURED, never a "
+         "false clean, when no local nexus_svc credentials exist "
+         "(managed/BYO deployment) or the escalation is refused "
+         "(grants-004 not applied). Always exit 0 — informational. "
+         "nexus-bb5c8.",
 )
 @click.option(
     "--days",
@@ -1421,10 +1155,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_post_store_hooks: bool,
                check_aspect_queue: bool,
                check_t1: bool,
-               check_t3_legacy_metadata: bool,
-               strict_legacy_metadata: bool,
-               check_dangling_links: bool,
-               strict_dangling_links: bool,
+               check_wal_retention: bool,
                check_tier_discipline: bool,
                check_storage_boundary: bool,
                fail_on_violation: bool,
@@ -1481,16 +1212,12 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         _run_check_aspect_queue()
         return
 
-    if check_t3_legacy_metadata:
-        _run_check_t3_legacy_metadata(strict=strict_legacy_metadata)
-        return
-
-    if check_dangling_links:
-        _run_check_dangling_links(strict=strict_dangling_links)
-        return
-
     if check_t1:
         _run_check_t1()
+        return
+
+    if check_wal_retention:
+        _run_check_wal_retention()
         return
 
     if check_tier_discipline:
@@ -1890,6 +1617,35 @@ def _run_check_t1() -> None:
         f"rm {lease_path}"
     )
     raise click.exceptions.Exit(1)
+
+
+def _run_check_wal_retention() -> None:
+    """Diagnostic: retained WAL bytes via nexus_svc's pg_monitor escalation.
+
+    nexus-bb5c8: grants-004-monitor-wal-visibility grants nexus_svc
+    MEMBERSHIP in pg_monitor, but membership alone does not make
+    pg_ls_waldir() callable under NOINHERIT -- and the CLOUD deployment's
+    nexus_svc IS NOINHERIT (measured live, conexus relay [22485]); local
+    provisioning currently keeps PostgreSQL's INHERIT default instead
+    (divergence tracked separately as nexus-v80f2). See
+    nexus.db.svc_monitor's module docstring for the full posture split --
+    its SET-ROLE escalation is issued unconditionally and is correct
+    either way. This is the first product consumer of that escalation --
+    no other call site samples pg_ls_waldir() in-repo.
+
+    Always exit 0: this is informational (RDR-191 Phase 4 trough-window
+    context, not a pass/fail gate), and every degrade path
+    (nexus.db.svc_monitor.wal_retention_report) already renders an
+    explicit UNMEASURED marker rather than a false clean -- there is
+    nothing here for a hard failure to add.
+    """
+    from nexus.db.svc_monitor import wal_retention_report  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    report = wal_retention_report()
+    if report.startswith("WAL retention: UNMEASURED"):
+        click.echo(f"[ ] {report}")
+    else:
+        click.echo(f"[✓] {report}")
 
 
 # ── --check-quotas (nexus-c590) ──────────────────────────────────────────────

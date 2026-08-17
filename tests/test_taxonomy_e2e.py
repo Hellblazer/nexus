@@ -12,6 +12,7 @@ to verify the on-disk path behaves identically.
 """
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,7 @@ import pytest
 from nexus.db.local_ef import LocalEmbeddingFunction
 from nexus.db.t2 import T2Database
 from nexus.types import SearchResult
+from tests._t2_fixture_ops import canonical_chunk_id
 from tests.conftest import make_vector_test_client
 from typing import Any
 
@@ -29,6 +31,64 @@ from typing import Any
 # convention so default ``pytest`` deselects it; run explicitly with
 # ``uv run pytest -m integration``.
 pytestmark = pytest.mark.integration
+
+#: RDR-194 P3d (nexus-tk070.p3d): the current test's minted tenant, stashed
+#: by the autouse fixture below so module-level ``discover_topics``/
+#: ``rebuild_taxonomy``/``assign_topic`` call sites across this file can
+#: seed a matching nexus.chunks row without threading ``t2_service_env``
+#: through every one of the ~15 test methods individually. This module has
+#: no async tests.
+_current_tenant: str | None = None
+
+
+@pytest.fixture(autouse=True)
+def _engine_substrate(t2_service_env: str):
+    """T2Database is HTTP-only over the engine substrate (SQLite retired,
+    RDR-158 P4) — every test in this module needs a minted tenant, and
+    RDR-194 P3d's topic_assignments_chunk_fk means discover_topics/
+    rebuild_taxonomy/assign_topic now need real backing nexus.chunks rows
+    too (see ``_seed_chunks_for_tenant`` below)."""
+    global _current_tenant
+    _current_tenant = t2_service_env
+    yield
+    _current_tenant = None
+
+
+def _seed_chunks_for_tenant(
+    tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 384,
+) -> None:
+    """RDR-194 P3d: seed real nexus.chunks rows so a topic_assignments
+    insert for (tenant, collection, chash) satisfies
+    topic_assignments_chunk_fk. Mirrors tests/test_taxonomy.py's helper of
+    the same name (this module has no import path to it).
+    """
+    from tests._engine_substrate import ensure_engine  # noqa: PLC0415 — laziness contract, see module docstring
+
+    if not chash_hexes:
+        return
+    state = ensure_engine()
+    embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
+    vec = "[" + ",".join(["0"] * dim) + "]"
+    values = ", ".join(
+        f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::vector)"
+        for c in chash_hexes
+    )
+    sql = (
+        f"INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('{tenant}', '{collection}') "
+        "ON CONFLICT DO NOTHING; "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
+        f"VALUES {values} ON CONFLICT DO NOTHING;"
+    )
+    psql = Path(state["pg_bin"]) / "psql"
+    proc = subprocess.run(
+        [
+            str(psql), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
+            "-U", state["pg_user"], "-d", state["pg_dbname"],
+            "-v", "ON_ERROR_STOP=1", "-c", sql,
+        ],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, f"_seed_chunks_for_tenant failed: {proc.stdout}\n{proc.stderr}"
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -89,9 +149,9 @@ def _build_corpus() -> tuple[list[str], list[str]]:
 
     texts = http + db + test
     doc_ids = (
-        [f"src/http/{i}.py" for i in range(20)]
-        + [f"src/db/{i}.py" for i in range(20)]
-        + [f"tests/test_{i}.py" for i in range(20)]
+        [canonical_chunk_id(f"src/http/{i}.py") for i in range(20)]
+        + [canonical_chunk_id(f"src/db/{i}.py") for i in range(20)]
+        + [canonical_chunk_id(f"tests/test_{i}.py") for i in range(20)]
     )
     return doc_ids, texts
 
@@ -155,9 +215,8 @@ class TestFullPipelineEphemeral:
         embeddings = np.array(ef(texts), dtype=np.float32)
 
         with T2Database(tmp_path / "e2e.db") as db:
-            count = db.taxonomy.discover_topics(
-                "code__e2e", doc_ids, embeddings, texts, ephemeral_chroma,
-            )
+            _seed_chunks_for_tenant(_current_tenant, "code__e2e", doc_ids)
+            count = db.taxonomy.discover_topics("code__e2e", doc_ids, embeddings, texts, ephemeral_chroma)
 
             assert count >= 2, f"Expected >=2 topics from 3 domains, got {count}"
 
@@ -181,9 +240,7 @@ class TestFullPipelineEphemeral:
         embeddings = np.array(ef(texts), dtype=np.float32)
 
         with T2Database(tmp_path / "e2e.db") as db:
-            db.taxonomy.discover_topics(
-                "code__e2e", doc_ids, embeddings, texts, ephemeral_chroma,
-            )
+            _seed_chunks_for_tenant(_current_tenant, "code__e2e", doc_ids); db.taxonomy.discover_topics("code__e2e", doc_ids, embeddings, texts, ephemeral_chroma)
 
             # New HTTP-like doc should be assigned to the HTTP cluster
             new_text = "def handle_post_request(request): data = request.json(); return created(data)"
@@ -196,8 +253,9 @@ class TestFullPipelineEphemeral:
             topic_id = result.topic_id
 
             # Check that the assigned topic's docs are mostly HTTP
+            http_doc_ids = {canonical_chunk_id(f"src/http/{i}.py") for i in range(20)}
             topic_docs = db.taxonomy.get_all_topic_doc_ids(topic_id)
-            http_count = sum(1 for d in topic_docs if d.startswith("src/http"))
+            http_count = sum(1 for d in topic_docs if d in http_doc_ids)
             assert http_count >= len(topic_docs) // 2, (
                 f"Expected HTTP-dominant topic, got {http_count}/{len(topic_docs)} HTTP docs"
             )
@@ -210,9 +268,7 @@ class TestFullPipelineEphemeral:
         embeddings = np.array(ef(texts), dtype=np.float32)
 
         with T2Database(tmp_path / "e2e.db") as db:
-            db.taxonomy.discover_topics(
-                "code__e2e", doc_ids, embeddings, texts, ephemeral_chroma,
-            )
+            _seed_chunks_for_tenant(_current_tenant, "code__e2e", doc_ids); db.taxonomy.discover_topics("code__e2e", doc_ids, embeddings, texts, ephemeral_chroma)
 
             # Rename a topic
             topics = db.taxonomy.get_topics()
@@ -238,12 +294,14 @@ class TestFullPipelineEphemeral:
         embeddings = np.array(ef(texts), dtype=np.float32)
 
         with T2Database(tmp_path / "e2e.db") as db:
-            db.taxonomy.discover_topics(
-                "code__e2e", doc_ids, embeddings, texts, ephemeral_chroma,
-            )
+            _seed_chunks_for_tenant(_current_tenant, "code__e2e", doc_ids); db.taxonomy.discover_topics("code__e2e", doc_ids, embeddings, texts, ephemeral_chroma)
 
             topics = db.taxonomy.get_topics()
-            db.taxonomy.assign_topic("manual-doc", topics[0]["id"], assigned_by="manual")
+            _seed_chunks_for_tenant(_current_tenant, "code__e2e", [canonical_chunk_id("manual-doc")])
+            db.taxonomy.assign_topic(
+                canonical_chunk_id("manual-doc"), topics[0]["id"], assigned_by="manual",
+                source_collection="code__e2e",
+            )
 
             db.taxonomy.rebuild_taxonomy(
                 "code__e2e", doc_ids, embeddings, texts, ephemeral_chroma,
@@ -257,7 +315,7 @@ class TestFullPipelineEphemeral:
             manual = db.taxonomy.read_rebuild_old_state(
                 "code__e2e", ephemeral_chroma.get_or_create_collection("taxonomy__centroids"),
             )["manual_assignments"]
-            assert "manual-doc" in manual, "Manual assignment lost"
+            assert canonical_chunk_id("manual-doc") in manual, "Manual assignment lost"
 
     def test_merge_and_split_roundtrip(
         self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
@@ -273,9 +331,7 @@ class TestFullPipelineEphemeral:
         coll.add(ids=doc_ids, documents=texts, embeddings=ef(texts))
 
         with T2Database(tmp_path / "e2e.db") as db:
-            db.taxonomy.discover_topics(
-                "code__e2e", doc_ids, embeddings, texts, ephemeral_chroma,
-            )
+            _seed_chunks_for_tenant(_current_tenant, "code__e2e", doc_ids); db.taxonomy.discover_topics("code__e2e", doc_ids, embeddings, texts, ephemeral_chroma)
 
             topics = db.taxonomy.get_topics()
             assert len(topics) >= 2
@@ -316,14 +372,12 @@ class TestFullPipelineEphemeral:
         embeddings = np.array(ef(texts), dtype=np.float32)
 
         with T2Database(tmp_path / "e2e.db") as db:
-            db.taxonomy.discover_topics(
-                "code__e2e", doc_ids, embeddings, texts, ephemeral_chroma,
-            )
+            _seed_chunks_for_tenant(_current_tenant, "code__e2e", doc_ids); db.taxonomy.discover_topics("code__e2e", doc_ids, embeddings, texts, ephemeral_chroma)
 
             # Simulate search results from the HTTP domain
             results = [
                 SearchResult(
-                    id=f"src/http/{i}.py", content=f"http handler {i}",
+                    id=canonical_chunk_id(f"src/http/{i}.py"), content=f"http handler {i}",
                     distance=0.3 + i * 0.01, collection="code__e2e",
                 )
                 for i in range(5)
@@ -358,9 +412,7 @@ class TestFullPipelineEphemeral:
         embeddings = np.array(ef(texts), dtype=np.float32)
 
         with T2Database(tmp_path / "e2e.db") as db:
-            db.taxonomy.discover_topics(
-                "code__e2e", doc_ids, embeddings, texts, ephemeral_chroma,
-            )
+            _seed_chunks_for_tenant(_current_tenant, "code__e2e", doc_ids); db.taxonomy.discover_topics("code__e2e", doc_ids, embeddings, texts, ephemeral_chroma)
 
             # All topics start as pending
             unreviewed = db.taxonomy.get_unreviewed_topics(collection="code__e2e")
@@ -399,9 +451,7 @@ class TestFullPipelineEphemeral:
         embeddings = np.array(ef(texts), dtype=np.float32)
 
         with T2Database(tmp_path / "e2e.db") as db:
-            db.taxonomy.discover_topics(
-                "code__e2e", doc_ids, embeddings, texts, ephemeral_chroma,
-            )
+            _seed_chunks_for_tenant(_current_tenant, "code__e2e", doc_ids); db.taxonomy.discover_topics("code__e2e", doc_ids, embeddings, texts, ephemeral_chroma)
 
             # After discover with 60 docs, doc count is recorded as 60.
             # No growth: no rebalance.
@@ -423,9 +473,7 @@ class TestFullPipelineEphemeral:
         embeddings = np.array(ef(texts), dtype=np.float32)
 
         with T2Database(tmp_path / "e2e.db") as db:
-            db.taxonomy.discover_topics(
-                "code__e2e", doc_ids, embeddings, texts, ephemeral_chroma,
-            )
+            _seed_chunks_for_tenant(_current_tenant, "code__e2e", doc_ids); db.taxonomy.discover_topics("code__e2e", doc_ids, embeddings, texts, ephemeral_chroma)
 
             topics = db.taxonomy.get_topics()
             if len(topics) < 2:
@@ -459,9 +507,7 @@ class TestFullPipelinePersistent:
         embeddings = np.array(ef(texts), dtype=np.float32)
 
         with T2Database(tmp_path / "e2e.db") as db:
-            count = db.taxonomy.discover_topics(
-                "code__e2e", doc_ids, embeddings, texts, isolated_vector_client,
-            )
+            _seed_chunks_for_tenant(_current_tenant, "code__e2e", doc_ids); count = db.taxonomy.discover_topics("code__e2e", doc_ids, embeddings, texts, isolated_vector_client)
             assert count >= 2
 
             # Incremental assignment
@@ -485,9 +531,7 @@ class TestFullPipelinePersistent:
         embeddings = np.array(ef(texts), dtype=np.float32)
 
         with T2Database(tmp_path / "e2e.db") as db:
-            db.taxonomy.discover_topics(
-                "code__e2e", doc_ids, embeddings, texts, isolated_vector_client,
-            )
+            _seed_chunks_for_tenant(_current_tenant, "code__e2e", doc_ids); db.taxonomy.discover_topics("code__e2e", doc_ids, embeddings, texts, isolated_vector_client)
             db.taxonomy.rename_topic(
                 db.taxonomy.get_topics()[0]["id"], "persistent-label",
             )
@@ -517,9 +561,7 @@ class TestCentroidSpaceConsistency:
         embeddings = np.array(ef(texts), dtype=np.float32)
 
         with T2Database(tmp_path / "e2e.db") as db:
-            db.taxonomy.discover_topics(
-                "code__e2e", doc_ids, embeddings, texts, ephemeral_chroma,
-            )
+            _seed_chunks_for_tenant(_current_tenant, "code__e2e", doc_ids); db.taxonomy.discover_topics("code__e2e", doc_ids, embeddings, texts, ephemeral_chroma)
 
             _assert_centroid_space_is_cosine(
                 db, "code__e2e", embeddings[0], ephemeral_chroma,
@@ -537,9 +579,7 @@ class TestCentroidSpaceConsistency:
 
         with T2Database(tmp_path / "e2e.db") as db:
             embeddings = np.array(emb_list, dtype=np.float32)
-            db.taxonomy.discover_topics(
-                "code__e2e", doc_ids, embeddings, texts, ephemeral_chroma,
-            )
+            _seed_chunks_for_tenant(_current_tenant, "code__e2e", doc_ids); db.taxonomy.discover_topics("code__e2e", doc_ids, embeddings, texts, ephemeral_chroma)
 
             topic = db.taxonomy.get_topics()[0]
             assert db.taxonomy.split_topic(
@@ -565,6 +605,7 @@ class TestCrossCollectionIsolation:
         embeddings = np.array(ef(texts), dtype=np.float32)
 
         with T2Database(tmp_path / "e2e.db") as db:
+            _seed_chunks_for_tenant(_current_tenant, "code__project_a", doc_ids)
             db.taxonomy.discover_topics(
                 "code__project_a", doc_ids, embeddings, texts, ephemeral_chroma,
             )
@@ -584,9 +625,11 @@ class TestCrossCollectionIsolation:
         embeddings = np.array(ef(texts), dtype=np.float32)
 
         with T2Database(tmp_path / "e2e.db") as db:
+            _seed_chunks_for_tenant(_current_tenant, "code__alpha", doc_ids)
             count_a = db.taxonomy.discover_topics(
                 "code__alpha", doc_ids, embeddings, texts, ephemeral_chroma,
             )
+            _seed_chunks_for_tenant(_current_tenant, "code__beta", doc_ids)
             count_b = db.taxonomy.discover_topics(
                 "code__beta", doc_ids, embeddings, texts, ephemeral_chroma,
             )

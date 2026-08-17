@@ -597,3 +597,231 @@ class TestTokenRotationSelfHeal:
         self._publish_lease(tmp_path, self.FRESH, ttl=-1.0)  # already expired
         with pytest.raises(RuntimeError, match="unauthorized T1 session"):
             gated_store.put("expired lease is never borrowed")
+
+
+# ── nexus-wrwb7: mint_token resolution seam (RDR-005 2a self-minting) ───────
+#
+# HttpScratchStore does NOT ride RefreshableHttpStoreMixin (bespoke
+# bearer-header caching) -- this is its OWN copy of the resolution-seam
+# wiring, tested independently of the T2 mixin's equivalent in
+# tests/db/test_refreshable_client.py.
+
+_MINT_CREDENTIAL = "mint-cred-for-t1-tests"
+_MINTED_DATA_TOKEN: dict[str, str | None] = {"value": None}
+_MINT_CALLS = 0
+
+
+class _FakeMonotonicClock:
+    """Injectable clock for DataTokenManager -- deterministic proactive-
+    refresh tests with no real sleep (critic S4)."""
+
+    def __init__(self, start: float = 1_000_000.0) -> None:
+        self._now = start
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+def _reset_mint_state() -> None:
+    global _MINT_CALLS
+    _MINTED_DATA_TOKEN["value"] = None
+    _MINT_CALLS = 0
+
+
+class _MintAwareScratchHandler(FakeT2HandlerBase):
+    """Minimal fake T1 service: /v1/t1/put + /v1/data-tokens/mint. Accepts
+    EITHER the static TOKEN or the most recently minted data token."""
+
+    TOKEN = TOKEN
+
+    def _check_auth(self) -> bool:
+        auth = self.headers.get("Authorization", "")
+        tenant = self.headers.get("X-Nexus-Tenant", "")
+        valid = {f"Bearer {self.TOKEN}"}
+        if _MINTED_DATA_TOKEN["value"]:
+            valid.add(f"Bearer {_MINTED_DATA_TOKEN['value']}")
+        if auth not in valid:
+            self._send(401, {"error": "unauthorized"})
+            return False
+        if not tenant:
+            self._send(400, {"error": "missing X-Nexus-Tenant header"})
+            return False
+        return True
+
+    def _handle_mint(self) -> None:
+        global _MINT_CALLS
+        _MINT_CALLS += 1
+        length = int(self.headers.get("Content-Length", "0"))
+        if length:
+            self.rfile.read(length)
+        auth = self.headers.get("Authorization", "")
+        if auth != f"Bearer {_MINT_CREDENTIAL}":
+            self._send(401, {"error": "bad mint credential"})
+            return
+        _MINTED_DATA_TOKEN["value"] = f"minted-t1-token-{_MINT_CALLS}"
+        self._send(200, {"data_token": _MINTED_DATA_TOKEN["value"], "expires_in_seconds": 300})
+
+    def do_POST(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path == "/v1/data-tokens/mint":
+            self._handle_mint()
+            return
+        if not self._check_auth():
+            return
+        body = self._read_body()
+        if path == "/v1/t1/put":
+            self._send(200, {"id": body.get("id", "gen-id")})
+        else:
+            self._send(404, {"error": "not found"})
+
+
+@pytest.fixture
+def mint_fake_server():
+    _reset_mint_state()
+    with fake_http_server(_MintAwareScratchHandler) as url:
+        yield url
+    _reset_mint_state()
+
+
+class TestMintTokenResolutionSeam:
+    def _reset_manager(self) -> None:
+        from nexus.db.data_token import reset_data_token_manager
+        reset_data_token_manager()
+
+    def test_unconfigured_uses_static_token_unchanged(
+        self, mint_fake_server, monkeypatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_MINT_TOKEN", raising=False)
+        monkeypatch.setenv("NX_SERVICE_TOKEN", TOKEN)
+        self._reset_manager()
+        store = HttpScratchStore(
+            base_url=mint_fake_server, tenant=DEFAULT_TENANT, session_id=SESSION,
+        )
+        result = store.put("hello")
+        assert result
+        assert _MINT_CALLS == 0
+        assert store._headers["Authorization"] == f"Bearer {TOKEN}"
+
+    def test_mint_token_configured_presents_data_token(
+        self, mint_fake_server, monkeypatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "static-token-must-not-be-used")
+        self._reset_manager()
+        try:
+            store = HttpScratchStore(
+                base_url=mint_fake_server, tenant=DEFAULT_TENANT, session_id=SESSION,
+            )
+            result = store.put("hello mint")
+            assert result
+            assert _MINT_CALLS == 1
+            assert store._headers["Authorization"] == f"Bearer {_MINTED_DATA_TOKEN['value']}"
+        finally:
+            self._reset_manager()
+
+    def test_pinned_token_never_overridden(
+        self, mint_fake_server, monkeypatch, tmp_path
+    ) -> None:
+        """A caller that pins ``_token=`` explicitly (fake-server test
+        fixtures throughout this file) must never have it silently swapped
+        for a self-minted data token."""
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        self._reset_manager()
+        try:
+            store = HttpScratchStore(
+                base_url=mint_fake_server, tenant=DEFAULT_TENANT, session_id=SESSION,
+                _token=TOKEN,
+            )
+            assert store._headers["Authorization"] == f"Bearer {TOKEN}"
+            assert _MINT_CALLS == 0
+        finally:
+            self._reset_manager()
+
+    def test_401_falls_back_to_data_token_remint_after_session_refresh_declines(
+        self, mint_fake_server, monkeypatch, tmp_path
+    ) -> None:
+        """No T1-session lease exists, so the session-token self-heal
+        (nexus-g5hzk) declines -- the store must THEN try a data-token
+        re-mint (nexus-wrwb7) rather than leaving the 401 to stand."""
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        self._reset_manager()
+        try:
+            store = HttpScratchStore(
+                base_url=mint_fake_server, tenant=DEFAULT_TENANT, session_id=SESSION,
+            )
+            baseline = store.put("before revoke")
+            assert baseline
+            assert _MINT_CALLS == 1
+
+            _MINTED_DATA_TOKEN["value"] = "revoked-elsewhere"  # simulate an out-of-band rotation
+
+            result = store.put("after revoke")
+            assert result
+            assert _MINT_CALLS == 2, "expected exactly one re-mint, not zero and not a loop"
+        finally:
+            self._reset_manager()
+
+    def test_persistent_mint_rejection_fails_loud(
+        self, mint_fake_server, monkeypatch, tmp_path
+    ) -> None:
+        from nexus.db.data_token import DataTokenMintError
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_MINT_TOKEN", "wrong-credential")
+        self._reset_manager()
+        try:
+            with pytest.raises(DataTokenMintError):
+                HttpScratchStore(
+                    base_url=mint_fake_server, tenant=DEFAULT_TENANT, session_id=SESSION,
+                )
+            assert _MINT_CALLS == 1
+        finally:
+            self._reset_manager()
+
+    def test_proactive_refresh_below_twenty_percent_ttl_no_401_involved(
+        self, mint_fake_server, monkeypatch, tmp_path
+    ) -> None:
+        """critic S4 (nexus-ssqk9): the design-of-record <20%-TTL PROACTIVE
+        refresh must fire from ORDINARY per-request resolution, not only
+        reactively after a 401. Advancing an INJECTED clock past the
+        threshold -- with NO out-of-band token rotation at all -- must
+        still trigger a re-mint on the next plain ``put()``, proving the
+        per-request path goes through ``bearer_for()`` (like T3) rather
+        than the construction-time-cached header."""
+        import nexus.db.data_token as data_token_module
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        self._reset_manager()
+        try:
+            clock = _FakeMonotonicClock()
+            manager = data_token_module.DataTokenManager(
+                clock=clock, mint_credential=lambda: _MINT_CREDENTIAL,
+            )
+            monkeypatch.setattr(data_token_module, "_default_manager", manager)
+
+            store = HttpScratchStore(
+                base_url=mint_fake_server, tenant=DEFAULT_TENANT, session_id=SESSION,
+            )
+            assert _MINT_CALLS == 1
+
+            clock.advance(300 * 0.85)  # 15% of the 300s TTL remains -- below threshold
+
+            result = store.put("after ttl decay, no 401 involved")
+
+            assert result
+            assert _MINT_CALLS == 2, (
+                "proactive per-request bearer_for() must re-mint BEFORE any "
+                "401 occurs -- the fake server accepts whatever token was "
+                "last minted regardless of client-side TTL bookkeeping, so "
+                "a 401 never fires in this scenario"
+            )
+        finally:
+            self._reset_manager()

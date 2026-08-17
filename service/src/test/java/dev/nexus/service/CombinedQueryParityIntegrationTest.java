@@ -201,10 +201,11 @@ class CombinedQueryParityIntegrationTest {
                     + "VALUES ('" + TENANT + "', '" + c.tumbler() + "', 0, decode('" + c.chash()
                     + "', 'hex'), '" + COLL + "') ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
                 if (c.inTopic()) {
+                    // RDR-194 P3c: topic_assignments.doc_id is bytea now — decode('hex').
                     su.createStatement().execute(
                         "INSERT INTO nexus.topic_assignments "
                         + "(tenant_id, doc_id, topic_id, source_collection, assigned_at) "
-                        + "VALUES ('" + TENANT + "', '" + c.chash() + "', " + topicId + ", '"
+                        + "VALUES ('" + TENANT + "', decode('" + c.chash() + "', 'hex'), " + topicId + ", '"
                         + COLL + "', '2026-01-01T00:00:00+00'::timestamptz) "
                         + "ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING");
                 }

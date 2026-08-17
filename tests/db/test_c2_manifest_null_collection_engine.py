@@ -42,10 +42,17 @@ different, purely structural reason now (the column cannot carry NULL at
 all, full stop) rather than because a write was skipped.
 
 ``_check_manifest_null_collection`` and ``manifest_backfill()`` themselves
-are OUT OF SCOPE for this bead (health.py's false-clean replacement is
-DEFERRED to RDR-191 Phase 6 — the wire contract two files this bead may not
-touch hard-code the field set); this rebase only updates what the ghost-doc
-write path now actually does.
+were OUT OF SCOPE for THIS module's original bead (health.py's false-clean
+replacement was DEFERRED to RDR-191 Phase 6); this rebase only updated what
+the ghost-doc write path actually does.
+
+RDR-191 PHASE 6 UPDATE (nexus-o8dil.33), 2026-08-15: the deferred work
+landed. ``manifest_backfill()`` (client method + SQL function) and
+``health._check_dangling_manifests`` are RETIRED — the manifest-chunk FK
+makes the dangling state they detected/fixed unreachable by construction.
+``_check_manifest_null_collection`` is EXPLICITLY NOT RETIRED (Decision
+item 4's own carve-out — the FK does not cover NULL-collection rows under
+``MATCH SIMPLE``) and remains this module's live coverage target.
 
 Every test is routed to a real per-test-tenant engine catalog by the autouse
 ``_pin_t2_substrate`` fixture (tests/conftest.py) — no explicit substrate
@@ -54,7 +61,7 @@ fixture request needed (same precedent as
 """
 from __future__ import annotations
 
-from tests._catalog_fixture_ops import ActiveCatalog, active_reader
+from tests._catalog_fixture_ops import ActiveCatalog, active_reader, fk_dropped_for_dangling_seed
 
 _SEQ = [0]
 
@@ -89,8 +96,8 @@ def _ghost_write_collection(label: str, seq: int) -> str:
     relationship between this value and the target document's own
     ``physical_collection``; any caller-supplied non-blank string works, so
     tests use one shaped like a real ``knowledge__`` collection (routable to
-    the 1024-dim table, matching ``test_du2dw_chash_conformance_report_engine.py``'s
-    and ``test_heizf_manifest_verify_list_engine.py``'s convention) so the
+    the 1024-dim table, matching
+    ``test_du2dw_chash_conformance_report_engine.py``'s convention) so the
     dangling-manifest checks exercised below can actually route it.
 
     nexus-mode-lint (nexus-f1f2x): the ``voyage-context-3`` token below is a
@@ -128,7 +135,15 @@ class TestManifestNullCollectionFalseClean:
 
         before = active_reader().manifest_null_collection_report()
         chash = _never_embedded_chash(seq)
-        cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
+        # nexus-dbzxb (RDR-191 Phase 5 Python collateral, idiom 3): this
+        # chash is DELIBERATELY never backed by a real T3 chunk (see
+        # _never_embedded_chash's docstring) — the whole point of this
+        # module is a manifest row whose chash has no real content behind
+        # it. fk_catalog_chunks_chunk makes that state unreachable via the
+        # normal write path; drop the constraint for this one write so the
+        # row lands genuinely dangling, exactly as this test needs.
+        with fk_dropped_for_dangling_seed():
+            cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
         after = active_reader().manifest_null_collection_report()
 
         assert after["total"] == before["total"], (
@@ -157,86 +172,45 @@ class TestManifestNullCollectionFalseClean:
         with pytest.raises(ValueError, match="collection"):
             cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection="")
 
-    def test_manifest_backfill_has_nothing_left_to_cover(self) -> None:
-        """RDR-191 rebase: ``manifest_backfill()`` remains a permanent 0-row
-        no-op for a ghost document — not because its row is missing (it now
-        exists, stamped with the caller-supplied collection at write time),
-        but because there is no longer any NULL-collection row anywhere for
-        backfill to stamp (RDR-191 plan §7.2 item 3 — manifest_backfill is
-        VESTIGIAL under this design, not deleted)."""
-        seq = _next_seq()
-        cat, tumbler = _register_ghost(seq, "ghost-bf")
-        collection = _ghost_write_collection("ghost-bf", seq)
-        chash = _never_embedded_chash(seq + 1_000_000)
-        cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
-        assert len(active_reader().get_manifest(str(tumbler))) == 1, (
-            "the caller-supplied collection means the row is written, not "
-            "skipped"
-        )
+    # test_manifest_backfill_has_nothing_left_to_cover DELETED (RDR-191
+    # Phase 6, nexus-o8dil.33): manifest_backfill() — client method AND
+    # the nexus.manifest_backfill() SQL function — is RETIRED entirely
+    # (catalog-030-retire-manifest-verify.xml). The test's premise (proving
+    # it stays a vestigial 0-row no-op) is moot once the callable no longer
+    # exists at all.
 
-        before = active_reader().manifest_null_collection_report()
-        active_reader().manifest_backfill()  # the documented call-protocol remedy
-        after = active_reader().manifest_null_collection_report()
+    # test_dangling_manifest_check_now_catches_a_ghost_documents_bad_reference
+    # DELETED (RDR-191 Phase 6, nexus-o8dil.33): called
+    # h._check_dangling_manifests(), also RETIRED — the manifest-chunk FK
+    # makes the dangling state it detected unreachable BY CONSTRUCTION (the
+    # fk_dropped_for_dangling_seed() context manager this test used to
+    # simulate a dangling row is itself the tell: seeding this state now
+    # requires artificially dropping the constraint that exists precisely
+    # to prevent it in production).
 
-        assert after["total"] == before["total"], (
-            f"manifest_backfill() has nothing to stamp for a ghost doc "
-            f"either way now — before={before} after={after}"
-        )
-
-    def test_dangling_manifest_check_now_catches_a_ghost_documents_bad_reference(
+    def test_c2_check_stays_an_honest_zero_for_a_ghost_documents_manifest_row(
         self,
     ) -> None:
-        """RDR-191 rebase of the original FALSE-CLEAN PROOF (INVERTED). Pre-
-        j862l, a ghost doc's manifest row landed with ``collection=NULL``
-        and was therefore invisible to ``_check_dangling_manifests`` (which
-        filters to ``collection IS NOT NULL``) — a false clean. Under the
-        shipped design the row is written with a REAL, caller-supplied
-        collection, so it is fully visible to that filter; since the chash
-        was never backed by a real T3 chunk, the check must now correctly
-        flag it as dangling. This is the check WORKING, not a residual gap.
-        """
-        import nexus.health as h
-
-        seq = _next_seq()
-        cat, tumbler = _register_ghost(seq, "falseclean")
-        collection = _ghost_write_collection("falseclean", seq)
-        chash = _never_embedded_chash(seq + 2_000_000)
-        cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
-        assert len(active_reader().get_manifest(str(tumbler))) == 1
-
-        results = h._check_dangling_manifests()
-        assert results, "expected at least one HealthResult"
-        assert any(not r.ok for r in results), (
-            f"expected _check_dangling_manifests to flag the ghost "
-            f"document's unbacked chash now that its row carries a real, "
-            f"non-NULL collection — it must no longer be invisible: "
-            f"{results}"
-        )
-
-    def test_c2_check_stays_an_honest_zero_alongside_a_real_dangling_finding(
-        self,
-    ) -> None:
-        """RDR-191 rebase of THE FIX test. ``_check_manifest_null_collection``'s
-        own population (rows with ``collection IS NULL``) is STRUCTURALLY
-        EMPTY regardless of what else happens in the catalog — it must read
-        an honest 0 even in the SAME catalog state where
-        ``_check_dangling_manifests`` correctly flags a real problem (the
-        ghost document's unbacked chash seeded here, same shape as the
-        sibling test above). The two checks are orthogonal now: one proves
-        "no blind spot", the other proves "a real defect is still caught" —
-        they no longer collapse into a single "everything reads clean"
-        assertion the way the pre-rebase version did.
-        """
+        """RDR-191 Phase 6 rebase (nexus-o8dil.33) of THE FIX test.
+        ``_check_manifest_null_collection``'s own population (rows with
+        ``collection IS NULL``) is STRUCTURALLY EMPTY regardless of what
+        else happens in the catalog — it must read an honest 0/informational
+        even for a ghost document's manifest row with a genuinely dangling
+        chash (no backing T3 chunk). The sibling half of this test that
+        cross-checked ``_check_dangling_manifests`` catching the same
+        dangling chash is DELETED alongside that now-retired check (Decision
+        item 4's own explicit carve-out: this check stays, that one goes —
+        the exclusion mechanized here rather than left as a comment)."""
         import nexus.health as h
 
         seq = _next_seq()
         cat, tumbler = _register_ghost(seq, "fix")
         collection = _ghost_write_collection("fix", seq)
         chash = _never_embedded_chash(seq + 3_000_000)
-        cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
+        with fk_dropped_for_dangling_seed():
+            cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)
         assert len(active_reader().get_manifest(str(tumbler))) == 1
 
-        dangling = h._check_dangling_manifests()
         null_collection = h._check_manifest_null_collection()
 
         assert len(null_collection) == 1
@@ -256,13 +230,6 @@ class TestManifestNullCollectionFalseClean:
                 nc.detail.startswith("skipped (")
                 or nc.detail.startswith("informational")
             ), f"unexpected null-collection check shape: ok={nc.ok} detail={nc.detail!r}"
-
-        assert any(not r.ok for r in dangling), (
-            f"the ghost document's unbacked chash must still be caught by "
-            f"the dangling-manifest check in this same run — a check with "
-            f"no blind spot must not ALSO have gone blind to a real "
-            f"problem: {dangling}"
-        )
 
     def test_c2_fix_is_read_only_never_calls_backfill(self, monkeypatch) -> None:
         """The check must remain READ-ONLY — it must never invoke the

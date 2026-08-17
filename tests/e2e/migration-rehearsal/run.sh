@@ -6,8 +6,9 @@
 #   tests/e2e/migration-rehearsal/run.sh --no-build   # reuse existing wheel/JAR
 #   tests/e2e/migration-rehearsal/run.sh --hole-punch # verify-fill delta-fill proof (nexus-s3dd4.7)
 #   tests/e2e/migration-rehearsal/run.sh --era-hop    # RDR-185 era-spanning hop: ancient install -> current via `nx upgrade` ALONE (nexus-n7u38.30)
-#   tests/e2e/migration-rehearsal/run.sh --chash-window # RDR-180 pre-cutover window: cohort engine boots (bytea conversion) BEFORE the chash-rekey rung runs (nexus-p78a0)
 #   tests/e2e/migration-rehearsal/run.sh --stranded    # nexus-8nlj4 two-hop stranded-redirect: ancient Chroma artifacts + package-upgrade straight to current must trip the LAST_MIGRATION_CAPABLE detector; downgrading to the pin must be able to migrate them for real
+#   tests/e2e/migration-rehearsal/run.sh --candidate-migration # nexus-z0ylb: the locally-built CANDIDATE engine's full Liquibase walk over a POPULATED store — provision the PUBLISHED FLOOR engine, populate through it (content + manifests + taxonomy), hand-swap the candidate binary in (sidecar stays at the floor tag), boot, assert the candidate's changesets apply clean over populated data with EXACT row invariants
+#   NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade  # nexus-86mx2 PUBLISHED-TARGET mode: upgrade to the REAL published PyPI wheel X.Y.Z (sha256-verified against PyPI's own JSON API) instead of the worktree build; unset = worktree behavior unchanged
 #   tests/e2e/migration-rehearsal/run.sh --comprehensive # Phase D: daily-driver surface (T2/T1/T3/catalog/doctor), deterministic bge-768 LOCAL only
 #   tests/e2e/migration-rehearsal/run.sh --stress      # Phase E: concurrency + queue-drain stress, same bge-768-local dependency as Phase D
 #
@@ -68,8 +69,8 @@ SHAKEOUT=0
 ACQUIRE=0
 PACKAGE_UPGRADE=0
 ERA_HOP=0
-CHASH_WINDOW=0
 STRANDED=0
+CANDIDATE_MIGRATION=0
 # RDR-002 ez5.13: the release_version the guided MVV stamps into the binary so
 # its /version reports >= the guided-upgrade version-pin floor and PASSES.
 # Derived from the product constant (engine_version.REQUIRED_ENGINE_VERSION —
@@ -119,7 +120,7 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # suite when it drifts. Following the old wording blocked the 7.6.0 release
 # battery (2026-08-10). A prose comment that contradicts a mechanical test
 # loses to the test.
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.75}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.79}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
@@ -146,8 +147,21 @@ COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.75}"
 # v0.1.71 while these two correctly STAYED at 7.5.0 / v0.1.69 — 7.5.0 being
 # the previous release and v0.1.69 what it pinned. The guard below does not
 # catch this case either; only a human/agent check does.
-PREV_RELEASE="${NEXUS_PREV_RELEASE:-7.6.1}"
-PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.71}"
+PREV_RELEASE="${NEXUS_PREV_RELEASE:-7.7.0}"
+PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.75}"
+# nexus-86mx2 (2026-08-14) PUBLISHED-TARGET mode for --package-upgrade: when
+# set, the UPGRADE TARGET is the real PUBLISHED PyPI wheel for that version
+# instead of the working-tree build — the published-BYTES upgrade journey,
+# closing the loop the pre-tag worktree run cannot prove ("identical tree" is
+# an argument, not a run; see the release skill's post-publish step). Unset
+# (default) leaves the worktree-wheel behavior below completely unchanged.
+# This is a companion axis to tests/e2e/published-client-write-gate.sh, not a
+# duplicate of it: that gate owns the FRESH-WRITE axis (a client that has
+# never upgraded, writing against a NEWER engine); this mode owns the UPGRADE
+# axis (an existing install's PACKAGE moving forward). Wheel is downloaded +
+# sha256-verified against PyPI's own JSON API digest — fail loud on mismatch,
+# never a silently-wrong artifact staged into the box.
+NEXUS_TARGET_RELEASE="${NEXUS_TARGET_RELEASE:-}"
 # RDR-185 P4.3 (nexus-n7u38.30): the ERA-HOP's starting point. Deliberately NOT
 # "one release back" like PREV_RELEASE — this leg's whole claim is that an
 # ANCIENT install converges, so the default is the OLDEST install the product
@@ -163,18 +177,6 @@ PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.71}"
 # construction.
 ERA_RELEASE="${NEXUS_ERA_RELEASE:-6.0.0}"
 ERA_ENGINE_TAG="${NEXUS_ERA_ENGINE_TAG:-engine-service-v0.1.11}"
-# nexus-p78a0 (RDR-180): the CHASH-WINDOW leg's starting point — the last
-# PRE-COHORT (legacy 32-hex TEXT chash) release + engine pair. The engine tag
-# defaults to the FLOOR tag (derived below from REQUIRED_ENGINE_VERSION):
-# pre-cutover that IS the last pre-cohort engine, AND it must equal the floor
-# so converge_engine (which reads the install-binary provenance sidecar)
-# no-ops over the harness's swapped-in cohort binary instead of re-downloading
-# the published tag over it — see the guard past the arg loop. Post-cutover
-# (floor bumped to the cohort tag) the leg's premise inverts; the DRIVER's
-# era guard then fails loud against the real store (chash already bytea) with
-# redesign instructions rather than grading a window that never opened.
-CHASH_OLD_RELEASE="${NEXUS_CHASH_OLD_RELEASE:-6.13.1}"
-CHASH_OLD_ENGINE_TAG="${NEXUS_CHASH_OLD_ENGINE_TAG:-engine-service-v${GUIDED_STAMP_VERSION}}"
 # The NEW required engine — derived from the SAME constant COLD_TAG's
 # default and GUIDED_STAMP_VERSION are, so this leg tracks a floor bump
 # automatically (nexus-b6qlf: one source of truth).
@@ -194,8 +196,8 @@ for a in "$@"; do
     --shakeout)   SHAKEOUT=1 ;;          # standalone: CANDIDATE shakeout — CLI verb matrix + incremental index + concurrent load against the locally-built -Ob binary (nexus-h8rf6)
     --package-upgrade) PACKAGE_UPGRADE=1 ;;  # standalone: nexus-cfgo9 ONE-engine convergence MVV — package-only upgrade from a real previous release, engine acquired for real by the product, never supplied by this harness
     --era-hop)    ERA_HOP=1 ;;           # standalone: RDR-185 nexus-n7u38.30 — ancient install (old release + old engine + pre-RDR-108 ids + Chroma substrate) -> current via `nx upgrade` ALONE, unattended
-    --chash-window) CHASH_WINDOW=1 ;;    # standalone: RDR-180 nexus-p78a0 — pre-cohort store -> locally-built cohort engine boot (window: loud + safe) -> nx upgrade rekey (window closed)
     --stranded)   STRANDED=1 ;;          # standalone: nexus-8nlj4 — two-hop stranded-redirect: ancient Chroma artifacts + package-upgrade to current trips LAST_MIGRATION_CAPABLE; downgrade to the pin must be able to migrate them for real
+    --candidate-migration) CANDIDATE_MIGRATION=1 ;;  # standalone: nexus-z0ylb — the locally-built CANDIDATE engine's Liquibase walk over a POPULATED store (floor engine populates for real, candidate binary hand-swapped in, sidecar stays at the floor tag)
     *) echo "unknown arg: $a" >&2; exit 2 ;;
   esac
 done
@@ -247,7 +249,13 @@ _guided_restore() {
   # into the working tree — which then bakes a stamp into every subsequent
   # local build and can be committed by accident. Observed exactly that way
   # 2026-08-09 when --shakeout-e2e was added to the stamp side only.
-  { [ "$GUIDED" = 1 ] || [ "$CHASH_WINDOW" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ]; } || return 0
+  # nexus-z0ylb: --candidate-migration ADDED to this list — it DOES build
+  # a local native candidate (the leg's whole point) and stamps it with
+  # the floor version so the candidate's own /version self-reports the
+  # floor tag it is hand-swapped in under (the harness's Stage 4/5 hand-
+  # swap bookkeeping depends on this — see rehearse_candidate_migration.sh's
+  # own header for what that bookkeeping does and does not claim).
+  { [ "$GUIDED" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ] || [ "$CANDIDATE_MIGRATION" = 1 ]; } || return 0
   rm -f "$RELEASE_PROPS.tmp" 2>/dev/null || true
   git checkout -- "$RELEASE_PROPS" 2>/dev/null || true
 }
@@ -256,7 +264,7 @@ trap '_guided_restore' EXIT
 [ "$COLD" = 1 ] && [ "$GUIDED" = 1 ] && { echo "--cold and --guided are different flows; pick one" >&2; exit 2; }
 
 # nexus-1ddsy: --acquire is a standalone published-artifact gate.
-[ "$ACQUIRE" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$SHAKEOUT" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$CHASH_WINDOW" = 1 ] || [ "$STRANDED" = 1 ]; } && { echo "--acquire is a standalone published-artifact gate (its own entrypoint); do not combine with other legs" >&2; exit 2; }
+[ "$ACQUIRE" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$SHAKEOUT" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$STRANDED" = 1 ]; } && { echo "--acquire is a standalone published-artifact gate (its own entrypoint); do not combine with other legs" >&2; exit 2; }
 # It validates a PUBLISHED tag, so the tag is mandatory and there is nothing to
 # infer: NEXUS_SERVICE_TAG is the artifact under test, never a default.
 [ "$ACQUIRE" = 1 ] && [ -z "${NEXUS_SERVICE_TAG:-}" ] && { echo "--acquire requires NEXUS_SERVICE_TAG=<published tag>, e.g. NEXUS_SERVICE_TAG=engine-service-v0.1.55 (it exercises the PUBLISHED artifact, not a local build)" >&2; exit 2; }
@@ -268,7 +276,7 @@ trap '_guided_restore' EXIT
 # stranded-install redirect; its acceptance rehearsal is tracked in nexus-8nlj4
 # (cut-time, gated on the LAST_MIGRATION_CAPABLE stamp). Refuse loud, pre-build.
 if [ "$GUIDED" = 1 ] || [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
-  echo "RETIRED (RDR-155 P4b): --guided/--cold/--hole-punch drive nx guided-upgrade, deleted in P4b P2. Superseded by the two-hop stranded-redirect rehearsal (nexus-8nlj4). The surviving journeys are --era-hop, --package-upgrade, --shakeout, --shakeout-e2e, --fullstack, --chash-window, and the default rehearse.sh (Phases A/D/E; its migrate leg is skipped)." >&2
+  echo "RETIRED (RDR-155 P4b): --guided/--cold/--hole-punch drive nx guided-upgrade, deleted in P4b P2. Superseded by the two-hop stranded-redirect rehearsal (nexus-8nlj4). The surviving journeys are --era-hop, --package-upgrade, --shakeout, --shakeout-e2e, --fullstack, --candidate-migration, and the default rehearse.sh (Phases A/D/E; its migrate leg is skipped)." >&2
   exit 2
 fi
 # nexus-gilf2: --guided seeds local-ONNX (bge-768) cross-model targets, while
@@ -278,8 +286,9 @@ fi
 [ "$GUIDED" = 1 ] && [ "$WITH_CLOUD" = 1 ] && { echo "--guided and --with-cloud are incoherent (guided seeds local bge-768 targets; cloud is voyage-only); run --guided alone" >&2; exit 2; }
 [ "$COLD" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--cold always rebuilds the wheel + cold-acquires the binary; --no-build is irrelevant" >&2; exit 2; }
 # --comprehensive adds Phase D to the DEFAULT rehearse.sh entrypoint; --cold and
-# --guided override the entrypoint (rehearse_cold.sh / rehearse_guided.sh) and so
-# never run Phase D. Reject the incoherent combination loudly.
+# --guided override the entrypoint (rehearse_cold.sh; --guided is RETIRED,
+# RDR-155 P4b, and refused pre-build above) and so never run Phase D. Reject
+# the incoherent combination loudly.
 [ "$COMPREHENSIVE" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ]; } && { echo "--comprehensive runs on the default rehearse path; it cannot combine with --cold/--guided (they override the entrypoint)" >&2; exit 2; }
 [ "$STRESS" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ]; } && { echo "--stress runs on the default rehearse path; it cannot combine with --cold/--guided (they override the entrypoint)" >&2; exit 2; }
 # nexus-f4apk: same incoherence class as the --guided+--with-cloud guard above
@@ -320,31 +329,28 @@ fi
   echo "FATAL: ERA_ENGINE_TAG ($ERA_ENGINE_TAG) already equals the current REQUIRED_ENGINE_VERSION ($GUIDED_STAMP_VERSION) — there is no era to span and the hop's convergence asserts would be vacuous. Fix NEXUS_ERA_RELEASE/NEXUS_ERA_ENGINE_TAG in run.sh." >&2
   exit 2
 }
-# --chash-window is a standalone journey (nexus-p78a0): stamped native build
-# of the working tree (the cohort engine, like --guided) PLUS runtime
-# acquisition of the pre-cohort pair — never combined.
-[ "$CHASH_WINDOW" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$SHAKEOUT" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ]; } && { echo "--chash-window is a standalone window rehearsal (its own entrypoint); do not combine with other legs" >&2; exit 2; }
-[ "$CHASH_WINDOW" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--chash-window requires a fresh STAMPED native build of the cohort engine; drop --no-build" >&2; exit 2; }
-# The window's premise: the pre-cohort engine's provenance sidecar satisfies
-# the floor, so converge_engine NO-OPS over the harness's swapped-in cohort
-# binary. An old tag below the floor would make the transition re-download
-# the published floor tag OVER the swap and silently collapse the window.
-[ "$CHASH_WINDOW" = 1 ] && [ "${CHASH_OLD_ENGINE_TAG#engine-service-v}" != "$GUIDED_STAMP_VERSION" ] && {
-  echo "FATAL: CHASH_OLD_ENGINE_TAG ($CHASH_OLD_ENGINE_TAG) != the floor (v$GUIDED_STAMP_VERSION) — converge_engine would re-download the floor tag over the swapped cohort binary and the window would collapse. The leg requires old-tag == floor (the pre-cutover premise)." >&2
-  exit 2
-}
 # --stranded is a standalone journey (nexus-8nlj4): NO native build (like
 # --era-hop/--package-upgrade — both the pin release and the working tree's
 # own package are installed from real PyPI / the local wheel; no engine
 # binary or PG bundle is staged by this harness) — never combined.
-[ "$STRANDED" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$SHAKEOUT" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$CHASH_WINDOW" = 1 ] || [ "$ACQUIRE" = 1 ]; } && { echo "--stranded is a standalone two-hop stranded-redirect journey (its own entrypoint); do not combine with other legs" >&2; exit 2; }
+[ "$STRANDED" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$SHAKEOUT" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$ACQUIRE" = 1 ]; } && { echo "--stranded is a standalone two-hop stranded-redirect journey (its own entrypoint); do not combine with other legs" >&2; exit 2; }
 [ "$STRANDED" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--stranded always rebuilds the working-tree wheel; --no-build is irrelevant" >&2; exit 2; }
+# --candidate-migration is a standalone journey (nexus-z0ylb): rebuilds
+# BOTH the native candidate (like --shakeout — this leg's whole point is
+# hand-swapping a locally-built candidate binary) AND the working-tree
+# wheel client (installed via `uv tool install`, like --era-hop/
+# --package-upgrade) — the FLOOR engine is the ONLY
+# artifact acquired at runtime (`nx daemon service install-binary`),
+# mirroring those legs' runtime-acquisition posture for the OTHER engine
+# in play — never combined with another flow flag.
+[ "$CANDIDATE_MIGRATION" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$SHAKEOUT" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$ACQUIRE" = 1 ] || [ "$STRANDED" = 1 ]; } && { echo "--candidate-migration is a standalone populated-store candidate rehearsal (its own entrypoint); do not combine with other legs" >&2; exit 2; }
+[ "$CANDIDATE_MIGRATION" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--candidate-migration always rebuilds the native candidate + working-tree wheel; --no-build is irrelevant" >&2; exit 2; }
 # --shakeout-e2e is a standalone journey (nexus-33hpq-class daily-driver
 # shakeout): same native-binary staging as the default path (it needs a
 # REAL locally-built service to embed the Step-2 corpus locally via
 # bge-768 — no engine artifact is acquired at runtime) — never combined
 # with another flow flag.
-[ "$SHAKEOUT_E2E" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$SHAKEOUT" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$CHASH_WINDOW" = 1 ] || [ "$ACQUIRE" = 1 ] || [ "$STRANDED" = 1 ]; } && { echo "--shakeout-e2e is a standalone daily-driver shakeout (its own entrypoint); do not combine with other legs" >&2; exit 2; }
+[ "$SHAKEOUT_E2E" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$SHAKEOUT" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$ACQUIRE" = 1 ] || [ "$STRANDED" = 1 ] || [ "$CANDIDATE_MIGRATION" = 1 ]; } && { echo "--shakeout-e2e is a standalone daily-driver shakeout (its own entrypoint); do not combine with other legs" >&2; exit 2; }
 
 # RDR-184 P0.2 (nexus-ccs9v.2): serialize on the machine-global fixed
 # resources this harness mutates — the fixed docker tag ($IMAGE) and the
@@ -384,14 +390,12 @@ echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
 # No-op — unset in every normal invocation.
 [[ -n "${NX_E2E_LOCK_SELFTEST:-}" ]] && exit 0
 
-if [ "$GUIDED" = 1 ] || [ "$CHASH_WINDOW" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ]; then
-  # --guided / --chash-window force-rebuild the native binary with the stamp
-  # baked in, so both are incompatible with --no-build (which would reuse a
-  # stale/unstamped binary). For --chash-window the stamp matters for the
-  # same reason as --guided: an unstamped binary reports release_version=null
-  # and every version-shaped surface degrades to "unknown".
+if [ "$GUIDED" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ] || [ "$CANDIDATE_MIGRATION" = 1 ]; then
+  # --guided force-rebuilds the native binary with the stamp baked in, so
+  # it is incompatible with --no-build (which would reuse a stale/unstamped
+  # binary).
   #
-  # --shakeout-e2e joins them for that SAME reason, proven empirically
+  # --shakeout-e2e joins --guided for the SAME reason, proven empirically
   # 2026-08-09: release.properties ships release_version= BLANK and it is
   # stamped only by the engine-service-release workflow, so a locally-built
   # binary reports release_version=null on /version FOREVER — not as a startup
@@ -401,7 +405,17 @@ if [ "$GUIDED" = 1 ] || [ "$CHASH_WINDOW" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ]; then
   # — the exact "claim, not verified state" shape of nexus-hdumg. Stamping
   # here makes the binary self-describe, so both doctor's convergence check
   # and the journey's cross-check become real measurements instead of claims.
-  [ "$DO_BUILD" = 0 ] && { echo "--guided/--chash-window/--shakeout-e2e require a fresh native build; drop --no-build" >&2; exit 2; }
+  #
+  # --candidate-migration joins for a THIRD, distinct reason (nexus-z0ylb):
+  # the candidate is hand-swapped in under the FLOOR tag's provenance
+  # sidecar — the harness's own Stage 4/5 bookkeeping self-consistency
+  # check (a `nx daemon restart-stale --dry-run` no-op assertion INSIDE
+  # this test run, not a production converge-safety claim) requires the
+  # candidate's own /version to self-report the floor version too, or
+  # that check would see a live version disagreeing with both the sidecar
+  # AND the release dependency. Same unstamped-forever problem as
+  # shakeout-e2e otherwise (release_version is blank in source).
+  [ "$DO_BUILD" = 0 ] && { echo "--guided/--shakeout-e2e/--candidate-migration require a fresh native build; drop --no-build" >&2; exit 2; }
   echo "[stamp] stamping $RELEASE_PROPS release_version=$GUIDED_STAMP_VERSION (restored on exit)…"
   grep -v '^release_version=' "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp"
   printf 'release_version=%s\n' "$GUIDED_STAMP_VERSION" >> "$RELEASE_PROPS.tmp"
@@ -412,9 +426,9 @@ fi
 
 GRAAL_IMAGE="container-registry.oracle.com/graalvm/native-image-community:25"
 if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$ACQUIRE" = 1 ] || [ "$STRANDED" = 1 ]; then
-  # nexus-4mm24 / nexus-s3dd4.7 / nexus-cfgo9 / nexus-n7u38.30 / nexus-8nlj4:
-  # these boxes acquire every engine binary at runtime (PUBLISHED release) —
-  # NO local native build, NO stamping. Just the wheel.
+  # nexus-4mm24 / nexus-s3dd4.7 / nexus-cfgo9 / nexus-n7u38.30 / nexus-8nlj4 /
+  # nexus-eo3qv: these boxes acquire every engine binary at runtime
+  # (PUBLISHED release) — NO local native build, NO stamping. Just the wheel.
   echo "[1/2] Building the conexus wheel (host)…"
   # Do NOT suppress this unconditionally: under `set -e` a failed build
   # exits the harness with no diagnosis at all (2026-07-25 — the
@@ -531,7 +545,7 @@ cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PE
 # uv embeds the -o path in the header comment, and $STAGE is a fresh mktemp
 # every run — that alone would bust the layer cache. --locked fails loud on a
 # stale uv.lock instead of exporting a closure the wheel does not match.
-# Runs unconditionally for every leg: era-hop/package-upgrade/chash-window
+# Runs unconditionally for every leg: era-hop/package-upgrade/stranded
 # never COPY it (they install deps at runtime from real PyPI — that is those
 # scenarios' point), so for them it is a 1ms offline no-op in the context dir.
 # --color never is belt-and-braces over the script-level NO_COLOR above:
@@ -555,30 +569,60 @@ if [ "$ERA_HOP" = 1 ]; then
   cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
   cp "$HERE/Dockerfile.era-hop" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_era_hop.sh" "$HERE/seed_legacy.py" "$STAGE/"
-elif [ "$CHASH_WINDOW" = 1 ]; then
-  # nexus-p78a0: the STAMPED cohort native build travels in (the unpublished
-  # cohort engine the driver swaps in by hand — its only engine supply, see
-  # the driver header) + the worktree wheel under its own subdirectory (real
-  # PEP 427 name preserved; the driver tool-installs the OLD release from
-  # real PyPI first) + the driver.
-  mkdir -p "$STAGE/native" "$STAGE/worktree-wheel"
-  cp service/target/nexus-service "$STAGE/native/"
-  if compgen -G "service/target/*.so" > /dev/null; then
-    cp service/target/*.so "$STAGE/native/"
-  fi
-  cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
-  cp "$HERE/Dockerfile.chash-window" "$STAGE/Dockerfile"
-  cp "$HERE/rehearse_chash_window.sh" "$STAGE/"
 elif [ "$PACKAGE_UPGRADE" = 1 ]; then
-  # nexus-cfgo9: the WORKING-TREE wheel travels in under its OWN subdirectory
-  # (its real PEP 427 filename preserved — pip/uv parse the filename strictly
-  # and a prefix-mangled name fails with "invalid version") so it never
-  # collides with the driver script's `pip install conexus==$PREV_RELEASE`
-  # from real PyPI into the SAME venv. No engine artifact is staged at all
-  # (both $PREV_ENGINE_TAG and $NEW_ENGINE_TAG are acquired at runtime by the
-  # product's own code — the harness never supplies an engine binary).
+  # nexus-cfgo9: the UPGRADE-TARGET wheel travels in under its OWN
+  # subdirectory (real PEP 427 filename preserved — pip/uv parse the wheel
+  # filename strictly and a prefix-mangled name fails with "invalid
+  # version") so it never collides with the driver script's
+  # `pip install conexus==$PREV_RELEASE` from real PyPI into the SAME venv.
+  # No engine artifact is staged at all (both $PREV_ENGINE_TAG and
+  # $NEW_ENGINE_TAG are acquired at runtime by the product's own code — the
+  # harness never supplies an engine binary).
   mkdir -p "$STAGE/worktree-wheel"
-  cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
+  if [ -n "$NEXUS_TARGET_RELEASE" ]; then
+    # nexus-86mx2: PUBLISHED-TARGET mode — download the REAL published wheel
+    # from PyPI instead of building the working tree. Resolved + verified
+    # via PyPI's own JSON API (never `pip download`: this box's dev venv has
+    # no `pip` module, and a direct JSON-API fetch resolves the exact wheel
+    # URL + expected digest in one round trip with no dependency-resolution
+    # surface to trust).
+    echo "[run.sh] NEXUS_TARGET_RELEASE=$NEXUS_TARGET_RELEASE — downloading the PUBLISHED wheel from PyPI (not the worktree build)"
+    PYPI_META="$(mktemp)"
+    curl -fsSL "https://pypi.org/pypi/conexus/$NEXUS_TARGET_RELEASE/json" -o "$PYPI_META" \
+      || { rm -f "$PYPI_META"; echo "FATAL: could not fetch PyPI metadata for conexus==$NEXUS_TARGET_RELEASE — is it published?" >&2; exit 1; }
+    TARGET_INFO="$(python3 -c "
+import json
+with open('$PYPI_META') as f:
+    d = json.load(f)
+for u in d['urls']:
+    if u['packagetype'] == 'bdist_wheel':
+        print(u['url'])
+        print(u['digests']['sha256'])
+        print(u['filename'])
+        break
+else:
+    raise SystemExit(1)
+" 2>/dev/null)" || { rm -f "$PYPI_META"; echo "FATAL: no bdist_wheel asset for conexus==$NEXUS_TARGET_RELEASE on PyPI" >&2; exit 1; }
+    rm -f "$PYPI_META"
+    TARGET_WHEEL_URL="$(sed -n '1p' <<<"$TARGET_INFO")"
+    TARGET_WHEEL_SHA256="$(sed -n '2p' <<<"$TARGET_INFO")"
+    TARGET_WHEEL_NAME="$(sed -n '3p' <<<"$TARGET_INFO")"
+    curl -fsSL -o "$STAGE/worktree-wheel/$TARGET_WHEEL_NAME" "$TARGET_WHEEL_URL" \
+      || { echo "FATAL: download of $TARGET_WHEEL_URL failed" >&2; exit 1; }
+    GOT_SHA256="$(python3 -c "
+import hashlib
+h = hashlib.sha256()
+with open('$STAGE/worktree-wheel/$TARGET_WHEEL_NAME', 'rb') as f:
+    for chunk in iter(lambda: f.read(1 << 20), b''):
+        h.update(chunk)
+print(h.hexdigest())
+")"
+    [ "$GOT_SHA256" = "$TARGET_WHEEL_SHA256" ] \
+      || { echo "FATAL: downloaded wheel sha256 mismatch for conexus==$NEXUS_TARGET_RELEASE: got $GOT_SHA256, PyPI JSON API says $TARGET_WHEEL_SHA256" >&2; exit 1; }
+    echo "[run.sh] verified $TARGET_WHEEL_NAME sha256=$TARGET_WHEEL_SHA256 (matches PyPI JSON API digest)"
+  else
+    cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
+  fi
   cp "$HERE/Dockerfile.package-upgrade" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_package_upgrade.sh" "$STAGE/"
 elif [ "$STRANDED" = 1 ]; then
@@ -586,8 +630,8 @@ elif [ "$STRANDED" = 1 ]; then
   # (real PEP 427 filename preserved — see the --package-upgrade rationale
   # above) so it never collides with the driver's `pip install
   # conexus==$PIN_RELEASE` from real PyPI into the SAME venv. seed_legacy.py
-  # is the SAME raw-sqlite/chromadb seeder era-hop/chash-window/fullstack
-  # already use (nexus-8nlj4 2026-08-08 note: it is live raw material, not
+  # is the SAME raw-sqlite/chromadb seeder era-hop/fullstack already use
+  # (nexus-8nlj4 2026-08-08 note: it is live raw material, not
   # dead weight) — it writes the pre-PG artifacts under the PIN release's
   # own libraries before the driver package-upgrades over them. No engine
   # artifact or PG bundle is staged (both the pin's own engine and the
@@ -625,6 +669,26 @@ elif [ "$FULLSTACK" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ]; then
   fi
   cp "$HERE/Dockerfile.fullstack" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_fullstack.sh" "$HERE/rehearse_shakeout_e2e.sh" "$HERE/seed_legacy.py" "$STAGE/"
+elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
+  # nexus-z0ylb: BOTH staging shapes at once — the native/ candidate (like
+  # the default/--shakeout path: the locally-built, now-stamped -Ob binary
+  # + its .so siblings, hand-swapped in at Stage 4) AND the working-tree
+  # wheel under its own subdirectory (like --era-hop/--package-upgrade:
+  # installed via `uv tool install` at runtime, never
+  # colliding with anything `pip`/`uv` resolves from real PyPI — this leg
+  # installs no OLD release at all, so there is nothing to collide with,
+  # but the own-subdirectory convention is kept for staging uniformity).
+  # No engine artifact of any kind travels in — the FLOOR engine is
+  # acquired for real by `nx daemon service install-binary` inside the
+  # container (Stage 2).
+  mkdir -p "$STAGE/native" "$STAGE/worktree-wheel"
+  cp service/target/nexus-service "$STAGE/native/"
+  if compgen -G "service/target/*.so" > /dev/null; then
+    cp service/target/*.so "$STAGE/native/"
+  fi
+  cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
+  cp "$HERE/Dockerfile.candidate-migration" "$STAGE/Dockerfile"
+  cp "$HERE/rehearse_candidate_migration.sh" "$STAGE/"
 else
   # The native binary travels into the image. A LOCAL -Pnative -Ob quick build also
   # emits native-image .so siblings (libjvm/libawt/liblcms/...) that must be
@@ -636,7 +700,13 @@ else
   if compgen -G "service/target/*.so" > /dev/null; then
     cp service/target/*.so "$STAGE/native/"
   fi
-  cp "$HERE/Dockerfile" "$HERE/rehearse.sh" "$HERE/rehearse_guided.sh" "$HERE/rehearse_shakeout.sh" "$HERE/seed_legacy.py" "$STAGE/"
+  cp "$HERE/Dockerfile" "$HERE/rehearse.sh" "$HERE/rehearse_shakeout.sh" "$HERE/seed_legacy.py" "$STAGE/"
+  # nexus-l8xnz: the SAME service/native-smoke.sh the release workflow runs
+  # (byte-for-byte -- callers are adapted, never the script). rehearse_
+  # shakeout.sh's Phase F drives it against this candidate so a stale probe
+  # fixture (the v0.1.77 16-char doc_id class) fails HERE, pre-tag, instead
+  # of only inside engine-service-release.yml.
+  cp service/native-smoke.sh "$STAGE/"
   # lib/ must reach the build context, not just the image: the Dockerfile's
   # COPY reads from HERE-staged files only, so a driver's `source lib/...`
   # silently resolves to nothing without this (nexus-xm0cp's Phase D census
@@ -681,15 +751,27 @@ elif [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
 fi
 if [ "$PACKAGE_UPGRADE" = 1 ]; then
   run_env+=(-e "PREV_RELEASE=$PREV_RELEASE" -e "PREV_ENGINE_TAG=$PREV_ENGINE_TAG" -e "NEW_ENGINE_TAG=$NEW_ENGINE_TAG")
+  # nexus-86mx2: forward which upgrade target staged above (published wheel
+  # vs worktree build) so rehearse_package_upgrade.sh's own logging + verdict
+  # line can NAME it — a log reader must never have to guess which axis ran.
+  [ -n "$NEXUS_TARGET_RELEASE" ] && run_env+=(-e "TARGET_RELEASE=$NEXUS_TARGET_RELEASE")
 fi
 if [ "$ERA_HOP" = 1 ]; then
   run_env+=(-e "ERA_RELEASE=$ERA_RELEASE" -e "ERA_ENGINE_TAG=$ERA_ENGINE_TAG" -e "NEW_ENGINE_TAG=$NEW_ENGINE_TAG")
 fi
-if [ "$CHASH_WINDOW" = 1 ]; then
-  run_env+=(-e "OLD_RELEASE=$CHASH_OLD_RELEASE" -e "OLD_ENGINE_TAG=$CHASH_OLD_ENGINE_TAG" -e "FLOOR_VERSION=$GUIDED_STAMP_VERSION")
-fi
 if [ "$STRANDED" = 1 ]; then
   run_env+=(-e "PIN_RELEASE=$STRAND_PIN_RELEASE")
+fi
+if [ "$CANDIDATE_MIGRATION" = 1 ]; then
+  run_env+=(-e "FLOOR_VERSION=$GUIDED_STAMP_VERSION")
+  # nexus-z0ylb: optional non-vacuity knob — when set, the leg asserts the
+  # changeset delta EQUALS this count instead of merely reporting it. Only
+  # forwarded when actually set (same "dead through the only documented
+  # entrypoint" lesson as the shakeout-e2e knobs below): a Phase 5 run that
+  # knows the candidate's exact new-changeset count can pin it; ordinary
+  # runs report the delta without asserting a value.
+  [ -n "${EXPECT_NEW_CHANGESETS:-}" ] && \
+    run_env+=(-e "EXPECT_NEW_CHANGESETS=$EXPECT_NEW_CHANGESETS")
 fi
 if [ "$SHAKEOUT_E2E" = 1 ]; then
   # Forward the two knobs rehearse_shakeout_e2e.sh advertises in its own header.
@@ -761,13 +843,13 @@ elif [ "$ERA_HOP" = 1 ]; then
   # nexus-n7u38.30: Dockerfile.era-hop's default entrypoint IS
   # rehearse_era_hop.sh.
   docker run --rm "${run_env[@]}" "$IMAGE"
-elif [ "$CHASH_WINDOW" = 1 ]; then
-  # nexus-p78a0: Dockerfile.chash-window's default entrypoint IS
-  # rehearse_chash_window.sh.
-  docker run --rm "${run_env[@]}" "$IMAGE"
 elif [ "$STRANDED" = 1 ]; then
   # nexus-8nlj4: Dockerfile.stranded's default entrypoint IS
   # rehearse_stranded.sh.
+  docker run --rm "${run_env[@]}" "$IMAGE"
+elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
+  # nexus-z0ylb: Dockerfile.candidate-migration's default entrypoint IS
+  # rehearse_candidate_migration.sh.
   docker run --rm "${run_env[@]}" "$IMAGE"
 elif [ "$COLD" = 1 ]; then
   # nexus-4mm24: Dockerfile.cold's default entrypoint IS rehearse_cold.sh.
@@ -781,11 +863,9 @@ elif [ "$SHAKEOUT" = 1 ]; then
   # concurrent-load assertions against the locally-built candidate binary.
   docker run --rm "${run_env[@]}" --entrypoint /bin/bash "$IMAGE" \
     /home/nexus/rehearse_shakeout.sh
-elif [ "$GUIDED" = 1 ]; then
-  # RDR-002 ez5.13: override the default entrypoint to drive the one-command
-  # guided-upgrade MVV instead of the full manual rehearsal.
-  docker run --rm "${run_env[@]}" --entrypoint /bin/bash "$IMAGE" \
-    /home/nexus/rehearse_guided.sh
+# --guided is RETIRED (RDR-155 P4b) and refused pre-build above; there is no
+# GUIDED branch here any more, and rehearse_guided.sh no longer ships
+# (nexus-lgdel.l2 — its own leg was the file's only consumer).
 else
   docker run --rm "${run_env[@]}" "$IMAGE"
 fi

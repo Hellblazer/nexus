@@ -15,6 +15,7 @@ import pytest
 from datetime import UTC, datetime, timedelta
 
 from nexus.db.t2 import T2Database
+from tests._t2_fixture_ops import canonical_chunk_id as _cid
 
 
 def _db(tmp_path):
@@ -31,10 +32,10 @@ def test_expire_bumps_cumulative_marker(tmp_path):
     # the RDR-155 P4b flip.
     for i in range(3):
         db.telemetry.import_relevance_row(
-            query=f"q{i}", chunk_id=f"c{i}", collection="",
+            query=f"q{i}", chunk_id=_cid(f"c{i}"), collection="",
             action="click", session_id="", timestamp=old,
         )
-    db.telemetry.log_relevance("fresh", "cf", "click")
+    db.telemetry.log_relevance("fresh", _cid("cf"), "click")
 
     assert db.telemetry.expire_relevance_log(days=90) == 3
     assert db.telemetry.get_retention_markers(["nexus.relevance_log"]) == {

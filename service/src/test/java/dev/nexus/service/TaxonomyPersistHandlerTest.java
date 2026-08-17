@@ -131,9 +131,13 @@ class TaxonomyPersistHandlerTest {
     @Test
     void persistDiscovered_thenOldState_roundTripsShapeAndKeepsNullableKeys() throws Exception {
         String col = "knowledge__hpd";
+        // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires
+        // a matching nexus.chunks row for every doc_id this test assigns.
+        seedChunk(col, hexChash("hd-disc-1"), 384);
+        seedChunk(col, hexChash("hd-disc-2"), 384);
         var spec = Map.of(
             "label", "topic-a", "doc_count", 2, "terms", "[\"a\"]",
-            "assigned_by", "hdbscan", "doc_ids", List.of("hd-disc-1", "hd-disc-2"));
+            "assigned_by", "hdbscan", "doc_ids", List.of(hexChash("hd-disc-1"), hexChash("hd-disc-2")));
         var body = mapper.writeValueAsString(Map.of("collection", col, "specs", List.of(spec)));
 
         var resp = post("/v1/taxonomy/topics/persist_discovered", body);
@@ -174,22 +178,27 @@ class TaxonomyPersistHandlerTest {
     @Test
     void persistRebuild_replaceSemanticsAndManualTransfer_endToEnd() throws Exception {
         String col = "knowledge__hrb";
+        // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires
+        // a matching nexus.chunks row for every doc_id this test assigns.
+        seedChunk(col, hexChash("hd-rb-1"), 384);
+        seedChunk(col, hexChash("hd-rb-2"), 384);
+        seedChunk(col, hexChash("hd-rb-manual"), 384);
         // Seed an "old" topic via discover.
         var old = Map.of("label", "old", "doc_count", 1, "terms", "[]",
-                         "assigned_by", "hdbscan", "doc_ids", List.of("hd-rb-1"));
+                         "assigned_by", "hdbscan", "doc_ids", List.of(hexChash("hd-rb-1")));
         post("/v1/taxonomy/topics/persist_discovered",
              mapper.writeValueAsString(Map.of("collection", col, "specs", List.of(old))));
 
         var specs = List.of(
             Map.of("label", "new-0", "doc_count", 2, "terms", "[\"x\"]",
                    "review_status", "pending", "assigned_by", "hdbscan",
-                   "doc_ids", List.of("hd-rb-1", "hd-rb-2")),
+                   "doc_ids", List.of(hexChash("hd-rb-1"), hexChash("hd-rb-2"))),
             Map.of("label", "new-1", "doc_count", 0, "terms", "[\"y\"]",
                    "review_status", "pending", "assigned_by", "hdbscan",
                    "doc_ids", List.of()));
         var body = mapper.writeValueAsString(Map.of(
             "collection", col, "specs", specs,
-            "manual_transfers", Map.of("hd-rb-manual", 1)));
+            "manual_transfers", Map.of(hexChash("hd-rb-manual"), 1)));
 
         var resp = post("/v1/taxonomy/topics/persist_rebuild", body);
         assertThat(resp.statusCode()).isEqualTo(200);
@@ -205,7 +214,7 @@ class TaxonomyPersistHandlerTest {
             .containsExactlyInAnyOrder("new-0", "new-1");
         var manual = mapper.convertValue(os.get("manual_assignments"), LIST_T);
         assertThat(manual).hasSize(1);
-        assertThat(manual.get(0).get("doc_id")).isEqualTo("hd-rb-manual");
+        assertThat(manual.get(0).get("doc_id")).isEqualTo(hexChash("hd-rb-manual"));
         assertThat(((Number) manual.get(0).get("topic_id")).longValue()).isEqualTo(secondId);
     }
 
@@ -224,9 +233,23 @@ class TaxonomyPersistHandlerTest {
         // posts the right fields and asserts the rename took effect end-to-end.
         String oldCol = "knowledge__rn-old";
         String newCol = "knowledge__rn-new";
+        // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires
+        // a matching nexus.chunks row for the assignment below, AND for the
+        // in-place UPDATE this test's own rename_collection call performs on
+        // topic_assignments.source_collection (oldCol -> newCol) -- unlike
+        // catalog_collections' own topic_assignments_collection_fk, this new
+        // FK does NOT auto-cascade with the collection rename (CatalogRepository
+        // .renameCollectionTxn is the ONLY writer that repoints nexus.chunks.
+        // collection, and this test calls the taxonomy-only rename endpoint in
+        // isolation). Seeding the SAME chash under both names is the correct
+        // simulation of a real caller sequencing the catalog-level chunk rename
+        // ahead of this taxonomy-level rename, which is this test's own scope
+        // boundary (isolated single-endpoint coverage, per its own javadoc).
+        seedChunk(oldCol, hexChash("rn-1"), 384);
+        seedChunk(newCol, hexChash("rn-1"), 384);
         var spec = Map.of(
             "label", "rn-topic", "doc_count", 1, "terms", "[\"x\"]",
-            "assigned_by", "hdbscan", "doc_ids", List.of("rn-1"));
+            "assigned_by", "hdbscan", "doc_ids", List.of(hexChash("rn-1")));
         assertThat(post("/v1/taxonomy/topics/persist_discovered",
             mapper.writeValueAsString(Map.of("collection", oldCol, "specs", List.of(spec))))
             .statusCode()).isEqualTo(200);
@@ -268,6 +291,41 @@ class TaxonomyPersistHandlerTest {
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Insert a minimal nexus.chunks row (RDR-194 P3d, nexus-tk070.p3d): every
+     * topic_assignments row now requires a matching (tenant_id, source_collection,
+     * doc_id) -> chunks(tenant_id, collection, chash) parent via
+     * topic_assignments_chunk_fk. Also registers the collection (ON CONFLICT DO
+     * NOTHING).
+     */
+    private void seedChunk(String collection, String chashHex, int dim) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT + "', '"
+                + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+            String embeddingCol = "embedding_" + dim;
+            su.createStatement().execute(
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embeddingCol + ") VALUES " +
+                "('" + TENANT + "', '" + collection + "', decode('" + chashHex + "', 'hex'), 'persist-test chunk', " +
+                "('[" + "0.1,".repeat(dim - 1) + "0.1]')::vector) " +
+                "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+        }
+    }
+
+    /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
+     *  (bytea since nexus-tk070.p3c; doc_ids/manual_transfers keys here flow into it
+     *  via TaxonomyRepository.persistDiscoveredTopics/persistRebuildTopics). */
+    private static String hexChash(String seed) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
 
     private HttpResponse<String> get(String path) throws Exception {
         var req = HttpRequest.newBuilder()

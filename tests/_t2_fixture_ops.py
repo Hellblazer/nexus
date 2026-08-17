@@ -23,6 +23,7 @@ should call :func:`memory_row`, which is a true non-mutating read on both.
 """
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ from nexus.db.t2 import T2Database
 __all__ = [
     "backdate_memory",
     "bootstrap_migration_source",
+    "canonical_chunk_id",
     "memory_row",
     "seed_tier_write",
     "rewrite_memory_row",
@@ -42,6 +44,18 @@ __all__ = [
     "set_memory_access_count",
     "utc_stamp",
 ]
+
+
+def canonical_chunk_id(label: str) -> str:
+    """Deterministic 64-hex chash for a short test chunk-id label.
+
+    nexus-lgdel.l1: the engine enforces a canonical-chash CHECK
+    (``^[0-9a-f]{64}$``) on ``nexus.frecency.chunk_id`` and
+    ``nexus.relevance_log.chunk_id``, so legacy short literals like
+    ``"c1"`` no longer round-trip. Deriving the hex value from the old
+    literal keeps fixtures traceable to their original meaning.
+    """
+    return hashlib.sha256(label.encode()).hexdigest()
 
 
 def utc_stamp(*, days: float = 0, seconds: float = 0) -> str:

@@ -1,0 +1,275 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-191 Phase 5 (bead nexus-o8dil.49) — the UNIFIED collection-registry
+    FK on nexus.chunks: the successor of fk-002's three per-dim collection
+    FKs (chunks_384_collection_fk / chunks_768_collection_fk /
+    chunks_1024_collection_fk), which died automatically as a side effect of
+    vectors-004-unify-chunks.xml's DROP TABLE ... CASCADE (a constraint
+    cannot outlive its table — see that changeset's own "fk-002 NOTE"
+    header, and this bead's 2026-08-13 comment). The DROP-half of the
+    original bead scope is therefore moot; this changelog ships only the
+    ADD-half, on the unified table, for the collection axis (chunks(tenant_id,
+    collection) -> catalog_collections(tenant_id, name)) — NOT to be
+    confused with catalog-029's manifest FK (catalog_document_chunks ->
+    nexus.chunks), a different table pair entirely.
+
+    THREE-STEP SHAPE, mirroring fk-002's own ADD-NOT-VALID -> reconcile ->
+    VALIDATE choreography (fk-002-collection-registry.xml / fk-002-validate.xml):
+
+      1. fk-004-0: ADD CONSTRAINT ... NOT VALID.
+      2. fk-004-1-reconcile: ADDITIVE parent-stub reconcile — INSERT ...
+         ON CONFLICT DO NOTHING into catalog_collections from nexus.chunks'
+         OWN distinct (tenant_id, collection) values. This is fk-002-6-
+         reconcile's shape for THIS direction (chunks -> catalog_collections
+         registry rows), never destructive — matching the o8dil.23 Phase-5
+         planning pass's SHAPE NOTE: "for THIS FK the missing parent is a
+         registry row, so fk-002-6-reconcile's additive stub-backfill
+         precedent applies directly." Because the reconcile derives every
+         stub row FROM nexus.chunks' own values, it is IMPOSSIBLE for this
+         step to leave a row in nexus.chunks whose collection is not
+         registered afterward — the "violating row" MUST-FAIL test below
+         therefore exercises the FK's actual guard mechanism directly (bare
+         VALIDATE without this reconcile step), not a data scenario this
+         changelog's own forward path can produce.
+      3. fk-004-2: new-id VALIDATE CONSTRAINT, guarded per the project's
+         blanket "every bare VALIDATE CONSTRAINT is guarded" tripwire
+         (tests/test_changelog_validate_precondition_lint.py) with a
+         whole-changeset <preConditions onFail="MARK_RAN"> naming the
+         constraint — identical shape to catalog-029-2 and fk-002-7..11.
+
+    All three are ORDINARY RUN-ONCE changesets (no runAlways). No LOCK TABLE
+    is needed before the reconcile: fk-004-0 (this same file, always runs
+    first in the same walk) already enforces every NEW write from the
+    instant it commits, so by the time fk-004-1-reconcile runs, only
+    PRE-EXISTING rows can possibly be unregistered — the identical
+    reasoning catalog-029-1's header gives for skipping its own LOCK TABLE.
+
+    RLS DISCIPLINE (fk-004-1-reconcile only; fk-004-0/2 are pure DDL/VALIDATE,
+    no DML): nexus.chunks (vectors-004-unify-chunks.xml) and
+    nexus.catalog_collections (catalog-001-baseline.xml changeset 7) both
+    carry FORCE ROW LEVEL SECURITY. Liquibase runs as nexus_admin, the table
+    owner but NOT BYPASSRLS — under FORCE RLS with no nexus.tenant GUC set
+    at migration time, an untoggled read of nexus.chunks would see ZERO rows
+    (the reconcile INSERT ... SELECT would silently register nothing), and
+    an untoggled INSERT into catalog_collections would fail every row's
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true), which is
+    NULL at migration time). Both tables are toggled NO FORCE, then restored
+    to FORCE, symmetrically, inside fk-004-1-reconcile's own changeset
+    (catalog-029-1 toggle-wrapped shape).
+
+    FK SHAPE: FOREIGN KEY (tenant_id, collection) REFERENCES
+    catalog_collections (tenant_id, name) ON DELETE RESTRICT NOT VALID —
+    the EXACT shape fk-002-1/2/3 used for chunks_384/768/1024 (no ON UPDATE
+    CASCADE: a collection rename re-homes chunk rows explicitly via
+    CatalogRepository#renameCollection's coherent INSERT-new/re-home/DELETE-
+    old sequence, RDR-164 P3, never a bare UPDATE catalog_collections SET
+    name — see fk-003's own "ON UPDATE SEMANTICS" header for the identical
+    house rule applied to its five FKs). MATCH SIMPLE (the PostgreSQL
+    default): nexus.chunks.collection is NOT NULL from creation
+    (vectors-004-unify-chunks.xml step 1), so MATCH SIMPLE's null-exemption
+    is structurally inert here, same disclosure as catalog-029's header.
+
+    Must come after catalog-029-manifest-chunk-fk.xml (registered immediately
+    after it in db.changelog-master.xml, matching every other late-appended
+    changelog's file-order convention) and, transitively, after the RDR-191
+    Phase 4 repoint batch (nexus.chunks, the FK's referencing table, does not
+    exist before vectors-004-unify-chunks.xml runs).
+
+    STALE-PROSE CORRECTIONS (this bead's acceptance criterion): the header
+    comments at db.changelog-master.xml naming the fk-002/fk-002-validate
+    <include> entries, and fk-002-collection-registry.xml / fk-002-validate.xml's
+    own file headers, are updated in this SAME diff to record that the three
+    per-dim chunks_<dim>_collection_fk constraints those files added are now
+    DEAD (retired automatically by vectors-004's DROP TABLE ... CASCADE, not
+    by any action in THIS file) rather than leaving the stale "P0.2/P0.3"
+    framing as though those constraints were still live. Comment edits only,
+    OUTSIDE the frozen <changeSet> bodies — fk-002-1..5/fk-002-6..11's own
+    <sql>/<preConditions> content is untouched (checksum-frozen, already
+    applied).
+
+    fk-002-7..11 / fk-003-7..11 VACUITY DISPOSITION (this bead's acceptance
+    criterion): fk-002-7/8/9's <preConditions> sqlCheck each count
+    pg_constraint rows named 'chunks_<dim>_collection_fk' — constraints
+    that no longer exist (dropped with their tables by vectors-004's
+    CASCADE). Per nexus-4m6i0.13's MARK_RAN freeze semantics (documented in
+    fk-002-validate.xml's own header and in
+    tests/test_changelog_validate_precondition_lint.py), a missing-constraint
+    precondition marks the changeset ran (once, harmlessly) rather than
+    hard-failing — these three changesets therefore MARK_RAN-skip on every
+    box from this release forward, permanently, and do NOT brick anything.
+    fk-002-10/11 (chash_index_collection_fk, topic_assignments_collection_fk)
+    remain live and unaffected — their tables/constraints still exist.
+    fk-003-7..11 similarly remain fully live (fk-003's five child tables —
+    document_aspects, aspect_extraction_queue, topics, taxonomy_meta,
+    document_highlights — were never touched by vectors-004's CASCADE).
+    No new-id VALIDATE supersedes fk-002-7/8/9: there is nothing left to
+    validate (their target constraints are gone), and this file's own
+    fk-004-2 VALIDATE is the successor for the SURVIVING invariant (the
+    unified table's own collection FK), not a replacement for the retired
+    per-dim ones. Disposition recorded here per this bead's acceptance
+    criterion ("document ... rather than editing frozen bodies").
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset fk-004-0: ADD CONSTRAINT ... NOT VALID ─────────────────── -->
+    <changeSet id="fk-004-0" author="nexus-o8dil.49">
+        <comment>
+            chunks_collection_fk: FOREIGN KEY (tenant_id, collection) REFERENCES
+            nexus.catalog_collections (tenant_id, name) ON DELETE RESTRICT NOT
+            VALID -- the unified successor of fk-002-1/2/3 (chunks_384/768/1024
+            -> catalog_collections), which died with their tables. NOT VALID:
+            enforces every new write immediately; retroactive validation of
+            pre-existing rows is fk-004-1-reconcile (additive stub-backfill)
+            then fk-004-2 (VALIDATE).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks
+    ADD CONSTRAINT chunks_collection_fk
+    FOREIGN KEY (tenant_id, collection)
+    REFERENCES nexus.catalog_collections (tenant_id, name)
+    ON DELETE RESTRICT
+    NOT VALID;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.chunks DROP CONSTRAINT IF EXISTS chunks_collection_fk;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-004-0-reconcile-precount: audit pre-count (nexus-iq0qr) ── -->
+    <changeSet id="fk-004-0-reconcile-precount" author="nexus-iq0qr">
+        <comment>
+            RDR-191 Phase 5 follow-up (bead nexus-iq0qr). conexus's v0.1.76 deploy
+            receipt ([22579]) found fk-004-1-reconcile's boot log unauditable: it
+            logs only "Custom SQL executed / ran successfully in 64ms", no INSERT
+            count, unlike catalog-029-1 (this same file's manifest-FK sibling)
+            which RAISE NOTICEs its deleted count. fk-004-1-reconcile's own
+            changeset body is checksum-frozen -- already applied in production
+            (cloud gate-xr789: 116,490 unregistered chunk rows to 0) -- so it
+            cannot be edited to add the NOTICE itself.
+            THIS changeset is a NEW, READ-ONLY audit step positioned in FILE
+            ORDER immediately BEFORE fk-004-1-reconcile: it counts the SAME
+            anti-join fk-004-1-reconcile's INSERT ... ON CONFLICT DO NOTHING
+            would insert, and RAISE NOTICEs that pre-count, without touching any
+            row. A POST-count re-run (tried first, then rejected on review) would
+            have run AFTER fk-004-1-reconcile in every walk on every install --
+            fresh or already-reconciled -- and so could never observe anything
+            but zero, an overclaim by construction. Positioned BEFORE the
+            reconcile instead: on a box that has NOT yet run fk-004-1-reconcile
+            this changeset runs before it, in the SAME walk, and logs the real
+            unregistered-pair count fk-004-1-reconcile is about to fix. That
+            count is nonzero only for an UPGRADING box carrying pre-fk-002-era
+            legacy debt (the gate-xr789 shape: 116,490 rows); an empty fresh
+            install has no chunks yet and logs 0. On an ALREADY-reconciled store (every box that has run
+            fk-004-1-reconcile in a prior release, including cloud at v0.1.76 and
+            beyond) Liquibase skips the already-applied fk-004-1-reconcile
+            entirely, so this changeset -- new to that box -- runs once, reads
+            the CURRENT (already-reconciled) state, and truthfully logs 0. Either
+            way the number logged is what is actually true at the moment this
+            changeset executes, never a structurally-guaranteed zero.
+            RLS toggle-wrapped (nexus-1wjmq shape), identical to
+            fk-004-1-reconcile and catalog-029-1: a read, not just a write, needs
+            it -- under FORCE RLS with no nexus.tenant GUC set at migration time,
+            an untoggled SELECT from either table sees ZERO rows (fk-004-1-
+            reconcile's own header documents the identical trap for its INSERT
+            ... SELECT), which would make this pre-count silently and always 0,
+            the exact overclaim this changeset exists to avoid.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chunks NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_collections NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_precount BIGINT;
+BEGIN
+    SELECT count(*) INTO v_precount
+    FROM (
+        SELECT DISTINCT c.tenant_id, c.collection
+        FROM nexus.chunks c
+        WHERE NOT EXISTS (
+            SELECT 1 FROM nexus.catalog_collections r
+             WHERE r.tenant_id = c.tenant_id
+               AND r.name      = c.collection
+        )
+    ) s;
+    RAISE NOTICE 'RDR-191 Phase 5 fk-004 reconcile pre-count (nexus-iq0qr): % unregistered chunk (tenant_id, collection) pair(s) about to be inserted by fk-004-1-reconcile', v_precount;
+END $$;
+
+ALTER TABLE nexus.catalog_collections FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks FORCE ROW LEVEL SECURITY;
+        </sql>
+        <rollback>
+            <!-- No rollback: this changeset only reads and RAISE NOTICEs a count,
+                 never writing a row, so there is nothing to undo. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-004-1-reconcile: additive parent-stub reconcile ─────── -->
+    <changeSet id="fk-004-1-reconcile" author="nexus-o8dil.49">
+        <comment>
+            Additive stub-register: INSERT INTO catalog_collections SELECT
+            DISTINCT (tenant_id, collection) FROM nexus.chunks ON CONFLICT DO
+            NOTHING -- fk-002-6-reconcile's shape, applied to nexus.chunks'
+            own values. Never destructive (no DELETE arm): a chunk row is real
+            data (chunk_text + an embedding), so an "orphan" here gets its
+            missing registry parent stub-created, exactly like fk-002's own
+            per-dim precedent for the identical vector-serving-layer tables
+            (fk-002-validate.xml's own header: "an orphan chunk is real data,
+            not lifecycle debris -- deleting it would be data loss"). RLS
+            toggle-wrapped (nexus-1wjmq shape): both nexus.chunks and
+            nexus.catalog_collections carry FORCE ROW LEVEL SECURITY and
+            Liquibase's nexus_admin owner is not BYPASSRLS, so both are
+            toggled off for the INSERT...SELECT and restored before this
+            changeset ends.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chunks NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_collections NO FORCE ROW LEVEL SECURITY;
+
+INSERT INTO nexus.catalog_collections (tenant_id, name)
+SELECT DISTINCT tenant_id, collection
+FROM nexus.chunks
+ON CONFLICT (tenant_id, name) DO NOTHING;
+
+ALTER TABLE nexus.catalog_collections FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks FORCE ROW LEVEL SECURITY;
+        </sql>
+        <rollback>
+            <!-- No rollback: stub rows are inert; the FK being added is dropped
+                 by fk-004-0's own rollback. Removing stubs here could break
+                 existing references (fk-002-0's own precedent). -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset fk-004-2: VALIDATE CONSTRAINT ──────────────────────────── -->
+    <changeSet id="fk-004-2" author="nexus-o8dil.49">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT COUNT(*) FROM pg_constraint WHERE conname = 'chunks_collection_fk'</sqlCheck>
+        </preConditions>
+        <comment>
+            VALIDATE chunks_collection_fk -- retroactively check pre-existing
+            rows now that fk-004-1-reconcile has stub-registered every
+            collection nexus.chunks references. Guarded by a whole-changeset
+            precondition (nexus-4m6i0.13/catalog-029-2 shape): skips (marks
+            ran, once) instead of hard-ERRORing a crash-loop boot on any box
+            where the constraint doesn't exist. All three fk-004 changesets
+            ship together in one file/release, so fk-004-0 always runs first
+            in the same walk and this guard is expected to be a permanent
+            no-op in practice -- added purely to satisfy the project's
+            blanket "every bare VALIDATE CONSTRAINT is guarded" tripwire
+            (tests/test_changelog_validate_precondition_lint.py).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks VALIDATE CONSTRAINT chunks_collection_fk;
+        </sql>
+        <rollback>
+            <!-- VALIDATE cannot be un-done (no INVALIDATE in PG); the constraint
+                 itself is dropped by fk-004-0's rollback. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

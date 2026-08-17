@@ -78,6 +78,11 @@ class FakeVectorClient:
         self.upsert_calls: list[tuple[str, list[str]]] = []
         # embeddings arg per upsert call, in call order (None = re-embed path)
         self.upsert_embeddings: list[list[list[float]] | None] = []
+        # retry arg per upsert call, in call order (nexus-cy9u7 round-3 C2:
+        # db/reconcile.py's verify-fill call site passes retry=False — record
+        # it so a test can assert that contract without needing the real
+        # HttpVectorClient).
+        self.upsert_retry: list[bool] = []
         self._count_delta = count_delta or {}
 
     def upsert_chunks(
@@ -88,10 +93,12 @@ class FakeVectorClient:
         metadatas: list[dict] | None = None,
         *,
         embeddings: list[list[float]] | None = None,
+        retry: bool = True,
     ) -> None:
         metas = metadatas or [{}] * len(ids)
         self.upsert_calls.append((collection, list(ids)))
         self.upsert_embeddings.append(embeddings)
+        self.upsert_retry.append(retry)
         col = self.store.setdefault(collection, {})
         for chunk_id, doc, meta in zip(ids, documents, metas):
             col[chunk_id] = (doc, dict(meta or {}))

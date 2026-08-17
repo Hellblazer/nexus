@@ -35,7 +35,7 @@ Promoting a field is now ONE Liquibase changeset with three statements:
     INSERT INTO nexus.aspect_promotion_log
            (tenant_id, field_name, sql_type, column_added,
             rows_backfilled, rows_pruned, pruned, promoted_at)
-    SELECT tenant_id, 'venue', 'TEXT', 1, count(*), 0, 0, now()
+    SELECT tenant_id, 'venue', 'TEXT', true, count(*), 0, false, now()
       FROM nexus.document_aspects
      WHERE venue IS NOT NULL
      GROUP BY tenant_id;
@@ -45,7 +45,8 @@ Promoting a field is now ONE Liquibase changeset with three statements:
 The optional extras prune (``UPDATE ... SET extras = extras - 'venue'``)
 is a SEPARATE, later changeset: run it only once every reader consumes
 the typed column, so the dual-read cutover the original mechanic
-supported is preserved. Record it with ``pruned = 1``.
+supported is preserved. Record it with ``pruned = true`` (boolean since
+aspects-003-type-hygiene, nexus-cefa1.4; ``rows_pruned`` stays the INT count).
 
 The audit log itself is NOT retired. ``nexus.aspect_promotion_log`` is
 the queryable history of which fields graduated when, and the changeset

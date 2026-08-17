@@ -268,6 +268,16 @@ class TestPgSourceFillVsSkipWiring:
         assert target.store[name][id_missing][0] == "doc-missing"
         assert id_present in target.store[name]
 
+        # nexus-cy9u7 round-3 CRITICAL C2: the verify-fill call site must
+        # pass retry=False — it already owns its own retry/breaker stack
+        # (_etl_batch_with_breaker -> _etl_with_retry) and must not ALSO
+        # get upsert_chunks's own internal _vector_with_retry wrap, or one
+        # failure gets retried by three nested layers. The seed call (index
+        # 0, made directly by this test, not through verify-fill) keeps the
+        # default retry=True; only the verify-fill-driven call (index 1)
+        # opts out.
+        assert target.upsert_retry == [True, False]
+
     def test_second_pass_is_a_true_noop(self, monkeypatch) -> None:
         """Stateful re-run: after the fill above, a second pass against the
         SAME (now-converged) target sends zero further rows — proves the

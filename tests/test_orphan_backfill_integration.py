@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 
 from nexus.catalog import orphan_backfill as ob
-from tests._catalog_fixture_ops import ActiveCatalog
+from tests._catalog_fixture_ops import ActiveCatalog, seed_manifest_chunks
 
 
 def _hx(label: str) -> str:
@@ -55,6 +55,30 @@ def _docs_in(cat: ActiveCatalog, collection: str) -> list[Any]:
     return sorted(cat.list_by_collection(collection), key=lambda e: e.title)
 
 
+def _seed_matches(collection: str, matches: list) -> None:
+    """Seed a real backing chunk for every ``DTMatch``/``TitleGroup`` chash.
+
+    nexus-dbzxb (RDR-191 Phase 5 Python collateral): ``register_dt_linked``
+    / ``register_synthetic`` / ``apply_csv`` all write real
+    ``document_chunks`` manifest rows through the real catalog for chashes
+    supplied via ``ChunkRef``. In production those chashes name chunks
+    that ALREADY exist in T3 (that is the premise of orphan-backfill: T3
+    chunks with no catalog registration) — this fixture's synthetic
+    ``_hx(...)`` labels are the same idea without a real prior index run,
+    so seeding them here is idiom 1 (reorder: write the chunk before the
+    manifest), not a bookkeeping-only stub.
+    """
+    chashes = [c.chash for m in matches for c in m.chunks]
+    seed_manifest_chunks(collection, chashes)
+
+
+def _seed_lookup(collection: str, chunk_lookup: dict) -> None:
+    """Same as :func:`_seed_matches`, for ``apply_csv``'s
+    ``chunk_lookup: dict[title, list[ChunkRef]]`` shape."""
+    chashes = [c.chash for refs in chunk_lookup.values() for c in refs]
+    seed_manifest_chunks(collection, chashes)
+
+
 class TestRegisterDtLinked:
     def test_registers_one_doc_per_match_with_dt_uri(self, cat: ActiveCatalog) -> None:
         owner = _owner(cat)
@@ -77,14 +101,15 @@ class TestRegisterDtLinked:
                 chunks=[ob.ChunkRef(cid="c3", chash=_hx("xyz333"), chunk_index=0)],
             ),
         ]
+        _seed_matches("knowledge__art-papers__bge-base-en-v15-768__v1", matches)
         docs, links = ob.register_dt_linked(
-            cat, owner, "knowledge__art-papers", matches,
+            cat, owner, "knowledge__art-papers__bge-base-en-v15-768__v1", matches,
         )
         assert docs == 2
         assert links == 3
 
         # Verify Documents written with the DT URI scheme.
-        rows = _docs_in(cat, "knowledge__art-papers")
+        rows = _docs_in(cat, "knowledge__art-papers__bge-base-en-v15-768__v1")
         assert len(rows) == 2
         assert rows[0].source_uri.startswith("x-devonthink-item://UUID-AAAA")
         assert rows[1].source_uri.startswith("x-devonthink-item://UUID-BBBB")
@@ -106,10 +131,11 @@ class TestRegisterDtLinked:
                 ],
             ),
         ]
+        _seed_matches("knowledge__art-papers__bge-base-en-v15-768__v1", matches)
         ob.register_dt_linked(
-            cat, owner, "knowledge__art-papers", matches,
+            cat, owner, "knowledge__art-papers__bge-base-en-v15-768__v1", matches,
         )
-        docs = [e for e in cat.list_by_collection("knowledge__art-papers")
+        docs = [e for e in cat.list_by_collection("knowledge__art-papers__bge-base-en-v15-768__v1")
                 if e.title == "Manifest Order Test"]
         assert len(docs) == 1
         rows = cat.get_manifest(str(docs[0].tumbler))
@@ -130,10 +156,11 @@ class TestRegisterDtLinked:
                 chunks=[ob.ChunkRef(cid="c1", chash=_hx("h1"), chunk_index=0)],
             ),
         ]
+        _seed_matches("knowledge__art-papers__bge-base-en-v15-768__v1", matches)
         ob.register_dt_linked(
-            cat, owner, "knowledge__art-papers", matches,
+            cat, owner, "knowledge__art-papers__bge-base-en-v15-768__v1", matches,
         )
-        docs = [e for e in cat.list_by_collection("knowledge__art-papers")
+        docs = [e for e in cat.list_by_collection("knowledge__art-papers__bge-base-en-v15-768__v1")
                 if e.title == "Provenance Test"]
         assert len(docs) == 1
         meta = docs[0].meta
@@ -160,17 +187,18 @@ class TestRegisterSynthetic:
                 chunks=[ob.ChunkRef(cid="c3", chash=_hx("b1"), chunk_index=0)],
             ),
         ]
+        _seed_matches("knowledge__art-papers__bge-base-en-v15-768__v1", groups)
         docs, links = ob.register_synthetic(
-            cat, owner, "knowledge__art-papers", groups,
+            cat, owner, "knowledge__art-papers__bge-base-en-v15-768__v1", groups,
         )
         assert docs == 2
         assert links == 3
 
-        rows = _docs_in(cat, "knowledge__art-papers")
+        rows = _docs_in(cat, "knowledge__art-papers__bge-base-en-v15-768__v1")
         assert len(rows) == 2
         assert all(r.source_uri.startswith("nx-orphan-backfill://") for r in rows)
         # URI carries collection + title for operator legibility.
-        assert "knowledge__art-papers/Unmatched Paper Alpha" in rows[0].source_uri
+        assert "knowledge__art-papers__bge-base-en-v15-768__v1/Unmatched Paper Alpha" in rows[0].source_uri
 
     def test_untitled_group_falls_back_to_per_chash_singletons(
         self, cat: ActiveCatalog,
@@ -187,17 +215,18 @@ class TestRegisterSynthetic:
                 ],
             ),
         ]
+        _seed_matches("knowledge__art__bge-base-en-v15-768__v1", groups)
         docs, links = ob.register_synthetic(
-            cat, owner, "knowledge__art", groups,
+            cat, owner, "knowledge__art__bge-base-en-v15-768__v1", groups,
         )
         # 3 chunks -> 3 singleton Documents (chash-based fallback).
         assert docs == 3
         assert links == 3
         uris = sorted(
-            e.source_uri for e in cat.list_by_collection("knowledge__art")
+            e.source_uri for e in cat.list_by_collection("knowledge__art__bge-base-en-v15-768__v1")
         )
         assert uris == sorted(
-            f"nx-orphan-backfill://knowledge__art/chash/{h}" for h in hashes
+            f"nx-orphan-backfill://knowledge__art__bge-base-en-v15-768__v1/chash/{h}" for h in hashes
         )
 
 
@@ -223,15 +252,16 @@ class TestApplyCsv:
             "Curated Title One,2,DT-UUID-AAA\n"
             "Curated Title Two,1,DT-UUID-BBB\n"
         )
+        _seed_lookup("knowledge__art-papers__bge-base-en-v15-768__v1", chunk_lookup)
         docs, links = ob.apply_csv(
-            cat, owner, "knowledge__art-papers", csv_path,
+            cat, owner, "knowledge__art-papers__bge-base-en-v15-768__v1", csv_path,
             chunk_lookup=chunk_lookup,
         )
         assert docs == 2
         assert links == 3
         uris = {
             e.title: e.source_uri
-            for e in cat.list_by_collection("knowledge__art-papers")
+            for e in cat.list_by_collection("knowledge__art-papers__bge-base-en-v15-768__v1")
         }
         assert uris["Curated Title One"] == "x-devonthink-item://DT-UUID-AAA"
         assert uris["Curated Title Two"] == "x-devonthink-item://DT-UUID-BBB"
@@ -251,12 +281,13 @@ class TestApplyCsv:
             "chunk_count,operator_decision\n"
             "Borderline Paper,SUGGESTED-UUID,Suggested Name,0.62,1,approve\n"
         )
+        _seed_lookup("knowledge__art-papers__bge-base-en-v15-768__v1", chunk_lookup)
         docs, _ = ob.apply_csv(
-            cat, owner, "knowledge__art-papers", csv_path,
+            cat, owner, "knowledge__art-papers__bge-base-en-v15-768__v1", csv_path,
             chunk_lookup=chunk_lookup,
         )
         assert docs == 1
-        rows = [e for e in cat.list_by_collection("knowledge__art-papers")
+        rows = [e for e in cat.list_by_collection("knowledge__art-papers__bge-base-en-v15-768__v1")
                 if e.title == "Borderline Paper"]
         assert len(rows) == 1
         assert rows[0].source_uri == "x-devonthink-item://SUGGESTED-UUID"
@@ -275,12 +306,13 @@ class TestApplyCsv:
             "Skip Me,1,\n"  # operator left UUID blank
             "Include Me,1,UUID-INCLUDED\n"
         )
+        _seed_lookup("knowledge__art-papers__bge-base-en-v15-768__v1", chunk_lookup)
         docs, _ = ob.apply_csv(
-            cat, owner, "knowledge__art-papers", csv_path,
+            cat, owner, "knowledge__art-papers__bge-base-en-v15-768__v1", csv_path,
             chunk_lookup=chunk_lookup,
         )
         assert docs == 1
-        titles = [e.title for e in cat.list_by_collection("knowledge__art-papers")]
+        titles = [e.title for e in cat.list_by_collection("knowledge__art-papers__bge-base-en-v15-768__v1")]
         assert "Include Me" in titles
         assert "Skip Me" not in titles
 
@@ -295,7 +327,7 @@ class TestApplyCsv:
             "Ghost Title,5,UUID-GHOST\n"
         )
         docs, links = ob.apply_csv(
-            cat, owner, "knowledge__art-papers", csv_path,
+            cat, owner, "knowledge__art-papers__bge-base-en-v15-768__v1", csv_path,
             chunk_lookup=chunk_lookup,
         )
         # No chunks for this title -> skip without error.

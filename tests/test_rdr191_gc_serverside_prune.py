@@ -8,20 +8,27 @@ Per ``tests/AGENTS.md``: integration over mocks, real substrate via
 
 The load-bearing claim under test: the SQL anti-join — keyed on
 ``chunks_<dim>.chash`` (the PK column) joined to
-``catalog_document_chunks.chash`` — classifies exactly the chunks the OLD
-client-side algorithm (``_fetch_all_chunk_metadata`` + a Python diff against
-``catalog.chashes_for_collection``) would have classified as orphan/live,
-AND does so without a single chunk row, document, or embedding crossing the
-``/v1/vectors`` wire. The zero-wire-crossing tests are a same-session A/B:
-:func:`test_fallback_path_crosses_full_chunk_payloads` proves the OLD
-(still-live, Phase-1-preserved) path DOES send full metadata/documents/
-embeddings, and :func:`test_serverside_path_crosses_zero_chunk_payloads`
-proves the code path that now runs BY DEFAULT does not — together they are
-the non-vacuity proof this file exists to give (there is no bisectable
-"before this change" commit to diff against from inside the working tree,
-per this session's constraints; the fallback path IS byte-for-byte the pre-
-RDR-191 algorithm, unconditionally reachable and independently exercised
-here, so the contrast is exact).
+``catalog_document_chunks.chash`` — classifies exactly the chunks a client-
+side fetch-diff-copy-delete algorithm would classify as orphan/live, AND
+does so without a single chunk row, document, or embedding crossing the
+``/v1/vectors`` wire.
+
+RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: the client-side fallback
+(``_fetch_all_chunk_metadata`` + a Python diff against ``catalog
+.chashes_for_collection``, plus ``chunk_quarantine.py``'s client-side
+``quarantine_orphans``/``restore_rereferenced``/``expire_quarantine``) is
+RETIRED — the manifest-chunk FK (catalog-029, VALIDATEd) makes the
+completeness apparatus it existed to prove correct unreachable by
+construction. Server-side prune is now the ONLY path;
+:func:`test_serverside_failure_skips_only_that_collection` and
+:func:`test_serverside_path_crosses_zero_chunk_payloads` (the latter
+retained, since it still proves the DEFAULT path's zero-wire-crossing
+property) cover what remains. The former same-session A/B contrast test
+(:func:`test_fallback_path_crosses_full_chunk_payloads`, proving the OLD
+path sent full payloads) is DELETED alongside the path it exercised — see
+:mod:`nexus.indexer`'s ``_prune_deleted_files`` docstring for the full
+retirement rationale; a collection whose engine predates catalog-023 now
+goes UNPRUNED with a loud WARNING, never a silent fallback.
 """
 from __future__ import annotations
 
@@ -104,6 +111,88 @@ def test_serverside_prune_quarantines_exactly_the_orphans(t2_service_env) -> Non
     )
 
 
+def test_serverside_prune_sweeps_rdr_collection_when_passed(t2_service_env) -> None:
+    """nexus-3lswy regression guard, REBASED onto the server-side path
+    (RDR-191 Phase 6, nexus-o8dil.33): RDR became a first-class 4th
+    collection (catalog registration, doc_id_resolver, staleness cache all
+    cover it), but the GC pass once silently never swept ``rdr__`` orphans
+    because the call site never threaded ``rdr_collection`` through. The
+    original regression test exercised the (now-retired) client-side
+    fallback; this proves the SAME property — the optional
+    ``rdr_collection`` kwarg actually gets swept — via the real server-side
+    anti-join, the only prune path left. Per-collection isolation: code
+    and docs stay untouched/empty while only the rdr collection's orphan
+    moves."""
+    import nexus.db.http_vector_client as hvc
+    from nexus.catalog.chunk_quarantine import quarantine_collection_name
+    from nexus.indexer import _prune_deleted_files
+    from tests._catalog_fixture_ops import ActiveCatalog
+
+    tenant = t2_service_env
+    cat = ActiveCatalog()
+    db = hvc.HttpVectorClient(tenant=tenant)
+
+    rdr_coll = "rdr__gcq-rdrsweep__bge-base-en-v15-768__v1"
+    rdr_owner = cat.register_owner("gcq-rdrsweep", "curator")
+    _chashes, rdr_live, rdr_orphans = _seed(cat, db, rdr_coll, rdr_owner, n_live=1, n_orphan=1)
+
+    _prune_deleted_files(
+        "code__gcq-rdrsweep-unused", "docs__gcq-rdrsweep-unused", db,
+        catalog=cat, rdr_collection=rdr_coll,
+    )
+
+    remaining = set(db.get_collection(rdr_coll).get_all_metadata()["ids"])
+    assert remaining == set(rdr_live), (
+        f"the rdr_collection kwarg must actually be swept; expected only "
+        f"the live chash to survive, got {remaining}"
+    )
+    qname = quarantine_collection_name(rdr_coll)
+    quarantined = set(db.get_collection(qname).get_all_metadata()["ids"])
+    assert quarantined == set(rdr_orphans), (
+        f"the rdr collection's orphan must be quarantined; got {quarantined}"
+    )
+
+
+def test_serverside_prune_rerun_with_no_new_orphans_is_idempotent(t2_service_env) -> None:
+    """RDR-191 Phase 6 (nexus-o8dil.33) rebase of the former mock-substrate
+    ``test_prune_deleted_files_idempotent`` (test_indexer.py) onto the real
+    server-side path, the only prune path left: re-running the sweep with
+    no NEW orphans since the first pass is a no-op — the first pass's
+    quarantine move is not re-attempted, nothing new moves, and the origin/
+    quarantine populations are byte-identical across both calls."""
+    import nexus.db.http_vector_client as hvc
+    from nexus.catalog.chunk_quarantine import quarantine_collection_name
+    from nexus.indexer import _prune_deleted_files
+    from tests._catalog_fixture_ops import ActiveCatalog
+
+    tenant = t2_service_env
+    cat = ActiveCatalog()
+    db = hvc.HttpVectorClient(tenant=tenant)
+
+    coll_name = "code__gcq-idempotent__bge-base-en-v15-768__v1"
+    owner = cat.register_owner("gcq-idempotent", "curator")
+    chashes, live_chashes, orphan_chashes = _seed(cat, db, coll_name, owner, n_live=2, n_orphan=2)
+
+    _prune_deleted_files(coll_name, "docs__gcq-idempotent-unused", db, catalog=cat)
+    first_remaining = set(db.get_collection(coll_name).get_all_metadata()["ids"])
+    qname = quarantine_collection_name(coll_name)
+    first_quarantined = set(db.get_collection(qname).get_all_metadata()["ids"])
+    assert first_remaining == set(live_chashes)
+    assert first_quarantined == set(orphan_chashes)
+
+    _prune_deleted_files(coll_name, "docs__gcq-idempotent-unused", db, catalog=cat)
+    second_remaining = set(db.get_collection(coll_name).get_all_metadata()["ids"])
+    second_quarantined = set(db.get_collection(qname).get_all_metadata()["ids"])
+    assert second_remaining == first_remaining, (
+        f"a second pass with no new orphans must not change the origin "
+        f"collection; first={first_remaining} second={second_remaining}"
+    )
+    assert second_quarantined == first_quarantined, (
+        f"a second pass with no new orphans must not re-move or duplicate "
+        f"quarantine entries; first={first_quarantined} second={second_quarantined}"
+    )
+
+
 def test_serverside_prune_noOrphans_movesNothing(t2_service_env) -> None:
     """No orphans present: server path is a clean zero-op — nothing moves,
     nothing crosses beyond the anti-join's own read."""
@@ -130,13 +219,21 @@ def test_serverside_prune_noOrphans_movesNothing(t2_service_env) -> None:
 
 def test_serverside_failure_skips_only_that_collection(t2_service_env) -> None:
     """A non-404 failure in the server-side prune must skip THAT collection
-    and let the sweep continue (the nexus-ou4tb contract the legacy arms in
-    this same function already honour).
+    and let the sweep continue to the NEXT collection (the nexus-ou4tb
+    contract) — proven here by letting the second collection go through the
+    REAL (now-only) server-side path rather than mocking it too.
 
     Non-vacuity: the first collection's prune RAISES. If the call site is
     unguarded, the exception escapes ``_prune_deleted_files`` and this test
     ERRORS rather than fails — and the second collection's orphans are never
     quarantined, which is the post-state actually asserted below.
+
+    RDR-191 Phase 6 (nexus-o8dil.33) rebase: the second collection used to
+    take the (now-retired) client-side fallback when this test's mock
+    returned ``False`` for it; it now delegates to the REAL
+    ``_prune_collection_serverside`` instead, so this test still proves
+    "the sweep continues to a collection that succeeds" without depending
+    on retired machinery.
     """
     import nexus.db.http_vector_client as hvc
     import nexus.indexer as indexer_mod
@@ -156,10 +253,12 @@ def test_serverside_failure_skips_only_that_collection(t2_service_env) -> None:
     _c1, boom_live, boom_orphans = _seed(cat, db, boom_coll, boom_owner, n_live=2, n_orphan=2)
     _c2, ok_live, ok_orphans = _seed(cat, db, ok_coll, ok_owner, n_live=2, n_orphan=3)
 
+    real_prune_serverside = indexer_mod._prune_collection_serverside
+
     def _fail_first(db_, collection_name, qname, stamp):
         if collection_name == boom_coll:
             raise ConnectionError("simulated transient engine blip")
-        return False  # benign fallback signal: use the client-side path
+        return real_prune_serverside(db_, collection_name, qname, stamp)
 
     with patch.object(indexer_mod, "_prune_collection_serverside", _fail_first):
         _prune_deleted_files(boom_coll, ok_coll, db, catalog=cat)
@@ -172,7 +271,8 @@ def test_serverside_failure_skips_only_that_collection(t2_service_env) -> None:
         f"got {boom_remaining}"
     )
 
-    # The sweep continued: the SECOND collection was still pruned.
+    # The sweep continued: the SECOND collection was still pruned, via the
+    # real server-side path.
     ok_remaining = set(db.get_collection(ok_coll).get_all_metadata()["ids"])
     assert ok_remaining == set(ok_live), (
         "the sweep must continue past a failed collection; "
@@ -234,13 +334,18 @@ def test_serverside_path_crosses_zero_chunk_payloads(t2_service_env) -> None:
         assert not leaked, f"POST {path} body carried chunk payload keys {leaked}: {body}"
 
 
-def test_fallback_path_crosses_full_chunk_payloads(t2_service_env) -> None:
-    """Contrast case: with the server route made unreachable (simulating a
-    pre-route engine — REQUIRED_ENGINE_VERSION is (0, 1, 69), this route
-    ships in the NEXT tag), the OLD client-side path DOES send full
-    metadata/documents/embeddings — proving the assertions in
-    :func:`test_serverside_path_crosses_zero_chunk_payloads` are
-    non-vacuous, not just "no route happened to fire"."""
+def test_route_unavailable_prunes_nothing_and_crosses_no_wire(t2_service_env) -> None:
+    """RDR-191 Phase 6 (nexus-o8dil.33) rebase of the former
+    ``test_fallback_path_crosses_full_chunk_payloads``: with the server
+    route made unreachable (simulating a pre-catalog-023 engine), there is
+    no client-side fallback left to fall back TO — the collection is left
+    completely untouched (no quarantine, no deletes) and NOTHING crosses
+    the ``/v1/vectors`` wire for it, replacing the old "fallback sends full
+    payloads" contrast with "no route means no action, ever, not even a
+    read" — the manifest-chunk FK makes the completeness apparatus the old
+    fallback existed to prove correct unreachable by construction, so
+    retiring the fallback rather than working around its absence is the
+    correct fix, not a regression to paper over."""
     import nexus.db.http_vector_client as hvc
     from nexus.indexer import _prune_deleted_files
     from tests._catalog_fixture_ops import ActiveCatalog
@@ -251,7 +356,7 @@ def test_fallback_path_crosses_full_chunk_payloads(t2_service_env) -> None:
 
     coll_name = "code__gcq-fallback__bge-base-en-v15-768__v1"
     owner = cat.register_owner("gcq-fallback", "curator")
-    _seed(cat, db, coll_name, owner, n_live=3, n_orphan=2)
+    chashes, live_chashes, orphan_chashes = _seed(cat, db, coll_name, owner, n_live=3, n_orphan=2)
 
     posted: list[tuple[str, dict]] = []
     real_post = hvc._post
@@ -262,25 +367,34 @@ def test_fallback_path_crosses_full_chunk_payloads(t2_service_env) -> None:
 
     # Simulate a pre-route engine: the client has no gc_quarantine_orphans
     # capability from the caller's point of view.
-    with patch.object(hvc.HttpVectorClient, "gc_quarantine_orphans", None), \
+    from structlog.testing import capture_logs
+
+    with capture_logs() as cap, \
+         patch.object(hvc.HttpVectorClient, "gc_quarantine_orphans", None), \
          patch.object(hvc.HttpVectorClient, "gc_restore_rereferenced", None), \
          patch.object(hvc.HttpVectorClient, "gc_expire_quarantine", None), \
          patch("nexus.db.http_vector_client._post", side_effect=_spy_post):
         _prune_deleted_files(coll_name, "docs__gcq-fallback-unused", db, catalog=cat)
 
-    posted_paths = [p for p, _ in posted]
-    assert "/v1/vectors/get-all-metadata" in posted_paths, (
-        f"expected the OLD fast-path full-collection metadata read to fire "
-        f"when the server route is unavailable; posted: {posted_paths}"
+    assert not posted, (
+        f"a route-unavailable collection must cross NO wire at all now "
+        f"(no client-side fallback exists to fall back to); posted: {posted}"
     )
-    # The old quarantine_orphans() copy path fetches metadatas+documents
-    # (+ embeddings via a separate get-embeddings call) for the batch it
-    # is about to move — that IS the wire cost RDR-191 eliminates.
-    payload_bearing = [
-        (p, body) for p, body in posted
-        if {"metadatas", "documents"} & set(body.keys())
+    # "never a silent fallback" must be PINNED, not assumed: a structured
+    # WARNING naming the collection must fire, not just a passive skip.
+    warn_logs = [
+        r for r in cap
+        if r.get("event") == "gc_serverside_prune_unavailable_no_client_fallback"
     ]
-    assert payload_bearing, (
-        f"expected the fallback path to carry chunk payloads over the wire "
-        f"at least once (the cost this RDR eliminates by default); posted: {posted_paths}"
+    assert warn_logs, (
+        f"a route-unavailable collection must log a structured WARNING "
+        f"(never a silent skip); captured events: {[r.get('event') for r in cap]}"
+    )
+    assert warn_logs[0]["collection"] == coll_name
+    assert warn_logs[0].get("log_level") == "warning", warn_logs[0]
+
+    remaining = set(db.get_collection(coll_name).get_all_metadata()["ids"])
+    assert remaining == set(chashes), (
+        "a route-unavailable collection must be left COMPLETELY untouched "
+        f"(orphans included — no fallback prunes them any more); got {remaining}"
     )

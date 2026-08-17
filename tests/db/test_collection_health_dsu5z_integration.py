@@ -289,13 +289,32 @@ def seeded_catalog(cat):
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
 
+def _same_instant(ts: str, expected_naive_utc: str) -> bool:
+    """True when *ts* (a possibly timestamptz-formatted string) names the
+    same instant as *expected_naive_utc* (a bare naive-UTC literal).
+
+    catalog-031-type-hygiene.xml (RDR-191) retyped catalog_documents.
+    indexed_at from TEXT to timestamptz -- the wire value now round-trips
+    as ``2026-06-01T12:00:00.000000+00:00`` instead of the bare literal
+    this fixture writes verbatim. Same instant, wider ISO-8601 form; parse
+    and compare rather than exact-string-matching a format the type
+    hygiene migration deliberately changed.
+    """
+    from datetime import datetime, timezone
+
+    norm = ts.replace("Z", "+00:00") if ts.endswith("Z") else ts
+    return datetime.fromisoformat(norm).astimezone(timezone.utc) == datetime.fromisoformat(
+        expected_naive_utc
+    ).replace(tzinfo=timezone.utc)
+
+
 class TestCollectionHealthMetaLiveService:
     """A) collection_health_meta returns exact values from the real Java service."""
 
     def test_last_indexed_is_max_indexed_at(self, cat, seeded_catalog) -> None:
         """last_indexed = MAX(indexed_at) = '2026-06-01T12:00:00' for _COLL."""
         result = cat.collection_health_meta(_COLL)
-        assert result["last_indexed"] == "2026-06-01T12:00:00", (
+        assert _same_instant(result["last_indexed"], "2026-06-01T12:00:00"), (
             f"Expected last_indexed='2026-06-01T12:00:00', got {result['last_indexed']!r}"
         )
 
@@ -354,7 +373,7 @@ class TestCollectionHealthDefaultStatsFn:
             with patch("nexus.collection_health._open_catalog", return_value=client):
                 result = _default_catalog_stats_fn(_COLL)
 
-            assert result["last_indexed"] == "2026-06-01T12:00:00", (
+            assert _same_instant(result["last_indexed"], "2026-06-01T12:00:00"), (
                 f"_default_catalog_stats_fn last_indexed wrong: {result}"
             )
             assert result["orphan_count"] == 2, (

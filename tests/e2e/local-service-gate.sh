@@ -400,7 +400,10 @@ echo "[gate] throwaway service on 127.0.0.1:$SERVICE_PORT"
 # LIVED_IN_EXPECTED / CLOUD_MODE_EXPECTED below: every assertion increments
 # SMOKE_PASSED, and a mismatch against SMOKE_EXPECTED FAILS the gate — an
 # unreachable service or a malformed response fails loud, never skips.
-SMOKE_EXPECTED=12
+SMOKE_EXPECTED=11  # 12->11 at 3b2901141: the manifest/verify leg was retired
+                   # with the catalog-030 subtraction but the count was not
+                   # lowered, making the gate structurally unpassable (caught
+                   # by its own vacuity guard in the 7.8.0 battery).
 SMOKE_PASSED=0
 SMOKE_BASE="http://127.0.0.1:$SERVICE_PORT"
 SMOKE_DIR="$SCRATCH/smoke"
@@ -529,10 +532,11 @@ smoke_request POST /v1/catalog/index-run/begin \
 [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/index-run/begin"
 smoke_check "POST /v1/catalog/index-run/begin -> ok" "d.get('ok') is True"
 
-smoke_request GET "/v1/catalog/manifest/verify?doc_id=$SMOKE_DOC_TUMBLER"
-[ "$SMOKE_CODE" = "200" ] || smoke_fail "GET /v1/catalog/manifest/verify"
-smoke_check "GET /v1/catalog/manifest/verify -> referenced=0 missing=0 (no chunks written)" \
-  "d.get('referenced')==0 and d.get('missing')==0"
+# GET /v1/catalog/manifest/verify smoke check REMOVED (RDR-191 Phase 6,
+# nexus-o8dil.33) — the route is retired; the manifest-chunk FK makes the
+# dangling state it diagnosed unreachable. completeIndexRun's internal use
+# of the same underlying SQL function is exercised by the /complete calls
+# elsewhere in this script, not by this now-gone read-only route.
 
 smoke_request POST /v1/catalog/index-run/fail \
   "$(python3 -c "import json;print(json.dumps({'doc_id':'$SMOKE_DOC_TUMBLER','error':'gate-smoke synthetic failure'}))")"
@@ -565,7 +569,7 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
     "any(r.get('id')=='$SMOKE_CHASH' for r in d)"
 else
   echo "[gate] NEXUS_GATE_NO_VECTOR_SMOKE=1 — vector leg skipped; SMOKE_EXPECTED lowered"
-  SMOKE_EXPECTED=10
+  SMOKE_EXPECTED=9
 fi
 
 smoke_verify_count "$SMOKE_PASSED" "$SMOKE_EXPECTED" || exit 1

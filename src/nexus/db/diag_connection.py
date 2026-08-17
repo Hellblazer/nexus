@@ -235,13 +235,71 @@ def live_store_detail(statements, *, resolve=None, run=None) -> str:
             "`nx init --service` to backfill the diagnostic role, then "
             "re-invoke. Do NOT interpret this as a clean store."
         )
+    if not statements:
+        # A topic can carry no diagnostic SQL at all (e.g. migration-legacy-
+        # ids' forensics leg is a Chroma-side classification, not a SQL
+        # probe) — nothing to connect for, never mind measure.
+        return "live diagnostic results:\n"
+
+    # nexus-rpw6u CRITICAL-2 remediation: connectivity preflight, THEN
+    # per-statement isolation. Before this fix every statement rode ONE
+    # atomic ``_run(statements, creds)`` call — a single failing statement
+    # (e.g. the counts view absent: the pre-A6 install case, or the DROP-
+    # then-reprovision window ``chash_rekey.py`` itself documents as
+    # EXPECTED mid-upgrade) raised and blanked EVERY statement's result,
+    # including a grant-free era-probe statement that would have succeeded
+    # on its own. That is exactly the scenario an agent is most likely to
+    # invoke forensics in, and it produced zero era discrimination — the
+    # opposite of what the fix exists to provide.
+    #
+    # A trivial one-statement preflight distinguishes the two failure
+    # classes: a CONNECTION-level failure (bad credentials, PG unreachable,
+    # a broken psql/libpq loader path) fails identically for every real
+    # statement too, so it is reported ONCE as the pre-existing aggregate
+    # "FAILED ... UNKNOWN" message rather than as N copies of the same
+    # error. Once connectivity is proven, each real statement runs its OWN
+    # ``_run`` call — a STATEMENT-level failure (the view/table this one
+    # statement targets does not exist yet) renders "FAILED (<reason>)" for
+    # THAT LINE ONLY and never suppresses its siblings.
     try:
-        results = _run(statements, creds)
+        _run(["SELECT 1"], creds)
     except Exception as exc:  # noqa: BLE001 — degrade loud-in-band; callers surface the text, never a crash
         return (
             f"live diagnostics FAILED ({exc}) — treat store state as "
             "UNKNOWN, not clean."
         )
-    return "live diagnostic results:\n" + "\n".join(
-        f"  {stmt} = {out}" for stmt, out in zip(statements, results)
-    )
+
+    lines: list[str] = []
+    for stmt in statements:
+        try:
+            (out,) = _run([stmt], creds)
+        except Exception as exc:  # noqa: BLE001 — per-statement isolation; one bad leg must not erase the others
+            lines.append(f"  {stmt} = FAILED ({exc})")
+            continue
+        lines.append(f"  {stmt} = {_render_diagnostic_output(out)}")
+    return "live diagnostic results:\n" + "\n".join(lines)
+
+
+def _render_diagnostic_output(out: str) -> str:
+    """Render one statement's psql output, never as a bare blank.
+
+    nexus-rpw6u (GH #1414 class recurrence on the forensics rendering path):
+    a NULL aggregate — e.g. a ``WHERE table_name = '...'`` filter matching no
+    row in the deployed ``diag_chash_conformance`` view during the RDR-191
+    straddle window — makes psql print an empty line, which ``.strip()``
+    collapses to ``""``. Rendered verbatim that produces ``stmt = `` with
+    nothing after the equals sign: visually indistinguishable from a result
+    that was silently dropped, and easy to misread as "checked, found
+    nothing" rather than "could not be measured". Mirrors
+    :class:`nexus.db.chash_tables.ConformanceProbe`'s MEASURED/UNAVAILABLE/
+    FAILED tri-state discipline: absence of a signal is rendered as an
+    explicit marker, never blank.
+    """
+    stripped = out.strip()
+    if not stripped:
+        return (
+            "UNMEASURED (no row for this statement — NULL aggregate; the "
+            "store may be in a different schema era than this statement "
+            "targets, or the counts view is stale/absent for this table)"
+        )
+    return stripped

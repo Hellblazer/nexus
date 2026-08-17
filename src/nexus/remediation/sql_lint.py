@@ -59,7 +59,7 @@ _STORE_TABLE_RE = re.compile(r"\b(nexus|t1)\.(\w+)", re.IGNORECASE)
 #: Liquibase journal. Anything NOT matching this AND not a same-statement CTE
 #: is treated as a potential store table and must be aggregate-only —
 #: fail-closed on "cannot prove it is metadata" (critic-final M1: an
-#: UNQUALIFIED ``SELECT content FROM chunks_768`` must not slip past just
+#: UNQUALIFIED ``SELECT content FROM chunks`` must not slip past just
 #: because it lacks a ``nexus.`` prefix).
 _METADATA_TARGET_RE = re.compile(
     r"^(?:pg_catalog\.pg_\w+|pg_\w+|information_schema\.\w+"

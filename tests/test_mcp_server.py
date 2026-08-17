@@ -47,6 +47,7 @@ from nexus.mcp_server import (
     store_put,
 )
 from nexus.types import SearchResult
+from tests._catalog_fixture_ops import seed_manifest_chunks
 from tests.conftest import make_vector_test_client
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
@@ -166,8 +167,38 @@ def _capture_search():
     return captured, fake
 
 
+def _seed_for_store_put(content: str, collection: str = "knowledge") -> None:
+    """Pre-seed a REAL ``nexus.chunks`` row for what ``store_put(...)`` is
+    about to write (nexus-dbzxb, RDR-191 Phase 5 Python collateral sweep).
+
+    This file's ``t3`` fixture injects a FAKE in-memory T3 client (see the
+    module docstring: "All tests use injected clients -- no API keys or
+    network required"), but ``store_put``'s catalog manifest write always
+    goes through the REAL engine catalog (autouse ``_pin_t2_substrate``).
+    ``fk_catalog_chunks_chunk`` now requires the manifest's chash to have a
+    matching REAL ``nexus.chunks`` row, which the fake T3 client can never
+    provide.
+
+    Computes the exact ``(collection, chash)`` ``store_put`` will use via
+    the SAME production helpers it calls internally
+    (``t3_collection_name`` / ``single_chunk_manifest_metadata``), then
+    seeds a real stub chunk — idiom 1/2 of the collateral sweep. Nothing
+    under test reads this row's content; every assertion in this file
+    reads back through ``store_get`` / ``search`` / the fake ``t3`` client,
+    never this real one.
+    """
+    from nexus.catalog.store_hook import single_chunk_manifest_metadata
+    from nexus.corpus import t3_collection_name
+    from nexus.mcp_infra import get_t3
+
+    col_name = t3_collection_name(collection, t3=get_t3())
+    chash, _ = single_chunk_manifest_metadata(content)
+    seed_manifest_chunks(col_name, [chash])
+
+
 def _put_id(content: str, collection: str = "knowledge", title: str = "t") -> str:
     """store_put then extract the doc ID."""
+    _seed_for_store_put(content, collection)
     return store_put(content=content, collection=collection, title=title) \
         .split("Stored:")[1].strip().split(" ->")[0].strip()
 
@@ -197,10 +228,28 @@ class TestNexusHmxiRoundTripGrandfathering:
     diverged on the same input.
     """
 
-    def test_legacy_collection_grandfathered_when_present(self, t3):
+    def test_legacy_collection_grandfathered_when_present(self, t3, t2_service_env):
         # Pre-create a legacy 2-segment collection (simulating
         # operator's pre-Phase-5 state).
         t3.get_or_create_collection("knowledge__art", strict=False)
+        # nexus-dbzxb (RDR-191 Phase 5 Python collateral): "knowledge__art"
+        # is a genuinely non-conformant (2-segment) LEGACY collection name —
+        # the whole point of this test. Every real /v1/vectors/* write
+        # endpoint refuses a non-conformant collection unconditionally (a
+        # server-side naming gate, not the FK), so a real backing chunk for
+        # fk_catalog_chunks_chunk can never be produced through this file's
+        # fake-T3-then-real-catalog write path (see _seed_for_store_put's
+        # docstring for the general case). This is the one class idiom 1/2
+        # cannot reach: bypass_fk_seed_chunk inserts the stub chunk directly
+        # via the test substrate's own psql connection, satisfying the FK
+        # without going through the naming gate at all.
+        from nexus.catalog.store_hook import single_chunk_manifest_metadata
+        from tests._catalog_fixture_ops import bypass_fk_seed_chunk
+
+        pre_chash, _ = single_chunk_manifest_metadata("Pre-Phase-5 ART data")
+        post_chash, _ = single_chunk_manifest_metadata("Post-Phase-5 ART addition")
+        bypass_fk_seed_chunk(t2_service_env, "knowledge__art", pre_chash)
+        bypass_fk_seed_chunk(t2_service_env, "knowledge__art", post_chash)
         t3.put(
             collection="knowledge__art",
             content="Pre-Phase-5 ART data",
@@ -230,6 +279,7 @@ class TestNexusHmxiRoundTripGrandfathering:
     def test_no_legacy_collection_promotes_to_conformant(self, t3):
         # No pre-existing collection; ``store_put`` auto-promotes to
         # conformant.
+        _seed_for_store_put("Greenfield content", "knowledge__greenfield")
         result = store_put(
             content="Greenfield content",
             collection="knowledge__greenfield",
@@ -281,6 +331,7 @@ def test_search_no_threshold_kwarg_passes_none():
 # ── Store ────────────────────────────────────────────────────────────────────
 
 def test_store_put(t3):
+    _seed_for_store_put("test content", "knowledge")
     result = store_put(content="test content", collection="knowledge", title="test-doc")
     assert "Stored:" in result
     assert "knowledge__knowledge" in result
@@ -797,6 +848,7 @@ def test_store_put_invalidates_page_cache(t3, monkeypatch):
 def test_store_delete_invalidates_page_cache(t3, monkeypatch):
     from nexus.mcp import core as mcp_core
     _fresh_page_cache(monkeypatch)
+    _seed_for_store_put("delete me", "knowledge")
     put_result = store_put(
         content="delete me", collection="knowledge", title="cache-del"
     )

@@ -853,12 +853,13 @@ _ALL_TENANT_TABLES = [
     "nexus.catalog_collections",
     "nexus.catalog_document_chunks",
     "nexus.catalog_documents",
-    "nexus.chash_alias",
     "nexus.catalog_links",
     "nexus.catalog_meta",
     "nexus.catalog_owners",
     # ("nexus.chash_index" removed — RDR-187/nexus-piwya.9: dropped table,
     # mirrors health._RLS_TENANT_TABLES)
+    # ("nexus.chash_alias" removed — nexus-lgdel.l1: dropped table
+    # (legacy-001-drop-chash-alias.xml), mirrors health._RLS_TENANT_TABLES)
     "nexus.chash_remap",
     "nexus.chunks",  # RDR-191 Phase 4 (nexus-o8dil.51)
     "nexus.claude_assisted_remediation_consents",
@@ -1361,6 +1362,7 @@ class TestRlsTableCompleteness:
         # retirement, with the dropping changeset named.
         dropped = {
             "nexus.chash_index",  # rdr187-001-drop-chash-index.xml (RDR-187)
+            "nexus.chash_alias",  # legacy-001-drop-chash-alias.xml (nexus-lgdel.l1)
         }
         return frozenset(found - dropped)
 
@@ -1938,274 +1940,11 @@ class TestDirectFallbackSafetyRailReRaise:
 # ── nexus-5xn3k AC5: dangling manifest chashes ───────────────────────────────
 
 
-class TestCheckDanglingManifests:
-    """A POPULATED manifest whose chashes no longer resolve in T3.
-
-    A partial index commits chunks and a manifest without a transaction
-    spanning them, so an interrupted run leaves a catalog row that LOOKS
-    healthy: a chunk_count, a manifest full of chashes, and nothing behind
-    them. `nx catalog reconcile` covers the adjacent shape (chunk_count>0 with
-    an EMPTY manifest, GH #1397) but not this one, so it was undetectable.
-
-    RE-ARMED (nexus-5xn3k.6, closes nexus-ac4id): the check no longer walks
-    T3 client-side at all (no more ``t3.list_collections()`` /
-    ``list_chunks_with_metadata``) — it is ONE ``manifest_verify_all()``
-    engine call, tenant-scoped, returning per-collection
-    referenced/present/missing aggregates directly. The prior fixtures here
-    mocked the T3-shape read that no longer exists; this class now mocks
-    the catalog reader's ``manifest_verify_all()`` return/raise instead.
-    """
-
-    def _cat(
-        self, *, collections: list[dict] | None = None, raise_status: int | None = None,
-        orphans_by_dim: dict[int, list[dict]] | None = None, orphans_exc: Exception | None = None,
-        orphans_responses_by_dim: dict[int, list] | None = None,
-        orphans_calls_log: list[tuple[int, int]] | None = None,
-    ):
-        """*orphans_responses_by_dim*: an optional ``{dim: [resp_or_exc, ...]}``
-        QUEUE consumed one entry per ``manifest_orphans(dim, ...)`` call for
-        that dim (nexus-heizf code-review fix round) — lets a test give the
-        FIRST call a truncated sample and the refetch a DIFFERENT outcome
-        (success or a raised exception), which a single ``orphans_by_dim``
-        dict cannot express. Falls through to the original ``orphans_by_dim``/
-        ``orphans_exc`` behavior once a dim's queue is exhausted or absent.
-        *orphans_calls_log*, when given, records ``(dim, limit)`` for every
-        call — used to assert the refetch never exceeds the ceiling.
-        """
-        import httpx
-
-        class _Cat:
-            def manifest_verify_all(self) -> dict:
-                if raise_status is not None:
-                    request = httpx.Request("GET", "https://engine.example/v1/catalog/manifest/verify_all")
-                    response = httpx.Response(raise_status, request=request)
-                    raise httpx.HTTPStatusError(
-                        f"{raise_status} error", request=request, response=response,
-                    )
-                rows = collections or []
-                return {"collections": rows, "count": len(rows)}
-
-            def manifest_orphans(self, dim: int, *, limit: int = 100) -> dict:
-                if orphans_calls_log is not None:
-                    orphans_calls_log.append((dim, limit))
-                queue = (orphans_responses_by_dim or {}).get(dim)
-                if queue:
-                    resp = queue.pop(0)
-                    if isinstance(resp, Exception):
-                        raise resp
-                    return resp
-                if orphans_exc is not None:
-                    raise orphans_exc
-                rows = (orphans_by_dim or {}).get(dim, [])
-                return {"dim": dim, "count": len(rows), "orphans": rows[:limit]}
-        return _Cat()
-
-    def _run(self, monkeypatch, cat):
-        import nexus.health as h
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader",
-            lambda *a, **k: cat, raising=False,
-        )
-        return h._check_dangling_manifests()[0]
-
-    def test_dangling_chash_is_reported(self, monkeypatch) -> None:
-        cat = self._cat(collections=[
-            {"collection": "code__x", "referenced": 2, "present": 1, "missing": 1},
-        ])
-        r = self._run(monkeypatch, cat)
-        assert r.ok is False and r.warn is True
-        assert "code__x" in r.detail
-        assert "1 of 2" in r.detail, r.detail
-        assert any("reconcile" in f for f in r.fix_suggestions)
-
-    def test_wording_says_rows_not_chashes(self, monkeypatch) -> None:
-        """nexus-heizf part 2: manifest_verify_all's SQL counts manifest
-        ROWS (position-duplicated chashes counted twice), not distinct
-        chashes — the detail text must say so, never "chash(es)"."""
-        cat = self._cat(collections=[
-            {"collection": "code__x", "referenced": 2, "present": 1, "missing": 1},
-        ])
-        r = self._run(monkeypatch, cat)
-        assert "row(s)" in r.detail, r.detail
-        assert "chash(es) missing" not in r.detail, r.detail
-
-    def test_small_count_names_damaged_tumblers(self, monkeypatch) -> None:
-        """nexus-heizf part 1: <=10 damaged documents are named directly —
-        no need to run a separate --list command to learn which."""
-        cat = self._cat(
-            collections=[
-                {"collection": "code__x__bge-base-en-v15-768__v1", "referenced": 1, "present": 0, "missing": 1},
-            ],
-            orphans_by_dim={
-                768: [{"tenant_id": "t", "doc_id": "1.2.3", "position": 0,
-                       "chash": "a" * 64, "collection": "code__x__bge-base-en-v15-768__v1"}],
-            },
-        )
-        r = self._run(monkeypatch, cat)
-        assert "1.2.3" in r.detail, r.detail
-        assert "--list" not in r.detail, r.detail
-
-    def test_large_count_points_at_list_flag_instead_of_naming(self, monkeypatch) -> None:
-        """nexus-heizf part 1: >10 damaged documents point at `nx catalog
-        manifest-verify --list` rather than dumping every tumbler inline."""
-        rows = [
-            {"tenant_id": "t", "doc_id": f"1.2.{i}", "position": 0,
-             "chash": f"{i:02x}" * 32, "collection": "code__x__bge-base-en-v15-768__v1"}
-            for i in range(11)
-        ]
-        cat = self._cat(
-            collections=[
-                {"collection": "code__x__bge-base-en-v15-768__v1", "referenced": 11, "present": 0, "missing": 11},
-            ],
-            orphans_by_dim={768: rows},
-        )
-        r = self._run(monkeypatch, cat)
-        assert "nx catalog manifest-verify --list" in r.detail, r.detail
-        assert "1.2.0" not in r.detail, r.detail
-
-    def test_distinct_chash_count_shown_when_cheap(self, monkeypatch) -> None:
-        """Two manifest rows (two positions) sharing ONE chash must report
-        1 distinct chash alongside the 2-row count — the enumeration is
-        already in hand (part 1's wiring), so this is free."""
-        cat = self._cat(
-            collections=[
-                {"collection": "code__x__bge-base-en-v15-768__v1", "referenced": 2, "present": 0, "missing": 2},
-            ],
-            orphans_by_dim={
-                768: [
-                    {"tenant_id": "t", "doc_id": "1.2.3", "position": 0,
-                     "chash": "a" * 64, "collection": "code__x__bge-base-en-v15-768__v1"},
-                    {"tenant_id": "t", "doc_id": "1.2.3", "position": 1,
-                     "chash": "a" * 64, "collection": "code__x__bge-base-en-v15-768__v1"},
-                ],
-            },
-        )
-        r = self._run(monkeypatch, cat)
-        assert "2 manifest row(s)" in r.detail, r.detail
-        assert "1 distinct chash(es)" in r.detail, r.detail
-
-    def test_enumeration_failure_degrades_to_collection_level_only(self, monkeypatch) -> None:
-        """manifest_orphans failing must never crash `nx doctor` or hide the
-        collection-level warning already established by manifest_verify_all
-        — it degrades to the old collection-only detail plus the --list
-        pointer (best-effort enrichment, not load-bearing)."""
-        cat = self._cat(
-            collections=[
-                {"collection": "code__x__bge-base-en-v15-768__v1", "referenced": 1, "present": 0, "missing": 1},
-            ],
-            orphans_exc=RuntimeError("engine unreachable"),
-        )
-        r = self._run(monkeypatch, cat)
-        assert r.ok is False and r.warn is True
-        assert "code__x__bge-base-en-v15-768__v1" in r.detail
-        assert "nx catalog manifest-verify --list" in r.detail, r.detail
-
-    def test_unroutable_collection_reported_loud_not_silent(self, monkeypatch) -> None:
-        """nexus-h1zu0: a damaged collection whose model token has no known
-        dim routing must be surfaced explicitly, never silently dropped
-        from the enumeration with no error."""
-        cat = self._cat(
-            collections=[
-                {"collection": "code__x__some-future-model-9000__v1", "referenced": 1, "present": 0, "missing": 1},
-            ],
-            orphans_by_dim={},
-        )
-        r = self._run(monkeypatch, cat)
-        assert "could not be enumerated" in r.detail, r.detail
-        assert "code__x__some-future-model-9000__v1" in r.detail, r.detail
-
-    def test_fully_resolvable_manifest_is_clean(self, monkeypatch) -> None:
-        cat = self._cat(collections=[
-            {"collection": "code__x", "referenced": 1, "present": 1, "missing": 0},
-        ])
-        r = self._run(monkeypatch, cat)
-        assert r.ok is True
-        assert "none" in r.detail
-
-    def test_nothing_to_compare_is_not_reported_as_clean(self, monkeypatch) -> None:
-        """NON-VACUITY: zero collections actually compared must read as SKIPPED,
-        never as a clean bill of health. A check whose silent-pass mode is
-        'found nothing to check' is the failure mode this whole class is about.
-        """
-        cat = self._cat(collections=[])
-        r = self._run(monkeypatch, cat)
-        assert r.ok is True
-        assert "skipped" in r.detail, r.detail
-        assert "none (" not in r.detail
-
-    def test_check_is_not_disabled_on_http_vector_client_box(self, monkeypatch) -> None:
-        """nexus-ac4id regression, direct assert: the check used to crash on
-        ``t3.list_collections()`` returning dicts (the HttpVectorClient
-        shape) and render a visible DISABLED warn. manifest_verify_all()
-        never touches T3 collection listing at all, so this class of crash
-        structurally cannot recur — assert the DISABLED/ac4id off-switch
-        text is gone from a normal run."""
-        cat = self._cat(collections=[
-            {"collection": "code__x", "referenced": 1, "present": 1, "missing": 0},
-        ])
-        r = self._run(monkeypatch, cat)
-        assert "DISABLED" not in r.detail
-        assert "ac4id" not in r.detail
-
-    def test_engine_predating_fence_renders_skipped_with_warning(self, monkeypatch) -> None:
-        """memo §3.4's fail-open+WARNING contract, applied to the doctor
-        sweep's own read: a 404 (pre-fence engine) must never crash `nx
-        doctor` and must never render as a clean pass — SKIPPED + a soft
-        warning (⚠), same shape as the old DISABLED interim."""
-        cat = self._cat(raise_status=404)
-        r = self._run(monkeypatch, cat)
-        assert r.ok is False and r.warn is True
-        assert "SKIPPED" in r.detail
-        # GREP-LEVEL PARITY tripwire (.6 review (d)): fresh-install-mvv.sh
-        # allowlists this warn by grepping for EXACTLY this substring —
-        # rewording health.py's detail without updating the script's
-        # ALLOWLIST_REGEX reds the MVV at battery time. This pins the pair
-        # at unit-test speed instead. Both self-destruct at the v0.1.62
-        # floor bump (the 404 branch stops firing on a virgin box).
-        assert "engine predates the index-run fence" in r.detail
-
-    def test_other_transport_failure_renders_skipped_with_warning_not_clean(self, monkeypatch) -> None:
-        cat = self._cat(raise_status=500)
-        r = self._run(monkeypatch, cat)
-        assert r.ok is False and r.warn is True
-        assert "SKIPPED" in r.detail
-
-    def test_catalog_unavailable_degrades_to_plain_skip(self, monkeypatch) -> None:
-        import nexus.health as h
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader",
-            lambda *a, **k: None, raising=False,
-        )
-        r = h._check_dangling_manifests()[0]
-        assert r.ok is True
-        assert "no catalog" in r.detail
-
-    def test_detail_always_carries_the_population_disjointness_note(self, monkeypatch) -> None:
-        """nexus-h1zu0 / substantive-critic Significant-1 (2026-08-05): the
-        disjointness caveat vs `purge-trash`'s 'stranded' population must be
-        in the LIVE detail text an agent actually parses, not docstring/help
-        only — the 2026-08-04 nexus-55l58 shakedown was misled by exactly
-        that gap."""
-        cat = self._cat(collections=[
-            {"collection": "code__x__bge-base-en-v15-768__v1", "referenced": 1, "present": 0, "missing": 1},
-        ])
-        r = self._run(monkeypatch, cat)
-        assert "purge-trash" in r.detail, r.detail
-        assert "stranded" in r.detail, r.detail
-
-    def test_text_mode_states_unroutable_count_even_with_zero_enumerated_rows(
-        self, monkeypatch,
-    ) -> None:
-        """nexus-heizf code-review fix round: when every damaged collection
-        is unroutable, total_rows is 0 but the warn must still be legible —
-        the unroutable count/names, not a bare '0 row(s)' that reads as
-        contradicting the non-zero exit."""
-        cat = self._cat(collections=[
-            {"collection": "code__x__unknown-token__v1", "referenced": 1, "present": 0, "missing": 1},
-        ])
-        r = self._run(monkeypatch, cat)
-        assert "could not be enumerated" in r.detail, r.detail
-        assert "code__x__unknown-token__v1" in r.detail, r.detail
+# RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: TestCheckDanglingManifests
+# DELETED — health.py's _check_dangling_manifests is retired entirely
+# (the manifest-chunk FK makes the dangling state it detected
+# unreachable). See TestManifestNullCollectionExclusionIsMechanical below
+# for the mechanical pin on what stays.
 
 
 class TestCheckChashConformanceReport:
@@ -2459,6 +2198,91 @@ class TestCheckChashConformanceReport:
         assert "3 chunk row(s)" in r.detail, r.detail
 
 
+class TestManifestNullCollectionExclusionIsMechanical:
+    """RDR-191 Phase 6 (bead nexus-o8dil.33) MECHANICAL EXCLUSION pin.
+
+    Decision item 4 retires ``manifest_orphans``, ``manifest_verify``/
+    ``manifest_verify_all``, ``manifest_backfill``, and
+    ``_check_dangling_manifests`` — but EXPLICITLY, BY NAME, does NOT retire
+    ``_check_manifest_null_collection`` / ``manifest_null_collection_report``:
+    the manifest-chunk FK does not cover NULL-collection rows (PostgreSQL
+    ``MATCH SIMPLE`` exempts any row with a NULL key column from enforcement
+    entirely), so this census remains the ONLY visibility into a population
+    that stays permanently unenforced.
+
+    The RDR's own Gate Critical 1 records that this exact exclusion was
+    ALREADY LOST ONCE — "the C1 correction was written in prose and never
+    applied" to an earlier draft of Decision item 4. A comment saying "do
+    not delete" is exactly what failed last time. This test makes the
+    exclusion MECHANICAL: it asserts both symbols still exist as live,
+    callable, non-stub code, so a future editor who deletes them (following
+    a literal read of "retire the manifest-verify apparatus" without
+    re-reading this carve-out) reds a real test, not a comment they can
+    skip past.
+    """
+
+    def test_check_manifest_null_collection_exists_and_is_callable(self) -> None:
+        import inspect
+
+        import nexus.health as h
+
+        assert hasattr(h, "_check_manifest_null_collection"), (
+            "nexus.health._check_manifest_null_collection must still exist — "
+            "RDR-191 Decision item 4's explicit carve-out, not retired "
+            "alongside _check_dangling_manifests"
+        )
+        assert callable(h._check_manifest_null_collection)
+        assert not inspect.iscoroutinefunction(h._check_manifest_null_collection)
+
+    def test_check_manifest_null_collection_still_functions(self, monkeypatch) -> None:
+        """Not just importable — actually runs and returns a real result."""
+        import nexus.health as h
+
+        class _Cat:
+            def manifest_null_collection_report(self) -> dict:
+                return {"total": 0, "backfillable": 0, "unavailable": False}
+
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: _Cat(), raising=False,
+        )
+        results = h._check_manifest_null_collection()
+        assert isinstance(results, list) and len(results) == 1
+        assert results[0].ok is True
+
+    def test_manifest_null_collection_report_exists_and_is_callable(self) -> None:
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        assert hasattr(HttpCatalogClient, "manifest_null_collection_report"), (
+            "HttpCatalogClient.manifest_null_collection_report must still "
+            "exist — RDR-191 Decision item 4's explicit carve-out, not "
+            "retired alongside manifest_verify/manifest_verify_all/"
+            "manifest_orphans/manifest_backfill"
+        )
+        assert callable(HttpCatalogClient.manifest_null_collection_report)
+
+    def test_doctor_still_registers_the_null_collection_check(self) -> None:
+        """The exclusion must be mechanical end-to-end, not just at the
+        function definition — a still-defined-but-unregistered check would
+        be dead code wearing the carve-out's name."""
+        import inspect
+
+        import nexus.health as h
+
+        source = inspect.getsource(h.run_health_checks) if hasattr(h, "run_health_checks") else None
+        if source is None:
+            # Fall back to scanning the whole module for the registration
+            # call if the sweep entrypoint's name ever changes — the
+            # invariant under test is "somewhere, doctor calls this",
+            # not the entrypoint's own name.
+            source = inspect.getsource(h)
+        assert "_check_manifest_null_collection()" in source, (
+            "nx doctor must still invoke _check_manifest_null_collection() "
+            "somewhere in its sweep — found in nexus.health source: "
+            f"{'_check_manifest_null_collection()' in source}"
+        )
+
+
 class TestCheckManifestNullCollection:
     """Substantive critique finding 1 (T2
     nexus/chroma-residue-C2-durability-critique-2026-08-10):
@@ -2569,127 +2393,10 @@ class TestCheckManifestNullCollection:
         assert r.detail == "none"
 
 
-class TestManifestOrphanReportCompleteness:
-    """nexus-heizf code-review fix round (2026-08-05): manifest_orphan_report
-    must never treat a truncated or failed refetch as a complete result —
-    cross-checked against the census's own `missing` count per collection."""
-
-    def _cat(self, *, responses: dict[int, list]):
-        class _Cat:
-            def manifest_orphans(self, dim: int, *, limit: int = 100) -> dict:
-                queue = responses.get(dim, [])
-                if not queue:
-                    return {"dim": dim, "count": 0, "orphans": []}
-                resp = queue.pop(0)
-                if isinstance(resp, Exception):
-                    raise resp
-                return resp
-        return _Cat()
-
-    def _row(self, doc_id: str, position: int, chash: str, collection: str) -> dict:
-        return {
-            "tenant_id": "t", "doc_id": doc_id, "position": position,
-            "chash": chash, "collection": collection,
-        }
-
-    def test_refetch_failure_marks_collection_incomplete_not_silently_complete(self) -> None:
-        from nexus.health import manifest_orphan_report
-
-        coll = "code__x__bge-base-en-v15-768__v1"
-        cat = self._cat(responses={
-            768: [
-                # First (sample) call: count says 5 total, only 1 comes back.
-                {"dim": 768, "count": 5, "orphans": [self._row("1.2.3", 0, "a" * 64, coll)]},
-                # Refetch attempt fails outright.
-                RuntimeError("engine unreachable mid-refetch"),
-            ],
-        })
-        report = manifest_orphan_report(cat, [{"collection": coll, "missing": 5, "referenced": 5}])
-
-        assert report["total_rows"] == 1, "the partial sample must still be reported, not discarded"
-        assert coll not in report["unroutable_collections"]
-        assert report["incomplete_collections"] == {coll: {"enumerated": 1, "expected": 5}}
-
-    def test_refetch_success_clears_incomplete(self) -> None:
-        from nexus.health import manifest_orphan_report
-
-        coll = "code__x__bge-base-en-v15-768__v1"
-        cat = self._cat(responses={
-            768: [
-                {"dim": 768, "count": 2, "orphans": [self._row("1.2.3", 0, "a" * 64, coll)]},
-                {"dim": 768, "count": 2, "orphans": [
-                    self._row("1.2.3", 0, "a" * 64, coll),
-                    self._row("1.2.3", 1, "b" * 64, coll),
-                ]},
-            ],
-        })
-        report = manifest_orphan_report(cat, [{"collection": coll, "missing": 2, "referenced": 2}])
-
-        assert report["total_rows"] == 2
-        assert report["incomplete_collections"] == {}
-
-    def test_count_exceeding_ceiling_bounds_the_refetch_and_marks_incomplete(
-        self, monkeypatch,
-    ) -> None:
-        """The refetch must NEVER request more than
-        `_MANIFEST_ORPHANS_MAX_ROWS_PER_DIM` — a single damaged dim with a
-        huge orphan population must not drive an unbounded response."""
-        import nexus.health as h
-        monkeypatch.setattr(h, "_MANIFEST_ORPHANS_MAX_ROWS_PER_DIM", 3)
-
-        coll = "code__x__bge-base-en-v15-768__v1"
-        calls: list[int] = []
-
-        class _Cat:
-            def manifest_orphans(self, dim: int, *, limit: int = 100) -> dict:
-                calls.append(limit)
-                if len(calls) == 1:
-                    return {"dim": dim, "count": 100, "orphans": [self._row_static("1.2.3", 0, "a" * 64, coll)]}
-                # Second call: engine-wide count is still 100, but the
-                # ceiling-bounded refetch can only ask for `limit` rows.
-                return {
-                    "dim": dim, "count": 100,
-                    "orphans": [
-                        self._row_static("1.2.3", i, f"{i:064x}", coll) for i in range(limit)
-                    ],
-                }
-
-            @staticmethod
-            def _row_static(doc_id, position, chash, collection):
-                return {"tenant_id": "t", "doc_id": doc_id, "position": position,
-                        "chash": chash, "collection": collection}
-
-        from nexus.health import manifest_orphan_report
-        report = manifest_orphan_report(_Cat(), [{"collection": coll, "missing": 100, "referenced": 100}])
-
-        assert calls == [h._MANIFEST_ORPHANS_SAMPLE_LIMIT, 3], (
-            f"refetch must be bounded to the ceiling (3), got calls={calls}"
-        )
-        assert report["incomplete_collections"] == {coll: {"enumerated": 3, "expected": 100}}
-
-    def test_malformed_position_is_skipped_not_raised(self) -> None:
-        """nexus-heizf code-review fix round: a malformed `position` from
-        the wire must be logged and skipped, never an unhandled exception —
-        `manifest_orphan_report`'s own docstring promises "never raises"."""
-        from nexus.health import manifest_orphan_report
-
-        coll = "code__x__bge-base-en-v15-768__v1"
-        cat = self._cat(responses={
-            768: [{
-                "dim": 768, "count": 2,
-                "orphans": [
-                    self._row("1.2.3", "not-an-int", "a" * 64, coll),
-                    self._row("1.2.3", 1, "b" * 64, coll),
-                ],
-            }],
-        })
-        report = manifest_orphan_report(cat, [{"collection": coll, "missing": 2, "referenced": 2}])
-
-        # Both rows counted (total_rows), but only the parseable position
-        # landed in the doc's position list.
-        assert report["total_rows"] == 2
-        assert report["collections"][coll]["1.2.3"]["positions"] == [1]
-        assert report["collections"][coll]["1.2.3"]["chashes"] == {"a" * 64, "b" * 64}
+# RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: TestManifestOrphanReportCompleteness
+# DELETED — health.py's manifest_orphan_report (and the manifest_orphans
+# client method it wired) are retired entirely alongside
+# _check_dangling_manifests.
 
 
 class TestCheckStaleIndexingRuns:

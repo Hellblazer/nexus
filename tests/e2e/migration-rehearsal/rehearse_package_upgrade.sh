@@ -17,13 +17,36 @@
 #   assert: /version == $NEW_ENGINE_TAG, service healthy, chash probe runs
 #           the VIEW-era statements (no legacy fallback), T1 round-trips and
 #           the pre-upgrade row survived the cycle.
+#
+# UPGRADE TARGET (Stage 4): run.sh stages EITHER the working-tree wheel
+# (default) OR, when NEXUS_TARGET_RELEASE was set on the host, the REAL
+# published PyPI wheel for that version (sha256-verified against PyPI's own
+# JSON API before it ever reaches this box) — see run.sh's own header for
+# the mechanics. Either way the file lands at the SAME path
+# ($HOME/worktree-wheel/conexus-*.whl); this script does not need to know
+# which one it is to install it. TARGET_RELEASE (optional; forwarded by
+# run.sh only in published-target mode) exists PURELY so this script's own
+# logging and verdict line can NAME which axis ran — a log reader must never
+# have to guess "worktree" vs "published X.Y.Z" (nexus-86mx2, 2026-08-14).
+#
+# JOURNEY OWNERSHIP: this script owns the UPGRADE axis (an EXISTING install's
+# PACKAGE moving forward while its engine converges). It does not test
+# whether a client that has NEVER upgraded can WRITE against a newer engine
+# fresh — that is tests/e2e/published-client-write-gate.sh's axis (nexus-
+# 86mx2). Neither substitutes for the other.
 set -uo pipefail
 
 PREV_RELEASE="${PREV_RELEASE:?PREV_RELEASE must be set (e.g. 6.9.0)}"
 PREV_ENGINE_TAG="${PREV_ENGINE_TAG:?PREV_ENGINE_TAG must be set (e.g. engine-service-v0.1.42)}"
 NEW_ENGINE_TAG="${NEW_ENGINE_TAG:?NEW_ENGINE_TAG must be set (e.g. engine-service-v0.1.43)}"
+TARGET_RELEASE="${TARGET_RELEASE:-}"
 PREV_EXPECT="${PREV_ENGINE_TAG#engine-service-v}"
 NEW_EXPECT="${NEW_ENGINE_TAG#engine-service-v}"
+if [ -n "$TARGET_RELEASE" ]; then
+  UPGRADE_TARGET_LABEL="published conexus $TARGET_RELEASE"
+else
+  UPGRADE_TARGET_LABEL="working tree"
+fi
 FAILS=0
 
 say()  { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
@@ -135,16 +158,22 @@ fi
 # ── Stage 4: PACKAGE upgrade ONLY — the engine binary is NEVER touched from
 #    here on. This is the exact GH #1402 shape: `uv tool upgrade conexus`
 #    moves the client, the engine on disk does not move by itself.
-say "Stage 4 — PACKAGE upgrade only (uv pip install --reinstall <worktree wheel>)"
+say "Stage 4 — PACKAGE upgrade only (uv pip install --reinstall <$UPGRADE_TARGET_LABEL wheel>)"
 WHEEL="$(ls "$HOME"/worktree-wheel/conexus-*.whl 2>/dev/null | head -1)"
 if [ -z "$WHEEL" ]; then
-  bad "no worktree wheel found in $HOME/worktree-wheel/"; say "ABORT"; exit 1
+  bad "no upgrade-target wheel found in $HOME/worktree-wheel/"; say "ABORT"; exit 1
 fi
 BEFORE_SHA="$(sha256sum "$HOME/.config/nexus/service/nexus-service" 2>/dev/null | awk '{print $1}')"
 if uv pip install --python "$HOME/nxenv" --reinstall "$WHEEL" 2>&1 | tail -5 | sed 's/^/       /'; then
-  ok "package upgraded to the working-tree build ($WHEEL)"
+  ok "package upgraded to $UPGRADE_TARGET_LABEL ($WHEEL)"
 else
   bad "package upgrade failed"; say "ABORT"; exit 1
+fi
+if [ -n "$TARGET_RELEASE" ]; then
+  GOT_CLIENT_VER="$(nx --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  [ "$GOT_CLIENT_VER" = "$TARGET_RELEASE" ] \
+    && ok "nx --version reports $GOT_CLIENT_VER (matches published target $TARGET_RELEASE — the PUBLISHED bytes, not a worktree rebuild)" \
+    || bad "nx --version reports $GOT_CLIENT_VER, expected published target $TARGET_RELEASE"
 fi
 AFTER_SHA="$(sha256sum "$HOME/.config/nexus/service/nexus-service" 2>/dev/null | awk '{print $1}')"
 if [ "$BEFORE_SHA" = "$AFTER_SHA" ]; then
@@ -348,10 +377,10 @@ fi
 
 say "RESULT"
 if [ "$FAILS" -eq 0 ]; then
-  printf '\033[32mPACKAGE-UPGRADE CONVERGENCE MVV PASSED\033[0m — %s + %s -> package-only upgrade to the working tree -> converged to %s for real, service healthy, chash probe clean via the view, T1 survives the cycle\n' \
-    "conexus $PREV_RELEASE" "$PREV_ENGINE_TAG" "$NEW_ENGINE_TAG"
+  printf '\033[32mPACKAGE-UPGRADE CONVERGENCE MVV PASSED\033[0m — %s + %s -> package-only upgrade to %s -> converged to %s for real, service healthy, chash probe clean via the view, T1 survives the cycle\n' \
+    "conexus $PREV_RELEASE" "$PREV_ENGINE_TAG" "$UPGRADE_TARGET_LABEL" "$NEW_ENGINE_TAG"
   exit 0
 else
-  printf '\033[31mPACKAGE-UPGRADE CONVERGENCE MVV FAILED — %d check(s) failed\033[0m\n' "$FAILS"
+  printf '\033[31mPACKAGE-UPGRADE CONVERGENCE MVV FAILED — %d check(s) failed -> %s\033[0m\n' "$FAILS" "$UPGRADE_TARGET_LABEL"
   exit 1
 fi

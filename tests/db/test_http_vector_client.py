@@ -2232,3 +2232,114 @@ class TestUpsertChunksPaging:
         )
         assert len(calls) == 1
         assert len(calls[0]["ids"]) == 200
+
+
+# ── nexus-wrwb7: mint_token resolution seam (RDR-005 2a self-minting) ───────
+
+
+class _StubDataTokenManager:
+    """Deterministic stand-in for DataTokenManager -- avoids touching the
+    real credential/config machinery at this transport-boundary level."""
+
+    def __init__(self, token: str | None) -> None:
+        self._token = token
+        self.bearer_for_calls: list[tuple[str, str]] = []
+        self.invalidate_calls: list[tuple[str, str]] = []
+
+    def bearer_for(self, base_url: str, tenant: str) -> str | None:
+        self.bearer_for_calls.append((base_url, tenant))
+        return self._token
+
+    def invalidate(self, base_url: str, tenant: str) -> None:
+        self.invalidate_calls.append((base_url, tenant))
+
+
+class _FakeHttpResponse:
+    def __init__(self, body: dict) -> None:
+        import json as _json
+        self._raw = _json.dumps(body).encode()
+
+    def read(self) -> bytes:
+        return self._raw
+
+    def __enter__(self) -> "_FakeHttpResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeOpener:
+    """Records every ``urllib.request.Request`` handed to ``.open()``."""
+
+    def __init__(self, body: dict | None = None) -> None:
+        self.requests: list = []
+        self._body = body if body is not None else {"ok": True}
+
+    def open(self, req, timeout=None):  # noqa: ANN001, ANN201, ARG002 — mirrors urllib.request.OpenerDirector.open
+        self.requests.append(req)
+        return _FakeHttpResponse(self._body)
+
+
+class TestDataTokenResolutionSeamRequestOnce:
+    """The T3 half of the DataTokenManager resolution seam:
+    ``_request_once`` (~http_vector_client.py L457-484)."""
+
+    def test_unconfigured_presents_the_static_token_unchanged(self, monkeypatch) -> None:
+        import nexus.db.http_vector_client as hv
+
+        monkeypatch.setattr(hv, "_resolve_endpoint", lambda: ("http://svc", "static-tok"))
+        stub = _StubDataTokenManager(None)  # None == "no mint_token configured"
+        monkeypatch.setattr("nexus.db.data_token.get_data_token_manager", lambda: stub)
+        opener = _FakeOpener()
+        monkeypatch.setattr(hv, "_keepalive_opener", lambda: opener)
+
+        hv._request_once("GET", "/v1/x", tenant="acme", timeout=10, body=None)
+
+        assert stub.bearer_for_calls == [("http://svc", "acme")]
+        assert opener.requests[-1].get_header("Authorization") == "Bearer static-tok"
+
+    def test_configured_presents_the_data_token_not_the_static_one(self, monkeypatch) -> None:
+        import nexus.db.http_vector_client as hv
+
+        monkeypatch.setattr(hv, "_resolve_endpoint", lambda: ("http://svc", "static-tok"))
+        stub = _StubDataTokenManager("minted-data-tok")
+        monkeypatch.setattr("nexus.db.data_token.get_data_token_manager", lambda: stub)
+        opener = _FakeOpener()
+        monkeypatch.setattr(hv, "_keepalive_opener", lambda: opener)
+
+        hv._request_once("GET", "/v1/x", tenant="acme", timeout=10, body=None)
+
+        assert opener.requests[-1].get_header("Authorization") == "Bearer minted-data-tok"
+
+    def test_401_retry_invalidates_the_data_token_cache_entry(self, monkeypatch) -> None:
+        """_request's existing re-resolve-and-retry-once path (nexus-pebfx.1)
+        must ALSO drop the DataTokenManager's cached entry for the endpoint
+        the failed request used, so the retry actually re-mints instead of
+        replaying the same rejected token."""
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+
+        monkeypatch.setattr(hv, "_resolve_endpoint", lambda: ("http://svc", "static-tok"))
+        stub = _StubDataTokenManager("minted-data-tok")
+        monkeypatch.setattr("nexus.db.data_token.get_data_token_manager", lambda: stub)
+        monkeypatch.setattr(hv, "_invalidate_endpoint", lambda: None)
+        monkeypatch.setattr(hv, "_wait_for_lease_republication", lambda: None)
+
+        calls: list[int] = []
+
+        def fake_once(method, path, *, tenant, timeout, body):
+            calls.append(1)
+            if len(calls) == 1:
+                raise urllib.error.HTTPError(
+                    url="http://svc/v1/x", code=401, msg="unauthorized", hdrs={}, fp=None,
+                )
+            return {"ok": True}
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+
+        result = hv._request("GET", "/v1/x", tenant="acme", timeout=10, body=None)
+
+        assert result == {"ok": True}
+        assert len(calls) == 2
+        assert stub.invalidate_calls == [("http://svc", "acme")]

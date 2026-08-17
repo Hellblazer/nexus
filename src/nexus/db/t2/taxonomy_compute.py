@@ -135,6 +135,27 @@ class AuditHub(NamedTuple):
 # ── Clustering primitives ────────────────────────────────────────────────────
 
 
+# nexus-9b9oi cap parameters. The divisor caps any single HDBSCAN cluster at
+# 25% of the collection. The floor is 10x min_cluster_size: low enough to
+# bind throughout the n=100-200 window (boundary-swept on real corpus
+# subsamples 2026-08-14 — a floor of 100 no-ops exactly there, leaving e.g. a
+# 98-of-150 root-grab uncapped, the nexus-9h7nz Critical), high enough that
+# legitimate coarse clusters in tiny collections survive (a 30-doc cluster in
+# a 60-doc collection clears it). Chunks HDBSCAN marks as noise stay
+# topic-less — backfill is tracked separately (nexus-065ib). NOTE: sklearn's
+# max_cluster_size only constrains the DEFAULT 'eom' selection — it silently
+# no-ops under cluster_selection_method='leaf'. _cluster() relies on eom;
+# anyone switching selection methods must revisit this cap.
+MAX_CLUSTER_FRACTION_DIVISOR: int = 4
+MAX_CLUSTER_SIZE_FLOOR: int = 50
+
+
+def _max_cluster_size(n: int) -> int:
+    """Cap on any single HDBSCAN cluster (nexus-9b9oi): 25% of the
+    collection, floored at :data:`MAX_CLUSTER_SIZE_FLOOR`."""
+    return max(n // MAX_CLUSTER_FRACTION_DIVISOR, MAX_CLUSTER_SIZE_FLOOR)
+
+
 def _cluster(
     embeddings: np.ndarray,
     n: int,
@@ -142,7 +163,9 @@ def _cluster(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Cluster embeddings. Returns (labels, centroids).
 
-    Uses HDBSCAN for small collections (density-based, automatic k).
+    Uses HDBSCAN for small collections (density-based, automatic k), with a
+    :func:`_max_cluster_size` cap so eom selection cannot return one
+    collection-sized root cluster (nexus-9b9oi).
     Switches to MiniBatchKMeans for large collections (O(n) speed).
 
     Pure (no instance state) so the daemon-routable COMPUTE half
@@ -153,6 +176,14 @@ def _cluster(
         _log.info("clustering_hdbscan", n=n, collection=collection_name)
         clusterer = SklearnHDBSCAN(
             min_cluster_size=5,
+            # nexus-9b9oi: eom cluster selection root-grabs on real embedding
+            # corpora — knowledge__delos (2101 chunks, 15 papers) came back as
+            # ONE cluster holding 94% of the collection, flattening topic
+            # grouping and retrieval diversity. Capping cluster size forces
+            # selection down the condensed tree. Empirically insensitive
+            # between 20% and 40% caps on that corpus (identical 57-cluster
+            # output); 25% is the conservative middle.
+            max_cluster_size=_max_cluster_size(n),
             store_centers="centroid",
             copy=True,
         )

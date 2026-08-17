@@ -14,7 +14,6 @@ import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_REMAP;
-import static dev.nexus.service.jooq.nexus.Tables.REMAP_MEMBERSHIP;
 
 /**
  * RDR-186 bead nexus-146xx.4 — jOOQ-based chash_remap repository.
@@ -27,9 +26,12 @@ import static dev.nexus.service.jooq.nexus.Tables.REMAP_MEMBERSHIP;
  * and enforced by FORCE RLS.
  *
  * <p><strong>RF-186-1:</strong> this repository exposes raw-fact operations
- * only — record, clear, and the live membership counts. There is no verdict
- * read or write surface, and none may ever be added (Gap-4 pin; see the
- * remap-001 changelog header).
+ * only — record and clear. There is no verdict read or write surface, and
+ * none may ever be added (Gap-4 pin; see the remap-001 changelog header).
+ * The live-membership read ({@code membership(...)} / {@code
+ * nexus.remap_membership()}) was itself DELETED at nexus-lgdel.l2 — an
+ * orphaned surface with zero production callers, not a verdict surface
+ * (RF-186-1 was never about it), but gone all the same.
  *
  * <p>Batch semantics mirror the SQLite store: {@link #recordBatch} is ONE
  * transaction (the RDR-185 r2 ordering unit — the map batch commits
@@ -92,17 +94,19 @@ public final class RemapRepository {
             requireNonBlank(e.oldId(), "old_id");
             requireNonBlank(e.targetCollection(), "target_collection");
             requireNonBlank(e.provenance(), "provenance");
-            // RDR-180 (nexus-jxizy.7): 64-hex is the canonical fact width;
-            // 32-hex era facts remain readable (DB CHECK length IN (32,64)).
-            // The HTTP boundary (RemapHandler.normalizeChash) already
-            // enforces 64 for NEW facts; this repo-level guard mirrors the
-            // DB CHECK as belt-and-suspenders.
-            int len = e.newChash() == null ? -1 : e.newChash().length();
-            if (len != 32 && len != 64) {
-                throw new IllegalArgumentException(
-                    "new_chash must be 64 hex chars (or a 32-hex era fact), got: "
-                    + (e.newChash() == null ? "null" : len + " chars"));
-            }
+            // RDR-194 D3 (bead nexus-tk070.p2): the 32-hex era-fact
+            // tolerance this guard used to mirror is GONE with the column
+            // itself — chash_remap.new_chash is bytea now, CHECKed
+            // octet_length=32 (remap-003-new-chash-bytea.xml), which is
+            // 64-hex-decoded only. cloud-count-2 (T2 [22670]) measured the
+            // live chash_remap at exactly ZERO rows, so there was no live
+            // 32-hex population this guard needed to keep admitting — the
+            // tolerance dies with the conversion, not ahead of it or after
+            // it. This guard now enforces the same canonical form
+            // RemapHandler.normalizeChash already enforces for NEW facts at
+            // the HTTP boundary (Chash.requireCanonical), rather than
+            // mirroring a DB CHECK that no longer tolerates 32-hex either.
+            requireCanonicalNewChash(e.newChash());
         }
 
         // LAST occurrence wins (executemany overwrite semantics), then sort by
@@ -127,16 +131,16 @@ public final class RemapRepository {
                     CHASH_REMAP.PROVENANCE);
             var step = insert.values(tenant,
                     deduped.get(0).sourceCollection(), deduped.get(0).oldId(),
-                    deduped.get(0).newChash(), deduped.get(0).targetCollection(),
+                    newChashBytes(deduped.get(0).newChash()), deduped.get(0).targetCollection(),
                     now, deduped.get(0).provenance());
             for (int i = 1; i < deduped.size(); i++) {
                 RemapEntry e = deduped.get(i);
                 step = step.values(tenant, e.sourceCollection(), e.oldId(),
-                        e.newChash(), e.targetCollection(), now, e.provenance());
+                        newChashBytes(e.newChash()), e.targetCollection(), now, e.provenance());
             }
             step.onConflict(CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.OLD_ID)
                 .doUpdate()
-                .set(CHASH_REMAP.NEW_CHASH, DSL.field("EXCLUDED.new_chash", String.class))
+                .set(CHASH_REMAP.NEW_CHASH, DSL.field("EXCLUDED.new_chash", byte[].class))
                 .set(CHASH_REMAP.TARGET_COLLECTION, DSL.field("EXCLUDED.target_collection", String.class))
                 .set(CHASH_REMAP.CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
                 .set(CHASH_REMAP.PROVENANCE, DSL.field("EXCLUDED.provenance", String.class))
@@ -181,27 +185,6 @@ public final class RemapRepository {
     }
 
     /**
-     * The LIVE leg membership counts — delegates to
-     * {@code nexus.remap_membership()} (remap-002, bead .5). Computed fresh on
-     * every call; never cached, never persisted (RF-186-1).
-     *
-     * @return {@code [mapped_total, present_count]}; converged iff equal
-     *         (including 0 == 0 — nothing owed)
-     */
-    public long[] membership(String tenant, String sourceCollection, String targetCollection) {
-        requireNonBlank(sourceCollection, "source_collection");
-        requireNonBlank(targetCollection, "target_collection");
-        return tenantScope.withTenant(tenant, ctx -> {
-            var row = ctx.selectFrom(REMAP_MEMBERSHIP.call(sourceCollection, targetCollection))
-                         .fetchOne();
-            if (row == null) {
-                throw new IllegalStateException("remap_membership returned no row");
-            }
-            return new long[]{row.getMappedTotal(), row.getPresentCount()};
-        });
-    }
-
-    /**
      * One source collection's facts: {@code [old_id, new_chash,
      * target_collection]} rows — the client {@code entries_for_collection} /
      * {@code entries_with_targets} read shape (rollback + cascade, bead .6/.8).
@@ -216,7 +199,7 @@ public final class RemapRepository {
                .orderBy(CHASH_REMAP.OLD_ID)
                .fetch(r -> Map.of(
                        "old_id", r.value1(),
-                       "new_chash", r.value2(),
+                       "new_chash", newChashHex(r.value2()),
                        "target_collection", r.value3())));
     }
 
@@ -242,7 +225,7 @@ public final class RemapRepository {
                .orderBy(CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.OLD_ID)
                .limit(limit)
                .offset(offset)
-               .fetch(r -> List.of(r.value1(), r.value2())));
+               .fetch(r -> List.of(r.value1(), newChashHex(r.value2()))));
     }
 
     /**
@@ -277,5 +260,34 @@ public final class RemapRepository {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException("'" + field + "' must not be blank");
         }
+    }
+
+    /**
+     * RDR-194 D3: reject anything that is not the canonical 64-lowercase-hex
+     * form, with a teaching message naming the remedy for a caller that
+     * somehow still holds a non-canonical value — re-index the source to
+     * mint a canonical 64-hex chash (nexus-lgdel.l1: the former {@code
+     * nexus.chash_alias} legacy-reference resolution route is retired), or
+     * clear the unresolvable leg via {@code POST /v1/remap/clear_leg} — this
+     * repository never silently truncates, pads, or widens to admit either.
+     */
+    private static void requireCanonicalNewChash(String newChash) {
+        try {
+            Chash.requireCanonical(newChash, "'new_chash'");
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(e.getMessage()
+                + " — re-index the source to mint a canonical 64-hex chash, "
+                + "or clear the unresolvable leg via POST /v1/remap/clear_leg");
+        }
+    }
+
+    /** Hex -> the bytea storage form (the repository is the hex/bytes seam). */
+    private static byte[] newChashBytes(String newChashHex) {
+        return Chash.fromHex(newChashHex).toBytes();
+    }
+
+    /** Bytea -> the wire-hex form (D0.8: the wire contract stays 64-hex). */
+    private static String newChashHex(byte[] newChashBytes) {
+        return Chash.fromSha256Bytes(newChashBytes).toHex();
     }
 }

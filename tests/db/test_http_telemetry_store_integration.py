@@ -45,6 +45,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._t2_fixture_ops import canonical_chunk_id
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     create_tenant_token,
@@ -287,14 +288,15 @@ def tel_store_b(java_service):
 
 class TestRelevanceLogRoundTrip:
     def test_log_and_query_roundtrip(self, tel_store):
+        chunk_id = canonical_chunk_id("chunk-int")
         tel_store.log_relevance(
-            "integration test query", "chunk-int", "store_put",
+            "integration test query", chunk_id, "store_put",
             collection="knowledge__nexus", session_id="sess-int",
         )
         rows = tel_store.get_relevance_log(query="integration test query")
         assert len(rows) >= 1
         row = rows[0]
-        assert row["chunk_id"] == "chunk-int"
+        assert row["chunk_id"] == chunk_id
         assert row["action"] == "store_put"
         assert row["collection"] == "knowledge__nexus"
 
@@ -302,7 +304,7 @@ class TestRelevanceLogRoundTrip:
         """Import an old row then expire — must be deleted."""
         tel_store.import_relevance_row(
             query="expire-test-query",
-            chunk_id="expire-chunk",
+            chunk_id=canonical_chunk_id("expire-chunk"),
             collection="",
             action="store_put",
             session_id="",
@@ -320,7 +322,7 @@ class TestTimestampPreservation:
     def test_relevance_log_timestamp_preserved_verbatim(self, tel_store):
         tel_store.import_relevance_row(
             query="ts-fidelity-int-query",
-            chunk_id="chunk-ts-fidelity",
+            chunk_id=canonical_chunk_id("chunk-ts-fidelity"),
             collection="knowledge__nexus",
             action="store_put",
             session_id="sess-ts",
@@ -350,7 +352,7 @@ class TestTimestampPreservation:
         """Stored timestamp must be years before now(), not within seconds of now()."""
         tel_store.import_relevance_row(
             query="ts-not-now-query",
-            chunk_id="chunk-ts-not-now",
+            chunk_id=canonical_chunk_id("chunk-ts-not-now"),
             collection="",
             action="store_put",
             session_id="",
@@ -528,9 +530,10 @@ class TestDoNothingIdempotency:
     """Event log tables must silently ignore duplicate imports."""
 
     def test_relevance_log_double_import_no_duplicate(self, tel_store):
+        chunk_id = canonical_chunk_id("idm-chunk")
         kwargs = dict(
             query="idm-int-query",
-            chunk_id="idm-chunk",
+            chunk_id=chunk_id,
             collection="",
             action="store_put",
             session_id="sess",
@@ -538,7 +541,7 @@ class TestDoNothingIdempotency:
         )
         tel_store.import_relevance_row(**kwargs)
         tel_store.import_relevance_row(**kwargs)
-        rows = tel_store.get_relevance_log(query="idm-int-query", chunk_id="idm-chunk")
+        rows = tel_store.get_relevance_log(query="idm-int-query", chunk_id=chunk_id)
         assert len(rows) == 1, (
             f"DO NOTHING: second import must not create a duplicate row; got {len(rows)}"
         )
@@ -548,8 +551,9 @@ class TestFrecencyGreatestLeast:
     """Frecency uses GREATEST for counters/timestamps, LEAST for embedded_at."""
 
     def test_greatest_no_clobber(self, tel_store):
+        chunk_id = canonical_chunk_id("chunk-greatest-int")
         tel_store.import_frecency_row(
-            chunk_id="chunk-greatest-int",
+            chunk_id=chunk_id,
             embedded_at="2024-01-01T00:00:00Z",
             ttl_days=30,
             frecency_score=0.95,
@@ -558,7 +562,7 @@ class TestFrecencyGreatestLeast:
         )
         # Re-import with stale (lower) values
         tel_store.import_frecency_row(
-            chunk_id="chunk-greatest-int",
+            chunk_id=chunk_id,
             embedded_at="2023-01-01T00:00:00Z",
             ttl_days=30,
             frecency_score=0.50,
@@ -573,7 +577,7 @@ class TestFrecencyGreatestLeast:
         # into a ``self._headers`` dict at construction time.
         resp = httpx.get(
             f"{base_url}/v1/telemetry/frecency/get",
-            params={"chunk_id": "chunk-greatest-int"},
+            params={"chunk_id": chunk_id},
             headers=tel_store._auth_headers(),
         )
         assert resp.status_code == 200
@@ -593,10 +597,11 @@ class TestFrecencyGreatestLeast:
         # request via RefreshableHttpStoreMixin._auth_headers(), not baked
         # into a ``self._headers`` dict at construction time.
         headers = tel_store._auth_headers()
+        chunk_id = canonical_chunk_id("chunk-least-int")
 
         # Seed with 2024-01-01
         tel_store.import_frecency_row(
-            chunk_id="chunk-least-int",
+            chunk_id=chunk_id,
             embedded_at="2024-01-01T00:00:00Z",
             ttl_days=30,
             frecency_score=0.5,
@@ -605,7 +610,7 @@ class TestFrecencyGreatestLeast:
         )
         # Re-import with newer embedded_at (2025-06-01) — LEAST means 2024 should win
         tel_store.import_frecency_row(
-            chunk_id="chunk-least-int",
+            chunk_id=chunk_id,
             embedded_at="2025-06-01T00:00:00Z",
             ttl_days=30,
             frecency_score=0.3,
@@ -615,7 +620,7 @@ class TestFrecencyGreatestLeast:
 
         resp = httpx.get(
             f"{base_url}/v1/telemetry/frecency/get",
-            params={"chunk_id": "chunk-least-int"},
+            params={"chunk_id": chunk_id},
             headers=headers,
         )
         assert resp.status_code == 200
@@ -637,7 +642,7 @@ class TestCrossTenantRlsNegative:
 
     def test_relevance_log_tenant_isolation(self, tel_store, tel_store_b):
         unique_query = f"rls-neg-test-{id(tel_store)}"
-        tel_store.log_relevance(unique_query, "chunk-rls", "store_put")
+        tel_store.log_relevance(unique_query, canonical_chunk_id("chunk-rls"), "store_put")
         rows_b = tel_store_b.get_relevance_log(query=unique_query)
         assert len(rows_b) == 0, (
             f"RLS NEGATIVE: tenant B must not see tenant A's relevance_log rows; "

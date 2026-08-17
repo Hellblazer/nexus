@@ -105,8 +105,10 @@ def _manifest_row_from_dict(d: dict) -> ManifestRow:
     """
     return ManifestRow(
         position=int(d.get("position", 0)),
-        # RDR-180: the wire value is authoritative — full 64-hex for rekeyed
-        # rows, 32-hex for not-yet-rekeyed legacy rows. Never truncate.
+        # RDR-180: the wire value is authoritative — always the full 64-hex
+        # chash (the engine's octet_length=32 CHECK rejects any other width
+        # on write; the not-yet-rekeyed 32-hex population is gone, RDR-194
+        # P2 cloud-count-2 = zero). Never truncate.
         chash=d.get("chash") or "",
         chunk_index=d.get("chunk_index"),
         line_start=d.get("line_start"),
@@ -261,8 +263,10 @@ def _engine_error_detail(exc: httpx.HTTPStatusError) -> str:
 def _coerce_legacy_grandfathered(d: dict) -> dict:
     """Coerce a collection row's ``legacy_grandfathered`` to ``bool`` (nexus-u26b4).
 
-    ``CatalogRepository.collRow()``'s ``legacy_grandfathered`` column is a boxed
-    Integer on the wire (serializes as a JSON number, 0/1); local
+    ``CatalogRepository.collRow()``'s ``legacy_grandfathered`` was a boxed
+    Integer on the wire (JSON number, 0/1) until catalog-031-type-hygiene
+    (nexus-cefa1.2) made the column boolean; engines from that changeset on
+    send JSON true/false, and ``bool()`` accepts both shapes. Local
     ``Catalog.list_collections()`` (via ``_row_to_collection_dict``) already casts
     it to a real Python ``bool``. Mirrors that cast here so raw dict-returning
     callers (``get_collection``/``list_collections``/``collections_by_owner``) get
@@ -694,59 +698,16 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         result = self._post("/docs/chunk-counts", {"doc_ids": doc_ids})
         return {k: int(v) for k, v in (result or {}).items() if v is not None}
 
-    def manifest_backfill(self) -> int:
-        """Stamp manifest collection from the owning doc where NULL; return
-        the number of rows stamped (RDR-159 P-1b).
+    # RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: manifest_backfill() and
+    # manifest_orphans(dim) are RETIRED here — both engine routes are
+    # retired and both underlying SQL functions are DROPPED
+    # (catalog-030-retire-manifest-verify.xml); the manifest-chunk FK makes
+    # the dangling state they detected/fixed unreachable by construction.
+    # ``_MANIFEST_DIMS`` (384, 768, 1024) is redeclared where still needed
+    # (chash_conformance_report below).
 
-        Wraps the ``nexus.manifest_backfill()`` stored function via the
-        service (RDR-152: no direct Python PG connection). MUST be called
-        before :meth:`manifest_orphans` — pre-backfill NULL-collection rows
-        would otherwise read as false orphans.
-        """
-        result = self._post("/manifest/backfill", {})
-        return int((result or {}).get("stamped", 0))
-
-    #: dims the ``chunks_<dim>`` tables (and the stored function) accept.
+    #: dims the ``chash_conformance_report`` stored function accepts.
     _MANIFEST_DIMS = (384, 768, 1024)
-
-    def manifest_orphans(self, dim: int, *, limit: int = 100) -> dict:
-        """Manifest rows with no chunk row in ``chunks_<dim>`` (RDR-159 P-1b).
-
-        Returns ``{"dim": d, "count": n, "orphans": [...]}`` where ``count``
-        is the exact orphan count (the non-vacuous migration-validation
-        signal — zero is clean) and ``orphans`` is a diagnostic sample capped
-        at ``limit`` (must be > 0; the count is the gate, not the sample
-        length). count and sample are computed server-side in one transaction
-        so they agree.
-
-        The result is tenant-scoped: the stored function is SECURITY INVOKER
-        and the service counts under the request tenant's RLS GUC. ``dim``
-        must be one of 384/768/1024. Call :meth:`manifest_backfill` FIRST —
-        pre-backfill (NULL-collection) rows are excluded by the function, so
-        an orphan check on an un-backfilled manifest reads a false-clean zero.
-        """
-        if dim not in self._MANIFEST_DIMS:
-            raise ValueError(
-                f"dim must be one of {self._MANIFEST_DIMS}, got {dim!r}"
-            )
-        if limit <= 0:
-            raise ValueError(f"limit must be > 0, got {limit!r}")
-        result = self._get("/manifest/orphans", dim=dim, limit=limit)
-        result = result or {}
-        if "count" not in result:
-            # nexus-znwc2: `count` feeds the migration P3 validation gate
-            # (manifest_check) — a stripped field defaulting to 0 would be a
-            # vacuous PASS. Fail closed, matching relation_counts' model.
-            raise RuntimeError(
-                "manifest/orphans response carried no `count` field — cannot "
-                "verify orphan state; refusing a false-clean zero "
-                f"(response keys: {sorted(result)})"
-            )
-        return {
-            "dim": int(result.get("dim", dim)),
-            "count": int(result["count"]),
-            "orphans": result.get("orphans", []),
-        }
 
     def manifest_null_collection_report(self) -> dict:
         """Read-only census of the manifest population :meth:`manifest_orphans`
@@ -988,45 +949,19 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 return
             raise
 
-    def manifest_verify(self, doc_id: str) -> dict:
-        """GET /v1/catalog/manifest/verify?doc_id=X — one-document
-        ``{referenced, present, missing}`` (memo §3.2's SQL primitive,
-        narrowed to a single document).
-
-        This is a READ: unlike begin/complete/fail above, a 404 or any
-        other transport failure PROPAGATES — callers that need to
-        distinguish "the engine doesn't support this route yet" from "the
-        engine says the document is clean" (the doctor sweep, `nx catalog
-        verify`) must be able to tell the two apart. The ONE caller that
-        must fail open on ANY failure here
-        (:func:`nexus.doc_indexer._manifest_is_fully_present`) implements
-        that fail-open+WARNING contract itself, around this call.
-
-        CALLER TRAP: an empty *doc_id* is silently DROPPED by ``_get``'s
-        falsy-param filter (``{k: v for k, v in params.items() if v is not
-        None and v != ""}``) — the request goes out with NO ``doc_id`` query
-        param at all, which the engine's ``doc_id.isBlank()`` guard answers
-        with a 400, not a per-document result. This method does not guard
-        against it; callers must pass a non-empty *doc_id* (the only current
-        caller, ``_manifest_is_fully_present``, already short-circuits on an
-        empty ``doc_id`` before ever reaching here).
-        """
-        result = self._get("/manifest/verify", doc_id=doc_id)
-        return result or {}
-
-    def manifest_verify_all(self) -> dict:
-        """GET /v1/catalog/manifest/verify_all — every live document in the
-        tenant, grouped by collection: ``{"collections": [...], "count": n}``
-        (nexus-ac4id part 2 — the doctor sweep primitive; supersedes the
-        client-side per-collection T3 paging that check used to do).
-
-        A READ; propagates on failure like :meth:`manifest_verify` — the
-        doctor's own non-vacuity discipline (``checked == 0`` renders
-        SKIPPED, never a false-clean pass) needs to see a 404 as a real
-        error, not a silently-empty "0 collections checked."
-        """
-        result = self._get("/manifest/verify_all")
-        return result or {}
+    # RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: manifest_verify(doc_id)
+    # and manifest_verify_all() are RETIRED here — both GET routes are
+    # retired server-side (CatalogHandler) and nexus.manifest_verify_all()
+    # is DROPPED outright (catalog-030-retire-manifest-verify.xml); the
+    # manifest-chunk FK makes the dangling state they diagnosed unreachable.
+    # nexus.manifest_verify(text) itself is KEPT server-side — completeIndexRun
+    # depends on it internally — but this client no longer has a route to
+    # reach it, since the ONE prior caller of this method
+    # (doc_indexer._manifest_is_fully_present) is now a structural no-op:
+    # the FK guarantees any manifest row that exists already references a
+    # real chunk, so the "missing" question this method answered is
+    # provably always 0 for any row that could reach this call. See
+    # doc_indexer.py's _manifest_is_fully_present for the full trace.
 
     def relation_counts(self, relations: list[str]) -> dict[str, int]:
         """Tenant-scoped row counts for migration-verify relations.
@@ -1137,25 +1072,33 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
     def orphaned_links(self) -> list[dict]:
         """Return catalog_links rows whose from_tumbler or to_tumbler
-        resolves to no document (nexus-ysrwi, GH #1419 issue 7).
+        resolves to a TOMBSTONED (soft-deleted) document, not a live one
+        (nexus-ysrwi, GH #1419 issue 7; narrowed by RDR-194 § D2 /
+        nexus-tk070.p1).
 
-        ``catalog_links`` carries a PK and a UNIQUE constraint but NO
-        foreign key to ``catalog_documents`` (catalog-001-baseline.xml), so
-        a link survives when its referenced document is hard-deleted. The
-        only production hard-delete of document rows is
-        ``CatalogRepository.deleteCollectionTxn``'s per-collection
-        ``catalog_documents`` delete (called from :meth:`delete_collection`)
-        — it has no corresponding ``catalog_links`` cleanup step, so a
-        cross-collection link whose endpoint's collection gets deleted
-        dangles forever. Closing that write-time gap needs an engine change
-        (a new step in that transaction) — this method is the DETECTION
-        half only.
+        ``catalog_links`` now carries ``fk_catalog_links_from_document`` /
+        ``fk_catalog_links_to_document`` (catalog-032-links-tumbler-fk.xml,
+        ON DELETE CASCADE ON UPDATE CASCADE to ``catalog_documents
+        (tenant_id, tumbler)``), so a link whose endpoint has NO
+        ``catalog_documents`` row at all can no longer exist — the FK
+        rejects the write (surfaced client-side as ``ValueError`` from the
+        ``dangling_endpoint`` 400) and cascades any pre-existing such row
+        away on delete. What survives, and what this method now reports,
+        is the narrower case the FK deliberately does not cover: an
+        endpoint that resolves to a document row that still exists but is
+        tombstoned (``deleted_at`` set) — a soft delete, which satisfies
+        the FK but is no longer a *live* document. ``nx doctor
+        --check-dangling-links`` / ``--strict-dangling-links`` is RETIRED
+        (the FK closed the write-time gap that check existed to detect);
+        this method and its endpoint remain for the tombstoned-endpoint
+        case.
 
         Uses GET /v1/catalog/links/orphaned (v0.1.55,
         ``CatalogRepository.orphanedLinks`` / ``CatalogHandler
         .handleLinksOrphaned``). Each dict carries ``id``, ``from_tumbler``,
         ``to_tumbler``, ``link_type``, ``created_by``, and ``side``
-        (``"from"``/``"to"``/``"both"``) naming which endpoint is missing.
+        (``"from"``/``"to"``/``"both"``) naming which endpoint is
+        tombstoned.
         """
         result = self._get("/links/orphaned")
         # Shape-guard the response. A truthy NON-dict (a bare JSON array, say)
@@ -1883,14 +1826,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         service mode — return ``None`` so callers fall back gracefully.
         ``t3`` is a local-mode artefact; accepted for conformance, ignored.
 
-        CAVEAT (review 2026-07-19, pre-existing): the returned
-        ``chunk_hash`` echoes the CALLER's requested width — a legacy
-        32-hex span that resolves via the engine's alias route is NOT
-        rewritten to the canonical 64-hex identity here (unlike
-        ``catalog_spans.resolve_chash_globally``, which rewrites). Both
-        current callers only null-check the result; a future caller that
-        trusts ``chunk_hash`` as canonical must rewrite it itself or go
-        through ``resolve_chash``.
+        The chash embedded in ``span`` must be the canonical 64-hex identity
+        — there is no legacy-ref retry (nexus-lgdel.l1 retired the
+        alias-resolution route this used to fall back to via
+        ``/v1/chash/lookup``; a legacy 32-hex ref now simply MISSes, same as
+        any other unknown identifier).
         """
         if not span.startswith("chash:"):
             return None
@@ -1899,11 +1839,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         except ValueError:
             return None
         try:
-            # RDR-180: pass the citation's own width through — 64-hex resolves
-            # directly; a legacy 32-hex reference rides the engine's alias
-            # route. Truncating a canonical citation to 32 would force EVERY
-            # resolution through the legacy path and dangle for post-cutover
-            # content (which has no alias row).
+            # RDR-180: full-width pass-through (see resolve_chash's width note).
             result = self._get(
                 "/resolve_span",
                 span_chash=hex_chash,
@@ -1940,20 +1876,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``t3`` and ``chash_index`` are local-mode artefacts; accepted for
         conformance, ignored. The service resolves via its own internal index.
 
-        On a miss, retries once through the alias-aware route (nexus-84tr4).
-        ``/resolve_chash`` has no alias fallback — that lives on
-        ``/v1/chash/lookup`` — so this used to MISS on a legacy 32-hex ref
-        while ``resolve_chash_globally`` RESOLVED the same ref, two functions
-        disagreeing about the same identifier space. Harmless on a fully
-        rekeyed store, where every caller reads 64-hex manifest chashes, but a
-        user pasting a legacy citation into an ``nx doc`` path, or any
-        un-rekeyed or partially-rekeyed store, got a silent MISS.
-
-        The retry costs one extra request only on a miss, and only when the
-        alias route reports a different canonical identity. The returned
-        ``chash``/``chunk_hash`` is then the CANONICAL hex, not the legacy ref
-        that was passed in, so a caller comparing against a 64-char citation
-        matches — the same rewrite the citation resolver performs.
+        ``chash`` must be the canonical 64-hex identity — there is no
+        legacy-ref retry (nexus-lgdel.l1 retired the alias-resolution route
+        this used to fall back to via ``/v1/chash/lookup``; a legacy 32-hex
+        ref now simply MISSes, same as any other unknown identifier).
         """
         try:
             hex_chash, char_range = parse_chash_span(chash)
@@ -1964,13 +1890,6 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if prefer_collection:
             params["prefer_collection"] = prefer_collection
         result = self._resolve_chash_once(params)
-        if not result:
-            canonical = self._canonical_chash(hex_chash)
-            if canonical and canonical != hex_chash:
-                params["chash"] = canonical
-                result = self._resolve_chash_once(params)
-                if result:
-                    hex_chash = canonical
         if not result:
             return None
         chunk_text: str = result.get("chunk_text", "")
@@ -1999,24 +1918,6 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             if exc.response.status_code == 404:
                 return None
             raise
-
-    def _canonical_chash(self, hex_chash: str) -> str | None:
-        """Alias-resolve *hex_chash* to its canonical identity (nexus-84tr4).
-
-        ``/v1/chash/lookup`` echoes the canonical 64-hex it resolved —
-        identity-mapped for canonical input, alias-chained for a legacy 32-hex
-        ref. Best-effort by design: this runs only after the primary lookup
-        already missed, so a failure here returns exactly the ``None`` the
-        caller was going to get anyway. It cannot mask a real error, because
-        a non-404 from the primary path propagates before we get here.
-        """
-        try:
-            data = super()._get("/v1/chash/lookup", params={"chash": hex_chash})
-        except Exception as exc:  # noqa: BLE001 — supplementary lookup; primary miss already stands
-            _log.debug("resolve_chash_alias_lookup_failed", chash=hex_chash, error=str(exc))
-            return None
-        canonical = (data or {}).get("chash")
-        return canonical if isinstance(canonical, str) and canonical else None
 
     def resolve_chunk(self, tumbler: Tumbler | str) -> dict | None:
         """Resolve a 4-segment chunk tumbler to its document + chunk metadata.
@@ -2089,13 +1990,27 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         catches — every install would take an uncaught exception on its next
         index pass, since a stale link-context reference occurs on every one.
 
-        FORWARD-COMPATIBLE BY CONSTRUCTION, which is why it can ship first:
-        against an engine that never emits that code this branch is unreachable,
-        and ``allow_dangling`` on the payload is ignored by an engine that does
-        not read it. So this is safe on today's engine and correct on the next.
+        FORWARD-COMPATIBLE BY CONSTRUCTION, which is why it could ship first:
+        against an engine that never emits that code this branch was unreachable,
+        and ``allow_dangling`` on the payload was ignored by an engine that did
+        not read it. So it was safe on the pre-FK engine and is correct now.
 
         Discriminates on ``code``, never on the bare 400: a malformed-body 400
         must keep raising what it raises today.
+
+        ``allow_dangling=True`` NARROWED, RDR-194 § D2 (nexus-tk070.p1) —
+        ``fk_catalog_links_from_document`` / ``fk_catalog_links_to_document``
+        now enforce endpoint EXISTENCE at the database level, independent of
+        this client's ``requireLiveEndpoints`` bypass. So today: a link to a
+        TOMBSTONED document (row exists, ``deleted_at`` set) still writes with
+        ``allow_dangling=True`` — the row satisfies the FK even though it is
+        not LIVE. A link to a tumbler with NO ``catalog_documents`` row at ALL
+        now raises the SAME ``ValueError`` this method already translates
+        ``dangling_endpoint`` into (the engine maps the real SQLSTATE 23503 to
+        the identical wire shape), even with ``allow_dangling=True`` — there is
+        no client-visible difference between "refused by the Java live-check"
+        and "refused by the real FK constraint" except which one the payload
+        happened to reach.
         """
         try:
             result = self._post("/link", payload)

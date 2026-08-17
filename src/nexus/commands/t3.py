@@ -42,6 +42,13 @@ _log = structlog.get_logger(__name__)
 # SIG-6 (nexus-872w): resumable backfill state file.
 # The state file is a JSON dict mapping collection name → list of doc_ids
 # that have been processed, or ["__done__"] when a collection is complete.
+# nexus-69c94 critique S1+C2: a THIRD marker, ["__partial__", "fk_409=N",
+# "chash_divergent=M", "zero_chunks=K"], means the collection finished this
+# run WITHOUT error but left N+M+K docs un-healed (all three classes are
+# caught per-doc and never raise -- zero_chunks is the dominant live gap
+# class and can become recoverable after a Phase-5 remediation pass) --
+# --resume treats it as pending, NOT done, and reprocesses the whole
+# collection.
 # Atomic writes via .tmp + rename avoid partial-write corruption on crash.
 _BACKFILL_STATE_FILE_ENV = "NEXUS_BACKFILL_STATE_FILE"
 _BACKFILL_STATE_DEFAULT = os.path.expanduser(
@@ -603,11 +610,24 @@ def gc_cmd(
         "from scratch (per-doc idempotency comes from write_manifest)."
     ),
 )
+@click.option(
+    "--only-gapped/--no-only-gapped",
+    default=False,
+    help=(
+        "Touch ONLY documents with zero manifest rows (nexus-3n7pr). "
+        "Skips any document that already has >=1 manifest row via a "
+        "batched pre-pass, before any T3 read or write -- use this for a "
+        "targeted repair pass so healthy manifests are never rewritten. "
+        "Default off (unchanged pre-existing behavior: every document in "
+        "the collection is processed)."
+    ),
+)
 def backfill_manifest_cmd(
     collection: str,
     dry_run: bool,
     limit: int,
     resume: bool,
+    only_gapped: bool,
 ) -> None:
     """Backfill document_chunks manifest from T3 chunk metadata (RDR-108 D2).
 
@@ -640,6 +660,7 @@ def backfill_manifest_cmd(
       nx t3 backfill-manifest --no-dry-run                      # all collections
       nx t3 backfill-manifest --no-dry-run -n 100               # first 100 docs
       nx t3 backfill-manifest --no-dry-run --resume             # continue after Ctrl-C
+      nx t3 backfill-manifest --no-dry-run --only-gapped        # repair pass: zero-manifest docs only
     """
     from nexus.catalog.manifest_backfill import (  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.manifest_backfill)
         MissingChunkHashError,
@@ -676,6 +697,21 @@ def backfill_manifest_cmd(
                 f"Resuming: {done_before} collection(s) already done, skipping.",
                 file=sys.stderr,
             )
+        # nexus-69c94 critique S1: collections left __partial__ by a prior
+        # run (nonzero fk_409/chash_divergent residual) are NOT skipped --
+        # they will be reprocessed below like any other pending collection.
+        # Surface the count so the operator knows this run's job includes
+        # retrying them.
+        partial_before = sum(
+            1 for v in state.values() if v and v[0] == "__partial__"
+        )
+        if partial_before:
+            print(
+                f"Resuming: {partial_before} collection(s) left partial by "
+                f"a prior run (fk_409/chash_divergent residual) will be "
+                f"reprocessed.",
+                file=sys.stderr,
+            )
 
     # SIG-6: SIGINT handler — flush state then exit 130.
     def _on_sigint(signum: int, frame: object) -> None:  # noqa: ARG001
@@ -697,6 +733,11 @@ def backfill_manifest_cmd(
     total_docs = 0
     total_chunks = 0
     total_skipped_no_t3 = 0
+    total_skipped_zero_chunks = 0
+    total_skipped_phase3_no_index = 0
+    total_skipped_has_manifest = 0
+    total_skipped_chash_divergent = 0
+    total_skipped_fk_409 = 0
     skipped_taxonomy = 0
     errors: list[str] = []
     docs_processed_overall = 0
@@ -717,7 +758,8 @@ def backfill_manifest_cmd(
 
         try:
             result = backfill_manifest_for_collection(
-                cat, t3_db, coll_name, dry_run=dry_run, limit=limit
+                cat, t3_db, coll_name, dry_run=dry_run, limit=limit,
+                only_gapped=only_gapped,
             )
         except MissingChunkHashError as exc:
             click.echo(
@@ -746,10 +788,46 @@ def backfill_manifest_cmd(
             if result.docs_skipped_no_t3
             else ""
         )
+        # nexus-gvmbo: zero-chunk-match skips must be COUNTED and visible in
+        # the command's own output, never silent -- this is what turns the
+        # "never write empty" fix into an observable non-vacuity guarantee.
+        zero_chunks_part = (
+            f" ({result.docs_skipped_zero_chunks} skipped: zero_chunks)"
+            if result.docs_skipped_zero_chunks
+            else ""
+        )
+        # nexus-3n7pr G2: docs_skipped_phase3_no_index was counted but never
+        # printed -- the dry run IS the sizing instrument for a remediation
+        # pass, so an unhealable class that isn't printed under-reports it.
+        phase3_no_index_part = (
+            f" ({result.docs_skipped_phase3_no_index} skipped: phase3_no_index)"
+            if result.docs_skipped_phase3_no_index
+            else ""
+        )
+        # nexus-3n7pr G1: --only-gapped skips surfaced the same way as the
+        # other skip classes -- never silent.
+        has_manifest_part = (
+            f" ({result.docs_skipped_has_manifest} skipped: has_manifest)"
+            if result.docs_skipped_has_manifest
+            else ""
+        )
+        # nexus-dmf7r: chash-id/metadata divergence skips -- never silent.
+        chash_divergent_part = (
+            f" ({result.docs_skipped_chash_divergent} skipped: chash_divergent)"
+            if result.docs_skipped_chash_divergent
+            else ""
+        )
+        # nexus-r7g3i: FK-409 skips -- never silent.
+        fk_409_part = (
+            f" ({result.docs_skipped_fk_409} skipped: fk_409)"
+            if result.docs_skipped_fk_409
+            else ""
+        )
         print(
             f"[{idx}/{total}] {coll_name}: processed {result.docs_processed} "
             f"doc(s), {verb} {result.chunks_written} chunk manifest row(s)"
-            f"{skipped_part}",
+            f"{skipped_part}{zero_chunks_part}{phase3_no_index_part}"
+            f"{has_manifest_part}{chash_divergent_part}{fk_409_part}",
             file=sys.stderr,
         )
 
@@ -762,11 +840,41 @@ def backfill_manifest_cmd(
                 if result.docs_skipped_no_t3
                 else ""
             )
+            + (
+                f" ({result.docs_skipped_zero_chunks} skipped: zero chunk matches)"
+                if result.docs_skipped_zero_chunks
+                else ""
+            )
+            + (
+                f" ({result.docs_skipped_phase3_no_index} skipped: phase3 no chunk_index)"
+                if result.docs_skipped_phase3_no_index
+                else ""
+            )
+            + (
+                f" ({result.docs_skipped_has_manifest} skipped: already has manifest)"
+                if result.docs_skipped_has_manifest
+                else ""
+            )
+            + (
+                f" ({result.docs_skipped_chash_divergent} skipped: chash id/metadata divergent)"
+                if result.docs_skipped_chash_divergent
+                else ""
+            )
+            + (
+                f" ({result.docs_skipped_fk_409} skipped: FK conflict)"
+                if result.docs_skipped_fk_409
+                else ""
+            )
         )
 
         total_docs += result.docs_processed
         total_chunks += result.chunks_written
         total_skipped_no_t3 += result.docs_skipped_no_t3
+        total_skipped_zero_chunks += result.docs_skipped_zero_chunks
+        total_skipped_phase3_no_index += result.docs_skipped_phase3_no_index
+        total_skipped_has_manifest += result.docs_skipped_has_manifest
+        total_skipped_chash_divergent += result.docs_skipped_chash_divergent
+        total_skipped_fk_409 += result.docs_skipped_fk_409
         docs_processed_overall += result.docs_processed
 
         # SIG-6: periodic progress every _PROGRESS_INTERVAL docs.
@@ -777,8 +885,48 @@ def backfill_manifest_cmd(
             )
 
         # SIG-6: mark collection done in state file (atomic write).
+        #
+        # nexus-69c94 critique S1+C2 (substantive-critic, T2 scratch
+        # 79007753 / T2 [22640]): docs_skipped_fk_409 and
+        # docs_skipped_chash_divergent are caught PER DOC inside
+        # backfill_manifest_for_collection and never raise -- a collection
+        # containing them still returns normally, so marking it __done__
+        # unconditionally would make --resume PERMANENTLY skip those
+        # un-healed docs (the plan's stated safety property, "a collection
+        # that errored is NOT marked done", would silently stop holding for
+        # this sub-case). docs_skipped_zero_chunks joins the residual too
+        # (critique C2): it is the DOMINANT live gap class (894/895 in the
+        # nexus-3n7pr population) and a future remediation pass (re-index /
+        # re-put) can make those exact docs recoverable -- a collection
+        # whose only gaps are zero_chunks must stay revisitable by
+        # --resume, not be permanently marked done. Mark __partial__
+        # instead, carrying the residual counts for operator visibility --
+        # --resume then reprocesses the WHOLE collection (per-doc
+        # idempotency makes a full re-pass safe and cheap for docs that
+        # already healed) rather than trusting a bare --resume to have
+        # picked the residual up.
         if not dry_run:
-            state[coll_name] = ["__done__"]
+            residual = (
+                result.docs_skipped_fk_409
+                + result.docs_skipped_chash_divergent
+                + result.docs_skipped_zero_chunks
+            )
+            if residual > 0:
+                state[coll_name] = [
+                    "__partial__",
+                    f"fk_409={result.docs_skipped_fk_409}",
+                    f"chash_divergent={result.docs_skipped_chash_divergent}",
+                    f"zero_chunks={result.docs_skipped_zero_chunks}",
+                ]
+                click.echo(
+                    f"  {coll_name}: NOT marked done -- {residual} doc(s) "
+                    f"skipped (fk_409={result.docs_skipped_fk_409}, "
+                    f"chash_divergent={result.docs_skipped_chash_divergent}, "
+                    f"zero_chunks={result.docs_skipped_zero_chunks}); "
+                    f"a future --resume will reprocess this collection"
+                )
+            else:
+                state[coll_name] = ["__done__"]
             _save_backfill_state(state_path, state)
 
     verb = "would write" if dry_run else "wrote"
@@ -787,10 +935,45 @@ def backfill_manifest_cmd(
         if total_skipped_no_t3
         else ""
     )
+    skipped_zero_chunks_part = (
+        f", {total_skipped_zero_chunks} doc(s) skipped (zero chunk matches)"
+        if total_skipped_zero_chunks
+        else ""
+    )
+    # nexus-3n7pr G2: print in the summary too -- was counted, never surfaced.
+    skipped_phase3_no_index_part = (
+        f", {total_skipped_phase3_no_index} doc(s) skipped (phase3 no chunk_index)"
+        if total_skipped_phase3_no_index
+        else ""
+    )
+    # nexus-3n7pr G1: --only-gapped skip total.
+    skipped_has_manifest_part = (
+        f", {total_skipped_has_manifest} doc(s) skipped (already has manifest)"
+        if total_skipped_has_manifest
+        else ""
+    )
+    # nexus-dmf7r: chash id/metadata divergence skip total.
+    skipped_chash_divergent_part = (
+        f", {total_skipped_chash_divergent} doc(s) skipped "
+        f"(chash id/metadata divergent)"
+        if total_skipped_chash_divergent
+        else ""
+    )
+    # nexus-r7g3i: FK-409 skip total.
+    skipped_fk_409_part = (
+        f", {total_skipped_fk_409} doc(s) skipped (FK conflict)"
+        if total_skipped_fk_409
+        else ""
+    )
     click.echo(
         f"\nSummary: processed {total_docs} doc(s), "
         f"{verb} {total_chunks} manifest row(s)"
         + skipped_no_t3_part
+        + skipped_zero_chunks_part
+        + skipped_phase3_no_index_part
+        + skipped_has_manifest_part
+        + skipped_chash_divergent_part
+        + skipped_fk_409_part
         + (f", skipped {skipped_taxonomy} taxonomy collection(s)" if skipped_taxonomy else "")
         + (f", {len(errors)} error(s)" if errors else "")
     )
