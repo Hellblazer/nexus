@@ -56,7 +56,18 @@ Classes, mirroring the design memo (T1 scratch 80500d58):
                          disposition — "exempt" would hide it.
                          reindex_candidate -> a concrete on-disk location
                          resolves (from file_path or a file:// source_uri)
-                         and the file exists there.
+                         and the file exists there, and its content is NOT
+                         verifiably unchunkable (see zero_content_by_design
+                         below) — re-index is a plausible remedy.
+                         zero_content_by_design -> the resolved, existing
+                         file is zero-byte or binary content (same
+                         ``classifier.looks_like_binary_content`` sniff the
+                         producer-side registration fix uses, nexus-rqsh1)
+                         — it can NEVER produce a chunk no matter how many
+                         times it is re-indexed, so re-index is never the
+                         correct remedy; tombstone is. An HONEST bucket,
+                         not a suppression — these stay in the census until
+                         actually tombstoned.
                          orphaned_path -> a concrete on-disk location
                          resolves and is CONFIRMED absent (``reason``:
                          ``file_missing`` — the file itself is gone;
@@ -136,7 +147,8 @@ Classes, mirroring the design memo (T1 scratch 80500d58):
                          genuinely unknown) is mechanical instead of a
                          hand-run SQL query.
 
-Mutation arms (``--execute {recount,tombstone-vanished,tombstone-orphaned}``)
+Mutation arms (``--execute {recount,tombstone-vanished,tombstone-orphaned,
+tombstone-zero-content}``)
 follow the ``--dry-run/--no-dry-run`` + ``--confirm`` gate nexus-tnz3
 inverted catalog_cmds.maintenance.gc_cmd to: a forgotten flag reports,
 it never mutates. The catalog writer is constructed lazily — only once a
@@ -163,6 +175,7 @@ from nexus.catalog.tumbler import Tumbler
 from nexus.commands.catalog_cmds.integrity import (
     _class_a_vanished_collections,
     _classify_never_chunked,
+    _is_zero_content_by_design,
 )
 
 # nexus-u8n4r: the worktree/tempdir predicate moved to nexus.repo_identity
@@ -179,7 +192,7 @@ _log = structlog.get_logger(__name__)
 if TYPE_CHECKING:
     from nexus.catalog.catalog_protocol import CatalogReader  # noqa: F401 — PEP 563 deferred annotation use
 
-_ACTIONS = ("recount", "tombstone-vanished", "tombstone-orphaned")
+_ACTIONS = ("recount", "tombstone-vanished", "tombstone-orphaned", "tombstone-zero-content")
 
 # reconcile_cmd's convention (catalog.py): actionable findings cap at 20,
 # report-only/diagnosis-only findings cap at 5.
@@ -420,6 +433,7 @@ def _classify(cat: "CatalogReader", t3: object) -> tuple[dict, list[str]]:
         "zero_count_recount": [],
         "zero_count_rdr145_exempt": [],
         "zero_count_reindex_candidate": [],
+        "zero_count_zero_content_by_design": [],
         "zero_count_orphaned_path": [],
         "zero_count_unresolvable_provenance": [],
         "zero_count_store_put_origin": [],
@@ -486,7 +500,16 @@ def _classify(cat: "CatalogReader", t3: object) -> tuple[dict, list[str]]:
                         "reason": "owner_root_gone",
                     })
                 elif resolved is not None and resolved.exists():
-                    report["zero_count_reindex_candidate"].append({**row, "resolved_path": str(resolved)})
+                    if _is_zero_content_by_design(resolved):
+                        # nexus-rqsh1: a zero-byte or binary source can
+                        # NEVER produce a chunk no matter how many times it
+                        # is re-indexed -- reindex_candidate implies
+                        # re-index is a valid remedy, which is false here.
+                        report["zero_count_zero_content_by_design"].append(
+                            {**row, "resolved_path": str(resolved)},
+                        )
+                    else:
+                        report["zero_count_reindex_candidate"].append({**row, "resolved_path": str(resolved)})
                 else:
                     report["zero_count_orphaned_path"].append({
                         **row,
@@ -569,13 +592,18 @@ def _echo_human_report(report: dict, unreadable: list[str]) -> None:
     zc_recount = report["zero_count_recount"]
     zc_exempt = report["zero_count_rdr145_exempt"]
     zc_reindex = report["zero_count_reindex_candidate"]
+    zc_zero_content = report["zero_count_zero_content_by_design"]
     zc_orphaned = report["zero_count_orphaned_path"]
     zc_unresolvable = report["zero_count_unresolvable_provenance"]
     zc_store_put = report["zero_count_store_put_origin"]
-    if zc_recount or zc_exempt or zc_reindex or zc_orphaned or zc_unresolvable or zc_store_put:
+    if (
+        zc_recount or zc_exempt or zc_reindex or zc_zero_content
+        or zc_orphaned or zc_unresolvable or zc_store_put
+    ):
         click.echo(
             f"\nZero-count live documents ({len(zc_recount)} recount, "
             f"{len(zc_exempt)} RDR-145 exempt, {len(zc_reindex)} reindex candidate(s), "
+            f"{len(zc_zero_content)} zero-content-by-design, "
             f"{len(zc_orphaned)} orphaned path, {len(zc_store_put)} store_put origin, "
             f"{len(zc_unresolvable)} unresolvable provenance):"
         )
@@ -588,6 +616,13 @@ def _echo_human_report(report: dict, unreadable: list[str]) -> None:
         if zc_reindex:
             click.echo("  Reindex candidates (source file present):")
             _echo_sample(zc_reindex, _CAP_ACTION, _label_zero_count)
+        if zc_zero_content:
+            click.echo(
+                "  Zero-content-by-design (zero-byte or binary source; "
+                "will never chunk; producer no longer registers these; "
+                "remedy is tombstone, not re-index):"
+            )
+            _echo_sample(zc_zero_content, _CAP_ACTION, _label_zero_count)
         if zc_orphaned:
             click.echo("  Orphaned path (confirmed absent; tombstone candidate):")
             _echo_sample(zc_orphaned, _CAP_ACTION, _label_zero_count)
@@ -611,7 +646,8 @@ def _echo_human_report(report: dict, unreadable: list[str]) -> None:
             click.echo(f"    by reason: {_format_reason_counts(_count_by_reason(zc_unresolvable))}")
         click.echo("  By collection:")
         for row in _breakdown_by_collection(
-            zc_recount + zc_exempt + zc_reindex + zc_orphaned + zc_store_put + zc_unresolvable
+            zc_recount + zc_exempt + zc_reindex + zc_zero_content
+            + zc_orphaned + zc_store_put + zc_unresolvable
         ):
             click.echo(f"    {row['count']:5d}  {row['collection']}")
 
@@ -634,6 +670,10 @@ def _echo_human_report(report: dict, unreadable: list[str]) -> None:
         f"  nx catalog reconcile-stale --execute tombstone-orphaned --no-dry-run --confirm"
         f"  # tombstone {len(zc_orphaned)} doc(s) whose source is confirmed gone"
     )
+    click.echo(
+        f"  nx catalog reconcile-stale --execute tombstone-zero-content --no-dry-run --confirm"
+        f"  # tombstone {len(zc_zero_content)} doc(s) whose source will never chunk (zero-byte/binary)"
+    )
 
     if unreadable:
         click.echo(
@@ -655,6 +695,7 @@ def _json_payload(report: dict, unreadable: list[str]) -> dict:
             "zero_count_recount": len(report["zero_count_recount"]),
             "zero_count_rdr145_exempt": len(report["zero_count_rdr145_exempt"]),
             "zero_count_reindex_candidate": len(report["zero_count_reindex_candidate"]),
+            "zero_count_zero_content_by_design": len(report["zero_count_zero_content_by_design"]),
             "zero_count_orphaned_path": len(zc_orphaned),
             "zero_count_store_put_origin": len(zc_store_put),
             "zero_count_unresolvable_provenance": len(zc_unresolvable),
@@ -669,6 +710,7 @@ def _json_payload(report: dict, unreadable: list[str]) -> dict:
             "recount_targets": report["zero_count_recount"],
             "rdr145_exempt": len(report["zero_count_rdr145_exempt"]),
             "reindex_candidates": report["zero_count_reindex_candidate"],
+            "zero_content_by_design": report["zero_count_zero_content_by_design"],
             "orphaned_path": zc_orphaned,
             "orphaned_path_by_reason": _count_by_reason(zc_orphaned),
             "orphaned_path_worktree_count": sum(
@@ -827,6 +869,12 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
                              source_uri, or no provenance at all) are never
                              in this arm's target set — see
                              ``unresolvable_provenance`` in the report.
+      tombstone-zero-content delete zero-count docs whose confirmed on-disk
+                             source is verifiably unchunkable by
+                             construction (zero-byte, or binary content —
+                             nexus-rqsh1): re-indexing can never produce a
+                             chunk for these, so re-index is never the
+                             correct remedy, only tombstone.
 
     \\b
     Examples:
@@ -871,6 +919,11 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
         _run_tombstone(
             report, "zero_count_orphaned_path",
             will_act=will_act, dry_run=dry_run, verb="tombstone-orphaned",
+        )
+    elif action == "tombstone-zero-content":
+        _run_tombstone(
+            report, "zero_count_zero_content_by_design",
+            will_act=will_act, dry_run=dry_run, verb="tombstone-zero-content",
         )
 
 

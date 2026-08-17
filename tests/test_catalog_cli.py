@@ -1190,7 +1190,7 @@ class _FakeFullCat:
 
     def __init__(
         self, entries, *, doc_counts=None, mv_all=None, manifests=None,
-        doc_counts_exc=None, get_manifests_exc=None,
+        doc_counts_exc=None, get_manifests_exc=None, owners_with_roots=None,
     ):
         self._entries = entries
         self._doc_counts = doc_counts or {}
@@ -1198,6 +1198,7 @@ class _FakeFullCat:
         self._manifests = manifests or {}
         self._doc_counts_exc = doc_counts_exc
         self._get_manifests_exc = get_manifests_exc
+        self._owners = owners_with_roots or {}
 
     def all_documents(self, limit=0):
         return list(self._entries)
@@ -1214,6 +1215,9 @@ class _FakeFullCat:
         if self._get_manifests_exc is not None:
             raise self._get_manifests_exc
         return {d: self._manifests[d] for d in doc_ids if d in self._manifests}
+
+    def owners_with_roots(self):
+        return dict(self._owners)
 
 
 class TestVerifyCommand:
@@ -1780,6 +1784,158 @@ class TestVerifyCommand:
         assert "legitimate by design" not in result.output.replace("\n", " ") or (
             "code__1-20" not in result.output.split("legitimate by design")[0]
         )
+
+    # ── nexus-rqsh1: zero-content-by-design (verifiably unchunkable source) ─
+
+    def test_verify_never_chunked_zero_content_by_design_bucket(
+        self, catalog_env, tmp_path, monkeypatch,
+    ):
+        """A gapped/never-chunked doc whose source is verifiably
+        unchunkable (zero-byte, or binary content per
+        classifier.looks_like_binary_content) must classify as
+        zero_content_by_design, NOT the generic 'unclassified' candidate-
+        data-loss bucket -- re-indexing it can never produce a chunk."""
+        (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src" / "__init__.py").write_bytes(b"")
+        (tmp_path / "src" / "fixture.npz").write_bytes(
+            b"\x93NUMPY\x01\x00\xff\xfe\xfd\x00binary-not-utf8"
+        )
+        (tmp_path / "src" / "thing.py").write_text("# real code\n")
+
+        entries = [
+            _FakeEntry(
+                "1.1.1", "Empty init", physical_collection="code__1-1",
+                chunk_count=0, file_path="src/__init__.py",
+            ),
+            _FakeEntry(
+                "1.1.2", "Binary fixture", physical_collection="code__1-1",
+                chunk_count=0, file_path="src/fixture.npz",
+            ),
+            # control: a real, chunkable text file -- must stay unclassified
+            # (a genuine candidate-data-loss doc, not zero-content-by-design).
+            _FakeEntry(
+                "1.1.3", "Real code", physical_collection="code__1-1",
+                chunk_count=0, file_path="src/thing.py",
+            ),
+        ]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"code__1-1": 3},
+            mv_all={"collections": [
+                {"collection": "code__1-1", "referenced": 0, "present": 0, "missing": 0},
+            ], "count": 1},
+            manifests={},
+            owners_with_roots={"1.1": str(tmp_path)},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"code__1-1"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        nc = data["never_chunked"]
+        assert nc["total"] == 3
+        zc = nc["zero_content_by_design"]
+        assert zc["total"] == 2
+        assert zc["by_collection"] == [{"physical_collection": "code__1-1", "count": 2}]
+        assert set(zc["sample_tumblers"]) == {"1.1.1", "1.1.2"}
+        assert "will never chunk" in zc["note"].lower()
+        assert "tombstone" in zc["note"].lower()
+        # control: the real file stays unclassified -- a genuine
+        # candidate-data-loss doc, never moved into zero_content_by_design.
+        assert nc["unclassified"]["total"] == 1
+        assert nc["unclassified"]["by_collection"] == [
+            {"physical_collection": "code__1-1", "count": 1},
+        ]
+        # non-vacuity: the docs must NOT vanish from the census -- total
+        # accounts for all three (killing the nexus-cotmr round-1
+        # exemption error, which hid a population like this entirely).
+        assert nc["total"] == zc["total"] + nc["unclassified"]["total"] + nc["rdr145_exempt"]["total"]
+
+    def test_verify_zero_content_by_design_honest_wording_in_human_report(
+        self, catalog_env, tmp_path, monkeypatch,
+    ):
+        (tmp_path / "empty.py").write_bytes(b"")
+        entries = [
+            _FakeEntry(
+                "1.1.1", "Empty file", physical_collection="code__1-1",
+                chunk_count=0, file_path="empty.py",
+            ),
+        ]
+        cat = _FakeFullCat(
+            entries=entries,
+            doc_counts={"code__1-1": 1},
+            mv_all={"collections": [
+                {"collection": "code__1-1", "referenced": 0, "present": 0, "missing": 0},
+            ], "count": 1},
+            manifests={},
+            owners_with_roots={"1.1": str(tmp_path)},
+        )
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"code__1-1"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify"])
+
+        assert result.exit_code == 0, result.output
+        lower = result.output.lower()
+        assert "zero-content-by-design" in lower
+        assert "will never chunk" in lower
+        assert "tombstone" in lower
+
+    def test_verify_zero_content_degrades_gracefully_without_owners_with_roots(
+        self, catalog_env, monkeypatch,
+    ):
+        """A catalog reader that doesn't support owners_with_roots (older
+        protocol / minimal test double) must not crash verify --
+        zero-content detection requires path resolution, so it silently
+        degrades to 'unclassified' rather than raising."""
+
+        class _BareCatNoOwnerRoots:
+            def __init__(self, entries, doc_counts, mv_all, manifests):
+                self._entries = entries
+                self._doc_counts = doc_counts
+                self._mv_all = mv_all
+                self._manifests = manifests
+
+            def all_documents(self, limit=0):
+                return list(self._entries)
+
+            def collection_doc_counts(self):
+                return dict(self._doc_counts)
+
+            def manifest_verify_all(self):
+                return self._mv_all
+
+            def get_manifests(self, doc_ids):
+                return {d: self._manifests[d] for d in doc_ids if d in self._manifests}
+
+        entries = [
+            _FakeEntry(
+                "1.1.1", "Some code file", physical_collection="code__x",
+                chunk_count=0, file_path="src/thing.py",
+            ),
+        ]
+        cat = _BareCatNoOwnerRoots(
+            entries, {"code__x": 1},
+            {"collections": [
+                {"collection": "code__x", "referenced": 0, "present": 0, "missing": 0},
+            ], "count": 1},
+            {},
+        )
+        assert not hasattr(cat, "owners_with_roots")
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: cat)
+        self._patch_t3(monkeypatch, {}, t3_collections={"code__x"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["never_chunked"]["zero_content_by_design"]["total"] == 0
+        assert data["never_chunked"]["unclassified"]["total"] == 1
 
     # ── nexus-bo2d1: ghost-doc manifest rows must never key a phantom "" ───
     #

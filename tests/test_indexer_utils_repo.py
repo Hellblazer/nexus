@@ -748,3 +748,44 @@ class TestStalenessCache:
             content_hash="hash-l", embedding_model="voyage-code-3",
             doc_id="", cache=cache,
         ) is False
+
+    # ── nexus-cp46b: RUNFENCE-aware staleness (never_fresh) ─────────────
+
+    def test_never_fresh_doc_id_treated_as_stale_despite_hash_match(self) -> None:
+        """A doc_id flagged ``never_fresh`` (fenced 'indexing'/'failed',
+        RUNFENCE nexus-5xn3k.3) must be re-processed even though its
+        content_hash + embedding_model still match the cache — a
+        stranded/failed run is never merely "unchanged". Pre-fix,
+        ``never_fresh`` didn't exist and this returned True (skipped
+        forever)."""
+        cache = StalenessCache(
+            by_doc_id={"1.2.4432": ("hash-a", "voyage-context-3")},
+            never_fresh=frozenset({"1.2.4432"}),
+        )
+        result = check_staleness(
+            col=MagicMock(),
+            source_file="docs/stranded.md",
+            content_hash="hash-a",
+            embedding_model="voyage-context-3",
+            doc_id="1.2.4432",
+            cache=cache,
+        )
+        assert result is False
+
+    def test_never_fresh_empty_leaves_hash_match_skip_behavior_unchanged(self) -> None:
+        """Control: an unchanged doc NOT in ``never_fresh`` (the default,
+        empty frozenset) still skips exactly as before this fix — the
+        hot path (unchanged + fence 'complete' or unreported) must not
+        regress."""
+        cache = StalenessCache(
+            by_doc_id={"1.2.9999": ("hash-b", "voyage-context-3")},
+        )
+        result = check_staleness(
+            col=MagicMock(),
+            source_file="docs/healthy.md",
+            content_hash="hash-b",
+            embedding_model="voyage-context-3",
+            doc_id="1.2.9999",
+            cache=cache,
+        )
+        assert result is True

@@ -4867,14 +4867,17 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
             warn=True,
             detail=(
                 f"{len(stale)} document(s) stranded in index_state='indexing' "
-                f"beyond {_STALE_INDEXING_THRESHOLD_HOURS:.0f}h: {names}. This is "
-                "SAFE (re-indexing never skips an 'indexing' document, "
-                "nexus-lcmbp) but wastes a full re-chunk/re-embed on every "
-                "intervening run — check for a stuck run or a rolling deploy "
-                "that split a begin/complete pair across engine versions."
+                f"beyond {_STALE_INDEXING_THRESHOLD_HOURS:.0f}h: {names}. A "
+                "normal re-index run now clears this automatically, even "
+                "when the document's content is unchanged (nexus-cp46b) — "
+                "for a repo document that means its own repo's next "
+                "`nx index repo` pass, no --force needed. If it keeps "
+                "recurring, check for a stuck run or a rolling deploy that "
+                "split a begin/complete pair across engine versions."
             ),
             fix_suggestions=[
-                "nx index <path> --force   (clears the fence on a clean run)",
+                "nx index <path>   (a normal re-index clears the fence; "
+                "--force is not required)",
             ],
         ))
 

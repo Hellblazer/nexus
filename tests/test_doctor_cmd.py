@@ -1091,6 +1091,36 @@ class TestJsonUnsupportedModesExhaustive:
         "check_search", "check_quotas", "check_mcp_logs",
     })
 
+    # nexus-omdjz: the AST early-return criterion only recognizes a mode
+    # flag shaped as a bare top-level ``if <param>: ... return``. A mode
+    # flag implemented some other way (e.g. gated behind a helper call --
+    # ``if _maybe_run_mode(check_x): return`` -- whose ``ast.If.test`` is
+    # a ``Call``, not a ``Name``) would silently fall through
+    # ``_early_return_flag_params`` uncounted: not flagged as a mode, not
+    # caught by ``test_dict_covers_exactly_every_early_return_mode_flag``
+    # (which only diffs against the recognized set), and the criterion
+    # would report a false "not a mode" without anyone noticing.
+    #
+    # ``_SWEEP_COMPATIBLE_MODE_PARAMS`` is the explicit, hand-verified
+    # complement: every ``is_flag`` doctor_cmd parameter that is NOT an
+    # early-return mode, confirmed by reading doctor_cmd's body directly.
+    # Each name below reaches the final health-sweep branch (or modifies
+    # another mode's behavior) without ever early-returning on its own:
+    #   - json_out: toggles JSON formatting; gates a UsageError check but
+    #     never itself ``return``s.
+    #   - dry_run: read inside the ``fix_paths`` mode's own body to choose
+    #     between reporting and writing; has no ``if dry_run:`` of its own.
+    #   - fail_on_violation: read inside the ``check_storage_boundary``
+    #     mode's own body as an argument; has no ``if fail_on_violation:``
+    #     of its own.
+    # ``test_recognized_modes_plus_sweep_compatible_covers_every_flag``
+    # below is the fail-loud floor: a new is_flag parameter that lands in
+    # NEITHER this set NOR the AST-recognized set fails explicitly, naming
+    # the parameter, instead of silently passing as an unclassified flag.
+    _SWEEP_COMPATIBLE_MODE_PARAMS = frozenset({
+        "json_out", "dry_run", "fail_on_violation",
+    })
+
     @staticmethod
     def _doctor_cmd_ast():
         import ast
@@ -1156,4 +1186,55 @@ class TestJsonUnsupportedModesExhaustive:
             "TestJsonUnsupportedCombinations's parametrize list above -- "
             "skipping the dict silently lets --json combine with the new "
             "mode without a usage error (the original nexus-0vycz bug)."
+        )
+
+    @staticmethod
+    def _all_is_flag_param_names() -> set[str]:
+        from nexus.commands.doctor import doctor_cmd
+
+        return {
+            p.name for p in doctor_cmd.params if getattr(p, "is_flag", False)
+        }
+
+    def test_recognized_modes_plus_sweep_compatible_covers_every_flag(self):
+        """Fail-loud floor (nexus-omdjz): every is_flag doctor_cmd param
+        must be classified as EITHER a recognized early-return mode flag
+        OR a declared sweep-compatible modifier -- never neither. A flag
+        the AST criterion cannot recognize (e.g. a mode implemented via a
+        helper-call gate instead of a bare ``if <param>:``) is invisible
+        to ``test_dict_covers_exactly_every_early_return_mode_flag`` by
+        construction; this test is the independent check that catches it
+        by comparing against doctor_cmd's actual parameter list instead
+        of only against the AST's own recognized set.
+        """
+        all_flags = self._all_is_flag_param_names()
+        recognized = self._early_return_flag_params()
+        sweep_compatible = self._SWEEP_COMPATIBLE_MODE_PARAMS
+
+        unclassified = all_flags - recognized - sweep_compatible
+        assert not unclassified, (
+            f"doctor_cmd has is_flag parameter(s) {sorted(unclassified)} "
+            "that this test cannot classify: not recognized as an "
+            "early-return mode flag (the AST scan found no bare "
+            "`if <param>: ... return`), and not declared in "
+            "_SWEEP_COMPATIBLE_MODE_PARAMS. Classify it explicitly -- "
+            "add it to _json_unsupported_modes (doctor.py) if it is a "
+            "mode flag (whatever its early-return shape), or to "
+            "_SWEEP_COMPATIBLE_MODE_PARAMS above if it is a modifier "
+            "that legitimately reaches the main health sweep without "
+            "early-returning on its own."
+        )
+
+        overlap = recognized & sweep_compatible
+        assert not overlap, (
+            f"parameter(s) {sorted(overlap)} are classified as BOTH an "
+            "early-return mode flag and sweep-compatible -- a flag "
+            "cannot be both; fix _SWEEP_COMPATIBLE_MODE_PARAMS."
+        )
+
+        stale = sweep_compatible - all_flags
+        assert not stale, (
+            f"_SWEEP_COMPATIBLE_MODE_PARAMS names {sorted(stale)} which "
+            "are no longer is_flag parameters of doctor_cmd -- stale "
+            "entry, remove it."
         )

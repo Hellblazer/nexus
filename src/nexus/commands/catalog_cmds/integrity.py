@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
 import structlog
 
 from nexus.catalog.tumbler import Tumbler
+from nexus.classifier import looks_like_binary_content
 
 _log = structlog.get_logger(__name__)
 
@@ -579,7 +581,7 @@ def _class_a_vanished_collections(
     # get_manifests + t3.existing_ids directly, never manifest_verify_all.
 
 
-def _classify_never_chunked(e: object) -> str:
+def _classify_never_chunked(e: object, owner_roots: dict[str, str] | None = None) -> str:
     """Classify a zero-chunk, no-manifest doc for the ``never_chunked`` report.
 
     nexus-sj4a3 substantive critique CRIT-1: RDR-145's "legitimate by
@@ -590,7 +592,24 @@ def _classify_never_chunked(e: object) -> str:
     ``docs__*``/``rdr__*`` docs indexed via ``nx index repo``, per
     nexus-cdypx's own production evidence — code__1-20 alone: 2,286)
     is ``unclassified``: a candidate data-loss population RDR-145 says
-    nothing about.
+    nothing about, UNLESS *owner_roots* is given and the source resolves
+    to a verifiably unchunkable file (nexus-rqsh1) — see
+    ``zero_content_by_design`` below.
+
+    ``owner_roots`` (``cat.owners_with_roots()``) is optional and defaults
+    to ``None``, which skips zero-content-by-design detection entirely
+    (no filesystem resolution attempted) — callers that don't have it, or
+    don't want the filesystem probe, get the pre-rqsh1 two-way split
+    unchanged.
+
+    zero_content_by_design -- the source resolves (via the SAME provenance
+    rules ``reconcile_stale._resolve_provenance`` uses) to a file that
+    EXISTS but is verifiably unchunkable by construction: zero bytes, or
+    binary content (``_is_zero_content_by_design``). Re-indexing such a
+    doc can never produce a chunk — it must never be prescribed a re-index
+    (nexus-rqsh1: 11 of nexus owner 1-1's 12 "gapped" docs were exactly
+    this, reappearing in every census forever since re-index is not a
+    valid remedy for them).
 
     ``rdr145_exempt`` population is LEGACY-ONLY going forward (nexus-sdp0u):
     since that fix, every non-empty-title ``store_put`` / ``memory promote``
@@ -612,7 +631,70 @@ def _classify_never_chunked(e: object) -> str:
         and not e.source_uri
     ):
         return "rdr145_exempt"
+    if owner_roots is not None and _resolves_to_zero_content_by_design(e, owner_roots):
+        return "zero_content_by_design"
     return "unclassified"
+
+
+def _is_zero_content_by_design(path: Path) -> bool:
+    """True when *path* is a verifiably unchunkable source: zero bytes, or
+    binary content per :func:`nexus.classifier.looks_like_binary_content`
+    (nexus-rqsh1) -- the same sniff the indexer's producer-side fix
+    (7733b48a9) uses to skip registering a catalog document in the first
+    place, reused here rather than forked so the two never drift.
+
+    A doc pointing at either can NEVER produce a chunk no matter how many
+    times it is re-indexed -- unlike ``reindex_candidate``/``unclassified``,
+    where re-index is at least a plausible remedy. Caller must confirm
+    ``path.exists()`` first; a missing source is a different (orphaned-path)
+    population and this function never guesses its way into that case.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if size == 0:
+        return True
+    return looks_like_binary_content(path)
+
+
+def _resolves_to_zero_content_by_design(e: object, owner_roots: dict[str, str]) -> bool:
+    """Resolve *e*'s on-disk source (same provenance rules
+    ``reconcile_stale._resolve_provenance`` uses) and, only when it
+    resolves to a CONFIRMED-existing file, apply
+    :func:`_is_zero_content_by_design`.
+
+    Deferred import (not a module-level one): ``reconcile_stale.py``
+    already imports predicates FROM this module at module scope (see this
+    module's own docstring); importing back at module scope would cycle.
+    """
+    from nexus.commands.catalog_cmds.reconcile_stale import (  # noqa: PLC0415 — see docstring
+        _resolve_provenance,
+    )
+    resolved, reason = _resolve_provenance(e, owner_roots)
+    if reason or resolved is None or not resolved.exists():
+        return False
+    return _is_zero_content_by_design(resolved)
+
+
+def _owner_roots_for_zero_content_check(cat: "CatalogReader", never_chunked_entries: list) -> dict[str, str]:
+    """Fetch ``owners_with_roots()`` for the zero-content-by-design filesystem
+    probe, but only when there's actually a never-chunked doc to disambiguate
+    (verify's "cheap, CI-gateable" design, nexus-sj4a3 — no owner-root round
+    trip when the census has nothing to resolve).
+
+    Exception-isolated (not a hard requirement of ``CatalogReader``): a
+    reader/test-double that doesn't support it degrades to no resolution
+    (every entry stays ``unclassified``, the pre-rqsh1 behavior) rather than
+    failing the whole verify sweep over a best-effort filesystem probe.
+    """
+    if not never_chunked_entries:
+        return {}
+    try:
+        return cat.owners_with_roots()
+    except Exception as exc:  # noqa: BLE001 — best-effort only, see docstring
+        _log.debug("catalog_verify_owners_with_roots_unavailable", error=str(exc))
+        return {}
 
 
 # nexus-0y0gk critique fix-round (observation item, integrity.py side):
@@ -631,22 +713,49 @@ _RDR145_EXEMPT_NOTE = (
     "exit code."
 )
 
+# nexus-rqsh1: an HONEST bucket, not a suppression -- these docs stay in
+# the census forever until they are actually tombstoned (killed the
+# nexus-cotmr round-1 exemption error, which hid a population like this
+# from the count entirely).
+_ZERO_CONTENT_BY_DESIGN_NOTE = (
+    "Zero-byte or binary source -- will NEVER chunk, no matter how many "
+    "times it is re-indexed. The producer no longer registers new catalog "
+    "documents for these (commit 7733b48a9); this population is the "
+    "pre-fix residue. Remedy is `nx catalog reconcile-stale --execute "
+    "tombstone-zero-content` (dry-run by default), never re-index. This "
+    "note does not change verify's exit code."
+)
 
-def _never_chunked_breakdown(entries: list) -> dict:
+# nexus-rqsh1: capped sample of zero_content_by_design tumblers, same
+# convention as the ghost-document census sample above.
+_CAP_ZERO_CONTENT_SAMPLE = _CAP_GHOST_SAMPLE
+
+
+def _never_chunked_breakdown(entries: list, owner_roots: dict[str, str] | None = None) -> dict:
     """Per-collection breakdown of never-chunked docs (nexus-sj4a3 CRIT-1).
 
     Replaces the old bare int: a reconciler cannot act on "N never-chunked
     docs" without knowing which collections they live in and which
-    sub-class (RDR-145-exempt store_put note vs. unclassified candidate
-    data loss) each falls into.
+    sub-class (RDR-145-exempt store_put note, zero_content_by_design, or
+    unclassified candidate data loss) each falls into.
+
+    *owner_roots* is threaded through to :func:`_classify_never_chunked` —
+    ``None`` (the default) skips zero-content-by-design detection, same as
+    that function's own default.
     """
     rdr145_counts: dict[str, int] = {}
+    zero_content_counts: dict[str, int] = {}
+    zero_content_tumblers: list[str] = []
     unclassified_counts: dict[str, int] = {}
     for e in entries:
-        bucket = (
-            rdr145_counts if _classify_never_chunked(e) == "rdr145_exempt"
-            else unclassified_counts
-        )
+        cls = _classify_never_chunked(e, owner_roots)
+        if cls == "rdr145_exempt":
+            bucket = rdr145_counts
+        elif cls == "zero_content_by_design":
+            bucket = zero_content_counts
+            zero_content_tumblers.append(str(e.tumbler))
+        else:
+            bucket = unclassified_counts
         bucket[e.physical_collection] = bucket.get(e.physical_collection, 0) + 1
 
     def _rows(counts: dict[str, int]) -> list[dict]:
@@ -656,13 +765,20 @@ def _never_chunked_breakdown(entries: list) -> dict:
         ]
 
     rdr145_total = sum(rdr145_counts.values())
+    zero_content_total = sum(zero_content_counts.values())
     unclassified_total = sum(unclassified_counts.values())
     return {
-        "total": rdr145_total + unclassified_total,
+        "total": rdr145_total + zero_content_total + unclassified_total,
         "rdr145_exempt": {
             "total": rdr145_total,
             "by_collection": _rows(rdr145_counts),
             "note": _RDR145_EXEMPT_NOTE,
+        },
+        "zero_content_by_design": {
+            "total": zero_content_total,
+            "by_collection": _rows(zero_content_counts),
+            "sample_tumblers": sorted(zero_content_tumblers)[:_CAP_ZERO_CONTENT_SAMPLE],
+            "note": _ZERO_CONTENT_BY_DESIGN_NOTE,
         },
         "unclassified": {"total": unclassified_total, "by_collection": _rows(unclassified_counts)},
     }
@@ -755,7 +871,8 @@ def _census_lost_and_never_chunked(
             })
         elif e.chunk_count == 0 and not rows:
             never_chunked_entries.append(e)
-    return lost, _never_chunked_breakdown(never_chunked_entries), manifest_row_totals
+    owner_roots = _owner_roots_for_zero_content_check(cat, never_chunked_entries)
+    return lost, _never_chunked_breakdown(never_chunked_entries, owner_roots), manifest_row_totals
 
 
     # _class_c_unverifiable_rows RETIRED (RDR-191 Phase 6, nexus-o8dil.33) —
@@ -939,6 +1056,20 @@ def _emit_verify_report(
                 )
                 for row in exempt["by_collection"]:
                     click.echo(f"    {row['count']:5d}  {row['physical_collection']}")
+            zero_content = never_chunked["zero_content_by_design"]
+            if zero_content["total"]:
+                click.echo(
+                    f"  {zero_content['total']} zero-content-by-design — "
+                    "will never chunk (zero-byte or binary source, "
+                    "nexus-rqsh1); producer no longer registers these; "
+                    "remedy is tombstone, not re-index:"
+                )
+                for row in zero_content["by_collection"]:
+                    click.echo(f"    {row['count']:5d}  {row['physical_collection']}")
+                if zero_content["sample_tumblers"]:
+                    click.echo("    Sample tumblers:")
+                    for t in zero_content["sample_tumblers"]:
+                        click.echo(f"      {t}")
             unclassified = never_chunked["unclassified"]
             if unclassified["total"]:
                 click.echo(
@@ -1204,7 +1335,8 @@ def _verify_scoped(cat: "CatalogReader", collection: str, *, heal: bool, json_ou
             elif e.chunk_count == 0 and not rows:
                 never_chunked_entries.append(e)
 
-    never_chunked = _never_chunked_breakdown(never_chunked_entries)
+    owner_roots = _owner_roots_for_zero_content_check(cat, never_chunked_entries)
+    never_chunked = _never_chunked_breakdown(never_chunked_entries, owner_roots)
     exit_dirty = bool(damaged or lost)
     _emit_verify_report(
         total_docs=total_docs,

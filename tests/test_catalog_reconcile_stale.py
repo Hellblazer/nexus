@@ -114,6 +114,7 @@ def _blank_report(**overrides) -> dict:
         "zero_count_recount": [],
         "zero_count_rdr145_exempt": [],
         "zero_count_reindex_candidate": [],
+        "zero_count_zero_content_by_design": [],
         "zero_count_orphaned_path": [],
         "zero_count_unresolvable_provenance": [],
         "zero_count_store_put_origin": [],
@@ -559,6 +560,156 @@ class TestClassification:
 
         assert result.exit_code != 0
         assert "INCOMPLETE" in result.output
+
+
+# ── Zero-content-by-design classification (nexus-rqsh1) ───────────────────
+#
+# A gapped/never-chunked doc whose SOURCE is verifiably unchunkable (a
+# zero-byte file, or binary content per classifier.looks_like_binary_content)
+# must classify as zero_content_by_design, NOT reindex_candidate --
+# re-indexing it can never produce a chunk, so it would otherwise reappear
+# in every census forever (the nexus repo owner 1-1 evidence: 11 of its 12
+# "gapped" docs -- 9 empty __init__.py files, a .bundle, a .npz fixture).
+
+
+class TestZeroContentByDesign:
+    def _cat(self, tmp_path, *, owner_id="1.60"):
+        (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src" / "__init__.py").write_bytes(b"")
+        (tmp_path / "src" / "fixture.npz").write_bytes(
+            b"\x93NUMPY\x01\x00v\x00{'descr':'<f8'}\xff\xfe\xfd\x00\x01\x02not valid utf-8"
+        )
+        (tmp_path / "src" / "real.py").write_text("# real code\n")
+
+        entries = [
+            # zero-byte source -> zero_content_by_design
+            _FakeEntry(
+                "1.60.1", "Empty init", physical_collection="code__zc", chunk_count=0,
+                file_path="src/__init__.py",
+            ),
+            # binary source -> zero_content_by_design
+            _FakeEntry(
+                "1.60.2", "Binary fixture", physical_collection="code__zc", chunk_count=0,
+                file_path="src/fixture.npz",
+            ),
+            # control: a real, chunkable text file -- must NOT move buckets
+            _FakeEntry(
+                "1.60.3", "Real file", physical_collection="code__zc", chunk_count=0,
+                file_path="src/real.py",
+            ),
+        ]
+        doc_counts = {"code__zc": 3}
+        owners = {owner_id: str(tmp_path)}
+        cat = _FakeCat(entries, doc_counts=doc_counts, owners_with_roots=owners)
+        t3 = _FakeT3({"code__zc"})
+        return cat, t3
+
+    def test_zero_byte_and_binary_classify_zero_content_by_design(self, tmp_path):
+        cat, t3 = self._cat(tmp_path)
+        report, unreadable = reconcile_stale_mod._classify(cat, t3)
+
+        assert unreadable == []
+        assert {r["tumbler"] for r in report["zero_count_zero_content_by_design"]} == {
+            "1.60.1", "1.60.2",
+        }
+        # control: the real file is untouched -- still reindex_candidate,
+        # never moved into the new bucket.
+        assert {r["tumbler"] for r in report["zero_count_reindex_candidate"]} == {"1.60.3"}
+
+    def test_zero_content_rows_carry_resolved_path_and_manifest_len_zero(self, tmp_path):
+        cat, t3 = self._cat(tmp_path)
+        report, _ = reconcile_stale_mod._classify(cat, t3)
+        by_tumbler = {r["tumbler"]: r for r in report["zero_count_zero_content_by_design"]}
+        assert by_tumbler["1.60.1"]["resolved_path"].endswith("src/__init__.py")
+        assert by_tumbler["1.60.2"]["resolved_path"].endswith("src/fixture.npz")
+        assert by_tumbler["1.60.1"]["manifest_len"] == 0
+        assert by_tumbler["1.60.2"]["manifest_len"] == 0
+
+    def test_is_zero_content_by_design_unit(self, tmp_path):
+        """Direct pin of the shared classifier.looks_like_binary_content
+        reuse (integrity.py) -- zero-byte, binary, and normal text."""
+        empty = tmp_path / "empty.py"
+        empty.write_bytes(b"")
+        binary = tmp_path / "data.npz"
+        binary.write_bytes(b"\x93NUMPY\x01\x00\xff\xfe\xfd\x00binary-not-utf8")
+        text = tmp_path / "real.py"
+        text.write_text("# hello world\n")
+        missing = tmp_path / "does_not_exist.py"
+
+        from nexus.commands.catalog_cmds.integrity import _is_zero_content_by_design
+
+        assert _is_zero_content_by_design(empty) is True
+        assert _is_zero_content_by_design(binary) is True
+        assert _is_zero_content_by_design(text) is False
+        # a missing path is a different (orphaned) population -- never
+        # guessed into zero_content_by_design.
+        assert _is_zero_content_by_design(missing) is False
+
+    def test_json_shape_includes_zero_content_by_design(self, tmp_path, monkeypatch):
+        cat, t3 = self._cat(tmp_path)
+        _patch(monkeypatch, cat, t3, writer=_writer_factory_raises())
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "reconcile-stale", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["summary"]["zero_count_zero_content_by_design"] == 2
+        assert {r["tumbler"] for r in data["zero_count_live"]["zero_content_by_design"]} == {
+            "1.60.1", "1.60.2",
+        }
+        # non-vacuity: these docs must NOT vanish from the census -- they
+        # are still counted in total_docs, just under a different, honest
+        # bucket (killing the nexus-cotmr round-1 exemption error).
+        assert data["summary"]["total_docs"] == 3
+
+    def test_human_report_honest_wording_not_a_suppression(self, tmp_path, monkeypatch):
+        cat, t3 = self._cat(tmp_path)
+        _patch(monkeypatch, cat, t3, writer=_writer_factory_raises())
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "reconcile-stale"])
+
+        assert result.exit_code == 0, result.output
+        lower = result.output.lower()
+        assert "zero-content-by-design" in lower
+        assert "will never chunk" in lower
+        assert "tombstone" in lower
+        assert "2 zero-content-by-design" in result.output
+
+    def test_tombstone_zero_content_dry_run_default_never_constructs_writer(
+        self, tmp_path, monkeypatch,
+    ):
+        cat, t3 = self._cat(tmp_path)
+        _patch(monkeypatch, cat, t3, writer=_writer_factory_raises())
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["catalog", "reconcile-stale", "--execute", "tombstone-zero-content"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "dry-run" in result.output.lower()
+
+    def test_tombstone_zero_content_confirmed_deletes_exact_set(self, tmp_path, monkeypatch):
+        cat, t3 = self._cat(tmp_path)
+        writer = _FakeWriter()
+        _patch(monkeypatch, cat, t3, writer=writer)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "catalog", "reconcile-stale",
+                "--execute", "tombstone-zero-content", "--no-dry-run", "--confirm",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        deleted_strs = {str(t) for t in writer.deleted}
+        assert deleted_strs == {"1.60.1", "1.60.2"}
+        assert "1.60.3" not in deleted_strs  # legit reindex candidate never tombstoned
+        assert writer.closed
 
 
 # ── Worktree/tempdir classifier (platform-independence pin) ──────────────

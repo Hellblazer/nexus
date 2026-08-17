@@ -29,6 +29,7 @@ import structlog
 
 from nexus._locking import lock_file, unlock_file
 from nexus.corpus import index_model_for_collection
+from nexus.db.limits import QUOTAS
 from nexus.retry import _vector_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
 from nexus.hook_registry import record_catalog_hook_failure
@@ -68,6 +69,15 @@ DEFAULT_IGNORE: list[str] = _DEFAULT_IGNORE
 #   v1-v3: pre-versioning (no version stamp in collection metadata)
 #   v4:    RDR-028 language registry + RDR-014 CCE prefixes
 PIPELINE_VERSION: str = "4"
+
+# Concurrent ChunkBatcher flush workers during a repo index run. 3 is the
+# empirical choice from the 3midv sweep (sequential flushes cost 76-112s of
+# wall vs. the concurrent path); ``min(...)`` with QUOTAS.MAX_CONCURRENT_WRITES
+# (the per-collection service quota, ``nexus.db.limits``) ties the literal to
+# the ceiling it was chosen to stay under, so a future quota tightening below
+# 3 is caught by the pinning test in test_indexer_flush_concurrency.py rather
+# than silently indexing outside the quota (nexus-dimrz).
+FLUSH_CONCURRENCY: int = min(3, QUOTAS.MAX_CONCURRENT_WRITES)
 
 
 def stamp_collection_version(col: object) -> None:
@@ -882,6 +892,7 @@ def _catalog_hook(
     indexed_files: list[tuple[Path, str, str]],
     on_locked: str = "wait",
     skip_housekeeping: bool = False,
+    stale_fence_doc_ids: set[str] | None = None,
 ) -> dict[Path, str]:
     """Register/update indexed files in catalog. Silently skipped if catalog absent.
 
@@ -891,6 +902,23 @@ def _catalog_hook(
     before per-file indexing runs (RDR-101 Phase 3 PR δ Stage B). The
     return type is additive — existing test call sites that ignore the
     return value continue to work unchanged.
+
+    ``stale_fence_doc_ids`` (nexus-cp46b) is an optional OUT-param: when
+    supplied, every EXISTING document (Pass 1's ``existing is not None``
+    branch below) whose reported ``index_state`` is ``'indexing'`` or
+    ``'failed'`` has its tumbler added to the set in place. This reuses
+    the SAME owner-scoped catalog fetch (``path_to_entry`` /
+    ``cat.by_file_path``) this pass already pays for — no extra per-file
+    or per-run HTTP round trip. The orchestrator threads the populated
+    set into the per-collection ``StalenessCache.never_fresh`` so a doc
+    stranded mid-run (content unchanged, fence stuck at 'indexing'/
+    'failed') is forced stale on the next normal ``nx index repo`` pass
+    instead of being permanently skipped by the content-hash-only
+    staleness check (the bug this bead fixes). A document whose
+    ``index_state`` was never reported at all (pre-fence engine —
+    ``index_state_reported=False``) is excluded, matching the
+    floor-tolerant stance ``doc_indexer._index_run_fresh`` /
+    ``indexer_utils.non_complete_documents`` already use elsewhere.
 
     RDR-146 P2 (nexus-5p2ci.12): this is the background batch producer that
     GH #1046 showed starving a foreground ``nx dt index``. The writer is
@@ -1203,6 +1231,20 @@ def _catalog_hook(
                             "source_mtime": source_mtime,
                         }))
                     file_to_doc_id[abs_path] = str(existing.tumbler)
+                    # nexus-cp46b: a doc fenced 'indexing'/'failed' is a
+                    # stranded run (RUNFENCE, nexus-5xn3k.3), not merely
+                    # "unchanged" — the content-hash staleness cache must
+                    # never skip it just because content still matches.
+                    # ``index_state_reported`` False = pre-fence engine
+                    # (nothing to say, not a stale signal) — same floor-
+                    # tolerant convention as _index_run_fresh/
+                    # non_complete_documents.
+                    if (
+                        stale_fence_doc_ids is not None
+                        and getattr(existing, "index_state_reported", True)
+                        and getattr(existing, "index_state", None) in ("indexing", "failed")
+                    ):
+                        stale_fence_doc_ids.add(str(existing.tumbler))
             except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 # Per-file failure must NOT abort the rest of the loop.
                 # The previous behaviour swallowed every subsequent
@@ -4159,6 +4201,10 @@ def _run_index(
     if on_phase is not None:
         on_phase(f"Registering {len(indexed_for_catalog)} catalog entries…")
     _catalog_t0 = time.monotonic()
+    # nexus-cp46b: doc_ids the catalog hook's own owner-scoped fetch (below)
+    # finds fenced 'indexing'/'failed' — reused to force those docs stale in
+    # the staleness caches built further down, no extra catalog round trip.
+    _stale_fence_doc_ids: set[str] = set()
     file_to_doc_id = _catalog_hook(
         repo=repo,
         repo_name=_repo_basename,
@@ -4169,6 +4215,7 @@ def _run_index(
         # nexus-fltb4: miss-counting against a delta-filtered walk would mark
         # every unvisited doc as missing and mass-delete after two runs.
         skip_housekeeping=delta_changed is not None,
+        stale_fence_doc_ids=_stale_fence_doc_ids,
     )
     if on_phase is not None:
         on_phase(
@@ -4227,6 +4274,14 @@ def _run_index(
         # separate physical collection from docs__, so a shared object would
         # cross-contaminate staleness lookups between the two.
         rdr_staleness = _build_with_marker("rdr", rdr_col)
+    if _stale_fence_doc_ids:
+        # nexus-cp46b: a doc_id only ever belongs to one collection's cache,
+        # so sharing the same frozenset across all three is harmless — each
+        # cache only ever looks up doc_ids for files routed to it.
+        _never_fresh = frozenset(_stale_fence_doc_ids)
+        code_staleness.never_fresh = _never_fresh
+        docs_staleness.never_fresh = _never_fresh
+        rdr_staleness.never_fresh = _never_fresh
     _log.info(
         "staleness_caches_built",
         code_doc_ids=len(code_staleness.by_doc_id),
@@ -4668,10 +4723,9 @@ def _run_index(
             on_batch_complete=_fire_flush_grain_hooks,
             on_batch_begin=_fire_flush_grain_begin,
             max_chunks=_cap_for,
-            # 3 concurrent flushes: inside the 10-concurrent-writes
-            # per-collection service quota with headroom; the 3midv
-            # sweep showed sequential flushes cost 76-112s of wall.
-            flush_concurrency=3,
+            # See FLUSH_CONCURRENCY's module-level comment for the
+            # empirical-vs-quota derivation (nexus-dimrz).
+            flush_concurrency=FLUSH_CONCURRENCY,
         )
         _log.info("index_chunk_batching_enabled")
 
