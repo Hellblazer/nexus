@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import ast
 import contextlib
 import tempfile
 from pathlib import Path
@@ -45,7 +46,7 @@ def mock_reg():
 
 
 def _invoke(runner, mock_reg, *, cred="sk-key", which="/usr/bin/tool",
-            cloud_client=None, extra_patches=None):
+            cloud_client=None, extra_patches=None, extra_args=None):
     # RDR-137 Phase 3.1 (nexus-tts0d.6): health.py now reads repos via
     # nexus.repos.list_repos_dual instead of RepoRegistry directly.
     # The legacy RepoRegistry patch stays for whatever doctor sub-checks
@@ -118,7 +119,7 @@ def _invoke(runner, mock_reg, *, cred="sk-key", which="/usr/bin/tool",
     with contextlib.ExitStack() as stack:
         for p in patches:
             stack.enter_context(p)
-        return runner.invoke(main, ["doctor"])
+        return runner.invoke(main, ["doctor", *(extra_args or [])])
 
 
 # ── Healthy / basic output ──────────────────────────────────────────────────
@@ -932,3 +933,227 @@ class TestCheckWalRetention:
         assert "[ ]" in result.output
         assert "UNMEASURED" in result.output
         assert "grants-004-monitor-wal-visibility" in result.output
+
+
+# ── --json on the main sweep (nexus-0vycz) ──────────────────────────────────
+#
+# Prior to this fix, `nx doctor --json` on the main sweep was accepted and
+# silently ignored -- it emitted the human-readable report at rc=0. The
+# shakedown playbook's S3 signal-density audit needs to classify every
+# green's detail string without scraping unicode glyphs, so the main sweep
+# must emit one JSON object with a `checks` array (each entry carrying at
+# least name/ok/status/detail) plus summary counts.
+
+
+class TestJsonMainSweep:
+    def test_emits_a_single_parseable_json_object(self, runner, mock_reg):
+        import json as _json
+
+        result = _invoke(runner, mock_reg, extra_args=["--json"])
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.stdout)
+        assert isinstance(data, dict)
+        assert isinstance(data["checks"], list)
+        assert len(data["checks"]) > 0
+
+    def test_stdout_is_json_only_no_human_prose_mixed_in(self, runner, mock_reg):
+        """A trailing/leading human line would break a naive `json.loads`
+        on the whole stdout -- this is the actual non-vacuous proof that
+        nothing besides the JSON document reached stdout."""
+        import json as _json
+
+        result = _invoke(runner, mock_reg, extra_args=["--json"])
+        _json.loads(result.stdout)  # raises if anything but pure JSON
+        assert "Nexus health check:" not in result.stdout
+        assert "✓" not in result.stdout
+
+    def test_check_entries_carry_required_fields(self, runner, mock_reg):
+        import json as _json
+
+        result = _invoke(runner, mock_reg, extra_args=["--json"])
+        data = _json.loads(result.stdout)
+        for entry in data["checks"]:
+            assert {"name", "ok", "status", "detail"} <= set(entry)
+            assert isinstance(entry["name"], str) and entry["name"]
+            assert isinstance(entry["ok"], bool)
+            assert entry["status"] in ("ok", "warn", "fail")
+            assert isinstance(entry["detail"], str)
+
+    def test_summary_counts_match_checks(self, runner, mock_reg):
+        import json as _json
+
+        result = _invoke(runner, mock_reg, extra_args=["--json"])
+        data = _json.loads(result.stdout)
+        checks = data["checks"]
+        summary = data["summary"]
+        assert summary["total"] == len(checks)
+        assert summary["ok"] == sum(1 for c in checks if c["status"] == "ok")
+        assert summary["warn"] == sum(1 for c in checks if c["status"] == "warn")
+        assert summary["fail"] == sum(1 for c in checks if c["status"] == "fail")
+        assert summary["ok"] + summary["warn"] + summary["fail"] == summary["total"]
+
+    def test_all_healthy_exits_zero_and_reports_zero_fails(self, runner, mock_reg):
+        import json as _json
+
+        result = _invoke(runner, mock_reg, extra_args=["--json"])
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.stdout)
+        assert data["summary"]["fail"] == 0
+
+    def test_fatal_failure_reflected_as_fail_status_and_nonzero_exit(
+        self, runner, mock_reg,
+    ):
+        import json as _json
+
+        result = _invoke(runner, mock_reg, extra_args=["--json"], extra_patches=[
+            patch("nexus.health._python_ok", return_value=(False, "3.11.0")),
+        ])
+        assert result.exit_code == 1, result.output
+        data = _json.loads(result.stdout)
+        assert data["summary"]["fail"] >= 1
+        python_entries = [c for c in data["checks"] if "Python" in c["name"]]
+        assert python_entries, data["checks"]
+        assert python_entries[0]["status"] == "fail"
+        assert python_entries[0]["ok"] is False
+        assert "3.11.0" in python_entries[0]["detail"]
+
+    def test_no_json_flag_human_output_is_unchanged(self, runner, mock_reg):
+        """Regression guard: human output stays byte-identical to the
+        pre-fix format when --json is absent."""
+        import json as _json
+
+        result = _invoke(runner, mock_reg)
+        assert result.exit_code == 0
+        assert "Nexus health check:\n" in result.output
+        assert "✓" in result.output
+        with pytest.raises(_json.JSONDecodeError):
+            _json.loads(result.output)
+
+
+class TestJsonUnsupportedCombinations:
+    """Every OTHER doctor mode combined with --json must fail loud instead
+    of silently ignoring the flag (nexus-0vycz). --check-search,
+    --check-quotas, and --check-mcp-logs already honor --json and are
+    covered by their own test classes/files -- not repeated here."""
+
+    @pytest.mark.parametrize("flag", [
+        "--check-schema",
+        "--check-resources",
+        "--check-taxonomy",
+        "--check-plan-library",
+        "--fix",
+        "--clean-checkpoints",
+        "--clean-pipelines",
+        "--fix-paths",
+        "--check-post-store-hooks",
+        "--check-mineru",
+        "--check-aspect-queue",
+        "--check-t1",
+        "--check-wal-retention",
+        "--check-tier-discipline",
+        "--check-storage-boundary",
+        "--trim-telemetry",
+    ])
+    def test_json_with_unsupported_mode_is_a_loud_error(self, runner, mock_reg, flag):
+        result = _invoke(runner, mock_reg, extra_args=[flag, "--json"])
+        assert result.exit_code == 2, result.output
+        assert flag in result.output
+
+
+class TestJsonUnsupportedModesExhaustive:
+    """nexus-0vycz round 2 (substantive-critic Significant, 2026-08-17):
+    ``_json_unsupported_modes`` (doctor.py) and the parametrize list
+    above are two INDEPENDENTLY hand-maintained enumerations of the
+    same 16 flags -- neither is derived from ``doctor_cmd``'s own
+    parameters. A 17th ``--check-X`` flag added later without a
+    matching ``_json_unsupported_modes`` entry silently reproduces the
+    ORIGINAL nexus-0vycz bug (--json combined with the new mode is
+    silently ignored instead of a usage error) with nothing here to
+    catch it.
+
+    Modeled on ``tests/test_catalog_doctor_new_checks.py::TestUsage::
+    test_no_flag_lists_every_check``, which fixed the identical
+    anti-pattern for a sibling command's usage-error surface: derive
+    the "should be in the dict" set from the command's own structure
+    instead of trusting a second hand-written list to stay in sync.
+
+    Structural criterion for "a mode flag --json cannot combine with,
+    besides the three that already support it": an ``if <param>:``
+    block, directly in ``doctor_cmd``'s body, whose body contains a
+    ``return`` -- i.e. a flag that unconditionally early-returns before
+    reaching the main health sweep. Every existing mode flag
+    (--check-schema, --fix, --clean-checkpoints, ...) follows this
+    exact shape; --check-search/--check-quotas/--check-mcp-logs follow
+    it too but are excluded (they DO support --json).
+    """
+
+    _JSON_SUPPORTED_MODE_PARAMS = frozenset({
+        "check_search", "check_quotas", "check_mcp_logs",
+    })
+
+    @staticmethod
+    def _doctor_cmd_ast():
+        import ast
+        import inspect
+        import textwrap
+        from nexus.commands.doctor import doctor_cmd
+
+        src = textwrap.dedent(inspect.getsource(doctor_cmd.callback))
+        return ast.parse(src).body[0]
+
+    @classmethod
+    def _early_return_flag_params(cls) -> set[str]:
+        func = cls._doctor_cmd_ast()
+        param_names = {a.arg for a in func.args.args}
+        return {
+            node.test.id
+            for node in func.body
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id in param_names
+            and any(isinstance(n, ast.Return) for n in node.body)
+        }
+
+    @classmethod
+    def _json_unsupported_modes_dict_from_source(cls) -> dict[str, str]:
+        """Statically parse the ``_json_unsupported_modes = {...}`` dict
+        literal out of ``doctor_cmd``'s source -- flag string -> param
+        name. Pure introspection, no invocation."""
+        func = cls._doctor_cmd_ast()
+        for node in ast.walk(func):
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "_json_unsupported_modes"
+            ):
+                return {
+                    k.value: v.id
+                    for k, v in zip(node.value.keys, node.value.values)
+                }
+        raise AssertionError(
+            "could not find `_json_unsupported_modes = {...}` in "
+            "doctor_cmd's source -- this guard's static-parse assumption "
+            "no longer holds; update "
+            "_json_unsupported_modes_dict_from_source to match the new shape"
+        )
+
+    def test_dict_covers_exactly_every_early_return_mode_flag(self):
+        early_return_params = self._early_return_flag_params()
+        expected_params = early_return_params - self._JSON_SUPPORTED_MODE_PARAMS
+
+        actual_params = set(
+            self._json_unsupported_modes_dict_from_source().values()
+        )
+
+        missing = expected_params - actual_params
+        extra = actual_params - expected_params
+        assert not missing and not extra, (
+            "doctor_cmd's _json_unsupported_modes dict has drifted from "
+            f"its own early-return mode flags (missing={sorted(missing)}, "
+            f"extra={sorted(extra)}). A new --check-X mode flag must be "
+            "added to BOTH _json_unsupported_modes (doctor.py) AND "
+            "TestJsonUnsupportedCombinations's parametrize list above -- "
+            "skipping the dict silently lets --json combine with the new "
+            "mode without a usage error (the original nexus-0vycz bug)."
+        )

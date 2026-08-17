@@ -116,6 +116,52 @@ def format_health_for_cli(
     return "\n".join(lines), failed
 
 
+def format_health_for_json(
+    results: list[HealthResult], *, local_mode: bool
+) -> str:
+    """JSON rendering of the main doctor sweep (nexus-0vycz).
+
+    One object with a ``checks`` array -- each entry carrying at least
+    ``name``/``ok``/``status``/``detail`` -- plus summary counts, so a
+    machine consumer (the shakedown playbook's S3 signal-density audit)
+    can classify every check without scraping unicode glyphs out of the
+    human-readable report. ``status`` mirrors the three-state model
+    ``format_health_for_cli`` renders as glyphs: ``"ok"`` (✓), ``"warn"``
+    (✗ soft/benign, RDR-129 B4), ``"fail"`` (✗ hard). ``fatal`` is carried
+    through raw so a consumer can reproduce the same pass/fail exit-code
+    semantics this module uses (only ``fatal and not ok`` fails the run --
+    some hard-fail checks are non-fatal by design).
+    """
+    checks = []
+    for r in results:
+        if r.ok:
+            status = "ok"
+        elif r.warn:
+            status = "warn"
+        else:
+            status = "fail"
+        checks.append({
+            "name": r.label,
+            "ok": r.ok,
+            "status": status,
+            "detail": r.detail,
+            "fatal": r.fatal,
+            "fix_suggestions": list(r.fix_suggestions),
+        })
+    summary = {
+        "total": len(checks),
+        "ok": sum(1 for c in checks if c["status"] == "ok"),
+        "warn": sum(1 for c in checks if c["status"] == "warn"),
+        "fail": sum(1 for c in checks if c["status"] == "fail"),
+    }
+    payload = {
+        "checks": checks,
+        "summary": summary,
+        "local_mode": local_mode,
+    }
+    return json.dumps(payload, indent=2)
+
+
 # ── Individual checks ────────────────────────────────────────────────────────
 
 
