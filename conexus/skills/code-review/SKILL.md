@@ -19,7 +19,33 @@ Default: **sonnet** (the agent's frontmatter pins it; omitting `model` gets sonn
 
 Model choice is secondary to prompt rigour (below): a named-suspect sonnet review outperforms an unbriefed opus one.
 
-## Prompt Rigour
+## Acceptance Bar (state before any reviewer runs)
+
+One line in the relay's Context Notes, before dispatch: "Ship when &lt;X&gt;." X names
+the condition that ends the gate — never "no criticals," which is unfalsifiable
+against an adversarial reviewer. Example: "Ship when the local-upgrade path cannot
+wedge and the migration walk is proven atomic; anything else becomes a bead."
+
+## Rounds (bounded — see also `orchestration/SKILL.md` § Review Rounds)
+
+Round 1: full review, report everything (see § Prompt Rigour below) — recall is
+the reviewer's job, triage is the orchestrator's.
+
+Orchestrator triage: each finding is a ship-blocker against the acceptance bar,
+or a bead. Never both, never left undecided, never re-litigated by a later round.
+
+Round 2 (only if a ship-blocker was fixed): ONE confirmation pass — see
+§ Confirmation Pass. Never a second full review.
+
+Round 3+: requires the human to ask for it, by name. Never self-initiated by the
+orchestrator or the reviewer.
+
+Test-only, comment-only, and prose-only fixes never re-enter review — EXCEPT
+a test-only change that weakens, removes, or vacuates an assertion. That is a
+change to the gate itself (the falsifiability rubric's exact surface) and
+re-enters review like any behavioral fix.
+
+## Prompt Rigour (first pass)
 
 Referenced by `/conexus:phase-review-gate` as "§ Prompt rigour". Friendly relays return friendly reviews — the relay MUST name what to suspect:
 
@@ -27,6 +53,35 @@ Referenced by `/conexus:phase-review-gate` as "§ Prompt rigour". Friendly relay
 - **The locked spec** (RDR `## Decision`, design memo, bead MUSTs) so the reviewer checks implementation-vs-spec, not style.
 - **What was NOT changed on purpose** (explicit non-goals), so the reviewer flags scope creep instead of recommending it.
 - **Verification already run**, so the reviewer verifies claims instead of re-running suites.
+
+## Confirmation Pass (round 2 only — not a second review)
+
+A confirmation brief is not a review brief. It names the findings under
+confirmation and asks whether each is closed. It does NOT name new suspect
+categories, and does NOT ask the reviewer to pressure-test, enumerate paths, or
+find what was missed — those instructions manufacture findings on any artifact,
+which is exactly what produced the unbounded loop this skill now bounds.
+
+Template:
+
+```markdown
+## Relay: code-review-expert — CONFIRMATION PASS (round 2 of at most 2)
+
+Confirming these findings, and nothing else:
+  1. <finding, verbatim from round 1> — fixed at <file:line>
+  2. ...
+
+For each: emit CONFIRMED-CLOSED or NOT-CLOSED with the evidence line.
+Do not open new attack axes. Observations outside this list go in a final
+"For beads" section, one line each — they are never grounds for another round.
+ONE exception: a defect INTRODUCED by the fix under confirmation, that is
+ship-blocking. Report it as a Critical, name the fix line that introduced it,
+and hand it to the orchestrator. The orchestrator may authorize exactly ONE
+further confirmation pass to verify that defect's fix — recorded in the round
+marker as `ext=fix-introduced`; this extension is not round 3 and needs no
+human ask. Anything beyond that single extension, or any new full review, IS
+round 3+ and requires the human (see `/conexus:orchestration` § Review Rounds).
+```
 
 ## When This Skill Activates
 
@@ -40,19 +95,28 @@ Referenced by `/conexus:phase-review-gate` as "§ Prompt rigour". Friendly relay
 digraph review_flow {
     "Code changes ready?" [shape=diamond];
     "Run tests first" [shape=box];
-    "Invoke code-review-expert" [shape=box];
-    "Critical findings?" [shape=diamond];
-    "Fix and re-review" [shape=box];
-    "Invoke test-validator" [shape=doublecircle];
+    "State acceptance bar" [shape=box];
+    "Round 1: full review" [shape=box];
+    "Orchestrator triage" [shape=diamond];
+    "Fix ship-blockers" [shape=box];
+    "Confirmation pass (round 2)" [shape=box];
+    "Human decides (round 3+)" [shape=box];
+    "Ship" [shape=doublecircle];
 
     "Code changes ready?" -> "Run tests first" [label="yes"];
-    "Run tests first" -> "Invoke code-review-expert";
-    "Invoke code-review-expert" -> "Critical findings?";
-    "Critical findings?" -> "Fix and re-review" [label="yes"];
-    "Critical findings?" -> "Invoke test-validator" [label="no"];
-    "Fix and re-review" -> "Invoke code-review-expert";
+    "Run tests first" -> "State acceptance bar";
+    "State acceptance bar" -> "Round 1: full review";
+    "Round 1: full review" -> "Orchestrator triage";
+    "Orchestrator triage" -> "Ship" [label="no ship-blockers"];
+    "Orchestrator triage" -> "Fix ship-blockers" [label="ship-blockers found"];
+    "Fix ship-blockers" -> "Confirmation pass (round 2)";
+    "Confirmation pass (round 2)" -> "Ship" [label="closed"];
+    "Confirmation pass (round 2)" -> "Human decides (round 3+)" [label="not closed"];
 }
 ```
+
+`test-validator` dispatch after `Ship` is conditional, not automatic — see
+`agents/code-review-expert.md` § Recommended Next Step.
 
 ## Pre-Dispatch: Seed Link Context (optional)
 

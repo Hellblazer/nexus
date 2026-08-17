@@ -129,13 +129,18 @@ Do not retry approaches listed in scratch under tag "failed-approach".
 
 ## Post-Implementation Review + Commit (orchestrator-driven, MANDATORY)
 
-The developer agent does not run this tail itself — reviewer selection,
-fix-round sequencing, and the commit are the orchestrator's job (nested
-Agent dispatch exists, probe-verified 2026-08-03, but orchestration stays
-at top level by convention). When the developer returns its
-`## Next Step: code-review-expert, substantive-critic, test-validator` block,
-YOU (the orchestrator running this skill) drive the loop. Do not stop at the
+The developer agent does not run this tail itself — reviewer selection, round
+sequencing, and the commit are the orchestrator's job (nested Agent dispatch
+exists, probe-verified 2026-08-03, but orchestration stays at top level by
+convention). The developer hands back per its own Completion Protocol without
+restating this policy (see `agents/developer.md` § Completion Hand-Back) —
+YOU (the orchestrator running this skill) drive the gate on every completion,
+regardless of what the developer's output says. Do not stop at the
 developer's return; do not let the developer self-commit.
+
+**State the acceptance bar before dispatching either reviewer** — see
+`/conexus:code-review` § Acceptance Bar. "Ship when &lt;X&gt;," never "no
+criticals."
 
 Run BOTH reviewers, they catch different, non-overlapping classes of issue:
 
@@ -148,9 +153,15 @@ Run BOTH reviewers, they catch different, non-overlapping classes of issue:
    implementation-vs-design, not style.
 
 **This is a gate, not a suggestion.** A clean code-review-expert verdict does
-NOT permit skipping the critic, that is the documented failure mode. Iterate:
-Critical/High finding → fix → re-review the affected reviewer. Only when BOTH
-return clean do you proceed to commit.
+NOT permit skipping the critic, that is the documented failure mode. The gate
+is BOUNDED, not an open loop — see `/conexus:code-review` § Rounds: round 1 is
+a full review from both reviewers; YOU triage every finding as a ship-blocker
+(against the stated bar) or a bead, never both; fix ship-blockers; round 2 is
+ONE confirmation pass per reviewer (§ Confirmation Pass, not a second review);
+round 3+ requires the human to ask for it by name, recorded via
+`nx scratch put "review-round bead=<id> n=<N> bar=..."` (see
+`orchestration/SKILL.md` § Review Rounds). Only when both reviewers' round-2
+ship-blockers are CONFIRMED-CLOSED do you proceed to commit.
 
 3. **Commit**: stage the code changes (explicit paths, never `git add -A`) plus
    the beads file, commit with the bead reference, and close the bead. The
@@ -158,7 +169,7 @@ return clean do you proceed to commit.
 
 When executing a strategic plan, the planner bakes review tasks into the plan at
 designated points, follow those, and they include both reviewers. For ad-hoc
-implementation outside a plan, run the loop above directly.
+implementation outside a plan, run the gate above directly.
 
 ## TDD Methodology
 

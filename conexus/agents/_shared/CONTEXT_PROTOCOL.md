@@ -157,6 +157,24 @@ Agents produce artifacts based on their specialization:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
 - **nx memory**: `project="{project}", title="{topic}.md"` (e.g., `project="ART", title="auth-implementation.md"`)
 
+## Deliverable Length
+
+Match written length to what the task needs. No filler sections, no redundant
+summaries, no boilerplate restating the relay back to the caller. A write-back
+is read by an agent (or a human) paying for every byte on every subsequent
+turn.
+
+Two-tier rule:
+- **Structural contract** (section headings, verdict blocks, machine-parsed
+  fields) is fixed and exempt from trimming — see `substantive-critic.md` §
+  Output Format for the canonical example of what NOT to compress.
+- **Prose content** within each section states the verdict, the findings at
+  file:line, the evidence chain, and what was not checked. No restated relay,
+  no narrated methodology, no praise.
+
+Evidence density is the protected quantity: trim only when file:line
+references and reachability chains stay flat or increase. If length and
+evidence density fall together, the trim cut evidence, not filler — revert it.
 
 ## RELAY (Standard Format)
 
@@ -188,6 +206,42 @@ Standard relay structure:
 ```
 
 See [RELAY_TEMPLATE.md](./RELAY_TEMPLATE.md) for the full template, extended template, and optional fields reference.
+
+## Escalation (conditional, never routine)
+
+Recommend a next agent only when a NAMED trigger fired, and name exactly one:
+
+- you hit a blocker outside your role (e.g. developer -> debugger on confirmed intermittency)
+- you found something whose remediation needs a plan you cannot write
+- the relay's own Quality Criteria cannot be met with what you have
+
+Otherwise end with your result and hand back. Do not recommend the routine
+review gate — the caller owns the review-gate-commit tail already
+(`~/.claude/CLAUDE.md` § Review Discipline; `orchestration/SKILL.md` Quick
+Routing), and a per-agent reminder to dispatch it is compounding scaffolding:
+it restates standing policy the caller already knows, and gets paid for again
+on every subsequent turn that re-reads your output. This section removes the
+per-agent REMINDER, not the gate: both reviewers still run, always, on every
+implementation.
+
+## Scope (MANDATORY, both directions)
+
+Deliver what was asked, at the scope intended — do not quietly narrow it,
+widen it, or transform it into an adjacent problem. If you believe the right
+scope differs from the relay's, say so in one sentence and proceed per the
+relay until told otherwise.
+
+- An accepted plan, RDR, or bead graph is a record of intended work, not a
+  standing order. If the relay's stated goal is already satisfied by work
+  that exists, report "goal met; remaining planned items are X" and STOP. Do
+  not auto-continue into the next phase.
+- A change whose blast radius explodes mid-flight — one edit breaking more
+  than ~20 tests, or requiring a parallel repair fleet — is a
+  STOP-AND-SURFACE point. Hand back with the blast radius named. It is not a
+  delegation problem to manage harder.
+- Narrowing is equally a defect: dropping a relay item without an explicit
+  DEVIATION line is silent scope reduction, which `/conexus:phase-review-gate`
+  exists to catch.
 
 ## RECOVER (If Context Missing)
 

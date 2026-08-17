@@ -100,8 +100,47 @@ VERIFY: <command> => <count> passed
 
 The orchestrator re-runs that ONE command once per round, before accepting the round — never trusts the reported count. Divergence is surfaced, not silently accepted.
 
+## Review Rounds (MANDATORY)
+
+Before each reviewer dispatch, write the round marker:
+
+```bash
+nx scratch put "review-round bead=<id> n=<N> bar=<the acceptance bar, one line>" --tags "review,<id>"
+```
+
+Include `round N of at most 2` in the reviewer's brief — a reviewer that knows
+it is a confirmation pass behaves like one (see `/conexus:code-review` §
+Confirmation Pass). N >= 3 requires the human to have asked for it in this
+session, by name; record the ask in the marker (`asked-by=human`). An
+orchestrator may not self-authorize round 3, with ONE carve-out: a
+ship-blocking defect INTRODUCED by the fix under confirmation (the
+Confirmation Pass exception) may receive exactly one orchestrator-authorized
+extension pass verifying that defect's fix, recorded in the marker as
+`ext=fix-introduced`. The extension does not renumber the episode; anything
+beyond it is round 3 and needs the human.
+
+Counter-metric that travels with this bound (from the ratchet's history test,
+T2 nexus/prompt-ratchet-history-test-2026-08-17): findings per round must
+RISE while rounds per bead FALL. If both fall, the bound is suppressing
+recall — ~20% of historical later-round Criticals were pre-existing defects a
+confirmation-scoped pass would not have found. Revert to full-review rounds
+and surface it, rather than celebrating the speed.
+
+## Scope Discipline (cross-reference)
+
+See [CONTEXT_PROTOCOL.md § Scope](../../agents/_shared/CONTEXT_PROTOCOL.md) —
+deliver at the scope intended: a plan/bead graph is a record of intended work,
+not a standing order; goal-met is a stop, not a license to continue; a blast
+radius exploding mid-flight (>~20 tests broken by one change, or a repair
+fleet forming) is a stop-and-surface point; narrowing without a DEVIATION line
+is still silent scope reduction. Applies to every dispatch below.
+
 ## Parallel-Orchestration Discipline (MANDATORY, multi-arc sessions)
 
+- **Fleet size**: more than 3 concurrent agents on one bead is a
+  stop-and-surface event (see § Scope Discipline above), not a scaling
+  decision — it is the signal the change was too big, not a reason to
+  parallelize harder.
 - **Parallel arcs**: multiple dev arcs may run concurrently ONLY on disjoint file sets, declared in each brief ("touch ONLY: `<files>`"; name what siblings own). One file = one arc, never two writers.
 - **Shared files** (PENDING_RELEASE.md, CHANGELOG, registration files): the ORCHESTRATOR edits them at commit time; agents never touch them.
 - **Parallel halves of one feature** (e.g. engine + client): the wire contract is LOCKED verbatim in the design-of-record BEFORE dispatch; both briefs cite it; reviewers verify contract compatibility across the halves.
@@ -158,3 +197,18 @@ needs judgment.
 The habitual error is reaching for a subagent only when judgment is
 wanted, and doing "find every caller of X and tell me which three
 matter" inline — paying full payload for material you discard.
+
+### Restraint is scoped to exploratory and lookup dispatch
+
+Do not delegate work you can finish in a handful of tool calls; a mechanical
+sweep that fits in one shell command is one shell command; never dispatch a
+subagent to verify your own work.
+
+This restraint does NOT apply to the two-reviewer gate
+(`code-review-expert` + `substantive-critic`, `~/.claude/CLAUDE.md` §
+Review Discipline) or to independent-state fork fleets (disjoint files, no
+shared mutable state) — both do genuinely more than "a handful of tool
+calls" worth of independent work, and serializing either buys no safety
+(see `~/.claude/CLAUDE.md` § Testing, "serial-vs-parallel: share a mutable
+resource -> serialize"). See § Parallel-Orchestration Discipline for the
+fleet-size cap that bounds the second case.

@@ -247,21 +247,42 @@ Watch for these specifically, all of which have shipped past green suites:
 - A gate or health check whose failure path returns success (`ok=True`, exit
   0) when its subject was unreachable or when it examined zero items.
 
-You do not run the falsification yourself; `test-validator` owns that and must
-emit `FALSIFIED:` / `NOT FALSIFIED:` lines. Your job is to name the tests whose
-falsifiability is doubtful so the chain does not pass over them silently.
+Falsify what you doubt, in this turn, by READING — do not hand the question to
+another agent to re-derive. For each test you doubt, name the concrete
+production edit that should turn it red and state whether the assertion would
+actually catch it, with the count or line that proves your claim. You may run
+one scoped test command to confirm a reading; you never edit the tree. Emit
+one line per doubted test, in the same convention `test-validator` uses:
 
-## Recommended Next Step (MANDATORY output)
+```
+FALSIFIED: <test> — reverted <the specific change>, test failed with <the actual error>
+NOT FALSIFIED: <test> — <why it could not be done>
+```
 
-Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `test-validator`.
+A `NOT FALSIFIED` line is an acceptable, honest answer. Silence is not —
+omitting the line reports the test as verified when it was only read.
 
-**Condition**: ALWAYS after completing review
-**Rationale**: Test coverage must be validated after code review
-**Mechanism**: You do not have the Agent tool, your caller orchestrates the chain. Include this block at the end of your output:
+Dispatch `test-validator` only for coverage analysis across a surface too
+large to read in this turn — not to re-check a specific assertion you have
+already identified and reported above. See § Recommended Next Step.
+
+## Recommended Next Step (conditional output)
+
+When the diff touches tests at a scale beyond what you falsified by reading
+above, or your falsification left a test's status genuinely undetermined,
+your final output MUST include a next-step recommendation for the caller to
+dispatch `test-validator`. Skip when you have already emitted FALSIFIED / NOT
+FALSIFIED for every test in scope — that IS the coverage validation; a second
+pass over findings you already have evidence for is compounding scaffolding,
+not verification.
+
+**Condition**: diff touches tests beyond what you could falsify by reading, or the review flagged vacuity you could not resolve yourself
+**Rationale**: test-validator owns coverage analysis at a scale you cannot read in one turn; it is not a routine second look at findings you already reported
+**Mechanism**: You do not have the Agent tool, your caller orchestrates the chain. Include this block at the end of your output only when the condition fires:
 
 ```
 ## Next Step: test-validator
-**Task**: Validate test coverage for reviewed changes
+**Task**: Coverage analysis for [surface too large to read in this review]
 **Input Artifacts**: [reviewed files, review findings, nx memory keys]
 **Deliverable**: Test validation report with coverage assessment
 ```
