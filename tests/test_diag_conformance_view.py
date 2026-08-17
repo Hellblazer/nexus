@@ -246,14 +246,19 @@ def test_grants_changeset_view_era_revokes_tables():
     OWNER-RESTRICTED (nexus-46yy3, live-reproduced P0: the bulk
     ALL-TABLES-IN-SCHEMA form hard-errors on the superuser-owned view from
     the NOSUPERUSER nexus_admin migration connection, crash-looping every
-    boot once the view exists). The changeset must NOT grant the view either
-    — only the view's owner (the superuser provisioning path) can."""
+    boot once the view exists). The REVOKE changeset (-2) must NOT grant the
+    view — since nexus-lhuhe the view grant lives in grants-nexus-diag-3,
+    the boot's LAST word (foreign-owner tolerant), because -2's own revoke
+    loop strips whatever taxonomy-011-8 granted earlier the same boot."""
     xml = (_REPO / "service/src/main/resources/db/changelog/grants-nexus-diag.xml").read_text()
     assert "grants-nexus-diag-2" in xml
     # 2x in-body era guard (nexus-ixsxa moved these out of <preConditions>,
     # which INSERTED a changelog row per boot on a runAlways changeset — see
-    # tests/test_changelog_markran_lint.py) + 5 prose mentions.
-    assert xml.count("diag_chash_conformance") == 7
+    # tests/test_changelog_markran_lint.py) + 5 prose mentions, + 4 from the
+    # nexus-lhuhe view re-grant in -3 (1 GRANT target + 3 comment/NOTICE
+    # mentions). Exact pin so a NEW writer of this name is a conscious edit
+    # here, not silent drift.
+    assert xml.count("diag_chash_conformance") == 11
     # Both changesets must stay runAlways with the era test in the BODY. Parsed,
     # not substring-matched: this file's header documents the rejected
     # alternatives verbatim, so `"runOnChange" not in xml` would fail on the
