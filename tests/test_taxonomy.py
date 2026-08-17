@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -69,6 +70,147 @@ def _seed_topic(
     )
 
 
+def _seed_chunk(topic_id: int, collection: str, chash_hex: str, *, dim: int = 384) -> None:
+    """RDR-194 P3d (nexus-tk070.p3d): seed a real ``nexus.chunks`` row so a
+    ``topic_assignments`` insert for ``(tenant, collection, chash)``
+    satisfies the new ``topic_assignments_chunk_fk`` composite FK
+    (``taxonomy-012-doc-id-chunk-fk.xml``) rather than 409ing with
+    "integrity constraint violation".
+
+    The owning tenant is looked up from the ALREADY-CREATED ``topics`` row
+    (``topic_id``, via ``_seed_topic``) rather than assumed or hardcoded:
+    this test substrate mints a FRESH tenant + bearer token PER TEST
+    (``tests/_engine_substrate.py``'s own module docstring, Decision D-A —
+    the engine binds tenant to the bearer server-side; ``X-Nexus-Tenant``
+    is ignored), so there is no shared ``"default"`` tenant to assume. The
+    superuser ``psql`` connection this uses (same ``pg_bin``/``pg_port``/
+    ``pg_user``/``pg_dbname`` coordinates ``tests/db/test_fk_census.py``
+    already establishes as this repo's house pattern for direct-schema
+    test access) bypasses RLS, so it can read ANY tenant's ``topics`` row
+    regardless of session GUC.
+
+    ``catalog_collections`` is stubbed first (chunks.collection FKs to it);
+    both inserts are idempotent (``ON CONFLICT DO NOTHING``) so calling this
+    more than once for the same ``(collection, chash)`` is safe. The
+    embedding column is a zero-vector -- these tests never vector-search
+    the seeded content, they only need the FK's parent row to exist.
+    """
+    from tests._engine_substrate import ensure_engine  # noqa: PLC0415 — laziness contract, see module docstring
+
+    state = ensure_engine()
+    embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
+    vec = "[" + ",".join(["0"] * dim) + "]"
+    sql = (
+        "INSERT INTO nexus.catalog_collections (tenant_id, name) "
+        f"SELECT tenant_id, '{collection}' FROM nexus.topics WHERE id = {topic_id} "
+        "ON CONFLICT DO NOTHING; "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
+        f"SELECT tenant_id, '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::vector "
+        f"FROM nexus.topics WHERE id = {topic_id} "
+        "ON CONFLICT DO NOTHING;"
+    )
+    _run_seed_psql(sql, "_seed_chunk")
+
+
+def _run_seed_psql(sql: str, caller: str) -> None:
+    """Shared ``psql -c`` executor for the seed helpers in this module."""
+    from tests._engine_substrate import ensure_engine  # noqa: PLC0415 — laziness contract, see module docstring
+
+    state = ensure_engine()
+    psql = Path(state["pg_bin"]) / "psql"
+    proc = subprocess.run(
+        [
+            str(psql), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
+            "-U", state["pg_user"], "-d", state["pg_dbname"],
+            "-v", "ON_ERROR_STOP=1", "-c", sql,
+        ],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, f"{caller} failed: {proc.stdout}\n{proc.stderr}"
+
+
+def _seed_chunks(taxonomy: Any, collection: str, chash_hexes: list[str], *, dim: int = 384) -> None:
+    """Bulk variant of :func:`_seed_chunk` for tests that need the FK's
+    parent rows to exist BEFORE any topic does -- the discover/persist_
+    discovered_topics/rebuild_taxonomy family, which create their OWN
+    topics as a side effect of the very call being seeded for, so there
+    is no existing topic_id to discover the tenant from yet.
+
+    Mints one throwaway bootstrap topic under a private collection purely
+    to discover the CURRENT TEST's tenant (this substrate mints a fresh
+    tenant per test -- see :func:`_seed_chunk`'s own docstring); the
+    bootstrap topic/collection never collides with any real test
+    assertion since ``"__chunk_seed_bootstrap__"`` is not a collection
+    name any test queries. One batched ``INSERT ... VALUES`` covers every
+    chash rather than one ``psql`` subprocess per row.
+    """
+    if not chash_hexes:
+        return
+    bootstrap_id = _seed_topic(
+        taxonomy, "chunk-seed-bootstrap", collection="__chunk_seed_bootstrap__",
+    )
+    embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
+    vec = "[" + ",".join(["0"] * dim) + "]"
+    values = ", ".join(
+        f"(tenant_id, '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::vector)"
+        for c in chash_hexes
+    )
+    sql = (
+        "INSERT INTO nexus.catalog_collections (tenant_id, name) "
+        f"SELECT tenant_id, '{collection}' FROM nexus.topics WHERE id = {bootstrap_id} "
+        "ON CONFLICT DO NOTHING; "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
+        f"SELECT * FROM (VALUES {values}) AS v(tenant_id, collection, chash, chunk_text, {embed_col}) "
+        "ON CONFLICT DO NOTHING;"
+    )
+    _run_seed_psql(sql, "_seed_chunks")
+
+
+def _seed_chunks_for_tenant(
+    tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 384,
+) -> None:
+    """Explicit-tenant twin of :func:`_seed_chunk` (RDR-194 P3d,
+    nexus-tk070.p3d) for callers that need to seed nexus.chunks rows
+    BEFORE any nexus.topics row exists — ``discover_topics``/
+    ``persist_discovered_topics``/``compute_assignments`` + ``persist_
+    assignments``/``assign_batch``/``project_against`` all CREATE their
+    topic(s) and assignment(s) together, so there is no ``topic_id`` yet
+    for ``_seed_chunk``'s tenant-derivation subquery to join off. The
+    tenant here comes directly from the ``t2_service_env`` fixture (the
+    per-test minted tenant name), which callers must request explicitly.
+
+    Batched into ONE multi-row INSERT (not a loop of single-row calls)
+    for the discovery tests, which seed 60 doc_ids per call.
+    """
+    from tests._engine_substrate import ensure_engine  # noqa: PLC0415 — laziness contract, see module docstring
+
+    if not chash_hexes:
+        return
+    state = ensure_engine()
+    embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
+    vec = "[" + ",".join(["0"] * dim) + "]"
+    values = ", ".join(
+        f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::vector)"
+        for c in chash_hexes
+    )
+    sql = (
+        f"INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('{tenant}', '{collection}') "
+        "ON CONFLICT DO NOTHING; "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
+        f"VALUES {values} ON CONFLICT DO NOTHING;"
+    )
+    psql = Path(state["pg_bin"]) / "psql"
+    proc = subprocess.run(
+        [
+            str(psql), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
+            "-U", state["pg_user"], "-d", state["pg_dbname"],
+            "-v", "ON_ERROR_STOP=1", "-c", sql,
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, f"_seed_chunks_for_tenant failed: {proc.stdout}\n{proc.stderr}"
+
+
 def _seed_assignment(
     taxonomy: Any,
     doc_id: str,
@@ -90,10 +232,15 @@ def _seed_assignment(
     ``nx taxonomy assign`` (P3b) all resolving the SAME identity. A test that
     genuinely wants a DIFFERENT (cross-collection) source_collection still
     passes one explicitly; this default only fills the common case.
+
+    RDR-194 P3d (nexus-tk070.p3d): seeds the backing ``nexus.chunks`` row
+    via ``_seed_chunk`` BEFORE the assignment insert -- every existing
+    caller of this helper is fixed for free.
     """
     if source_collection is None:
         topic_row = taxonomy.get_topic_by_id(topic_id)
         source_collection = topic_row.get("collection") if topic_row else None
+    _seed_chunk(topic_id, source_collection, doc_id)
     taxonomy.import_assignment(
         doc_id=doc_id,
         topic_id=topic_id,
@@ -147,7 +294,7 @@ def test_get_topics_empty(db: T2Database) -> None:
 
 
 def test_discover_topics_creates_topics_and_centroids(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """discover_topics persists topics to T2 and upserts centroids to ChromaDB."""
     rng = np.random.default_rng(42)
@@ -161,6 +308,11 @@ def test_discover_topics_creates_topics_and_centroids(
         [f"machine learning neural network gradient {i}" for i in range(30)]
         + [f"database query indexing sql schema {i}" for i in range(30)]
     )
+    # RDR-194 P3d: discover_topics writes topic_assignments for every
+    # doc_id -- each needs a matching nexus.chunks row for the new
+    # topic_assignments_chunk_fk. Seeded BEFORE any topic exists, so the
+    # explicit-tenant helper (not the topic_id-derived one) is used.
+    _seed_chunks_for_tenant(t2_service_env, "test__coll", doc_ids)
 
     count = db.taxonomy.discover_topics(
         "test__coll", doc_ids, embeddings, texts, chroma_client,
@@ -189,8 +341,13 @@ def test_discover_topics_creates_topics_and_centroids(
 # ── RDR-128 P1 (fkq5q): assign_batch compute/persist split ───────────────────
 
 
-def _seed_centroids(db: T2Database, chroma_client) -> list[str]:
-    """discover topics so taxonomy__centroids exists; return the doc_ids."""
+def _seed_centroids(db: T2Database, chroma_client, tenant: str) -> list[str]:
+    """discover topics so taxonomy__centroids exists; return the doc_ids.
+
+    RDR-194 P3d: *tenant* (the test's own ``t2_service_env`` value) seeds
+    a matching nexus.chunks row for every doc_id BEFORE discover_topics
+    writes their topic_assignments rows.
+    """
     rng = np.random.default_rng(7)
     embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
@@ -200,19 +357,20 @@ def _seed_centroids(db: T2Database, chroma_client) -> list[str]:
         [f"machine learning neural network gradient {i}" for i in range(30)]
         + [f"database query indexing sql schema {i}" for i in range(30)]
     )
+    _seed_chunks_for_tenant(tenant, "split__coll", doc_ids)
     db.taxonomy.discover_topics("split__coll", doc_ids, embeddings, texts, chroma_client)
     return doc_ids
 
 
 def test_compute_assignments_returns_json_serializable_dicts(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """The COMPUTE half returns plain dicts (no chroma objects) that survive
     JSON — i.e. they can cross the daemon RPC boundary, which is the whole
     point of the split."""
     import json
 
-    _seed_centroids(db, chroma_client)
+    _seed_centroids(db, chroma_client, t2_service_env)
     new_embs = [
         (np.random.default_rng(1).standard_normal(384).astype(np.float32) * 0.1
          + np.array([3.0] + [0.0] * 383, dtype=np.float32)).tolist()
@@ -235,10 +393,11 @@ def test_compute_assignments_returns_json_serializable_dicts(
 
 
 def test_persist_assignments_writes_rows(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """The PERSIST half writes the computed dicts to topic_assignments."""
-    _seed_centroids(db, chroma_client)
+    _seed_centroids(db, chroma_client, t2_service_env)
+    _seed_chunks_for_tenant(t2_service_env, "split__coll", [canonical_chunk_id("persist-doc")])
     new_embs = [
         (np.random.default_rng(2).standard_normal(384).astype(np.float32) * 0.1
          + np.array([3.0] + [0.0] * 383, dtype=np.float32)).tolist()
@@ -255,11 +414,12 @@ def test_persist_assignments_writes_rows(
 
 
 def test_assign_batch_still_composes_compute_and_persist(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """Back-compat: assign_batch == compute_assignments + persist_assignments,
     same return + same persisted rows (direct callers unchanged)."""
-    _seed_centroids(db, chroma_client)
+    _seed_centroids(db, chroma_client, t2_service_env)
+    _seed_chunks_for_tenant(t2_service_env, "split__coll", [canonical_chunk_id("batch-doc")])
     new_embs = [
         (np.random.default_rng(3).standard_normal(384).astype(np.float32) * 0.1
          + np.array([3.0] + [0.0] * 383, dtype=np.float32)).tolist()
@@ -347,12 +507,15 @@ def test_compute_discovered_topics_empty_short_circuits() -> None:
     assert out == []
 
 
-def test_persist_discovered_topics_writes_and_returns_ids(db: T2Database) -> None:
+def test_persist_discovered_topics_writes_and_returns_ids(
+    db: T2Database, t2_service_env: str,
+) -> None:
     """The PERSIST half writes topic rows + assignments and returns the
     generated topic_ids aligned to the input spec order — no chroma needed."""
     from nexus.db.t2 import taxonomy_compute as _tc
 
     doc_ids, embeddings, texts = _discovery_inputs()
+    _seed_chunks_for_tenant(t2_service_env, "persist__disc", doc_ids)
     specs = _tc.compute_discovered_topics(
         "persist__disc", doc_ids, embeddings, texts,
     )
@@ -370,12 +533,15 @@ def test_persist_discovered_topics_writes_and_returns_ids(db: T2Database) -> Non
     assert total_assigned == sum(s["doc_count"] for s in specs)
 
 
-def test_persist_discovered_topics_skips_existing(db: T2Database) -> None:
+def test_persist_discovered_topics_skips_existing(
+    db: T2Database, t2_service_env: str,
+) -> None:
     """Existing-topics guard preserved: a second persist for the same
     collection is a no-op returning [] (matches discover_topics' guard)."""
     from nexus.db.t2 import taxonomy_compute as _tc
 
     doc_ids, embeddings, texts = _discovery_inputs()
+    _seed_chunks_for_tenant(t2_service_env, "guard__disc", doc_ids)
     specs = _tc.compute_discovered_topics(
         "guard__disc", doc_ids, embeddings, texts,
     )
@@ -386,12 +552,13 @@ def test_persist_discovered_topics_skips_existing(db: T2Database) -> None:
 
 
 def test_discover_topics_still_composes(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """Back-compat: discover_topics == compute + persist + centroid upsert.
     Same end state (topic rows in T2 AND centroids in chroma) so direct
     callers and the CLI path are unchanged by the split."""
     doc_ids, embeddings, texts = _discovery_inputs(seed=13)
+    _seed_chunks_for_tenant(t2_service_env, "compose__disc", doc_ids)
     count = db.taxonomy.discover_topics(
         "compose__disc", doc_ids, embeddings, texts, chroma_client,
     )
@@ -476,6 +643,7 @@ def test_assign_topic(db: T2Database) -> None:
     # explicit assigned_by, so call the store directly (the deprecated
     # nexus.taxonomy.assign_topic facade omits it).
     topic_id = _seed_topic(db.taxonomy, "test-topic", collection="proj")
+    _seed_chunk(topic_id, "proj", canonical_chunk_id("doc-123"))
 
     db.taxonomy.assign_topic(
         canonical_chunk_id("doc-123"), topic_id, assigned_by="hdbscan", source_collection="proj",
@@ -489,6 +657,7 @@ def test_assign_topic(db: T2Database) -> None:
 def test_assign_topic_idempotent(db: T2Database) -> None:
     """Assigning same doc to same topic twice doesn't error."""
     topic_id = _seed_topic(db.taxonomy, "test-topic", collection="proj")
+    _seed_chunk(topic_id, "proj", canonical_chunk_id("doc-123"))
 
     db.taxonomy.assign_topic(
         canonical_chunk_id("doc-123"), topic_id, assigned_by="hdbscan", source_collection="proj",
@@ -517,6 +686,8 @@ def test_assign_topic_updates_doc_count_cache(db: T2Database) -> None:
         )
 
     # HDBSCAN path (default assigned_by)
+    _seed_chunk(topic_id, "proj", canonical_chunk_id("doc-a"))
+    _seed_chunk(topic_id, "proj", canonical_chunk_id("doc-b"))
     db.taxonomy.assign_topic(
         canonical_chunk_id("doc-a"), topic_id, assigned_by="hdbscan", source_collection="proj",
     )
@@ -527,6 +698,7 @@ def test_assign_topic_updates_doc_count_cache(db: T2Database) -> None:
     assert cached == derived == 2, f"cached={cached} derived={derived}"
 
     # Projection (UPSERT) path
+    _seed_chunk(topic_id, "proj", canonical_chunk_id("doc-c"))
     db.taxonomy.assign_topic(
         canonical_chunk_id("doc-c"),
         topic_id,
@@ -550,7 +722,7 @@ def test_assign_topic_updates_doc_count_cache(db: T2Database) -> None:
 
 
 def test_rebuild_taxonomy_clears_and_rediscovers(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """rebuild_taxonomy deletes old topics, then re-discovers fresh ones."""
     rng = np.random.default_rng(42)
@@ -562,6 +734,7 @@ def test_rebuild_taxonomy_clears_and_rediscovers(
         [f"machine learning neural network {i}" for i in range(30)]
         + [f"database query sql schema {i}" for i in range(30)]
     )
+    _seed_chunks_for_tenant(t2_service_env, "test__coll", doc_ids)
 
     count1 = db.taxonomy.rebuild_taxonomy(
         "test__coll", doc_ids, embeddings, texts, chroma_client,
@@ -589,17 +762,19 @@ def test_rebuild_taxonomy_clears_and_rediscovers(
 
 
 def test_rebuild_taxonomy_preserves_manual_assignment(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """RDR-151 Phase 3 regression: rebuild must carry a manually-assigned doc
     onto the rebuilt topic (Route 1 — old topic matched to new via _merge_labels).
     This is the transfer logic the compute/persist split must preserve exactly."""
     doc_ids, embeddings, texts = _discovery_inputs(seed=21)
+    _seed_chunks_for_tenant(t2_service_env, "manual__coll", doc_ids)
     db.taxonomy.discover_topics(
         "manual__coll", doc_ids, embeddings, texts, chroma_client,
     )
     # Operator manually assigns a doc to an existing topic.
     first_topic = min(_collection_topic_ids(db.taxonomy, "manual__coll"))
+    _seed_chunk(first_topic, "manual__coll", canonical_chunk_id("manual-doc"))
     db.taxonomy.assign_topic(
         canonical_chunk_id("manual-doc"), first_topic, assigned_by="manual",
         source_collection="manual__coll")
@@ -715,7 +890,7 @@ def test_discover_topics_all_noise_returns_zero(
 
 
 def test_assign_single_returns_nearest_topic(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """assign_single returns the nearest topic_id via centroid ANN lookup."""
     rng = np.random.default_rng(42)
@@ -727,6 +902,7 @@ def test_assign_single_returns_nearest_topic(
         [f"machine learning neural {i}" for i in range(30)]
         + [f"database query sql {i}" for i in range(30)]
     )
+    _seed_chunks_for_tenant(t2_service_env, "test__coll", doc_ids)
 
     db.taxonomy.discover_topics("test__coll", doc_ids, embeddings, texts, chroma_client)
 
@@ -758,7 +934,7 @@ def test_assign_single_no_centroids_returns_none(
 
 
 def test_assign_single_cross_collection_isolation(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """assign_single returns None for collection B when centroids only exist for A."""
     rng = np.random.default_rng(42)
@@ -770,6 +946,7 @@ def test_assign_single_cross_collection_isolation(
         [f"machine learning neural {i}" for i in range(30)]
         + [f"database query sql {i}" for i in range(30)]
     )
+    _seed_chunks_for_tenant(t2_service_env, "coll_A", doc_ids)
 
     # Discover for collection A — creates centroids
     db.taxonomy.discover_topics("coll_A", doc_ids, embeddings, texts, chroma_client)
@@ -782,7 +959,7 @@ def test_assign_single_cross_collection_isolation(
 
 
 def test_assign_single_cross_collection_finds_foreign_topic(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """assign_single with cross_collection=True returns topics from other collections."""
     rng = np.random.default_rng(42)
@@ -792,6 +969,7 @@ def test_assign_single_cross_collection_finds_foreign_topic(
     embeddings[30:, 1] += 3.0
     doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
     texts = [f"text {i}" for i in range(60)]
+    _seed_chunks_for_tenant(t2_service_env, "coll_A_xc", doc_ids)
     db.taxonomy.discover_topics("coll_A_xc", doc_ids, embeddings, texts, chroma_client)
 
     # Query from collection B with cross_collection=True — should find A's topics
@@ -810,16 +988,18 @@ def test_assign_single_cross_collection_finds_foreign_topic(
 
 
 def test_assign_batch_cross_collection(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """assign_batch with cross_collection=True assigns from foreign centroids."""
     rng = np.random.default_rng(42)
     embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
     embeddings[30:, 1] += 3.0
+    seed_doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
+    _seed_chunks_for_tenant(t2_service_env, "batch_A_xc", seed_doc_ids)
     db.taxonomy.discover_topics(
         "batch_A_xc",
-        [canonical_chunk_id(f"doc-{i}") for i in range(60)],
+        seed_doc_ids,
         embeddings,
         [f"text {i}" for i in range(60)],
         chroma_client,
@@ -831,6 +1011,11 @@ def test_assign_batch_cross_collection(
     new_ids = [
         canonical_chunk_id("xc-0"), canonical_chunk_id("xc-1"), canonical_chunk_id("xc-2"),
     ]
+    # assign_batch's own INSERT stamps source_collection = the batch's OWN
+    # collection ("batch_B_xc") regardless of which collection's centroid
+    # matched (cross_collection only affects centroid SEARCH scope, not
+    # where the resulting row is attributed) — seed under batch_B_xc.
+    _seed_chunks_for_tenant(t2_service_env, "batch_B_xc", new_ids)
 
     assigned = db.taxonomy.assign_batch(
         "batch_B_xc", new_ids, new_embs.tolist(), chroma_client,
@@ -847,7 +1032,7 @@ def test_assign_batch_cross_collection(
 
 
 def test_assign_batch_assigns_multiple_docs(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """assign_batch assigns multiple new docs to nearest topics."""
     rng = np.random.default_rng(42)
@@ -859,6 +1044,7 @@ def test_assign_batch_assigns_multiple_docs(
         [f"machine learning neural {i}" for i in range(30)]
         + [f"database query sql {i}" for i in range(30)]
     )
+    _seed_chunks_for_tenant(t2_service_env, "test__coll", doc_ids)
 
     db.taxonomy.discover_topics("test__coll", doc_ids, embeddings, texts, chroma_client)
 
@@ -867,6 +1053,7 @@ def test_assign_batch_assigns_multiple_docs(
     new_embs[:3, 0] += 3.0  # near cluster A
     new_embs[3:, 1] += 3.0  # near cluster B
     new_ids = [canonical_chunk_id(f"new-doc-{i}") for i in range(5)]
+    _seed_chunks_for_tenant(t2_service_env, "test__coll", new_ids)
 
     assigned = db.taxonomy.assign_batch(
         "test__coll", new_ids, new_embs.tolist(), chroma_client,
@@ -892,7 +1079,7 @@ def test_assign_batch_no_centroids_returns_zero(
 
 
 def test_assign_single_dimension_mismatch(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """assign_single returns None with warning on embedding dimension mismatch."""
     rng = np.random.default_rng(42)
@@ -902,6 +1089,7 @@ def test_assign_single_dimension_mismatch(
     embeddings[30:, 1] += 3.0
     doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
     texts = [f"text {i}" for i in range(60)]
+    _seed_chunks_for_tenant(t2_service_env, "dim__coll", doc_ids)
     db.taxonomy.discover_topics("dim__coll", doc_ids, embeddings, texts, chroma_client)
 
     # Query with 1024d embedding — dimension mismatch
@@ -911,7 +1099,7 @@ def test_assign_single_dimension_mismatch(
 
 
 def test_assign_batch_dimension_mismatch(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """assign_batch returns 0 on embedding dimension mismatch."""
     rng = np.random.default_rng(42)
@@ -921,6 +1109,7 @@ def test_assign_batch_dimension_mismatch(
     embeddings[30:, 1] += 3.0
     doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
     texts = [f"text {i}" for i in range(60)]
+    _seed_chunks_for_tenant(t2_service_env, "dimbatch__coll", doc_ids)
     db.taxonomy.discover_topics("dimbatch__coll", doc_ids, embeddings, texts, chroma_client)
 
     # Query with 1024d embeddings — dimension mismatch
@@ -934,7 +1123,7 @@ def test_assign_batch_dimension_mismatch(
 
 
 def test_project_against_basic(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """project_against returns matched topics and novel chunks."""
     rng = np.random.default_rng(42)
@@ -950,6 +1139,7 @@ def test_project_against_basic(
     tgt_embs[30:, 1] += 3.0  # similar to source cluster B
     tgt_ids = [canonical_chunk_id(f"tgt-{i}") for i in range(60)]
     tgt_texts = [f"text {i}" for i in range(60)]
+    _seed_chunks_for_tenant(t2_service_env, "target__coll", tgt_ids)
     db.taxonomy.discover_topics("target__coll", tgt_ids, tgt_embs, tgt_texts, chroma_client)
 
     # Store source embeddings in a ChromaDB collection
@@ -999,7 +1189,7 @@ def test_project_against_empty_target(
 
 
 def test_project_against_dimension_mismatch(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """project_against raises ValueError on dimension mismatch."""
     rng = np.random.default_rng(42)
@@ -1009,6 +1199,7 @@ def test_project_against_dimension_mismatch(
     tgt_embs[30:, 1] += 3.0
     tgt_ids = [canonical_chunk_id(f"tgt-{i}") for i in range(60)]
     tgt_texts = [f"text {i}" for i in range(60)]
+    _seed_chunks_for_tenant(t2_service_env, "dimtgt__coll", tgt_ids)
     db.taxonomy.discover_topics("dimtgt__coll", tgt_ids, tgt_embs, tgt_texts, chroma_client)
 
     # Source collection with 1024d — dimension mismatch
@@ -1026,7 +1217,7 @@ def test_project_against_dimension_mismatch(
 
 
 def test_assigned_by_column_populated(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> None:
     """discover_topics sets assigned_by='hdbscan' on topic_assignment rows."""
     rng = np.random.default_rng(42)
@@ -1038,6 +1229,7 @@ def test_assigned_by_column_populated(
         [f"machine learning neural {i}" for i in range(30)]
         + [f"database query sql {i}" for i in range(30)]
     )
+    _seed_chunks_for_tenant(t2_service_env, "test__coll", doc_ids)
 
     db.taxonomy.discover_topics("test__coll", doc_ids, embeddings, texts, chroma_client)
 
@@ -1219,6 +1411,7 @@ def test_cli_taxonomy_status_missing_projection_count_not_truncated_by_limit(
         big_id = _seed_topic(db.taxonomy, "big", collection="docs__big", doc_count=100)
         _seed_topic(db.taxonomy, "medium", collection="docs__medium", doc_count=50)
         _seed_topic(db.taxonomy, "small", collection="docs__small", doc_count=10)
+        _seed_chunk(big_id, "docs__big", canonical_chunk_id("doc-1"))
         db.taxonomy.assign_topic(
             canonical_chunk_id("doc-1"), big_id, assigned_by="projection",
             similarity=0.9, source_collection="docs__big",
@@ -1251,6 +1444,7 @@ def test_cli_taxonomy_status_silent_when_hook_failures_table_missing(
     db_path = tmp_path / "memory.db"
     with T2Database(db_path) as db:
         tid = _seed_topic(db.taxonomy, "t1", collection="docs__alpha", doc_count=10)
+        _seed_chunk(tid, "docs__alpha", canonical_chunk_id("doc-1"))
         db.taxonomy.assign_topic(
             canonical_chunk_id("doc-1"), tid, assigned_by="projection",
             similarity=0.9, source_collection="docs__alpha",
@@ -1283,6 +1477,7 @@ def test_cli_taxonomy_status_quiet_when_projection_present(tmp_path: Path) -> No
             db.taxonomy, "t1", collection="docs__alpha", doc_count=10,
             review_status="accepted",
         )
+        _seed_chunk(tid, "docs__alpha", canonical_chunk_id("doc-1"))
         db.taxonomy.assign_topic(
             canonical_chunk_id("doc-1"), tid, assigned_by="projection",
             similarity=0.8, source_collection="docs__alpha",
@@ -1404,7 +1599,7 @@ class TestMiniLMTopicQuality:
         return make_vector_test_client()
 
     def test_code_chunk_topic_quality(
-        self, db: T2Database, ef, chroma,
+        self, db: T2Database, ef, chroma, t2_service_env: str,
     ) -> None:
         """Topics from code-like chunks show recognizable structural patterns."""
         # Three domains of code-like text
@@ -1433,6 +1628,7 @@ class TestMiniLMTopicQuality:
         texts = http_chunks + db_chunks + test_chunks
         doc_ids = [canonical_chunk_id(f"chunk-{i}") for i in range(len(texts))]
         embeddings = np.array(ef(texts), dtype=np.float32)
+        _seed_chunks_for_tenant(t2_service_env, "code__test", doc_ids)
 
         count = db.taxonomy.discover_topics(
             "code__test", doc_ids, embeddings, texts, chroma,
@@ -1448,7 +1644,7 @@ class TestMiniLMTopicQuality:
             assert t["doc_count"] > 0
 
     def test_nearest_centroid_agreement(
-        self, db: T2Database, ef, chroma,
+        self, db: T2Database, ef, chroma, t2_service_env: str,
     ) -> None:
         """Hold-out agreement: nearest-centroid assigns consistently with batch.
 
@@ -1475,6 +1671,7 @@ class TestMiniLMTopicQuality:
         train_ids = [doc_ids[i] for i in range(len(doc_ids)) if train_mask[i]]
         train_texts = [texts[i] for i in range(len(texts)) if train_mask[i]]
         train_embs = embeddings[train_mask]
+        _seed_chunks_for_tenant(t2_service_env, "code__agreement", train_ids)
 
         # Discover on training set
         count = db.taxonomy.discover_topics(
@@ -1785,7 +1982,7 @@ class TestDiscoverStoresTerms:
         return make_vector_test_client()
 
     def test_terms_stored_as_json(
-        self, db: T2Database, chroma_client: Any,
+        self, db: T2Database, chroma_client: Any, t2_service_env: str,
     ) -> None:
         """discover_topics persists top c-TF-IDF terms as JSON."""
         import json
@@ -1799,6 +1996,7 @@ class TestDiscoverStoresTerms:
             [f"machine learning neural network gradient {i}" for i in range(30)]
             + [f"database query indexing sql schema {i}" for i in range(30)]
         )
+        _seed_chunks_for_tenant(t2_service_env, "test__coll", doc_ids)
 
         db.taxonomy.discover_topics(
             "test__coll", doc_ids, embeddings, texts, chroma_client,
@@ -2321,19 +2519,23 @@ class TestProjectionLinks:
         tgt_b = _seed_topic(db.taxonomy, "tgt-b", collection="c_target_b", doc_count=3)
 
         # Projection assignments originate from two different source collections.
+        _seed_chunk(tgt_a, "c_src_1", canonical_chunk_id("doc-1"))
         db.taxonomy.assign_topic(
             canonical_chunk_id("doc-1"), tgt_a, assigned_by="projection",
             similarity=0.9, source_collection="c_src_1",
         )
+        _seed_chunk(tgt_a, "c_src_1", canonical_chunk_id("doc-2"))
         db.taxonomy.assign_topic(
             canonical_chunk_id("doc-2"), tgt_a, assigned_by="projection",
             similarity=0.8, source_collection="c_src_1",
         )
+        _seed_chunk(tgt_b, "c_src_2", canonical_chunk_id("doc-3"))
         db.taxonomy.assign_topic(
             canonical_chunk_id("doc-3"), tgt_b, assigned_by="projection",
             similarity=0.7, source_collection="c_src_2",
         )
         # A non-projection assignment must be ignored by the helper.
+        _seed_chunk(tgt_a, "c_target_a", canonical_chunk_id("doc-4"))
         db.taxonomy.assign_topic(
             canonical_chunk_id("doc-4"), tgt_a, assigned_by="hdbscan",
             source_collection="c_target_a",
@@ -2359,6 +2561,7 @@ class TestProjectionLinks:
         for doc_id in (
             canonical_chunk_id("doc-1"), canonical_chunk_id("doc-2"), canonical_chunk_id("doc-3"),
         ):
+            _seed_chunk(src_id, "c_src", doc_id)
             db.taxonomy.assign_topic(
                 doc_id, src_id, assigned_by="hdbscan", source_collection="c_src")
             db.taxonomy.assign_topic(
@@ -2391,6 +2594,7 @@ class TestProjectionLinks:
         ])
 
         # Assign a projection pair
+        _seed_chunk(src_id, "c1", canonical_chunk_id("doc-1"))
         db.taxonomy.assign_topic(
             canonical_chunk_id("doc-1"), src_id, assigned_by="hdbscan", source_collection="c1",
         )
@@ -2444,6 +2648,9 @@ class TestManualOpsCLI:
             topic_id = _seed_topic(
                 db.taxonomy, "target-topic", collection="proj", doc_count=5,
             )
+            # RDR-194 P3d: topic_assignments_chunk_fk needs a matching
+            # nexus.chunks row for (proj, _MANUAL_DOC_ID).
+            _seed_chunk(topic_id, "proj", self._MANUAL_DOC_ID)
 
         runner = CliRunner()
         with (
@@ -2714,7 +2921,7 @@ class TestManualPreservation:
         return make_vector_test_client()
 
     def test_manual_assignments_survive_rebuild(
-        self, db: T2Database, chroma: Any,
+        self, db: T2Database, chroma: Any, t2_service_env: str,
     ) -> None:
         """Rebuild with merge strategy preserves manual assignments."""
         from nexus.db.local_ef import LocalEmbeddingFunction
@@ -2726,6 +2933,7 @@ class TestManualPreservation:
         texts = texts_a + texts_b
         doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
         embeddings = np.array(ef(texts), dtype=np.float32)
+        _seed_chunks_for_tenant(t2_service_env, "test__preserve", doc_ids)
 
         count = db.taxonomy.discover_topics(
             "test__preserve", doc_ids, embeddings, texts, chroma,
@@ -2735,6 +2943,7 @@ class TestManualPreservation:
         # Manually assign a doc and rename a topic
         topics = db.taxonomy.get_topics()
         topic = topics[0]
+        _seed_chunk(topic["id"], "test__preserve", canonical_chunk_id("manual-doc"))
         db.taxonomy.assign_topic(
             canonical_chunk_id("manual-doc"), topic["id"], assigned_by="manual",
             source_collection="test__preserve")
@@ -2770,7 +2979,7 @@ class TestRediscoveryCentroidLifecycle:
         return make_vector_test_client()
 
     def test_force_clears_old_centroids(
-        self, db: T2Database, chroma: Any,
+        self, db: T2Database, chroma: Any, t2_service_env: str,
     ) -> None:
         """rebuild_taxonomy clears old centroids before upserting new."""
         rng = np.random.default_rng(42)
@@ -2782,6 +2991,7 @@ class TestRediscoveryCentroidLifecycle:
             [f"machine learning neural {i}" for i in range(30)]
             + [f"database query sql {i}" for i in range(30)]
         )
+        _seed_chunks_for_tenant(t2_service_env, "test__lifecycle", doc_ids)
 
         # First discovery
         db.taxonomy.discover_topics(
@@ -3151,7 +3361,9 @@ class TestEdgeCases:
         result = db.taxonomy.split_topic(tid, k=2, chroma_client=chroma)
         assert result == 0
 
-    def test_discover_skip_existing_topics(self, db: T2Database) -> None:
+    def test_discover_skip_existing_topics(
+        self, db: T2Database, t2_service_env: str,
+    ) -> None:
         """discover_topics skips if topics already exist for collection."""
         chroma = make_vector_test_client()
         rng = np.random.default_rng(42)
@@ -3163,6 +3375,7 @@ class TestEdgeCases:
             [f"machine learning {i}" for i in range(30)]
             + [f"database query {i}" for i in range(30)]
         )
+        _seed_chunks_for_tenant(t2_service_env, "dup__coll", doc_ids)
 
         # First discover succeeds
         count1 = db.taxonomy.discover_topics(
@@ -3299,7 +3512,7 @@ class TestProjectCmd:
     """Tests for nx taxonomy project CLI command."""
 
     def test_project_cmd_output(
-        self, db: T2Database, chroma_client: Any, tmp_path: Path,
+        self, db: T2Database, chroma_client: Any, tmp_path: Path, t2_service_env: str,
     ) -> None:
         """project command shows matched topics and novel chunks."""
         from unittest.mock import MagicMock, patch
@@ -3314,9 +3527,11 @@ class TestProjectCmd:
         tgt_embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
         tgt_embs[:30, 0] += 3.0
         tgt_embs[30:, 1] += 3.0
+        tgt_ids = [canonical_chunk_id(f"t-{i}") for i in range(60)]
+        _seed_chunks_for_tenant(t2_service_env, "tgt__coll", tgt_ids)
         db.taxonomy.discover_topics(
             "tgt__coll",
-            [canonical_chunk_id(f"t-{i}") for i in range(60)],
+            tgt_ids,
             tgt_embs,
             [f"text {i}" for i in range(60)],
             chroma_client,
@@ -3352,7 +3567,7 @@ class TestProjectCmd:
         assert "matched topics" in result.output.lower() or "novel chunks" in result.output.lower()
 
     def test_project_cmd_persist(
-        self, db: T2Database, chroma_client: Any, tmp_path: Path,
+        self, db: T2Database, chroma_client: Any, tmp_path: Path, t2_service_env: str,
     ) -> None:
         """--persist writes assignments with assigned_by='projection'."""
         from unittest.mock import MagicMock, patch
@@ -3366,9 +3581,11 @@ class TestProjectCmd:
         tgt_embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
         tgt_embs[:30, 0] += 3.0
         tgt_embs[30:, 1] += 3.0
+        tgt_ids = [canonical_chunk_id(f"t-{i}") for i in range(60)]
+        _seed_chunks_for_tenant(t2_service_env, "ptgt__coll", tgt_ids)
         db.taxonomy.discover_topics(
             "ptgt__coll",
-            [canonical_chunk_id(f"t-{i}") for i in range(60)],
+            tgt_ids,
             tgt_embs,
             [f"text {i}" for i in range(60)],
             chroma_client,
@@ -3379,10 +3596,16 @@ class TestProjectCmd:
         src_coll = chroma_client.get_or_create_collection(
             "psrc__coll", embedding_function=None, metadata={"hnsw:space": "cosine"},
         )
+        src_ids = [canonical_chunk_id(f"ps-{i}") for i in range(10)]
         src_coll.upsert(
-            ids=[canonical_chunk_id(f"ps-{i}") for i in range(10)],
+            ids=src_ids,
             embeddings=src_embs.tolist(),
         )
+        # RDR-194 P3d: --persist writes topic_assignments for the SOURCE
+        # chunks (source_collection = the source's own collection,
+        # "psrc__coll") via assign_many -- each needs a matching
+        # nexus.chunks row for the new topic_assignments_chunk_fk.
+        _seed_chunks_for_tenant(t2_service_env, "psrc__coll", src_ids)
 
         runner = CliRunner()
         with (

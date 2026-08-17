@@ -15,7 +15,6 @@ import java.util.Set;
 
 import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
 import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
-import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 
 /**
  * RDR-180 COLUMN CENSUS (nexus-jxizy.10.5, Hal directive 2026-07-19):
@@ -63,9 +62,10 @@ import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
  * public.databasechangelog} (outside jOOQ's {@code nexus}/{@code t1}
  * codegen scope for a different reason: cross-schema, not runtime-unknown).
  * {@code information_schema.columns}/{@code .tables} get the same
- * treatment. The three FIXED hex-keyed pointer tables in {@link
- * #danglingPointers} ({@code topic_assignments}, {@code frecency}, {@code
- * relevance_log}) are not runtime-discovered at all — they are compile-time
+ * treatment. The hex-keyed pointer tables in {@link #danglingPointers}
+ * ({@code frecency}, {@code relevance_log} — {@code topic_assignments}
+ * retired at RDR-194 P3d, nexus-tk070.p3d, D0.10, see that method's own
+ * javadoc) are not runtime-discovered at all — they are compile-time
  * known and DO have generated {@code Tables} constants, so that leg
  * converts to fully typed DSL via {@link ChashSqlIdioms#existsInAnyDim}.
  * Zero raw string-SQL execute/fetch sites remain in this class; the
@@ -126,6 +126,13 @@ public final class ChashCensus {
     // RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-o8dil.41 item 5):
     // chunks_384/768/1024.chash (three BYTEA-discovered entries) collapsed to
     // the single chunks.chash entry the unified table now carries.
+    //
+    // RDR-194 P3d (nexus-tk070.p3d): topic_assignments.doc_id KEEPS its
+    // entry here — this set tracks the schema-DERIVED column enumeration
+    // (columns(ctx, "text"|"bytea") rediscovering every known chash-bearing
+    // column), which is independent of the dangling-POINTER scan below. The
+    // column itself is unaffected by C1's retirement (it is FK-enforced now,
+    // not dropped) and remains bytea-discovered exactly as it was at P3c.
     static final Set<String> KNOWN_INVENTORY = Set.of(
         "catalog_document_chunks.chash",
         "topic_assignments.doc_id", "frecency.chunk_id", "relevance_log.chunk_id",
@@ -202,32 +209,19 @@ public final class ChashCensus {
     }
 
     /**
-     * EITHER era's chash shape — the 64-only filter was the blindness.
-     * SURVIVES for {@code topic_assignments} only (nexus-lgdel.l1): that
-     * leg's own retirement to canonical-only belongs to nexus-tk070.p3d, not
-     * this commit. {@code frecency}/{@code relevance_log} move to {@link
-     * #CANONICAL_SHAPE} below — the new {@code chunk_id ~
-     * '^[0-9a-f]{64}$'} CHECK (legacy-001-drop-chash-alias.xml) makes a
-     * legacy-width value in either column structurally impossible from this
-     * migration forward, so scanning for the wider shape on those two legs
-     * would only ever match pre-existing rows the same changeset just
-     * deleted.
-     *
-     * <p>RDR-194 P3c (nexus-tk070.p3c, {@code taxonomy-011-doc-id-bytea.xml}):
-     * {@code topic_assignments.doc_id} is {@code bytea} now, so this value
-     * is no longer applied as a regex — there is no hex text left to match.
-     * {@link #unresolvableBytesCount} mirrors it verbatim as an
-     * {@code octet_length} filter (32-or-64 hex chars decodes to 16-or-32
-     * bytes), so the constant stays declared, documented, and referenced
-     * from that method's javadoc rather than deleted: the leg's detection
-     * power is UNCHANGED by this phase, only its representation. Retirement
-     * of both the leg and this width tolerance is still nexus-tk070.p3d's,
-     * not this commit's (D0.10).
+     * Canonical-only shape — {@code frecency}/{@code relevance_log}'s
+     * dangling leg (nexus-lgdel.l1). RDR-194 P3d (nexus-tk070.p3d): the
+     * former {@code EITHER_ERA_SHAPE} width tolerance this constant was
+     * documented against — {@code topic_assignments.doc_id}'s "32- or
+     * 64-hex" carve-out — RETIRED with leg C1 below: the {@code
+     * topic_assignments_chunk_fk} composite FK
+     * ({@code taxonomy-012-doc-id-chunk-fk.xml}) makes a dangling
+     * {@code topic_assignments.doc_id} structurally impossible from this
+     * migration forward (ON DELETE CASCADE removes the assignment the
+     * instant its chunk is gone), so there is no wider shape left to
+     * tolerate anywhere in this class. {@code frecency}/{@code
+     * relevance_log} carry no such FK and stay on this shape alone.
      */
-    private static final String EITHER_ERA_SHAPE = "^([0-9a-f]{32}|[0-9a-f]{64})$";
-
-    /** Canonical-only shape — {@code frecency}/{@code relevance_log}'s dangling
-     *  leg after nexus-lgdel.l1 (see {@link #EITHER_ERA_SHAPE}'s javadoc). */
     private static final String CANONICAL_SHAPE = "^[0-9a-f]{64}$";
 
     /**
@@ -255,30 +249,6 @@ public final class ChashCensus {
     }
 
     /**
-     * bytea-native counterpart of {@link #unresolvableHexCount}, for
-     * {@code topic_assignments.doc_id} post-RDR-194-P3c (bead
-     * nexus-tk070.p3c, {@code taxonomy-011-doc-id-bytea.xml}): the column is
-     * {@code bytea} now, so there is no hex text to regex-match or {@code
-     * decode(...)} — the value is already raw bytes. The width filter
-     * mirrors {@link #EITHER_ERA_SHAPE} verbatim (32-or-64 hex chars decodes
-     * to 16-or-32 bytes), so this leg's detection power is UNCHANGED, not
-     * narrowed: a genuinely non-canonical width would still be flagged if
-     * one ever existed. In practice nothing is expected to match — RDR-194
-     * P3a closed both admitting paths and P3b's backfill/delete guaranteed
-     * every surviving row decoded cleanly before P3c's {@code ALTER} ran —
-     * but the leg itself, and this width filter, formally retire together
-     * only at RDR-194 P3d (D0.10), in the same commit as the {@code doc_id}
-     * FK VALIDATE. Not before.
-     */
-    private static Integer unresolvableBytesCount(DSLContext ctx, TableField<?, byte[]> byteCol) {
-        Field<Integer> octetLen = DSL.function("octet_length", Integer.class, byteCol);
-        return ctx.selectCount().from(byteCol.getTable())
-            .where(octetLen.in(16, 32))
-            .and(DSL.not(ChashSqlIdioms.existsInAnyDim(ctx, byteCol)))
-            .fetchOne(0, Integer.class);
-    }
-
-    /**
      * Dangling-pointer legs (nexus-kmd5b).
      *
      * <p>These previously gated on the CONFORMANT width — {@code
@@ -299,37 +269,36 @@ public final class ChashCensus {
      * zero, so a legacy-width pointer is now dangling on the direct-existence
      * test alone, with no second route to check.
      *
-     * <p>The TEXT columns (frecency/relevance_log) keep a shape filter,
-     * "a chash of EITHER era" (32- or 64-hex). CORRECTED (RDR-194 D1,
-     * nexus-tk070.p3a, nexus-yo9mi): {@code topic_assignments.doc_id} is NOT
-     * a mixed identity space and does NOT hold memory-note titles: every
-     * live writer emits a chunk chash (RDR-180 Item6 / Item6a, {@code
-     * docs/rdr/rdr-180-content-address-chash-binary-32byte.md:80,82,135}; the
-     * one real memory-note-clustering path died with the SQLite store at
-     * commit {@code f24bdb853}). {@code topic_assignments.doc_id} itself is
-     * {@code bytea} now (RDR-194 P3c, nexus-tk070.p3c) — see {@link
-     * #unresolvableBytesCount} — so its width filter is expressed as
-     * {@code octet_length} rather than a hex regex, but the SAME shape
-     * tolerance and the SAME reason for it (the two ETL-era admitting paths,
-     * {@link dev.nexus.service.db.StagingPromoteOps}'s legacy passthrough
-     * and the {@code nx taxonomy assign} CLI argument, both closed at P3a —
-     * this is not a title population) carries forward unchanged. Both the
-     * width tolerance and this leg (C1) retire together at RDR-194 P3d, in
-     * the same commit as the {@code doc_id} FK VALIDATE (D0.10).
+     * <p>RDR-194 P3d (nexus-tk070.p3d, D0.10): leg C1
+     * ({@code dangling.topic_assignments}) is RETIRED HERE, in the same
+     * commit as the {@code topic_assignments_chunk_fk} composite FK's
+     * VALIDATE ({@code taxonomy-012-doc-id-chunk-fk.xml}). The FK's
+     * {@code ON DELETE CASCADE} makes the population this leg scanned for
+     * — a {@code topic_assignments} row whose chunk no longer exists —
+     * structurally impossible from this migration forward: PostgreSQL
+     * removes the assignment in the SAME statement that deletes its chunk,
+     * rather than leaving a pointer for this leg to find later. Retiring
+     * the leg NARROWS what {@code StagingPromoteOps.finalizeTenant}'s FATAL
+     * census check refuses on (D0.10's own reasoning for why the leg could
+     * not retire before the FK existed) — safe now that the FK is the
+     * thing enforcing what the leg used to only report. {@code
+     * topic_assignments.doc_id} is NOT a mixed identity space and does NOT
+     * hold memory-note titles (RDR-194 D1, nexus-tk070.p3a, nexus-yo9mi):
+     * every live writer emits a chunk chash (RDR-180 Item6 / Item6a,
+     * {@code docs/rdr/rdr-180-content-address-chash-binary-32byte.md:80,82,135}).
+     *
+     * <p>The remaining TEXT columns (frecency/relevance_log, legs C2/C3)
+     * keep their CANONICAL-ONLY shape filter (nexus-lgdel.l1) UNCHANGED —
+     * they carry no FK to nexus.chunks and are explicitly out of this
+     * phase's scope (RDR-194 D7, by grain). Leg C4 (the manifest leg,
+     * below) is untouched.
      */
     private static Map<String, Integer> danglingPointers(DSLContext ctx) {
         Map<String, Integer> out = new LinkedHashMap<>();
-        // topic_assignments.doc_id is bytea now (RDR-194 P3c, nexus-tk070.p3c)
-        // -- unresolvableBytesCount replaces the regex/decode form, same
-        // EITHER_ERA_SHAPE width tolerance, just bytea-native. Its own
-        // retirement to canonical-only, and this leg's retirement outright,
-        // belong to nexus-tk070.p3d (see unresolvableBytesCount's javadoc).
-        Integer taCount = unresolvableBytesCount(ctx, TOPIC_ASSIGNMENTS.DOC_ID);
-        if (taCount != null && taCount > 0) out.put("dangling.topic_assignments", taCount);
-
         // frecency/relevance_log stay TEXT, CANONICAL_SHAPE only
-        // (nexus-lgdel.l1 — see EITHER_ERA_SHAPE's javadoc for why
-        // topic_assignments alone used to carry the wider shape).
+        // (nexus-lgdel.l1). topic_assignments (leg C1) retired above
+        // (RDR-194 P3d, nexus-tk070.p3d, D0.10) — see this method's own
+        // javadoc.
         Map<String, TableField<?, String>> hexKeyed = new LinkedHashMap<>();
         hexKeyed.put("frecency", FRECENCY.CHUNK_ID);
         hexKeyed.put("relevance_log", RELEVANCE_LOG.CHUNK_ID);

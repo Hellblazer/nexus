@@ -1,0 +1,246 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-194 Phase P3d (Decision D1, bead nexus-tk070.p3d): the composite FK
+    `nexus.topic_assignments (tenant_id, source_collection, doc_id)` ->
+    `nexus.chunks (tenant_id, collection, chash)`, and the one-for-one
+    retirement of `ChashCensus` leg C1 (`dangling.topic_assignments`) plus
+    its "either era" width tolerance — SAME commit as this file's VALIDATE,
+    never earlier (D0.10; see `ChashCensus.java`'s own updated javadoc).
+
+    THREE-STEP SHAPE (catalog-029 precedent, `catalog-029-manifest-chunk-
+    fk.xml` — Hal disposition (a), T2 nexus/rdr-191-validate-placement-
+    decision [22557], RDR-191 amendment (xi)):
+
+      1. taxonomy-012-1: ADD CONSTRAINT ... NOT VALID.
+      2. taxonomy-012-2: anti-join remediation — DELETE every
+         topic_assignments row whose (tenant_id, source_collection,
+         doc_id) has no matching nexus.chunks row (F17's shape: an
+         anti-join against the chunk store, never a count comparison).
+         Priced as safe: topic assignments are DERIVED data, recomputable
+         by re-running assignment (RDR-194 D1's own remediation-ordering
+         note; the writers' `ON CONFLICT DO NOTHING` makes recomputation
+         idempotent).
+      3. taxonomy-012-3: VALIDATE CONSTRAINT.
+
+    All three are ORDINARY RUN-ONCE changesets (no runAlways), ship
+    TOGETHER in ONE file, in ONE release — changeset 1 always runs before
+    changeset 3 in the same migration walk, so if changeset 1 succeeds the
+    constraint necessarily exists when changeset 3 runs. No SEPARATE-
+    RELEASE gap window exists here (unlike fk-002-validate.xml's own
+    history), but changeset 3 still carries a whole-changeset MARK_RAN
+    precondition to satisfy the project's blanket "every bare VALIDATE
+    CONSTRAINT is guarded" tripwire (tests/test_changelog_validate_
+    precondition_lint.py), which does not carve out a same-release
+    exception — matching catalog-029-2's own reasoning verbatim.
+
+    FK SHAPE (RDR-194 D1, `rdr-194-fk-census-structural-schema-warts.md`
+    Decision D1 — read that section before touching this):
+      - ON UPDATE CASCADE (mandatory, D1): nexus.chunks is the PARENT; a
+        collection rename or an RDR-180-style chash rekey is a parent-key
+        UPDATE that must propagate to the assignment, not fail. The
+        SIBLING FK already on this exact table,
+        `topic_assignments_collection_fk` (fk-002-5, `(tenant_id,
+        source_collection)` -> `catalog_collections(tenant_id, name)`),
+        already uses ON UPDATE CASCADE for the identical reason — house
+        pattern, not a novel choice.
+      - ON DELETE CASCADE (D1, deliberately NOT the catalog-029/fk-002
+        DEFERRABLE-NO-ACTION shape): an assignment whose chunk is gone is
+        exactly the dangling-row population `ChashCensus` leg C1 exists to
+        report — CASCADE removes it structurally, which is what retires
+        the leg. Unlike catalog-029's manifest FK, no class-B deferred-
+        constraint site is needed anywhere for this FK: CASCADE lets
+        PostgreSQL remove the referencing topic_assignments rows AS PART
+        OF the same DELETE statement against nexus.chunks, with no
+        caller-side `SET CONSTRAINTS ... DEFERRED` ordering dance required
+        (that machinery exists only for a NO ACTION/RESTRICT delete side,
+        which this FK does not use).
+      - Natural key throughout: `(tenant_id, source_collection, doc_id)`,
+        the same triple shape as `nexus.chunks`' own PK
+        (`vectors-004-unify-chunks.xml`) — never a metadata copy.
+      - MATCH SIMPLE (the PostgreSQL FK default): `source_collection` is
+        NOT NULL (taxonomy-010-source-collection-backfill.xml's `SET NOT
+        NULL`, P3b) and `doc_id` is NOT NULL (taxonomy-001-baseline.xml)
+        — MATCH SIMPLE's null-exemption is structurally inert here,
+        exactly as catalog-029's own header documents for the identical
+        reason on its FK. This is also the P3d non-vacuity check named in
+        the bead's acceptance criteria: a table left mostly NULL on
+        `source_collection` would validate green while enforcing nothing;
+        P3b's `SET NOT NULL` is the structural defence closing that gap
+        BEFORE this changeset ever runs.
+
+    RESOLVABLE-ONLY DISCIPLINE AT THE APPLICATION LAYER (RDR-194 P3d scope
+    enlargement, deep-analyst cncue analysis, T2 nexus/cncue-finalize-
+    reject-reconciliation [22750] §2b/§4): this FK, once VALIDATEd, makes
+    it possible for `StagingPromoteOps.finalizeTenant`'s topic_assignments
+    promote to violate it — a CONFORMANT 64-hex staged doc_id whose
+    content collection has not promoted to `nexus.chunks` yet would
+    otherwise hit SQLSTATE 23503 and abort the WHOLE tenant finalize
+    transaction, naming no offending row. That promote path (companion
+    commit, same bead) now anti-joins against `nexus.chunks` itself before
+    inserting, so an unresolvable-yet-conformant row stays STAGED and
+    counted rather than reaching this FK at all — the FK is the STORAGE
+    guarantee; the anti-join is the APPLICATION-side deferral that keeps
+    the storage guarantee from ever firing on the ordinary "topics ETL
+    landed before the content collection did" case.
+
+    RLS DISCIPLINE (taxonomy-012-2 only; changesets 1/3 are pure DDL/
+    VALIDATE, no DML): nexus.topic_assignments and nexus.chunks both carry
+    FORCE ROW LEVEL SECURITY (taxonomy-001-baseline.xml,
+    vectors-004-unify-chunks.xml). Liquibase runs as nexus_admin, the
+    table owner but NOT BYPASSRLS (role-001-nexus-svc.xml) — under FORCE
+    RLS with no nexus.tenant GUC set at migration time, an untoggled read
+    of nexus.chunks returns ZERO rows for every tenant, which would make
+    the anti-join misclassify EVERY topic_assignments row as dangling and
+    delete the whole table (the identical trap catalog-029-1's own header
+    documents for its manifest anti-join against the same nexus.chunks
+    table). Both tables are toggled NO FORCE, then restored to FORCE,
+    symmetrically, inside taxonomy-012-2's own changeset (nexus-1wjmq
+    toggle-wrapped shape).
+
+    NO LOCK TABLE ... ACCESS EXCLUSIVE is needed before taxonomy-012-2's
+    DELETE, for the identical reason catalog-029-1's header gives: changeset
+    taxonomy-012-1 (in this SAME migration walk, always immediately before
+    taxonomy-012-2) already adds the FK NOT VALID, which enforces EVERY new
+    write from the instant it commits — no writer running after
+    taxonomy-012-1 commits can create a NEW dangling row, so taxonomy-012-2's
+    anti-join only ever needs to clean up rows that predate this walk.
+
+    CENSUS LEG RETIREMENT (D0.10, same commit as this file's VALIDATE, in
+    the COMPANION Java commit, never split across two commits): `ChashCensus`
+    leg C1 (`dangling.topic_assignments`, `unresolvableBytesCount` against
+    `EITHER_ERA_SHAPE`) retires along with the "either era" width tolerance
+    it exists to apply — the FK this file adds makes the population it
+    scans for structurally impossible from this migration forward. Legs C2
+    (`frecency.chunk_id`) and C3 (`relevance_log.chunk_id`) are UNCHANGED —
+    they stay on `CANONICAL_SHAPE` (nexus-lgdel.l1); C4 is untouched. See
+    `ChashCensus.java`'s own updated javadoc for the mechanical diff.
+
+    CONSEQUENCE RECORDED (so no later reader mistakes the cascade for data
+    loss): with ON DELETE CASCADE, any deletion of a `nexus.chunks` row
+    (`purge_trash`'s orphan-chunk sweep, RDR-192-class superseded-chunk
+    reaping, collection deletion) now also removes that chunk's
+    `topic_assignments` rows. That IS the intended semantics — an
+    assignment for a chunk that no longer exists is exactly the dangling
+    leg `ChashCensus` C1 used to report — and it is precisely what makes
+    C1's retirement above correct rather than a detection regression.
+
+    Placed after `taxonomy-011-doc-id-bytea.xml` (current tail) and before
+    the `grants-nexus-svc.xml` runAlways block, matching the established
+    late-append convention (D0.1; see catalog-031's / telemetry-004's /
+    aspects-003's / plans-002's / taxonomy-008's / catalog-032's /
+    remap-003's / taxonomy-009's / legacy-001's / legacy-002's /
+    taxonomy-010's / taxonomy-011's own `<include>` comments for the
+    identical reasoning). `EXPECT_NEW_CHANGESETS=3`, re-pinned to this
+    file as authored.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset taxonomy-012-1: ADD CONSTRAINT ... NOT VALID ───────────── -->
+    <changeSet id="taxonomy-012-1" author="nexus-tk070.p3d">
+        <comment>
+            topic_assignments_chunk_fk: FOREIGN KEY (tenant_id, source_collection,
+            doc_id) REFERENCES nexus.chunks (tenant_id, collection, chash) ON UPDATE
+            CASCADE ON DELETE CASCADE NOT VALID. ON UPDATE CASCADE mirrors the
+            sibling topic_assignments_collection_fk (fk-002-5) already on this
+            table. ON DELETE CASCADE (RDR-194 D1) rather than catalog-029's
+            DEFERRABLE NO ACTION shape: an assignment whose chunk is gone is
+            exactly the dangling row ChashCensus leg C1 exists to report, and
+            CASCADE removes it structurally with no caller-side deferred-
+            constraint ordering needed. NOT VALID: enforces every new write
+            immediately; retroactive validation of pre-existing rows is
+            taxonomy-012-2 (remediate) then taxonomy-012-3 (VALIDATE).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topic_assignments
+    ADD CONSTRAINT topic_assignments_chunk_fk
+    FOREIGN KEY (tenant_id, source_collection, doc_id)
+    REFERENCES nexus.chunks (tenant_id, collection, chash)
+    ON UPDATE CASCADE
+    ON DELETE CASCADE
+    NOT VALID;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS topic_assignments_chunk_fk;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset taxonomy-012-2: anti-join remediation (F17 shape) ──────── -->
+    <changeSet id="taxonomy-012-2" author="nexus-tk070.p3d">
+        <comment>
+            Delete every topic_assignments row whose (tenant_id, source_collection,
+            doc_id) has no matching nexus.chunks row -- an anti-join against the
+            chunk store (F17), never a count comparison. RLS toggle-wrapped
+            (nexus-1wjmq shape): both nexus.topic_assignments and nexus.chunks
+            carry FORCE ROW LEVEL SECURITY and Liquibase's nexus_admin owner is
+            not BYPASSRLS, so both are toggled off for the DELETE and restored
+            before this changeset ends. The deleted-row count is surfaced via
+            RAISE NOTICE, captured by Liquibase's JdbcExecutor from the JDBC
+            Statement's SQLWarning chain (SHOW_SQL_WARNING_MESSAGES defaults
+            true) -- no runAlways, no DDL-in-Python, no bespoke Java capture.
+            Priced as safe: topic assignments are DERIVED data, recomputable by
+            re-running assignment (RDR-194 D1), and the writers' own
+            ON CONFLICT DO NOTHING makes recomputation idempotent.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.topic_assignments NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_deleted_count BIGINT;
+BEGIN
+    DELETE FROM nexus.topic_assignments ta
+    WHERE NOT EXISTS (
+        SELECT 1 FROM nexus.chunks c
+         WHERE c.tenant_id  = ta.tenant_id
+           AND c.collection = ta.source_collection
+           AND c.chash      = ta.doc_id
+    );
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    RAISE NOTICE 'RDR-194 P3d (nexus-tk070.p3d): deleted % dangling topic_assignments row(s) with no matching nexus.chunks row', v_deleted_count;
+END $$;
+
+ALTER TABLE nexus.chunks FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.topic_assignments FORCE ROW LEVEL SECURITY;
+        </sql>
+        <rollback>
+            <!-- No rollback: the deleted rows are unrecoverable, dangling,
+                 derived bookkeeping (RDR-194 D1 prices this deletion as safe;
+                 topic assignments are recomputable by re-running assignment).
+                 Rolling back the FK/VALIDATE is taxonomy-012-1's / taxonomy-012-3's
+                 own rollback. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset taxonomy-012-3: VALIDATE CONSTRAINT ─────────────────────── -->
+    <changeSet id="taxonomy-012-3" author="nexus-tk070.p3d">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT COUNT(*) FROM pg_constraint WHERE conname = 'topic_assignments_chunk_fk'</sqlCheck>
+        </preConditions>
+        <comment>
+            VALIDATE topic_assignments_chunk_fk -- retroactively check pre-existing
+            rows now that taxonomy-012-2 has remediated any dangling population.
+            Guarded by a whole-changeset precondition (nexus-4m6i0.13/nexus-ms57z
+            shape 1, same as fk-002-7..11/fk-003-7..11/catalog-029-2): skips (marks
+            ran, once) instead of hard-ERRORing a crash-loop boot on any box where
+            the constraint doesn't exist. All three taxonomy-012 changesets ship
+            together in one file/release, so this guard is expected to be a
+            permanent no-op in practice (taxonomy-012-1 always runs first in the
+            same walk) -- it is added purely to satisfy the project's blanket
+            "every bare VALIDATE CONSTRAINT is guarded" tripwire (tests/
+            test_changelog_validate_precondition_lint.py), which does not carve
+            out a same-release exception.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topic_assignments VALIDATE CONSTRAINT topic_assignments_chunk_fk;
+        </sql>
+        <rollback>
+            <!-- VALIDATE cannot be un-done (no INVALIDATE in PG); the constraint
+                 itself is dropped by taxonomy-012-1's rollback. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

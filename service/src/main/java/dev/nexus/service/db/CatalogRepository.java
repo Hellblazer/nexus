@@ -5994,6 +5994,26 @@ public final class CatalogRepository {
             deferManifestChunkFk(ctx);
 
             Map<String, Integer> counts = new LinkedHashMap<>();
+            // 0. RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk
+            //    (tenant_id, source_collection, doc_id) -> chunks(tenant_id,
+            //    collection, chash), ON DELETE CASCADE, NOT deferrable -- deleting
+            //    FROM nexus.chunks below (step 1) would otherwise CASCADE-delete
+            //    any matching topic_assignments row immediately, silently, before
+            //    step 3's own explicit DELETE ever runs. That explicit DELETE's
+            //    own row count is this method's cross-language-contract "topic_
+            //    assignments" key (collection_rename.py / collection_purge.py read
+            //    it literally, same contract step 4's own comment documents for
+            //    "taxonomy_centroids") -- if the cascade beats it to the rows, the
+            //    count silently drops to 0 for a real deletion that did happen,
+            //    just not through the counted statement. Deleting topic_
+            //    assignments FIRST, before chunks, makes the explicit DELETE the
+            //    one that actually removes the rows (the later chunks-triggered
+            //    cascade then has nothing left to act on -- a harmless no-op), so
+            //    the returned count stays accurate. Nothing else in this method
+            //    depends on chunks preceding topic_assignments (unlike step 1b's
+            //    catalog_document_chunks, which has its own documented ordering
+            //    reason relative to step 1).
+            counts.put("topic_assignments", ctx.deleteFrom(TOPIC_ASSIGNMENTS).where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(name)).execute());
             // 1. T3 chunk vectors (registry children, fk-002 RESTRICT). RDR-191
             //    (nexus-o8dil.48): one DELETE against the unified nexus.chunks,
             //    not three against chunks_384/768/1024 -- the cascade-count key
@@ -6024,10 +6044,13 @@ public final class CatalogRepository {
             // 2. (chash_index leg RETIRED — RDR-187/nexus-piwya.9: the router
             //    table is dropped; conexus's rdr164 cascade EXPLAIN probe
             //    retargets in lockstep with this removal.)
-            // 3. taxonomy: projection assignments by source_collection (fk-002-5 RESTRICT),
-            //    then topics (fk-003 RESTRICT) — deleting topics cascades any remaining
-            //    assignments via topic_assignments.topic_id -> topics(id) ON DELETE CASCADE.
-            counts.put("topic_assignments", ctx.deleteFrom(TOPIC_ASSIGNMENTS).where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(name)).execute());
+            // 3. taxonomy: topics (fk-003 RESTRICT) — topic_assignments by
+            //    source_collection already deleted at step 0 above (RDR-194 P3d
+            //    ordering fix); deleting topics here cascades any remaining
+            //    assignments via topic_assignments.topic_id -> topics(id) ON
+            //    DELETE CASCADE (a different axis than source_collection, so a
+            //    topic_assignments row from ANOTHER collection but pointing at
+            //    one of THIS collection's topics can still exist here).
             counts.put("topics", ctx.deleteFrom(TOPICS).where(TOPICS.COLLECTION.eq(name)).execute());
             // 3b. taxonomy_meta (fk-003-4 RESTRICT; PK (tenant_id, collection) — explicit DELETE).
             //     topic_links clears via topics(id) ON DELETE CASCADE in step 3, so it needs no row here.
@@ -6610,11 +6633,33 @@ public final class CatalogRepository {
             //    topics, so an explicit re-home); aspects, highlights and the extraction
             //    queue; catalog_documents itself; and the audit/telemetry tables.
             //    (chash_index leg RETIRED — RDR-187/nexus-piwya.9.)
+            // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk (tenant_id,
+            // source_collection, doc_id) -> chunks(tenant_id, collection, chash) is ON
+            // UPDATE CASCADE, and chunks is re-homed BEFORE topic_assignments in the
+            // list above (correct: topic_assignments's own explicit UPDATE below would
+            // otherwise try to move source_collection to newName while doc_id's chunk
+            // is STILL at oldName, an immediate FK violation -- the target tuple must
+            // already exist). But that ordering means chunks' rename CASCADES topic_
+            // assignments.source_collection to newName as a side effect, silently,
+            // before the loop's own topic_assignments statement ever runs -- its
+            // `WHERE source_collection = oldName` then matches zero already-cascaded
+            // rows, and would under-report a real rename as zero in the counts map
+            // this method returns (a cross-language contract read by collection_
+            // rename.py). Capture the TRUE population via a pre-count BEFORE the loop,
+            // independent of whichever mechanism (explicit UPDATE or FK cascade)
+            // ends up performing the actual write -- this is a 1:1 rename (every
+            // oldName row becomes a newName row, never a merge-with-loss), so the
+            // pre-count is exactly the correct post-rename delta regardless.
+            int topicAssignmentsPreCount = ctx.selectCount().from(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(oldName))
+                .fetchOne(0, Integer.class);
             for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
                 counts.put(t.countKey(),
                     ctx.update(t.table()).set(t.collection(), newName)
                        .where(t.collection().eq(oldName)).execute());
             }
+            // Override with the pre-count captured above -- see the comment there.
+            counts.put("topic_assignments", topicAssignmentsPreCount);
 
             // 3. RETIRE the old registry row X as a superseded tombstone (nexus-cecqy).
             //

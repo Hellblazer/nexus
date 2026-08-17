@@ -560,86 +560,31 @@ class StagingPromoteOpsIntegrationTest {
 
     // ── nexus-kmd5b: the dangling census must see LEGACY-WIDTH pointers ──────
 
-    /**
-     * The dangling-pointer legs gated on the CONFORMANT width, which excludes
-     * exactly the population they exist to find: a pointer the cascade could
-     * NOT repoint is, by definition, still at its legacy width. Production
-     * 2026-07-20 measured the consequence — the chash_index leg reported
-     * <strong>1</strong> against <strong>292,230</strong> actual orphans,
-     * five orders of magnitude low, while the manifest leg (which carries no
-     * width precondition) reported 426 against 426 actual.
-     *
-     * <p>Same structural shape as nexus-vounk: a check that cannot see the
-     * thing it is checking for. Its "all clear" was not evidence of a clean
-     * store, it was evidence of a blind query.
-     *
-     * <p>Seeds one dangling pointer per affected leg at LEGACY width — 16-byte
-     * bytea for chash_index, 32-hex text for the three debt columns — with no
-     * chash_alias entry, so none is resolvable by any route. Every leg must
-     * report it. Pre-fix all four are silently invisible.
-     */
-    @Test
-    @Order(13)
-    void census_seesDanglingPointersAtLegacyWidth() throws Exception {
-        // nexus-lgdel.l1: the relevance_log leg of this test is RETIRED —
-        // nexus.relevance_log now carries a CHECK (chunk_id ~
-        // '^[0-9a-f]{64}$'), so a legacy-width chunk_id can no longer be
-        // seeded at all (the CHECK constraint itself is the fix for exactly
-        // the class this leg used to prove needed a census). The
-        // topic_assignments leg SURVIVES unchanged (no CHECK yet — its own
-        // retirement belongs to nexus-tk070.p3d) and remains this test's
-        // subject.
-        final String legacyHex = "b".repeat(32);   // 16 bytes decoded
-        long topicId;
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
-                + T1 + "', 'code__kmd5b') ON CONFLICT DO NOTHING");
-            try (ResultSet rs = su.createStatement().executeQuery(
-                    "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
-                    + "VALUES ('" + T1 + "', 'kmd5b', 'code__kmd5b', now()) RETURNING id")) {
-                rs.next();
-                topicId = rs.getLong(1);
-            }
-            // RDR-194 P3c: doc_id is bytea now -- decode('hex') so this actually
-            // stores the intended 16 bytes (a bare string literal against a bytea
-            // column is legacy "escape format" input, silently storing 32 raw ASCII
-            // bytes instead of the 16 real bytes legacyHex's own comment documents).
-            su.createStatement().execute(
-                "INSERT INTO nexus.topic_assignments "
-                + "(tenant_id, doc_id, topic_id, assigned_by, source_collection) "
-                + "VALUES ('" + T1 + "', decode('" + legacyHex + "', 'hex'), " + topicId
-                + ", 'kmd5b', 'code__kmd5b')");
-        }
-        try {
-            Map<String, Integer> residue = scope.withTenant(T1, ctx ->
-                dev.nexus.service.db.ChashCensus.scan(ctx));
-            assertThat(residue)
-                .as("RDR-187 (nexus-piwya.5): the dangling.chash_index census leg is "
-                    + "RETIRED ahead of the table DROP (nexus-piwya.9) — a leg reading "
-                    + "nexus.chash_index would error on the missing relation once the "
-                    + "router dies. The seeded orphan row is deliberately still here: "
-                    + "the census must NOT report it (a resurrected leg fails this). "
-                    + "The 292,230-orphan population this leg once counted dies at the "
-                    + "DROP itself; the manifest + topic_assignments legs below remain "
-                    + "the census's surface.")
-                .doesNotContainKey("dangling.chash_index");
-            assertThat(residue)
-                .as("the 32-hex-shaped topic_assignments.doc_id is the same bug shape: "
-                    + "a legacy-width pointer the cascade missed is excluded by a "
-                    + "64-hex-only filter")
-                .containsKeys("dangling.topic_assignments");
-        } finally {
-            try (Connection su = pg.createConnection("")) {
-                su.setAutoCommit(true);
-                su.createStatement().execute(
-                    "DELETE FROM nexus.topic_assignments WHERE assigned_by = 'kmd5b'");
-                su.createStatement().execute(
-                    "DELETE FROM nexus.topics WHERE label = 'kmd5b'");
-            }
-        }
-    }
+    // nexus-kmd5b / RDR-194 P3d: census_seesDanglingPointersAtLegacyWidth
+    // (Order 13) DELETED — its subject was seeding a legacy-width value
+    // into one of four dangling-pointer legs (chash_index, frecency,
+    // relevance_log, topic_assignments) and proving the census's width
+    // precondition used to blind itself to exactly that population.
+    // Production 2026-07-20 measured the consequence directly (chash_index
+    // reported 1 against 292,230 actual orphans) — the finding this test
+    // preserved. By RDR-194 P3d that scenario can no longer be CONSTRUCTED
+    // at all, on any of the four legs: chash_index's table is DROPPED
+    // (RDR-187, nexus-piwya.9); frecency/relevance_log both carry a
+    // `chunk_id ~ '^[0-9a-f]{64}$'` CHECK (legacy-001-drop-chash-alias.xml,
+    // nexus-lgdel.l1) that rejects a legacy-width INSERT outright; and
+    // topic_assignments.doc_id now carries the composite
+    // topic_assignments_chunk_fk FK (taxonomy-012-doc-id-chunk-fk.xml,
+    // this bead) which rejects any doc_id with no matching nexus.chunks
+    // row — a bare legacy-width value has no such row by construction, so
+    // the seeding INSERT itself would fail with SQLSTATE 23503 before the
+    // census ever ran. Leg C1 (dangling.topic_assignments) is retired
+    // outright (ChashCensus.java, D0.10); legs C2/C3 (frecency/
+    // relevance_log) survive but can no longer be exercised by THIS
+    // test's legacy-width-seeding shape — their structural prevention
+    // (the CHECK constraint) is a stronger guarantee than a census leg
+    // finding the row after the fact, which is exactly why deleting the
+    // seed rather than replacing it is correct here, not a coverage
+    // regression.
 
     // nexus-lgdel.l1: census_doesNotFlagLegacyPointersTheAliasStillResolves
     // DELETED — its subject was a legacy-width pointer resolving through a
@@ -1434,26 +1379,27 @@ class StagingPromoteOpsIntegrationTest {
         });
     }
 
-    // ── Order 34: RDR-194 D0.9 (nexus-tk070.p3a), non-conformant doc_id reject ──
+    // ── Order 34: RDR-194 P3d (nexus-tk070.p3d), non-conformant doc_id ──────
+    //    skip-and-scream (nexus-cncue DISPOSITION OF RECORD, T2 nexus/cncue-
+    //    finalize-reject-reconciliation [22750]) ────────────────────────────
 
     @Test
     @Order(34)
-    void finalizeTenant_nonConformantTopicAssignmentDocId_rejectsByName() {
+    void finalizeTenant_nonConformantTopicAssignmentDocId_excludedByCount() {
         // A staged doc_id that is not already a conformant 64-hex chash is
         // arbitrary text: a memory-note title, a historic tumbler, a
-        // legacy 16/32-hex shape (nexus-lgdel.l1 tightened the reject to
-        // cover this case too — chash_alias is retired, so a legacy shape
-        // can never resolve and is non-conformant now, not merely staged-
-        // pending), anything an ETL-era row could have carried. D0.9
-        // requires finalize to fail loud, naming the offending value,
-        // rather than pass it through to a column that can no longer hold
-        // it once D1's bytea conversion lands.
+        // legacy 16/32-hex shape, anything an ETL-era row could have
+        // carried. RDR-194 P3d converts the former IllegalStateException
+        // hard-throw (nexus-tk070.p3a) to a counted + WARN-logged
+        // exclusion (nexus-cncue's disposition, option (b)) — the promote
+        // INSERT's own `staDocId.likeRegex('^[0-9a-f]{64}$')` WHERE clause
+        // already guarantees the value can never reach
+        // nexus.topic_assignments, so this is a visibility-only change,
+        // not a write-safety one.
         String badDocId = "some-memory-note-title-not-a-chash";
         scope.withTenant(T_REJECT, ctx -> {
             ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
                 + "VALUES (?, ?) ON CONFLICT (tenant_id, name) DO NOTHING", T_REJECT, COLL_A);
-            ctx.execute("INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
-                + "VALUES (?, 'reject-topic', ?, now())", T_REJECT, COLL_A);
             ctx.execute("INSERT INTO staging.topic_assignments "
                 + "(tenant_id, doc_id, topic_id, topic_label, topic_collection) "
                 + "VALUES (?, ?, 999999, 'reject-topic', ?) ON CONFLICT DO NOTHING",
@@ -1461,14 +1407,195 @@ class StagingPromoteOpsIntegrationTest {
             return null;
         });
 
-        assertThatThrownBy(() -> ops.finalizeTenant(T_REJECT, false))
-            .as("a non-conformant staged doc_id must abort finalize loud, naming the value")
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining(badDocId);
+        Map<String, Object> fin = ops.finalizeTenant(T_REJECT, false);
 
+        assertThat(((Number) fin.get("topic_assignments_non_conformant")).intValue())
+            .as("the FALSIFIABLE half of this test: delete the counting code "
+                + "and this goes to zero — a bare row-count-stays-zero "
+                + "assertion alone would pass identically whether or not the "
+                + "exclusion logic runs at all (cncue analysis's own vacuity "
+                + "finding against the prior throw-based version of this test)")
+            .isEqualTo(1);
         assertThat(countAs(T_REJECT, "SELECT count(*) FROM nexus.topic_assignments "
             + "WHERE tenant_id = '" + T_REJECT + "'"))
-            .as("the rejected row must never reach nexus.topic_assignments")
+            .as("the excluded row must never reach nexus.topic_assignments")
             .isEqualTo(0);
+        // Re-running finalize over the same excluded row must not throw —
+        // this method is explicitly idempotent/re-runnable (class javadoc),
+        // and the whole point of skip-and-scream is that it never wedges.
+        ops.finalizeTenant(T_REJECT, false);
+
+        // Cleanup (Order 33's convention): the row is harmless now (no
+        // wedge), but leaving it staged forever would pollute the counts
+        // map for the sibling @Order tests below that share this tenant.
+        scope.withTenant(T_REJECT, ctx -> {
+            ctx.execute("DELETE FROM staging.topic_assignments WHERE doc_id = ?", badDocId);
+            return null;
+        });
+    }
+
+    // ── Order 35: the positive control cncue's analysis flagged as MISSING ──
+
+    @Test
+    @Order(35)
+    void finalizeTenant_nonConformantAlongsideResolvable_conformantStillPromotes() {
+        // The single assertion that actually falsifies the wedge (cncue
+        // analysis §4 item 4, "the non-vacuous gate for this whole
+        // discussion"): a non-conformant row sharing a finalize transaction
+        // with a fully resolvable, conformant row must not block the
+        // resolvable row from promoting. The prior hard-throw made this
+        // scenario untestable — the transaction aborted before either row's
+        // fate could be observed. Nothing in the suite tested it before.
+        String badDocId = "another-non-conformant-title";
+        String goodText = "resolvable topic assignment content " + System.nanoTime();
+        String goodChash = digestHex(goodText);
+        scope.withTenant(T_REJECT, ctx -> {
+            ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                + "VALUES (?, ?) ON CONFLICT (tenant_id, name) DO NOTHING", T_REJECT, COLL_A);
+            ctx.execute("INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
+                + "VALUES (?, 'reject-topic-resolvable', ?, now()) ON CONFLICT DO NOTHING",
+                T_REJECT, COLL_A);
+            ctx.execute("INSERT INTO staging.chunks "
+                + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) "
+                + "VALUES (?, ?, 768, ?, ?, '" + vec(768) + "'::vector, 'bge-768') "
+                + "ON CONFLICT (tenant_id, collection, legacy_ref) DO UPDATE SET chunk_text = excluded.chunk_text",
+                T_REJECT, COLL_A, goodChash, goodText);
+            ctx.execute("INSERT INTO staging.topic_assignments "
+                + "(tenant_id, doc_id, topic_id, topic_label, topic_collection) "
+                + "VALUES (?, ?, 999999, 'reject-topic-resolvable', ?) ON CONFLICT DO NOTHING",
+                T_REJECT, badDocId, COLL_A);
+            ctx.execute("INSERT INTO staging.topic_assignments "
+                + "(tenant_id, doc_id, topic_id, topic_label, topic_collection) "
+                + "VALUES (?, ?, 999999, 'reject-topic-resolvable', ?) ON CONFLICT DO NOTHING",
+                T_REJECT, goodChash, COLL_A);
+            return null;
+        });
+        ops.promoteCollection(T_REJECT, COLL_A, 768);
+
+        Map<String, Object> fin = ops.finalizeTenant(T_REJECT, false);
+
+        assertThat(((Number) fin.get("topic_assignments_non_conformant")).intValue())
+            .as("the non-conformant row is still excluded and counted")
+            .isEqualTo(1);
+        assertThat(countAs(T_REJECT, "SELECT count(*) FROM nexus.topic_assignments "
+            + "WHERE tenant_id = '" + T_REJECT + "' AND encode(doc_id, 'hex') = '" + goodChash + "'"))
+            .as("the CONFORMANT, fully-resolvable row must promote in the SAME "
+                + "finalize call despite the non-conformant row's presence in "
+                + "the same staged batch")
+            .isEqualTo(1);
+
+        scope.withTenant(T_REJECT, ctx -> {
+            ctx.execute("DELETE FROM staging.topic_assignments WHERE doc_id IN (?, ?)",
+                badDocId, goodChash);
+            return null;
+        });
+    }
+
+    // ── Order 36: RESOLVABLE-ONLY anti-join — the scope-enlargement fix ──────
+
+    @Test
+    @Order(36)
+    void finalizeTenant_conformantDocIdNoMatchingChunk_staysStagedNeverHitsFk() {
+        // RDR-194 P3d scope enlargement (cncue analysis §2b/§4, CRITICAL
+        // finding): a CONFORMANT 64-hex staged doc_id whose content
+        // collection has not promoted to nexus.chunks yet must stay
+        // STAGED, counted — never reach the topic_assignments_chunk_fk
+        // composite FK, which would otherwise abort the WHOLE tenant
+        // finalize with SQLSTATE 23503 naming no offending row. This is
+        // exactly the RESOLVABLE-ONLY deferral this method's own comment
+        // promises ("a later finalize converges it once its content
+        // collection promotes"). Falsify by deleting the
+        // topicChunkResolvable anti-join in StagingPromoteOps — this test
+        // must go red with an unchecked FK-violation exception, not a
+        // graceful count.
+        String pendingChash = digestHex("chunk that has not promoted yet " + System.nanoTime());
+        scope.withTenant(T_REJECT, ctx -> {
+            ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                + "VALUES (?, ?) ON CONFLICT (tenant_id, name) DO NOTHING", T_REJECT, COLL_A);
+            ctx.execute("INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
+                + "VALUES (?, 'reject-topic-pending', ?, now()) ON CONFLICT DO NOTHING",
+                T_REJECT, COLL_A);
+            ctx.execute("INSERT INTO staging.topic_assignments "
+                + "(tenant_id, doc_id, topic_id, topic_label, topic_collection) "
+                + "VALUES (?, ?, 999999, 'reject-topic-pending', ?) ON CONFLICT DO NOTHING",
+                T_REJECT, pendingChash, COLL_A);
+            return null;
+        });
+
+        Map<String, Object> fin = ops.finalizeTenant(T_REJECT, false);
+
+        assertThat(((Number) fin.get("topic_assignments_chunk_pending")).intValue())
+            .as("the conformant-but-unresolvable row must be counted as "
+                + "pending, not silently dropped, not promoted, and not the "
+                + "trigger for a tenant-wide FK abort")
+            .isEqualTo(1);
+        assertThat(countAs(T_REJECT, "SELECT count(*) FROM nexus.topic_assignments "
+            + "WHERE tenant_id = '" + T_REJECT + "' AND encode(doc_id, 'hex') = '" + pendingChash + "'"))
+            .as("the row must stay staged, never promoted")
+            .isEqualTo(0);
+
+        scope.withTenant(T_REJECT, ctx -> {
+            ctx.execute("DELETE FROM staging.topic_assignments WHERE doc_id = ?", pendingChash);
+            return null;
+        });
+    }
+
+    // ── Order 37: the FK itself, independent of the application-layer guard ─
+
+    @Test
+    @Order(37)
+    void topicAssignmentsChunkFk_rejectsRawInsertForNonexistentChunk() throws Exception {
+        // Non-vacuity for the FK itself (RDR-194 P3d acceptance criteria):
+        // independent of the application-layer anti-join (Order 36 above),
+        // the topic_assignments_chunk_fk constraint must reject a RAW
+        // INSERT whose (tenant_id, source_collection, doc_id) has no
+        // matching nexus.chunks row — proves the FK is actually VALIDATEd
+        // and enforced, not merely NOT VALID or silently absent. Also
+        // exercises D1's MATCH SIMPLE non-vacuity claim: source_collection
+        // is passed non-NULL here (P3b's SET NOT NULL forbids any row from
+        // exempting itself through MATCH SIMPLE's null-exemption anyway).
+        String orphanChash = digestHex("never landed anywhere " + System.nanoTime());
+        long topicId;
+        try (Connection conn = dsConnection()) {
+            conn.setAutoCommit(true);
+            try (var st = conn.prepareStatement("SET nexus.tenant = '" + T_REJECT + "'")) {
+                st.execute();
+            }
+            try (var st = conn.prepareStatement(
+                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
+                    + "ON CONFLICT DO NOTHING")) {
+                st.setString(1, T_REJECT);
+                st.setString(2, COLL_A);
+                st.execute();
+            }
+            try (var st = conn.prepareStatement(
+                    "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
+                    + "VALUES (?, 'reject-topic-fk-raw', ?, now()) RETURNING id")) {
+                st.setString(1, T_REJECT);
+                st.setString(2, COLL_A);
+                try (ResultSet rs = st.executeQuery()) {
+                    rs.next();
+                    topicId = rs.getLong(1);
+                }
+            }
+            long finalTopicId = topicId;
+            assertThatThrownBy(() -> {
+                    try (var ps = conn.prepareStatement(
+                            "INSERT INTO nexus.topic_assignments "
+                            + "(tenant_id, doc_id, topic_id, source_collection) "
+                            + "VALUES (?, decode(?, 'hex'), ?, ?)")) {
+                        ps.setString(1, T_REJECT);
+                        ps.setString(2, orphanChash);
+                        ps.setLong(3, finalTopicId);
+                        ps.setString(4, COLL_A);
+                        ps.executeUpdate();
+                    }
+                })
+                .as("topic_assignments_chunk_fk must reject an assignment whose "
+                    + "(source_collection, doc_id) has no matching nexus.chunks "
+                    + "row — proves the FK is VALIDATEd and enforced")
+                .isInstanceOf(SQLException.class)
+                .satisfies(e -> assertThat(((SQLException) e).getSQLState()).isEqualTo("23503"));
+        }
     }
 }

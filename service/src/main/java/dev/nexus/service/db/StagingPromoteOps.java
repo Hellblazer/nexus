@@ -907,28 +907,64 @@ public final class StagingPromoteOps {
             // restrict every row this decode ever runs against to canonical
             // 64-hex -- never a bare decode over an unguarded value (D0.9).
             Field<byte[]> staDocIdDecoded = DSL.function("decode", byte[].class, staDocId, DSL.val("hex"));
-            // NON-CONFORMANT REJECT (RDR-194 D0.9, nexus-tk070.p3a, tightened
-            // nexus-lgdel.l1): a staged doc_id that is not already a
-            // conformant 64-hex chash is arbitrary text this column can no
-            // longer hold once D1's bytea conversion lands (P3c). The prior
-            // "legacy 16/32-hex shape awaiting a future alias" carve-out is
-            // REMOVED — chash_alias is dropped, so there is no future alias
-            // left to await; a legacy-shaped doc_id can never resolve and is
-            // non-conformant now, not merely staged-pending. Fail loud here,
-            // naming the offending value(s), rather than pass it through to
-            // nexus.topic_assignments.doc_id.
-            List<String> nonConformantDocIds = ctx.selectDistinct(staDocId)
-                .from(sta)
+            // NON-CONFORMANT REJECT -> SKIP-AND-SCREAM (RDR-194 P3d, bead
+            // nexus-cncue's DISPOSITION OF RECORD, deep-analyst analysis T2
+            // nexus/cncue-finalize-reject-reconciliation [22750]): the prior
+            // IllegalStateException hard-throw (nexus-tk070.p3a, tightened
+            // nexus-lgdel.l1) is converted to a counted + WARN-logged
+            // exclusion. The decisive fact: the promote INSERT's own
+            // `staDocId.likeRegex('^[0-9a-f]{64}$')` WHERE clause (below)
+            // ALREADY guarantees a non-conformant staged value can never
+            // reach nexus.topic_assignments -- this pre-check purchases
+            // ZERO additional write-safety over that predicate, only
+            // visibility. A tenant-wide abort over it is disproportionate
+            // for this idempotent/re-runnable method (class javadoc): the
+            // wedge is reachable (conexus==6.18.1's two-hop upgrade client
+            // posts doc_id verbatim with no shape validation), permanent
+            // (deterministic -- the same row fails every re-run), and its
+            // only in-product remedy (POST /v1/staging/clear) discards the
+            // tenant's ENTIRE staged migration across all seven tables, not
+            // just the offending row. Matches the settled precedent 80
+            // lines above in this SAME method (manifest_doc_not_registered/
+            // manifest_doc_no_collection: counter + WARN, not a throw) and
+            // this leg's own sibling axis (topic_assignments_unresolved,
+            // just below: unresolved topics also stay staged, uncounted-
+            // as-a-throw). D0.9 stays satisfied on its own terms: nothing
+            // is coerced, nothing is widened, the offending values are
+            // still named -- just via a greppable structured log instead
+            // of a tenant-wedging stack trace.
+            int nonConformantCount = ctx.selectCount().from(sta)
                 .where(DSL.not(staDocId.likeRegex("^[0-9a-f]{64}$")))
-                .limit(10)
-                .fetch(staDocId);
-            if (!nonConformantDocIds.isEmpty()) {
-                throw new IllegalStateException(
-                    "finalize found non-conformant staged topic_assignments.doc_id "
-                    + "value(s) that are not a valid 64-hex chash: "
-                    + nonConformantDocIds + " -- refusing to write "
-                    + "arbitrary text to a chash-typed column (RDR-194 D0.9)");
+                .fetchOne(0, Integer.class);
+            counts.put("topic_assignments_non_conformant", nonConformantCount);
+            if (nonConformantCount > 0) {
+                List<String> nonConformantSample = ctx.selectDistinct(staDocId)
+                    .from(sta)
+                    .where(DSL.not(staDocId.likeRegex("^[0-9a-f]{64}$")))
+                    .limit(10)
+                    .fetch(staDocId);
+                log.warn("event=staging_finalize_topic_assignment_non_conformant tenant={} count={} sample={}",
+                    tenant, nonConformantCount, nonConformantSample);
             }
+            // RESOLVABLE-ONLY anti-join against nexus.chunks (RDR-194 P3d
+            // scope enlargement, cncue analysis §2b/§4.3, CRITICAL finding):
+            // once the composite FK topic_assignments_chunk_fk (companion
+            // Liquibase commit, same bead) is VALIDATEd, a CONFORMANT 64-hex
+            // staged doc_id whose (source_collection, doc_id) tuple has no
+            // matching nexus.chunks row -- the topics ETL landed before its
+            // content collection promoted -- would otherwise violate the FK:
+            // SQLSTATE 23503, tenant-wide transaction abort, naming no
+            // offending row. That is exactly the RESOLVABLE-ONLY deferral
+            // this method's own comment above (`(3) topic_assignments`)
+            // already promises: "a legacy-shaped doc_id with NO alias yet
+            // stays STAGED." Gated here the same way the manifest promote
+            // gates on `manifestResolvable` above -- an unresolvable row
+            // simply does not join, stays staged, and is counted below; a
+            // later finalize converges it once its content collection
+            // promotes.
+            Condition topicChunkResolvable = DSL.exists(ctx.selectOne().from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(staTopicCollection))
+                .and(CHUNKS.CHASH.eq(staDocIdDecoded)));
             // RDR-194 D1/P3b (nexus-tk070.p3b, relayed finding nexus-hva5p):
             // source_collection wired through as `s.topic_collection` -- staging.
             // topic_assignments carries no SEPARATE source_collection column
@@ -948,13 +984,25 @@ public final class StagingPromoteOps {
                     .from(sta)
                     .join(TOPICS).on(TOPICS.LABEL.eq(staTopicLabel)
                         .and(TOPICS.COLLECTION.eq(staTopicCollection)))
-                    .where(staDocId.likeRegex("^[0-9a-f]{64}$")))
+                    .where(staDocId.likeRegex("^[0-9a-f]{64}$"))
+                    .and(topicChunkResolvable))
                 .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
                 .doNothing()
                 .execute());
             counts.put("topic_assignments_unresolved", ctx.selectCount().from(sta)
                 .where(DSL.notExists(ctx.selectOne().from(TOPICS)
                     .where(TOPICS.LABEL.eq(staTopicLabel).and(TOPICS.COLLECTION.eq(staTopicCollection)))))
+                .fetchOne(0, Integer.class));
+            // Companion counter for the anti-join above: conformant,
+            // topic-resolvable staged rows whose chunk has not promoted to
+            // nexus.chunks yet -- the population the anti-join defers
+            // rather than lets hit the FK. Distinct from
+            // topic_assignments_unresolved (topic missing) -- a row can be
+            // topic-resolvable and chunk-pending simultaneously; both
+            // counters can be nonzero for the same underlying row.
+            counts.put("topic_assignments_chunk_pending", ctx.selectCount().from(sta)
+                .where(staDocId.likeRegex("^[0-9a-f]{64}$"))
+                .and(DSL.not(topicChunkResolvable))
                 .fetchOne(0, Integer.class));
 
             // (4) frecency: GREATEST-merge from the staged rows through the

@@ -10,6 +10,7 @@ UPSERT, 3-tuple tuple shape across all five call sites.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,45 @@ from nexus.db.t2 import T2Database
 from tests._t2_fixture_ops import canonical_chunk_id
 from tests.conftest import make_vector_test_client
 from typing import Any
+
+
+def _seed_chunks_for_tenant(
+    tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 384,
+) -> None:
+    """RDR-194 P3d (nexus-tk070.p3d): seed real nexus.chunks rows so a
+    topic_assignments insert for (tenant, collection, chash) satisfies the
+    new topic_assignments_chunk_fk composite FK. Mirrors tests/test_taxonomy.py's
+    helper of the same name (this module has no import path to it, so a
+    copy lives here instead). Batched into ONE multi-row INSERT — several
+    callers in this file seed hundreds of doc_ids per collection.
+    """
+    from tests._engine_substrate import ensure_engine  # noqa: PLC0415 — laziness contract, see module docstring
+
+    if not chash_hexes:
+        return
+    state = ensure_engine()
+    embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
+    vec = "[" + ",".join(["0"] * dim) + "]"
+    values = ", ".join(
+        f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::vector)"
+        for c in chash_hexes
+    )
+    sql = (
+        f"INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('{tenant}', '{collection}') "
+        "ON CONFLICT DO NOTHING; "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
+        f"VALUES {values} ON CONFLICT DO NOTHING;"
+    )
+    psql = Path(state["pg_bin"]) / "psql"
+    proc = subprocess.run(
+        [
+            str(psql), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
+            "-U", state["pg_user"], "-d", state["pg_dbname"],
+            "-v", "ON_ERROR_STOP=1", "-c", sql,
+        ],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, f"_seed_chunks_for_tenant failed: {proc.stdout}\n{proc.stderr}"
 
 
 @pytest.fixture(autouse=True)
@@ -157,7 +197,7 @@ class TestAssignSingleReturnsNamedTuple:
     """SC-2 case 4: AssignResult shape + distance→similarity inversion."""
 
     def test_assign_single_returns_namedtuple(
-        self, db: T2Database, chroma_client: Any,
+        self, db: T2Database, chroma_client: Any, t2_service_env: str,
     ) -> None:
         from nexus.db.t2.taxonomy_compute import AssignResult
 
@@ -167,6 +207,10 @@ class TestAssignSingleReturnsNamedTuple:
         embeddings[30:, 1] += 3.0
         doc_ids = [canonical_chunk_id(f"d-{i}") for i in range(60)]
         texts = [f"text {i}" for i in range(60)]
+        # RDR-194 P3d: discover_topics persists the discovered CLUSTER as
+        # topic_assignments rows too — each doc_id needs a matching
+        # nexus.chunks row for topic_assignments_chunk_fk.
+        _seed_chunks_for_tenant(t2_service_env, "nt_coll", doc_ids)
         db.taxonomy.discover_topics(
             "nt_coll", doc_ids, embeddings, texts, chroma_client,
         )
@@ -187,7 +231,7 @@ class TestProjectAgainst3Tuple:
     """``project_against`` emits 3-tuples with raw cosine similarity."""
 
     def test_chunk_assignments_carry_similarity(
-        self, db: T2Database, chroma_client: Any,
+        self, db: T2Database, chroma_client: Any, t2_service_env: str,
     ) -> None:
         rng = np.random.default_rng(42)
         for name in ("code__pA", "code__pB"):
@@ -196,6 +240,10 @@ class TestProjectAgainst3Tuple:
             embs[30:, 1] += 3.0
             doc_ids = [canonical_chunk_id(f"{name}-d{i}") for i in range(60)]
             texts = [f"text {name} {i}" for i in range(60)]
+            # RDR-194 P3d: discover_topics persists the discovered CLUSTER
+            # as topic_assignments rows too — each doc_id needs a matching
+            # nexus.chunks row for topic_assignments_chunk_fk.
+            _seed_chunks_for_tenant(t2_service_env, name, doc_ids)
             db.taxonomy.discover_topics(
                 name, doc_ids, embs, texts, chroma_client,
             )
@@ -225,11 +273,15 @@ class TestProjectAgainst3Tuple:
 
 
 def _seed_projection_rows(
-    db: T2Database, rows: list[tuple[str, int, str]],
+    db: T2Database, rows: list[tuple[str, int, str]], tenant: str,
 ) -> None:
     """Seed projection topic_assignments with ``(doc_id, topic_id, source_collection)``.
 
     Creates referenced ``topics`` rows on demand so FKs resolve.
+
+    RDR-194 P3d: also seeds a matching nexus.chunks row per (source_collection,
+    doc_id) — topic_assignments_chunk_fk requires it before assign_topic's
+    INSERT below.
     """
     topic_ids = {tid for _, tid, _ in rows}
     for tid in topic_ids:
@@ -238,6 +290,11 @@ def _seed_projection_rows(
         # 'seed' label 23505s on the second import.
         _insert_topic(db, topic_id=tid, collection="code__any",
                       label=f"seed-{tid}")
+    by_collection: dict[str, list[str]] = {}
+    for doc_id, _tid, src in rows:
+        by_collection.setdefault(src, []).append(canonical_chunk_id(doc_id))
+    for src, chashes in by_collection.items():
+        _seed_chunks_for_tenant(tenant, src, chashes)
     for doc_id, tid, src in rows:
         db.taxonomy.assign_topic(
             canonical_chunk_id(doc_id), tid, assigned_by="projection",
@@ -250,7 +307,7 @@ def _seed_projection_rows(
 class TestICF:
     """RDR-077 Phase 3 — ``compute_icf_map`` SC-3 + SC-8."""
 
-    def test_icf_log2_base(self, db: T2Database) -> None:
+    def test_icf_log2_base(self, db: T2Database, t2_service_env: str) -> None:
         """N=4, DF=2 → ICF = log2(4/2) = 1.0 exactly."""
         import math
 
@@ -262,7 +319,7 @@ class TestICF:
             ("docC", B + 2, "code__c1"),
             ("docD", B + 3, "code__c3"),
             ("docE", B + 4, "code__c4"),
-        ])
+        ], t2_service_env)
         icf = db.taxonomy.compute_icf_map()
         # N_effective = 4 distinct source_collections.
         assert icf[B + 1] == pytest.approx(math.log2(4 / 2))
@@ -270,18 +327,18 @@ class TestICF:
         assert icf[B + 3] == pytest.approx(math.log2(4 / 1))
         assert icf[B + 4] == pytest.approx(math.log2(4 / 1))
 
-    def test_icf_df_equals_n_yields_zero(self, db: T2Database) -> None:
+    def test_icf_df_equals_n_yields_zero(self, db: T2Database, t2_service_env: str) -> None:
         """Ubiquitous topic (appears in every collection) → ICF = 0."""
         B = _unique_topic_base()
         _seed_projection_rows(db, [
             ("docA", B + 1, "code__c1"),
             ("docB", B + 1, "code__c2"),
             ("docC", B + 1, "code__c3"),
-        ])
+        ], t2_service_env)
         icf = db.taxonomy.compute_icf_map()
         assert icf[B + 1] == pytest.approx(0.0)
 
-    def test_icf_n_effective_excludes_null_source(self, db: T2Database) -> None:
+    def test_icf_n_effective_excludes_null_source(self, db: T2Database, t2_service_env: str) -> None:
         """SUPERSEDED (RDR-194 D1/P3b, nexus-11pe7): source_collection is NOT
         NULL as of taxonomy-010-1 -- a "legacy NULL row" can no longer be
         constructed at all, so this no longer tests ICF's exclusion logic;
@@ -299,7 +356,7 @@ class TestICF:
             ("docA", B + 1, "code__c1"),
             ("docB", B + 1, "code__c2"),
             ("docC", B + 2, "code__c1"),
-        ])
+        ], t2_service_env)
         # A NULL source_collection write must now fail loud, not silently
         # land and get excluded downstream.
         _insert_topic(db, topic_id=B + 99, collection="code__any", label="legacy")
@@ -317,13 +374,13 @@ class TestICF:
         # Topic B+1 in both collections → ICF = 0.
         assert icf[B + 1] == pytest.approx(0.0)
 
-    def test_icf_disabled_when_n_lt_2(self, db: T2Database) -> None:
+    def test_icf_disabled_when_n_lt_2(self, db: T2Database, t2_service_env: str) -> None:
         """Single-collection corpus → empty map (ICF undefined)."""
         B = _unique_topic_base()
         _seed_projection_rows(db, [
             ("docA", B + 1, "code__only"),
             ("docB", B + 2, "code__only"),
-        ])
+        ], t2_service_env)
         icf = db.taxonomy.compute_icf_map()
         assert icf == {}
 
@@ -360,7 +417,7 @@ class TestDefaultProjectionThreshold:
 
 @pytest.fixture()
 def fixture_icf_ranking(
-    db: T2Database, chroma_client: Any,
+    db: T2Database, chroma_client: Any, t2_service_env: str,
 ) -> T2Database:
     """≥10 collections — calibration spread for ICF ranking tests (SC-3, S-3).
 
@@ -381,6 +438,13 @@ def fixture_icf_ranking(
         embs[15:, 1] += 3.0
         doc_ids = [canonical_chunk_id(f"{col}-d{i}") for i in range(30)]
         texts = [f"text {col} {i}" for i in range(30)]
+        # RDR-194 P3d: discover_topics persists the discovered CLUSTER as
+        # topic_assignments rows too — each doc_id needs a matching
+        # nexus.chunks row for topic_assignments_chunk_fk. The later
+        # persist_assignments (below) reassigns the SAME doc_ids into
+        # other collections' topics with source_collection=col, which
+        # this same seed already backs.
+        _seed_chunks_for_tenant(t2_service_env, col, doc_ids)
         db.taxonomy.discover_topics(col, doc_ids, embs, texts, chroma_client)
         src_coll = chroma_client.get_or_create_collection(
             col, embedding_function=None,
@@ -474,7 +538,7 @@ class TestProjectAgainstIcf:
     """``project_against(icf_map=...)`` — weighting at filter time only."""
 
     def _seed_two_corpora(
-        self, db: T2Database, chroma_client: Any,
+        self, db: T2Database, chroma_client: Any, tenant: str,
     ) -> None:
         rng = np.random.default_rng(42)
         for name in ("code__icfA", "code__icfB"):
@@ -483,6 +547,10 @@ class TestProjectAgainstIcf:
             embs[30:, 1] += 3.0
             doc_ids = [canonical_chunk_id(f"{name}-d{i}") for i in range(60)]
             texts = [f"text {name} {i}" for i in range(60)]
+            # RDR-194 P3d: discover_topics persists the discovered CLUSTER
+            # as topic_assignments rows too — each doc_id needs a matching
+            # nexus.chunks row for topic_assignments_chunk_fk.
+            _seed_chunks_for_tenant(tenant, name, doc_ids)
             db.taxonomy.discover_topics(
                 name, doc_ids, embs, texts, chroma_client,
             )
@@ -496,10 +564,10 @@ class TestProjectAgainstIcf:
             )
 
     def test_icf_suppresses_hub_topics_below_threshold(
-        self, db: T2Database, chroma_client: Any,
+        self, db: T2Database, chroma_client: Any, t2_service_env: str,
     ) -> None:
         """A topic with ICF=0 must fail threshold regardless of raw cosine."""
-        self._seed_two_corpora(db, chroma_client)
+        self._seed_two_corpora(db, chroma_client, t2_service_env)
         # Without ICF: at low threshold we get matches.
         baseline = db.taxonomy.project_against(
             "code__icfA", ["code__icfB"], chroma_client, threshold=0.1,
@@ -521,10 +589,10 @@ class TestProjectAgainstIcf:
         assert len(result["novel_chunks"]) == result["total_chunks"]
 
     def test_stored_similarity_is_raw_cosine_even_with_icf(
-        self, db: T2Database, chroma_client: Any,
+        self, db: T2Database, chroma_client: Any, t2_service_env: str,
     ) -> None:
         """Raw cosine stored; ICF only affects what gets through the filter."""
-        self._seed_two_corpora(db, chroma_client)
+        self._seed_two_corpora(db, chroma_client, t2_service_env)
         baseline = db.taxonomy.project_against(
             "code__icfA", ["code__icfB"], chroma_client, threshold=0.1,
         )
@@ -544,10 +612,10 @@ class TestProjectAgainstIcf:
                 )
 
     def test_missing_topic_in_icf_map_defaults_to_one(
-        self, db: T2Database, chroma_client: Any,
+        self, db: T2Database, chroma_client: Any, t2_service_env: str,
     ) -> None:
         """ICF map lookup missing entries → weight 1.0 (no suppression)."""
-        self._seed_two_corpora(db, chroma_client)
+        self._seed_two_corpora(db, chroma_client, t2_service_env)
         # Empty ICF map — every target topic defaults to 1.0, result matches
         # the baseline no-icf case.
         baseline = db.taxonomy.project_against(
@@ -595,7 +663,7 @@ class TestProjectCmdFlag:
 # ── Phase 5 (nexus-84v) — nx taxonomy hubs ──────────────────────────────────
 
 
-def _seed_projection_assignments(db: T2Database, rows: list[dict]) -> None:
+def _seed_projection_assignments(db: T2Database, rows: list[dict], tenant: str) -> None:
     """Seed explicit-``assigned_at`` projection assignments on either
     substrate.
 
@@ -604,7 +672,16 @@ def _seed_projection_assignments(db: T2Database, rows: list[dict]) -> None:
     fidelity-preserving ``import_rows_batch`` — one POST instead of
     hundreds of sequential per-row round-trips (the RDR-155 P4b P0a'
     read-timeout / engine-wedge mechanism).
+
+    RDR-194 P3d: also seeds a matching nexus.chunks row per
+    (source_collection, doc_id) — topic_assignments_chunk_fk requires it
+    before the batch INSERT below.
     """
+    by_collection: dict[str, list[str]] = {}
+    for r in rows:
+        by_collection.setdefault(r["source_collection"], []).append(r["doc_id"])
+    for src, chashes in by_collection.items():
+        _seed_chunks_for_tenant(tenant, src, chashes)
     db.taxonomy.import_rows_batch(
         "assignment",
         [
@@ -619,7 +696,7 @@ def _seed_projection_assignments(db: T2Database, rows: list[dict]) -> None:
 
 
 @pytest.fixture()
-def fixture_hub_synthetic(db: T2Database) -> tuple[T2Database, int]:
+def fixture_hub_synthetic(db: T2Database, t2_service_env: str) -> tuple[T2Database, int]:
     """5 collections × 100 docs — half assigned to a stopword-labeled hub,
     half spread across 5 distinct domain topics (one per collection).
 
@@ -670,7 +747,7 @@ def fixture_hub_synthetic(db: T2Database) -> tuple[T2Database, int]:
             }
             for d in range(50)
         )
-    _seed_projection_assignments(db, rows)
+    _seed_projection_assignments(db, rows, t2_service_env)
     db.taxonomy.clear_icf_cache()
     return db, B
 
@@ -752,7 +829,7 @@ class TestHubs:
 
 class TestAudit:
     @pytest.fixture()
-    def audit_db(self, db: T2Database) -> tuple[T2Database, int]:
+    def audit_db(self, db: T2Database, t2_service_env: str) -> tuple[T2Database, int]:
         """Seed a collection with a known similarity distribution.
 
         Yields ``(db, B)``: hub topic is ``B+1``, others ``B+2..B+4``
@@ -771,6 +848,17 @@ class TestAudit:
                 db, topic_id=tid, collection=coll,
                 label=label, created_at=created,
             )
+
+        # RDR-194 P3d: topic_assignments_chunk_fk requires a matching
+        # nexus.chunks row for every (source_collection, doc_id) below.
+        _seed_chunks_for_tenant(
+            t2_service_env, "code__peer", [canonical_chunk_id("peer-doc-1")],
+        )
+        _seed_chunks_for_tenant(
+            t2_service_env, "code__auditC0",
+            [canonical_chunk_id(f"auditC0-d{i}") for i in range(11)]
+            + [canonical_chunk_id("hdbscan-doc")],
+        )
 
         db.taxonomy.assign_topic(
             canonical_chunk_id("peer-doc-1"), B + 4,

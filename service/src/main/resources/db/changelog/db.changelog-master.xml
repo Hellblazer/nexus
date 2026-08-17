@@ -735,6 +735,21 @@
          rollback-ordering derivation. -->
     <include file="db/changelog/taxonomy-011-doc-id-bytea.xml"/>
 
+    <!-- RDR-194 Phase P3d (Decision D1, bead nexus-tk070.p3d): composite FK
+         nexus.topic_assignments (tenant_id, source_collection, doc_id) ->
+         nexus.chunks (tenant_id, collection, chash), catalog-029 three-step
+         shape (ADD NOT VALID -> anti-join remediation -> VALIDATE), and the
+         companion Java commit's ChashCensus leg C1 retirement. Placed after
+         taxonomy-011-doc-id-bytea.xml (current tail) and before the
+         grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention (D0.1; see catalog-031's / telemetry-004's /
+         aspects-003's / plans-002's / taxonomy-008's / catalog-032's /
+         remap-003's / taxonomy-009's / legacy-001's / legacy-002's /
+         taxonomy-010's / taxonomy-011's own <include> comments for the
+         identical reasoning). See taxonomy-012-doc-id-chunk-fk.xml's own
+         header for the full D1 trace and the FK-shape derivation. -->
+    <include file="db/changelog/taxonomy-012-doc-id-chunk-fk.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

@@ -12,12 +12,44 @@ audit). This suite pins the SQLite leg to PG's cascade semantics.
 from __future__ import annotations
 
 import itertools
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from nexus.db.t2 import T2Database
 from tests._t2_fixture_ops import canonical_chunk_id
+
+
+def _seed_chunk(tenant: str, collection: str, chash_hex: str, *, dim: int = 384) -> None:
+    """RDR-194 P3d (nexus-tk070.p3d): seed a real nexus.chunks row so a
+    topic_assignments insert for (tenant, collection, chash) satisfies
+    the new topic_assignments_chunk_fk composite FK. Mirrors
+    tests/test_taxonomy.py's ``_seed_chunks_for_tenant`` (this module has
+    no import path to it, so a lean single-row copy lives here instead).
+    """
+    from tests._engine_substrate import ensure_engine  # noqa: PLC0415 — laziness contract, see module docstring
+
+    state = ensure_engine()
+    embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
+    vec = "[" + ",".join(["0"] * dim) + "]"
+    sql = (
+        f"INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('{tenant}', '{collection}') "
+        "ON CONFLICT DO NOTHING; "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
+        f"VALUES ('{tenant}', '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::vector) "
+        "ON CONFLICT DO NOTHING;"
+    )
+    psql = Path(state["pg_bin"]) / "psql"
+    proc = subprocess.run(
+        [
+            str(psql), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
+            "-U", state["pg_user"], "-d", state["pg_dbname"],
+            "-v", "ON_ERROR_STOP=1", "-c", sql,
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, f"_seed_chunk failed: {proc.stdout}\n{proc.stderr}"
 
 
 @pytest.fixture
@@ -158,13 +190,16 @@ class TestRebuildLinkCleanup:
         _assert_no_orphan_links(db)
 
     def test_purge_assignments_for_doc_removes_links_of_emptied_topics(
-        self, db: T2Database,
+        self, db: T2Database, t2_service_env: str,
     ) -> None:
         a = _seed_topic(db, "topic-a", "proj")
         b = _seed_topic(db, "topic-b", "proj")
         for doc_id, topic_id in [
             (canonical_chunk_id("note1"), a), (canonical_chunk_id("note2"), b),
         ]:
+            # RDR-194 P3d: topic_assignments_chunk_fk requires a matching
+            # nexus.chunks row for (tenant, "proj", doc_id) first.
+            _seed_chunk(t2_service_env, "proj", doc_id)
             db.taxonomy.import_assignment(
                 doc_id=doc_id, topic_id=topic_id, assigned_by="hdbscan",
                 similarity=None, assigned_at=None, source_collection="proj",

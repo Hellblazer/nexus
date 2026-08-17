@@ -372,6 +372,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   legacy-001-2 nexus-lgdel.l1
                 //   taxonomy-010-1 nexus-tk070.p3b
                 //   taxonomy-011-1 nexus-tk070.p3c
+                //   taxonomy-012-2 nexus-tk070.p3d
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -1110,6 +1111,56 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("FORCE ROW LEVEL SECURITY restored on nexus.topic_assignments after "
                             + "taxonomy-011-1's own NO FORCE/FORCE toggle around its guard")
                         .isEqualTo(1);
+
+                    // taxonomy-012-2 leg (nexus-tk070.p3d, RDR-194 § D1, seed-coverage
+                    // lint follow-up): the composite-FK anti-join DELETE on
+                    // nexus.topic_assignments (tenant_id, source_collection, doc_id) ->
+                    // nexus.chunks (tenant_id, collection, chash), the SAME NO FORCE/
+                    // FORCE toggle-wrap shape as catalog-013-1b/catalog-014-0/
+                    // catalog-025-0/catalog-029-1/catalog-032-1/legacy-001-1/
+                    // legacy-001-2. No NEW seed data is needed: taxonomy-010-1's own
+                    // seed above is EXACTLY the population that would exercise this
+                    // arm, and it is ALREADY DRAINED by the time this changeset runs --
+                    // all four seeded rows were removed by taxonomy-010-1's own three
+                    // DELETE arms (asserted above: the ambiguous, unresolvable, and
+                    // both shape-invalid rows are all isEqualTo(0)), so
+                    // nexus.topic_assignments for tenant t1 is already empty. This
+                    // mirrors catalog-029-1's own reasoning verbatim (its own entry in
+                    // the Python DECLARED_SEED_COVERAGE): "any row that would exercise
+                    // the DELETE arm is, by construction, ALREADY dangling under a
+                    // structurally identical anti-join earlier in this same hop" --
+                    // here that earlier anti-join is taxonomy-010-1's own
+                    // source_collection-IS-NULL-scoped unresolvable arm, which (once
+                    // combined with the two shape-unconditional arms) leaves nothing a
+                    // later, source_collection-agnostic anti-join could still catch.
+                    // Effect-asserted the same minimal way as fk-004-0-reconcile-
+                    // precount / taxonomy-011-1: the changeset EXECUTES (a dangling row
+                    // surviving into VALIDATE would instead abort the whole migration
+                    // walk with SQLSTATE 23503, well before this JDBC connection could
+                    // run a single assertion), the population it would have deleted is
+                    // still (independently) zero, the FK it makes possible to VALIDATE
+                    // exists and IS validated at HEAD, and FORCE ROW LEVEL SECURITY is
+                    // restored on both tables its own toggle-wrap covers.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_assignments WHERE tenant_id = 't1'"))
+                        .as("taxonomy-012-2's own anti-join population is empty -- every row "
+                            + "this fixture seeded was already removed by taxonomy-010-1's three "
+                            + "DELETE arms above, so taxonomy-012-2 by construction deletes nothing "
+                            + "new in this hop")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'topic_assignments_chunk_fk' AND convalidated"))
+                        .as("topic_assignments_chunk_fk must exist and be VALIDATED at HEAD -- "
+                            + "only reachable if taxonomy-012-1's NOT VALID add, taxonomy-012-2's "
+                            + "remediation, and taxonomy-012-3's VALIDATE all ran in this same walk")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.topic_assignments'::regclass, 'nexus.chunks'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-012-2's own "
+                            + "toggle-wrap covers")
+                        .isEqualTo(2);
                 }
             }
         } finally {

@@ -146,6 +146,19 @@ class Taxonomy010BackfillDirectIntegrationTest {
             // taxonomy-011-8 recreates it going forward every boot).
             su.createStatement().execute(
                 "DROP VIEW IF EXISTS nexus.diag_chash_conformance");
+            // RDR-194 P3d (nexus-tk070.p3d): startAll()'s full migration now ALSO
+            // runs taxonomy-012, which ADDs topic_assignments_chunk_fk -- a
+            // composite FK whose (source_collection, doc_id) leg targets
+            // nexus.chunks(collection, chash), bytea. The ALTER below would now
+            // hit "foreign key constraint ... cannot be implemented" (a bytea-vs-
+            // TEXT type mismatch on the referencing column) the moment doc_id
+            // stops being bytea -- same test-only-relaxation shape as the view
+            // drop directly above: this dedicated, throwaway container never
+            // re-adds the constraint, because this test replays taxonomy-010-1
+            // alone (never touches taxonomy-011/012's own logic) and the whole
+            // container is stopped in @AfterAll.
+            su.createStatement().execute(
+                "ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS topic_assignments_chunk_fk");
             su.createStatement().execute(
                 "ALTER TABLE nexus.topic_assignments ALTER COLUMN doc_id TYPE TEXT USING encode(doc_id, 'hex')");
 

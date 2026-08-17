@@ -167,7 +167,7 @@ class CatalogDocumentCascadeTest {
             assertChildCounts(su, TENANT, "hard-doc-1", 0, 0, 0, 0);
             // topic_assignments has NO document-rooted FK (fk-001 changeset 1 = index only) — survives.
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.topic_assignments WHERE tenant_id='" + TENANT
-                + "' AND doc_id='" + hexChash("hard-doc-1") + "'"))
+                + "' AND doc_id=decode('" + hexChash("hard-doc-1") + "', 'hex')"))
                 .as("topic_assignments NOT cascaded by document delete (no doc-rooted FK)").isEqualTo(1);
             // nexus-tk070.p1 (RDR-194 § D2): fk_catalog_links_from_document/_to_document
             // now cascade BOTH links (either endpoint = hard-doc-1) off this same hard delete.
@@ -276,8 +276,16 @@ class CatalogDocumentCascadeTest {
         long topicId = (tenant + docId).hashCode() & 0xFFFFFFFFL;
         st.execute("INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) "
             + "VALUES (" + topicId + ", '" + tenant + "', 'topic-dc', '" + COLL + "', 0, NOW(), 'pending')");
+        // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires a
+        // matching nexus.chunks row for this INSERT to succeed at all -- decode(...,
+        // 'hex') on BOTH the chunk and the assignment (a bare string literal into a
+        // bytea column stores the ASCII bytes of the hex STRING via "escape format",
+        // never matching a real decode()'d row).
+        st.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
+            + "VALUES ('" + tenant + "', '" + COLL + "', decode('" + hexChash(docId) + "', 'hex'), 'text', "
+            + vec(384) + "::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
         st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', '" + hexChash(docId) + "', " + topicId + ", 'projection', '" + COLL + "', NOW())");
+            + "VALUES ('" + tenant + "', decode('" + hexChash(docId) + "', 'hex'), " + topicId + ", 'projection', '" + COLL + "', NOW())");
     }
 
     /** Seed one catalog_links row directly (raw SQL, bypassing the repository's
@@ -296,6 +304,11 @@ class CatalogDocumentCascadeTest {
 
     private static String chash(String seed) {
         return (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
+    }
+
+    /** {@code '[v,v,...]'} pgvector literal of {@code dim} identical components. */
+    private static String vec(int dim) {
+        return ("0.1,".repeat(dim - 1) + "0.1").transform(s -> "'[" + s + "]'");
     }
 
     /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id

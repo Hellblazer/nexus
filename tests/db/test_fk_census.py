@@ -12,11 +12,12 @@ engine substrate's freshly Liquibase-applied schema and asserts:
     - ``fk_catalog_chunks_chunk`` (catalog-029-manifest-chunk-fk.xml) is
       VALIDATED — catalog-029-2 runs a bare ``VALIDATE CONSTRAINT`` after
       the anti-join remediation step.
-    - ``nexus.topic_assignments.doc_id`` carries no FK (RDR-194 P3d adds the
-      composite FK; not landed yet) and is ``bytea`` (RDR-194 P3c,
-      ``taxonomy-011-doc-id-bytea.xml`` — converted from the TEXT this
-      ground truth pinned pre-P3c; the column is a chunk chash, not a
-      tumbler, RDR-194 Problem Statement item 2 / Q1).
+    - ``nexus.topic_assignments.doc_id`` carries the composite
+      ``topic_assignments_chunk_fk`` FK, VALIDATED (RDR-194 P3d,
+      ``taxonomy-012-doc-id-chunk-fk.xml`` — moved from the needs_design
+      class this ground truth pinned pre-P3d), and is ``bytea`` (RDR-194
+      P3c, ``taxonomy-011-doc-id-bytea.xml``; the column is a chunk chash,
+      not a tumbler, RDR-194 Problem Statement item 2 / Q1).
     - ``nexus.catalog_links.from_tumbler`` (and ``to_tumbler``) carry NO
       FK today (nexus-ysrwi: 277 dangling rows measured 2026-07-25,
       RDR-194 Problem Statement item 5 / Q2).
@@ -156,13 +157,21 @@ def test_ground_truth_fk_catalog_chunks_chunk_is_validated(census_state):
     assert rows[0] == "t", f"expected fk_catalog_chunks_chunk to be VALIDATED, convalidated={rows[0]!r}"
 
 
-def test_ground_truth_topic_assignments_doc_id_is_needs_design(census_state):
-    """topic_assignments.doc_id carries no FK yet (RDR-194 P3d adds the
-    composite FK to nexus.chunks) and is bytea (RDR-194 P3c,
+def test_ground_truth_topic_assignments_doc_id_is_fk_enforced(census_state):
+    """topic_assignments.doc_id moved from needs_design to fk_enforced at
+    RDR-194 P3d (bead nexus-tk070.p3d, taxonomy-012-doc-id-chunk-fk.xml):
+    the composite FK topic_assignments_chunk_fk (tenant_id,
+    source_collection, doc_id) -> nexus.chunks (tenant_id, collection,
+    chash) is added and VALIDATEd in the same migration walk (catalog-029
+    three-step shape), so a freshly-migrated schema always sees it
+    VALIDATED, never NOT VALID. doc_id itself is bytea (RDR-194 P3c,
     taxonomy-011-doc-id-bytea.xml) holding a chunk chash — Problem
-    Statement item 2 / Q1."""
+    Statement item 2 / Q1. Ground truth PRIOR to this phase (needs_design,
+    no FK) is preserved in this test's own git history; do not resurrect
+    it here as a second assertion — a column carries exactly one FK
+    ground truth at a time."""
     sql = """
-    SELECT count(*)
+    SELECT con.conname, con.convalidated
     FROM pg_constraint con
     JOIN pg_class c ON c.oid = con.conrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -173,7 +182,13 @@ def test_ground_truth_topic_assignments_doc_id_is_needs_design(census_state):
       AND a.attname = 'doc_id';
     """
     rows = _psql_csv(census_state, sql)
-    assert rows[0] == "0", f"expected topic_assignments.doc_id to carry NO FK, found {rows[0]}"
+    assert rows, "expected topic_assignments.doc_id to carry the topic_assignments_chunk_fk FK, found none"
+    conname, convalidated = rows[0].split(",")
+    assert conname == "topic_assignments_chunk_fk", f"unexpected FK name on doc_id: {conname!r}"
+    assert convalidated == "t", (
+        f"expected topic_assignments_chunk_fk to be VALIDATED on a freshly-migrated schema "
+        f"(catalog-029 three-step shape ships all three steps in one walk), convalidated={convalidated!r}"
+    )
 
     type_sql = (
         "SELECT data_type FROM information_schema.columns "

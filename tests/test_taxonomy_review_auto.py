@@ -25,6 +25,7 @@ positional ``idx`` — the review-gate fix for the wrong-topic-verdict class
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -40,11 +41,62 @@ from nexus.db.t2 import T2Database
 from tests._t2_fixture_ops import canonical_chunk_id
 from tests.conftest import next_import_seed_id  # session-unique import ids (see conftest note)
 
+#: RDR-194 P3d (nexus-tk070.p3d): the current test's minted tenant, stashed
+#: by the autouse fixture below so module-level ``_seed_topic`` (called from
+#: ~40 sites across this file) can seed a matching nexus.chunks row without
+#: every call site threading ``t2_service_env`` through explicitly. Safe
+#: across xdist workers (separate processes) and sequential test execution
+#: within one worker (reset every test by the autouse fixture below); this
+#: module has no async tests that call ``_seed_topic``.
+_current_tenant: str | None = None
+
 
 @pytest.fixture(autouse=True)
 def _engine_substrate(t2_service_env):
     """RDR-155 P4b P0a' representative batch: this module runs its T2
     against the engine-backed substrate (per-test minted tenant)."""
+    global _current_tenant
+    _current_tenant = t2_service_env
+    yield
+    _current_tenant = None
+
+
+def _seed_chunks_for_tenant(
+    tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 384,
+) -> None:
+    """RDR-194 P3d: seed real nexus.chunks rows so a topic_assignments
+    insert for (tenant, collection, chash) satisfies
+    topic_assignments_chunk_fk. Mirrors tests/test_taxonomy.py's helper of
+    the same name (this module has no import path to it).
+    """
+    from tests._engine_substrate import ensure_engine  # noqa: PLC0415 — laziness contract, see module docstring
+
+    if not chash_hexes:
+        return
+    state = ensure_engine()
+    embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
+    vec = "[" + ",".join(["0"] * dim) + "]"
+    values = ", ".join(
+        f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::vector)"
+        for c in chash_hexes
+    )
+    sql = (
+        f"INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('{tenant}', '{collection}') "
+        "ON CONFLICT DO NOTHING; "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
+        f"VALUES {values} ON CONFLICT DO NOTHING;"
+    )
+    psql = Path(state["pg_bin"]) / "psql"
+    proc = subprocess.run(
+        [
+            str(psql), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
+            "-U", state["pg_user"], "-d", state["pg_dbname"],
+            "-v", "ON_ERROR_STOP=1", "-c", sql,
+        ],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, f"_seed_chunks_for_tenant failed: {proc.stdout}\n{proc.stderr}"
+
 
 # ── Shared seeding + mocking helpers ────────────────────────────────────────
 
@@ -82,6 +134,14 @@ def _seed_topic(
             terms=_json.dumps(terms or ["term-a", "term-b"]),
         )
         n = n_docs if n_docs is not None else doc_count
+        # RDR-194 P3d: topic_assignments_chunk_fk requires a matching
+        # nexus.chunks row for (tenant, collection, doc_id) before each
+        # import_assignment below. _current_tenant is stashed by the
+        # module's autouse _engine_substrate fixture.
+        _seed_chunks_for_tenant(
+            _current_tenant, collection,
+            [canonical_chunk_id(f"{label}-doc-{i}.py") for i in range(n)],
+        )
         for i in range(n):
             # RDR-194 D1/P3b (nexus-11pe7): source_collection is NOT NULL;
             # this own-pass seed's source collection is this topic's own

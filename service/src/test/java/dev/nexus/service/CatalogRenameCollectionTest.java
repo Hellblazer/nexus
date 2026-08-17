@@ -476,8 +476,21 @@ class CatalogRenameCollectionTest {
             + "VALUES ('" + tenant + "', 'rn-doc-1', 'Doc 1', '" + coll + "')");
         // chunks: 2/1/1 across three dims, one unified nexus.chunks table (RDR-191).
         st.execute(chunkInsert(tenant, coll, 384, "rn384a"));
-        st.execute(chunkInsert(tenant, coll, 384, "rn384b"));
-        st.execute(chunkInsert(tenant, coll, 768, "rn768a"));
+        // RDR-194 P3d (nexus-tk070.p3d): rn384b and rn768a below are REPURPOSED
+        // (decode(hexChash(...),'hex') identity, not the file's own chash(seed)
+        // escape-format shape) to ALSO back the two topic_assignments rows
+        // further down via topic_assignments_chunk_fk -- reusing two of the four
+        // already-seeded chunks rather than minting two more, so the "chunks
+        // (unified, 2+1+1)" count assertion elsewhere stays exactly 4. The two
+        // encodings are NOT interchangeable (chash(seed) stores raw ASCII bytes
+        // of a hex-digit-shaped string via bytea "escape format"; decode(...,
+        // 'hex') stores the genuine hex-decoded bytes), so this chunk's chash is
+        // no longer chash("rn384b") -- nothing else in this file references it
+        // by that name (unlike rn384a, reused by the manifest INSERT below).
+        st.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
+            + "VALUES ('" + tenant + "', '" + coll + "', decode('" + hexChash("rn-doc-1") + "', 'hex'), 'text', " + vec(384) + "::vector)");
+        st.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768) "
+            + "VALUES ('" + tenant + "', '" + coll + "', decode('" + hexChash("rn-doc-2") + "', 'hex'), 'text', " + vec(768) + "::vector)");
         st.execute(chunkInsert(tenant, coll, 1024, "rn1024a"));
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for the manifest insert below -- reuse rn384a's
@@ -498,10 +511,14 @@ class CatalogRenameCollectionTest {
         // topic_assignments: 2 (source_collection=coll). doc_id is bytea now
         // (nexus-tk070.p3c) — a genuine 64-hex chash, independent of the catalog
         // tumbler string (topic_assignments.doc_id has no FK to catalog_documents).
+        // RDR-194 P3d (nexus-tk070.p3d): decode(...,'hex') here (NOT a bare string
+        // literal, which would store the ASCII bytes of the hex STRING via bytea
+        // "escape format", never matching a real decode()'d chunks row) so both
+        // rows resolve against the two REPURPOSED chunks seeded above.
         st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', '" + hexChash("rn-doc-1") + "', " + topicId + ", 'projection', '" + coll + "', NOW())");
+            + "VALUES ('" + tenant + "', decode('" + hexChash("rn-doc-1") + "', 'hex'), " + topicId + ", 'projection', '" + coll + "', NOW())");
         st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', '" + hexChash("rn-doc-2") + "', " + topicId + ", 'projection', '" + coll + "', NOW())");
+            + "VALUES ('" + tenant + "', decode('" + hexChash("rn-doc-2") + "', 'hex'), " + topicId + ", 'projection', '" + coll + "', NOW())");
         // centroids: one per dim, one unified nexus.taxonomy_centroids table (RDR-191).
         // PK is (tenant_id, collection, topic_id) -- three DIFFERENT topic_ids, not
         // the shared `topicId` above (would collide on the unified PK; pre-unification

@@ -163,6 +163,9 @@ class TaxonomyHandlerAssignFkTest {
         // Non-regression: register a real topic first, then a valid assignment
         // must still succeed (the guard doesn't over-fire).
         long topicId = repo.insertTopic(TENANT, "fk-test-topic", null, "coll", 0, "2026-07-01T00:00:00Z", null);
+        // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires
+        // a matching nexus.chunks row for this assign to succeed at all.
+        seedChunk(TENANT, "coll", DOC_ID_HEX, 384);
         CapturingExchange ex = post("/v1/taxonomy/assignments/assign",
             "{\"doc_id\":\"" + DOC_ID_HEX + "\",\"topic_id\":" + topicId + ",\"assigned_by\":\"manual\","
             + "\"source_collection\":\"coll\"}");
@@ -222,6 +225,28 @@ class TaxonomyHandlerAssignFkTest {
 
     private static CapturingExchange post(String path, String jsonBody) {
         return new CapturingExchange("POST", URI.create(path), jsonBody);
+    }
+
+    /**
+     * Insert a minimal nexus.chunks row (RDR-194 P3d, nexus-tk070.p3d): every
+     * topic_assignments row now requires a matching (tenant_id, source_collection,
+     * doc_id) -> chunks(tenant_id, collection, chash) parent via
+     * topic_assignments_chunk_fk. Also registers the collection (ON CONFLICT DO
+     * NOTHING).
+     */
+    private void seedChunk(String tenant, String collection, String chashHex, int dim) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '"
+                + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+            String embeddingCol = "embedding_" + dim;
+            su.createStatement().execute(
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embeddingCol + ") VALUES " +
+                "('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), 'fk-assign-test chunk', " +
+                "('[" + "0.1,".repeat(dim - 1) + "0.1]')::vector) " +
+                "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+        }
     }
 
     /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id

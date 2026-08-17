@@ -290,6 +290,22 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # before any assertion could run), doc_id is bytea at HEAD, and
         # FORCE ROW LEVEL SECURITY is restored on topic_assignments.
         ("taxonomy-011-1", "nexus-tk070.p3c"),
+        # nexus-tk070.p3d (RDR-194 § D1): taxonomy-012-2's composite-FK
+        # anti-join DELETE on nexus.topic_assignments (tenant_id,
+        # source_collection, doc_id) -> nexus.chunks (tenant_id, collection,
+        # chash), the same NO FORCE/FORCE toggle-wrap shape as
+        # catalog-013-1b/catalog-014-0/catalog-025-0/catalog-029-1/
+        # catalog-032-1/legacy-001-1/legacy-001-2. Reuses taxonomy-010-1's
+        # seed rather than a fresh fixture: by the time this changeset runs,
+        # taxonomy-010-1's own three DELETE arms have already removed every
+        # row the fixture seeded (the ambiguous, unresolvable, and both
+        # shape-invalid rows), so taxonomy-012-2's anti-join finds zero
+        # dangling rows in this hop by construction -- the same
+        # already-dead-by-an-earlier-identical-anti-join reasoning as
+        # catalog-029-1's own entry above; effect-asserted (the population
+        # is independently still zero, topic_assignments_chunk_fk exists and
+        # is VALIDATED at HEAD, FORCE restored on both toggled tables).
+        ("taxonomy-012-2", "nexus-tk070.p3d"),
     }
 )
 

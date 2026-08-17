@@ -36,6 +36,7 @@ import pytest
 
 from nexus.db.t2 import T2Database
 from tests._t2_fixture_ops import canonical_chunk_id
+from tests.test_taxonomy import _seed_chunk
 
 
 @pytest.fixture()
@@ -71,6 +72,7 @@ def test_assignment_quality_columns_round_trip(db: T2Database) -> None:
     topic_id = _unique_topic_id()
     _seed_topic(db, topic_id, "code__src_a")
     doc_id = canonical_chunk_id(f"onjvy-detail-{topic_id}")
+    _seed_chunk(topic_id, "code__onjvy_src", doc_id)
 
     db.taxonomy.assign_topic(
         doc_id, topic_id, assigned_by="projection",
@@ -102,6 +104,8 @@ def test_prefer_higher_upsert_keeps_the_higher_similarity(db: T2Database) -> Non
     topic_id = _unique_topic_id()
     _seed_topic(db, topic_id, "code__src_a")
     doc_id = canonical_chunk_id(f"onjvy-upsert-{topic_id}")
+    _seed_chunk(topic_id, "code__src_a", doc_id)
+    _seed_chunk(topic_id, "code__src_b", doc_id)
 
     db.taxonomy.assign_topic(
         doc_id, topic_id, assigned_by="projection", similarity=0.9,
@@ -235,8 +239,10 @@ def _seed_hub(db: T2Database, topic_id: int, sources: tuple[str, ...],
               assigned_at: str) -> None:
     _seed_topic(db, topic_id, "code__src_a")
     for i, src in enumerate(sources):
+        doc_id = canonical_chunk_id(f"onjvy-hub-{topic_id}-{i}")
+        _seed_chunk(topic_id, src, doc_id)
         db.taxonomy.assign_topic(
-            canonical_chunk_id(f"onjvy-hub-{topic_id}-{i}"), topic_id, assigned_by="projection",
+            doc_id, topic_id, assigned_by="projection",
             similarity=0.5, source_collection=src, assigned_at=assigned_at,
         )
 
@@ -368,8 +374,10 @@ def test_taxonomy_status_surfaces_hook_failures_in_service_mode(
     # claims to be about.
     topic_id = _unique_topic_id()
     _seed_topic(db, topic_id, "docs__status")
+    status_doc_id = canonical_chunk_id(f"status-projected-{topic_id}")
+    _seed_chunk(topic_id, "docs__status", status_doc_id)
     db.taxonomy.assign_topic(
-        canonical_chunk_id(f"status-projected-{topic_id}"), topic_id, assigned_by="projection",
+        status_doc_id, topic_id, assigned_by="projection",
         similarity=0.5, source_collection="docs__status",
         assigned_at="2026-04-14T10:00:00Z",
     )

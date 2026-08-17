@@ -394,6 +394,23 @@ class CollectionRegistryFkTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
 
+            // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk (composite,
+            // (tenant_id, source_collection, doc_id) -> chunks(tenant_id, collection,
+            // chash)) is orthogonal to this test's subject (topic_assignments_
+            // collection_fk's ON UPDATE CASCADE) and structurally INCOMPATIBLE with
+            // it: seeding a real nexus.chunks row to satisfy it would itself block
+            // the rename below, because chunks_collection_fk (fk-004) has NO
+            // ON UPDATE CASCADE of its own (plain NO ACTION) -- a chunk sitting on
+            // 'casc__old' would not follow the rename, so the very UPDATE this test
+            // exercises would fail on a DIFFERENT constraint before ever reaching
+            // the cascade behavior under test. Dropped here rather than seeded
+            // around; left dropped for the remainder of this shared container per
+            // this file's own Group 13 convention (GROUP 13's header: "a future
+            // @Order(>134) group must account for the residual re-added FKs" --
+            // the identical shape, applied one FK earlier).
+            su.createStatement().execute(
+                "ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS topic_assignments_chunk_fk");
+
             // Fixture: catalog_documents row (required by fk-001 (tenant_id,doc_id) FK)
             insertCatalogDocument(su, TENANT_A, "casc-doc-1");
             // Fixture: topics row (required only for the topic_id FK). Its OWN collection must
@@ -1283,6 +1300,16 @@ class CollectionRegistryFkTest {
         final String COL = "p03-orphan-ta";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk is orthogonal
+            // to this test's subject (topic_assignments_collection_fk's reconcile-
+            // load-bearing VALIDATE flow) -- the orphanInsertSql below has no
+            // matching nexus.chunks row and would otherwise violate the NEW FK
+            // before ever reaching what this test verifies. Defensive IF-EXISTS
+            // drop: Order(30) above already drops it for the remainder of this
+            // shared container (Group 13's own convention), but this statement
+            // makes THIS test robust to running standalone/out of order too.
+            su.createStatement().execute(
+                "ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS topic_assignments_chunk_fk");
             // topic_assignments is multiply-rooted: seed the doc (fk-001 doc_id), the topic's
             // home collection (topics_collection_fk), and the topic row (topic_id FK) so the
             // ONLY remaining VALIDATE failure is the source_collection FK under test.

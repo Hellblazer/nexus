@@ -215,7 +215,21 @@ class SoftDeleteTest {
                     "catalog_document_chunks",
                     "document_aspects",
                     "document_highlights",
-                    "aspect_extraction_queue")) {
+                    "aspect_extraction_queue",
+                    // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk's
+                    // ON DELETE CASCADE means a DELETE on nexus.chunks can now
+                    // cascade-delete matching nexus.topic_assignments rows --
+                    // Postgres's own FK/RI cascade mechanism is privilege-exempt,
+                    // but the EXISTING taxonomy-003 doc_count triggers
+                    // (trg_topic_assignments_doc_count_del, deliberately SECURITY
+                    // INVOKER, never DEFINER -- taxonomy-003-doc-count-trigger.xml)
+                    // fire as part of that SAME cascade and run an ordinary UPDATE
+                    // nexus.topics under the INVOKING role's own privileges. This
+                    // role never touched topic_assignments/topics before this FK
+                    // existed, so both need the same DML grant shape as every
+                    // other table in this list.
+                    "topic_assignments",
+                    "topics")) {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
             }

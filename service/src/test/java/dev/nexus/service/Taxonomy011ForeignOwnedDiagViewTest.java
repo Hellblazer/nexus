@@ -218,6 +218,19 @@ class Taxonomy011ForeignOwnedDiagViewTest {
      */
     private static void resetToTextDocIdWithForeignOwnedView(Connection su) throws Exception {
         su.createStatement().execute("DROP VIEW IF EXISTS nexus.diag_chash_conformance");
+        // RDR-194 P3d (nexus-tk070.p3d): the full migration above now ALSO runs
+        // taxonomy-012, which ADDs topic_assignments_chunk_fk -- a composite FK
+        // whose (source_collection, doc_id) leg targets nexus.chunks(collection,
+        // chash), bytea. The ALTER below would now hit "foreign key constraint
+        // ... cannot be implemented" (a bytea-vs-TEXT type mismatch on the
+        // referencing column) before ever reaching the foreign-owned-view
+        // scenario this class exists to prove -- same test-only-relaxation
+        // shape as the view drop directly above, and the identical fix
+        // Taxonomy010BackfillDirectIntegrationTest applies for the same
+        // reason: this dedicated, throwaway container never re-adds the
+        // constraint.
+        su.createStatement().execute(
+            "ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS topic_assignments_chunk_fk");
         su.createStatement().execute(
             "ALTER TABLE nexus.topic_assignments ALTER COLUMN doc_id TYPE TEXT USING encode(doc_id, 'hex')");
         su.createStatement().execute(
