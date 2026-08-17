@@ -295,5 +295,14 @@ def test_grants_changeset_view_era_revokes_tables():
     assert "REVOKE SELECT ON %I.%I FROM nexus_diag" in xml
     # The bulk form must never come back.
     assert "REVOKE SELECT ON ALL TABLES IN SCHEMA" not in xml
-    # No cross-owner grant on the view (a non-owner GRANT hard-errors too).
-    assert "GRANT SELECT ON nexus.diag_chash_conformance" not in xml
+    # Exactly ONE view grant, in grants-nexus-diag-3 (nexus-lhuhe: the boot's
+    # last word re-grants what -2's revoke loop stripped from taxonomy-011-8),
+    # and it MUST be insufficient_privilege-wrapped — a bare non-owner GRANT
+    # hard-errors (the nexus-46yy3 crash-loop class this test originally
+    # pinned; the wrap is what makes the grant safe where the ban used to be).
+    assert xml.count("GRANT SELECT ON nexus.diag_chash_conformance") == 1
+    grant_at = xml.index("GRANT SELECT ON nexus.diag_chash_conformance")
+    assert "EXCEPTION WHEN insufficient_privilege" in xml[grant_at : grant_at + 400], (
+        "the view grant must be insufficient_privilege-wrapped (foreign-owner "
+        "tolerant) or it reintroduces the nexus-46yy3 boot crash-loop"
+    )
