@@ -274,6 +274,22 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # outside the seed-coverage lint's scope (that lint only covers
         # the hop's own toggle-wrapped row-DML changesets).
         ("taxonomy-010-1", "nexus-tk070.p3b"),
+        # nexus-tk070.p3c (RDR-194 § D1 step (e)): taxonomy-011-1's doc_id
+        # TEXT -> bytea ALTER carries NO INSERT/UPDATE/DELETE of its own --
+        # its guard is a read-only SELECT COUNT(*) wrapped in the SAME NO
+        # FORCE/FORCE toggle shape as fk-004-0-reconcile-precount
+        # (nexus-iq0qr, above), which trips rule (b) regardless of carrying
+        # no literal DML. No NEW seed data needed: taxonomy-010-1's own
+        # seeded rows (immediately above in the same hop) ARE the
+        # population the guard walks, and by construction every surviving
+        # row is canonical 64-hex once taxonomy-010-1's three DELETE arms
+        # have run -- the guard is expected to find zero bad rows, exactly
+        # mirroring fk-004-0-reconcile-precount's "always zero in this hop"
+        # reasoning. Effect-asserted the same minimal way: the changeset
+        # EXECUTES (a RAISE EXCEPTION would abort the whole migration walk
+        # before any assertion could run), doc_id is bytea at HEAD, and
+        # FORCE ROW LEVEL SECURITY is restored on topic_assignments.
+        ("taxonomy-011-1", "nexus-tk070.p3c"),
     }
 )
 

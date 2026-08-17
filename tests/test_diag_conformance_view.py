@@ -46,6 +46,12 @@ def test_the_authoritative_set_is_column_aware_and_complete():
     assert not by_table["nexus.topic_assignments"].poison
     assert not by_table["nexus.frecency"].poison
     assert not by_table["nexus.relevance_log"].poison
+    # RDR-194 P3c (nexus-tk070.p3c): doc_id is bytea now; the other two debt
+    # columns stay TEXT (nexus-lgdel.l1's canonical-only CHECK covers them
+    # directly).
+    assert by_table["nexus.topic_assignments"].bytea
+    assert not by_table["nexus.frecency"].bytea
+    assert not by_table["nexus.relevance_log"].bytea
     assert tuple(t.table for t in POISON_CHASH_TABLES) == (
         "nexus.chunks",
         "nexus.catalog_document_chunks",
@@ -69,10 +75,17 @@ def test_view_ddl_covers_exactly_the_chash_tables():
     # references that miss every chunk-table join; titles/non-hex identities
     # are excluded by the hex guard (not chash debt). RDR-191: the anti-join
     # used to be a 3-way AND (one per dim shard) and is now ONE NOT EXISTS
-    # against the unified nexus.chunks relation.
+    # against the unified nexus.chunks relation. RDR-194 P3c: debt columns
+    # are no longer uniformly TEXT -- a bytea debt column (topic_assignments.
+    # doc_id) skips the hex-shape guard entirely (direct bytea equality);
+    # only the still-TEXT debt columns (frecency/relevance_log) keep it.
     for t in DEBT_CHASH_TABLES:
         assert f"'{t.table}' AS table_name" in ddl
-        assert f"t.{t.column} ~ '^[0-9a-f]+$'" in ddl
+        if t.bytea:
+            assert f"c.chash = t.{t.column})" in ddl
+            assert f"t.{t.column} ~ '^[0-9a-f]+$'" not in ddl
+        else:
+            assert f"t.{t.column} ~ '^[0-9a-f]+$'" in ddl
     assert ddl.count("NOT EXISTS") == len(DEBT_CHASH_TABLES)
     # One UNION arm per table, no extras.
     assert ddl.count("UNION ALL") == len(CHASH_BEARING_TABLES) - 1
@@ -159,6 +172,41 @@ def test_docs_rendered_copy_matches_the_generator():
         "docs/configuration.md's Amendment-A6 view SQL drifted from "
         "nexus.db.chash_tables.diag_conformance_view_ddl() - regenerate the "
         "docs block"
+    )
+
+
+def test_liquibase_owned_view_matches_the_generator():
+    """RDR-194 P3c critical fix round (2026-08-17, critic Sig-2 / bead
+    nexus-i3k3e): ``taxonomy-011-doc-id-bytea.xml``'s ``taxonomy-011-8``
+    changeset embeds a LITERAL SQL copy of ``diag_conformance_view_ddl()``'s
+    output (a static XML changelog cannot import the Python generator) —
+    pin the two copies to each other, same containment-check pattern as
+    :func:`test_docs_rendered_copy_matches_the_generator`, so a
+    ``CHASH_BEARING_TABLES`` change regenerates BOTH the docs block and the
+    changelog's embedded copy, not just one of them silently drifting from
+    the other."""
+    xml = (
+        _REPO
+        / "service/src/main/resources/db/changelog/taxonomy-011-doc-id-bytea.xml"
+    ).read_text()
+    # The changeset's SQL is nested inside a `DO $$ BEGIN ... BEGIN ... END;`
+    # block (2026-08-17 defensive fix, critic Sig-1/-2: a foreign-owned
+    # pre-existing view must degrade gracefully, not abort the migration),
+    # so its lines carry an 8-space indent the bare generator output does
+    # not — normalize that away the same way
+    # test_docs_rendered_copy_matches_the_generator normalizes the docs'
+    # 3-space markdown indent.
+    xml_flat = re.sub(r"\n {8}", "\n", xml)
+    ddl = diag_conformance_view_ddl()
+    # The XML changelog escapes the two XML-special characters this DDL text
+    # contains (`<>` in the poison legs' octet_length inequality) as entity
+    # references — everything else in the DDL (single quotes, `~`, `$`) is
+    # XML-legal as bare text content and needs no escaping.
+    xml_escaped_ddl = ddl.replace("<", "&lt;").replace(">", "&gt;")
+    assert xml_escaped_ddl in xml_flat, (
+        "taxonomy-011-doc-id-bytea.xml's taxonomy-011-8 changeset's embedded "
+        "CREATE VIEW SQL drifted from nexus.db.chash_tables."
+        "diag_conformance_view_ddl() — regenerate the changeset's SQL"
     )
 
 

@@ -20,6 +20,7 @@ import pytest
 from nexus.db.local_ef import LocalEmbeddingFunction
 from nexus.db.t2 import T2Database
 from nexus.types import SearchResult
+from tests._t2_fixture_ops import canonical_chunk_id
 from tests.conftest import make_vector_test_client
 from typing import Any
 
@@ -89,9 +90,9 @@ def _build_corpus() -> tuple[list[str], list[str]]:
 
     texts = http + db + test
     doc_ids = (
-        [f"src/http/{i}.py" for i in range(20)]
-        + [f"src/db/{i}.py" for i in range(20)]
-        + [f"tests/test_{i}.py" for i in range(20)]
+        [canonical_chunk_id(f"src/http/{i}.py") for i in range(20)]
+        + [canonical_chunk_id(f"src/db/{i}.py") for i in range(20)]
+        + [canonical_chunk_id(f"tests/test_{i}.py") for i in range(20)]
     )
     return doc_ids, texts
 
@@ -196,8 +197,9 @@ class TestFullPipelineEphemeral:
             topic_id = result.topic_id
 
             # Check that the assigned topic's docs are mostly HTTP
+            http_doc_ids = {canonical_chunk_id(f"src/http/{i}.py") for i in range(20)}
             topic_docs = db.taxonomy.get_all_topic_doc_ids(topic_id)
-            http_count = sum(1 for d in topic_docs if d.startswith("src/http"))
+            http_count = sum(1 for d in topic_docs if d in http_doc_ids)
             assert http_count >= len(topic_docs) // 2, (
                 f"Expected HTTP-dominant topic, got {http_count}/{len(topic_docs)} HTTP docs"
             )
@@ -243,7 +245,10 @@ class TestFullPipelineEphemeral:
             )
 
             topics = db.taxonomy.get_topics()
-            db.taxonomy.assign_topic("manual-doc", topics[0]["id"], assigned_by="manual")
+            db.taxonomy.assign_topic(
+                canonical_chunk_id("manual-doc"), topics[0]["id"], assigned_by="manual",
+                source_collection="code__e2e",
+            )
 
             db.taxonomy.rebuild_taxonomy(
                 "code__e2e", doc_ids, embeddings, texts, ephemeral_chroma,
@@ -257,7 +262,7 @@ class TestFullPipelineEphemeral:
             manual = db.taxonomy.read_rebuild_old_state(
                 "code__e2e", ephemeral_chroma.get_or_create_collection("taxonomy__centroids"),
             )["manual_assignments"]
-            assert "manual-doc" in manual, "Manual assignment lost"
+            assert canonical_chunk_id("manual-doc") in manual, "Manual assignment lost"
 
     def test_merge_and_split_roundtrip(
         self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
@@ -323,7 +328,7 @@ class TestFullPipelineEphemeral:
             # Simulate search results from the HTTP domain
             results = [
                 SearchResult(
-                    id=f"src/http/{i}.py", content=f"http handler {i}",
+                    id=canonical_chunk_id(f"src/http/{i}.py"), content=f"http handler {i}",
                     distance=0.3 + i * 0.01, collection="code__e2e",
                 )
                 for i in range(5)

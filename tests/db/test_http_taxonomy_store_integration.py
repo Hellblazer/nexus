@@ -54,6 +54,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._t2_fixture_ops import canonical_chunk_id
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     create_tenant_token,
@@ -439,7 +440,7 @@ class TestTaxonomyMVV:
 
         # Assign a doc
         taxonomy_store.assign_topic(
-            "doc-inttest-a1",
+            canonical_chunk_id("doc-inttest-a1"),
             1001,
             "hdbscan",
             similarity=0.85,
@@ -447,7 +448,7 @@ class TestTaxonomyMVV:
         )
 
         docs = taxonomy_store.get_topic_doc_ids(1001, limit=10)
-        assert "doc-inttest-a1" in docs
+        assert canonical_chunk_id("doc-inttest-a1") in docs
 
     def test_b_merge_topics(self, taxonomy_store) -> None:
         """b) merge_topics: source removed, returns collection for chroma cleanup."""
@@ -473,7 +474,10 @@ class TestTaxonomyMVV:
             review_status="pending",
             terms=None,
         )
-        taxonomy_store.assign_topic("doc-merge-src", 2001, "hdbscan")
+        taxonomy_store.assign_topic(
+            canonical_chunk_id("doc-merge-src"), 2001, "hdbscan",
+            source_collection="knowledge__papers",
+        )
 
         collection = taxonomy_store.merge_topics(2001, 2002)
         assert collection == "knowledge__papers"
@@ -553,7 +557,7 @@ class TestTaxonomyMVV:
             terms=None,
         )
         taxonomy_store.import_assignment(
-            doc_id="doc-fidelity-sim-inttest",
+            doc_id=canonical_chunk_id("doc-fidelity-sim-inttest"),
             topic_id=6001,
             assigned_by="projection",
             similarity=0.732,
@@ -561,7 +565,7 @@ class TestTaxonomyMVV:
             source_collection="knowledge__papers",
         )
         docs = taxonomy_store.get_topic_doc_ids(6001, limit=10)
-        assert "doc-fidelity-sim-inttest" in docs
+        assert canonical_chunk_id("doc-fidelity-sim-inttest") in docs
 
     def test_f2_import_assignment_applied_when_doc_present(self, taxonomy_store) -> None:
         """REGRESSION (nexus-0a7xc): import_assignment returns True when the referenced
@@ -572,11 +576,11 @@ class TestTaxonomyMVV:
             created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
         )
         applied = taxonomy_store.import_assignment(
-            doc_id="analytic-doc1", topic_id=6002, assigned_by="hdbscan",
+            doc_id=canonical_chunk_id("analytic-doc1"), topic_id=6002, assigned_by="hdbscan",
             similarity=0.5, assigned_at=None, source_collection="knowledge__papers",
         )
         assert applied is True
-        assert "analytic-doc1" in taxonomy_store.get_topic_doc_ids(6002, limit=10)
+        assert canonical_chunk_id("analytic-doc1") in taxonomy_store.get_topic_doc_ids(6002, limit=10)
 
     def test_f3_import_assignment_chash_doc_id_no_catalog_fk(self, taxonomy_store) -> None:
         """REGRESSION (nexus-sa14p): topic_assignments.doc_id is a CHUNK chash, not a
@@ -590,7 +594,7 @@ class TestTaxonomyMVV:
             created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
         )
         # A realistic chunk chash — not seeded in catalog_documents, never a tumbler.
-        chash = "7740557a279d0481db33c93fd0342464"
+        chash = canonical_chunk_id("f3-chash-inttest")
         applied = taxonomy_store.import_assignment(
             doc_id=chash, topic_id=6003, assigned_by="hdbscan",
             similarity=0.5, assigned_at=None, source_collection="knowledge__papers",
@@ -693,28 +697,28 @@ class TestAnalyticalMethods:
         # doc3 projects from COLL_A into T_B1
         # This creates cross-collection co-occurrence between A1↔B1, A2↔B1
         taxonomy_store.import_assignment(
-            doc_id="analytic-doc1", topic_id=self._T_A1,
+            doc_id=canonical_chunk_id("analytic-doc1"), topic_id=self._T_A1,
             assigned_by="projection", similarity=0.88,
             assigned_at="2026-03-01T00:00:00Z",
             source_collection=self._COLL_B,
         )
         taxonomy_store.import_assignment(
-            doc_id="analytic-doc2", topic_id=self._T_A2,
+            doc_id=canonical_chunk_id("analytic-doc2"), topic_id=self._T_A2,
             assigned_by="projection", similarity=0.72,
             assigned_at="2026-03-01T00:00:00Z",
             source_collection=self._COLL_B,
         )
         taxonomy_store.import_assignment(
-            doc_id="analytic-doc3", topic_id=self._T_B1,
+            doc_id=canonical_chunk_id("analytic-doc3"), topic_id=self._T_B1,
             assigned_by="projection", similarity=0.91,
             assigned_at="2026-03-01T00:00:00Z",
             source_collection=self._COLL_A,
         )
         # hdbscan assignments for co-occurrence: doc1 also hdbscan-assigned to B1
         taxonomy_store.import_assignment(
-            doc_id="analytic-doc1", topic_id=self._T_B1,
+            doc_id=canonical_chunk_id("analytic-doc1"), topic_id=self._T_B1,
             assigned_by="hdbscan", similarity=None,
-            assigned_at=None, source_collection=None,
+            assigned_at=None, source_collection=self._COLL_B,
         )
 
     def test_i_compute_icf_map(self, taxonomy_store) -> None:
@@ -801,14 +805,14 @@ class TestAnalyticalMethods:
         )
         # Assign some docs
         taxonomy_store.import_assignment(
-            doc_id="split-doc1", topic_id=9900,
+            doc_id=canonical_chunk_id("split-doc1"), topic_id=9900,
             assigned_by="hdbscan", similarity=None,
-            assigned_at=None, source_collection=None,
+            assigned_at=None, source_collection=self._COLL_A,
         )
         taxonomy_store.import_assignment(
-            doc_id="split-doc2", topic_id=9900,
+            doc_id=canonical_chunk_id("split-doc2"), topic_id=9900,
             assigned_by="hdbscan", similarity=None,
-            assigned_at=None, source_collection=None,
+            assigned_at=None, source_collection=self._COLL_A,
         )
 
         split_result = {
@@ -820,7 +824,7 @@ class TestAnalyticalMethods:
                     "doc_count": 2,
                     "created_at": "2026-01-01T00:00:00Z",
                     "terms_json": None,
-                    "doc_ids": ["split-doc1", "split-doc2"],
+                    "doc_ids": [canonical_chunk_id("split-doc1"), canonical_chunk_id("split-doc2")],
                 },
             ],
         }
@@ -852,7 +856,7 @@ class TestAnalyticalMethods:
         )
         # Initial import as 'projection'
         taxonomy_store.import_assignment(
-            doc_id="assigned-by-doc1",
+            doc_id=canonical_chunk_id("assigned-by-doc1"),
             topic_id=9801,
             assigned_by="projection",
             similarity=0.9,
@@ -861,16 +865,16 @@ class TestAnalyticalMethods:
         )
         # Re-import as 'hdbscan' — must NOT downgrade assigned_by
         taxonomy_store.import_assignment(
-            doc_id="assigned-by-doc1",
+            doc_id=canonical_chunk_id("assigned-by-doc1"),
             topic_id=9801,
             assigned_by="hdbscan",
             similarity=None,
             assigned_at=None,
-            source_collection=None,
+            source_collection=self._COLL_B,
         )
         # Verify: doc is still in the topic (assignment not lost)
         docs = taxonomy_store.get_topic_doc_ids(9801, limit=10)
-        assert "assigned-by-doc1" in docs
+        assert canonical_chunk_id("assigned-by-doc1") in docs
 
     def test_r_record_discover_greatest_no_clobber(self, taxonomy_store) -> None:
         """r) recordDiscoverCount uses GREATEST — re-record with smaller count preserves max."""
@@ -903,13 +907,15 @@ class TestServiceBackedPersist:
     def test_persist_discovered_returns_ids_and_guards(self, taxonomy_store) -> None:
         specs = [
             {"label": "pdi-0", "doc_count": 2, "terms": "[]", "assigned_by": "hdbscan",
-             "doc_ids": ["pdi-d1", "pdi-d2"]},
+             "doc_ids": [canonical_chunk_id("pdi-d1"), canonical_chunk_id("pdi-d2")]},
             {"label": "pdi-1", "doc_count": 0, "terms": "[]", "assigned_by": "hdbscan",
              "doc_ids": []},
         ]
         ids = taxonomy_store.persist_discovered_topics(self._COLL, specs)
         assert isinstance(ids, list) and len(ids) == 2 and all(i > 0 for i in ids)
-        assert sorted(taxonomy_store.get_all_topic_doc_ids(ids[0])) == ["pdi-d1", "pdi-d2"]
+        assert sorted(taxonomy_store.get_all_topic_doc_ids(ids[0])) == sorted(
+            [canonical_chunk_id("pdi-d1"), canonical_chunk_id("pdi-d2")]
+        )
         # existing-topics guard: second call is a no-op
         assert taxonomy_store.persist_discovered_topics(self._COLL, specs) == []
 
@@ -917,22 +923,24 @@ class TestServiceBackedPersist:
         coll = "knowledge__1di3r-rebuild-inttest"  # inline, isolated (re-run safe)
         taxonomy_store.persist_discovered_topics(
             coll, [{"label": "prb-old", "doc_count": 1, "terms": "[]",
-                    "assigned_by": "hdbscan", "doc_ids": ["prb1"]}])
+                    "assigned_by": "hdbscan", "doc_ids": [canonical_chunk_id("prb1")]}])
         plan = {
             "specs": [
                 {"label": "prb-new0", "doc_count": 2, "terms": "[]",
                  "review_status": "pending", "assigned_by": "hdbscan",
-                 "doc_ids": ["prb1", "prb2"]},
+                 "doc_ids": [canonical_chunk_id("prb1"), canonical_chunk_id("prb2")]},
                 {"label": "prb-new1", "doc_count": 0, "terms": "[]",
                  "review_status": "pending", "assigned_by": "hdbscan", "doc_ids": []},
             ],
-            "manual_transfers": {"prb-manual": 1},
+            "manual_transfers": {canonical_chunk_id("prb-manual"): 1},
         }
         ids = taxonomy_store.persist_rebuild_topics(coll, plan)
         assert len(ids) == 2
         labels = {t["label"] for t in taxonomy_store.get_all_topics(collection=coll)}
         assert labels == {"prb-new0", "prb-new1"}  # old replaced
-        assert taxonomy_store.get_assignments_for_docs(["prb-manual"]) == {"prb-manual": ids[1]}
+        assert taxonomy_store.get_assignments_for_docs(
+            [canonical_chunk_id("prb-manual")]
+        ) == {canonical_chunk_id("prb-manual"): ids[1]}
 
     def test_old_state_t2_half_shape(self, taxonomy_store) -> None:
         # Directly exercise the GET /rebuild/old_state endpoint (T2-read half) —
@@ -940,20 +948,22 @@ class TestServiceBackedPersist:
         coll = "knowledge__1di3r-oldstate-inttest"
         ids = taxonomy_store.persist_discovered_topics(
             coll, [{"label": "os-t", "doc_count": 1, "terms": "[]",
-                    "assigned_by": "hdbscan", "doc_ids": ["os-d1"]}])
-        taxonomy_store.assign_topic("os-manual", ids[0], "manual")
+                    "assigned_by": "hdbscan", "doc_ids": [canonical_chunk_id("os-d1")]}])
+        taxonomy_store.assign_topic(
+            canonical_chunk_id("os-manual"), ids[0], "manual", source_collection=coll,
+        )
         raw = taxonomy_store._get("/rebuild/old_state", {"collection": coll})
         assert set(raw) == {"old_topic_map", "manual_assignments"}
         assert raw["old_topic_map"][0]["label"] == "os-t"
         assert set(raw["old_topic_map"][0]) == {"id", "label", "review_status"}
         manual = {r["doc_id"]: r["topic_id"] for r in raw["manual_assignments"]}
-        assert manual == {"os-manual": ids[0]}
+        assert manual == {canonical_chunk_id("os-manual"): ids[0]}
 
     def test_purge_collection_count_dict(self, taxonomy_store) -> None:
         coll = "knowledge__1di3r-purge-inttest"
         ids = taxonomy_store.persist_discovered_topics(
             coll, [{"label": "pg-t", "doc_count": 1, "terms": "[]",
-                    "assigned_by": "hdbscan", "doc_ids": ["pg-d1"]}])
+                    "assigned_by": "hdbscan", "doc_ids": [canonical_chunk_id("pg-d1")]}])
         taxonomy_store.upsert_topic_links(
             [{"from_topic_id": ids[0], "to_topic_id": ids[0], "link_count": 1,
               "link_types": ["projection"]}])

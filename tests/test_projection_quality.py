@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 from nexus.db.t2 import T2Database
+from tests._t2_fixture_ops import canonical_chunk_id
 from tests.conftest import make_vector_test_client
 from typing import Any
 
@@ -164,7 +165,7 @@ class TestAssignSingleReturnsNamedTuple:
         embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
         embeddings[:30, 0] += 3.0
         embeddings[30:, 1] += 3.0
-        doc_ids = [f"d-{i}" for i in range(60)]
+        doc_ids = [canonical_chunk_id(f"d-{i}") for i in range(60)]
         texts = [f"text {i}" for i in range(60)]
         db.taxonomy.discover_topics(
             "nt_coll", doc_ids, embeddings, texts, chroma_client,
@@ -193,7 +194,7 @@ class TestProjectAgainst3Tuple:
             embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
             embs[:30, 0] += 3.0
             embs[30:, 1] += 3.0
-            doc_ids = [f"{name}-d{i}" for i in range(60)]
+            doc_ids = [canonical_chunk_id(f"{name}-d{i}") for i in range(60)]
             texts = [f"text {name} {i}" for i in range(60)]
             db.taxonomy.discover_topics(
                 name, doc_ids, embs, texts, chroma_client,
@@ -239,7 +240,7 @@ def _seed_projection_rows(
                       label=f"seed-{tid}")
     for doc_id, tid, src in rows:
         db.taxonomy.assign_topic(
-            doc_id, tid, assigned_by="projection",
+            canonical_chunk_id(doc_id), tid, assigned_by="projection",
             similarity=0.9, source_collection=src,
             assigned_at="2026-04-14T00:00:00",
         )
@@ -304,7 +305,7 @@ class TestICF:
         _insert_topic(db, topic_id=B + 99, collection="code__any", label="legacy")
         with pytest.raises(httpx.HTTPStatusError):
             db.taxonomy.import_assignment(
-                doc_id="docLegacy", topic_id=B + 99, assigned_by="projection",
+                doc_id=canonical_chunk_id("docLegacy"), topic_id=B + 99, assigned_by="projection",
                 similarity=None, assigned_at=None, source_collection=None,
             )
         db.taxonomy.clear_icf_cache()
@@ -378,7 +379,7 @@ def fixture_icf_ranking(
         embs = rng.standard_normal((30, 384)).astype(np.float32) * 0.1
         embs[:15, 0] += 3.0
         embs[15:, 1] += 3.0
-        doc_ids = [f"{col}-d{i}" for i in range(30)]
+        doc_ids = [canonical_chunk_id(f"{col}-d{i}") for i in range(30)]
         texts = [f"text {col} {i}" for i in range(30)]
         db.taxonomy.discover_topics(col, doc_ids, embs, texts, chroma_client)
         src_coll = chroma_client.get_or_create_collection(
@@ -480,7 +481,7 @@ class TestProjectAgainstIcf:
             embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
             embs[:30, 0] += 3.0
             embs[30:, 1] += 3.0
-            doc_ids = [f"{name}-d{i}" for i in range(60)]
+            doc_ids = [canonical_chunk_id(f"{name}-d{i}") for i in range(60)]
             texts = [f"text {name} {i}" for i in range(60)]
             db.taxonomy.discover_topics(
                 name, doc_ids, embs, texts, chroma_client,
@@ -648,7 +649,7 @@ def fixture_hub_synthetic(db: T2Database) -> tuple[T2Database, int]:
         col = f"code__c{col_idx}"
         rows.extend(
             {
-                "doc_id": f"{col}-hub-d{d}",
+                "doc_id": canonical_chunk_id(f"{col}-hub-d{d}"),
                 "topic_id": B + 1,
                 "similarity": 0.85,
                 "source_collection": col,
@@ -661,7 +662,7 @@ def fixture_hub_synthetic(db: T2Database) -> tuple[T2Database, int]:
         col = f"code__c{col_idx}"
         rows.extend(
             {
-                "doc_id": f"{col}-dom-d{d}",
+                "doc_id": canonical_chunk_id(f"{col}-dom-d{d}"),
                 "topic_id": tid,
                 "similarity": 0.82,
                 "source_collection": col,
@@ -772,7 +773,7 @@ class TestAudit:
             )
 
         db.taxonomy.assign_topic(
-            "peer-doc-1", B + 4,
+            canonical_chunk_id("peer-doc-1"), B + 4,
             assigned_by="projection", similarity=0.80,
             source_collection="code__peer",
             assigned_at="2026-04-05T00:00:00",
@@ -783,14 +784,15 @@ class TestAudit:
         topic_per_row = [1, 1, 1, 1, 1, 1, 2, 2, 2, 3, 3]
         for i, (sim, tid) in enumerate(zip(sims, topic_per_row)):
             db.taxonomy.assign_topic(
-                f"auditC0-d{i}", B + tid,
+                canonical_chunk_id(f"auditC0-d{i}"), B + tid,
                 assigned_by="projection", similarity=sim,
                 source_collection="code__auditC0",
                 assigned_at=f"2026-04-10T12:{i:02d}:00",
             )
         # HDBSCAN row that must NOT be counted.
         db.taxonomy.assign_topic(
-            "hdbscan-doc", B + 1, assigned_by="hdbscan", source_collection="code__auditC0")
+            canonical_chunk_id("hdbscan-doc"), B + 1, assigned_by="hdbscan",
+            source_collection="code__auditC0")
         db.taxonomy.clear_icf_cache()
         return db, B
 

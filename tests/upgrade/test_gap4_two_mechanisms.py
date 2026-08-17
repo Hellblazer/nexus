@@ -241,6 +241,13 @@ _ENGINE_MECHANISM_CALLERS = frozenset({
     "upgrade_ladder/preconditions.py",  # the ladder's precondition stage
     "health.py",                      # doctor read-only convergence check
     "engine_version.py",              # docstring/derivation home (no live call)
+    "db/pg_provision.py",             # RDR-194 P3c companion (nexus-v5lk3):
+                                      # docstring cross-references to
+                                      # converge_engine (the function this
+                                      # module's own reassign_diag_view_owner_
+                                      # before_restart is WIRED INTO, from the
+                                      # upgrade_finish.py side) — no live call
+                                      # from this module itself.
 })
 
 

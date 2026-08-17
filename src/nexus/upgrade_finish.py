@@ -1139,9 +1139,14 @@ def converge_engine(
                     f"would restart the storage service: the on-disk engine "
                     f"is v{req_s} but the RUNNING service reports v{got_run}"
                 ]
+            # nexus-v5lk3: transfer nexus.diag_chash_conformance's ownership
+            # to nexus_admin BEFORE the restart that boots the on-disk
+            # engine — see _reassign_diag_view_before_restart's own
+            # docstring for the crash-loop this prevents.
+            predrop_actions = _reassign_diag_view_before_restart(config_dir)
             return _restart_and_verify(
                 config_dir,
-                [
+                predrop_actions + [
                     f"on-disk engine is already v{req_s} but the RUNNING "
                     f"service reports v{got_run} — restarting to pick it up"
                 ],
@@ -1332,8 +1337,15 @@ def converge_engine(
     # nexus-4yf4u: the install is a fact (it either raised or it did not);
     # the CONVERGENCE is a claim, and it is now observed rather than inferred
     # from the restart's returncodes.
+    # nexus-v5lk3: transfer nexus.diag_chash_conformance's ownership to
+    # nexus_admin BEFORE the restart that boots the freshly-installed
+    # engine — see _reassign_diag_view_before_restart's own docstring for
+    # the crash-loop this prevents.
+    predrop_actions = _reassign_diag_view_before_restart(config_dir)
     return _restart_and_verify(
-        config_dir, [f"converged engine: installed {tag} (was {got_s})"], req_s,
+        config_dir,
+        predrop_actions + [f"converged engine: installed {tag} (was {got_s})"],
+        req_s,
     )
 
 
@@ -1379,6 +1391,80 @@ def heal_diag_view(config_dir: Path) -> list[str]:
         return heal_diag_view_grants_and_ownership(bins, port, os_user)
     except Exception as exc:  # noqa: BLE001 — best-effort heal; must never break the finish pass
         _log.debug("diag_view_heal_failed", error=str(exc))
+        return []
+
+
+def _reassign_diag_view_before_restart(config_dir: Path) -> list[str]:
+    """RDR-194 P3c companion fix (nexus-v5lk3, 2026-08-17). Wired into
+    :func:`converge_engine`'s own restart-triggering call sites, immediately
+    BEFORE each ``_restart_and_verify`` — see
+    :func:`nexus.db.pg_provision.reassign_diag_view_owner_before_restart`'s
+    own docstring for the full crash-loop this closes (essentially every
+    existing local install carries a superuser-owned
+    ``nexus.diag_chash_conformance``, which the first restart into a
+    taxonomy-011-carrying engine would otherwise wedge on).
+
+    SECONDARY, REDUNDANT-BUT-HARMLESS (RDR-194 critical fix round 4,
+    nexus-rkn3i, 2026-08-17): this call site is KEPT as belt-and-braces, but
+    is no longer the mechanism that makes the reassignment reachable from
+    every restart path — that job now belongs to
+    :func:`nexus.db.pg_provision.provision`'s own fast idempotency path
+    (round 3's placement here only, without that wiring, left
+    ``nx daemon service install-binary``'s own documented restart
+    instruction unprotected, and gave a wedged box no automated recovery —
+    see the target function's own docstring, "TWO CALLERS, ONE PRIMARY",
+    for the full derivation). By the time ``_restart_and_verify`` below
+    actually cycles the service, the fast-path call already ran once during
+    that SAME restart's own ``nx daemon service start`` — so this call is
+    ordinarily a no-op confirming what already happened, run one step
+    earlier for the specific case where ``converge_engine`` itself decided
+    to restart (shaving one settle/restart cycle off the very first
+    floor-crossing convergence). It stays because two independent paths
+    reaching the same safe state is a strictly stronger guarantee than one,
+    at the cost of one extra idempotent psql round-trip.
+
+    Same best-effort posture as :func:`heal_diag_view`: degrades to ``[]``
+    on any probe failure (PG down, not service mode, no PG binaries on this
+    box) — a probe that cannot run must never abort the restart it exists
+    to protect. Deliberately NOT gated by ``dry_run``/``unattended`` the way
+    :func:`converge_engine`'s other branches are: unlike a live-service
+    restart (which can sever an in-flight client, GH #1419 Issue 3b) or an
+    asset download (which a preview must never perform), this is a single
+    metadata-only ``ALTER VIEW ... OWNER TO`` against a PostgreSQL cluster
+    the service is not currently serving through — it carries none of the
+    disruption those guards exist to prevent, and skipping it on a
+    ``--dry-run`` or unattended pass would leave the box in exactly the
+    wedged state this function exists to prevent on the very next real
+    restart.
+    """
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred for test patchability
+
+    if not is_local_mode():
+        return []
+
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred, circular-dep avoidance
+
+    creds_path = config_dir / CREDENTIALS_FILENAME
+    if not creds_path.exists():
+        return []
+
+    try:
+        from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred, circular-dep avoidance
+            _read_credentials,
+            bootstrap_superuser,
+            discover_pg_binaries,
+            reassign_diag_view_owner_before_restart,
+        )
+
+        creds = _read_credentials(creds_path)
+        port = int(creds.get("PG_PORT", 0) or 0)
+        if port <= 0:
+            return []
+        bins = discover_pg_binaries()
+        os_user = bootstrap_superuser()
+        return reassign_diag_view_owner_before_restart(bins, port, os_user)
+    except Exception as exc:  # noqa: BLE001 — best-effort; must never abort the restart it protects
+        _log.debug("diag_view_predrop_failed", error=str(exc))
         return []
 
 

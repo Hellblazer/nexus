@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from nexus.db.t2 import T2Database
+from tests._t2_fixture_ops import canonical_chunk_id
 
 
 @pytest.fixture
@@ -161,7 +162,9 @@ class TestRebuildLinkCleanup:
     ) -> None:
         a = _seed_topic(db, "topic-a", "proj")
         b = _seed_topic(db, "topic-b", "proj")
-        for doc_id, topic_id in [("note1", a), ("note2", b)]:
+        for doc_id, topic_id in [
+            (canonical_chunk_id("note1"), a), (canonical_chunk_id("note2"), b),
+        ]:
             db.taxonomy.import_assignment(
                 doc_id=doc_id, topic_id=topic_id, assigned_by="hdbscan",
                 similarity=None, assigned_at=None, source_collection="proj",
@@ -170,7 +173,7 @@ class TestRebuildLinkCleanup:
             [{"from_topic_id": a, "to_topic_id": b, "link_count": 1, "link_types": ["relates"]}]
         )
 
-        removed = db.taxonomy.purge_assignments_for_doc("proj", "note1")
+        removed = db.taxonomy.purge_assignments_for_doc("proj", canonical_chunk_id("note1"))
 
         assert removed == 1
         remaining = sorted(t["id"] for t in db.taxonomy.get_topics_for_collection("proj"))

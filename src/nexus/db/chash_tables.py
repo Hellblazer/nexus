@@ -106,6 +106,19 @@ class ChashBearingTable(NamedTuple):
     table: str  #: schema-qualified relation name (``nexus.<table>``)
     column: str  #: the chash-bearing column (``chash`` / ``doc_id`` / ``chunk_id``)
     poison: bool  #: True → counts gate install-binary (GH #1390 class)
+    bytea: bool = False
+    """True when the column itself is stored as ``bytea`` (RDR-194 P3c,
+    nexus-tk070.p3c). Every POISON entry is bytea by construction (RDR-180
+    converted chash/chunk-content columns first) and does not need this
+    flag read — the octet_length predicate is already era-safe for those.
+    It exists for the DEBT entries, which are NOT era-uniform: RDR-194 P3c
+    moved ``topic_assignments.doc_id`` to bytea while ``frecency.chunk_id``
+    and ``relevance_log.chunk_id`` stay TEXT (nexus-lgdel.l1's canonical-only
+    CHECK covers those two; they were never part of D1's scope). A bytea
+    debt column's anti-join is direct equality against the chunk key (no
+    regex/decode — the value already IS bytes); a TEXT debt column's
+    anti-join still needs the hex-shape guard + decode(). See
+    :func:`diag_conformance_view_ddl` for where this branches."""
 
 
 #: The unified chunk-storage relation (RDR-191, nexus-o8dil.19): the ONE
@@ -130,9 +143,12 @@ CHASH_BEARING_TABLES: tuple[ChashBearingTable, ...] = (
     # gate/forensics statements filter by table_name, so any deployed view
     # generation still satisfies the gate unchanged, and the LEGACY
     # direct-table fallback no longer queries a dropped relation.
-    ChashBearingTable(CHUNKS_TABLE, "chash", poison=True),
-    ChashBearingTable("nexus.catalog_document_chunks", "chash", poison=True),
-    ChashBearingTable("nexus.topic_assignments", "doc_id", poison=False),
+    ChashBearingTable(CHUNKS_TABLE, "chash", poison=True, bytea=True),
+    ChashBearingTable("nexus.catalog_document_chunks", "chash", poison=True, bytea=True),
+    # RDR-194 P3c (nexus-tk070.p3c, taxonomy-011-doc-id-bytea.xml): doc_id
+    # moved from TEXT to bytea. See ChashBearingTable.bytea's own docstring
+    # for why this is a per-entry flag, not a blanket era assumption.
+    ChashBearingTable("nexus.topic_assignments", "doc_id", poison=False, bytea=True),
     ChashBearingTable("nexus.frecency", "chunk_id", poison=False),
     ChashBearingTable("nexus.relevance_log", "chunk_id", poison=False),
 )
@@ -219,11 +235,42 @@ def diag_conformance_view_ddl() -> str:
     """The view's DDL, generated from :data:`CHASH_BEARING_TABLES` so the
     view and the constant cannot drift (pinned by test). Covers BOTH severity
     classes — the view is the observability surface; gating is decided by
-    which statements a caller runs, not by view membership. Executed by the
-    SUPERUSER provisioning path (``pg_provision``) — under FORCE RLS a view
-    counts cross-tenant rows only when its OWNER is RLS-exempt, which only
-    the superuser context can arrange (the nexus-vounk lesson, structurally).
-    Managed/DBA deployments get the rendered copy in docs/configuration.md.
+    which statements a caller runs, not by view membership.
+
+    ``WITH (security_invoker = true)`` (RDR-194 P3c critical fix round,
+    2026-08-17, nexus-i3k3e/Sig-2): PG15+ view option that evaluates RLS
+    (and privilege checks) against the INVOKING role, not the view's OWNER.
+    Before this flag existed, the nexus-vounk lesson held without
+    exception — "under FORCE RLS a view counts cross-tenant rows only when
+    its OWNER is RLS-exempt" — which meant only a superuser-owned view
+    (the ``pg_provision`` provisioning path) could ever see all tenants,
+    and a Liquibase-owned view (created as ``nexus_admin``, NOSUPERUSER
+    NOCREATEROLE, no BYPASSRLS) would silently degrade to zero rows.
+    ``security_invoker`` inverts that: RLS is now evaluated against
+    whichever role RUNS the query, so ``nexus_diag`` (LOGIN ... BYPASSRLS,
+    ``grants-nexus-diag.xml``) sees every tenant's rows regardless of who
+    owns the view. This is what makes it safe for BOTH consumers of this
+    generator to create the SAME view text: the superuser provisioning
+    path (``pg_provision._provision_diag_conformance_view``, still the
+    only route for a pre-P3c engine upgrading, and a harmless idempotent
+    no-op — ``CREATE OR REPLACE`` — if it races with or follows the
+    Liquibase changeset) AND, since RDR-194 P3c
+    (``taxonomy-011-doc-id-bytea.xml``'s ``taxonomy-011-8``, runAlways),
+    the engine's own Liquibase walk. A superuser querying a
+    ``security_invoker`` view is unaffected (superuser already bypasses
+    RLS regardless of invoker/definer semantics), so this is a strict
+    widening, not a behavior change for the existing superuser-owned
+    deployments. Managed/DBA deployments get the rendered copy in
+    docs/configuration.md.
+
+    Two independent copies of this exact DDL text exist by necessity — the
+    Python string here, and a literal SQL copy embedded in
+    ``taxonomy-011-doc-id-bytea.xml``'s ``taxonomy-011-8`` changeset (a
+    static XML changelog cannot import this function) — pinned to each
+    other by ``tests/test_diag_conformance_view.py::
+    test_liquibase_owned_view_matches_the_generator``, the same
+    containment-check pattern ``test_docs_rendered_copy_matches_the_
+    generator`` already uses for the docs/configuration.md copy.
 
     ERA-SAFE PREDICATE (RDR-180 Item6a, nexus-jxizy.5): the conformance
     predicate is ``octet_length(col) <> 32`` — deliberately NOT ``length``.
@@ -243,25 +290,32 @@ def diag_conformance_view_ddl() -> str:
     ETL-era non-hex 32-char ids are contract-legal pre-rekey and must not
     fire the install gate.
 
-    DEBT LEGS ARE ANTI-JOINS (RDR-180 .6 amendment 1): the debt columns
-    stay TEXT, so a width predicate mismeasures them across eras (64-hex
-    text = 64 octets; historically a legacy 32-hex value would be flagged
-    even when resolvable — the ``chash_alias`` route itself was dropped at
-    nexus-lgdel.l1, but anti-joins remain the correct measurement either
-    way). CORRECTED (RDR-194 D1,
+    DEBT LEGS ARE ANTI-JOINS (RDR-180 .6 amendment 1): a hex-shaped
+    reference that misses its chunk-table join. CORRECTED (RDR-194 D1,
     nexus-tk070.p3a, nexus-yo9mi): ``topic_assignments.doc_id`` is NOT a
     mixed identity space and does NOT hold memory-note titles: every live
     writer emits a chunk chash (RDR-180 Item6/Item6a; the one real
     memory-note-clustering path died with the SQLite store at commit
-    ``f24bdb853``). The honest, era-independent debt definition is SEMANTIC:
-    a hex-shaped reference that misses its chunk-table join. Non-hex-shaped
-    values are excluded by the hex guard as ETL-era external ids, not
-    titles.
-    NOTE: the debt legs decode() against the bytea chunk keys, so this view
-    only CREATEs against a post-rdr180 (bytea) engine schema — on an older
-    text-era store the CREATE fails and provisioning's best-effort catch
-    degrades the probe to legacy statements (the converged-pair floor makes
-    that window transient).
+    ``f24bdb853``). Non-hex-shaped values are excluded by the hex guard as
+    ETL-era external ids, not titles.
+
+    MIXED-ERA DEBT COLUMNS (RDR-194 P3c, nexus-tk070.p3c): the debt legs are
+    no longer uniformly TEXT. ``topic_assignments.doc_id`` moved to
+    ``bytea`` (:attr:`ChashBearingTable.bytea`); ``frecency.chunk_id`` and
+    ``relevance_log.chunk_id`` stay TEXT (nexus-lgdel.l1's canonical-only
+    CHECK covers those two directly, so their debt leg here is genuinely
+    the SOFT reference this view exists to observe, not width conformance).
+    A bytea debt column's anti-join is direct bytea equality against
+    :data:`CHUNKS_TABLE`'s ``chash`` — no regex guard, no ``decode()``, the
+    value already IS bytes. A TEXT debt column's anti-join keeps the
+    hex-shape guard + ``decode()`` form. Both shapes still degrade the same
+    way: this view only CREATEs once every referenced table/column exists
+    in its CURRENT type (a stale, pre-P3c engine's provisioning attempt
+    against an already-bytea doc_id, or a not-yet-converted engine's
+    attempt with this generator, would fail the CREATE the same way a
+    pre-rdr180 text-era store already did) — provisioning's best-effort
+    catch degrades the probe to legacy statements meanwhile (the
+    converged-pair floor makes that window transient).
 
     RDR-191 (nexus-o8dil.19): the anti-join used to be a 3-way ``AND`` over
     ``chunks_384``/``chunks_768``/``chunks_1024`` (a debt chash counted as
@@ -278,16 +332,45 @@ def diag_conformance_view_ddl() -> str:
         f"FROM {t.table} WHERE octet_length({t.column}) <> 32"
         for t in POISON_CHASH_TABLES
     ]
-    debt_legs = [
-        f"SELECT '{t.table}' AS table_name, count(*) AS non_conformant "
-        f"FROM {t.table} t "
-        f"WHERE t.{t.column} ~ '^[0-9a-f]+$' AND length(t.{t.column}) % 2 = 0 "
-        f"AND NOT EXISTS (SELECT 1 FROM {CHUNKS_TABLE} c "
-        f"WHERE c.chash = decode(t.{t.column}, 'hex'))"
-        for t in DEBT_CHASH_TABLES
-    ]
+    def _debt_leg(t: ChashBearingTable) -> str:
+        if t.bytea:
+            # RDR-194 P3c: the column is bytea already -- direct equality,
+            # no hex-shape guard, no decode(). Same NOT EXISTS anti-join
+            # SHAPE as the engine-side ChashCensus.unresolvableBytesCount
+            # idiom, but deliberately WIDER in scope (critic finding,
+            # 2026-08-17): that idiom restricts to
+            # octet_length(byteCol) IN (16, 32) before its anti-join -- a
+            # narrow census-leg scope tuned to the two widths ITS OWN
+            # callers care about (canonical vs. one legacy width). This
+            # view's anti-join carries no width restriction at all, so it
+            # also surfaces a row of any OTHER width as unresolvable --
+            # the more conservative, no-silent-miss choice for a pure
+            # observability surface (a malformed row of an unexpected
+            # width is exactly the kind of thing a diagnostic view should
+            # never quietly exclude). "Mirrors exactly" was inaccurate
+            # prose, not a behavior bug; left as documented, not narrowed
+            # to match, since narrowing would REDUCE what this view can
+            # see.
+            return (
+                f"SELECT '{t.table}' AS table_name, count(*) AS non_conformant "
+                f"FROM {t.table} t "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {CHUNKS_TABLE} c "
+                f"WHERE c.chash = t.{t.column})"
+            )
+        return (
+            f"SELECT '{t.table}' AS table_name, count(*) AS non_conformant "
+            f"FROM {t.table} t "
+            f"WHERE t.{t.column} ~ '^[0-9a-f]+$' AND length(t.{t.column}) % 2 = 0 "
+            f"AND NOT EXISTS (SELECT 1 FROM {CHUNKS_TABLE} c "
+            f"WHERE c.chash = decode(t.{t.column}, 'hex'))"
+        )
+
+    debt_legs = [_debt_leg(t) for t in DEBT_CHASH_TABLES]
     union = "\nUNION ALL\n".join(poison_legs + debt_legs)
-    return f"CREATE OR REPLACE VIEW {DIAG_CONFORMANCE_VIEW} AS\n{union}"
+    return (
+        f"CREATE OR REPLACE VIEW {DIAG_CONFORMANCE_VIEW} "
+        f"WITH (security_invoker = true) AS\n{union}"
+    )
 
 
 def chash_conformance_statements() -> tuple[str, ...]:

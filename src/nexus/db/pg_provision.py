@@ -529,11 +529,34 @@ def heal_diag_view_grants_and_ownership(
        RLS-exempt (the nexus-vounk lesson); a non-exempt owner silently
        degrades every future probe toward the legacy-statement fallback (or
        a false-clean 0-vs-N gap on the direct fallback route). Repaired via
-       ``ALTER VIEW ... OWNER TO`` back to *os_user*.
+       ``ALTER VIEW ... OWNER TO`` back to *os_user* — BUT ONLY for the
+       LEGACY generation; see the generation guard below.
+
+    GENERATION GUARD (RDR-194 P3c companion fix, nexus-v5lk3, 2026-08-17):
+    this repair PREDATES ``taxonomy-011-8`` (RDR-194 P3c), which made the
+    view Liquibase-owned — created by ``nexus_admin`` (NOSUPERUSER, no
+    BYPASSRLS) with ``WITH (security_invoker = true)``, the PG15+ option
+    that evaluates row-level security against the INVOKING role rather than
+    the view's OWNER. For that generation, RLS-exemption of the OWNER is no
+    longer what makes the view see cross-tenant rows — ``nexus_diag``'s own
+    BYPASSRLS does, regardless of who owns the view. Left unguarded, this
+    function would keep reassigning a correctly-functioning
+    ``nexus_admin``-owned view back to the superuser on every finish pass
+    FOREVER (``nexus_admin`` structurally can never satisfy
+    ``rolsuper OR rolbypassrls``), permanently defeating changeset 8's own
+    "closes the reprovisioning gap permanently" claim and forcing its
+    ``runAlways`` ``CREATE OR REPLACE`` to perpetually
+    ``insufficient_privilege``-skip against a view it no longer owns. The
+    guard below detects the ``security_invoker`` reloption and skips the
+    ownership-fragmentation repair entirely for that generation — the grant
+    repair (item 1) is UNCHANGED and still runs for both generations, since
+    a missing ``nexus_diag`` grant is a real gap regardless of which
+    generation owns the view.
 
     Returns human-readable action lines — empty when the view does not exist
     (nothing to heal; view creation is provisioning's job, not this
-    function's) or when both checks already pass (the common case).
+    function's) or when nothing needs repair (the common case, including the
+    new generation once it is functioning correctly).
     Best-effort at the CALL SITE (:func:`nexus.upgrade_finish.heal_diag_view`)
     — this function itself raises on a genuine psql failure so the caller's
     degrade-cleanly wrapper can log it, matching every other repair helper
@@ -558,10 +581,27 @@ def heal_diag_view_grants_and_ownership(
         # is _backfill_diag_role's job, not this function's narrower scope.
         return actions
 
+    # GENERATION GUARD (nexus-v5lk3): security_invoker=true means RLS
+    # evaluates against the INVOKING role, not the owner — RLS-exemption of
+    # the owner is no longer load-bearing for this view, so the
+    # ownership-fragmentation repair below must not fire regardless of who
+    # owns it. Checked via the reloption directly (not merely "is the owner
+    # nexus_admin"), so a future non-nexus_admin creator of a
+    # security_invoker view is equally exempted — the invariant that
+    # matters is the view's OWN declared semantics, not a specific role name.
+    is_new_generation = _psql_tuples(
+        bins, port, NEXUS_DB_NAME, os_user,
+        "SELECT EXISTS (SELECT 1 FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace, "
+        "unnest(coalesce(c.reloptions, '{}'::text[])) o "
+        f"WHERE n.nspname = '{schema}' AND c.relname = '{relname}' "
+        "AND o = 'security_invoker=true')",
+    ) == "t"
+
     # Ownership-fragmentation repair first: GRANT below is meaningless if the
     # owner itself cannot see cross-tenant rows to begin with — order this
     # side so the log/action narrative reads cause-then-effect.
-    owner_row = _psql_tuples(
+    owner_row = "" if is_new_generation else _psql_tuples(
         bins, port, NEXUS_DB_NAME, os_user,
         "SELECT r.rolname, (r.rolsuper OR r.rolbypassrls) FROM pg_class c "
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -608,6 +648,156 @@ def heal_diag_view_grants_and_ownership(
             "(missing-grant class, GH #1402) — granted"
         )
 
+    return actions
+
+
+def reassign_diag_view_owner_before_restart(
+    bins: PgBinaries, port: int, os_user: str,
+) -> list[str]:
+    """RDR-194 P3c companion fix (nexus-v5lk3, 2026-08-17): proactively
+    transfer ``nexus.diag_chash_conformance``'s ownership to ``nexus_admin``,
+    AS THE SUPERUSER, immediately before restarting the storage service into
+    a converged engine binary.
+
+    THE CRASH-LOOP THIS CLOSES. On essentially every EXISTING local install
+    (round-2 final verification, T2 nexus/rdr194-p3c-round2-final-
+    verification-2026-08-17 [22764]), ``nexus.diag_chash_conformance`` is
+    superuser-owned RIGHT NOW: nothing ``nexus_admin``-owned has EVER
+    created this view before ``taxonomy-011-8`` (brand new, RDR-194 P3c),
+    and both ``_provision_diag_conformance_view`` (superuser-run, every
+    ``nx daemon service start``) and, until this same fix round,
+    ``heal_diag_view_grants_and_ownership`` (actively reassigning drift back
+    to the superuser) have kept it that way continuously. The first time
+    such an install's on-disk engine binary is swapped to a version
+    carrying ``taxonomy-011-1``, that changeset's own ownership-guarded
+    ``DROP VIEW`` raises ``insufficient_privilege`` (``nexus_admin`` does
+    not own a superuser-owned view) and RAISE EXCEPTIONs with a NAMED
+    remedy (RDR-194 critical fix round 2, bead nexus-7ec4i) — correctly, by
+    design, since PostgreSQL structurally refuses ``ALTER COLUMN TYPE``
+    while ANY view depends on the column regardless of ownership (verified
+    empirically that same round). Correct as a FAILURE MODE does not make
+    it an acceptable STEADY STATE: with nothing in the local upgrade path
+    ever transferring ownership proactively, this fires on literally every
+    existing local install's first restart into the new engine — a mass
+    wedge, not a rare edge case. This function is the missing proactive
+    transfer.
+
+    WHY REASSIGN, NOT DROP: ``ALTER VIEW ... OWNER TO nexus_admin`` makes
+    ``nexus_admin`` (Liquibase's migration role) the owner of WHATEVER view
+    currently exists, regardless of its definition or prior owner — so
+    ``taxonomy-011-1``'s own guarded ``DROP VIEW IF EXISTS`` then succeeds
+    cleanly (the migration role owns what it is dropping) and
+    ``taxonomy-011-8`` recreates the view fresh and correctly from the
+    current generator. No window where the view is absent; no dependency
+    on the view's possibly-stale definition being compatible with anything
+    — this function never touches the view's DEFINITION, only its OWNER.
+
+    TWO CALLERS, ONE PRIMARY (RDR-194 critical fix round 4, nexus-rkn3i,
+    2026-08-17 — round 3's original wiring below was found INCOMPLETE, not
+    wrong):
+
+    1. **PRIMARY, universal**: :func:`provision`'s own fast idempotency
+       path (the "already provisioned" branch, alongside its sibling
+       backfills ``_backfill_diag_role`` / ``_backfill_pg_monitor_admin_option``
+       / ``_backfill_svc_noinherit``). That path is reached by
+       ``nexus.daemon.storage_service_daemon._backfill_provision_grants``,
+       called from ``_ensure_pg_running`` at Step 1 of EVERY
+       ``_start_locked`` — i.e. EVERY service start, full stop, regardless
+       of trigger: ``nx daemon service start`` itself, the printed remedy
+       after ``nx daemon service install-binary <tag>``, OS-level
+       launchd/systemd autostart units, and
+       :func:`nexus.upgrade_finish.converge_engine`'s own restart. Round 3
+       wired this function ONLY into ``converge_engine``'s two
+       restart-triggering call sites, which substantive-critic's round-3
+       verification (T2 nexus/rdr194-p3c-round3-final-verification-
+       2026-08-17 [22766]) proved does NOT cover ``install-binary``'s own
+       documented restart path (the exact escape hatch
+       ``converge_engine``'s own NEEDS-HUMAN/DEFERRED messages point
+       operators at), and — worse — leaves a box that wedges via ANY
+       unwired path with NO automated recovery: ``converge_engine``'s own
+       decision tree treats "service not up" as an ordinary silent state,
+       so a crash-looped box just stays wedged. Wiring at the fast-path
+       choke point closes BOTH gaps: every current and FUTURE restart path
+       inherits the fix with no per-path patching (the same posture every
+       other backfill in that block already has), and recovery becomes
+       AUTOMATIC — a previously-wedged install's very next
+       ``nx daemon service start`` reassigns ownership here, at Step 1,
+       BEFORE the service binary is even spawned at Step 2, so the walk
+       that follows sees a ``nexus_admin``-owned view and completes.
+    2. **Secondary, redundant-but-harmless**: :func:`nexus.upgrade_finish.
+       converge_engine`'s own two restart-triggering call sites (KEPT, not
+       removed, per Hal's explicit "belt-and-braces" instruction). On the
+       ``converge_engine`` path specifically, this call now runs TWICE in
+       quick succession for the same restart — once here (via
+       ``converge_engine`` itself, before its own ``_restart_and_verify``)
+       and once more moments later (via the service-start subprocess that
+       ``_restart_and_verify`` spawns, which reaches the PRIMARY caller
+       above through the normal boot sequence). The second call is always
+       a no-op (the first already made the view ``nexus_admin``-owned).
+       Kept because it costs one extra idempotent psql round-trip on a path
+       that already budgets far more than that for the restart itself, and
+       because removing it would re-introduce exactly the kind of
+       single-point-of-failure reasoning that made round 3's coverage gap
+       possible in the first place — two independent code paths reaching
+       the same safe state is a strictly stronger guarantee than one.
+
+    WHY THIS IS SAFE TO WIRE UNCONDITIONALLY, NOT GATED ON A HARDCODED
+    ENGINE-VERSION NUMBER: this function is QUERY-DRIVEN (it checks the
+    view's CURRENT owner, not any version string) — a no-op when the view
+    is absent or already ``nexus_admin``-owned. Running it on EVERY service
+    start, including on engines below the taxonomy-011 floor, is harmless:
+    a pre-P3c view has no ownership-dependent DDL of its own to violate, so
+    an early ownership transfer there changes nothing observable until
+    ``taxonomy-011-1`` eventually runs. No separate floor-version constant
+    to introduce, track, or let drift.
+
+    No-op, loudly reported as such via an empty action list, when: the view
+    does not exist yet (nothing to transfer — provisioning or a later
+    Liquibase pass creates it fresh, already ``nexus_admin``-owned via
+    ``taxonomy-011-8`` if that engine is what boots next), or is ALREADY
+    ``nexus_admin``-owned (the steady state after a successful
+    ``taxonomy-011`` walk — reassigning to the same owner would be a
+    Postgres no-op anyway, but is skipped here for a clean action-line log
+    instead of reporting a healed-nothing "fix").
+
+    Best-effort at BOTH call sites, matching :func:`heal_diag_view_grants_and_ownership`'s
+    own posture: this function itself raises on a genuine psql failure, and
+    each caller wraps it in its own independent try/except that degrades to
+    a warning log — a probe/repair that cannot run must never abort the
+    restart or service start it exists to protect. See the PRIMARY caller
+    in :func:`provision`'s fast idempotency path, and the SECONDARY caller
+    in :func:`nexus.upgrade_finish.converge_engine` (via that module's own
+    ``_reassign_diag_view_before_restart`` wrapper).
+    """
+    from nexus.db.chash_tables import DIAG_CONFORMANCE_VIEW  # noqa: PLC0415 — deferred, keeps provision import-light
+
+    schema, relname = DIAG_CONFORMANCE_VIEW.split(".", 1)
+    actions: list[str] = []
+
+    owner = _psql_tuples(
+        bins, port, NEXUS_DB_NAME, os_user,
+        "SELECT r.rolname FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "JOIN pg_roles r ON r.oid = c.relowner "
+        f"WHERE n.nspname = '{schema}' AND c.relname = '{relname}'",
+    )
+    if not owner:
+        return actions  # view absent — nothing to transfer
+    if owner == "nexus_admin":
+        return actions  # already the Liquibase-owned generation
+
+    _psql(
+        bins, port, NEXUS_DB_NAME, os_user,
+        f"ALTER VIEW {DIAG_CONFORMANCE_VIEW} OWNER TO nexus_admin",
+    )
+    actions.append(
+        f"transferred {DIAG_CONFORMANCE_VIEW} ownership from {owner!r} to "
+        "'nexus_admin' before restarting the storage service (nexus-v5lk3) "
+        "— RDR-194 P3c's taxonomy-011-1 changeset guards its own DROP VIEW "
+        "against foreign ownership and fails the whole migration rather "
+        "than silently tolerate it; this pre-transfer is what lets that "
+        "guard's happy path succeed on an existing install"
+    )
     return actions
 
 
@@ -817,6 +1007,84 @@ def _provision_diag_conformance_view(bins: PgBinaries, port: int, os_user: str) 
     falls back to legacy statements. ONE definition, called from both
     _create_roles and the backfill path (review 47dcb65e: the block was
     previously duplicated verbatim).
+
+    STILL THE ONLY CREATOR FOR ONE WINDOW (RDR-194 P3c critical fix round,
+    2026-08-17, nexus-i3k3e/Sig-2): since ``taxonomy-011-doc-id-bytea.xml``
+    landed a Liquibase-owned ``CREATE OR REPLACE VIEW`` (changeset
+    ``taxonomy-011-8``, runAlways, security_invoker'd so a non-superuser
+    owner is safe — see :func:`nexus.db.chash_tables.diag_conformance_view_ddl`'s
+    docstring), this function is REDUNDANT for any engine that has run
+    ``taxonomy-011`` or later: the Liquibase changeset self-heals the view
+    on every boot regardless of what this function does. It remains the
+    ONLY creator for an engine BELOW that changeset (a pre-P3c engine
+    upgrading, or the window before ANY engine has run Liquibase at all —
+    this function's own precondition, "chash tables existing," is never
+    true at fresh-cluster role-creation time either way). Calling both is
+    harmless-for-OWNERSHIP: verified empirically this round (nexus-v5lk3,
+    2026-08-17) that a superuser's ``CREATE OR REPLACE VIEW`` over an
+    already-``nexus_admin``-owned view does NOT change the owner —
+    Postgres only requires the replacer to own the existing view OR be
+    superuser, and does not reassign ownership to the replacer either way.
+    This function is NOT deleted — deleting the only pre-P3c creation path
+    would strand every engine below the P3c floor with an
+    unrecoverable-by-this-function gap.
+
+    DEFERS TO AN EXISTING VIEW (RDR-194 P3c companion fix, nexus-v5lk3,
+    2026-08-17): CORRECTED from the prior revision of this docstring, which
+    stopped at "harmless for ownership" and concluded re-running ``CREATE
+    OR REPLACE VIEW`` unconditionally was therefore fine. That missed a
+    SEPARATE problem: an unconditional re-CREATE here is still a SECOND,
+    INDEPENDENT writer of the same object as changeset 8, and any future
+    divergence between this generator call and ``taxonomy-011-8``'s
+    embedded copy (RDR-194 D0.2 layering — a schema change to
+    ``CHASH_BEARING_TABLES`` that regenerates one copy but not the other
+    before a release) would make whichever writer runs LAST on a given
+    boot silently win, never a hard error, just quiet drift. This function
+    now checks the view's EXISTENCE first and skips the DDL entirely when
+    it is already present, regardless of generation or definition —
+    creating ONLY when genuinely absent (a pre-P3c engine that predates
+    ``taxonomy-011-8``, or the fresh-init window before ANY engine has run
+    Liquibase at all). Once ``taxonomy-011-8`` has created the view even
+    once, this function becomes a permanent no-op for it — Liquibase, not
+    this provisioning path, is the sole subsequent writer, matching
+    changeset 8's own "closes the reprovisioning gap permanently" claim
+    for real. See :func:`reassign_diag_view_owner_before_restart` for the
+    companion piece that gets a LEGACY (superuser-owned) view's ownership
+    out of Liquibase's way in the first place, so this deferral does not
+    strand an existing install on a foreign-owned view forever.
+
+    ACCEPTED RESIDUAL (code-review-expert round 4, nexus-rkn3i, 2026-08-17):
+    this deferral also means a stale-but-present view on an engine still
+    BELOW the taxonomy-011 floor no longer self-widens when a future
+    release adds a new entry to ``CHASH_BEARING_TABLES`` — before this fix,
+    every fast-path call re-ran the DDL unconditionally, so a new leg
+    reached an already-provisioned box the next time all chash tables
+    existed; now that box's view stays on whatever generator shape was
+    live the LAST time this function actually created it, until it either
+    crosses the taxonomy-011 floor (Liquibase takes over) or something
+    else explicitly drops the view first. Accepted, not fixed: the
+    alternative (re-diffing an existing view's definition against the
+    current generator before deciding whether to replace it) reintroduces
+    the exact "which of two independent writers wins" question this fix
+    exists to close, for a residual window (pre-P3c installs, mid-release)
+    materially narrower than the crash-loop it replaces.
+
+    WHAT THIS DOES **NOT** FIX (nexus-7shei, OPEN, unaffected by the above):
+    nexus-7shei's actual complaint is the FRESH-INIT chicken-egg window —
+    PG provisioning (this function, called from ``_create_roles``) runs
+    BEFORE the engine's first-ever Liquibase boot, so on a genuinely fresh
+    install this function's own "chash tables existing" precondition is
+    never true the first time it is called, and ``nx doctor``'s
+    chash-poison diagnostic has no working view until SOME LATER
+    re-provision or backfill path re-invokes this function. The P3c fix
+    above does not touch that timing at all — it only guarantees that
+    ONCE Liquibase reaches ``taxonomy-011`` on any given boot (which by
+    construction happens only AFTER every chash table this view
+    references already exists), the view exists and stays self-healing
+    from then on, closing the narrower "P3c's own DROP VIEW has no working
+    cloud reprovision path" gap the critic actually flagged. The broader
+    fresh-init synchronization nexus-7shei describes remains a separate,
+    open piece of work.
     """
     try:
         from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred, keeps provision import-light
@@ -825,24 +1093,42 @@ def _provision_diag_conformance_view(bins: PgBinaries, port: int, os_user: str) 
             diag_conformance_view_ddl,
         )
 
-        # Existence guard derived from the CONSTANT (review 47dcb65e: a
-        # hand-typed sentinel here could drift from the table set). The view
-        # references EVERY chash table, so require all of them.
-        rel_list = ", ".join(
-            f"'{t.table.split('.', 1)[1]}'" for t in CHASH_BEARING_TABLES
-        )
-        _psql(
+        schema, relname = DIAG_CONFORMANCE_VIEW.split(".", 1)
+
+        # RDR-194 P3c companion fix (nexus-v5lk3, 2026-08-17): DEFER to an
+        # existing view — check existence FIRST, and skip the DDL entirely
+        # (both the CREATE and the GRANT) when the view is already present.
+        # See this function's own docstring, "DEFERS TO AN EXISTING VIEW",
+        # for why this replaces the prior "unconditional re-CREATE is
+        # harmless" reasoning (true for ownership specifically, not
+        # sufficient — a second independent writer of the same object is
+        # still a drift risk this avoids outright).
+        already_exists = _psql_tuples(
             bins, port, NEXUS_DB_NAME, os_user,
-            "DO $do$ BEGIN "
-            "IF (SELECT count(*) FROM pg_class c JOIN pg_namespace n "
-            "ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' "
-            f"AND c.relname IN ({rel_list})) = {len(CHASH_BEARING_TABLES)} THEN "
-            + diag_conformance_view_ddl().replace("\n", " ")
-            + "; "
-            "GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag; "
-            "END IF; "
-            "END $do$;",
-        )
+            "SELECT 1 FROM pg_class c JOIN pg_namespace n "
+            "ON n.oid = c.relnamespace "
+            f"WHERE n.nspname = '{schema}' AND c.relname = '{relname}'",
+        ) == "1"
+
+        if not already_exists:
+            # Existence guard derived from the CONSTANT (review 47dcb65e: a
+            # hand-typed sentinel here could drift from the table set). The
+            # view references EVERY chash table, so require all of them.
+            rel_list = ", ".join(
+                f"'{t.table.split('.', 1)[1]}'" for t in CHASH_BEARING_TABLES
+            )
+            _psql(
+                bins, port, NEXUS_DB_NAME, os_user,
+                "DO $do$ BEGIN "
+                "IF (SELECT count(*) FROM pg_class c JOIN pg_namespace n "
+                "ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' "
+                f"AND c.relname IN ({rel_list})) = {len(CHASH_BEARING_TABLES)} THEN "
+                + diag_conformance_view_ddl().replace("\n", " ")
+                + "; "
+                "GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag; "
+                "END IF; "
+                "END $do$;",
+            )
         # nexus-o8dil.15 non-vacuity fix (RDR-191 repoint batch, risk R4):
         # the DO block above is a fire-and-forget anonymous block — Postgres
         # gives psql no signal whether its IF branch actually ran. The prior
@@ -855,22 +1141,35 @@ def _provision_diag_conformance_view(bins: PgBinaries, port: int, os_user: str) 
         # nothing" shape RDR-182 forbids for the conformance diagnostics
         # elsewhere in this module; a DO block that can no-op has no
         # business sharing ONE log line with the case where it did the work.
-        # Query the view's ACTUAL post-DDL existence and log the two
-        # outcomes under DIFFERENT, greppable event names so this can never
-        # collapse back into a single silently-ambiguous line.
-        schema, relname = DIAG_CONFORMANCE_VIEW.split(".", 1)
-        exists = _psql_tuples(
+        # Query the view's ACTUAL post-call existence and log the three
+        # outcomes (already-present-deferred / freshly-created /
+        # tables-not-ready-yet) under DIFFERENT, greppable event names so
+        # this can never collapse back into a single silently-ambiguous line.
+        if already_exists:
+            _log.info(
+                "pg_diag_conformance_view_already_present_deferred",
+                view=DIAG_CONFORMANCE_VIEW,
+                note="the view already existed — this provisioning path did "
+                     "NOT touch its definition or ownership (nexus-v5lk3: "
+                     "avoiding a second independent writer of the same "
+                     "object as taxonomy-011-8). See "
+                     "reassign_diag_view_owner_before_restart for the "
+                     "companion piece that gets a legacy-owned view out of "
+                     "Liquibase's way, separately from this deferral.",
+            )
+        elif _psql_tuples(
             bins, port, NEXUS_DB_NAME, os_user,
             "SELECT 1 FROM pg_class c JOIN pg_namespace n "
             "ON n.oid = c.relnamespace "
             f"WHERE n.nspname = '{schema}' AND c.relname = '{relname}'",
-        )
-        if exists == "1":
+        ) == "1":
             _log.info(
                 "pg_diag_conformance_view_provisioned",
                 view=DIAG_CONFORMANCE_VIEW,
-                note="the view exists after this call (freshly created here, "
-                     "or already present from an earlier provision)",
+                note="the view was freshly created by this call (it did not "
+                     "exist before — an already-present view is logged "
+                     "separately as pg_diag_conformance_view_already_"
+                     "present_deferred, nexus-v5lk3)",
             )
         else:
             _log.info(
@@ -1597,6 +1896,60 @@ def provision(
                     except Exception as exc:  # noqa: BLE001 — repair path must never break the no-op re-run
                         _log.warning(
                             "pg_svc_role_noinherit_backfill_failed", error=str(exc)
+                        )
+                    # nexus-rkn3i (RDR-194 P3c critical-fix round 4,
+                    # 2026-08-17): independent try/except, same shape as the
+                    # three backfills above — one failing must not prevent
+                    # the others from being attempted. THE PRIMARY, UNIVERSAL
+                    # fix for the diag-view ownership crash-loop (see
+                    # reassign_diag_view_owner_before_restart's own
+                    # docstring for the full derivation): this fast path is
+                    # reached by `storage_service_daemon._backfill_provision_
+                    # grants`, called from `_ensure_pg_running` at Step 1 of
+                    # EVERY `_start_locked` — i.e. EVERY service start,
+                    # regardless of trigger (`nx daemon service start`
+                    # itself, the printed remedy after `nx daemon service
+                    # install-binary <tag>`, OS-level launchd/systemd
+                    # autostart units, and `converge_engine`'s own restart).
+                    # Round 3 wired this ONLY into `converge_engine`'s two
+                    # restart-triggering call sites (upgrade_finish.py),
+                    # which substantive-critic's round-3-final verification
+                    # (T2 nexus/rdr194-p3c-round3-final-verification-
+                    # 2026-08-17 [22766]) proved does NOT cover
+                    # install-binary's own documented restart path, and
+                    # gives a box that crosses the taxonomy-011 floor via
+                    # ANY unwired path (or a transient predrop failure) NO
+                    # automated recovery — `converge_engine`'s own decision
+                    # tree treats "service not up" as an ordinary silent
+                    # state, so a wedged box just stays wedged forever.
+                    # Placing the call HERE closes both gaps at once: every
+                    # future restart path automatically inherits the fix (no
+                    # per-path patching, matching every other backfill in
+                    # this same fast-path block), AND recovery becomes
+                    # automatic — a previously-wedged install's very next
+                    # `nx daemon service start` reassigns ownership here
+                    # (Step 1) BEFORE the service binary is even spawned
+                    # (Step 2), so the walk that follows sees a
+                    # nexus_admin-owned view and completes cleanly. Same
+                    # no-hardcoded-version-gate reasoning as
+                    # `converge_engine`'s own wiring: this call is
+                    # query-driven (checks the view's CURRENT owner) and a
+                    # no-op when the view is absent or already
+                    # nexus_admin-owned, so running it unconditionally on
+                    # EVERY service start — including on engines below the
+                    # taxonomy-011 floor, where it is a harmless early
+                    # ownership transfer with no dependent DDL to block — is
+                    # safe. `converge_engine`'s own two call sites are KEPT
+                    # (not removed) as belt-and-braces: see that wiring's
+                    # own comment for how the two relate now that this is
+                    # the primary mechanism.
+                    try:
+                        reassign_diag_view_owner_before_restart(
+                            _bins, stored_port, os_user
+                        )
+                    except Exception as exc:  # noqa: BLE001 — repair path must never break the no-op re-run
+                        _log.warning(
+                            "pg_diag_view_reassign_backfill_failed", error=str(exc)
                         )
                 _log.info(
                     "pg_provision_no_op",

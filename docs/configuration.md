@@ -238,19 +238,25 @@ run:
    explicit `UNMEASURED` (never a false clean) if the grant above was
    never applied.
 3. **Diagnostic counts view (RDR-182 Amendment A6).** After the first
-   migration run has created the chunk tables, create the superuser-owned
-   counts view and grant it to `nexus_diag` — under FORCE row-level security a
-   view counts cross-tenant rows only when its owner is RLS-exempt, so this
-   MUST run as the superuser (the local bundle's provisioning does this
-   automatically; bring-your-own-Postgres DBAs run it once):
+   migration run has created the chunk tables, create the counts view and
+   grant it to `nexus_diag` (the local bundle's provisioning does this
+   automatically; bring-your-own-Postgres DBAs run it once — or let the
+   engine's own `taxonomy-011-8` Liquibase changeset create it for you on
+   its next boot, since 2026-08-17). `WITH (security_invoker = true)`
+   evaluates row-level security against the QUERYING role rather than the
+   view's owner (PG15+), so `nexus_diag` (`LOGIN ... BYPASSRLS`) sees every
+   tenant's rows through this view regardless of who created it — the view
+   no longer NEEDS a superuser owner the way it did before this option
+   existed, though creating it as the superuser (as below) remains a safe,
+   supported path too:
 
    ```sql
-   CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS
+   CREATE OR REPLACE VIEW nexus.diag_chash_conformance WITH (security_invoker = true) AS
    SELECT 'nexus.chunks' AS table_name, count(*) AS non_conformant FROM nexus.chunks WHERE octet_length(chash) <> 32
    UNION ALL
    SELECT 'nexus.catalog_document_chunks' AS table_name, count(*) AS non_conformant FROM nexus.catalog_document_chunks WHERE octet_length(chash) <> 32
    UNION ALL
-   SELECT 'nexus.topic_assignments' AS table_name, count(*) AS non_conformant FROM nexus.topic_assignments t WHERE t.doc_id ~ '^[0-9a-f]+$' AND length(t.doc_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = decode(t.doc_id, 'hex'))
+   SELECT 'nexus.topic_assignments' AS table_name, count(*) AS non_conformant FROM nexus.topic_assignments t WHERE NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = t.doc_id)
    UNION ALL
    SELECT 'nexus.frecency' AS table_name, count(*) AS non_conformant FROM nexus.frecency t WHERE t.chunk_id ~ '^[0-9a-f]+$' AND length(t.chunk_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = decode(t.chunk_id, 'hex'))
    UNION ALL

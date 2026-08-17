@@ -37,6 +37,7 @@ import nexus.mcp_infra as _mi
 from nexus.commands.taxonomy_cmd import taxonomy
 from nexus.db.t2 import T2Database
 
+from tests._t2_fixture_ops import canonical_chunk_id
 from tests.conftest import next_import_seed_id  # session-unique import ids (see conftest note)
 
 
@@ -88,7 +89,7 @@ def _seed_topic(
             # writer (assign_from_chashes_<dim> centroid branch, assignOne's
             # non-projection branch, this file's own callers) resolves to.
             db.taxonomy.import_assignment(
-                doc_id=f"{label}-doc-{i}.py",
+                doc_id=canonical_chunk_id(f"{label}-doc-{i}.py"),
                 topic_id=topic_id,
                 assigned_by="test-seed",
                 similarity=None,

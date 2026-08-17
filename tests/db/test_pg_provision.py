@@ -720,6 +720,413 @@ class TestHealDiagViewGrantsAndOwnership:
                 f"BYPASSRLS LOGIN PASSWORD '{diag_pass}'",
             )
 
+    def test_security_invoker_view_ownership_is_never_touched(self, diag_view, bins):
+        """RDR-194 P3c companion fix (nexus-v5lk3, 2026-08-17), REGRESSION
+        TEST: the generation guard. A ``WITH (security_invoker = true)``
+        view owned by ``nexus_admin`` (NOSUPERUSER, no BYPASSRLS — the
+        taxonomy-011-8 generation) must NEVER have its ownership reassigned
+        back to the superuser, even though ``nexus_admin`` structurally
+        fails the OLD ``rolsuper OR rolbypassrls`` exemption test this
+        function used unconditionally before this fix. Left unguarded, this
+        function would keep reassigning a correctly-functioning view back
+        to the superuser on every finish pass FOREVER, permanently
+        defeating changeset 8's own "closes the reprovisioning gap
+        permanently" claim."""
+        from nexus.db.pg_provision import heal_diag_view_grants_and_ownership
+
+        result, config_dir, os_user = diag_view
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "CREATE OR REPLACE VIEW nexus.diag_chash_conformance "
+              "WITH (security_invoker = true) AS "
+              "SELECT 'stub'::text AS table_name, 0::bigint AS non_conformant")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "ALTER VIEW nexus.diag_chash_conformance OWNER TO nexus_admin")
+        owner_sql = (
+            "SELECT r.rolname FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_roles r ON r.oid = c.relowner "
+            "WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'"
+        )
+        assert _query(bins, result.port, NEXUS_DB_NAME, os_user, owner_sql) == "nexus_admin", (
+            "precondition: view must be nexus_admin-owned (the new generation)"
+        )
+
+        actions = heal_diag_view_grants_and_ownership(bins, result.port, os_user)
+
+        assert not any("ownership fragmentation" in a for a in actions), (
+            f"the generation guard must skip the ownership repair entirely "
+            f"for a security_invoker view: {actions!r}"
+        )
+        assert _query(bins, result.port, NEXUS_DB_NAME, os_user, owner_sql) == "nexus_admin", (
+            "ownership must NOT have been reassigned away from nexus_admin"
+        )
+        # The grant repair is UNCHANGED and independent — still runs for
+        # both generations, since a missing nexus_diag grant is real either
+        # way. The fixture already granted it, so no action is expected
+        # here, but this positively confirms the OTHER branch was not
+        # accidentally short-circuited by the generation guard too.
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT has_table_privilege('nexus_diag', "
+            "'nexus.diag_chash_conformance', 'SELECT')",
+        ) == "t"
+
+
+class TestReassignDiagViewOwnerBeforeRestart:
+    """RDR-194 P3c companion fix (nexus-v5lk3, 2026-08-17): the proactive
+    ownership transfer wired into ``converge_engine``'s own restart-
+    triggering call sites, which closes the crash-loop bead nexus-7ec4i's
+    own critical-fix round introduced for essentially every existing local
+    install — see ``reassign_diag_view_owner_before_restart``'s own
+    docstring for the full derivation."""
+
+    # Drives PostgreSQL directly via psql; never launches the JVM service
+    # jar, so exempt from tests/db/conftest.py's jar-freshness gate.
+    pytestmark = pytest.mark.no_service_jar
+
+    @pytest.fixture()
+    def superuser_owned_view(self, provisioned, bins):
+        """The STEADY STATE this fix closes: a view created (as every
+        pre-taxonomy-011-8 local install's provisioning always has)
+        entirely by the superuser, never touched by anything nexus_admin-
+        owned."""
+        result, config_dir = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "CREATE SCHEMA IF NOT EXISTS nexus")
+        # In production nexus_admin OWNS this schema (it creates it via
+        # Liquibase's very first changeset), so USAGE is implicit. This
+        # fixture creates the schema directly as the superuser instead —
+        # grant USAGE explicitly so nexus_admin's own DROP VIEW attempt
+        # below fails on OWNERSHIP (the real crash-loop precondition this
+        # test proves), not on schema-level permission denied first.
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "GRANT USAGE ON SCHEMA nexus TO nexus_admin")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS "
+              "SELECT 'stub'::text AS table_name, 0::bigint AS non_conformant")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              f'ALTER VIEW nexus.diag_chash_conformance OWNER TO "{os_user}"')
+        yield result, config_dir, os_user
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "DROP VIEW IF EXISTS nexus.diag_chash_conformance")
+
+    def test_absent_view_is_a_noop(self, provisioned, bins):
+        from nexus.db.pg_provision import reassign_diag_view_owner_before_restart
+
+        result, config_dir = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT 1 FROM pg_class c JOIN pg_namespace n "
+            "ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' "
+            "AND c.relname = 'diag_chash_conformance'",
+        ) == "", "precondition: view must be absent"
+
+        actions = reassign_diag_view_owner_before_restart(bins, result.port, os_user)
+
+        assert actions == []
+
+    def test_already_admin_owned_is_a_noop(self, superuser_owned_view, bins):
+        """The steady state AFTER a successful taxonomy-011 walk: reassigning
+        to the SAME owner would be a harmless Postgres no-op, but is
+        skipped here for a clean, honest action-line log instead of
+        reporting a healed-nothing 'fix'."""
+        from nexus.db.pg_provision import reassign_diag_view_owner_before_restart
+
+        result, config_dir, os_user = superuser_owned_view
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "ALTER VIEW nexus.diag_chash_conformance OWNER TO nexus_admin")
+
+        actions = reassign_diag_view_owner_before_restart(bins, result.port, os_user)
+
+        assert actions == []
+
+    def test_superuser_owned_view_is_reassigned_and_the_crash_loop_is_closed(
+        self, superuser_owned_view, bins,
+    ):
+        """THE END-TO-END CRASH-LOOP PROOF (nexus-v5lk3). Before this fix,
+        ``nexus_admin`` attempting ``DROP VIEW nexus.diag_chash_
+        conformance`` against a superuser-owned view — exactly what
+        ``taxonomy-011-1``'s own guard does on every real migration walk —
+        raises ``insufficient_privilege``. Reproduce that failure as the
+        PRECONDITION (proving this fixture really is the crash-loop
+        shape, not merely asserted to be), run the reassignment, then
+        prove ``nexus_admin``'s own drop attempt (the guard's REAL
+        statement, run by the REAL migration role) now succeeds where it
+        failed a moment ago."""
+        from nexus.db.pg_provision import reassign_diag_view_owner_before_restart
+
+        result, config_dir, os_user = superuser_owned_view
+        creds = _read_credentials(result.credentials_path)
+        admin_pass = creds["NX_DB_ADMIN_PASS"]
+
+        # PRECONDITION: nexus_admin cannot drop the superuser-owned view —
+        # this IS the crash-loop taxonomy-011-1's own guard would hit,
+        # reproduced directly against a real cluster.
+        with pytest.raises(RuntimeError, match="insufficient_privilege|must be owner"):
+            _psql_as(bins, result.port, "nexus_admin", admin_pass, NEXUS_DB_NAME,
+                     "DROP VIEW nexus.diag_chash_conformance")
+
+        actions = reassign_diag_view_owner_before_restart(bins, result.port, os_user)
+
+        assert len(actions) == 1
+        assert "nexus_admin" in actions[0]
+        owner_sql = (
+            "SELECT r.rolname FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_roles r ON r.oid = c.relowner "
+            "WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'"
+        )
+        assert _query(bins, result.port, NEXUS_DB_NAME, os_user, owner_sql) == "nexus_admin"
+
+        # THE PROOF: nexus_admin's own DROP VIEW (taxonomy-011-1's exact
+        # guarded statement) now succeeds where it raised above.
+        _psql_as(bins, result.port, "nexus_admin", admin_pass, NEXUS_DB_NAME,
+                 "DROP VIEW IF EXISTS nexus.diag_chash_conformance")
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT 1 FROM pg_class c JOIN pg_namespace n "
+            "ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' "
+            "AND c.relname = 'diag_chash_conformance'",
+        ) == ""
+
+
+class TestProvisionFastPathReassignsDiagView:
+    """RDR-194 P3c critical-fix round 4 (nexus-rkn3i, 2026-08-17): both
+    round-3 reviewers (code-review-expert + substantive-critic,
+    independently) found ``reassign_diag_view_owner_before_restart`` wired
+    ONLY into ``converge_engine``'s two restart-triggering call sites —
+    unreachable from ``nx daemon service install-binary``'s own documented
+    ``stop && start`` remedy, and from OS-level launchd/systemd autostart,
+    both of which go ``service_start_cmd`` -> ``_start_locked`` ->
+    ``_ensure_pg_running`` -> ``_backfill_provision_grants`` ->
+    ``pg_provision.provision()``'s fast path, which never called it. This
+    class proves the round-4 fix: the call is now wired into ``provision()``
+    itself, so it is reachable from EVERY service start, and a previously
+    wedged install self-heals on its very next ``nx daemon service start``
+    with no operator intervention beyond that ordinary restart.
+
+    ``TestReassignDiagViewOwnerBeforeRestart`` above proves the target
+    function's own behaviour (calling it directly); this class proves it is
+    actually WIRED into the fast path real service starts traverse — the
+    distinction round 3's gap turned on.
+    """
+
+    # Drives PostgreSQL directly via psql / provision()'s fast path; never
+    # launches the JVM service jar.
+    pytestmark = pytest.mark.no_service_jar
+
+    @pytest.fixture()
+    def superuser_owned_view(self, provisioned, bins):
+        """Same steady-state precondition as
+        ``TestReassignDiagViewOwnerBeforeRestart.superuser_owned_view``: a
+        view created entirely by the superuser, exactly what every
+        pre-taxonomy-011-8 local install's provisioning has produced."""
+        result, config_dir = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "CREATE SCHEMA IF NOT EXISTS nexus")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "GRANT USAGE ON SCHEMA nexus TO nexus_admin")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS "
+              "SELECT 'stub'::text AS table_name, 0::bigint AS non_conformant")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              f'ALTER VIEW nexus.diag_chash_conformance OWNER TO "{os_user}"')
+        yield result, config_dir, os_user
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "DROP VIEW IF EXISTS nexus.diag_chash_conformance")
+
+    def test_daemon_start_path_reassigns_via_provision_fast_path(
+        self, superuser_owned_view, bins,
+    ):
+        """REACHABILITY (round 4, test 1): call ``provision(config_dir)`` —
+        the exact function ``_backfill_provision_grants`` calls at Step 1 of
+        EVERY ``_start_locked``, i.e. what ``nx daemon service start``, the
+        printed remedy after ``nx daemon service install-binary``, and OS
+        autostart units all funnel through — WITHOUT calling
+        ``reassign_diag_view_owner_before_restart`` directly. Assert the
+        view is reassigned anyway: proof the wiring, not just the function,
+        works.
+        """
+        result, config_dir, os_user = superuser_owned_view
+        owner_sql = (
+            "SELECT r.rolname FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_roles r ON r.oid = c.relowner "
+            "WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'"
+        )
+        assert _query(bins, result.port, NEXUS_DB_NAME, os_user, owner_sql) == os_user, (
+            "precondition: view must still be superuser-owned before the "
+            "fast path runs"
+        )
+
+        result2 = provision(config_dir)
+
+        assert result2.already_provisioned, (
+            "this must hit provision()'s fast idempotency path (the "
+            "steady state for every already-provisioned install) — a fresh "
+            "provision would not exercise the same code path a real "
+            "service restart does"
+        )
+        assert _query(bins, result.port, NEXUS_DB_NAME, os_user, owner_sql) == "nexus_admin", (
+            "provision()'s fast path did not reassign the diag view's "
+            "owner — the round-4 wiring into provision() is missing or "
+            "broken, reopening the install-binary/autostart reachability "
+            "gap (nexus-rkn3i)"
+        )
+
+    def test_wedged_install_self_heals_on_next_service_start(
+        self, superuser_owned_view, bins,
+    ):
+        """RECOVERY (round 4, test 2): reproduce the actual wedged state —
+        nexus_admin's own DROP VIEW (taxonomy-011-1's exact guarded
+        statement) genuinely fails against the foreign-owned view — then
+        run ``provision(config_dir)`` (simulating the wedged box's very
+        next ``nx daemon service start``, BEFORE Step 2 spawns the service
+        binary), then prove nexus_admin's identical DROP VIEW attempt now
+        succeeds where it failed a moment ago. This is the automated-
+        recovery half of round 4: a previously-wedged install needs no
+        operator intervention beyond an ordinary restart.
+        """
+        result, config_dir, os_user = superuser_owned_view
+        creds = _read_credentials(result.credentials_path)
+        admin_pass = creds["NX_DB_ADMIN_PASS"]
+
+        # PRECONDITION: reproduce the crash loop for real — nexus_admin
+        # cannot drop the superuser-owned view.
+        with pytest.raises(RuntimeError, match="insufficient_privilege|must be owner"):
+            _psql_as(bins, result.port, "nexus_admin", admin_pass, NEXUS_DB_NAME,
+                     "DROP VIEW nexus.diag_chash_conformance")
+
+        # THE RECOVERY STEP: exactly what a wedged install's next
+        # `nx daemon service start` runs at Step 1, before the service
+        # binary (and therefore Liquibase) is ever spawned.
+        result2 = provision(config_dir)
+        assert result2.already_provisioned, "recovery re-run must hit the fast path"
+
+        # THE PROOF: the identical DROP VIEW that raised above now
+        # succeeds — taxonomy-011-1's guard would proceed cleanly on the
+        # next Liquibase walk (Step 2, which this test never needs to run).
+        _psql_as(bins, result.port, "nexus_admin", admin_pass, NEXUS_DB_NAME,
+                 "DROP VIEW IF EXISTS nexus.diag_chash_conformance")
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT 1 FROM pg_class c JOIN pg_namespace n "
+            "ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' "
+            "AND c.relname = 'diag_chash_conformance'",
+        ) == ""
+
+
+class TestProvisionDiagConformanceViewDefersToExisting:
+    """RDR-194 P3c companion fix (nexus-v5lk3, 2026-08-17): create-only-if-
+    absent, against a REAL cluster where the DDL gate's own precondition
+    (every chash-bearing table exists) genuinely holds — proving deferral,
+    not merely a lucky no-op from the gate condition never firing (which is
+    all the pure-unit tests in tests/db/test_pg_provision_diag_view_non_
+    vacuity.py can show, since they monkeypatch the DDL away entirely)."""
+
+    pytestmark = pytest.mark.no_service_jar
+
+    @pytest.fixture()
+    def chash_tables(self, provisioned, bins):
+        """Stub chash-bearing tables. The DDL GATE (the ``IF (SELECT
+        count(*)...)`` existence check) only checks EXISTENCE by name, but
+        the VIEW DEFINITION itself — ``CREATE ... AS <the real UNION ALL
+        query>`` — type-checks every expression at CREATE time, so the
+        stub column TYPES must match what the generator expects:
+        ``ChashBearingTable.bytea`` decides bytea vs text per column, same
+        as the real schema (e.g. the debt legs compare ``nexus.chunks``'s
+        bytea ``chash`` against either a bytea column directly or
+        ``decode(text_column, 'hex')``, never bytea against a bare text
+        column)."""
+        from nexus.db.chash_tables import CHASH_BEARING_TABLES
+
+        result, config_dir = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user, "CREATE SCHEMA IF NOT EXISTS nexus")
+        names = [t.table.split(".", 1)[1] for t in CHASH_BEARING_TABLES]
+        for name, t in zip(names, CHASH_BEARING_TABLES):
+            col_type = "bytea" if t.bytea else "text"
+            _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+                  f"CREATE TABLE IF NOT EXISTS nexus.{name} ({t.column} {col_type})")
+        yield result, config_dir, os_user
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "DROP VIEW IF EXISTS nexus.diag_chash_conformance")
+        for name in names:
+            _psql(bins, result.port, NEXUS_DB_NAME, os_user, f"DROP TABLE IF EXISTS nexus.{name}")
+
+    def test_creates_fresh_view_when_absent_and_tables_ready(self, chash_tables, bins):
+        """The POSITIVE case, unchanged behavior: absent view + all chash
+        tables present -> the view gets created."""
+        from nexus.db.pg_provision import _provision_diag_conformance_view
+
+        result, config_dir, os_user = chash_tables
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT 1 FROM pg_class c JOIN pg_namespace n "
+            "ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' "
+            "AND c.relname = 'diag_chash_conformance'",
+        ) == "", "precondition: view must be absent"
+
+        _provision_diag_conformance_view(bins, result.port, os_user)
+
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT 1 FROM pg_class c JOIN pg_namespace n "
+            "ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' "
+            "AND c.relname = 'diag_chash_conformance'",
+        ) == "1"
+
+    def test_backfill_idempotence_without_ownership_or_definition_clobber(
+        self, chash_tables, bins,
+    ):
+        """THE IDEMPOTENCE PROOF (nexus-v5lk3): with the view ALREADY
+        present (nexus_admin-owned, a definition DELIBERATELY different
+        from the real generator's), a repeat call — exactly what
+        ``_backfill_diag_role`` triggers on EVERY ``nx daemon service
+        start`` — must touch NEITHER the ownership NOR the definition.
+        Before this fix, the unconditional ``CREATE OR REPLACE VIEW`` here
+        would have replaced the stub definition with the real generator's
+        (a second, independent writer of the same object as
+        taxonomy-011-8) even though ownership itself was separately proven
+        safe from THIS specific statement (see the function's own
+        docstring)."""
+        from nexus.db.pg_provision import _provision_diag_conformance_view
+
+        result, config_dir, os_user = chash_tables
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS "
+              "SELECT 'sentinel-stub-definition'::text AS table_name, "
+              "0::bigint AS non_conformant")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "ALTER VIEW nexus.diag_chash_conformance OWNER TO nexus_admin")
+        owner_sql = (
+            "SELECT r.rolname FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_roles r ON r.oid = c.relowner "
+            "WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'"
+        )
+        assert _query(bins, result.port, NEXUS_DB_NAME, os_user, owner_sql) == "nexus_admin", (
+            "precondition: view must be nexus_admin-owned with the stub definition"
+        )
+
+        _provision_diag_conformance_view(bins, result.port, os_user)
+
+        assert _query(bins, result.port, NEXUS_DB_NAME, os_user, owner_sql) == "nexus_admin", (
+            "ownership must survive a repeat backfill call unchanged"
+        )
+        definition = _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT pg_get_viewdef('nexus.diag_chash_conformance'::regclass)",
+        )
+        assert "sentinel-stub-definition" in definition, (
+            f"the DDL must never re-run when the view already exists — the "
+            f"stub definition must survive unchanged, proving deferral "
+            f"rather than a lucky no-op: got {definition!r}"
+        )
+
 
 # ── Test 5: end-to-end provision → migrate DDL → svc DML under RLS ────────────
 

@@ -12,9 +12,11 @@ engine substrate's freshly Liquibase-applied schema and asserts:
     - ``fk_catalog_chunks_chunk`` (catalog-029-manifest-chunk-fk.xml) is
       VALIDATED — catalog-029-2 runs a bare ``VALIDATE CONSTRAINT`` after
       the anti-join remediation step.
-    - ``nexus.topic_assignments.doc_id`` carries no FK and is TEXT (a hex
-      chunk chash, not a tumbler — contradicts its own in-file comment;
-      RDR-194 Problem Statement item 2 / Q1).
+    - ``nexus.topic_assignments.doc_id`` carries no FK (RDR-194 P3d adds the
+      composite FK; not landed yet) and is ``bytea`` (RDR-194 P3c,
+      ``taxonomy-011-doc-id-bytea.xml`` — converted from the TEXT this
+      ground truth pinned pre-P3c; the column is a chunk chash, not a
+      tumbler, RDR-194 Problem Statement item 2 / Q1).
     - ``nexus.catalog_links.from_tumbler`` (and ``to_tumbler``) carry NO
       FK today (nexus-ysrwi: 277 dangling rows measured 2026-07-25,
       RDR-194 Problem Statement item 5 / Q2).
@@ -155,9 +157,10 @@ def test_ground_truth_fk_catalog_chunks_chunk_is_validated(census_state):
 
 
 def test_ground_truth_topic_assignments_doc_id_is_needs_design(census_state):
-    """topic_assignments.doc_id carries no FK and is TEXT holding a hex
-    chunk chash — Problem Statement item 2 / Q1. No FK constraint should
-    reference this column."""
+    """topic_assignments.doc_id carries no FK yet (RDR-194 P3d adds the
+    composite FK to nexus.chunks) and is bytea (RDR-194 P3c,
+    taxonomy-011-doc-id-bytea.xml) holding a chunk chash — Problem
+    Statement item 2 / Q1."""
     sql = """
     SELECT count(*)
     FROM pg_constraint con
@@ -177,7 +180,7 @@ def test_ground_truth_topic_assignments_doc_id_is_needs_design(census_state):
         "WHERE table_schema='nexus' AND table_name='topic_assignments' AND column_name='doc_id'"
     )
     type_rows = _psql_csv(census_state, type_sql)
-    assert type_rows[0] == "text", f"expected topic_assignments.doc_id to be text, got {type_rows[0]!r}"
+    assert type_rows[0] == "bytea", f"expected topic_assignments.doc_id to be bytea (RDR-194 P3c), got {type_rows[0]!r}"
 
 
 def test_ground_truth_catalog_links_tumbler_columns_have_no_fk(census_state):
