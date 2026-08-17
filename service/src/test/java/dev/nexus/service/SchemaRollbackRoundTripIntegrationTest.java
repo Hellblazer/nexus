@@ -358,6 +358,24 @@ class SchemaRollbackRoundTripIntegrationTest {
      * <p><strong>The row invariant (nexus-ixsxa), unchanged.</strong> A
      * reboot must re-stamp the {@code runAlways} rows in place, not grow
      * the changelog.
+     *
+     * <p><strong>REVISED AGAIN (2026-08-17, bead nexus-lhuhe, P1).</strong>
+     * The 2026-08-17 revision above asserted {@link #diagBaseTableGrants}
+     * is EMPTY in view era and called that "the content boundary" — that
+     * assertion LOCKED IN a real bug as intended behavior. Fork-verified:
+     * after a full walk, {@code taxonomy-011-doc-id-bytea.xml} (included
+     * BEFORE this file in {@code db.changelog-master.xml}) creates the
+     * view and grants {@code nexus_diag} SELECT on it via
+     * {@code taxonomy-011-8}, but {@code grants-nexus-diag-2}'s later
+     * per-relation REVOKE loop strips that grant again in the SAME boot
+     * (it owns the view by then too) — leaving {@code nexus_diag} with
+     * ZERO SELECT anywhere in the content boundary, not even on the view
+     * itself. {@code security_invoker=true} means the view ALSO needs
+     * direct SELECT on every table it reads, so "view era" grants are
+     * correctly NON-empty: exactly the five {@code CHASH_BEARING_TABLES}
+     * (src/nexus/db/chash_tables.py) — see {@code grants-nexus-diag-3}'s
+     * own comment for the fix. {@link #diagBaseTableGrants} filters
+     * {@code relkind IN ('r','p')} so it never counts the view itself.
      */
     @Test
     void eraTransitionRevokesTableSelectWithoutGrowingTheChangelog() throws Exception {
@@ -390,10 +408,19 @@ class SchemaRollbackRoundTripIntegrationTest {
                         .isEqualTo(1);
                     assertThat(diagBaseTableGrants(c))
                         .as("a FRESH cluster must land DIRECTLY in view era — "
-                            + "grants-nexus-diag-1's legacy branch must NOT have fired, "
-                            + "since the view already existed (created by taxonomy-011-8 "
-                            + "earlier in this SAME walk) by the time diag-1 ran")
-                        .isEmpty();
+                            + "grants-nexus-diag-1's legacy branch must NOT have fired "
+                            + "(its bulk ALL-TABLES grant would produce a much wider set "
+                            + "than the five below) — but grants-nexus-diag-3 must have "
+                            + "re-granted exactly the tables security_invoker=true "
+                            + "requires, restoring what grants-nexus-diag-2's own "
+                            + "REVOKE loop stripped earlier in this SAME boot "
+                            + "(nexus-lhuhe)")
+                        .containsExactly(
+                            "nexus.catalog_document_chunks",
+                            "nexus.chunks",
+                            "nexus.frecency",
+                            "nexus.relevance_log",
+                            "nexus.topic_assignments");
                     viewEraRows = changelogRowCount(c);
                 }
 
@@ -407,9 +434,15 @@ class SchemaRollbackRoundTripIntegrationTest {
                         .as("a reboot must re-stamp the runAlways rows in place")
                         .isEqualTo(viewEraRows);
                     assertThat(diagBaseTableGrants(c))
-                        .as("view era holds across a reboot too — still no base-table "
-                            + "grants")
-                        .isEmpty();
+                        .as("view era holds across a reboot too — the same five tables, "
+                            + "re-granted fresh by grants-nexus-diag-3 every boot "
+                            + "(nexus-lhuhe)")
+                        .containsExactly(
+                            "nexus.catalog_document_chunks",
+                            "nexus.chunks",
+                            "nexus.frecency",
+                            "nexus.relevance_log",
+                            "nexus.topic_assignments");
                 }
             }
 

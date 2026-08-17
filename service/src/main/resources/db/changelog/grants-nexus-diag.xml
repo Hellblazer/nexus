@@ -237,6 +237,65 @@ $$;
             grant is not part of the era dance at all. Same role-existence
             guard as -1/-2 (self-heals every boot); read-only by
             construction, matching -1's own construction.
+
+            EXTENDED (2026-08-17, bead nexus-lhuhe, P1) — closes a THIRD
+            grants-era interaction bug this file's own -1/-2 sequencing
+            created against taxonomy-011-8
+            (taxonomy-011-doc-id-bytea.xml). taxonomy-011-8 creates
+            nexus.diag_chash_conformance (WITH security_invoker=true) and
+            grants nexus_diag SELECT on it, every boot — but
+            taxonomy-011-doc-id-bytea.xml is included BEFORE this file in
+            db.changelog-master.xml, so on EVERY boot the sequence is: -8
+            (re)creates the view, owned by nexus_admin (the migration
+            role) → grants-nexus-diag-1 skips (view already exists, so the
+            legacy branch never fires) → grants-nexus-diag-2's
+            per-relation REVOKE loop (over every relation nexus_admin
+            OWNS) strips SELECT on the view -8 just (re)granted THIS SAME
+            BOOT, plus every base table (never granted in the view era to
+            begin with, since -1 skipped). Measured (nexus-lhuhe, fork
+            rehearsal against a full v0.1.78 walk): nexus_diag ends every
+            boot holding ZERO content-boundary grants — permission denied
+            on the view itself AND on its underlying tables — degrading
+            nx doctor's chash-poison check, the forensics topic, and any
+            post-deploy census to permanently unusable. taxonomy-011-8's
+            own conditional GRANT was never wrong on its own terms; the
+            bug is that BOTH -8 and -1/-2 each assumed the other owned the
+            diag grants' final state, and post-migration neither did.
+
+            THE FIX: since this changeset runs LAST among the runAlways
+            grants blocks (this file is included last in
+            db.changelog-master.xml, and -3 is the last changeset in this
+            file), it is the correct place to make the content-boundary
+            grants stick as the final word every boot — re-granting
+            exactly what security_invoker=true requires: SELECT on the
+            view itself, PLUS direct SELECT on every table the view reads
+            internally (security_invoker means Postgres checks the
+            INVOKING role's OWN table privileges for the relations the
+            view references — nexus_diag's BYPASSRLS exempts it from
+            row-level policies, never from ordinary GRANT-based privilege
+            checks). The five tables below are exactly
+            CHASH_BEARING_TABLES (src/nexus/db/chash_tables.py) — the SAME
+            set diag_conformance_view_ddl() reads to build the view text —
+            named individually (never a schema-wide bulk grant) so this
+            stays scoped to precisely what the view needs and does not
+            silently re-widen -2's own content boundary. No mechanical
+            coupling exists between this XML list and the Python tuple (a
+            static changelog cannot import it); a future drift is a
+            manual-review debt, caught by
+            GrantsNexusDiagViewAccessIntegrationTest, which connects AS
+            nexus_diag and SELECTs the view plus every underlying table
+            against a live install.
+
+            No foreign-owner guard is needed for the five table grants
+            (unlike the view's own GRANT below): nexus_admin created every
+            one of them via forward DDL and always owns them, the same
+            assumption -1's own unguarded bulk grant already makes for
+            this schema. The view CAN be foreign-owned (a pre-existing
+            superuser-owned copy from pg_provision that taxonomy-011-8's
+            own CREATE OR REPLACE gracefully skipped) — same degrade as
+            taxonomy-011-8's own GRANT: skip with a NOTICE, since that
+            owner's own provisioning path already grants nexus_diag
+            directly.
         </comment>
         <sql splitStatements="false" stripComments="false">
 DO $$
@@ -249,6 +308,32 @@ BEGIN
     GRANT USAGE  ON SCHEMA staging TO nexus_diag;
     GRANT SELECT ON ALL TABLES IN SCHEMA staging TO nexus_diag;
     ALTER DEFAULT PRIVILEGES IN SCHEMA staging GRANT SELECT ON TABLES TO nexus_diag;
+
+    -- VIEW-ERA RE-GRANT (bead nexus-lhuhe, P1). See this changeset's own
+    -- comment element above for the full derivation. View existence
+    -- implies every underlying table already exists too (the view's own
+    -- CREATE would have failed otherwise), so no separate existence
+    -- guard is needed for the five GRANTs below.
+    IF EXISTS (
+        SELECT 1 FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'
+    ) THEN
+        BEGIN
+            GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag;
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE NOTICE 'cannot GRANT SELECT on a foreign-owned nexus.diag_chash_conformance -- its owner must grant nexus_diag directly (matches taxonomy-011-8''s own identical degrade)';
+        END;
+
+        -- Exactly CHASH_BEARING_TABLES (src/nexus/db/chash_tables.py) --
+        -- the set diag_conformance_view_ddl() reads. nexus_admin owns
+        -- every one of these via forward DDL, so no foreign-owner guard.
+        GRANT SELECT ON nexus.chunks                  TO nexus_diag;
+        GRANT SELECT ON nexus.catalog_document_chunks TO nexus_diag;
+        GRANT SELECT ON nexus.topic_assignments        TO nexus_diag;
+        GRANT SELECT ON nexus.frecency                 TO nexus_diag;
+        GRANT SELECT ON nexus.relevance_log            TO nexus_diag;
+    END IF;
 END
 $$;
         </sql>

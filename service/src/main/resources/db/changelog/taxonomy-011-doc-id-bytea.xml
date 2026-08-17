@@ -1134,6 +1134,20 @@ $$;
             1's own rollback. `pg_provision`'s superuser path is untouched
             (see its own docstring for the narrow window it remains the
             only creator for, and what of bead nexus-7shei is still open).
+
+            KNOWN INTERACTION (2026-08-17, bead nexus-lhuhe, P1) — this
+            changeset's own GRANT above does NOT survive a full boot on
+            its own: this file (taxonomy-011-doc-id-bytea.xml) is included
+            BEFORE grants-nexus-diag.xml in db.changelog-master.xml, so
+            grants-nexus-diag-2's later per-relation REVOKE loop (over
+            every relation nexus_admin owns, which by then includes the
+            view this changeset just (re)created) strips it again in the
+            SAME boot. grants-nexus-diag-3 is where the grant is made to
+            stick — see that changeset's own comment for the full
+            derivation. This changeset's own GRANT is kept regardless
+            (harmless, idempotent, and correct in isolation) rather than
+            removed, matching this changeset's own DEFENSE IN DEPTH
+            ethos elsewhere in this file.
         </comment>
         <sql splitStatements="false" stripComments="false">
 DO $$
