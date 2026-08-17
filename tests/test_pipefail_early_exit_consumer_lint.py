@@ -852,18 +852,23 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # would have died on iteration 1 under the new `-e`), so it moved
         # to the `_PIPEFAIL_OR_TRUE_SITES` guarded ratchet below instead.
         # 13 entries -> 12; see the ceiling adjustment below.
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:75",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:159",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:162",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:172",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:178",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:183",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:189",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:198",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:209",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:217",
+        # nexus-l8xnz: retargeted -- the Phase F header (candidate-shakeout
+        # journey summary) gained 12 lines describing the new native-smoke.sh
+        # probe-set phase, shifting every site below by +12. Numbers
+        # regenerated from the detector itself (_early_exit_consumer_hits),
+        # not arithmetic.
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:87",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:171",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:174",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:184",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:190",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:195",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:201",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:210",
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:221",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:266",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:229",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:233",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:278",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:142",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:193",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:238",
@@ -926,14 +931,19 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/mac-signed-binary-gate.sh:190",
         # --- service/native-smoke.sh (8 entries): native-image
         # release-only smoke; needs a real GraalVM native build to
-        # safely verify a rewrite.
-        "service/native-smoke.sh:126",
-        "service/native-smoke.sh:219",
-        "service/native-smoke.sh:351",
-        "service/native-smoke.sh:443",
-        "service/native-smoke.sh:481",
-        "service/native-smoke.sh:487",
+        # safely verify a rewrite. Retargeted (nexus-l8xnz, pre-existing
+        # drift found while gating this bead): the 64-hex doc_id fix
+        # (5d142ed72) added 3 comment lines before the T1 section, shifting
+        # every site from :126 onward by +3; the migration-check site at
+        # :76 is above that point and unmoved. Numbers regenerated from the
+        # detector itself (_early_exit_consumer_hits), not arithmetic.
+        "service/native-smoke.sh:129",
+        "service/native-smoke.sh:222",
+        "service/native-smoke.sh:354",
+        "service/native-smoke.sh:446",
+        "service/native-smoke.sh:484",
         "service/native-smoke.sh:490",
+        "service/native-smoke.sh:493",
         "service/native-smoke.sh:76",
         # --- service/linux-native-verify.sh:43 (1 entry): a GENUINE
         # FALSE POSITIVE, not a "needs live infra" deferral -- the
@@ -1135,8 +1145,10 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         #   assertion is the SEPARATE post-loop line,
         #   `[ "$healthy" = 1 ] && ok ... || { bad ...; exit 1; }` --
         #   this guarded site itself gates nothing.
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:264",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:128",
+        #   Retargeted AGAIN (nexus-l8xnz): +12 for the Phase F header
+        #   addition described above -- :264 -> :276, :128 -> :140.
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:276",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:140",
         # tests/e2e/release-sandbox.sh (3 entries): the already-commented
         # `|| true: head is an early-exit consumer...` idiom this file's
         # own docstring cites as the sanctioned shape -- readback for

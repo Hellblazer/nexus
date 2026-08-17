@@ -81,6 +81,22 @@ tests/e2e/migration-rehearsal/run.sh --shakeout
 
 Must end `CANDIDATE SHAKEOUT PASSED`.
 
+**Phase F now runs `service/native-smoke.sh`'s own probe set too (nexus-l8xnz,
+2026-08-17).** The raw-curl probe set (taxonomy/assignments/details' 64-hex
+`doc_id` width validation, T1's separate-jOOQ-schema reflection check, the
+memory/plans/taxonomy/chash routes, the bge-768 embed path, the fused-rerank
+stage) used to run ONLY inside `engine-service-release.yml` — a stale probe
+fixture (the pre-fix 16-char `doc_id` literal) burned the `v0.1.77` tag on
+both linux release legs while the binary itself was fine, and `--shakeout`
+stayed green because nothing local ever exercised the script. `--shakeout`
+now drives the IDENTICAL script (byte-for-byte; only the caller is adapted)
+against the candidate over the already-provisioned Postgres — a stale probe
+now fails `--shakeout` locally, before a tag is ever cut. This does **not**
+replace `--acquire` below (which drives the SIGNED, PUBLISHED bytes) — it
+closes the "release-workflow-only procedures rot silently" gap for the
+*script's own assertions*, not for signing/codesign/cosign/PG-bundle
+packaging defects, which remain `--acquire`-only by construction (see below).
+
 **`--candidate-migration` — MANDATORY whenever this cut's `service/` delta
 touches `db/changelog/**` (a new or modified Liquibase changeset); optional
 otherwise** (a cut that only touches Java handler/repository code with no

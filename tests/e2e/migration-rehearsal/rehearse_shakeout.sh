@@ -42,6 +42,18 @@
 #                                              v0.1.70 shipped it and was
 #                                              caught only by the client
 #                                              shakedown, a full day later.)
+#   Phase F  native-smoke.sh probe set        (nexus-l8xnz: the SAME script
+#                                              engine-service-release.yml
+#                                              runs, byte-for-byte, against
+#                                              this candidate over the
+#                                              already-provisioned Postgres —
+#                                              closes the release-only-
+#                                              procedures-rot gap that let a
+#                                              stale probe fixture (16-char
+#                                              doc_id vs the RDR-194 P3c
+#                                              64-hex width validation) burn
+#                                              the v0.1.77 tag with a
+#                                              perfectly good binary.)
 #
 # Exit 0 only when every phase passes: "CANDIDATE SHAKEOUT PASSED".
 #
@@ -375,6 +387,51 @@ say "Phase E — collections-drift: catalog_collections projection vs T3 (nexus-
 nx catalog backfill-collections --no-dry-run >/dev/null 2>&1 || true
 run_check "collections-drift (no orphaned quarantine/projection rows, nexus-syfes class)" \
   "collections-drift: PASS" nx catalog doctor --collections-drift
+
+# ── Phase F: native-smoke.sh probe set (nexus-l8xnz) ─────────────────────────
+say "Phase F — native-smoke.sh probe set against the CANDIDATE (pre-tag, not release-workflow-only)"
+# nexus-l8xnz: native-smoke.sh's raw-curl probe set (taxonomy/assignments/
+# details' 64-hex doc_id width validation, T1's separate-jOOQ-schema
+# reflection check, memory/plans/taxonomy/chash read/write routes, the
+# bge-768 embed path, the fused-rerank stage) previously ran ONLY inside
+# engine-service-release.yml -- a stale probe fixture (the pre-fix 16-char
+# doc_id literal) burned the v0.1.77 tag on both linux release legs while
+# the binary itself was fine, and this journey (like every other local
+# gate) stayed green because nothing local exercised the script at all.
+#
+# This phase runs the IDENTICAL script byte-for-byte -- only the CALLER is
+# adapted, never the script -- against the SAME candidate binary Phases A-E
+# already proved healthy, pointed at the SAME already-provisioned Postgres
+# (NX_DB_URL / NX_DB_USER / NX_DB_PASS, sourced from pg_credentials at the
+# end of Phase A) instead of native-smoke.sh's own throwaway-docker-pgvector
+# default: this image has no Docker socket (Dockerfile header: "NOT DinD").
+# Pointing native-smoke.sh at an external NX_DB_URL is a FIRST-CLASS,
+# already-documented mode of the script (its own header: "NX_DB_URL / ... --
+# point at an existing Postgres. When unset, a throwaway ... container is
+# started."), not a fork of it -- it self-selects OWN_PG=0 and self-skips
+# its own docker-only voyage-mode-boot phase (that phase needs a resettable
+# database; accepted gap, the voyage/egress-proxy boot path has no other
+# local coverage today). The bge-768 embed section runs FOR REAL (the same
+# model this image bakes in for Phases A/C); the cross-encoder rerank
+# section takes its documented LOUD-degrade path (that model is not baked
+# into this image); the T1 / memory-plans-taxonomy-chash real-Python-client
+# blocks self-skip via native-smoke.sh's own documented WARN (no service/
+# tree or pyproject.toml in this image) -- that exact coverage (routing +
+# backend together, against this SAME candidate through this SAME real
+# client code) is already proven by Phase B's CLI verb matrix above.
+NATIVE_SMOKE_LOG=/tmp/native-smoke.log
+NATIVE_SMOKE_RC=0
+# gap-15 shape: rc captured explicitly via `||`, never left bare under -e --
+# a native-smoke.sh failure must increment FAILS and let this journey reach
+# the Verdict section, not abort the whole rehearsal mid-phase.
+BIN="$SVC_NATIVE_DIR/nexus-service" bash "$HOME/native-smoke.sh" > "$NATIVE_SMOKE_LOG" 2>&1 \
+  || NATIVE_SMOKE_RC=$?
+if [ "$NATIVE_SMOKE_RC" = 0 ] && grep -q "^NATIVE SMOKE PASS$" "$NATIVE_SMOKE_LOG"; then
+  ok "native-smoke.sh probe set (exit 0, NATIVE SMOKE PASS)"
+else
+  bad "native-smoke.sh probe set (exit $NATIVE_SMOKE_RC) -- full log follows for diagnosis:"
+  sed 's/^/       | /' "$NATIVE_SMOKE_LOG"
+fi
 
 # ── Verdict ──────────────────────────────────────────────────────────────────
 say "Verdict"

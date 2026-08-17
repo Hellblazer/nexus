@@ -701,6 +701,12 @@ else
     cp service/target/*.so "$STAGE/native/"
   fi
   cp "$HERE/Dockerfile" "$HERE/rehearse.sh" "$HERE/rehearse_shakeout.sh" "$HERE/seed_legacy.py" "$STAGE/"
+  # nexus-l8xnz: the SAME service/native-smoke.sh the release workflow runs
+  # (byte-for-byte -- callers are adapted, never the script). rehearse_
+  # shakeout.sh's Phase F drives it against this candidate so a stale probe
+  # fixture (the v0.1.77 16-char doc_id class) fails HERE, pre-tag, instead
+  # of only inside engine-service-release.yml.
+  cp service/native-smoke.sh "$STAGE/"
   # lib/ must reach the build context, not just the image: the Dockerfile's
   # COPY reads from HERE-staged files only, so a driver's `source lib/...`
   # silently resolves to nothing without this (nexus-xm0cp's Phase D census
