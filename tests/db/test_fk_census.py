@@ -198,12 +198,22 @@ def test_ground_truth_topic_assignments_doc_id_is_fk_enforced(census_state):
     assert type_rows[0] == "bytea", f"expected topic_assignments.doc_id to be bytea (RDR-194 P3c), got {type_rows[0]!r}"
 
 
-def test_ground_truth_catalog_links_tumbler_columns_have_no_fk(census_state):
-    """nexus-ysrwi: catalog_links.(from_tumbler,to_tumbler) carry NO FK
-    today (277 dangling rows measured live 2026-07-25) — Problem
-    Statement item 5 / Q2."""
+def test_ground_truth_catalog_links_tumbler_columns_are_fk_enforced(census_state):
+    """catalog_links.(from_tumbler,to_tumbler) moved from needs_design (no
+    FK, nexus-ysrwi: 277 dangling rows measured live 2026-07-25, Problem
+    Statement item 5 / Q2) to fk_enforced at RDR-194 Phase P1 (Decision D2,
+    bead nexus-tk070.p1, catalog-032-links-tumbler-fk.xml):
+    fk_catalog_links_from_document / fk_catalog_links_to_document, each
+    ON DELETE CASCADE ON UPDATE CASCADE to nexus.catalog_documents
+    (tenant_id, tumbler), added and VALIDATEd in the same migration walk
+    (catalog-029 three-step shape), so a freshly-migrated schema always
+    sees both VALIDATED, never NOT VALID. Ground truth PRIOR to this phase
+    (needs_design, no FK) is preserved in this test's own git history; do
+    not resurrect it here as a second assertion — same one-ground-truth-
+    per-column discipline as the topic_assignments.doc_id sibling test
+    above."""
     sql = """
-    SELECT count(*)
+    SELECT a.attname, con.conname, con.convalidated
     FROM pg_constraint con
     JOIN pg_class c ON c.oid = con.conrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -211,10 +221,28 @@ def test_ground_truth_catalog_links_tumbler_columns_have_no_fk(census_state):
     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
     WHERE con.contype = 'f'
       AND n.nspname = 'nexus' AND c.relname = 'catalog_links'
-      AND a.attname IN ('from_tumbler', 'to_tumbler');
+      AND a.attname IN ('from_tumbler', 'to_tumbler')
+    ORDER BY a.attname;
     """
     rows = _psql_csv(census_state, sql)
-    assert rows[0] == "0", f"expected catalog_links.(from_tumbler,to_tumbler) to carry NO FK, found {rows[0]}"
+    by_column = {r.split(",")[0]: r.split(",") for r in rows}
+    assert set(by_column) == {"from_tumbler", "to_tumbler"}, (
+        f"expected both from_tumbler and to_tumbler to carry an FK, found columns {sorted(by_column)}"
+    )
+    _, from_conname, from_validated = by_column["from_tumbler"]
+    _, to_conname, to_validated = by_column["to_tumbler"]
+    assert from_conname == "fk_catalog_links_from_document", f"unexpected FK name on from_tumbler: {from_conname!r}"
+    assert to_conname == "fk_catalog_links_to_document", f"unexpected FK name on to_tumbler: {to_conname!r}"
+    assert from_validated == "t", (
+        f"expected fk_catalog_links_from_document to be VALIDATED on a freshly-migrated "
+        f"schema (catalog-029 three-step shape ships all three steps in one walk), "
+        f"convalidated={from_validated!r}"
+    )
+    assert to_validated == "t", (
+        f"expected fk_catalog_links_to_document to be VALIDATED on a freshly-migrated "
+        f"schema (catalog-029 three-step shape ships all three steps in one walk), "
+        f"convalidated={to_validated!r}"
+    )
 
 
 def test_ground_truth_migration_jobs_has_no_tenant_scoped_uniqueness(census_state):

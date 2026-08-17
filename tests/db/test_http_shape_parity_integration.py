@@ -172,8 +172,10 @@ def test_telemetry_consents_and_relevance_shape_parity_live(service, _token_env)
             "telemetry.list_consents",
         )
 
+        from tests._t2_fixture_ops import canonical_chunk_id
+
         http.log_relevance(
-            "shape probe", "chunk-d1", "click",
+            "shape probe", canonical_chunk_id("chunk-d1"), "click",
             session_id="shape-live", collection="knowledge__shape",
         )
         r_rows = http.get_relevance_log(limit=1)

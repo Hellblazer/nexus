@@ -42,9 +42,13 @@ document's own home-collection truth, read by catalog-scoped routing and by
 manifest honest. Consequence for the tests here: the two scenarios that used
 to end in ``IndexRunVerifyRefused`` (the kill control, and the reconcile-
 write-failure fence proof) now run CLEAN, and both were re-derived to pin the
-new contract rather than deleted or weakened. Their ``IndexRunVerifyRefused``
-coverage is preserved by an explicit constructed-missing-chunk control inside
-the kill control; if you touch that control, keep a real refusal exercised.
+new contract rather than deleted or weakened. A real-refusal control is
+preserved inside the kill control via an explicit constructed-missing-chunk
+write; if you touch that control, keep a real refusal exercised. RE-RE-DERIVED
+(2026-08-17, catalog-029-manifest-chunk-fk.xml): that control used to prove
+``IndexRunVerifyRefused`` at ``complete_index_run``; RDR-191's manifest FK now
+refuses the same construction one step earlier, at ``append_manifest_chunks``
+itself (``httpx.HTTPStatusError`` 409) — a stronger fence, not a weaker one.
 
 Drives the PRODUCTION entry point ``nexus.doc_indexer.index_pdf`` (never
 ``_register_or_lookup_doc_id`` directly for the reconciliation proof) against
@@ -86,7 +90,7 @@ from unittest.mock import patch
 import pytest
 from structlog.testing import capture_logs
 
-from nexus.errors import IndexRunVerifyRefused, SourceUriCollectionMismatchError
+from nexus.errors import SourceUriCollectionMismatchError
 
 pytestmark = [pytest.mark.integration]
 
@@ -444,25 +448,31 @@ class TestReconcileOnCollectionRetarget:
         # the_code). Everything above is a green built on the ABSENCE of a
         # refusal, which is worthless if the refusal path is dead. Construct
         # a genuinely missing chunk — a manifest row naming a chash that was
-        # never upserted into T3 — and prove the fence still bites. This
-        # keeps IndexRunVerifyRefused coverage alive on the production
-        # writer after the wedge scenario stopped producing it.
+        # never upserted into T3 — and prove a fence still bites.
+        #
+        # RE-DERIVED (2026-08-17, catalog-029-manifest-chunk-fk.xml): this
+        # used to prove IndexRunVerifyRefused at complete_index_run, one
+        # step AFTER a successful append_manifest_chunks. RDR-191's manifest
+        # FK (nexus.catalog_document_chunks -> nexus.chunks) now refuses the
+        # SAME construction earlier and harder — the append call itself
+        # 409s, since `absent_chash` names no nexus.chunks row at all. That
+        # is a STRONGER fence than the one this control originally pinned,
+        # not a weaker one: the dangling reference can no longer be written
+        # at all, so IndexRunVerifyRefused never gets a chance to fire on
+        # this path. The control's intent is unchanged — prove a real fence
+        # still bites for a genuinely missing chunk — it now bites at
+        # append_manifest_chunks instead of complete_index_run.
+        import httpx
+
         writer = make_catalog_writer()
         try:
             absent_chash = "de" * 32  # 64 hex, never upserted to T3
-            writer.append_manifest_chunks(
-                doc_id, [{"position": 99, "chash": absent_chash}],
-                collection=collection_b,
-            )
-            verify_dirty = _manifest_verify_via_client_reads(reader, doc_id)
-            assert verify_dirty["missing"] == 1, (
-                "the control chunk is not registering as missing, so the "
-                f"refusal below would prove nothing. Got {verify_dirty}"
-            )
-            with pytest.raises(IndexRunVerifyRefused) as excinfo:
-                writer.complete_index_run(doc_id, "killctl-control-hash", 5)
-            assert excinfo.value.missing == 1, excinfo.value
-            assert excinfo.value.doc_id == doc_id, excinfo.value
+            with pytest.raises(httpx.HTTPStatusError) as excinfo:
+                writer.append_manifest_chunks(
+                    doc_id, [{"position": 99, "chash": absent_chash}],
+                    collection=collection_b,
+                )
+            assert excinfo.value.response.status_code == 409, excinfo.value
         finally:
             writer.close()
 

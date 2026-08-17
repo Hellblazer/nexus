@@ -51,6 +51,7 @@ from tests.db.test_http_catalog_integration import (  # noqa: F401, PLC2701 — 
     _JAR,
     _JAVA,
     _PG_CTL,
+    _seed_chunks,
     cat,
     pg_instance,
     service,
@@ -121,6 +122,14 @@ def _manifest_rows(n: int, seed: str) -> list[dict]:
     ]
 
 
+def _seed_manifest_rows(pg_instance: dict, collection: str, rows: list[dict]) -> None:
+    """RDR-194 P3d / catalog-029-manifest-chunk-fk.xml: seed the nexus.chunks
+    rows a manifest write for *rows* needs before the FK-enforcing engine
+    accepts it. See tests/db/test_http_catalog_integration.py's _seed_chunks
+    for the underlying pattern."""
+    _seed_chunks(pg_instance, "default", collection, [r["chash"] for r in rows])
+
+
 # ── Module-scoped fixtures (engine stack imported above; owner is local) ──────
 
 
@@ -147,7 +156,7 @@ def owner(cat) -> str:
 
 class TestUpdateContracts:
     def test_update_re_derives_chunk_count_from_manifest_when_omitted(
-        self, cat, owner,
+        self, cat, owner, pg_instance,
     ) -> None:
         """update() with no chunk_count must refresh it from the manifest count.
 
@@ -163,10 +172,10 @@ class TestUpdateContracts:
             owner, "re-derive doc", content_type="prose",
             file_path=f"{slug}/doc.md", chunk_count=0,
         )
-        cat.append_manifest_chunks(
-            str(tumbler), _manifest_rows(5, f"rederive-{slug}"),
-            collection=f"knowledge__i711w-{slug}__voyage-context-3__v1",
-        )
+        collection = f"knowledge__i711w-{slug}__voyage-context-3__v1"
+        rows = _manifest_rows(5, f"rederive-{slug}")
+        _seed_manifest_rows(pg_instance, collection, rows)
+        cat.append_manifest_chunks(str(tumbler), rows, collection=collection)
         # DE-CONFOUNDING (2026-07-30). The original shape — append 5 rows, then
         # assert 5 after a head_hash-only update — stopped proving anything the
         # moment nexus-e4gel ALSO made append_manifest_chunks fold the count:
@@ -192,7 +201,7 @@ class TestUpdateContracts:
         )
 
     def test_update_respects_caller_supplied_chunk_count(
-        self, cat, owner,
+        self, cat, owner, pg_instance,
     ) -> None:
         """An explicit chunk_count must NOT be re-derived — caller intent wins.
 
@@ -207,10 +216,10 @@ class TestUpdateContracts:
             file_path=f"{slug}/doc.md", chunk_count=0,
         )
         # 3 manifest rows present, but caller wants to assert 99.
-        cat.append_manifest_chunks(
-            str(tumbler), _manifest_rows(3, f"caller-{slug}"),
-            collection=f"knowledge__i711w-{slug}__voyage-context-3__v1",
-        )
+        collection = f"knowledge__i711w-{slug}__voyage-context-3__v1"
+        rows = _manifest_rows(3, f"caller-{slug}")
+        _seed_manifest_rows(pg_instance, collection, rows)
+        cat.append_manifest_chunks(str(tumbler), rows, collection=collection)
         cat.update(tumbler, chunk_count=99)
 
         entry = cat.resolve(tumbler)
@@ -370,7 +379,7 @@ class TestCollectionMoveBibPreservation:
 
 
 class TestDeleteDocumentContracts:
-    def test_delete_cascades_to_document_chunks(self, cat, owner) -> None:
+    def test_delete_cascades_to_document_chunks(self, cat, owner, pg_instance) -> None:
         """delete_document must cascade-purge the document_chunks manifest.
 
         # nexus-i711w.1 item 8
@@ -385,10 +394,10 @@ class TestDeleteDocumentContracts:
             owner, "delete-cascade doc", content_type="prose",
             file_path=f"{slug}/doc.md",
         )
-        cat.append_manifest_chunks(
-            str(tumbler), _manifest_rows(3, f"del-{slug}"),
-            collection=f"knowledge__i711w-{slug}__voyage-context-3__v1",
-        )
+        collection = f"knowledge__i711w-{slug}__voyage-context-3__v1"
+        rows = _manifest_rows(3, f"del-{slug}")
+        _seed_manifest_rows(pg_instance, collection, rows)
+        cat.append_manifest_chunks(str(tumbler), rows, collection=collection)
         assert len(cat.get_manifest(str(tumbler))) == 3  # precondition
 
         assert cat.delete_document(tumbler) is True

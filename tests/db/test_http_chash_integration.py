@@ -359,11 +359,23 @@ class TestChashMVV:
         assert chash_store.is_empty() is True
 
     def test_a2_lookup_unknown_returns_empty(self, chash_store):
-        """a2) lookup for an absent canonical chash returns []; an unmapped
-        32-hex LEGACY reference also answers [] (alias miss is dangling,
-        not an error — RDR-180 Item3)."""
+        """a2) lookup for an absent canonical (64-hex) chash returns [].
+
+        A 32-hex LEGACY reference used to answer [] too (alias miss is
+        dangling, not an error — RDR-180 Item3) back when a chash_alias
+        resolution table existed to miss against. legacy-001-drop-chash-
+        alias.xml (2026-08-16) DROPPED that table outright — there is no
+        resolution route left for a half-digest at all, so the honest
+        contract is now a loud 400 naming the retirement, not a silent
+        empty list masquerading as "not found" for input the service can
+        no longer even attempt to resolve.
+        """
         assert chash_store.lookup(_ch("no-such-content")) == []
-        assert chash_store.lookup("nosuch00000000000000000000000000") == []
+
+        with pytest.raises(httpx.HTTPStatusError) as exc:
+            chash_store.lookup("nosuch00000000000000000000000000")
+        assert exc.value.response.status_code == 400
+        assert "chash_alias" in exc.value.response.text
 
     def test_b_retired_upsert_many_is_410_gone(self, chash_store):
         """b) upsert_many is 410 Gone (nexus-piwya.11)."""

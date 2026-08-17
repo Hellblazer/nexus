@@ -230,8 +230,14 @@ class TestEndToEndPoisonedStore:
             "  VALUES (convert_to('short-poison-id', 'UTF8'), 'default'); "
             "CREATE TABLE IF NOT EXISTS nexus.catalog_document_chunks "
             "  (chash TEXT NOT NULL); "
+            # RDR-194 P3c (taxonomy-011-doc-id-bytea.xml): doc_id is BYTEA in
+            # the real schema — ChashBearingTable("nexus.topic_assignments",
+            # "doc_id", poison=False, bytea=True) — so the debt leg's
+            # anti-join (c.chash = t.doc_id, both against nexus.chunks.chash
+            # BYTEA) needs a BYTEA column here too, or PG rejects the view
+            # with "operator does not exist: bytea = text".
             "CREATE TABLE IF NOT EXISTS nexus.topic_assignments "
-            "  (doc_id TEXT NOT NULL); "
+            "  (doc_id BYTEA NOT NULL); "
             "CREATE TABLE IF NOT EXISTS nexus.frecency "
             "  (chunk_id TEXT NOT NULL); "
             "CREATE TABLE IF NOT EXISTS nexus.relevance_log "
@@ -241,15 +247,27 @@ class TestEndToEndPoisonedStore:
         # connection — SET ROLE from the call above does not carry over),
         # matching production's superuser provisioning path. RLS bypass for
         # nexus_diag comes from its own BYPASSRLS role attribute
-        # (_create_roles), not from view ownership — so this is about
-        # matching the real grant topology, not RLS semantics: post-A6,
-        # nexus_diag gets SELECT on the VIEW only, never direct table
-        # SELECT (the "grants-nexus-diag-2" changeset revokes it once the
-        # view exists).
+        # (_create_roles), not from view ownership.
+        #
+        # bead nexus-lhuhe (2026-08-17, grants-nexus-diag-3.xml) SUPERSEDES
+        # the "SELECT on the VIEW only" shape this comment used to describe:
+        # diag_conformance_view_ddl() now carries WITH (security_invoker =
+        # true) (nexus-i3k3e/Sig-2, same day), which means Postgres checks
+        # the INVOKING role's OWN table privileges for every relation the
+        # view reads — nexus_diag's BYPASSRLS exempts it from row-level
+        # policies, never from ordinary GRANT-based privilege checks. So
+        # nexus_diag needs DIRECT SELECT on every CHASH_BEARING_TABLES
+        # relation too, exactly what grants-nexus-diag-3 grants in
+        # production (named individually, never a schema-wide bulk grant).
         su(diag_conformance_view_ddl())
         su(
             "GRANT USAGE ON SCHEMA nexus TO nexus_diag; "
-            f"GRANT SELECT ON {DIAG_CONFORMANCE_VIEW} TO nexus_diag;"
+            f"GRANT SELECT ON {DIAG_CONFORMANCE_VIEW} TO nexus_diag; "
+            f"GRANT SELECT ON {CHUNKS_TABLE} TO nexus_diag; "
+            "GRANT SELECT ON nexus.catalog_document_chunks TO nexus_diag; "
+            "GRANT SELECT ON nexus.topic_assignments TO nexus_diag; "
+            "GRANT SELECT ON nexus.frecency TO nexus_diag; "
+            "GRANT SELECT ON nexus.relevance_log TO nexus_diag;"
         )
         yield {"port": port, "psql": bins.pg_ctl and str(bins.psql)}
         subprocess.run(

@@ -505,6 +505,41 @@ def _ch(seed: str) -> str:
     return hashlib.sha256(seed.encode()).hexdigest()
 
 
+def _seed_chunks(pg: dict, tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 1024) -> None:
+    """RDR-194 P3d (nexus-tk070.p3d) / RDR-191 (catalog-029-manifest-chunk-fk.xml):
+    seed real ``nexus.chunks`` rows so a ``write_manifest``/``append_manifest_chunks``/
+    ``atomic_manifest_replace`` call for ``(tenant, collection, chash)`` satisfies the
+    ``catalog_document_chunks -> nexus.chunks`` composite FK instead of 409ing with
+    "integrity constraint violation". Mirrors ``tests/test_taxonomy.py``'s
+    ``_seed_chunk``/``_seed_chunks`` house pattern; ``nexus.catalog_collections`` is
+    stubbed first (``chunks_collection_fk``, fk-004-chunks-collection-registry.xml).
+    Both inserts are idempotent (``ON CONFLICT DO NOTHING``) — safe to call more than
+    once for the same ``(collection, chash)``. Superuser ``psql`` (``pg_instance``'s
+    OS-trust-auth user) bypasses FORCE RLS on both tables, so no ``nexus.tenant`` GUC
+    dance is needed. The embedding is a zero-vector — these tests never vector-search
+    the seeded content, they only need the FK's parent row to exist.
+    """
+    if not chash_hexes:
+        return
+    embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
+    vec = "[" + ",".join(["0"] * dim) + "]"
+    values = ", ".join(
+        f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::vector)"
+        for c in chash_hexes
+    )
+    _psql(pg, (
+        f"INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('{tenant}', '{collection}') "
+        "ON CONFLICT DO NOTHING; "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
+        f"VALUES {values} ON CONFLICT DO NOTHING;"
+    ))
+
+
+def _seed_chunk(pg: dict, tenant: str, collection: str, chash_hex: str, *, dim: int = 1024) -> None:
+    """Single-chash convenience wrapper for :func:`_seed_chunks`."""
+    _seed_chunks(pg, tenant, collection, [chash_hex], dim=dim)
+
+
 class TestCatalogServiceHealth:
     def test_stats_endpoint_reachable(self, cat) -> None:
         s = cat.stats()
@@ -731,7 +766,7 @@ class TestManifest:
     """
 
     @pytest.fixture(scope="class")
-    def doc_with_manifest(self, cat):
+    def doc_with_manifest(self, cat, pg_instance):
         t = cat.register(
             "1.1",
             "Manifest Test Doc",
@@ -743,6 +778,10 @@ class TestManifest:
             {"position": 1, "chash": _ch("chunk_hash_010000000000000000000"), "line_start": 11, "line_end": 20},
             {"position": 2, "chash": _ch("chunk_hash_020000000000000000000"), "line_start": 21, "line_end": 30},
         ]
+        _seed_chunks(
+            pg_instance, "default", "knowledge__test__voyage-context-3__v1",
+            [c["chash"] for c in chunks],
+        )
         cat.write_manifest(str(t), chunks, collection="knowledge__test__voyage-context-3__v1")
         return t, chunks
 
@@ -761,8 +800,12 @@ class TestManifest:
         assert _ch("chunk_hash_000000000000000000000") in chashes
         assert len(chashes) == 3
 
-    def test_append_manifest_chunks(self, cat, doc_with_manifest) -> None:
+    def test_append_manifest_chunks(self, cat, pg_instance, doc_with_manifest) -> None:
         t, _ = doc_with_manifest
+        _seed_chunk(
+            pg_instance, "default", "knowledge__test__voyage-context-3__v1",
+            _ch("chunk_hash_030000000000000000000"),
+        )
         cat.append_manifest_chunks(str(t), [
             {"position": 3, "chash": _ch("chunk_hash_030000000000000000000")},
         ], collection="knowledge__test__voyage-context-3__v1")
@@ -816,12 +859,16 @@ class TestManifest:
         prefix_form = stored_chash[:32]
         assert cat.docs_for_chashes([prefix_form]) == {}
 
-    def test_purge_manifest(self, cat) -> None:
+    def test_purge_manifest(self, cat, pg_instance) -> None:
         t = cat.register(
             "1.1",
             "Purge Manifest Test",
             content_type="paper",
             source_uri="file:///manifest/purge.md",
+        )
+        _seed_chunk(
+            pg_instance, "default", "knowledge__test__voyage-context-3__v1",
+            _ch("purge_hash_000000000000000000000"),
         )
         cat.write_manifest(str(t), [{"position": 0, "chash": _ch("purge_hash_000000000000000000000")}], collection="knowledge__test__voyage-context-3__v1")
         before = cat.get_manifest(str(t))
@@ -830,13 +877,21 @@ class TestManifest:
         after = cat.get_manifest(str(t))
         assert len(after) == 0
 
-    def test_atomic_manifest_replace(self, cat) -> None:
+    def test_atomic_manifest_replace(self, cat, pg_instance) -> None:
         """atomic_manifest_replace uses /manifest/write (delete+insert)."""
         t = cat.register(
             "1.1",
             "Atomic Replace Test",
             content_type="paper",
             source_uri="file:///manifest/atomic.md",
+        )
+        _seed_chunks(
+            pg_instance, "default", "knowledge__test__voyage-context-3__v1",
+            [
+                _ch("old_hash000000000000000000000000"),
+                _ch("new_hash_00000000000000000000000"),
+                _ch("new_hash_01000000000000000000000"),
+            ],
         )
         cat.write_manifest(str(t), [{"position": 0, "chash": _ch("old_hash000000000000000000000000")}], collection="knowledge__test__voyage-context-3__v1")
         cat.atomic_manifest_replace(str(t), [
@@ -861,11 +916,15 @@ class TestPruneUnionGuard:
     the document under prune must NOT.
     """
 
-    def test_shared_chash_kept_exclusive_chash_orphaned(self, cat) -> None:
+    def test_shared_chash_kept_exclusive_chash_orphaned(self, cat, pg_instance) -> None:
         from nexus.indexer_utils import orphaned_chashes
 
         shared = _ch("tp8yk_shared_chash_0000000000000000")
         exclusive_a = _ch("tp8yk_exclusive_a_chash_00000000000")
+        _seed_chunks(
+            pg_instance, "default", "knowledge__test__voyage-context-3__v1",
+            [shared, exclusive_a],
+        )
 
         doc_a = cat.register(
             "1.1", "tp8yk Union Guard Doc A", content_type="paper",
@@ -1538,7 +1597,7 @@ class TestResyncChunkCount:
     if resync_chunk_count_cache is still a no-op.
     """
 
-    def test_resync_corrects_wrong_chunk_count(self, cat) -> None:
+    def test_resync_corrects_wrong_chunk_count(self, cat, pg_instance) -> None:
         """push wrong chunk_count, write 3-chunk manifest, resync, assert corrected to 3."""
         # Register a doc with a deliberately wrong chunk_count
         tumbler = cat.register(
@@ -1555,6 +1614,14 @@ class TestResyncChunkCount:
             f"precondition: chunk_count must be 99 before manifest write; got {entry.chunk_count}"
         )
 
+        _seed_chunks(
+            pg_instance, "default", "knowledge__test__voyage-context-3__v1",
+            [
+                _ch("resync_chk_aaa000000000000000000"),
+                _ch("resync_chk_bbb111000000000000000"),
+                _ch("resync_chk_ccc222000000000000000"),
+            ],
+        )
         # Write a 3-chunk manifest
         cat.write_manifest(str(tumbler), [
             {"position": 0, "chash": _ch("resync_chk_aaa000000000000000000"), "chunk_index": 0},
@@ -1647,11 +1714,61 @@ class TestServiceModeIndexMVV:
         monkeypatch.setenv("NX_SERVICE_PORT", m.group(1))
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)
         monkeypatch.setenv("NX_LOCAL", "1")  # T3 + embeddings local
+        monkeypatch.setenv("NX_SERVICE_URL", base_url)
 
         local_t3 = T3Database(
             _client=make_vector_test_client(),
             _ef_override=DefaultEmbeddingFunction(),
         )
+
+        # RDR-194 P3d / catalog-029-manifest-chunk-fk.xml: local_t3 is an
+        # in-memory test double — its chunks never reach the real engine's
+        # nexus.chunks table the running (live-service) catalog's
+        # manifest-chunk FK checks against, so the manifest-write hook
+        # that fires moments after each upsert (SAME index_repository()
+        # call, chunk-then-manifest ordering) would 409 per-doc and be
+        # silently swallowed (manifest_write_batch_hook is best-effort:
+        # any failure logged, never propagated). Mirror every local_t3
+        # write into the real engine SYNCHRONOUSLY, as it happens — a
+        # zero-vector FK-satisfying stub (tests/_catalog_fixture_ops.
+        # seed_manifest_chunks's idiom), landing before the manifest hook
+        # fires in the SAME call — instead of a second full index_
+        # repository() pass, which would additionally trip the
+        # nexus-7vuw legacy-rename migration this test does not otherwise
+        # exercise (it indexes ONCE, by design). NX_SERVICE_URL is
+        # exported explicitly (above) rather than relying on
+        # HttpVectorClient's env_host_port_url()+lease fallback chain —
+        # this box's own live supervisor install can otherwise satisfy
+        # that fallback with an unrelated real endpoint.
+        from tests._catalog_fixture_ops import seed_manifest_chunks
+
+        def _mirror_to_engine(collection: str, ids: list) -> None:
+            if not ids:
+                return
+            seed_manifest_chunks(collection, list(ids))
+
+        # NOTE the two methods' first-parameter names genuinely differ
+        # (T3Database.upsert_chunks's is "collection",
+        # upsert_chunks_with_embeddings's is "collection_name") — callers
+        # in the indexer pass them as keywords by those exact names, so
+        # the wrappers must match verbatim rather than accept either
+        # positionally.
+        _orig_upsert_chunks = local_t3.upsert_chunks
+        _orig_upsert_chunks_with_embeddings = local_t3.upsert_chunks_with_embeddings
+
+        def _upsert_chunks_mirrored(collection, ids, *a, **kw):  # noqa: ANN001, ANN202
+            result = _orig_upsert_chunks(collection, ids, *a, **kw)
+            _mirror_to_engine(collection, ids)
+            return result
+
+        def _upsert_chunks_with_embeddings_mirrored(collection_name, ids, *a, **kw):  # noqa: ANN001, ANN202
+            result = _orig_upsert_chunks_with_embeddings(collection_name, ids, *a, **kw)
+            _mirror_to_engine(collection_name, ids)
+            return result
+
+        local_t3.upsert_chunks = _upsert_chunks_mirrored
+        local_t3.upsert_chunks_with_embeddings = _upsert_chunks_with_embeddings_mirrored
+
         registry = RepoRegistry(fixture_repo.parent / "repos.json")
         registry.add(fixture_repo)
 
@@ -1673,16 +1790,21 @@ class TestServiceModeIndexMVV:
         mock_voyage.embed.side_effect = fake_embed
         mock_voyage.contextualized_embed.side_effect = fake_cce
 
-        def fake_credential(key):  # noqa: ANN001, ANN202
-            # service endpoint must resolve from the NX_SERVICE_* env (the live fixture),
-            # NOT this stub — returning a non-URL here poisons base_url resolution. Only
-            # the embedding/API key is stubbed.
-            if key in ("service_url", "service_token"):
-                return None
-            return "test-key"
+        # tests/conftest.py's canonical get_credential stub (nexus-aqbrk):
+        # service_url/service_token/mint_token pass through to the REAL
+        # resolver (so the live-fixture NX_SERVICE_* env and the "no mint_
+        # token configured" default both survive the mock) while every
+        # other key (the embedder routing key this test actually cares
+        # about) gets the blanket "test-key" stub. service_token passing
+        # through — not just service_url — is what makes the real-chunk
+        # seeding step below (a bare HttpVectorClient()) resolvable; a
+        # hand-rolled stub returning None for service_token has no
+        # env-based fallback in HttpVectorClient's endpoint resolver
+        # (get_credential + lease-only for the token half).
+        from tests.conftest import fake_credentials
 
         with patch("nexus.db.make_t3", return_value=local_t3), \
-             patch("nexus.config.get_credential", side_effect=fake_credential), \
+             patch("nexus.config.get_credential", side_effect=fake_credentials()), \
              patch("voyageai.Client", return_value=mock_voyage):
             index_repository(fixture_repo, registry, force=True)
 

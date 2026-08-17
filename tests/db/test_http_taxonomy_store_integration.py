@@ -102,6 +102,58 @@ pytestmark = [
 ]
 
 
+# ── FK fixture seed helper (RDR-194 P3d, nexus-tk070.p3d) ─────────────────────
+#
+# taxonomy-012-doc-id-chunk-fk.xml adds a composite FK from
+# nexus.topic_assignments (tenant_id, source_collection, doc_id) to
+# nexus.chunks (tenant_id, collection, chash). Every assign_topic /
+# import_assignment / persist_discovered_topics / persist_rebuild_topics call
+# in this module that inserts a topic_assignments row for a fabricated
+# doc_id/chash must seed a matching nexus.chunks row FIRST or the real Java
+# service 409s with "integrity constraint violation". Mirrors
+# tests/test_taxonomy.py's _seed_chunk/_seed_chunks_for_tenant house pattern.
+
+
+def _psql(pg: dict, sql: str) -> None:
+    proc = subprocess.run(
+        [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg["port"]),
+         "-U", pg["user"], "-d", pg["dbname"],
+         "-v", "ON_ERROR_STOP=1", "-c", sql],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"psql failed (rc={proc.returncode}):\nstdout={proc.stdout}\nstderr={proc.stderr}"
+        )
+
+
+def _seed_chunks(pg: dict, tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 384) -> None:
+    """Seed real nexus.chunks rows (+ their catalog_collections parent) so a
+    topic_assignments insert for (tenant, collection, chash) satisfies
+    taxonomy-012-doc-id-chunk-fk.xml's composite FK. Idempotent
+    (ON CONFLICT DO NOTHING). Superuser psql (pg_instance's OS-trust-auth
+    user) bypasses FORCE RLS on both tables."""
+    if not chash_hexes:
+        return
+    embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
+    vec = "[" + ",".join(["0"] * dim) + "]"
+    values = ", ".join(
+        f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::vector)"
+        for c in chash_hexes
+    )
+    _psql(pg, (
+        f"INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('{tenant}', '{collection}') "
+        "ON CONFLICT DO NOTHING; "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
+        f"VALUES {values} ON CONFLICT DO NOTHING;"
+    ))
+
+
+def _seed_chunk(pg: dict, tenant: str, collection: str, chash_hex: str, *, dim: int = 384) -> None:
+    """Single-chash convenience wrapper for :func:`_seed_chunks`."""
+    _seed_chunks(pg, tenant, collection, [chash_hex], dim=dim)
+
+
 # ── Bootstrap SQL for taxonomy tables ─────────────────────────────────────────
 # Mirrors taxonomy-001-baseline.xml changeset, applied manually for the hermetic test.
 # Run as two separate psql invocations:
@@ -422,7 +474,7 @@ def _seed_catalog_docs(pg_instance, service):
 class TestTaxonomyMVV:
     """Minimum viable verification (MVV) for the taxonomy service (bead nexus-gmiaf.14)."""
 
-    def test_a_assign_and_get_docs(self, taxonomy_store) -> None:
+    def test_a_assign_and_get_docs(self, taxonomy_store, pg_instance) -> None:
         """a) assign_topic -> get_topic_doc_ids round-trip with real Postgres."""
         # Import a topic first (ETL-style)
         topic_id = taxonomy_store.import_topic(
@@ -439,6 +491,7 @@ class TestTaxonomyMVV:
         assert topic_id == 1001
 
         # Assign a doc
+        _seed_chunk(pg_instance, "default", "knowledge__papers", canonical_chunk_id("doc-inttest-a1"))
         taxonomy_store.assign_topic(
             canonical_chunk_id("doc-inttest-a1"),
             1001,
@@ -450,7 +503,7 @@ class TestTaxonomyMVV:
         docs = taxonomy_store.get_topic_doc_ids(1001, limit=10)
         assert canonical_chunk_id("doc-inttest-a1") in docs
 
-    def test_b_merge_topics(self, taxonomy_store) -> None:
+    def test_b_merge_topics(self, taxonomy_store, pg_instance) -> None:
         """b) merge_topics: source removed, returns collection for chroma cleanup."""
         taxonomy_store.import_topic(
             src_id=2001,
@@ -474,6 +527,7 @@ class TestTaxonomyMVV:
             review_status="pending",
             terms=None,
         )
+        _seed_chunk(pg_instance, "default", "knowledge__papers", canonical_chunk_id("doc-merge-src"))
         taxonomy_store.assign_topic(
             canonical_chunk_id("doc-merge-src"), 2001, "hdbscan",
             source_collection="knowledge__papers",
@@ -543,7 +597,7 @@ class TestTaxonomyMVV:
         assert t["centroid_hash"] == "abc123"
         assert t["review_status"] == "accepted"
 
-    def test_f_etl_fidelity_assignment_similarity(self, taxonomy_store) -> None:
+    def test_f_etl_fidelity_assignment_similarity(self, taxonomy_store, pg_instance) -> None:
         """f) import_assignment preserves similarity verbatim."""
         taxonomy_store.import_topic(
             src_id=6001,
@@ -556,6 +610,7 @@ class TestTaxonomyMVV:
             review_status="pending",
             terms=None,
         )
+        _seed_chunk(pg_instance, "default", "knowledge__papers", canonical_chunk_id("doc-fidelity-sim-inttest"))
         taxonomy_store.import_assignment(
             doc_id=canonical_chunk_id("doc-fidelity-sim-inttest"),
             topic_id=6001,
@@ -567,7 +622,7 @@ class TestTaxonomyMVV:
         docs = taxonomy_store.get_topic_doc_ids(6001, limit=10)
         assert canonical_chunk_id("doc-fidelity-sim-inttest") in docs
 
-    def test_f2_import_assignment_applied_when_doc_present(self, taxonomy_store) -> None:
+    def test_f2_import_assignment_applied_when_doc_present(self, taxonomy_store, pg_instance) -> None:
         """REGRESSION (nexus-0a7xc): import_assignment returns True when the referenced
         catalog doc exists (seeded), and the row is queryable."""
         taxonomy_store.import_topic(
@@ -575,6 +630,7 @@ class TestTaxonomyMVV:
             collection="knowledge__papers", centroid_hash=None, doc_count=1,
             created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
         )
+        _seed_chunk(pg_instance, "default", "knowledge__papers", canonical_chunk_id("analytic-doc1"))
         applied = taxonomy_store.import_assignment(
             doc_id=canonical_chunk_id("analytic-doc1"), topic_id=6002, assigned_by="hdbscan",
             similarity=0.5, assigned_at=None, source_collection="knowledge__papers",
@@ -582,7 +638,7 @@ class TestTaxonomyMVV:
         assert applied is True
         assert canonical_chunk_id("analytic-doc1") in taxonomy_store.get_topic_doc_ids(6002, limit=10)
 
-    def test_f3_import_assignment_chash_doc_id_no_catalog_fk(self, taxonomy_store) -> None:
+    def test_f3_import_assignment_chash_doc_id_no_catalog_fk(self, taxonomy_store, pg_instance) -> None:
         """REGRESSION (nexus-sa14p): topic_assignments.doc_id is a CHUNK chash, not a
         document tumbler. After dropping fk_ta_catalog_doc, an assignment whose doc_id
         is not a catalog tumbler (the normal case — chashes never match tumblers) imports
@@ -595,6 +651,7 @@ class TestTaxonomyMVV:
         )
         # A realistic chunk chash — not seeded in catalog_documents, never a tumbler.
         chash = canonical_chunk_id("f3-chash-inttest")
+        _seed_chunk(pg_instance, "default", "knowledge__papers", chash)
         applied = taxonomy_store.import_assignment(
             doc_id=chash, topic_id=6003, assigned_by="hdbscan",
             similarity=0.5, assigned_at=None, source_collection="knowledge__papers",
@@ -653,7 +710,7 @@ class TestAnalyticalMethods:
     _T_B1 = 9003
 
     @pytest.fixture(autouse=True, scope="class")
-    def seed_data(self, taxonomy_store):
+    def seed_data(self, taxonomy_store, pg_instance):
         """Seed topics and assignments for analytical method tests."""
         # Topic A1 in collection A
         taxonomy_store.import_topic(
@@ -696,6 +753,10 @@ class TestAnalyticalMethods:
         # doc2 projects from COLL_B into T_A2
         # doc3 projects from COLL_A into T_B1
         # This creates cross-collection co-occurrence between A1↔B1, A2↔B1
+        _seed_chunks(pg_instance, "default", self._COLL_B, [
+            canonical_chunk_id("analytic-doc1"), canonical_chunk_id("analytic-doc2"),
+        ])
+        _seed_chunk(pg_instance, "default", self._COLL_A, canonical_chunk_id("analytic-doc3"))
         taxonomy_store.import_assignment(
             doc_id=canonical_chunk_id("analytic-doc1"), topic_id=self._T_A1,
             assigned_by="projection", similarity=0.88,
@@ -789,7 +850,7 @@ class TestAnalyticalMethods:
         count = taxonomy_store.refresh_projection_links()
         assert isinstance(count, int), "refresh_projection_links must return int"
 
-    def test_p_persist_split(self, taxonomy_store) -> None:
+    def test_p_persist_split(self, taxonomy_store, pg_instance) -> None:
         """p) persist_split inserts children and zeroes parent doc_count."""
         # Import a topic to split
         taxonomy_store.import_topic(
@@ -804,6 +865,9 @@ class TestAnalyticalMethods:
             terms=None,
         )
         # Assign some docs
+        _seed_chunks(pg_instance, "default", self._COLL_A, [
+            canonical_chunk_id("split-doc1"), canonical_chunk_id("split-doc2"),
+        ])
         taxonomy_store.import_assignment(
             doc_id=canonical_chunk_id("split-doc1"), topic_id=9900,
             assigned_by="hdbscan", similarity=None,
@@ -840,7 +904,7 @@ class TestAnalyticalMethods:
             f"Parent doc_count should be 0 after split, got {parent['doc_count']}"
         )
 
-    def test_q_assigned_by_never_downgrades_projection(self, taxonomy_store) -> None:
+    def test_q_assigned_by_never_downgrades_projection(self, taxonomy_store, pg_instance) -> None:
         """q) re-importing an assignment never downgrades 'projection' to 'hdbscan'."""
         # Import topic first
         taxonomy_store.import_topic(
@@ -855,6 +919,7 @@ class TestAnalyticalMethods:
             terms=None,
         )
         # Initial import as 'projection'
+        _seed_chunk(pg_instance, "default", self._COLL_B, canonical_chunk_id("assigned-by-doc1"))
         taxonomy_store.import_assignment(
             doc_id=canonical_chunk_id("assigned-by-doc1"),
             topic_id=9801,
@@ -904,7 +969,10 @@ class TestServiceBackedPersist:
 
     _COLL = "knowledge__1di3r-persist-inttest"
 
-    def test_persist_discovered_returns_ids_and_guards(self, taxonomy_store) -> None:
+    def test_persist_discovered_returns_ids_and_guards(self, taxonomy_store, pg_instance) -> None:
+        _seed_chunks(pg_instance, "default", self._COLL, [
+            canonical_chunk_id("pdi-d1"), canonical_chunk_id("pdi-d2"),
+        ])
         specs = [
             {"label": "pdi-0", "doc_count": 2, "terms": "[]", "assigned_by": "hdbscan",
              "doc_ids": [canonical_chunk_id("pdi-d1"), canonical_chunk_id("pdi-d2")]},
@@ -919,8 +987,11 @@ class TestServiceBackedPersist:
         # existing-topics guard: second call is a no-op
         assert taxonomy_store.persist_discovered_topics(self._COLL, specs) == []
 
-    def test_persist_rebuild_replace_and_manual(self, taxonomy_store) -> None:
+    def test_persist_rebuild_replace_and_manual(self, taxonomy_store, pg_instance) -> None:
         coll = "knowledge__1di3r-rebuild-inttest"  # inline, isolated (re-run safe)
+        _seed_chunks(pg_instance, "default", coll, [
+            canonical_chunk_id("prb1"), canonical_chunk_id("prb2"), canonical_chunk_id("prb-manual"),
+        ])
         taxonomy_store.persist_discovered_topics(
             coll, [{"label": "prb-old", "doc_count": 1, "terms": "[]",
                     "assigned_by": "hdbscan", "doc_ids": [canonical_chunk_id("prb1")]}])
@@ -942,10 +1013,13 @@ class TestServiceBackedPersist:
             [canonical_chunk_id("prb-manual")]
         ) == {canonical_chunk_id("prb-manual"): ids[1]}
 
-    def test_old_state_t2_half_shape(self, taxonomy_store) -> None:
+    def test_old_state_t2_half_shape(self, taxonomy_store, pg_instance) -> None:
         # Directly exercise the GET /rebuild/old_state endpoint (T2-read half) —
         # the centroid half is composed Python-side and is unit-tested separately.
         coll = "knowledge__1di3r-oldstate-inttest"
+        _seed_chunks(pg_instance, "default", coll, [
+            canonical_chunk_id("os-d1"), canonical_chunk_id("os-manual"),
+        ])
         ids = taxonomy_store.persist_discovered_topics(
             coll, [{"label": "os-t", "doc_count": 1, "terms": "[]",
                     "assigned_by": "hdbscan", "doc_ids": [canonical_chunk_id("os-d1")]}])
@@ -959,8 +1033,9 @@ class TestServiceBackedPersist:
         manual = {r["doc_id"]: r["topic_id"] for r in raw["manual_assignments"]}
         assert manual == {canonical_chunk_id("os-manual"): ids[0]}
 
-    def test_purge_collection_count_dict(self, taxonomy_store) -> None:
+    def test_purge_collection_count_dict(self, taxonomy_store, pg_instance) -> None:
         coll = "knowledge__1di3r-purge-inttest"
+        _seed_chunk(pg_instance, "default", coll, canonical_chunk_id("pg-d1"))
         ids = taxonomy_store.persist_discovered_topics(
             coll, [{"label": "pg-t", "doc_count": 1, "terms": "[]",
                     "assigned_by": "hdbscan", "doc_ids": [canonical_chunk_id("pg-d1")]}])

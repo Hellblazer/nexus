@@ -81,7 +81,10 @@ def _seed_owned_note(client, content: str, title: str) -> str:
         title=title, doc_id=chash, collection_name=_COLLECTION,
     )
     assert created is True
-    store_put_manifest_direct(tumbler, manifest_metadatas, collection=_COLLECTION)
+    # RDR-194 P3d / catalog-029-manifest-chunk-fk.xml: the T3 chunk must
+    # land BEFORE the manifest write below (chunk-then-manifest, matching
+    # production's real hook ordering) -- the FK now refuses a manifest row
+    # naming a chash with no matching nexus.chunks row.
     client.upsert_chunks_with_embeddings(
         _COLLECTION,
         ids=[chash],
@@ -89,6 +92,7 @@ def _seed_owned_note(client, content: str, title: str) -> str:
         embeddings=[],
         metadatas=[{"title": title, "chunk_text_hash": chash, "doc_id": tumbler}],
     )
+    store_put_manifest_direct(tumbler, manifest_metadatas, collection=_COLLECTION)
     return chash
 
 

@@ -75,6 +75,7 @@ from tests.db.test_http_catalog_integration import (  # noqa: F401, PLC2701 — 
     _JAR,
     _JAVA,
     _PG_CTL,
+    _seed_chunk,
     cat,
     pg_instance,
     service,
@@ -123,7 +124,7 @@ class TestT3GcTombstoneSafety:
         return self._OWNER_PREFIX
 
     # nexus-i711w.1 item 13 -> nexus-mqd6t (BUG 1)
-    def test_chashes_for_collection_excludes_tombstoned_doc(self, cat) -> None:
+    def test_chashes_for_collection_excludes_tombstoned_doc(self, cat, pg_instance) -> None:
         owner = self._owner(cat)
         coll = "code__i711w-gc1__voyage-code-3__v1"
         t = cat.register(
@@ -134,6 +135,7 @@ class TestT3GcTombstoneSafety:
             source_uri="file:///i711w/gc1/doc.md",
         )
         h = _ch("i711w-gc1-chunk")
+        _seed_chunk(pg_instance, "default", coll, h)
         cat.write_manifest(str(t), [{"chash": h, "position": 0}], collection=coll)
 
         # NON-VACUITY guard: the chunk is visible while the doc is live.
@@ -148,7 +150,7 @@ class TestT3GcTombstoneSafety:
         assert h not in cat.chashes_for_collection(coll)
 
     # nexus-i711w.1 item 13 -> nexus-mqd6t (BUG 2)
-    def test_docs_for_chashes_excludes_tombstoned_doc(self, cat) -> None:
+    def test_docs_for_chashes_excludes_tombstoned_doc(self, cat, pg_instance) -> None:
         owner = self._owner(cat)
         coll = "code__i711w-gc2__voyage-code-3__v1"
         t = cat.register(
@@ -159,6 +161,7 @@ class TestT3GcTombstoneSafety:
             source_uri="file:///i711w/gc2/doc.md",
         )
         h = _ch("i711w-gc2-chunk")
+        _seed_chunk(pg_instance, "default", coll, h)
         cat.write_manifest(str(t), [{"chash": h, "position": 0}], collection=coll)
 
         # NON-VACUITY guard: while live, the chash attributes to the doc.
@@ -175,7 +178,7 @@ class TestT3GcTombstoneSafety:
 
     # nexus-i711w.1 item 13 -> nexus-mqd6t (VERB level)
     def test_t3_gc_verb_collects_tombstoned_docs_chunks(
-        self, cat, service, monkeypatch: pytest.MonkeyPatch,
+        self, cat, service, pg_instance, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """VERB-LEVEL twin of the two method-level pins above.
 
@@ -239,6 +242,7 @@ class TestT3GcTombstoneSafety:
             source_uri="file:///i711w/gc3/live.md",
         )
         h_live = _ch("i711w-gc3-live-chunk")
+        _seed_chunk(pg_instance, "default", coll, h_live)
         cat.write_manifest(str(t_live), [{"chash": h_live, "position": 0}], collection=coll)
 
         # Doomed doc: tombstoned below; its chunk is the GC subject.
@@ -250,6 +254,7 @@ class TestT3GcTombstoneSafety:
             source_uri="file:///i711w/gc3/dead.md",
         )
         h_dead = _ch("i711w-gc3-dead-chunk")
+        _seed_chunk(pg_instance, "default", coll, h_dead)
         cat.write_manifest(str(t_dead), [{"chash": h_dead, "position": 0}], collection=coll)
 
         # Real T3Database over the canonical vector substitute. Both chunks

@@ -66,12 +66,15 @@ def _seed_ttl_lapsed_note(client, cat, content: str, title: str) -> str:
     )
     assert created is True
 
-    # Real production manifest write (put_cmd's exact call).
-    store_put_manifest_direct(tumbler, manifest_metadatas, collection=_COLLECTION)
-
     # The T3 chunk itself, with TTL-expired metadata baked in directly --
     # db.put() always stamps indexed_at=now with no override, so a test
     # cannot produce an already-expired row through it without sleeping.
+    # RDR-194 P3d / catalog-029-manifest-chunk-fk.xml: this MUST land before
+    # the manifest write below -- the FK now refuses a manifest row naming a
+    # chash with no matching nexus.chunks row, so the chunk-before-manifest
+    # order production's real hook already follows (upsert_chunks, THEN the
+    # post-store manifest hook) has to hold here too, not just be produced
+    # in some order that happened to work before the FK existed.
     client.upsert_chunks_with_embeddings(
         _COLLECTION,
         ids=[chash],
@@ -85,6 +88,9 @@ def _seed_ttl_lapsed_note(client, cat, content: str, title: str) -> str:
             "doc_id": tumbler,
         }],
     )
+
+    # Real production manifest write (put_cmd's exact call).
+    store_put_manifest_direct(tumbler, manifest_metadatas, collection=_COLLECTION)
     return chash
 
 
@@ -246,6 +252,20 @@ def test_expire_does_not_reap_a_twin_owned_by_a_different_collection(t2_service_
     twin_tumbler = cat.register(
         owner, twin_title, content_type="knowledge",
         physical_collection=other_collection, meta={"doc_id": chash},
+    )
+    # RDR-194 P3d / catalog-029-manifest-chunk-fk.xml: the FK keys on
+    # (tenant, collection, chash) -- the T3 chunk above lives under
+    # _COLLECTION, not other_collection, so the twin's manifest row needs
+    # its OWN nexus.chunks row under other_collection before the append
+    # below. Same content/chash, a second physical copy under the twin's
+    # own collection -- exactly what a real cross-collection duplicate
+    # would have indexed.
+    client.upsert_chunks_with_embeddings(
+        other_collection,
+        ids=[chash],
+        documents=[content],
+        embeddings=[],
+        metadatas=[{"title": twin_title, "chunk_text_hash": chash}],
     )
     cat.append_manifest_chunks(
         str(twin_tumbler), [{"chash": chash, "position": 0}], collection=other_collection,
