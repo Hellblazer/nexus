@@ -6,6 +6,68 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.8.0] - 2026-08-17
+
+Paired with `engine-service-v0.1.79` (`REQUIRED_ENGINE_VERSION` → 0.1.79). The
+engine walk was rehearsed twice against a forked production cluster before
+this release: migration CLEAN in ~58s over 479k rows, diagnostic surface
+verified restored. The deploy fires at this release's tag push.
+
+### The legacy-identity deletion arc (nexus-lgdel)
+
+- **`nexus.chash_alias` is DROPPED** with every resolution path: the rekey
+  engine and its `/v1/remap/rekey` endpoints, the client `chash_rekey`
+  upgrade rung (the ladder is now empty and says so out loud), the legacy
+  32-hex acceptance arms, the chash-window rehearsal leg, and
+  `nx doctor --check-t3-legacy-metadata`. Legacy-width telemetry rows are
+  deleted with regrowth CHECKs; `POST /v1/chash/delete_collection` is 410.
+  Nothing is preserved; migrations warn loudly and delete — no data state
+  can wedge a user's upgrade walk.
+
+### RDR-194: topic_assignments becomes fully enforced (P1–P3d)
+
+- `catalog_links` endpoint FKs (dangling links deleted+counted;
+  `nx doctor --check-dangling-links` retired — the FK makes the state
+  unreachable). `chash_remap.new_chash` → bytea.
+- `topic_assignments.source_collection` backfilled, remainder deleted
+  (counted), `NOT NULL`; every writer — engine and client — now sends the
+  real collection. `nx taxonomy assign` validates 64-hex doc ids and
+  resolves the collection from the topic itself.
+- `topic_assignments.doc_id` → bytea; composite FK to `nexus.chunks` with a
+  resolvable-only promote anti-join (a conformant-but-unpromoted row stays
+  staged and counted — never a tenant-wide abort). Staging finalize converts
+  its non-conformant hard-throw to a counted, named exclusion.
+- The diag conformance view is now Liquibase-owned (`security_invoker`) and
+  its grants converge on every boot — the strip that left the diagnostic
+  role with zero grants post-migration was found by the fork rehearsal and
+  is pinned by a privilege-proof test.
+
+### Data tokens
+
+- Client-side self-minting (mint-locked credential → short-TTL data
+  tokens), cross-process lease cache, process-wide rate brake, and a
+  non-blocking per-key flock guard on mint-on-miss (derived two-wall wait
+  ceiling; 8-way cold-start fan-out converges to exactly one mint).
+
+### Plugin (goes live with this pin advance)
+
+- SessionStart/SubagentStart T2 context injection reads the engine over
+  HTTP — the shipped hook had been reading a SQLite file frozen at
+  2026-07-02 (absent entirely on fresh installs) and now fails loud on
+  unreachable-vs-stale instead of silently serving June. MCP `store_put`
+  gains agent/session attribution, and agent guidance passes it.
+
+### Also
+
+- catalog-030 client half: the manifest-integrity apparatus the manifest
+  FK obsoleted is retired (`manifest_verify_all` and friends).
+- `nx t3 backfill-manifest --only-gapped`, chash-keyed manifest backfill,
+  reconcile-stale store_put-origin labeling, ghost census on verify.
+- `nexus_svc` is NOINHERIT in every mode.
+- Release gates hardened: `--shakeout` runs `native-smoke.sh` locally
+  (Phase F — a stale release-only probe can no longer burn a tag), and the
+  local-service gate's smoke-leg count is corrected.
+
 ## [7.7.0] - 2026-08-14
 
 Paired release with **engine-service-v0.1.75** (cut, shakeout-gated,
