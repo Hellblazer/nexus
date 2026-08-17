@@ -120,7 +120,7 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # suite when it drifts. Following the old wording blocked the 7.6.0 release
 # battery (2026-08-10). A prose comment that contradicts a mechanical test
 # loses to the test.
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.75}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.79}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
@@ -147,8 +147,8 @@ COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.75}"
 # v0.1.71 while these two correctly STAYED at 7.5.0 / v0.1.69 — 7.5.0 being
 # the previous release and v0.1.69 what it pinned. The guard below does not
 # catch this case either; only a human/agent check does.
-PREV_RELEASE="${NEXUS_PREV_RELEASE:-7.6.1}"
-PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.71}"
+PREV_RELEASE="${NEXUS_PREV_RELEASE:-7.7.0}"
+PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.75}"
 # nexus-86mx2 (2026-08-14) PUBLISHED-TARGET mode for --package-upgrade: when
 # set, the UPGRADE TARGET is the real PUBLISHED PyPI wheel for that version
 # instead of the working-tree build — the published-BYTES upgrade journey,
