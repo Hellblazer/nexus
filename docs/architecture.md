@@ -415,7 +415,13 @@ fenced index:
 non-goal) — it never means "someone else is running, skip." A retry or a
 second concurrent run simply re-stamps the same shape. What it guarantees
 is the opposite of a lock: a document can never read as done while a run
-against it is in flight or has failed.
+against it is in flight or has failed. Since nexus-bhlfy (2026-08-17) every
+indexing producer — the repo-walk ChunkBatcher path and the three legacy
+fallbacks, not just `doc_indexer` — pairs its `_fence_begin` with a
+`_fence_fail` arm, and the repo path's staleness check treats
+`index_state IN ('indexing','failed')` as stale regardless of content-hash
+match (nexus-cp46b), so a stranded fence always drains on the next normal
+run.
 
 **Lifecycle**, driven client-side (`src/nexus/doc_indexer.py`:
 `_fence_begin` / `_fence_complete` / `_fence_fail`) against three engine
