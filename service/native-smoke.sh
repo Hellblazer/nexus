@@ -98,7 +98,10 @@ assert "chash/distinct"        200 "${A[@]}" "$U/v1/chash/distinct_collections"
 # Empty-result 200s are the assertion — these run against a fresh DB, so the
 # point is that the route EXISTS and serves, not that it finds rows.
 assert "telemetry/hook_failures/list" 200 "${A[@]}" "$U/v1/telemetry/hook_failures/list?days=1&limit=5"
-assert "taxonomy/assignments/details" 200 "${A[@]}" "${J[@]}" -X POST -d '{"doc_ids":["native-smoke-doc"]}' "$U/v1/taxonomy/assignments/details"
+# doc_id must be a full 64-hex chash since RDR-194 P3c (bytea doc_id; the
+# handler 400s any other width). sha256("native-smoke-doc") — a valid,
+# deterministically-absent id: the probe asserts the read path, not data.
+assert "taxonomy/assignments/details" 200 "${A[@]}" "${J[@]}" -X POST -d '{"doc_ids":["5dfa67d7a291e17721dd5e656b9d2459dad589592cff1dc27ff083ca252c7138"]}' "$U/v1/taxonomy/assignments/details"
 assert "taxonomy/hubs (staleness)"    200 "${A[@]}" "$U/v1/taxonomy/hubs?min_collections=2"
 
 # ── T1 scratch (separate jOOQ schema, nexus-opr9m) ───────────────────────────
