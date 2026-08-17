@@ -157,25 +157,45 @@ class TestStorePutStampsFence:
 
 
 class TestRepoIndexKilledMidflushLeavesIndexing:
-    """Production test #3 (nexus-vw594 F1): a repo-index run killed AFTER
-    begin but BEFORE the flush's upsert lands leaves ``index_state ==
-    'indexing'`` with a non-empty ``index_started_at`` — and, load-bearing,
-    ``health._check_stale_indexing_runs`` is actually CAPABLE of firing
-    against that row (with the staleness threshold patched down to make
-    the injected failure immediately "stale"). This is the first test in
-    the repo proving the doctor check is capable of firing at all; every
-    prior fence test only asserted the COLUMN value, never that the
-    consuming health check could see it.
+    """Production test #3 (nexus-vw594 F1), UPDATED by nexus-bhlfy: a
+    repo-index flush failure now stamps ``index_state == 'failed'``
+    instead of stranding the row at ``'indexing'`` forever.
 
-    KILL CONTROL: this test's own assertion that ``index_state ==
-    'indexing'`` IS its kill control against a regression to the pre-F1
-    behaviour (where this producer had no begin call and the column
-    would read NULL/unreported instead) — a NULL row would fail the
-    ``state == "indexing"`` assertion outright. Additionally verified
-    manually 2026-08-04: with the ``_STALE_INDEXING_THRESHOLD_HOURS``
-    patch removed, the doctor check does NOT fire (the row is real but
-    not yet old enough), confirming the threshold patch — not test
-    fixture leakage — is what makes the assertion meaningful.
+    ORIGINAL (pre-bhlfy) behaviour: this class's kill injector (a raise
+    from the batcher flush's catalog write) landed between
+    ``_fence_begin_many`` and the completion stamp with NO paired fail
+    arm — ``ChunkBatcher``'s ``on_file_failed`` callback
+    (``indexer.py``'s ``_batched_file_failed``) fired but only logged,
+    never called ``_fence_fail``. The row was stranded at ``'indexing'``
+    with only the 6h doctor sweep (``_check_stale_indexing_runs``, which
+    fires ONLY for ``state == 'indexing'``) as signal — exactly the
+    nexus-bhlfy bug (nexus-tjf7l investigation: 13 ART docs stranded this
+    way by a real 504 run).
+
+    nexus-bhlfy wires ``_fence_fail`` into ``_batched_file_failed`` (the
+    per-file failure callback ``ChunkBatcher`` already fires once per
+    PERMANENTLY-failed file — no new ChunkBatcher callback needed). This
+    test now asserts the CORRECTED outcome: the row reaches ``'failed'``
+    with a non-empty ``index_started_at`` (proving begin genuinely fired
+    before the failure), and — load-bearing — the doctor's stale-
+    'indexing' WARN does NOT fire for it any more, because the failure
+    was already reported at run time (``index_batch_upload_failures`` in
+    the CLI output) and 'failed' is deliberately excluded from that
+    specific check (``health.py``'s ``if state != "indexing": continue``)
+    — restating an already-known failure 6h later would be noise, not
+    signal. ``doc_indexer.py``'s freshness three-way still treats
+    'failed' identically to 'indexing' (both "definitely stale, always
+    re-index"), so this is a reporting change only, never a correctness
+    regression.
+
+    KILL CONTROL: this test's assertion that ``index_state == 'failed'``
+    is its kill control against BOTH a regression to the pre-F1 fully-
+    unfenced behaviour (a NULL row would fail the ``state == "failed"``
+    assertion outright) AND a regression to the pre-bhlfy stranded-
+    'indexing' behaviour (reverting the ``_fence_fail`` wiring in
+    ``_batched_file_failed`` reproduces ``state == "indexing"`` instead —
+    verified manually 2026-08-17 by commenting out that call and
+    re-running this test alone).
 
     INJECTION-POINT RETARGET (2026-08-09, nexus-vw594 release-blocker
     follow-up): nexus-wxjr6/nexus-kl2z6 (this same release) replaced the
@@ -200,13 +220,13 @@ class TestRepoIndexKilledMidflushLeavesIndexing:
     which rides IN the same ``write_manifest_many`` call via its
     ``complete=`` kwarg — so raising here still lands squarely between
     begin and completion. IF THIS SEAM CHANGES AGAIN: this test will
-    fail LOUDLY (fence reads 'complete' instead of 'indexing') rather
+    fail LOUDLY (fence reads 'complete' instead of 'failed') rather
     than silently passing vacuous, per the F1 kill-control discipline —
     grep ``_batch_flush`` in ``indexer.py`` for the current upload call
     before assuming this patch target is still correct.
     """
 
-    def test_repo_index_killed_midflush_leaves_indexing(
+    def test_repo_index_killed_midflush_stamps_failed(
         self, t2_service_env, tmp_path, monkeypatch,
     ) -> None:
         from nexus.catalog.factory import make_catalog_reader, reset_shared_service_catalog_client_for_tests
@@ -256,17 +276,28 @@ class TestRepoIndexKilledMidflushLeavesIndexing:
         assert len(entries) == 1, entries
         entry = entries[0]
         state, run_id, started_at = _fence_fields(entry)
-        assert state == "indexing", (
-            f"expected the fence to be stranded at 'indexing' after a "
-            f"kill mid-flush, got {state!r} — either the begin never "
-            f"fired (coverage regression) or the flush somehow completed "
-            f"despite the injected raise"
+        # nexus-bhlfy: the fence now stamps 'failed', not 'indexing' — the
+        # missing fail arm this bead closes. A regression to the pre-bhlfy
+        # gap (or the pre-F1 fully-unfenced state) would read "indexing"
+        # or None here respectively.
+        assert state == "failed", (
+            f"expected the fence to be stamped 'failed' after a kill "
+            f"mid-flush (nexus-bhlfy fail-arm wiring), got {state!r} — "
+            f"either the begin never fired (coverage regression), the "
+            f"flush somehow completed despite the injected raise, or the "
+            f"fail arm regressed back to the pre-bhlfy stranded-'indexing' "
+            f"gap"
         )
-        assert run_id != ""
+        assert run_id != "", "index_run_id empty — begin never fired"
         assert started_at != ""
 
-        # Load-bearing: prove the doctor check can actually FIRE against
-        # this exact row, not just that the column holds the right value.
+        # Load-bearing: a CLEANLY-REPORTED failure (state == 'failed', not
+        # 'indexing') must NOT trip doctor's stale-'indexing' WARN — that
+        # check exists for a run that died silently with no report at all
+        # (health.py's `_check_stale_indexing_runs`: `if state !=
+        # "indexing": continue`). Restating an already-known failure 6h
+        # later would be noise, not signal — this is the actual payoff of
+        # the fail-arm fix (T1 scratch nexus-tjf7l investigation).
         import nexus.health as health
 
         monkeypatch.setattr(health, "_STALE_INDEXING_THRESHOLD_HOURS", 0.0)
@@ -275,13 +306,12 @@ class TestRepoIndexKilledMidflushLeavesIndexing:
             lambda *a, **k: cat, raising=False,
         )
         results = health._check_stale_indexing_runs()
-        assert len(results) == 1
-        r = results[0]
-        assert r.ok is False and r.warn is True, (
-            f"doctor's stale-run check did not fire against a real "
-            f"stranded-indexing row: {r}"
+        warns = [r for r in results if r.warn and r.ok is False]
+        assert not warns, (
+            f"a cleanly fence-failed document ('failed', not 'indexing') "
+            f"must not trip the stale-'indexing' WARN — the failure was "
+            f"already reported at run time: {warns}"
         )
-        assert "a.py" in r.detail or entry.tumbler and str(entry.tumbler) in r.detail
 
 
 class TestRepoIndexOrphanSeamFailureDoesNotStrandBatchmateFence:
@@ -426,3 +456,120 @@ class TestRepoIndexOrphanSeamFailureDoesNotStrandBatchmateFence:
         )
         assert run_id != ""
         assert started_at != ""
+
+
+class TestBatcherBisectedBatchFailsExactlyOnePoisonedFile:
+    """nexus-bhlfy production test: a batch of TWO identity-having files
+    that fails as a whole flush (both share the initial combined
+    ``write_manifest_many`` POST) must, after ``ChunkBatcher`` bisects the
+    failure to file granularity, report the fence fail EXACTLY ONCE for
+    the genuinely poisoned file and never for its healthy batch-mate — no
+    double-report, no leak.
+
+    Distinct from ``TestRepoIndexOrphanSeamFailureDoesNotStrandBatchmateFence``
+    above: that class kills the OTHER upload seam (the orphan
+    ``upsert_chunks_with_embeddings`` call for a file with NO catalog
+    identity) and proves isolation from an unrelated batch-mate. This
+    class kills the SAME seam ``TestRepoIndexKilledMidflushLeavesIndexing``
+    does (``HttpCatalogClient.write_manifest_many``, the combined-write
+    seam every identity-having file goes through) but SELECTIVELY — only
+    for the batch containing the poisoned file's chunk text — so both
+    files start in the SAME initial flush and the poisoned one survives
+    bisection down to its own single-file retry.
+
+    KILL CONTROL: reverting the ``_fence_fail`` wiring in ``indexer.py``'s
+    ``_batched_file_failed`` reproduces ``bad.py``'s fence stranded at
+    'indexing' instead of 'failed' (the pre-bhlfy gap) while leaving this
+    test's ``fail_reports`` assertion trivially satisfied (zero reports
+    for either file) — verified manually 2026-08-17 by commenting out the
+    ``_fence_fail`` call and re-running this test alone.
+    """
+
+    def test_bisected_batch_reports_poisoned_file_exactly_once(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        from nexus.catalog.factory import make_catalog_reader, reset_shared_service_catalog_client_for_tests
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+        from nexus.db.http_vector_client import reset_http_vector_client_for_tests
+        from nexus.mcp_infra import reset_singletons
+
+        reset_http_vector_client_for_tests()
+        reset_singletons()
+        reset_shared_service_catalog_client_for_tests()
+
+        poison = "NEXUS_BHLFY_BISECT_POISON_MARKER"
+        repo = _git_repo(tmp_path, {
+            "good.py": "def good():\n    return 1\n",
+            "bad.py": f'def bad():\n    """{poison}"""\n    return 2\n',
+        })
+
+        real_write_manifest_many = HttpCatalogClient.write_manifest_many
+
+        def _selective_boom(self, *a, **kw):  # noqa: ANN001, ANN002, ANN003 — test-local kill injector
+            chunks = kw.get("chunks") or []
+            if any(poison in c.get("text", "") for c in chunks):
+                raise RuntimeError("nexus-bhlfy kill-control: injected selective bisect failure")
+            return real_write_manifest_many(self, *a, **kw)
+
+        monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", _selective_boom)
+
+        # Record every _fence_fail call (module-level patch target every
+        # producer resolves at call time) while still calling through, so
+        # the real engine catalog is genuinely stamped.
+        import nexus.doc_indexer as doc_indexer_mod
+
+        real_fence_fail = doc_indexer_mod._fence_fail
+        fail_reports: list[tuple[str, str]] = []
+
+        def _wrapped_fail(doc_id: str, error: str) -> None:
+            fail_reports.append((doc_id, error))
+            real_fence_fail(doc_id, error)
+
+        monkeypatch.setattr(doc_indexer_mod, "_fence_fail", _wrapped_fail)
+
+        from click.testing import CliRunner
+
+        from nexus.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["index", "repo", str(repo)])
+        assert result.exit_code != 0 or "fail" in result.output.lower() or "error" in result.output.lower(), result.output
+
+        monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", real_write_manifest_many)
+
+        cat = make_catalog_reader()
+        assert cat is not None
+        good_entries = [
+            e for e in cat.all_documents(limit=0)
+            if str(getattr(e, "file_path", "")).endswith("good.py")
+        ]
+        bad_entries = [
+            e for e in cat.all_documents(limit=0)
+            if str(getattr(e, "file_path", "")).endswith("bad.py")
+        ]
+        assert len(good_entries) == 1, good_entries
+        assert len(bad_entries) == 1, bad_entries
+
+        good_state, good_run, _ = _fence_fields(good_entries[0])
+        bad_state, bad_run, _ = _fence_fields(bad_entries[0])
+        assert good_state == "complete", (
+            f"good.py must reach 'complete' despite bad.py's poisoned "
+            f"content sharing the initial flush, got {good_state!r}"
+        )
+        assert bad_state == "failed", (
+            f"bad.py must reach 'failed' (nexus-bhlfy fix), got {bad_state!r}"
+        )
+        assert good_run != "" and bad_run != ""
+
+        good_doc_id = str(good_entries[0].tumbler)
+        bad_doc_id = str(bad_entries[0].tumbler)
+        bad_reports = [r for r in fail_reports if r[0] == bad_doc_id]
+        good_reports = [r for r in fail_reports if r[0] == good_doc_id]
+        assert len(bad_reports) == 1, (
+            f"expected EXACTLY ONE fence-fail report for bad.py (no "
+            f"double-report across bisect retries), got {bad_reports} "
+            f"(all reports: {fail_reports})"
+        )
+        assert not good_reports, (
+            f"good.py must never receive a fence-fail report: {fail_reports}"
+        )

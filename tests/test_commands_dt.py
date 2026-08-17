@@ -818,6 +818,7 @@ from nexus.errors import (  # noqa: E402 — grouped with this section's test-on
     ExtractionQualityError,
     IndexRunVerifyRefused,
     NexusError as _NexusError,
+    UnchunkableContentError,
 )
 
 _MEMBER_KWARGS: dict[type, dict] = {
@@ -837,6 +838,15 @@ _MEMBER_KWARGS: dict[type, dict] = {
             "PDF paper.pdf failed the post-extraction quality gate "
             "(extraction_method=docling): whitespace_ratio=0.0114 < "
             "floor 0.05."
+        ),
+    },
+    # nexus-rqsh1/nexus-1sd0f: pre-registration chunkability guard in
+    # index_markdown/index_pdf — one zero-byte/binary record must fail
+    # that record only, never abort the rest of the batch.
+    UnchunkableContentError: {
+        "message": (
+            "refusing to index empty.md: file is zero bytes — nothing "
+            "to chunk, no catalog document registered"
         ),
     },
 }

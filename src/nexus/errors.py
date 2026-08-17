@@ -178,6 +178,32 @@ class SourceUriCollectionMismatchError(NexusError):
     """
 
 
+class UnchunkableContentError(NexusError):
+    """A file passed directly to the doc_indexer family (``nx index
+    md``/``pdf``/``rdr``) is zero-byte or decodes as binary content, so
+    it can never produce a chunk.
+
+    nexus-rqsh1 round 2 (Hal directive 2026-08-15 + substantive-critic
+    2026-08-17): the indexer must not register a catalog document for a
+    file it will not chunk. ``nx index repo``'s bulk discovery walk
+    skips such files silently (a debug log, folded into a summary line)
+    because that walk is an unbounded population where an unchunkable
+    file is expected noise. The doc_indexer family is different: the
+    operator named this exact file, so registering nothing while
+    reporting plain success would be misleading. Raised BEFORE any
+    catalog write (``_register_or_lookup_doc_id``), never after.
+
+    A per-record-raisable member of :data:`PER_RECORD_SURVIVABLE_
+    EXCEPTIONS`; like :class:`ExtractionQualityError`, ``__init__``
+    accepts *message* as a plain keyword so the registry-driven
+    ``member_cls(**kwargs)`` construction in ``tests/test_commands_dt.py``
+    works (base ``Exception.__init__`` is positional-only).
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
 class PutOversizedError(NexusError):
     """A ``put``-path write was refused because the document exceeds the
     ChromaDB Cloud per-document byte cap.
@@ -399,8 +425,14 @@ class CombinedWriteEmbedTimeoutError(NexusError):
 #: -- reached by dt.py's ``nx dt index`` per-record loop for any
 #: ``.pdf``-suffixed record. One PDF tripping the post-extraction quality
 #: gate must fail THAT record, never abort the rest of the batch.
+#: UnchunkableContentError fires from index_markdown/index_pdf's
+#: pre-registration chunkability guard (nexus-rqsh1/nexus-1sd0f) — a
+#: zero-byte or binary-content file in a batch must fail THAT record
+#: only; single-file commands translate it to ClickException at the
+#: wrapper boundary before any loop sees it.
 PER_RECORD_SURVIVABLE_EXCEPTIONS: tuple[type[NexusError], ...] = (
     ChunkLandingUnverifiedError,
     IndexRunVerifyRefused,
     ExtractionQualityError,
+    UnchunkableContentError,
 )

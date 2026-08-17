@@ -1615,6 +1615,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         IndexRunVerifyRefused,
         SourceUriCollectionMismatchError,
         SourceUriNotFoundError,
+        UnchunkableContentError,
     )
 
     # Local wrapper: convert the typed credential/identity errors into a
@@ -1626,6 +1627,12 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         except CredentialsMissingError as e:
             raise click.ClickException(str(e)) from e
         except (SourceUriNotFoundError, SourceUriCollectionMismatchError) as e:
+            raise click.ClickException(str(e)) from e
+        except UnchunkableContentError as e:
+            # nexus-1sd0f (round 3): a zero-byte PDF named explicitly on
+            # this command must fail loud, before any catalog write --
+            # see index_pdf's guard and index_md_cmd's identical
+            # UnchunkableContentError handling for the full rationale.
             raise click.ClickException(str(e)) from e
         except ChunkLandingUnverifiedError as e:
             # nexus-tp8yk D1 substantive-critic SIGNIFICANT (2026-08-04):
@@ -2122,6 +2129,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
         IndexRunVerifyRefused,
         SourceUriCollectionMismatchError,
         SourceUriNotFoundError,
+        UnchunkableContentError,
     )
 
     # Normalize --collection through t3_collection_name() so bare names like
@@ -2185,6 +2193,11 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
         raise click.ClickException(str(exc)) from exc
     except (SourceUriNotFoundError, SourceUriCollectionMismatchError) as exc:
         # nexus-y8qtj: fail-loud identity errors surface the same way.
+        raise click.ClickException(str(exc)) from exc
+    except UnchunkableContentError as exc:
+        # nexus-rqsh1 round 2: a zero-byte or binary-content file named
+        # explicitly on this command must fail loud, before any catalog
+        # write -- see index_markdown's guard for the full rationale.
         raise click.ClickException(str(exc)) from exc
     except IndexRunVerifyRefused as exc:
         # nexus-tp8yk substantive-critic SIGNIFICANT (2026-08-04): this

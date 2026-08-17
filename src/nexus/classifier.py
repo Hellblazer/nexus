@@ -6,6 +6,7 @@ strategy each file receives during repository indexing.
 """
 from __future__ import annotations
 
+import codecs
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -110,6 +111,76 @@ def _has_shebang(path: Path) -> bool:
     except OSError as exc:
         _log.debug("has_shebang_read_failed", path=str(path), error=str(exc))
         return False
+
+
+def looks_like_binary_content(path: Path, *, sample_bytes: int = 8192) -> bool:
+    """Cheap prefix sniff for binary content on a file ``classify_file``
+    classified as PROSE via its step-8 fall-through default.
+
+    ``classify_file`` is extension-only by design (its docstring): any
+    extension not in the code/skip/binary-asset tables falls through to
+    PROSE, on the assumption that unknown extensions are more often prose
+    than not. Extensions such as ``.npz`` (numpy archive) or ``.bundle``
+    (git bundle) are not in ``_BINARY_EXTENSIONS`` yet decode as binary,
+    not UTF-8 text — the prose indexer's own ``read_text(encoding="utf-8")``
+    then raises ``UnicodeDecodeError`` and returns 0 chunks
+    (``prose_indexer.py``). Registering a catalog document ahead of that
+    outcome mints a permanent ``chunk_count=0`` phantom no re-index can
+    ever clear (nexus-rqsh1). This sniff catches that case at
+    classification time, before registration, by reading a small prefix
+    rather than the whole file.
+
+    Returns False (i.e. "looks like text") on any read failure — the
+    per-file indexer's own read is the authority on genuine I/O errors;
+    this is only a best-effort early skip, not a correctness gate.
+
+    nexus-rqsh1 round 2 (substantive-critic Critical, 2026-08-17): a
+    strict, single-shot ``sample.decode("utf-8")`` on a TRUNCATED
+    prefix false-positives whenever a valid multi-byte UTF-8 character
+    happens to straddle the ``sample_bytes`` cut (accented text, em/en
+    dashes, curly quotes, CJK, emoji) — the prefix ends mid-character,
+    which is indistinguishable from genuine corruption to a strict
+    decode. That misclassifies ordinary prose as binary and silently,
+    permanently excludes it from indexing. An incremental decoder run
+    with ``final=False`` defers judgment on an incomplete sequence at
+    the very end of the buffer instead of raising, while still raising
+    immediately on an invalid byte anywhere else in the sample — so
+    genuine binary content is unaffected. ``final=False`` is only safe
+    when *sample* is itself a truncated prefix (more bytes exist beyond
+    it that we didn't read); when the read returned the WHOLE file,
+    there is no "more bytes coming" to defer to, so a trailing
+    incomplete sequence there IS genuine corruption and must be
+    decoded strict (``final=True``).
+
+    nexus-ih383 (round 3, substantive-critic round-2 verification,
+    2026-08-17): ``len(sample) < sample_bytes`` conflates two distinct
+    cases when the read returns exactly ``sample_bytes`` bytes -- the
+    file could be LARGER than the sample (a true truncated prefix,
+    defer -- correct) OR the file could be EXACTLY ``sample_bytes``
+    long (the sample IS the whole file, no more bytes exist -- must
+    decode strict). Both hit ``len(sample) == sample_bytes``, so the
+    old check always deferred, silently misclassifying an exactly-
+    ``sample_bytes``-byte corrupt file as text. Disambiguated here by
+    reading one extra byte: if more than ``sample_bytes`` bytes come
+    back, the sample is a genuine truncated prefix (defer); otherwise
+    the read hit true EOF at or before the cap (decode strict).
+    """
+    try:
+        with path.open("rb") as f:
+            sample = f.read(sample_bytes + 1)
+    except OSError:
+        return False
+    is_truncated_prefix = len(sample) > sample_bytes
+    if is_truncated_prefix:
+        sample = sample[:sample_bytes]
+    if b"\x00" in sample:
+        return True
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        decoder.decode(sample, final=not is_truncated_prefix)
+    except UnicodeDecodeError:
+        return True
+    return False
 
 
 def classify_file(

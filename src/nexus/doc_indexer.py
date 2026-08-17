@@ -2062,6 +2062,29 @@ def index_pdf(
     # Normalize to absolute so staleness checks are path-form-independent.
     pdf_path = pdf_path.resolve()
 
+    # nexus-1sd0f (round 3, substantive-critic round-2 verification,
+    # 2026-08-17): a zero-byte PDF can never yield extracted text/pages,
+    # so registering a catalog document ahead of that outcome (below)
+    # mints a permanent chunk_count=0 phantom no re-index can ever
+    # clear -- the identical mechanism index_markdown's round-2 guard
+    # already closes for md/rdr (nexus-rqsh1). Unlike index_markdown,
+    # this is zero-byte ONLY: PDFs are legitimately binary content, so
+    # looks_like_binary_content (a UTF-8 text sniff) does not apply
+    # here -- every real PDF would misclassify as "binary" under that
+    # check, which is not the defect this bead is about. Malformed-but-
+    # nonempty PDF extraction failures (docling/mineru/pymupdf errors)
+    # are a separate, already-handled concern (ExtractionQualityError /
+    # IndexingError below) and are out of scope for this guard.
+    from nexus.errors import UnchunkableContentError  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
+    try:
+        _pdf_size = pdf_path.stat().st_size
+    except OSError as exc:
+        raise UnchunkableContentError(f"cannot stat {pdf_path}: {exc}") from exc
+    if _pdf_size == 0:
+        raise UnchunkableContentError(
+            f"{pdf_path} is empty (0 bytes) and cannot be chunked"
+        )
+
     content_hash = _sha256(pdf_path)
     # RDR-103 Phase 5 leaf fallback (see _index_document for the
     # full rationale). Synthesises a conformant 4-segment name for
@@ -2779,6 +2802,36 @@ def index_markdown(
 
     # Normalize to absolute so staleness checks are path-form-independent.
     md_path = md_path.resolve()
+
+    # nexus-rqsh1 round 2 (Hal directive 2026-08-15 + substantive-critic
+    # Critical, 2026-08-17): a zero-byte file yields chunks=[] from
+    # ``_markdown_chunks`` (read_text() on empty content, chunker
+    # returns nothing) and a binary-content file fails read_text()'s
+    # UTF-8 decode -- neither can ever produce a chunk, so registering
+    # a catalog document ahead of that outcome (below) would mint a
+    # permanent chunk_count=0 phantom no re-index can ever clear.
+    # Unlike ``nx index repo``'s bulk discovery walk (indexer.py's
+    # skipped_unchunkable set, silently skipped -- an unbounded
+    # population where this is expected noise), the doc_indexer family
+    # (``nx index md`` / ``nx index rdr``, both routed through this
+    # function) targets a file the operator named explicitly: fail
+    # loud, before any catalog write, rather than silently registering
+    # nothing while reporting plain success.
+    from nexus.classifier import looks_like_binary_content  # noqa: PLC0415 — circular-dep avoidance (nexus.classifier)
+    from nexus.errors import UnchunkableContentError  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
+    try:
+        _md_size = md_path.stat().st_size
+    except OSError as exc:
+        raise UnchunkableContentError(f"cannot stat {md_path}: {exc}") from exc
+    if _md_size == 0:
+        raise UnchunkableContentError(
+            f"{md_path} is empty (0 bytes) and cannot be chunked"
+        )
+    if looks_like_binary_content(md_path):
+        raise UnchunkableContentError(
+            f"{md_path} looks like binary content, not markdown text, "
+            "and cannot be chunked"
+        )
 
     # RDR-103 Phase 5 leaf fallback (see _index_document for the
     # full rationale). Synthesises a conformant 4-segment name for

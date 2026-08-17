@@ -304,6 +304,12 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
     # per-record loop for any .pdf record. One gated PDF must fail that
     # record only, never abort the rest of the batch.
     "ExtractionQualityError",
+    # nexus-rqsh1/nexus-1sd0f: fires from index_markdown/index_pdf's
+    # pre-registration chunkability guard (zero-byte or binary content),
+    # reachable from batch_index_markdowns and dt.py per-record loops.
+    # One unchunkable file must fail that record only; single-file
+    # commands translate it to ClickException at the wrapper boundary.
+    "UnchunkableContentError",
 })
 
 #: Command-level: every OTHER NexusError subclass, with a specific,

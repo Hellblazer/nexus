@@ -221,6 +221,44 @@ def test_index_credentials_missing_exits_nonzero_with_message(
     assert "Set via" in result.output or "config set" in result.output
 
 
+def test_index_md_command_empty_file_exits_nonzero_without_registering(
+    runner, home,
+):
+    """nexus-rqsh1 round 2: ``nx index md`` on a zero-byte file must fail
+    loud (non-zero exit, clean message naming the file) and must NEVER
+    register a catalog document -- the end-to-end wiring through the
+    REAL ``index_markdown`` guard (only ``_register_or_lookup_doc_id``
+    is doubled, to assert non-call without needing a live catalog)."""
+    empty = home / "empty.md"
+    empty.write_bytes(b"")
+    with patch("nexus.doc_indexer._register_or_lookup_doc_id") as mock_register:
+        result = runner.invoke(main, ["index", "md", str(empty)])
+    assert result.exit_code != 0, result.output
+    assert str(empty) in result.output
+    assert "Traceback (most recent call last)" not in result.output
+    mock_register.assert_not_called()
+
+
+def test_index_pdf_command_empty_file_exits_nonzero_without_registering(
+    runner, home,
+):
+    """nexus-1sd0f (round 3): ``nx index pdf`` on a zero-byte file must
+    fail loud (non-zero exit, clean message naming the file) and must
+    NEVER register a catalog document -- the end-to-end wiring through
+    the REAL ``index_pdf`` guard (only ``_register_or_lookup_doc_id``
+    is doubled, to assert non-call without needing a live catalog),
+    mirroring ``test_index_md_command_empty_file_exits_nonzero_without_
+    registering``."""
+    empty = home / "empty.pdf"
+    empty.write_bytes(b"")
+    with patch("nexus.doc_indexer._register_or_lookup_doc_id") as mock_register:
+        result = runner.invoke(main, ["index", "pdf", str(empty)])
+    assert result.exit_code != 0, result.output
+    assert str(empty) in result.output
+    assert "Traceback (most recent call last)" not in result.output
+    mock_register.assert_not_called()
+
+
 def test_index_pdf_indexing_error_exits_nonzero_with_clean_message(runner, fake_pdf):
     """nexus-w6wp0 review round (code-review-expert Critical, 2026-08-05):
     index_pdf's streaming return_metadata path can raise IndexingError

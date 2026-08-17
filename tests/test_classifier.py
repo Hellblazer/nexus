@@ -304,3 +304,123 @@ class TestMinifiedBundleSkip:
             classify_file(Path("HTMX.MIN.JS"))
             == ContentClass.SKIP
         )
+
+
+# ── nexus-rqsh1 round 2 (substantive-critic Critical, 2026-08-17):
+# looks_like_binary_content's 8192-byte prefix sniff must not
+# false-positive on a valid multi-byte UTF-8 character straddling the
+# truncation boundary. ──────────────────────────────────────────────
+
+
+class TestLooksLikeBinaryContent:
+    def test_short_valid_utf8_text_is_not_binary(self, tmp_path: Path):
+        from nexus.classifier import looks_like_binary_content
+        p = tmp_path / "small.md"
+        p.write_text("# Hello\n\nOrdinary short prose.\n", encoding="utf-8")
+        assert looks_like_binary_content(p) is False
+
+    def test_nul_byte_is_binary(self, tmp_path: Path):
+        from nexus.classifier import looks_like_binary_content
+        p = tmp_path / "fixture.npz"
+        p.write_bytes(b"prefix\x00suffix")
+        assert looks_like_binary_content(p) is True
+
+    def test_genuine_binary_over_8192_bytes_is_binary(self, tmp_path: Path):
+        """A byte sequence that is invalid UTF-8 well within the first
+        8192-byte sample (not near the truncation boundary), padded past
+        8192 bytes total, must still be classified as binary — the fix
+        for the boundary false-positive must not blind the sniff to
+        genuinely binary content."""
+        from nexus.classifier import looks_like_binary_content
+        p = tmp_path / "fixture.bin"
+        # 0xFF is never a valid UTF-8 lead byte -- invalid at position 0.
+        p.write_bytes(b"\xff\xfe" * 5000)  # 10000 bytes, well over 8192
+        assert looks_like_binary_content(p) is True
+
+    def test_long_valid_utf8_multibyte_char_straddles_sample_boundary_is_text(
+        self, tmp_path: Path,
+    ):
+        """A real prose file whose ONLY non-ASCII character happens to
+        land astride the 8192-byte sniff-sample cut must be classified
+        as text, not binary. Pre-fix: sample.decode("utf-8") on the
+        truncated 8192-byte prefix raises UnicodeDecodeError (the lead
+        byte of a 2-byte char with its continuation byte cut off) even
+        though the FULL file decodes cleanly -- silently and
+        permanently excluding ordinary prose (accented text, em/en
+        dashes, curly quotes, CJK, emoji) from indexing.
+        """
+        from nexus.classifier import looks_like_binary_content
+        multibyte = "é".encode("utf-8")
+        assert len(multibyte) == 2
+        # Position the 2-byte char's first byte at index 8191 so the
+        # 8192-byte sniff sample ends mid-character (second byte cut off).
+        content = b"a" * 8191 + multibyte + b"b" * 71
+        assert len(content) == 8264, "deterministic critic-repro shape"
+        assert content[:8192][-1:] == multibyte[:1], (
+            "the 8192-byte sample must end on the multibyte char's first byte"
+        )
+        content.decode("utf-8")  # sanity: the FULL file is valid UTF-8
+        p = tmp_path / "prose_with_boundary_char.md"
+        p.write_bytes(content)
+        assert looks_like_binary_content(p) is False, (
+            "a multibyte UTF-8 character straddling the 8192-byte sniff "
+            "boundary must not be misclassified as binary content"
+        )
+
+    def test_critic_exact_repro_8264_byte_boundary_char(self, tmp_path: Path):
+        """The substantive-critic's own repro shape, pinned verbatim:
+        an 8264-byte fully-valid-UTF-8 file with a 2-byte character
+        landing exactly at the 8192-byte cut."""
+        from nexus.classifier import looks_like_binary_content
+        content = ("a" * 8191 + "é" + "b" * 71).encode("utf-8")
+        assert len(content) == 8264
+        p = tmp_path / "critic_repro.md"
+        p.write_bytes(content)
+        assert looks_like_binary_content(p) is False
+
+    def test_read_failure_is_not_binary(self, tmp_path: Path):
+        from nexus.classifier import looks_like_binary_content
+        assert looks_like_binary_content(tmp_path / "does_not_exist.md") is False
+
+    def test_exactly_8192_bytes_ending_mid_multibyte_char_is_binary(
+        self, tmp_path: Path,
+    ):
+        """nexus-ih383: when the file is EXACTLY ``sample_bytes`` (8192)
+        long, the read returns exactly 8192 bytes -- there are no more
+        bytes to defer to. A truncated multibyte sequence at true EOF
+        here is genuine corruption, not a sampling artifact, and must
+        be classified as binary.
+
+        Pre-fix: ``final = len(sample) < sample_bytes`` is False
+        whenever ``len(sample) == sample_bytes`` (True in both the
+        "file is larger, sample is a truncated prefix" case AND the
+        "file is exactly sample_bytes, sample IS the whole file" case)
+        -- so this exactly-8192-byte corrupt file was misclassified as
+        text (``final=False`` deferred judgment on a sequence with no
+        more bytes coming).
+        """
+        from nexus.classifier import looks_like_binary_content
+        # 0xC3 is the lead byte of a 2-byte UTF-8 sequence (e.g. "é" is
+        # 0xC3 0xA9); alone at true EOF it is an incomplete/invalid
+        # sequence with no continuation byte anywhere in the file.
+        content = b"a" * 8191 + b"\xc3"
+        assert len(content) == 8192, "deterministic exactly-sample_bytes shape"
+        p = tmp_path / "exactly_8192_corrupt.md"
+        p.write_bytes(content)
+        assert looks_like_binary_content(p) is True, (
+            "an exactly-8192-byte file truncated mid-multibyte-char at "
+            "true EOF is genuine corruption and must be classified as "
+            "binary, not deferred as if more bytes existed"
+        )
+
+    def test_exactly_8192_bytes_valid_utf8_is_text(self, tmp_path: Path):
+        """The disambiguation fix must not regress the exactly-8192-byte
+        case where the sample IS the whole file AND it decodes cleanly
+        (no straddling character, no corruption) -- must stay text."""
+        from nexus.classifier import looks_like_binary_content
+        content = b"a" * 8190 + "é".encode("utf-8")
+        assert len(content) == 8192, "deterministic exactly-sample_bytes shape"
+        content.decode("utf-8")  # sanity: fully valid UTF-8
+        p = tmp_path / "exactly_8192_valid.md"
+        p.write_bytes(content)
+        assert looks_like_binary_content(p) is False
