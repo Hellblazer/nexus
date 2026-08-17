@@ -279,6 +279,14 @@ def _run_ladder(
     for run in report.runs:
         if run.outcome is RungOutcome.RECORDED and not auto_mode:
             click.echo(f"Upgrade ladder: rung '{run.name}' converged and verified.")
+    if not report.runs and not auto_mode:
+        # Empty registry (every rung retired — first true at nexus-lgdel.l1,
+        # which deleted the last rung). The affirmative line must still print:
+        # the fresh-install MVV's 9xfx5 assert greps for "converged and
+        # verified", and silence-as-converged is exactly the vacuity that
+        # assert exists to ban. An empty ladder is converged BY CONSTRUCTION,
+        # stated out loud, never inferred from the absence of output.
+        click.echo("Upgrade ladder: converged and verified (no rungs registered).")
     if report.hard_failed:
         failed = [
             run for run in report.runs
