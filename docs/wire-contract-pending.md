@@ -41,9 +41,11 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
-- `3b2901141627c98a4ad1c182bf021b44703d6d33` -- bead nexus-o8dil.33 -- engine tag `UNCUT (rides the next engine-service tag after v0.1.76; catalog-030)` -- RDR-191 Phase 6 subtraction: retires the client-side manifest-integrity apparatus; engine half drops manifest_orphans/manifest_verify_all/manifest_backfill SQL at catalog-030 — before deploying the engine tag that carries it, confirm whether the currently published client (v7.7.0) still calls any endpoint backed by those functions (that check is what this entry exists to force; see RDR-191 post-mortem)
+(none)
 
 ## Shipped
+
+- `3b2901141627c98a4ad1c182bf021b44703d6d33` -- bead nexus-o8dil.33 -- engine tag `engine-service-v0.1.79` (catalog-030) -- client half SHIPPED in v7.8.0 (2026-08-17, the paired release); the forced check was performed pre-deploy: v7.7.0's only callers were doctor diagnostics (degradation acknowledged via --ack-client-lag during the paired window, resolved the moment v7.8.0 published)
 
 - `498c92953ea3ad60a75389aea53a9f501d8b126a` -- bead nexus-sh9v2 -- shipped in `v7.7.0` -- RDR-191 GATE-2: caller-supplied manifest collection, NOT NULL at the store (engine half: engine-service-v0.1.73)
 - `b361a8106953c0bb586ab3aac969f904d3dff9df` -- bead nexus-rnqbw -- shipped in `v7.7.0` -- one protection semantics for the delete paths; manifest rows carry their own collection on the wire (engine half: engine-service-v0.1.74)
