@@ -19,6 +19,15 @@ contract).
 
 Hal's personal git-policy PreToolUse hook: wildcard-add + push-to-main.
 
+SCOPE DECISION (Hal, 2026-08-18, nexus-2mb2j): this hook is deliberately
+UNSCOPED -- it fires in EVERY repo, with no nexus-repo detection. The
+plugin ancestor was repo-scoped (nexus-vscgz) because a marketplace
+plugin must not impose one user's branch policy on foreign checkouts;
+this personal copy IS that user's branch policy, and ~/.claude/CLAUDE.md
+states it globally ("Where no project rule exists: PRs only -- never
+push directly to main"). A repo that legitimately needs direct main
+pushes uses the audited escape (`# routing-allow: <reason>`).
+
 EXTRACTED FROM: conexus/hooks/scripts/routing/git_add_all_redirects_to_
 explicit_paths.py in the nexus repo (Hal decision 2026-08-18, nexus-ww9fw).
 That plugin-shipped hook used to enforce THREE checks in one script to
