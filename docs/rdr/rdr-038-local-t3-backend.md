@@ -18,6 +18,8 @@ related_issues:
 
 # RDR-038: Local T3 Backend
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents a local ChromaDB `PersistentClient` as the T3 backend. That substrate was retired by RDR-155; the decision here is historical record, not current architecture.
+
 ## Problem Statement
 
 T3 currently requires ChromaDB Cloud + Voyage AI API keys — both cloud services with signup friction. Even free tiers create a barrier: users must create accounts, generate API keys, and configure credentials before `nx search` works. This makes nexus harder to adopt for developers who just want local semantic search over their repos.

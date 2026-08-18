@@ -14,7 +14,7 @@ related_issues: [RDR-055, RDR-056, RDR-057, RDR-058, RDR-049, RDR-051, RDR-052, 
 related_notes: >
   RDR-055 (closed): Section-type metadata — E1 already shipped as part of this work.
   RDR-056 (closed): Search robustness — foundation for E2.
-  RDR-057 (draft): Progressive formalization — IS E6 (tier promotion) AND owns T2 access-tracking schema.
+  RDR-057 (closed): Progressive formalization — IS E6 (tier promotion) AND owns T2 access-tracking schema.
   RDR-058 (closed): Pipeline orchestration — foundation for E4.
   RDR-049/051/052/053 (closed): Catalog infrastructure — foundation for E3, E5.
 ---

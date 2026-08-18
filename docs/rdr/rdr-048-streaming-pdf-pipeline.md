@@ -4,6 +4,8 @@ id: RDR-048
 type: Architecture
 status: closed
 accepted_date: 2026-04-03
+closed_date: 2026-04-09
+close_reason: "implemented (backfilled from post-mortem/048-streaming-pdf-pipeline.md, 2026-08-18 audit)"
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
@@ -15,6 +17,8 @@ related_issues:
 ---
 
 # RDR-048: Streaming PDF Pipeline
+
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents a SQLite WAL-mode persistent pipeline buffer. That substrate was retired by RDR-186; the decision here is historical record, not current architecture.
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.

@@ -32,6 +32,8 @@ implementation_notes: |
 
 # RDR-108: Graph Identity Normalization
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents ChromaDB and SQLite as the catalog + T3 substrate. That substrate was retired by RDR-152, RDR-155 and RDR-186; the decision here is historical record, not current architecture.
+
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
 

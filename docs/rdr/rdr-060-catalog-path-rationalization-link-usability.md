@@ -4,6 +4,8 @@ id: RDR-060
 type: Feature
 status: closed
 accepted_date: 2026-04-08
+closed_date: 2026-04-09
+close_reason: "implemented (backfilled from post-mortem/060-catalog-path-rationalization-link-usability.md, 2026-08-18 audit)"
 reviewed-by: self
 priority: high
 author: Hal Hildebrand

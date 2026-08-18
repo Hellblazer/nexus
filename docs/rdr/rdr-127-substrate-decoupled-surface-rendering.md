@@ -2,13 +2,14 @@
 title: "Surface Rendering: Palinex is Downstream (nexus has no integration story to ship)"
 id: RDR-127
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-22
 revised: 2026-05-22
-accepted_date:
+accepted_date: 2026-05-22
+implementation_notes: "Non-implementation RDR: the accepted decision is that nexus ships no surface-rendering code and palinex (downstream) owns the integration. That non-decision is in force and carries live supersession authority over RDR-123/RDR-124 (see References). Corrects 2026-08-18 audit finding: frontmatter had been left at 'draft' despite the v2 decision being operative since 2026-05-22."
 related_issues: []
 related_rdrs: [RDR-053, RDR-118, RDR-119, RDR-120, RDR-122, RDR-123, RDR-124]
 related_external: [palinex-rdr-001, palinex-rdr-003, a2ui-v0.9-spec]

@@ -2,12 +2,14 @@
 title: "Multi-hop entity-resolution retrieval: ingest-time entity-linker + traverse resolution hop, gated by a query-time type-mismatch trigger"
 id: RDR-147
 type: Architecture
-status: accepted
+status: deferred
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-03
 accepted_date: 2026-06-05
+deferred_date: 2026-07-08
+deferred_reason: "All 11 tracking beads, including epic nexus-bwct4, are DEFERRED (P1/P2/P3 rungs incl. entity-linker hook, resolve operator, type-mismatch trigger, phase-review gates, E2E/MVV) as of 2026-07-08. Corrects 2026-08-18 audit finding: this deferral was visible in beads but not reflected in the RDR frontmatter, the audit's highest-value single correction."
 related_issues: []
 ---
 

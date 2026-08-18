@@ -2,14 +2,18 @@
 title: "Client-Persistence Closure: PG in Every Mode — Retire Every SQLite Substrate Outside RDR-158's Seven-Domain Scope, and End Self-Granted Exemptions"
 id: RDR-186
 type: Architecture
-status: accepted
+status: closed
+postmortem_waiver: "Administrative closure by the 2026-08-18 true-state audit: retirement shipped (8ca47f664, 02bf9891b, 474fe6ba2), gate PASSED 2026-07-18. Residue nexus-146xx.22 registered in this file. Status flip only; evidence in T2 rdr_process/audit-nexus-2026-08-18."
 accepted_date: 2026-07-18
+closed_date: 2026-07-30
+close_reason: "Retirement shipped: commits 02bf9891b/474fe6ba2 (2026-07-18), 8ca47f664 (2026-07-30). Gate PASSED 2026-07-18 (delta re-gate of the P0 inventory-adjudication amendment nexus-146xx.1; 0 Critical, both re-review Significants fixed pre-commit; Hal ratified all three P0 forks same day)."
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-07-18
 related_issues: [nexus-146xx, nexus-tidtd, nexus-83ld0, nexus-tcqah, nexus-ixl85, nexus-gmiaf]
 related: [RDR-152, RDR-153, RDR-155, RDR-156, RDR-157, RDR-158, RDR-185]
+implementation_notes: "Residue: nexus-146xx.22 (P3, open) — pdf_pages/pdf_chunks batch writes still loop per-row .execute() inside one txn (PipelineRepository.writePages/writeChunks); apply the same ctx.batch() fix CatalogRepository.updateDocumentsMany already proved (175.5s/1718-files incident). Rides any engine cut; no wire change."
 ---
 
 # RDR-186: Client-Persistence Closure — PG in Every Mode

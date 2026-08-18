@@ -33,6 +33,8 @@ implementation_notes: >
 
 # RDR-129: T2 Daemon Write-Path Hardening: Guaranteed-Single-Daemon Enforcement and Contention-Free Internal Serialization
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents the SQLite-backed T2 daemon serving path. That substrate was retired by RDR-152 and RDR-158; the decision here is historical record, not current architecture.
+
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
 

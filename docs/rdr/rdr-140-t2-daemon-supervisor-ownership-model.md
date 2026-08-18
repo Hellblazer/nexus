@@ -16,6 +16,8 @@ related_rdrs: [RDR-128, RDR-129, RDR-120]
 
 # RDR-140: T2 Daemon Supervisor & Ownership Model — Single-Flight Election to End the Spawn-Race / SQLite-Lock Thrash
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents the T2-daemon supervisor/ownership model over SQLite. That substrate was retired by RDR-152 and RDR-158; the decision here is historical record, not current architecture.
+
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
 

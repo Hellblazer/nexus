@@ -13,6 +13,7 @@ related_issues: []
 related_rdrs: [RDR-024, RDR-065, RDR-066, RDR-069, RDR-109, RDR-121, RDR-149]
 supersedes: []
 related_tests: []
+implementation_notes: "Residue: nexus-hm0y4 (P1, open) — the P2 shared-tree git-write PreToolUse block did NOT fire on two subagent 'git stash' events during the 2026-07-30 i711w terminal-deletion session; mechanize a matcher extension to stash/checkout/reset in subagent context, or determine why the existing hook missed these."
 ---
 
 # RDR-184: Multi-Agent Orchestration Protocol Hardening

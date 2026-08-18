@@ -22,6 +22,8 @@ related: [RDR-101]
 
 # RDR-102: RDR-101 Phase 4 Completion — doc_indexer Wiring, Write-Side source_path Retirement, Doctor Visibility
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents the same SQLite catalog + ChromaDB T3 substrate as RDR-101. That substrate was retired by RDR-152 and RDR-155; the decision here is historical record, not current architecture.
+
 RDR-101 Phase 4 was declared complete on 2026-05-02 after the prune verb shipped, the t3-backfill drained, and `nx catalog doctor --t3-doc-id-coverage --replay-equality` returned PASS on production. An operator-driven audit immediately afterwards found that PASS was tautological: the gate is "every non-orphan chunk has doc_id" and 84% of T3 chunks (309,681 of ~370K) are classified as `synthesized_orphan`. Underneath the green checkmark, three structural gaps were live:
 
 - **`nx index pdf`, `nx index md`, and `nx index rdr` standalone** (the doc_indexer paths) build chunk metadata via `make_chunk_metadata()` *without* passing `doc_id`. Catalog registration fires *after* the upsert. Existing chunks survive only because ChromaDB upsert merges metadata — pre-existing doc_ids from synthesize-log persist, but no fresh write ever supplies one.

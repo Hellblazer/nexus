@@ -12,6 +12,8 @@ created: 2026-03-04
 
 # RDR-020: Voyage AI and ChromaDB Client Read Timeouts
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents Voyage AI and ChromaDB client read-timeout configuration. That substrate was retired by RDR-155; the decision here is historical record, not current architecture.
+
 ## Problem
 
 `nx index repo` can hang indefinitely on a single file when the Voyage AI embedding

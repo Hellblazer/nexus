@@ -2,14 +2,18 @@
 title: "Retire chash_index: the Chunks Tables Are the Chash-Keyed Store — Drop the Router Remnant of the Split-Store Architecture"
 id: RDR-187
 type: Architecture
-status: accepted
+status: closed
+postmortem_waiver: "Administrative closure by the 2026-08-18 true-state audit: chash_index removed (health.py cites it as precedent), gate PASSED 2026-07-20. Residue nexus-70vpz + nexus-xm0cp registered in this file. Status flip only; evidence in T2 rdr_process/audit-nexus-2026-08-18."
 accepted_date: 2026-07-20
+closed_date: 2026-07-24
+close_reason: "Gate PASSED 2026-07-20 (re-gate at fbfca3f4; round-1 Critical + both Significants fixed). chash_index removal shipped through steps 3-7 (commits 4d66892ea/843dd7f6a/701179467/3dfbd10a9/00594ac59) and the 2026-07-24 stragglers commit (98f91e702, dual-write + chash-reconcile retirement); cited as removal precedent in health.py:2338."
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-07-20
 related_issues: [nexus-uu4ue, nexus-9zuks, nexus-84tr4, nexus-kmd5b, nexus-19svb]
 related: [RDR-108, RDR-152, RDR-155, RDR-156, RDR-158, RDR-180, RDR-186]
+implementation_notes: "Residue: nexus-70vpz (P2, open) — chash_indexed_ratio health metric is now tautological (numerator==denominator by construction since chash_index was dropped), reads 1.000 on every collection including zombies. nexus-xm0cp (P1, open) — nx doctor --shakeout carries two dual_write_failed assertions with zero producers (retired at RDR-187) plus an unrelated 5xx-scan assertion with no access log; all three are vacuous."
 ---
 
 # RDR-187: Retire chash_index — the Chunks Tables Are the Chash-Keyed Store

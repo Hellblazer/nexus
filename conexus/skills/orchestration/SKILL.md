@@ -155,7 +155,7 @@ is still silent scope reduction. Applies to every dispatch below.
 | Plan a feature | strategic-planner | -> nx_plan_audit -> architect-planner |
 | Implement code | developer | -> code-review-expert -> test-validator |
 | Debug issue | debugger | -> (if cross-cutting) deep-analyst |
-| Review code | code-review-expert | -> (if critical) substantive-critic |
+| Review code | code-review-expert | -> substantive-critic (always, both reviewers) |
 | Research topic | deep-research-synthesizer | -> store_put (direct) |
 | Analyze system | codebase-deep-analyzer | -> (if deep) deep-analyst |
 

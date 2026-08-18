@@ -17,6 +17,8 @@ related: [RDR-010, RDR-034, RDR-062, RDR-078]
 
 # RDR-094: MCP-Owned T1 Chroma Lifecycle
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents a ChromaDB-backed T1 lifecycle owned by the MCP process. That substrate was retired by RDR-152 and RDR-158; the decision here is historical record, not current architecture.
+
 The T1 ChromaDB HTTP server that backs per-session scratch is spawned
 by a `SessionStart` hook, cleaned up by a `SessionEnd` hook, policed
 by an external watchdog sidecar, and swept by a liveness-plus-UUID-

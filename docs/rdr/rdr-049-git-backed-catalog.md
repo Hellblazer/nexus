@@ -17,6 +17,8 @@ related_issues:
 
 # RDR-049: Git-Backed Xanadu-Inspired Catalog for T3
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents a SQLite-backed local catalog cache. That substrate was retired by RDR-101, RDR-108 and RDR-152; the decision here is historical record, not current architecture.
+
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
 

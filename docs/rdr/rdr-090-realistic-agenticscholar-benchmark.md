@@ -2,12 +2,15 @@
 title: "RDR-090: Realistic AgenticScholar Benchmark"
 id: RDR-090
 type: Feature
-status: accepted
+status: closed
+postmortem_waiver: "Administrative closure by the 2026-08-18 true-state audit, not a fresh implementation close: Phase 1 shipped 2026-04 (6 closed beads + spike commit 12b5285be), phases 2-3 deferred at P4 with epic nexus-ic83 DEFERRED since 2026-05-17. No new outcome to post-mortem; evidence in T2 rdr_process/audit-nexus-2026-08-18."
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-17
 accepted_date: 2026-04-27
+closed_date: 2026-06-02
+close_reason: "implemented-phase-1. Phase 1 Infrastructure (force_dynamic flag, plan_match scope-aware corpus filter, plan-grow match-text hygiene, T3 staleness sweep, catalog staleness remediation, bench harness scaffold — 6 beads: nexus-dslg/smhc/zgko/u7r0/zg4c/q5yt) shipped 2026-06-02. Phases 2-3 (query authoring, CI integration) DEFERRED: epic nexus-ic83 parked 2026-07-21 (nexus-9kq3h), all remaining beads moved open->deferred. Reactivate when the benchmark resumes. Corrects 2026-08-18 audit finding: prior 'accepted' status read as never-started; Phase 1 in fact shipped."
 related_issues: []
 related_tests: [test_benchmark.py]
 related: [RDR-042, RDR-078, RDR-080, RDR-088]

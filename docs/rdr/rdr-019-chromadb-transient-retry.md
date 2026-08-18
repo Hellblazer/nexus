@@ -13,6 +13,8 @@ related_issues: []
 
 # RDR-019: ChromaDB Transient HTTP Error Retry
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents ChromaDB HTTP client transient-error retry handling. That substrate was retired by RDR-155; the decision here is historical record, not current architecture.
+
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
 

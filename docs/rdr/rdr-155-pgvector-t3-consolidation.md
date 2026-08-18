@@ -12,6 +12,7 @@ accepted_date: 2026-06-09
 related_rdrs: [RDR-152, RDR-108, RDR-105, RDR-101, conexus:RDR-001]
 related_issues: [nexus-skp06]
 related_tests: []
+implementation_notes: "Residue: nexus-xg6em (P2, open) — Low-severity test gaps pinned at the P4a.G gate (deprecated-bridge null-rejection ordering, cross-tenant listCollections isolation, HttpVectorClient count/existing_ids coverage, getWhere(null) strengthening) remain open, needed before any P4b-style deletion of the deprecated bridge. nexus-sjb52 (P2, open) — 'nx collection reindex' raises NotImplementedError on every call in both modes: HttpVectorClient.delete_collection was left a stub when P4b retired ChromaDB, so the verb has been dead since 2026-07-25."
 ---
 
 # RDR-155: pgvector T3 — Retire ChromaDB, Consolidate Vectors into the RDR-152 Postgres

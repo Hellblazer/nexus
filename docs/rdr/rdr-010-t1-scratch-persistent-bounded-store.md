@@ -17,6 +17,8 @@ related_issues:
 
 ## RDR-010: T1 Scratch: Cross-Process Session Sharing via ChromaDB Server + PPID Chain
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents a ChromaDB server-backed, cross-process T1 scratch store. That substrate was retired by RDR-152 and RDR-158; the decision here is historical record, not current architecture.
+
 ## Summary
 
 T1 scratch uses `chromadb.EphemeralClient` — purely in-process memory. When a

@@ -51,7 +51,7 @@ digraph routing {
     "debugger" -> "deep-analyst" [label="if cross-cutting"];
 
     "Review code" -> "code-review-expert";
-    "code-review-expert" -> "substantive-critic" [label="if critical"];
+    "code-review-expert" -> "substantive-critic" [label="always, both reviewers"];
 
     "Research topic" -> "deep-research-synthesizer";
     "deep-research-synthesizer" -> "store_put (MCP)" [label="then"];
@@ -69,7 +69,7 @@ digraph routing {
 | Implement code | developer | -> code-review-expert -> substantive-critic -> test-validator |
 | Implement code (circuit breaker fired) | debugger | [after developer stops] -> debugger -> developer resumes |
 | Debug issue | debugger | -> (if cross-cutting) deep-analyst |
-| Review code | code-review-expert | -> (if critical) substantive-critic |
+| Review code | code-review-expert | -> substantive-critic (always, both reviewers) |
 | Research topic | deep-research-synthesizer | -> store_put (MCP direct) |
 | Analyze system | codebase-deep-analyzer | -> (if deep) deep-analyst |
 
