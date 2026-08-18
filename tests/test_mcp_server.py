@@ -1063,12 +1063,21 @@ class TestQueryCatalogRouting:
         pytest.param({"follow_links": "cites"}, "knowledge__papers__voyage-context-3__v1",
                      "transformer attention is all you need", [], id="follow-links"),
     ])
-    def test_catalog_filter(self, t3, catalog_with_docs, kwargs, collection, content, expect_in):
+    def test_catalog_filter_on_non_service_t3_is_loud_rejected(
+        self, t3, catalog_with_docs, kwargs, collection, content, expect_in,
+    ):
+        """RDR-156 P4.2c (nexus-2bqpn): this file's ``t3`` fixture injects a
+        non-service ``InMemoryVectorClient`` (module docstring: "no API
+        keys or network required"). Catalog params used to route through
+        the app-side dance against exactly this substrate; the dance is
+        deleted, so catalog params + non-service T3 now loud-reject instead
+        of retrieving real content — real-content assertions moved to the
+        service-mode fake-backed coverage in tests/test_query_repoint.py."""
         t3.put(collection=collection, content=content, title="t")
         result = query(question=content.split(":")[0] if ":" in content else content[:20], **kwargs)
-        assert not result.startswith("Error:")
-        for s in expect_in:
-            assert s in result
+        assert result.startswith("Error:")
+        assert "service mode" in result
+        assert "pgvector" in result
 
     def test_catalog_params_without_catalog(self, t3, monkeypatch):
         import nexus.mcp.core as mod
@@ -1079,8 +1088,14 @@ class TestQueryCatalogRouting:
         pytest.param({"author": "NonexistentAuthor"}, id="author-no-match"),
         pytest.param({"subtree": "9.9"}, id="subtree-empty"),
     ])
-    def test_catalog_no_match(self, t3, catalog_with_docs, kwargs):
-        assert "No documents found matching catalog filters" in query(question="anything", **kwargs)
+    def test_catalog_no_match_on_non_service_t3_is_loud_rejected(self, t3, catalog_with_docs, kwargs):
+        """RDR-156 P4.2c (nexus-2bqpn): same non-service substrate as above —
+        the catalog-not-initialized guard runs first (still reachable), but
+        with a real catalog present the next gate is now the service-mode
+        loud reject, not a dance-produced 'no documents found'."""
+        result = query(question="anything", **kwargs)
+        assert result.startswith("Error:")
+        assert "service mode" in result
 
 
 # ── Cluster output (RDR-056) ────────────────────────────────────────────────

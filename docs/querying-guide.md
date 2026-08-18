@@ -93,14 +93,16 @@ query(question="database design", follow_links="cites", depth=1)  # + citation g
 | `follow_links` | string | Link type to follow (e.g., `cites`) — enriches with linked documents |
 | `depth` | integer | Hops to follow in the link graph (default 1) |
 | `limit` | integer | Maximum results (default 10) |
-| `where` | string | Vector-store metadata filter (e.g. `bib_year>=2020,section_type!=references`) |
+| `where` | string | Vector-store metadata filter. Any operator (`bib_year>=2020,section_type!=references`) when NO catalog param is set. Equality-only (`tags=arch`) when combined with a catalog param (`author`/`content_type`/`follow_links`/`subtree`) — the combined-query path applies it as JSONB containment; an operator shape combined with a catalog param is a loud error, not a silent drop. |
 | `structured` | boolean | Return a structured dict instead of the human-readable string (plan-runner use; default false) |
 
 ### How catalog routing works
 
+Catalog params (`author`, `content_type`, `follow_links`, `subtree`) require service mode (pgvector) — a non-service T3 with any of these set returns a loud error naming the requirement, not a degraded local search.
+
 1. If `author`, `content_type`, or `subtree` is set: query the catalog for matching documents, extract their `physical_collection` values, and search only those collections.
 2. If `follow_links` is set: find matching documents, BFS-traverse their link graph to `depth`, collect all linked collections.
-3. If no catalog parameters: fall through to corpus-based search (same as `nx search`).
+3. If no catalog parameters: fall through to corpus-based search (same as `nx search`) — this path works in both service and local/Chroma-shaped mode, and supports the full `where` operator set.
 
 `query(question="X", author="Fagin")` is faster and more precise than `query(question="X")` — fewer collections to search, hits constrained by the catalog before embedding.
 

@@ -2084,141 +2084,6 @@ def _dedup_by_id_keep_best(rows: list[dict], limit: int) -> list[dict]:
     return _dedup_by_id(rows)[:limit]
 
 
-def _resolve_seed_entries_batched(cat: Any, tumblers: list[str]) -> list:
-    """Batch-resolve *tumblers* to CatalogEntry objects, alias-following.
-
-    nexus-descendants-seed-n1: replaces a per-tumbler ``cat.resolve()`` loop
-    (one ``GET /show`` round trip per document — the same shape as the
-    175.5s/1,718-file incident cited in ``update_many``'s own docstring; at
-    scale this was 4,797 sequential round trips for one measured subtree)
-    with ``cat.resolve_many()`` (one batched, internally-paged
-    ``POST /resolve_many`` call).
-
-    ALIAS SEMANTIC: ``cat.descendants()``'s SQL (``CatalogRepository
-    .descendants``) filters only on ``tumbler LIKE prefix.%`` and
-    ``deleted_at IS NULL`` — it does NOT exclude alias rows, so a subtree can
-    legitimately contain documents whose ``alias_of`` points elsewhere
-    (possibly outside the subtree). The per-doc ``cat.resolve(...,
-    follow_alias=True)`` this replaces returns the CANONICAL entry for such a
-    row (server-side ``CatalogRepository.resolveAliasTarget``, chain-walked
-    up to 16 hops) — callers here need that: graph-traversal links
-    (``cat.graph()``/``cat.graph_many()``) are registered against canonical
-    tumblers, so seeding traversal from a raw alias tumbler would silently
-    miss them. ``cat.resolve_many()`` is a flat, non-alias-following identity
-    lookup (``WHERE tumbler IN (...)``, ``CatalogRepository.resolveMany`` —
-    no ``alias_of`` walk at all), so it is NOT a like-for-like substitute on
-    its own. This resolves the (typically small) subset of ACTUAL alias rows
-    with a per-doc, alias-chain-following ``cat.resolve()`` follow-up —
-    bounding round trips to ``1 + (aliases in the subtree)`` instead of
-    ``len(tumblers)``, while preserving the exact alias-following semantic
-    for every entry that needs it.
-    """
-    if not tumblers:
-        return []
-    resolved = cat.resolve_many(tumblers)
-    entries: list = []
-    for t in tumblers:
-        entry = resolved.get(t)
-        if entry is None:
-            continue
-        if getattr(entry, "alias_of", ""):
-            canonical = cat.resolve(t, follow_alias=True)
-            if canonical is None:
-                continue
-            entry = canonical
-        entries.append(entry)
-    return entries
-
-
-#: Batch size for :func:`_graph_many_batched`'s ``cat.graph_many()`` calls
-#: (substantive critique finding 2, T2 nexus/chroma-residue-C2-durability-
-#: critique-2026-08-10). ``CatalogRepository.MAX_GRAPH_NODES=500``
-#: (service/**, ``CatalogRepository.java``) is a PER-CALL cap applied to the
-#: MERGED reachable-node set across every seed in that one call — the N+1
-#: ``cat.graph()``-per-seed loop this replaced gave each seed its own
-#: independent 500-node budget; a single ``graph_many()`` call over ALL
-#: seeds collapses that to ONE 500-node budget shared across every seed —
-#: a severe, undisclosed completeness regression on exactly the
-#: large-subtree workload the N+1 fix targeted. Batching restores a budget
-#: PER BATCH while keeping round trips at ``ceil(N / _GRAPH_MANY_BATCH_SIZE)``
-#: instead of ``N``.
-#:
-#: 100 is chosen as: (a) an order of magnitude under
-#: ``CatalogHandler.MAX_BATCH_DOC_IDS=1000`` (service/**) — the HARD cap
-#: enforced server-side on POST /traverse's ``seeds`` array (a batch over
-#: that cap 400s outright, not merely truncates) — so a batch can never
-#: itself trigger that error, with 10x headroom for the hard cap value ever
-#: moving; (b) small enough that each batch's 500-node budget is a
-#: meaningful fraction of the batch (up to 5 nodes/seed average) rather
-#: than diluted to near-zero; (c) large enough that round trips stay
-#: bounded rather than reverting to the old N+1 shape — the plan's own
-#: 4,797-document reproduction subtree becomes 48 calls, not 4,797. Not
-#: independently measured against a live large, heavily-linked corpus
-#: (this repo has no such fixture); if a future measurement shows a
-#: different number materially reduces truncation without materially
-#: increasing latency, update this constant and its comment together.
-_GRAPH_MANY_BATCH_SIZE = 100
-
-#: Client-side mirror of ``CatalogRepository.MAX_GRAPH_NODES`` (service/**)
-#: — used ONLY as a truncation HEURISTIC, never asserted as certain: the
-#: POST /traverse wire response carries no truncation flag (the server-side
-#: cap only ``log.warn``s, CatalogRepository.java), so a batch landing at
-#: EXACTLY this many nodes is indistinguishable between "found exactly 500
-#: nodes" and "the server capped a larger result at 500". Treated as
-#: "possibly truncated" and disclosed either way — never silently dropped.
-_GRAPH_MANY_NODE_CAP_HINT = 500
-
-
-def _graph_many_batched(
-    cat: Any, seeds: list, *, depth: int, link_type: str,
-) -> tuple[dict, int, int]:
-    """Batched ``graph_many()`` BFS over *seeds*, restoring a PER-BATCH
-    ``MAX_GRAPH_NODES`` budget instead of one budget shared across every
-    seed in a single call (substantive critique finding 2 — see
-    :data:`_GRAPH_MANY_BATCH_SIZE`'s docstring for the full rationale).
-
-    Returns ``(merged_graph, batches_at_cap, batches_total)``:
-
-    - ``merged_graph``: ``{"nodes": [...], "edges": [...]}``, deduped
-      across batches (a node/edge reachable from more than one batch's
-      seeds would otherwise appear once per batch).
-    - ``batches_at_cap``: number of batches whose response landed at or
-      above :data:`_GRAPH_MANY_NODE_CAP_HINT` nodes — a heuristic signal
-      that batch MAY have been server-side truncated (see that constant's
-      docstring for why this cannot be certain from the wire response
-      alone).
-    - ``batches_total``: total batches issued, for the caller's disclosure
-      text ("N of M batches...").
-
-    Callers MUST surface ``batches_at_cap > 0`` to the user — silently
-    dropping it reintroduces exactly the completeness regression this
-    function exists to fix disclosure for.
-    """
-    if not seeds:
-        return {"nodes": [], "edges": []}, 0, 0
-    nodes_by_tumbler: dict[str, Any] = {}
-    edges_seen: dict[tuple, Any] = {}
-    batches_at_cap = 0
-    batches_total = 0
-    for i in range(0, len(seeds), _GRAPH_MANY_BATCH_SIZE):
-        chunk = seeds[i:i + _GRAPH_MANY_BATCH_SIZE]
-        batches_total += 1
-        graph = cat.graph_many(chunk, depth=depth, link_type=link_type)
-        chunk_nodes = graph.get("nodes", [])
-        if len(chunk_nodes) >= _GRAPH_MANY_NODE_CAP_HINT:
-            batches_at_cap += 1
-        for node in chunk_nodes:
-            nodes_by_tumbler[str(node.tumbler)] = node
-        for edge in graph.get("edges", []):
-            key = (str(edge.from_tumbler), str(edge.to_tumbler), edge.link_type)
-            edges_seen[key] = edge
-    return (
-        {"nodes": list(nodes_by_tumbler.values()), "edges": list(edges_seen.values())},
-        batches_at_cap,
-        batches_total,
-    )
-
-
 @mcp.tool(
     title="Metadata-Scoped Combined Search",
     annotations={"readOnlyHint": True},
@@ -2626,7 +2491,10 @@ def query(
     Use this for research questions where you need to know WHICH documents match,
     not just which text fragments. The calling agent handles analysis/synthesis.
 
-    Catalog-aware routing (optional — all require an initialized catalog):
+    Catalog-aware routing (optional — all require an initialized catalog AND
+    service mode (pgvector); RDR-156 P4.2c removed the local/Chroma-mode
+    fallback these params used to have — a non-service T3 with any catalog
+    param set returns a loud error instead):
         author: Filter to documents by this author (catalog metadata search)
         content_type: Filter to documents of this type (code, paper, rdr, knowledge)
         follow_links: Follow links of this type from catalog results (e.g. "cites", "implements").
@@ -2635,12 +2503,12 @@ def query(
         depth: BFS depth for follow_links traversal (default 1)
         subtree: Tumbler prefix — search only documents in this subtree (e.g. "1.1")
 
-    MULTI-MODEL CORPUS (nexus-3l6gz / nexus-hg745): in service mode, when a
-    catalog param is set AND *corpus* resolves to collections spanning more
-    than one embedding model (e.g. ``corpus="all"`` or ``"code,docs"``),
-    this tool's service-mode branch issues one combined-query call PER
-    model group and merges — see :func:`_grouped_combined_query`. Same
-    ALL-OR-NOTHING semantics and cross-model raw-cosine-distance caveat as
+    MULTI-MODEL CORPUS (nexus-3l6gz / nexus-hg745): when a catalog param is
+    set AND *corpus* resolves to collections spanning more than one
+    embedding model (e.g. ``corpus="all"`` or ``"code,docs"``), this tool's
+    catalog-param branch issues one combined-query call PER model group and
+    merges — see :func:`_grouped_combined_query`. Same ALL-OR-NOTHING
+    semantics and cross-model raw-cosine-distance caveat as
     ``search_metadata_scoped`` / ``search_graph_hop``.
 
     Args:
@@ -2650,7 +2518,14 @@ def query(
                 Note: when catalog params (author, content_type, subtree) are provided,
                 corpus is overridden by the resolved catalog collections.
         where: Metadata filter — KEY=VALUE, comma-separated.
-               Example: "bib_year>=2020,tags=arch"
+               Example: "tags=arch" (equality only).
+               Comparison operators (e.g. "bib_year>=2020") and operator-shaped
+               filters ($and/$or) are supported ONLY when no catalog param
+               (author, content_type, follow_links, subtree) is set — combined
+               with a catalog param, `where` is equality-only (the combined-query
+               path applies it as JSONB containment) and an operator shape
+               returns a loud error naming the workarounds (equality `where`,
+               the `search` tool, or dropping the catalog params).
         limit: Maximum documents to return (default 10)
         author: Filter by author (catalog metadata)
         content_type: Filter by content type (catalog metadata)
@@ -2669,13 +2544,13 @@ def query(
 
         t3 = _get_t3()
 
-        # Catalog-aware routing: derive target collections from catalog metadata
-        catalog_collections: set[str] | None = None
         # nexus-descendants-seed-n1 / substantive critique finding 2: declared
         # here (not inside `if has_catalog_params:`) so it is ALWAYS defined
-        # by the time the routing_note/lines/structured-result code below
-        # reads it — a plain corpus-based query (no catalog params at all)
-        # must see None, not a NameError.
+        # by the time the structured-result/text-form code below reads it —
+        # a plain corpus-based query (no catalog params at all) must see
+        # None, not a NameError. RDR-156 P4.2c (nexus-2bqpn) deleted its
+        # sole producer (the app-side follow_links dance in local/Chroma
+        # mode); this is permanently None now, kept only for that reason.
         graph_batch_info: dict | None = None
         has_catalog_params = author or content_type or follow_links or subtree
 
@@ -2691,13 +2566,27 @@ def query(
                 if subtree_depth >= 3:
                     return f"Error: subtree '{subtree}' is a document-level address — use an owner prefix (e.g., '{'.'.join(subtree.split('.')[:2])}') to search a subtree"
 
-            # ── SERVICE-MODE BRANCH (nexus-rzqto) ────────────────────────────
-            # When the T3 backend is the pgvector service, route through the
-            # combined-query SQL functions (search_metadata_scoped /
-            # search_graph_hop) instead of the app-side catalog dance +
-            # search_cross_corpus.  The SQL functions perform the catalog-
-            # metadata join server-side and return document-level rows
-            # (id=tumbler, content, distance, collection, chash).
+            # ── CATALOG-PARAM PATH (nexus-rzqto; dance deleted nexus-2bqpn) ──
+            # Catalog params route through the combined-query SQL functions
+            # (search_metadata_scoped / search_graph_hop), which perform the
+            # catalog-metadata join server-side and return document-level rows
+            # (id=tumbler, content, distance, collection, chash). RDR-156
+            # P4.2c deleted the app-side catalog-dance + search_cross_corpus
+            # fallback that used to run when the combined path couldn't be
+            # used — this is now the ONLY catalog-param path. Two
+            # preconditions the dance used to silently absorb are now loud
+            # rejects instead:
+            #
+            #   1. Non-service T3 (local/Chroma-shaped substrate): the
+            #      combined-query functions live in the pgvector Postgres
+            #      only. Production T3 is always HttpVectorClient post-
+            #      RDR-158; non-service is the InMemoryVectorClient unit-test
+            #      substrate.
+            #   2. An operator-shaped `where` ($and/$or/any comparison
+            #      operator, e.g. {"k": {"$gte": ...}}): the SQL predicate on
+            #      both combined-query functions is JSONB containment
+            #      (equality-only) — an operator shape would silently
+            #      containment-fail to zero rows if allowed through.
             #
             # bib richness (nexus-rzqto): the combined functions return only
             # (id=tumbler, content, distance, collection, chash), so the text
@@ -2706,107 +2595,92 @@ def query(
             # Java catalog already serializes the bib_* columns
             # (CatalogRepository.docRowFromRecord), surfaced onto CatalogEntry.
             from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            if not is_service_backed(t3):
+                return (
+                    "Error: query catalog params (author, content_type, "
+                    "follow_links, subtree) require service mode (pgvector); "
+                    "not available in local/Chroma mode"
+                )
             _where_dict = _parse_where_str(where)
-            # H2 NARROWED (nexus-7ndh3): search_graph_hop carries `where`
-            # since catalog-012, so follow_links + EQUALITY where routes
-            # through the combined-query path like everything else. But the
-            # SQL predicate is JSONB containment (equality-only) on BOTH the
-            # metadata-scoped and graph-hop functions — an operator-shaped
-            # where ({"k": {"$gte": ...}}, $and/$or) would silently
-            # containment-fail to zero rows. Operator wheres therefore still
-            # take the dance below, whose search_cross_corpus leg translates
-            # operators to real SQL. The dance's remaining consumers: that
-            # operator arm, and non-service (Chroma) mode — see nexus-2bqpn
-            # for the deletion gates.
             _operator_where = bool(_where_dict) and (
                 "$and" in _where_dict or "$or" in _where_dict
                 or any(isinstance(v, dict) for v in _where_dict.values())
             )
-            if is_service_backed(t3) and not _operator_where:
-                # Broad corpus target: the SQL functions filter by catalog
-                # metadata internally, so pass the full corpus set.
-                target = _resolve_corpus_target(corpus, t3)
-                if not target:
-                    return f"No collections match corpus {corpus!r}"
-
-                where_dict = _where_dict  # equality-only here: the _operator_where gate above routed operator shapes to the dance
-                fetch_n = limit * 10
-
-                _no_docs_msg = (
-                    f"No documents found matching catalog filters "
-                    f"(author={author!r}, content_type={content_type!r}, "
-                    f"subtree={subtree!r}, follow_links={follow_links!r})"
+            if _operator_where:
+                return (
+                    "Error: query catalog params (author, content_type, "
+                    "follow_links, subtree) combined with an operator-shaped "
+                    "`where` ($and/$or, or a comparison operator like "
+                    "{'k': {'$gte': ...}}) are not supported — the combined-"
+                    "query path supports equality-only `where` with catalog "
+                    "params. Use (a) an equality-only `where`, (b) the "
+                    "`search` tool (chunk-level, retains full operator "
+                    "support), or (c) drop the catalog params."
                 )
+            # Broad corpus target: the SQL functions filter by catalog
+            # metadata internally, so pass the full corpus set.
+            target = _resolve_corpus_target(corpus, t3)
+            if not target:
+                return f"No collections match corpus {corpus!r}"
 
-                # Disclosure envelope for a capped subtree seed list
-                # (nexus-descendants-seed-cap) — stays None unless the
-                # follow_links+subtree arm below actually runs; surfaced in
-                # both the text and structured responses so a cap is never
-                # silent.
-                seed_scope: dict | None = None
+            where_dict = _where_dict  # equality-only here: the operator-where guard above loud-rejects operator shapes
+            fetch_n = limit * 10
 
-                if follow_links:
-                    # Graph-hop path: seeds resolved app-side, BFS in SQL.
-                    seed_tumblers: list[str] = []
-                    if subtree:
-                        desc = cat.descendants(subtree)
-                        all_seed_tumblers = [d["tumbler"] for d in desc if d.get("tumbler")]
-                        seed_tumblers = all_seed_tumblers[:_MAX_GRAPH_HOP_SEEDS]
-                        seed_scope = {
-                            "total": len(all_seed_tumblers),
-                            "used": len(seed_tumblers),
-                            "truncated": len(all_seed_tumblers) > _MAX_GRAPH_HOP_SEEDS,
-                        }
-                    elif author or content_type:
-                        if content_type and not author:
-                            seed_entries_svc = cat.by_content_type(content_type)
-                        else:
-                            seed_entries_svc = cat.find(author, content_type=content_type or None)
-                            seed_entries_svc = [
-                                r for r in seed_entries_svc
-                                if author.lower() in (r.author or "").lower()
-                            ]
-                        seed_tumblers = [str(r.tumbler) for r in seed_entries_svc if r.tumbler]
+            _no_docs_msg = (
+                f"No documents found matching catalog filters "
+                f"(author={author!r}, content_type={content_type!r}, "
+                f"subtree={subtree!r}, follow_links={follow_links!r})"
+            )
+
+            # Disclosure envelope for a capped subtree seed list
+            # (nexus-descendants-seed-cap) — stays None unless the
+            # follow_links+subtree arm below actually runs; surfaced in
+            # both the text and structured responses so a cap is never
+            # silent.
+            seed_scope: dict | None = None
+
+            if follow_links:
+                # Graph-hop path: seeds resolved app-side, BFS in SQL.
+                seed_tumblers: list[str] = []
+                if subtree:
+                    desc = cat.descendants(subtree)
+                    all_seed_tumblers = [d["tumbler"] for d in desc if d.get("tumbler")]
+                    seed_tumblers = all_seed_tumblers[:_MAX_GRAPH_HOP_SEEDS]
+                    seed_scope = {
+                        "total": len(all_seed_tumblers),
+                        "used": len(seed_tumblers),
+                        "truncated": len(all_seed_tumblers) > _MAX_GRAPH_HOP_SEEDS,
+                    }
+                elif author or content_type:
+                    if content_type and not author:
+                        seed_entries_svc = cat.by_content_type(content_type)
                     else:
-                        # follow_links only: use question as catalog seed
-                        seed_results_svc = cat.find(question)
-                        seed_tumblers = [str(r.tumbler) for r in seed_results_svc[:5] if r.tumbler]
-
-                    # nexus-3l6gz / nexus-hg745: route through
-                    # _grouped_combined_query — a single client call cannot
-                    # rank a corpus spanning more than one embedding model
-                    # against one query vector (this branch is query()'s
-                    # canonical entry point and reproduced the exact
-                    # nexus-3l6gz symptom via corpus="all"/"code,docs" +
-                    # author/content_type/follow_links/subtree before this
-                    # fix). ALL-OR-NOTHING: a group's exception aborts the
-                    # whole merge, matching search_metadata_scoped /
-                    # search_graph_hop above.
-                    if not seed_tumblers:
-                        # No graph seeds resolved — fall through to
-                        # search_metadata_scoped over the broad target
-                        # (mirrors the dance path's fallback to broad search
-                        # when catalog_collections stays None).
-                        rows = _grouped_combined_query(
-                            target, lambda group: t3.search_metadata_scoped(
-                                question, group,
-                                content_type=content_type or None,
-                                author=author or None,
-                                subtree=(subtree or None),
-                                where=(where_dict or None),
-                                n_results=fetch_n,
-                            ))
-                    else:
-                        rows = _grouped_combined_query(
-                            target, lambda group: t3.search_graph_hop(
-                                question, seed_tumblers, group,
-                                link_type=(follow_links or None),
-                                depth=depth,
-                                where=(where_dict or None),
-                                n_results=fetch_n,
-                            ))
+                        seed_entries_svc = cat.find(author, content_type=content_type or None)
+                        seed_entries_svc = [
+                            r for r in seed_entries_svc
+                            if author.lower() in (r.author or "").lower()
+                        ]
+                    seed_tumblers = [str(r.tumbler) for r in seed_entries_svc if r.tumbler]
                 else:
-                    # Metadata-scoped path: catalog filters pushed into SQL.
+                    # follow_links only: use question as catalog seed
+                    seed_results_svc = cat.find(question)
+                    seed_tumblers = [str(r.tumbler) for r in seed_results_svc[:5] if r.tumbler]
+
+                # nexus-3l6gz / nexus-hg745: route through
+                # _grouped_combined_query — a single client call cannot
+                # rank a corpus spanning more than one embedding model
+                # against one query vector (this branch is query()'s
+                # canonical entry point and reproduced the exact
+                # nexus-3l6gz symptom via corpus="all"/"code,docs" +
+                # author/content_type/follow_links/subtree before this
+                # fix). ALL-OR-NOTHING: a group's exception aborts the
+                # whole merge, matching search_metadata_scoped /
+                # search_graph_hop above.
+                if not seed_tumblers:
+                    # No graph seeds resolved — fall through to
+                    # search_metadata_scoped over the broad target
+                    # (mirrors the now-deleted dance's fallback to broad
+                    # search when no seed collections resolved).
                     rows = _grouped_combined_query(
                         target, lambda group: t3.search_metadata_scoped(
                             question, group,
@@ -2816,237 +2690,173 @@ def query(
                             where=(where_dict or None),
                             n_results=fetch_n,
                         ))
+                else:
+                    rows = _grouped_combined_query(
+                        target, lambda group: t3.search_graph_hop(
+                            question, seed_tumblers, group,
+                            link_type=(follow_links or None),
+                            depth=depth,
+                            where=(where_dict or None),
+                            n_results=fetch_n,
+                        ))
+            else:
+                # Metadata-scoped path: catalog filters pushed into SQL.
+                rows = _grouped_combined_query(
+                    target, lambda group: t3.search_metadata_scoped(
+                        question, group,
+                        content_type=content_type or None,
+                        author=author or None,
+                        subtree=(subtree or None),
+                        where=(where_dict or None),
+                        n_results=fetch_n,
+                    ))
 
-                # Dedup: one row per tumbler, keeping best (lowest) distance.
-                # deduped_svc (pre-truncation) feeds the "N of M documents"
-                # header/footer below; rows is the truncated display page.
-                deduped_svc = _dedup_by_id(rows)
-                rows = deduped_svc[:limit]
+            # Dedup: one row per tumbler, keeping best (lowest) distance.
+            # deduped_svc (pre-truncation) feeds the "N of M documents"
+            # header/footer below; rows is the truncated display page.
+            deduped_svc = _dedup_by_id(rows)
+            rows = deduped_svc[:limit]
 
-                if not rows:
-                    if structured:
-                        empty_result: dict = {
-                            "ids": [], "tumblers": [], "distances": [],
-                            "collections": [], "chunk_collections": [],
-                            "chunk_text_hash": [],
-                        }
-                        if seed_scope is not None:
-                            empty_result["seed_scope"] = seed_scope
-                        return empty_result
-                    if seed_scope is not None and seed_scope["truncated"]:
-                        return (
-                            f"[WARNING: subtree seed list capped at "
-                            f"{seed_scope['used']} of {seed_scope['total']} "
-                            f"documents for graph-hop traversal — results may "
-                            f"be INCOMPLETE. Narrow `subtree` or split into "
-                            f"multiple queries.]\n{_no_docs_msg}"
-                        )
-                    return _no_docs_msg
-
+            if not rows:
                 if structured:
-                    tumblers_svc = [r.get("id", "") for r in rows]
-                    result: dict = {
-                        "ids": tumblers_svc,
-                        "tumblers": tumblers_svc,
-                        "distances": _reported_distances(rows),
-                        # sorted distinct across rows (mirrors existing dance path)
-                        "collections": sorted({r.get("collection", "") for r in rows}),
-                        # per-row aligned (RDR-086 / review #7)
-                        "chunk_collections": [r.get("collection", "") for r in rows],
-                        # HIGH-1: chash per matched chunk row, not a manifest guess
-                        "chunk_text_hash": [r.get("chash", "") for r in rows],
+                    empty_result: dict = {
+                        "ids": [], "tumblers": [], "distances": [],
+                        "collections": [], "chunk_collections": [],
+                        "chunk_text_hash": [],
                     }
-                    # nexus-descendants-seed-cap: disclose a capped subtree
-                    # seed list — never silent (see _MAX_GRAPH_HOP_SEEDS).
                     if seed_scope is not None:
-                        result["seed_scope"] = seed_scope
-                    return result
-
-                # Text form: re-hydrate per tumbler from the catalog to build
-                # the same format as the existing dance path.
-                parts_note = []
-                if author:
-                    parts_note.append(f"author={author!r}")
-                if content_type:
-                    parts_note.append(f"content_type={content_type!r}")
-                if subtree:
-                    parts_note.append(f"subtree={subtree!r}")
-                if follow_links:
-                    parts_note.append(f"follow_links={follow_links!r}")
-                routing_note_svc = (
-                    f"[Catalog routing: {', '.join(parts_note)} -> {len(target)} collections]"
-                )
-                header_svc = (
-                    f"Found {len(rows)} documents "
-                    f"(from {len(deduped_svc)} across {len(target)} collections)"
-                )
-                lines_svc: list[str] = []
+                        empty_result["seed_scope"] = seed_scope
+                    return empty_result
                 if seed_scope is not None and seed_scope["truncated"]:
-                    # nexus-descendants-seed-cap: never silent — see
-                    # _MAX_GRAPH_HOP_SEEDS.
-                    lines_svc.append(
+                    return (
                         f"[WARNING: subtree seed list capped at "
                         f"{seed_scope['used']} of {seed_scope['total']} "
-                        f"documents for graph-hop traversal — results may be "
-                        f"INCOMPLETE. Narrow `subtree` or split into multiple "
-                        f"queries.]"
+                        f"documents for graph-hop traversal — results may "
+                        f"be INCOMPLETE. Narrow `subtree` or split into "
+                        f"multiple queries.]\n{_no_docs_msg}"
                     )
-                lines_svc.append(f"{routing_note_svc}\n{header_svc}")
-                lines_svc.append("")
-                for i, row in enumerate(rows, 1):
-                    tumbler_str = row.get("id", "")
-                    dist = f"{row.get('distance', 0.0):.4f}"
-                    # Re-hydrate from catalog
-                    try:
-                        entry_svc = cat.resolve(Tumbler.parse(tumbler_str)) if tumbler_str else None
-                    except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-                        entry_svc = None
-                    title_svc = (entry_svc.title if entry_svc else tumbler_str or "")[:70]
-                    # Mirror the dance path's bib richness: prefer bib_* (RDR-101
-                    # enrichment), fall back to the plain author/year fields.
-                    bib_year_svc = (entry_svc.bib_year or entry_svc.year) if entry_svc else 0
-                    bib_authors_svc = (entry_svc.bib_authors or entry_svc.author) if entry_svc else ""
-                    bib_venue_svc = entry_svc.bib_venue if entry_svc else ""
-                    bib_citation_count_svc = entry_svc.bib_citation_count if entry_svc else 0
-                    try:
-                        chunk_count_svc = len(cat.get_manifest(tumbler_str)) if tumbler_str else 0
-                    except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-                        chunk_count_svc = 0
-                    snippet_svc = row.get("content", "")[:300].replace("\n", " ")
-                    collection_svc = row.get("collection", "")
+                return _no_docs_msg
 
-                    lines_svc.append(f"{i}. [{dist}] {title_svc}")
-                    bib_svc: list[str] = []
-                    if bib_year_svc:
-                        bib_svc.append(str(bib_year_svc))
-                    if bib_authors_svc:
-                        bib_svc.append(bib_authors_svc[:60])
-                    if bib_venue_svc:
-                        bib_svc.append(bib_venue_svc[:30])
-                    if bib_citation_count_svc:
-                        bib_svc.append(f"{bib_citation_count_svc} citations")
-                    if bib_svc:
-                        lines_svc.append(f"   {' · '.join(bib_svc)}")
-                    if chunk_count_svc:
-                        lines_svc.append(f"   [{chunk_count_svc} chunks]")
-                    lines_svc.append(f"   {collection_svc}")
-                    lines_svc.append(f"   {snippet_svc}")
-                    lines_svc.append("")
+            if structured:
+                tumblers_svc = [r.get("id", "") for r in rows]
+                result: dict = {
+                    "ids": tumblers_svc,
+                    "tumblers": tumblers_svc,
+                    "distances": _reported_distances(rows),
+                    # sorted distinct across rows
+                    "collections": sorted({r.get("collection", "") for r in rows}),
+                    # per-row aligned (RDR-086 / review #7)
+                    "chunk_collections": [r.get("collection", "") for r in rows],
+                    # HIGH-1: chash per matched chunk row, not a manifest guess
+                    "chunk_text_hash": [r.get("chash", "") for r in rows],
+                }
+                # nexus-descendants-seed-cap: disclose a capped subtree
+                # seed list — never silent (see _MAX_GRAPH_HOP_SEEDS).
+                if seed_scope is not None:
+                    result["seed_scope"] = seed_scope
+                return result
 
-                if len(deduped_svc) > limit:
-                    lines_svc.append(
-                        f"\n--- showing 1-{len(rows)} of {len(deduped_svc)} documents. "
-                        f"Results are capped at limit={limit}."
-                    )
-                return "\n".join(lines_svc)
-            # ── END SERVICE-MODE BRANCH ───────────────────────────────────────
-
-            # FALLBACK: local/Chroma mode — existing app-side catalog dance below.
-
-            # Resolve seed entries for catalog routing
-            seed_entries: list = []
-            if subtree:
-                # Use descendants() directly — NOT catalog_search(owner=) which has depth-equality bug
-                desc = cat.descendants(subtree)
-                catalog_collections = {d["physical_collection"] for d in desc if d.get("physical_collection")}
-                # nexus-descendants-seed-n1: batched (1 + aliases) round trips
-                # instead of one cat.resolve() per descendant — see
-                # _resolve_seed_entries_batched's docstring for the alias
-                # semantics this preserves.
-                seed_entries = _resolve_seed_entries_batched(
-                    cat, [d["tumbler"] for d in desc if d.get("tumbler")]
-                )
-            elif author or content_type:
-                if content_type and not author:
-                    seed_entries = cat.by_content_type(content_type)
-                else:
-                    seed_entries = cat.find(author, content_type=content_type or None)
-                    seed_entries = [r for r in seed_entries if author.lower() in (r.author or "").lower()]
-                catalog_collections = {r.physical_collection for r in seed_entries if r.physical_collection}
-
-            if follow_links and catalog_collections is not None:
-                # Expand via link graph from already-resolved seed entries.
-                # nexus-descendants-seed-n1: batched graph_many() BFS calls
-                # over ALL seeds instead of one cat.graph() round trip per
-                # seed — POST /traverse already accepts a seed list natively
-                # (graphBFS), so the per-entry loop was pure overhead, same
-                # N+1 shape as the resolve() loop above. A SINGLE graph_many()
-                # call over every seed (the original N+1 fix) shares ONE
-                # CatalogRepository.MAX_GRAPH_NODES=500 budget across all
-                # seeds instead of each seed getting its own, as the old N+1
-                # loop did — substantive critique finding 2 (T2
-                # nexus/chroma-residue-C2-durability-critique-2026-08-10).
-                # _graph_many_batched restores a PER-BATCH budget while
-                # keeping round trips far below N; any batch that may have
-                # been server-side truncated is disclosed via
-                # `graph_batch_info` below — never silent.
-                linked_collections: set[str] = set()
-                if seed_entries:
-                    graph, batches_at_cap, batches_total = _graph_many_batched(
-                        cat, [e.tumbler for e in seed_entries],
-                        depth=depth, link_type=follow_links,
-                    )
-                    graph_batch_info = {
-                        "batches_total": batches_total,
-                        "batches_at_cap": batches_at_cap,
-                        "possibly_incomplete": batches_at_cap > 0,
-                    }
-                    for node in graph["nodes"]:
-                        if node.physical_collection:
-                            linked_collections.add(node.physical_collection)
-                catalog_collections |= linked_collections
-            elif follow_links:
-                # follow_links without other filters: use question as catalog seed
-                seed_results = cat.find(question)
-                if seed_results:
-                    catalog_collections = set()
-                    for r in seed_results[:5]:  # limit seed to avoid explosion
-                        graph = cat.graph(r.tumbler, depth=depth, link_type=follow_links)
-                        for node in graph["nodes"]:
-                            if node.physical_collection:
-                                catalog_collections.add(node.physical_collection)
-                    # No link-enriched collections found — fall through to broad search
-                    if not catalog_collections:
-                        catalog_collections = None
-                # else: no seeds found — catalog_collections stays None, broad search proceeds
-
-            if catalog_collections is not None and not catalog_collections:
-                return f"No documents found matching catalog filters (author={author!r}, content_type={content_type!r}, subtree={subtree!r}, follow_links={follow_links!r})"
-
-        routing_note = ""
-        # Exactly one branch sets `target` — catalog routing or corpus-based routing
-        if catalog_collections is not None:
-            target = [c for c in catalog_collections if c]
-            parts = []
+            # Text form: re-hydrate per tumbler from the catalog.
+            parts_note = []
             if author:
-                parts.append(f"author={author!r}")
+                parts_note.append(f"author={author!r}")
             if content_type:
-                parts.append(f"content_type={content_type!r}")
+                parts_note.append(f"content_type={content_type!r}")
             if subtree:
-                parts.append(f"subtree={subtree!r}")
+                parts_note.append(f"subtree={subtree!r}")
             if follow_links:
-                parts.append(f"follow_links={follow_links!r}")
-            routing_note = f"[Catalog routing: {', '.join(parts)} -> {len(target)} collections]"
-        else:
-            all_names = _get_collection_names()
+                parts_note.append(f"follow_links={follow_links!r}")
+            routing_note_svc = (
+                f"[Catalog routing: {', '.join(parts_note)} -> {len(target)} collections]"
+            )
+            header_svc = (
+                f"Found {len(rows)} documents "
+                f"(from {len(deduped_svc)} across {len(target)} collections)"
+            )
+            lines_svc: list[str] = []
+            if seed_scope is not None and seed_scope["truncated"]:
+                # nexus-descendants-seed-cap: never silent — see
+                # _MAX_GRAPH_HOP_SEEDS.
+                lines_svc.append(
+                    f"[WARNING: subtree seed list capped at "
+                    f"{seed_scope['used']} of {seed_scope['total']} "
+                    f"documents for graph-hop traversal — results may be "
+                    f"INCOMPLETE. Narrow `subtree` or split into multiple "
+                    f"queries.]"
+                )
+            lines_svc.append(f"{routing_note_svc}\n{header_svc}")
+            lines_svc.append("")
+            for i, row in enumerate(rows, 1):
+                tumbler_str = row.get("id", "")
+                dist = f"{row.get('distance', 0.0):.4f}"
+                # Re-hydrate from catalog
+                try:
+                    entry_svc = cat.resolve(Tumbler.parse(tumbler_str)) if tumbler_str else None
+                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
+                    entry_svc = None
+                title_svc = (entry_svc.title if entry_svc else tumbler_str or "")[:70]
+                # Prefer bib_* (RDR-101
+                # enrichment), fall back to the plain author/year fields.
+                bib_year_svc = (entry_svc.bib_year or entry_svc.year) if entry_svc else 0
+                bib_authors_svc = (entry_svc.bib_authors or entry_svc.author) if entry_svc else ""
+                bib_venue_svc = entry_svc.bib_venue if entry_svc else ""
+                bib_citation_count_svc = entry_svc.bib_citation_count if entry_svc else 0
+                try:
+                    chunk_count_svc = len(cat.get_manifest(tumbler_str)) if tumbler_str else 0
+                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
+                    chunk_count_svc = 0
+                snippet_svc = row.get("content", "")[:300].replace("\n", " ")
+                collection_svc = row.get("collection", "")
 
-            if corpus == "all":
-                seen_prefixes: list[str] = []
-                for n in all_names:
-                    prefix = n.split("__", 1)[0]
-                    if prefix and prefix not in seen_prefixes:
-                        seen_prefixes.append(prefix)
-                corpus = ",".join(seen_prefixes) if seen_prefixes else "knowledge,code,docs,rdr"
+                lines_svc.append(f"{i}. [{dist}] {title_svc}")
+                bib_svc: list[str] = []
+                if bib_year_svc:
+                    bib_svc.append(str(bib_year_svc))
+                if bib_authors_svc:
+                    bib_svc.append(bib_authors_svc[:60])
+                if bib_venue_svc:
+                    bib_svc.append(bib_venue_svc[:30])
+                if bib_citation_count_svc:
+                    bib_svc.append(f"{bib_citation_count_svc} citations")
+                if bib_svc:
+                    lines_svc.append(f"   {' · '.join(bib_svc)}")
+                if chunk_count_svc:
+                    lines_svc.append(f"   [{chunk_count_svc} chunks]")
+                lines_svc.append(f"   {collection_svc}")
+                lines_svc.append(f"   {snippet_svc}")
+                lines_svc.append("")
 
-            target: list[str] = []
-            for part in corpus.split(","):
-                part = part.strip()
-                if not part:
-                    continue
-                if "__" in part:
-                    target.append(part)
-                else:
-                    target.extend(resolve_corpus(part, all_names))
+            if len(deduped_svc) > limit:
+                lines_svc.append(
+                    f"\n--- showing 1-{len(rows)} of {len(deduped_svc)} documents. "
+                    f"Results are capped at limit={limit}."
+                )
+            return "\n".join(lines_svc)
+
+        # routing_note stays "" — RDR-156 P4.2c (nexus-2bqpn) deleted the
+        # only branch that ever set it (the catalog_collections-driven
+        # dance, whose catalog_collections variable is gone too); every
+        # query reaching here is the plain corpus-based path.
+        routing_note = ""
+        all_names = _get_collection_names()
+
+        if corpus == "all":
+            seen_prefixes: list[str] = []
+            for n in all_names:
+                prefix = n.split("__", 1)[0]
+                if prefix and prefix not in seen_prefixes:
+                    seen_prefixes.append(prefix)
+            corpus = ",".join(seen_prefixes) if seen_prefixes else "knowledge,code,docs,rdr"
+
+        target: list[str] = []
+        for part in corpus.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "__" in part:
+                target.append(part)
+            else:
+                target.extend(resolve_corpus(part, all_names))
 
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -3110,7 +2920,11 @@ def query(
             if graph_batch_info is not None:
                 # nexus-descendants-seed-n1 / substantive critique finding 2:
                 # disclose possible graph-traversal truncation — never
-                # silent (see _graph_many_batched's docstring).
+                # silent. graph_batch_info's sole producer (the app-side
+                # follow_links dance in local/Chroma mode) was deleted at
+                # RDR-156 P4.2c (nexus-2bqpn); this stays None for every
+                # live caller now, kept only so a plain corpus-based query
+                # never sees a NameError.
                 structured_result["graph_scope"] = graph_batch_info
             return structured_result
 
@@ -3219,7 +3033,8 @@ def query(
         lines: list[str] = []
         if graph_batch_info is not None and graph_batch_info["possibly_incomplete"]:
             # nexus-descendants-seed-n1 / substantive critique finding 2:
-            # never silent — see _graph_many_batched's docstring.
+            # never silent. See the structured branch above for why
+            # graph_batch_info is now always None (RDR-156 P4.2c).
             lines.append(
                 f"[WARNING: link-graph traversal for "
                 f"{graph_batch_info['batches_at_cap']} of "

@@ -70,30 +70,41 @@ def _seed_templates(tmp_path, monkeypatch):
 
 
 class TestPathRouting:
-    def test_subtree_routes_to_descendants(self, t3, catalog):
+    """RDR-156 P4.2c (nexus-2bqpn): this file's ``t3`` fixture injects a
+    non-service ``InMemoryVectorClient`` (``make_vector_test_client()``).
+    Catalog-param routing used to reach real content through the app-side
+    dance against exactly this substrate; the dance is deleted, so catalog
+    params + non-service T3 now loud-reject. Real-content routing coverage
+    for the surviving (service-mode) combined-query path lives in
+    tests/test_query_repoint.py."""
+
+    def test_subtree_on_non_service_t3_is_loud_rejected(self, t3, catalog):
         t3.put(collection="code__nexus", content="tree sitter chunking", title="ts-chunk")
         t3.put(collection="rdr__nexus", content="catalog first query routing", title="rdr-chunk")
         result = query(question="chunking", subtree="1.1")
-        assert not result.startswith("Error:")
+        assert result.startswith("Error:")
+        assert "service mode" in result
 
-    def test_follow_links_enriches_collections(self, t3, catalog):
+    def test_follow_links_on_non_service_t3_is_loud_rejected(self, t3, catalog):
         t3.put(collection="knowledge__delos", content="schema data exchange", title="delos-chunk")
         t3.put(collection="knowledge__transformers", content="attention heads layers", title="trans-chunk")
         result = query(question="schema mappings", follow_links="cites")
-        assert not result.startswith("Error:")
+        assert result.startswith("Error:")
+        assert "service mode" in result
 
     def test_no_catalog_params_backward_compat(self, t3):
         t3.put(collection="knowledge__test", content="vector database embeddings", title="vec-chunk")
         result = query(question="vector database", corpus="knowledge__test")
         assert not result.startswith("Error:")
 
-    @pytest.mark.parametrize("kw,expected_msg", [
-        ({"author": "NonexistentPerson"}, "No documents found matching catalog filters"),
-        ({"subtree": "9.9"}, "No documents found matching catalog filters"),
+    @pytest.mark.parametrize("kw", [
+        {"author": "NonexistentPerson"},
+        {"subtree": "9.9"},
     ])
-    def test_no_match_returns_clear_message(self, t3, catalog, kw, expected_msg):
+    def test_catalog_params_on_non_service_t3_is_loud_rejected(self, t3, catalog, kw):
         result = query(question="anything", **kw)
-        assert expected_msg in result
+        assert result.startswith("Error:")
+        assert "service mode" in result
 
     def test_subtree_document_level_returns_error(self, t3, catalog):
         result = query(question="anything", subtree="1.1.42")
@@ -108,16 +119,17 @@ class TestPathRouting:
 
 
 class TestReferenceQuestions:
-    # The "papers by Fagin" case is gone with nexus-i711w: it asserted that a
-    # rich Catalog.init-seeded LOCAL catalog surfaced knowledge__delos through
-    # an author filter, and the only remaining catalog is the service one.
-    @pytest.mark.parametrize("question,kw,assert_check", [
-        ("schema mappings", {"author": "Fagin"}, lambda r: not r.startswith("Error:")),
-        ("RDR about streaming", {"content_type": "rdr"}, lambda r: not r.startswith("Error:")),
-        ("what cites schema mappings", {"follow_links": "cites"}, lambda r: not r.startswith("Error:")),
-        ("nexus architecture", {"subtree": "1.1"}, lambda r: not r.startswith("Error:")),
+    """RDR-156 P4.2c (nexus-2bqpn): same non-service ``t3`` fixture as
+    ``TestPathRouting`` above — catalog params now loud-reject rather than
+    reaching real content through the deleted dance."""
+
+    @pytest.mark.parametrize("question,kw", [
+        ("schema mappings", {"author": "Fagin"}),
+        ("RDR about streaming", {"content_type": "rdr"}),
+        ("what cites schema mappings", {"follow_links": "cites"}),
+        ("nexus architecture", {"subtree": "1.1"}),
     ])
-    def test_reference_question(self, t3, catalog, question, kw, assert_check):
+    def test_reference_question_on_non_service_t3_is_loud_rejected(self, t3, catalog, question, kw):
         # Seed data for all reference questions
         for col, content, title in [
             ("knowledge__delos", "schema mappings chase", "ref1"),
@@ -128,7 +140,8 @@ class TestReferenceQuestions:
         ]:
             t3.put(collection=col, content=content, title=title)
         result = query(question=question, **kw)
-        assert assert_check(result)
+        assert result.startswith("Error:")
+        assert "service mode" in result
 
 
 # ── Templates and Plans ─────────────────────────────────────────────────────
@@ -219,9 +232,18 @@ class TestPlanTTLEnforcement:
 
 
 class TestFollowLinksFallback:
-    def test_follow_links_no_seed_falls_back(self, t3, catalog):
+    def test_follow_links_no_seed_on_non_service_t3_is_loud_rejected(self, t3, catalog):
+        """RDR-156 P4.2c (nexus-2bqpn): this used to pin the dance's
+        no-seed-found fallback to broad search (never a catalog-filter
+        'no match' message). The dance is deleted — catalog params on this
+        non-service fixture now loud-reject before seed resolution is ever
+        attempted, so the assertion is the loud-reject contract, not the
+        absence of one specific unrelated message (a pre-fix version of
+        this test would have passed vacuously on that weaker check)."""
         t3.put(collection="knowledge__delos", content="schema data exchange", title="fb-chunk")
         result = query(question="xyzzy_nonexistent_topic_12345", follow_links="cites", corpus="knowledge__delos")
+        assert result.startswith("Error:")
+        assert "service mode" in result
         assert "No documents found matching catalog filters" not in result
 
 
