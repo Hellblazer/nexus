@@ -4284,10 +4284,22 @@ def _check_chash_conformance_report() -> list[HealthResult]:
 
         cat = make_catalog_reader()
         if cat is None:
+            # Benign by design (nexus-5h4ou re-examination): reader-returns-
+            # None is the "no catalog configured" state — a configuration
+            # fact, not a probe failure. There is genuinely nothing for this
+            # check to examine, so a plain skip is honest, unlike the arms
+            # below where something SHOULD have been examinable.
             return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
-    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        _log.debug("doctor_chash_conformance_report_check_failed", error=str(exc))
-        return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
+    except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`, but must not lie either
+        # nexus-5h4ou: the factory RAISING is "could not check" — a box with
+        # a catalog whose reader failed to construct. That is
+        # distinguishable-from-clean territory (nexus-kmo9h), never a bare
+        # ok=True skip.
+        _log.warning("doctor_chash_conformance_report_check_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"SKIPPED (catalog reader unavailable: {exc}) — not a clean-store signal",
+        )]
 
     import httpx  # noqa: PLC0415 — deferred to avoid a heavy/optional import at module load
 
@@ -4346,9 +4358,30 @@ def _check_chash_conformance_report() -> list[HealthResult]:
         rows.extend(result.get("tables") or [])
 
     if dims_checked == 0:
-        # NON-VACUITY (nexus-kmo9h): zero dims actually checked is not a
-        # clean bill of health.
-        return [HealthResult(label=label, ok=True, detail="skipped (no dim reachable)")]
+        # NON-VACUITY (nexus-kmo9h / nexus-5h4ou): zero dims actually
+        # checked is not a clean bill of health — this arm used to return
+        # ok=True directly under this very comment. RDR-191's shard-drop
+        # window makes "no dim reachable" a real state, and it must render
+        # distinguishable from genuinely-clean.
+        #
+        # SCOPE (nexus-5h4ou acceptance item 4, decided at review): warn,
+        # NOT fatal — deliberately matching every OTHER could-not-check arm
+        # of this same check (engine-predates-route 404, transport failure,
+        # factory-raise above). Doctor's process exit code is therefore
+        # unchanged (warns never mark the run failed, RDR-129 B4);
+        # "distinguishable from clean" is served by the CLI warn glyph and
+        # the --json ok=false/status field, which scripted consumers read.
+        # Making only these two arms fatal while the 404 arm stays warn
+        # would be an arbitrary split inside one check's uniform
+        # degradation contract. Pinned by
+        # test_could_not_check_arms_warn_but_do_not_fail_the_run.
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                "SKIPPED (0 dims checked — no dim reachable); this check "
+                "examined NOTHING and must not read as clean (nexus-5h4ou)"
+            ),
+        )]
 
     total_non_conformant = 0
     offenders: list[str] = []

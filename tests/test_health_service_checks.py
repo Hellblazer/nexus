@@ -2172,6 +2172,59 @@ class TestCheckChashConformanceReport:
         assert r.ok is True
         assert "no catalog" in r.detail
 
+    def test_zero_dims_checked_is_not_a_clean_pass(self, monkeypatch) -> None:
+        """nexus-5h4ou: ``dims_checked == 0`` used to return a bare ok=True
+        "skipped (no dim reachable)" directly under a comment citing the
+        nexus-kmo9h non-vacuity rule — healthy-when-it-examined-NOTHING.
+        RDR-191 makes the state reachable for real (the window between the
+        shard drop and consumer retargeting)."""
+        import nexus.health as h
+        monkeypatch.setattr(h, "_CHASH_CONFORMANCE_REPORT_DIMS", ())
+        r = self._run(monkeypatch, self._cat())
+        assert r.ok is False, "zero dims examined must not read as clean"
+        assert r.warn is True
+        assert "0 dim" in r.detail or "no dim" in r.detail.lower()
+
+    def test_catalog_factory_raising_warns_not_a_false_clean(self, monkeypatch) -> None:
+        """nexus-5h4ou second arm: the factory RAISING is "could not check",
+        which must be distinguishable from clean — unlike reader-returns-
+        None (a benign no-catalog configuration state, pinned ok=True by
+        test_catalog_unavailable_degrades_to_plain_skip above)."""
+        import nexus.health as h
+
+        def _boom(*a, **k):
+            raise RuntimeError("factory exploded")
+
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader", _boom, raising=False,
+        )
+        r = h._check_chash_conformance_report()[0]
+        assert r.ok is False
+        assert r.warn is True
+        assert "factory exploded" in r.detail
+
+    def test_could_not_check_arms_warn_but_do_not_fail_the_run(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-5h4ou acceptance item 4, DECIDED SCOPE (batch-2 review
+        Important-1): the zero-dims and factory-raise arms are warn, NOT
+        fatal — matching every other could-not-check arm of this check
+        (engine-404, transport failure). Doctor's exit path
+        (``format_health_for_cli``'s ``failed`` flag keys on ``fatal and
+        not ok``; warns never fail the run, RDR-129 B4) is therefore
+        deliberately unchanged; distinguishability from clean lives in the
+        rendered warn glyph and the JSON ``ok=false``. This test pins BOTH
+        halves so neither the arms silently regain fatal (noisy doctor
+        reds on every pre-route box) nor the render path stops
+        distinguishing them from clean."""
+        import nexus.health as h
+        monkeypatch.setattr(h, "_CHASH_CONFORMANCE_REPORT_DIMS", ())
+        r = self._run(monkeypatch, self._cat())
+        assert (r.ok, r.warn, r.fatal) == (False, True, False)
+        rendered, failed = h.format_health_for_cli([r], local_mode=True)
+        assert failed is False  # warn convention: never fails the run
+        assert "SKIPPED" in rendered and "NOTHING" in rendered  # but never renders clean
+
     def test_label_distinct_from_gate_matched_local_probe_label(self) -> None:
         """This check must NEVER collide with ``CHASH_CONFORMANCE_LABEL`` —
         the install-binary gate (``commands/daemon.py``) and the convergence
