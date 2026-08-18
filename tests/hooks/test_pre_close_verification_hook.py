@@ -831,6 +831,272 @@ class TestStampFailureIsLoud:
         assert "FAILED" in result.stderr or "WARNING" in result.stderr
 
 
+class TestF2EnvPrefixOverride:
+    """nexus-cr4lp F2: an inline ``NX_REVIEW_GATE_OVERRIDE=1`` prefix on
+    the command itself must be PARSED (the bd verb recognized despite the
+    leading env-assignment token, rules apply) and HONORED as an override
+    -- not a silent, unaudited no-op via a parser miss (B2: pre-fix,
+    the bd-verb matcher required ``tokens[0] == 'bd'``, so the env-
+    prefixed form left ``has_close_or_done`` False and the WHOLE hook
+    fast-no-op'd, never running the coverage check at all)."""
+
+    def test_inline_env_prefixed_close_is_recognized_and_overridden(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_nx_bin = fake_nx("No scratch entries.")
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="NX_REVIEW_GATE_OVERRIDE=1 bd close nexus-abc12"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", parsed
+        assert "OVERRIDE" in _get_context(parsed), parsed
+        assert "nexus-abc12 verification=overridden" in log.read_text()
+
+    def test_inline_override_emits_an_escape_routing_event(
+        self, mock_config_env, fake_nx, tmp_path
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        log_path = tmp_path / "routing_log.jsonl"
+        result = _run_hook(
+            _make_payload(command="NX_REVIEW_GATE_OVERRIDE=1 bd close nexus-abc12"),
+            path_prefix=str(fake_bin),
+            env_overrides={**env, "NX_ROUTING_LOG_PATH": str(log_path)},
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", parsed
+        assert log_path.exists(), "no routing event was logged for the override"
+        events = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+        assert any(e.get("outcome") == "escape" for e in events), events
+
+    def test_ambient_env_override_also_emits_an_escape_routing_event(
+        self, mock_config_env, fake_nx, tmp_path
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        log_path = tmp_path / "routing_log.jsonl"
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=str(fake_bin),
+            env_overrides={
+                **env,
+                "NX_ROUTING_LOG_PATH": str(log_path),
+                "NX_REVIEW_GATE_OVERRIDE": "1",
+            },
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", parsed
+        events = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+        assert any(e.get("outcome") == "escape" for e in events), events
+
+
+class TestF3ReasonBlindIdHarvesting:
+    """nexus-cr4lp F3 (T2 nexus/guard-evidence-cluster-root-cause-2026-08-
+    18, LEG D1): a bead id appearing ONLY inside a --reason/--description/
+    --notes/-m OPTION VALUE must not be harvested as a required-coverage
+    close target -- but genuine close targets (positional args, loop
+    variables) must still be."""
+
+    def test_id_only_in_reason_value_is_not_required_for_coverage(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        # nexus-target is a covered close target; nexus-lemv5 appears ONLY
+        # inside the --reason prose and must not be demanded.
+        scratch = _marker(
+            "review-completed,nexus-target",
+            "review-completed: nexus-target -- clean",
+        )
+        fake_bin = fake_nx(scratch)
+        result = _run_hook(
+            _make_payload(
+                command=(
+                    'bd close nexus-target --reason="residue tracked as '
+                    'nexus-lemv5, not a close target"'
+                )
+            ),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", parsed
+
+    def test_id_only_in_description_equals_value_is_not_required(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        scratch = _marker(
+            "review-completed,nexus-target",
+            "review-completed: nexus-target -- clean",
+        )
+        fake_bin = fake_nx(scratch)
+        result = _run_hook(
+            _make_payload(
+                command=(
+                    "bd close nexus-target && bd create "
+                    '--description="was blocked, see nexus-lemv5 for residue"'
+                )
+            ),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", parsed
+
+    def test_id_in_reason_value_is_still_a_denial_target_if_it_is_ALSO_the_close_positional(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """The flag-value skip must not swallow an id that ALSO appears as
+        the genuine positional close target elsewhere in the same
+        command -- only the VALUE occurrence is skipped."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command='bd close nexus-uncov --reason="mentions nexus-uncov again"'),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny", parsed
+        assert "nexus-uncov" in _get_reason(parsed)
+
+    def test_loop_variable_ids_still_harvested_alongside_a_reason_flag(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """datum (i)'s loop-variable recovery must survive: those ids sit
+        as bare positional tokens in the `for ... in` segment, never a
+        flag value, so F3's flag-value skip must not touch them."""
+        env = mock_config_env({"on_close": True})
+        scratch = _marker(
+            "review-completed,nexus-cotmr,nexus-tafjk",
+            "review-completed: nexus-cotmr + nexus-tafjk",
+        )
+        fake_bin = fake_nx(scratch)
+        result = _run_hook(
+            _make_payload(
+                command=(
+                    "for b in nexus-cotmr nexus-tafjk; do bd close $b "
+                    '--reason="batch close, ref nexus-unrelated"; done'
+                )
+            ),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", parsed
+
+
+class TestF4RemedySeparateCallWarning:
+    """nexus-cr4lp F4: every denial's Remedy block must lead with the
+    separate-tool-call warning -- the shared root cause of every report
+    in the guard-evidence cluster."""
+
+    def test_denial_remedy_opens_with_separate_call_warning(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny", parsed
+        reason = _get_reason(parsed)
+        assert "SEPARATE tool call" in reason, reason
+        assert reason.index("Remedy") < reason.index("SEPARATE tool call")
+
+
+class TestB3T2TitleOnlyMarker:
+    """nexus-cr4lp B3 (latent, found during guard-evidence-cluster
+    forensics): a T2 marker whose bead id lives ONLY in the TITLE (this
+    hook's OWN printed ``-t review-<bead-id>`` form) must satisfy
+    coverage even when the CONTENT carries no bare bead id."""
+
+    def test_t2_marker_covers_when_bead_id_is_only_in_the_title(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx(
+            "No scratch entries.",
+            memory_by_query={
+                "nexus-b3ttl": _t2_marker(
+                    "nexus/review-nexus-b3ttl",
+                    "review-completed: clean, no bead id restated here",
+                )
+            },
+        )
+        result = _run_hook(
+            _make_payload(command="bd close nexus-b3ttl"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", parsed
+
+
+class TestF5RemedyRoundTripReal:
+    """nexus-cr4lp F5: each remedy string the hook PRINTS, executed via
+    the REAL ``nx`` CLI (THIS checkout's dev build -- never the live
+    production install) as its OWN subprocess call, must actually satisfy
+    the hook's own T1/T2 lookup afterward. Uses the real engine-backed
+    T2/T1 substrate (``t2_service_env``); skips cleanly if the dev ``nx``
+    console script cannot be found next to ``sys.executable``."""
+
+    @staticmethod
+    def _real_nx_dir() -> Path | None:
+        d = Path(sys.executable).parent
+        return d if (d / "nx").exists() else None
+
+    @pytest.mark.parametrize("remedy_kind", ["t1_scratch", "t2_memory"])
+    def test_printed_remedy_satisfies_the_hooks_own_lookup(
+        self, remedy_kind, mock_config_env, t2_service_env
+    ) -> None:
+        real_nx_dir = self._real_nx_dir()
+        if real_nx_dir is None:
+            pytest.skip("dev checkout `nx` console script not found next to sys.executable")
+        real_nx = str(real_nx_dir / "nx")
+
+        bead_id = f"nexus-r5{'a' if remedy_kind == 't1_scratch' else 'b'}01"
+        session_id = f"cr4lp-close-f5-{remedy_kind}"
+
+        write_env = os.environ.copy()
+        write_env["NX_SESSION_ID"] = session_id
+        write_env["NX_T1_ALLOW_SHARED_FALLBACK"] = "1"
+
+        if remedy_kind == "t1_scratch":
+            write_cmd = [
+                real_nx, "scratch", "put", f"review-completed: {bead_id}",
+                "--tags", f"review-completed,{bead_id}",
+            ]
+        else:
+            write_cmd = [
+                real_nx, "memory", "put", f"review-completed: {bead_id}",
+                "-p", "nexus-cr4lp-f5-close-test", "-t", f"review-{bead_id}",
+            ]
+
+        # The remedy write is ITS OWN subprocess call -- never bundled
+        # with the gated `bd close`.
+        wproc = subprocess.run(
+            write_cmd, env=write_env, capture_output=True, text=True, timeout=60,
+        )
+        assert wproc.returncode == 0, wproc.stderr
+
+        env = mock_config_env({"on_close": True})
+        result = _run_hook(
+            _make_payload(command=f"bd close {bead_id}", session_id=session_id),
+            path_prefix=str(real_nx_dir),
+            env_overrides={**env, "NX_T1_ALLOW_SHARED_FALLBACK": "1"},
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow", parsed
+
+
 class TestSessionIdExport:
     """nexus-36q84: the hook is detached from any live nx-mcp process and
     cannot rely on env-var inheritance from a parent Claude session. It

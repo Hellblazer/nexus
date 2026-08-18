@@ -240,6 +240,19 @@ def test_non_push_git_commands_are_untouched(repo_on):
         assert out["permissionDecision"] == "allow", f"{cmd}: {out}"
 
 
+def test_bare_push_with_stdout_redirect_from_main_is_still_blocked(repo_on):
+    """nexus-cr4lp B1 (T2 nexus/guard-evidence-cluster-root-cause-2026-08-
+    18): a phantom refspec manufactured from shell redirection tokens
+    (``>``, ``/dev/null``) used to make ``_targets_protected`` see a
+    non-empty refspec list and skip the upstream-branch fallback
+    ENTIRELY -- defeating the push-to-main guard for any push carrying
+    output redirection. Reproduced live pre-fix in a throwaway repo."""
+    work = repo_on("main")
+    out = _decision(_run(_bash("git push > /dev/null", str(work))))
+    assert out["permissionDecision"] == "deny", out
+    assert "PRs only" in out["permissionDecisionReason"]
+
+
 def test_fails_open_outside_a_repo(tmp_path):
     """A workflow guard, not a security boundary: undeterminable git state must
     not brick pushes. Matches the sibling hooks' fail_closed=False contract."""

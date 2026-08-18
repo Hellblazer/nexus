@@ -337,6 +337,86 @@ _VALUED_PUSH_FLAGS: frozenset[str] = frozenset({
     "--repo", "--exec", "--receive-pack", "--push-option", "-o",
 })
 
+#: Leading ``NAME=VALUE`` env-assignment token, e.g. the ``NX_REVIEW_GATE_
+#: OVERRIDE=1`` prefix on ``NX_REVIEW_GATE_OVERRIDE=1 git push`` (nexus-cr4lp
+#: F2). Shell-legal identifier on the left, ``=`` immediately after.
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+#: A BARE shell redirection operator token (optionally fd-prefixed), e.g.
+#: ``>``, ``>>``, ``<``, ``&>``, ``2>``, ``1>>`` -- shlex hands this back as
+#: its OWN token, with the target (file, or ``&N`` fd-dup) as a SEPARATE
+#: following token (``>`` ``/dev/null``). nexus-cr4lp F1.
+_REDIRECT_BARE_RE = re.compile(r"^\d*(?:>>|>|<<|<|&>>|&>)$")
+
+#: An ATTACHED redirection form: operator and operand share ONE token, with
+#: no intervening whitespace -- ``>file``, ``2>&1`` (fd duplication, no
+#: separate operand token at all). Self-contained; drop just this token.
+_REDIRECT_ATTACHED_RE = re.compile(r"^\d*(?:>>|>|<<|<|&>>|&>)\S")
+
+
+def _strip_shell_redirections(tokens: list[str]) -> list[str]:
+    """Drop shell redirection tokens (and, for the bare-operator form, the
+    SEPARATE operand token that follows) from *tokens* (nexus-cr4lp F1).
+
+    A PreToolUse hook sees the raw command text tokenised by ``shlex``,
+    which has no concept of shell redirection semantics -- ``2>&1``, ``>``,
+    ``2> /dev/null`` etc. are ordinary tokens to it. Pre-fix, these walked
+    straight into the positional-argument / refspec scan as phantom
+    refspecs (LEG A, T2 nexus/guard-evidence-cluster-root-cause-2026-08-18:
+    ``git push -u origin release/v7.9.0 2>&1`` read as pushing to the TWO
+    destinations ``release/v7.9.0`` and the bogus ``2>&1``, so the
+    release/* exemption's ``all()`` predicate failed and a legitimate
+    release-branch push was denied) and as a phantom destination branch
+    (B1: ``git push > /dev/null`` read its refspec list as ``['/dev/null']``,
+    which is non-empty, so ``_targets_protected`` skipped the upstream-
+    branch fallback ENTIRELY and a bare push-to-main defeated the guard).
+    """
+    out: list[str] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if _REDIRECT_BARE_RE.fullmatch(tok):
+            i += 2  # operator + its separate operand token
+            continue
+        if _REDIRECT_ATTACHED_RE.match(tok):
+            i += 1  # operator+operand (or fd-dup) in one token
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
+def _override_active(command: str) -> bool:
+    """True iff ``NX_REVIEW_GATE_OVERRIDE=1`` is set, either via this hook's
+    own process environment OR as an inline ``NAME=VALUE`` prefix in the
+    command text itself (nexus-cr4lp F2).
+
+    A PreToolUse hook subprocess's ``os.environ`` never observes an inline
+    ``NAME=VALUE cmd`` assignment -- that assignment is scoped to the CHILD
+    process the shell would go on to spawn, not to this hook process. Pre-
+    fix, ``NX_REVIEW_GATE_OVERRIDE=1 git push ...`` was not read as an
+    override at all: ``_push_tokens`` required ``tokens[0] == "git"``, so
+    the env-prefixed form failed to parse as a push segment and the WHOLE
+    check silently no-opped -- an unaudited pass-through, not the
+    documented, logged override (B2, T2 nexus/guard-evidence-cluster-root-
+    cause-2026-08-18). Every caller of this function must, on a positive
+    result, emit a logged ``escape`` routing event -- see ``body()``.
+    """
+    if os.environ.get("NX_REVIEW_GATE_OVERRIDE") == "1":
+        return True
+    for segment in re.split(r"(?:&&|\|\||;|\s\|\s|\bthen\b|\bdo\b)", command):
+        try:
+            tokens = shlex.split(segment, posix=True)
+        except ValueError:
+            continue
+        for tok in tokens:
+            if not _ENV_ASSIGN_RE.match(tok):
+                break
+            if tok == "NX_REVIEW_GATE_OVERRIDE=1":
+                return True
+    return False
+
 
 def _push_tokens(command: str) -> list[list[str]]:
     """Every ``git push`` segment in *command*, tokenised."""
@@ -346,13 +426,20 @@ def _push_tokens(command: str) -> list[list[str]]:
             tokens = shlex.split(segment, posix=True)
         except ValueError:
             continue
+        # nexus-cr4lp F2: skip leading NAME=VALUE env-assignment tokens
+        # before requiring "git" -- `NX_REVIEW_GATE_OVERRIDE=1 git push ...`
+        # must still be recognised as a push segment, not silently dropped.
+        i = 0
+        while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+            i += 1
+        tokens = tokens[i:]
         if len(tokens) >= 2 and tokens[0] == "git":
             # Skip global flags (`git -C path push`) to find the subcommand.
-            i = 1
-            while i < len(tokens) and tokens[i].startswith("-"):
-                i += 2 if tokens[i] in {"-C", "-c"} else 1
-            if i < len(tokens) and tokens[i] == "push":
-                out.append(tokens[i:])
+            j = 1
+            while j < len(tokens) and tokens[j].startswith("-"):
+                j += 2 if tokens[j] in {"-C", "-c"} else 1
+            if j < len(tokens) and tokens[j] == "push":
+                out.append(tokens[j:])
     return out
 
 
@@ -450,7 +537,10 @@ def _targets_protected(tokens: list[str], cwd: str) -> bool:
     """
     positional: list[str] = []
     skip_next = False
-    for tok in tokens[1:]:                       # drop "push"
+    # nexus-cr4lp F1: strip shell redirection tokens BEFORE the flag/
+    # positional scan -- see `_strip_shell_redirections`'s docstring for
+    # the exact LEG A / B1 failure this closes.
+    for tok in _strip_shell_redirections(tokens[1:]):     # drop "push"
         if skip_next:
             skip_next = False
             continue
@@ -537,7 +627,11 @@ def _push_positional_and_refspecs(tokens: list[str]) -> tuple[list[str], list[st
     kept as a separate copy (see module docstring)."""
     positional: list[str] = []
     skip_next = False
-    for tok in tokens[1:]:
+    # nexus-cr4lp F1: same redirection strip as `_targets_protected`'s
+    # inline copy (see `_strip_shell_redirections`'s docstring) -- kept as
+    # a separate call for the same reason this whole function is a
+    # separate copy (see module docstring).
+    for tok in _strip_shell_redirections(tokens[1:]):
         if skip_next:
             skip_next = False
             continue
@@ -921,10 +1015,24 @@ def _t2_memory_search(
 
 
 def _t2_entry_covers_bead(bead_id: str, header: str, content: str) -> bool:
+    """nexus-cr4lp B3: a T2 marker whose bead id lives ONLY in the TITLE
+    (``-t review-nexus-t5uol`` -- this hook's OWN printed remedy form) used
+    to fail the strict ``(?<![A-Za-z0-9-])`` lookbehind, because the hyphen
+    in ``review-<bead-id>`` sits immediately to the left of the id. Latent
+    pre-fix: it survived only because the printed CONTENT also happened to
+    carry the bare id alongside the title. A second, narrower alternate
+    matches the literal ``review-<bead-id>`` shape specifically (left
+    boundary excludes only an alnum char, not a hyphen), so a title-only
+    marker is now covered without loosening the general match elsewhere."""
     combined = f"{header} {content}".lower()
     if "review-completed" not in combined:
         return False
-    pat = re.compile(r"(?<![A-Za-z0-9-])" + re.escape(bead_id) + r"(?![A-Za-z0-9-])", re.IGNORECASE)
+    escaped = re.escape(bead_id)
+    pat = re.compile(
+        r"(?<![A-Za-z0-9-])" + escaped + r"(?![A-Za-z0-9-])"
+        r"|(?<![A-Za-z0-9])review-" + escaped + r"(?![A-Za-z0-9-])",
+        re.IGNORECASE,
+    )
     return bool(pat.search(combined))
 
 
@@ -1005,6 +1113,17 @@ def _range_status(tip: str | None, t1_entries: list[tuple[str, str]], budget: "_
     return "absent"
 
 
+#: nexus-cr4lp F4: the shared root cause of every report in the
+#: guard-evidence-cluster (T2 nexus/guard-evidence-cluster-root-cause-
+#: 2026-08-18) is a PreToolUse deny aborting the WHOLE Bash call, remedy
+#: bundled ahead of the gated command included -- the remedy never ran.
+#: Every deny message's Remedy block leads with this sentence.
+_SEPARATE_CALL_WARNING = (
+    "Run the marker write as a SEPARATE tool call -- this deny aborts the "
+    "ENTIRE command, including any marker write bundled ahead of it."
+)
+
+
 def _uncovered_message(
     uncovered: list[tuple[str, str, list[str]]],
     deadline_hit: list[tuple[str, str, list[str]]],
@@ -1044,9 +1163,10 @@ def _uncovered_message(
         for sha, subject, _paths in uncertain:
             lines.append(f"  {sha[:12]}  {subject}")
     lines.append(
-        "Remedy (fastest first): write ONE per-range marker covering the "
-        "WHOLE push -- a single lookup regardless of push size, the "
-        "designed path for multi-commit pushes:\n"
+        f"Remedy (fastest first): {_SEPARATE_CALL_WARNING} Then write ONE "
+        "per-range marker covering the WHOLE push -- a single lookup "
+        "regardless of push size, the designed path for multi-commit "
+        "pushes:\n"
         f"  nx scratch put \"review-completed: range {tip or '<tip-sha>'}\" "
         f"--tags \"review-completed\"\n"
         "or write a per-bead marker (to T1 and/or T2 -- write to T2 when "
@@ -1094,8 +1214,9 @@ def _deadline_scan_message(scanned: int, total: int, tip: str | None) -> str:
         f"deadline (nexus-4av2n round 3: the hook stops itself "
         f"deterministically rather than risk a harness timeout on an "
         f"open-ended scan).\n"
-        "Remedy (fastest first): write ONE per-range marker covering the "
-        "WHOLE push -- a single lookup regardless of push size:\n"
+        f"Remedy (fastest first): {_SEPARATE_CALL_WARNING} Then write ONE "
+        "per-range marker covering the WHOLE push -- a single lookup "
+        "regardless of push size:\n"
         f"  nx scratch put \"review-completed: range {tip or '<tip-sha>'}\" "
         f"--tags \"review-completed\"\n"
         "Deliberate override (audited): set NX_REVIEW_GATE_OVERRIDE=1 and re-run, "
@@ -1121,12 +1242,19 @@ def _scan_gated_commits(
     return gated, len(shas), False
 
 
-def _review_coverage_check(cwd: str, payload: dict[str, Any]) -> tuple[str, str]:
-    """Returns (decision, message). decision is one of:
+def _review_coverage_check(
+    cwd: str, payload: dict[str, Any], command: str
+) -> tuple[str, str, bool]:
+    """Returns (decision, message, override_used). decision is one of:
       "ok"   -- nothing to check, or everything covered, uncapped. message "".
       "warn" -- allow, but with a loud advisory (capability gap, truncation,
                 override, or a release-branch exemption). message non-empty.
       "deny" -- block the push. message is the deny reason.
+    ``override_used`` is True iff ``NX_REVIEW_GATE_OVERRIDE`` (env or inline
+    command-text prefix, nexus-cr4lp F2) downgraded a would-be deny to
+    "warn" -- the caller must log an ``escape`` routing event whenever this
+    is True (every override is auditable, never silently absorbed into a
+    plain "warn").
 
     ROUND 3 (nexus-4av2n, substantive-critic closure verification): the
     whole phase is now bounded by a single wall-clock ``_Deadline``
@@ -1139,7 +1267,7 @@ def _review_coverage_check(cwd: str, payload: dict[str, Any]) -> tuple[str, str]
 
     shas, total = _outgoing_commits(cwd)
     if not shas:
-        return "ok", ""
+        return "ok", "", False
     truncation_note = _cap_truncation_note(total, len(shas)) if total > len(shas) else ""
 
     tip = _git_out(cwd, "rev-parse", "HEAD", timeout=_clamp_timeout(deadline))
@@ -1149,12 +1277,12 @@ def _review_coverage_check(cwd: str, payload: dict[str, Any]) -> tuple[str, str]
         msg = _deadline_scan_message(_scanned, len(shas), tip)
         if truncation_note:
             msg = truncation_note + "\n\n" + msg
-        if os.environ.get("NX_REVIEW_GATE_OVERRIDE") == "1":
-            return "warn", "OVERRIDE (NX_REVIEW_GATE_OVERRIDE=1): " + msg
-        return "deny", msg
+        if _override_active(command):
+            return "warn", "OVERRIDE (NX_REVIEW_GATE_OVERRIDE=1): " + msg, True
+        return "deny", msg, False
 
     if not gated:
-        return ("warn", truncation_note) if truncation_note else ("ok", "")
+        return ("warn", truncation_note, False) if truncation_note else ("ok", "", False)
 
     t1_reachable, t1_entries = _t1_scratch_entries(cwd, payload, deadline)
 
@@ -1171,7 +1299,7 @@ def _review_coverage_check(cwd: str, payload: dict[str, Any]) -> tuple[str, str]
         still_uncovered[sha] = (paths, bead_ids)
 
     if not still_uncovered:
-        return ("warn", truncation_note) if truncation_note else ("ok", "")
+        return ("warn", truncation_note, False) if truncation_note else ("ok", "", False)
 
     uncovered: list[tuple[str, str, list[str]]] = []
     uncertain: list[tuple[str, str, list[str]]] = []
@@ -1218,18 +1346,18 @@ def _review_coverage_check(cwd: str, payload: dict[str, Any]) -> tuple[str, str]
                 uncovered.append((sha, _commit_subject(cwd, sha), paths))
 
     if not uncovered and not uncertain and not deadline_hit and not truncation_note:
-        return "ok", ""
+        return "ok", "", False
 
     if uncovered or deadline_hit:
         msg = _uncovered_message(uncovered, deadline_hit, uncertain, tip, truncation_note)
-        if os.environ.get("NX_REVIEW_GATE_OVERRIDE") == "1":
-            return "warn", "OVERRIDE (NX_REVIEW_GATE_OVERRIDE=1): " + msg
-        return "deny", msg
+        if _override_active(command):
+            return "warn", "OVERRIDE (NX_REVIEW_GATE_OVERRIDE=1): " + msg, True
+        return "deny", msg, False
 
     if uncertain:
-        return "warn", _uncertain_only_message(uncertain, truncation_note)
+        return "warn", _uncertain_only_message(uncertain, truncation_note), False
 
-    return "warn", truncation_note
+    return "warn", truncation_note, False
 
 
 def body(payload: dict[str, Any]) -> None:
@@ -1246,7 +1374,7 @@ def body(payload: dict[str, Any]) -> None:
     wildcard_add = _scan_command(command)
 
     push_to_main = False
-    review_decision, review_message = "ok", ""
+    review_decision, review_message, review_override_used = "ok", "", False
     if not wildcard_add:
         # Only pay for the git subprocesses when the cheap check missed.
         cwd = str(payload.get("cwd") or "") or os.getcwd()
@@ -1281,9 +1409,21 @@ def body(payload: dict[str, Any]) -> None:
                     review_decision = "warn"
                     review_message = _release_branch_exempt_message(flat)
                 else:
-                    review_decision, review_message = _review_coverage_check(cwd, payload)
+                    review_decision, review_message, review_override_used = (
+                        _review_coverage_check(cwd, payload, command)
+                    )
 
     if not wildcard_add and not push_to_main and review_decision != "deny":
+        if review_override_used:
+            # nexus-cr4lp F2: every override (env OR inline command-text
+            # prefix) is auditable -- a dedicated `escape` event, never
+            # silently folded into a plain `warn`.
+            _lib.log_routing_event(
+                rule=RULE_NAME, outcome="escape", tool_name="Bash",
+                command_fragment=command,
+                escape_reason="NX_REVIEW_GATE_OVERRIDE=1",
+            )
+            _lib.warn(review_message)
         if review_decision == "warn" and review_message:
             _lib.log_routing_event(
                 rule=RULE_NAME, outcome="warn", tool_name="Bash",
