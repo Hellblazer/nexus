@@ -1007,3 +1007,55 @@ class TestWiring:
         assert "nexus-vduer" in registry, (
             "incident archaeology should still be traceable from the registry"
         )
+
+
+class TestMalformedQuotingNeverBypasses:
+    """nexus-2e874: an unbalanced quote anywhere in the command used to make
+    shlex reject the segment inside `_push_tokens`, which silently DROPPED
+    it -- `push_segments` came back empty and the whole hook fast-no-op'd
+    with a bare allow, a full silent bypass of the review-coverage gate.
+    The degraded quote-blanked whitespace fallback keeps the `git push`
+    anchor visible."""
+
+    def test_unbalanced_quote_push_with_uncovered_commit_is_still_denied(
+        self, repo, tmp_path
+    ):
+        _commit(repo, "src/nexus/x.py", "feat: x (nexus-tst34)")
+        fake_bin = _fake_nx(
+            tmp_path,
+            scratch="No scratch entries.",
+            memory_default="No results found.",
+        )
+        out = _decision(_run(
+            'git push origin develop --receive-pack="unterminated',
+            repo, path=f"{fake_bin}:/usr/bin:/bin",
+        ))
+        assert out["permissionDecision"] == "deny", out
+        assert "nexus-tst34" in out["permissionDecisionReason"]
+
+    def test_unbalanced_quote_with_no_outgoing_gated_commit_stays_allowed(
+        self, repo, tmp_path
+    ):
+        """The degraded parse must not over-deny: same malformed quoting,
+        docs-only outgoing range -- still exempt."""
+        _commit(repo, "docs/x.md", "docs: x")
+        out = _decision(_run(
+            'git push origin develop --receive-pack="unterminated',
+            repo, path=_NO_NX_PATH,
+        ))
+        assert out["permissionDecision"] == "allow", out
+
+    def test_quote_inside_the_verb_is_still_gated(self, repo, tmp_path):
+        """Review Important-1 (nexus-2e874): quote INSIDE the git verb --
+        the quote-removed degraded variant must still see the push."""
+        _commit(repo, "src/nexus/y.py", "feat: y (nexus-tst56)")
+        fake_bin = _fake_nx(
+            tmp_path,
+            scratch="No scratch entries.",
+            memory_default="No results found.",
+        )
+        out = _decision(_run(
+            'gi"t push origin develop',
+            repo, path=f"{fake_bin}:/usr/bin:/bin",
+        ))
+        assert out["permissionDecision"] == "deny", out

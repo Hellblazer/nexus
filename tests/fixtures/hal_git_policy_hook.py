@@ -295,14 +295,32 @@ def _has_wildcard_add(segment_tokens: list[str]) -> bool:
     return False
 
 
+def _degraded_token_variants(segment: str) -> list[list[str]]:
+    """Rough tokenizations of a segment ``shlex`` rejected for unbalanced
+    quoting (nexus-2e874). ``except ValueError: continue`` silently DROPPED
+    the whole segment, so a single stray quote anywhere in the command
+    fully bypassed both rules (``git push origin main --receive-pack="x``
+    was ALLOWed with zero warning).
+
+    Two variants, because neither alone keeps every anchor visible:
+    quote-chars-as-whitespace keeps a quote glued to a token BOUNDARY
+    splitting (``--receive-pack="x``), while quote-chars-removed keeps a
+    quote INSIDE a verb from fracturing it (``gi"t push``). A match in
+    EITHER variant counts -- the safe, over-inclusive direction; only
+    quoting fidelity inside VALUES is lost."""
+    blanked = segment.replace('"', " ").replace("'", " ").split()
+    stripped = segment.replace('"', "").replace("'", "").split()
+    return [blanked] if blanked == stripped else [blanked, stripped]
+
+
 def _scan_command_for_wildcard_add(command: str) -> bool:
     """Return True iff any sub-segment is a wildcard ``git add``."""
     for segment in re.split(_SEGMENT_SPLIT_RE, command):
         try:
-            tokens = shlex.split(segment, posix=True)
+            candidates = [shlex.split(segment, posix=True)]
         except ValueError:
-            continue
-        if _has_wildcard_add(tokens):
+            candidates = _degraded_token_variants(segment)  # nexus-2e874
+        if any(_has_wildcard_add(tokens) for tokens in candidates):
             return True
     return False
 
@@ -356,22 +374,24 @@ def _push_tokens(command: str) -> list[list[str]]:
     out: list[list[str]] = []
     for segment in re.split(_SEGMENT_SPLIT_RE, command):
         try:
-            tokens = shlex.split(segment, posix=True)
+            candidates = [shlex.split(segment, posix=True)]
         except ValueError:
-            continue
-        # Skip a leading NAME=VALUE env-assignment prefix before requiring
-        # "git" -- `SOME_VAR=1 git push ...` must still be recognised as a
-        # push segment.
-        i = 0
-        while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
-            i += 1
-        tokens = tokens[i:]
-        if len(tokens) >= 2 and tokens[0] == "git":
-            j = 1
-            while j < len(tokens) and tokens[j].startswith("-"):
-                j += 2 if tokens[j] in {"-C", "-c"} else 1
-            if j < len(tokens) and tokens[j] == "push":
-                out.append(tokens[j:])
+            candidates = _degraded_token_variants(segment)  # nexus-2e874
+        for tokens in candidates:
+            # Skip a leading NAME=VALUE env-assignment prefix before
+            # requiring "git" -- `SOME_VAR=1 git push ...` must still be
+            # recognised as a push segment.
+            i = 0
+            while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+                i += 1
+            tokens = tokens[i:]
+            if len(tokens) >= 2 and tokens[0] == "git":
+                j = 1
+                while j < len(tokens) and tokens[j].startswith("-"):
+                    j += 2 if tokens[j] in {"-C", "-c"} else 1
+                if j < len(tokens) and tokens[j] == "push":
+                    out.append(tokens[j:])
+                    break  # one entry per segment, first matching variant
     return out
 
 

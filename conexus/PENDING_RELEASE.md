@@ -31,4 +31,6 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release (pinned: v7.10.0)
 
-(none)
+- `conexus/hooks/scripts/routing/git_add_all_redirects_to_explicit_paths.py` — nexus-2e874: malformed shell quoting no longer silently drops a push segment (review-coverage gate was fully bypassable by one stray quote); degraded quote-blanked tokenization fallback.
+- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` — nexus-2e874: same degraded-tokenization fallback; a stray quote no longer hides a subagent git write from the shared-tree guard.
+- `conexus/hooks/scripts/pre_close_verification_hook.sh` — nexus-2e874: BD_VERBS matcher degrades instead of skipping; a stray quote in a `--reason` value no longer bypasses the bd-close review gate.
