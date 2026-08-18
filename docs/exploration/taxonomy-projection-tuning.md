@@ -1,5 +1,9 @@
 # Taxonomy projection tuning
 
+> **Note**: despite living under `exploration/`, this is a LIVE operator guide
+> (4 inbound citations from architecture.md, catalog.md, storage-tiers.md, and
+> cli-reference.md). Not a candidate for archive.
+
 Operator guide for `nx taxonomy project`, `nx taxonomy hubs`, and
 `nx taxonomy audit` — how the projection quality signals work, how to
 calibrate thresholds for a new corpus, and how to diagnose bad results.

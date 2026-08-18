@@ -1,5 +1,8 @@
 # Proposal: Applying "Open Ontologies" Findings to Nexus
 
+> **UNRESOLVED DRAFT (2026-05-31)**; substrate claims predate RDR-155/158;
+> disposition pending.
+
 **Status:** draft — proposal only, no code or doc changes yet
 **Author:** synthesis of /nx:research run 2026-05-17
 **Source paper:** Fabio Rovai, *Open Ontologies: Tool-Augmented Ontology Engineering with Stable Matching Alignment*, arXiv:2512.05594 (2026)

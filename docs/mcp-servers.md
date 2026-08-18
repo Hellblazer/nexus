@@ -39,7 +39,7 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 |---|---|
 | `memory_put` | Write a per-project persistent note |
 | `memory_get` | Retrieve by `(project, title)` or id. Title resolution is exact-then-prefix; ambiguous prefixes return candidates rather than picking one |
-| `memory_search` | FTS5 keyword search over T2 memory |
+| `memory_search` | PostgreSQL full-text search over T2 memory (SQLite/FTS5 retired — RDR-158 P4) |
 | `memory_delete` | Delete a single note |
 | `memory_consolidate` | Find overlaps, merge, flag stale entries. See [storage tiers § T2](storage-tiers.md#t2----memory-bank) |
 
@@ -56,7 +56,7 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 |---|---|
 | `collection_list` | List all T3 collections visible to the current credentials |
 | `plan_save` | Persist a plan template or ad-hoc plan (TTL-bounded) for later reuse |
-| `plan_search` | Retrieve cached plans by semantic similarity (FTS5) |
+| `plan_search` | Retrieve cached plans by PostgreSQL full-text search (`ts_rank` relevance) |
 | `plan_delete` | Delete a plan-library entry by id (cleanup counterpart to `plan_save`) |
 | `traverse` | Walk the catalog link graph from seed tumblers with typed link filters or a named purpose. Depth capped at 3. Returns `{tumblers, ids, collections}` for downstream retrieval |
 
@@ -94,7 +94,9 @@ workloads — see the failure-modes section). `nx_answer` has no `timeout`
 parameter; its per-operator steps carry their own.
 
 Three further tools round out the server (RDR-126/182): `daemon_uninstall`
-(remove the background T2 daemon; destructive, `confirm=true` gated),
+(remove the storage-service OS autostart unit — plus any legacy
+`com.nexus.t2` unit left behind by a pre-retirement install — and stop the
+engine-service + Postgres stack; destructive, `confirm=true` gated),
 `forensics` (read-only diagnostic playbook for upgrade-edge topics, opt-in
 gated), and `remediate` (consent-gated guided recovery playbook — describe
 first, `confirm=true` to release).
@@ -185,10 +187,26 @@ To enforce stricter permission boundaries on a custom agent, narrow the matcher 
 
 The `nx_answer` / `nx_tidy` / `nx_plan_audit` / `nx_enrich_beads` / `operator_*` tools all wrap a `claude -p` subprocess (`src/nexus/operators/dispatch.py::claude_dispatch`). Understanding that substrate explains most of their failure surface.
 
-- **Subprocess timeout (`OperatorTimeoutError`)**: every call to `claude_dispatch` runs under `asyncio.wait_for(proc.communicate(...), timeout=timeout)`. Standalone `operator_*` tools default to 300s; `nx_plan_audit` / `nx_tidy` default to 600s. **Symptom**: the tool call raises with a message like `claude -p timed out after 300.0s; partial output (N B stdout, N B stderr) logged to <path>`. **Cause**: the underlying analytical workload (extraction, ranking, comparison, plan audit) genuinely didn't finish inside the budget — bead nexus-7sbf raised these defaults after real workloads were false-timing-out at 60–120s, so a timeout at the current defaults usually means the input is unusually large, not that the timeout is miscalibrated. **How to check**: the exception message names the log file directly — `~/.config/nexus/logs/operator-timeout-<UTC-timestamp>.log` — which holds whatever partial stdout/stderr the subprocess had produced when it was killed (SIGKILL to the whole process group via `safe_killpg`, so nested `claude -p` children and tool subprocesses are reaped too, not just the leader). Read that file first — it often shows the child was still mid-tool-call, which tells you whether to raise the budget or narrow the input. **Fix**: pass a larger `timeout` argument to the tool call (callers cannot go *below* the 300s floor — `mcp/core.py::_clamp_subagent_timeout` silently clamps a lower request upward and emits a `subagent_timeout_clamped` structlog warning, so lowering it to "fail faster" during debugging won't work; look for that warning in `mcp.log` if a requested timeout appears to have been ignored), or reduce the amount of content passed in (`items`, `context`, `groups`) so the subprocess has less to reason over. **How to verify**: re-run with the raised timeout and confirm the call returns a structured result rather than raising again; for `nx_answer` specifically, `plan_run` emits per-step `nx_answer_step_start` / `nx_answer_step_complete` structlog events to `mcp.log`, so tailing that file during a re-run shows which step is actually slow.
-- **`nx_answer` plan-step failure is non-fatal by design**: unlike a standalone `operator_*` call, a single step timing out or erroring inside an `nx_answer` multi-step plan does **not** fail the whole call. `plans/runner.py` catches `OperatorError`/`OperatorTimeoutError` per step (or per bundled segment), logs a `operator_step_failed` structlog warning naming the failing tool and step index, substitutes a sentinel value, and continues the plan. **Symptom**: `nx_answer` returns a plausible-looking answer that's actually missing a step's contribution, or a downstream `$stepN.<field>` reference resolves to an empty/sentinel value instead of raising. **How to check**: grep `mcp.log` for `operator_step_failed` around the call's timestamp — the log line names the tool and step index that degraded. **Fix**: same as above (raise timeout / shrink input for that step), or re-run with `structured=True` to inspect which step produced the sentinel. **How to verify**: `operator_step_failed` no longer appears for that step on re-run, and the field the plan references is populated.
-- **`OperatorOutputError` (non-timeout)**: the subprocess exited 0 but stdout was empty or not valid JSON, or exited non-zero. **Symptom**: `claude -p exited N: <stderr snippet>` or `claude -p produced empty stdout` / `claude -p output is not valid JSON`. **Cause**: usually a malformed `--json-schema`, a prompt that induced free-text output despite the schema constraint, or an actual crash in the child (auth failure, missing CLI). **How to check**: the exception carries the first 300 chars of stderr, or the raw stdout snippet — enough to distinguish an auth/CLI problem from a schema-adherence problem. **Fix**: if stderr shows an auth or CLI-not-found error, check that `claude` is on `PATH` for the environment the MCP server process itself runs in (not your interactive shell — see the Desktop-install PATH footgun in `docs/desktop-deployment.md` for the analogous class of bug). If it's a JSON-adherence failure, simplify the schema or the prompt. **How to verify**: re-run and confirm a `dict` is returned instead of an exception.
-- **Timeout clamping surprises**: because `_SUBAGENT_TIMEOUT_FLOOR = 300.0` silently raises any caller-supplied timeout below it, a subagent (plan-enricher, plan-auditor) that "already passed a timeout" may not be getting the value it thinks it is. **How to check**: `subagent_timeout_clamped` in `mcp.log`, with `requested` and `floor` fields. This is expected behavior (nexus-7sbf), not a bug — the floor exists specifically to stop agents from re-introducing false-positive timeouts via low overrides.
+- **Subprocess timeout (`OperatorTimeoutError`)**: every call to `claude_dispatch` runs under `asyncio.wait_for(proc.communicate(...), timeout=timeout)`. Standalone `operator_*` tools default to 300s; `nx_plan_audit` / `nx_tidy` default to 600s.
+  - **Symptom**: the tool call raises with a message like `claude -p timed out after 300.0s; partial output (N B stdout, N B stderr) logged to <path>`.
+  - **Cause**: the underlying analytical workload (extraction, ranking, comparison, plan audit) genuinely didn't finish inside the budget — bead nexus-7sbf raised these defaults after real workloads were false-timing-out at 60–120s, so a timeout at the current defaults usually means the input is unusually large, not that the timeout is miscalibrated.
+  - **Check**: the exception message names the log file directly — `~/.config/nexus/logs/operator-timeout-<UTC-timestamp>.log` — which holds whatever partial stdout/stderr the subprocess had produced when it was killed (SIGKILL to the whole process group via `safe_killpg`, so nested `claude -p` children and tool subprocesses are reaped too, not just the leader). Read that file first — it often shows the child was still mid-tool-call, which tells you whether to raise the budget or narrow the input.
+  - **Fix**: pass a larger `timeout` argument to the tool call (callers cannot go *below* the 300s floor — `mcp/core.py::_clamp_subagent_timeout` silently clamps a lower request upward and emits a `subagent_timeout_clamped` structlog warning, so lowering it to "fail faster" during debugging won't work; look for that warning in `mcp.log` if a requested timeout appears to have been ignored), or reduce the amount of content passed in (`items`, `context`, `groups`) so the subprocess has less to reason over.
+  - **Verify**: re-run with the raised timeout and confirm the call returns a structured result rather than raising again; for `nx_answer` specifically, `plan_run` emits per-step `nx_answer_step_start` / `nx_answer_step_complete` structlog events to `mcp.log`, so tailing that file during a re-run shows which step is actually slow.
+- **`nx_answer` plan-step failure is non-fatal by design**: unlike a standalone `operator_*` call, a single step timing out or erroring inside an `nx_answer` multi-step plan does **not** fail the whole call. `plans/runner.py` catches `OperatorError`/`OperatorTimeoutError` per step (or per bundled segment), logs a `operator_step_failed` structlog warning naming the failing tool and step index, substitutes a sentinel value, and continues the plan.
+  - **Symptom**: `nx_answer` returns a plausible-looking answer that's actually missing a step's contribution, or a downstream `$stepN.<field>` reference resolves to an empty/sentinel value instead of raising.
+  - **Check**: grep `mcp.log` for `operator_step_failed` around the call's timestamp — the log line names the tool and step index that degraded.
+  - **Fix**: same as the timeout entry above (raise timeout / shrink input for that step), or re-run with `structured=True` to inspect which step produced the sentinel.
+  - **Verify**: `operator_step_failed` no longer appears for that step on re-run, and the field the plan references is populated.
+- **`OperatorOutputError` (non-timeout)**: the subprocess exited 0 but stdout was empty or not valid JSON, or exited non-zero.
+  - **Symptom**: `claude -p exited N: <stderr snippet>` or `claude -p produced empty stdout` / `claude -p output is not valid JSON`.
+  - **Cause**: usually a malformed `--json-schema`, a prompt that induced free-text output despite the schema constraint, or an actual crash in the child (auth failure, missing CLI).
+  - **Check**: the exception carries the first 300 chars of stderr, or the raw stdout snippet — enough to distinguish an auth/CLI problem from a schema-adherence problem.
+  - **Fix**: if stderr shows an auth or CLI-not-found error, check that `claude` is on `PATH` for the environment the MCP server process itself runs in (not your interactive shell — see the Desktop-install PATH footgun in `docs/desktop-deployment.md` for the analogous class of bug). If it's a JSON-adherence failure, simplify the schema or the prompt.
+  - **Verify**: re-run and confirm a `dict` is returned instead of an exception.
+- **Timeout clamping surprises**: because `_SUBAGENT_TIMEOUT_FLOOR = 300.0` silently raises any caller-supplied timeout below it, a subagent (plan-enricher, plan-auditor) that "already passed a timeout" may not be getting the value it thinks it is.
+  - **Check**: `subagent_timeout_clamped` in `mcp.log`, with `requested` and `floor` fields.
+  - **Note**: this is expected behavior (nexus-7sbf), not a bug — the floor exists specifically to stop agents from re-introducing false-positive timeouts via low overrides.
 
 ## See also
 

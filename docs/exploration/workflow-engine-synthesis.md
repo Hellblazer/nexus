@@ -1,5 +1,8 @@
 # Workflow Engine Landscape Synthesis
 
+> **Disposition**: historical exploration; candidate for archive. No outcome
+> disposition named in the docs audit — adopt-or-scrap is Hal's call.
+
 Deep-research-synthesizer (run a78c5a1c) cross-source synthesis on workflow-engine design doc, May 2026.
 
 ## Landscape position

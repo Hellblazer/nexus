@@ -1,5 +1,15 @@
 # Agentic cockpit: tuple space common model + semantic events as integration
 
+> **Disposition**: historical exploration; candidate for archive. Outcome:
+> superseded by RDR-127 (see banner below).
+
+> **SCRAPPED ARCHITECTURE**: this exploration is written atop RDR-110 (semantic
+> tuple space), RDR-111 (ORB agentic-cockpit substrate), RDR-112 (storage-as-service
+> container boundary), and RDR-113 (host trust model) — all four are `status: scrapped`.
+> The surviving successor is [RDR-127: Substrate-Decoupled Surface Rendering](../rdr/rdr-127-substrate-decoupled-surface-rendering.md)
+> (`status: accepted`). Kept in-tree as historical record of the design exploration;
+> do NOT use as a current-state reference.
+
 A design exploration. **Not a workflow engine spec.** The workflow engine
 is handed off to the work-instance under a separate document set; here
 it is a free variable. We assume *some* workflow capability exists; we

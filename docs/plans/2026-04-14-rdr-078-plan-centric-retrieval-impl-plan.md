@@ -1,5 +1,8 @@
 # RDR-078 Implementation Plan: Plan-Centric Retrieval
 
+> **Executed, historical.** RDR-078 is `status: closed`. This plan is a record
+> of the phased implementation, not current guidance.
+
 **RDR**: [RDR-078 — Plan-Centric Retrieval](../rdr/rdr-078-unified-context-graph-and-retrieval.md) (accepted 2026-04-15, revision 8)
 **Plan author**: strategic-planner
 **Plan date**: 2026-04-14

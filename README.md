@@ -35,13 +35,13 @@ uv tool install conexus                  # 1. the nx CLI (the plugin's MCP serve
 
 The plugin's MCP servers (`nx-mcp`, `nx-mcp-catalog`) are console-scripts from the `conexus` package, so **the `nx` CLI must be installed too**: `/plugin install` alone leaves the servers unable to launch. Install the CLI first (step 1; see [CLI quick-start](#cli-quick-start) to then provision the storage backend).
 
-The plugin ships 13 specialized agents, 45 skills (RDR lifecycle, plan-centric retrieval, dev workflows), and 48 MCP tools split across two focused servers. Session hooks load project context at startup.
+The plugin ships 13 specialized agents, 46 skills (RDR lifecycle, plan-centric retrieval, dev workflows), and 48 MCP tools split across two focused servers. Session hooks load project context at startup.
 
 ### Claude Cowork
 
 Works automatically once the conexus plugin is installed in Claude Code on the host. State round-trips bidirectionally with the host CLI through the storage service.
 
-For the full deployment story across all three surfaces (install, service lifecycle, drift detection, uninstall), see [docs/desktop-deployment.md](https://github.com/Hellblazer/nexus/blob/main/docs/desktop-deployment.md).
+For the full deployment story across all three surfaces (install, service lifecycle, drift detection, uninstall), see [docs/desktop-deployment.md](docs/desktop-deployment.md).
 
 ## What it does
 
@@ -66,7 +66,7 @@ You never choose an engine version: every conexus release is built pinned to the
 
 `nx init` provisions the bundled Postgres 17 + pgvector cluster, fetches the bge-768 ONNX model the service embeds with, starts the persistent service, and offers to register the OS autostart unit so it restarts at login/boot (prompt defaults to yes; `--yes` accepts non-interactively, `--no-autostart` starts a session supervisor only). There is **no** separate `nx daemon t2 install` step — T2 (notes/plans) is served by the same service in the default config. The permanent vector store (T3) serves through this native service; the bundled binary + Postgres are cosign-verified and acquired automatically. `nx init` is idempotent — safe to re-run. (The older `nx init --service` flag still works but is deprecated — plain `nx init` is the path now.) **First run only:** this downloads roughly 600 MB (the signed ~134 MB service binary, the relocatable Postgres bundle, and the ~416 MB bge-768 ONNX model) and takes a few minutes; subsequent starts are fast.
 
-The `nx` CLI provides direct access to all storage tiers, indexing, search, the catalog, and taxonomy. See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for a walkthrough, [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md) for every command and flag.
+The `nx` CLI provides direct access to all storage tiers, indexing, search, the catalog, and taxonomy. See [Getting Started](docs/getting-started.md) for a walkthrough, [CLI Reference](docs/cli-reference.md) for every command and flag.
 
 ## Updating
 
@@ -75,7 +75,7 @@ uv tool upgrade conexus                  # 1. update the code — PRESERVES your
 nx upgrade                               # 2. converge the data
 ```
 
-Upgrading nexus is: update the code, then run `nx upgrade`. That single trigger converges everything else — it brings the package, engine, and process preconditions current, then walks one ordered ladder. The T2-schema and ChromaDB→Postgres+pgvector substrate-move rungs (and the chunk-identity / embedder-era migrations that were co-resident inside the substrate move) retired with the Chroma + client-SQLite migration machinery at RDR-155 P4b; the RDR-180 chash rekey is the ladder's sole remaining data rung today, detecting, converging, and verifying before it records completion, resumable and idempotent, with your existing store left byte-untouched as a rollback target. There is nothing to sequence by hand and no era to know for any install that has already reached the PG substrate (6.0+): `nx doctor` reports the pending rung read-only, `nx upgrade` walks it, and a dormant-but-migrated install converges the same way a current one no-ops. A **pre-PG install** (5.x, or 6.x that never migrated off ChromaDB) is a separate two-hop — the Chroma-era migration machinery retired at RDR-155 P4b, so hop through `conexus==6.18.1` first (`nx upgrade` there migrates ChromaDB → Postgres+pgvector, copy-not-move), then upgrade forward to current; see [Getting Started § Upgrading an existing install](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) for the exact commands. Rollback is always yours to invoke and never automatic.
+Upgrading nexus is: update the code, then run `nx upgrade`. That single trigger converges everything else — it brings the package, engine, and process preconditions current, then walks one ordered ladder. The T2-schema and ChromaDB→Postgres+pgvector substrate-move rungs (and the chunk-identity / embedder-era migrations that were co-resident inside the substrate move) retired with the Chroma + client-SQLite migration machinery at RDR-155 P4b; the RDR-180 chash rekey is the ladder's sole remaining data rung today, detecting, converging, and verifying before it records completion, resumable and idempotent, with your existing store left byte-untouched as a rollback target. There is nothing to sequence by hand and no era to know for any install that has already reached the PG substrate (6.0+): `nx doctor` reports the pending rung read-only, `nx upgrade` walks it, and a dormant-but-migrated install converges the same way a current one no-ops. A **pre-PG install** (5.x, or 6.x that never migrated off ChromaDB) is a separate two-hop — the Chroma-era migration machinery retired at RDR-155 P4b, so hop through `conexus==6.18.1` first (`nx upgrade` there migrates ChromaDB → Postgres+pgvector, copy-not-move), then upgrade forward to current; see [Getting Started § Upgrading an existing install](docs/getting-started.md#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) for the exact commands. Rollback is always yours to invoke and never automatic.
 
 **Always upgrade with `uv tool upgrade conexus`.** It retains the spec you installed with, so a `[local]` install stays a `[local]` install. **Do not** upgrade with `uv tool install conexus --force` / `uv tool install conexus` — that *resets* the install and **drops `[local]`**, silently downgrading your embedder from 768-dim to 384-dim. With existing 768-dim collections that produces a dimension mismatch and search returns nothing. If you hit that, reinstall the extra: `uv tool install --reinstall "conexus[local]"`.
 
@@ -97,14 +97,16 @@ especially the first time.
 
 | If you want to... | Read |
 |---|---|
-| Understand the architecture | [Storage Tiers](https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md), [Architecture](https://github.com/Hellblazer/nexus/blob/main/docs/architecture.md) |
-| Install, upgrade, or uninstall the agent | [Agent Lifecycle & Operations](https://github.com/Hellblazer/nexus/blob/main/docs/operations/agent-lifecycle.md) |
-| Use the hosted managed service | [Managed Onboarding](https://github.com/Hellblazer/nexus/blob/main/docs/managed-onboarding.md) |
-| Write an RDR | [RDR: Research-Design-Review](https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md) |
-| Index a repo or PDFs | [Repo Indexing](https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md) |
-| Configure or tune | [Configuration](https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md) |
-| Run in containers or Cowork | [Container Integration](https://github.com/Hellblazer/nexus/blob/main/docs/container-integration.md) |
-| Browse the docs tree | [docs/README.md](https://github.com/Hellblazer/nexus/blob/main/docs/README.md) |
+| Understand the architecture | [Storage Tiers](docs/storage-tiers.md), [Architecture](docs/architecture.md) |
+| Install, upgrade, or uninstall the agent | [Agent Lifecycle & Operations](docs/operations/agent-lifecycle.md) |
+| Use the hosted managed service | [Managed Onboarding](docs/managed-onboarding.md) |
+| Write an RDR | [RDR: Research-Design-Review](docs/rdr.md) |
+| Index a repo or PDFs | [Repo Indexing](docs/repo-indexing.md) |
+| Configure or tune | [Configuration](docs/configuration.md) |
+| Run in containers or Cowork | [Container Integration](docs/container-integration.md) |
+| Back up my knowledge store | [Storage Tiers § T3 Backup and Migration](docs/storage-tiers.md#t3-backup-and-migration-exportimport) |
+| Fix empty search results after upgrading | [Getting Started § Troubleshooting](docs/getting-started.md#troubleshooting) |
+| Browse the docs tree | [docs/README.md](docs/README.md) |
 | Read the conceptual story | [How I actually use Nexus](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) |
 | Walk through a fresh install | [Installing Nexus](https://tensegrity.blog/2026/04/26/installing-nexus/) |
 | Browse the full series | [Tensegrity blog](https://tensegrity.blog/) |
@@ -112,6 +114,6 @@ especially the first time.
 ## License
 
 Dual-licensed. Open source under AGPL-3.0-or-later
-([LICENSE](https://github.com/Hellblazer/nexus/blob/main/LICENSE)); commercial
+([LICENSE](LICENSE)); commercial
 licenses are available for organizations that need non-AGPL terms — see
-[LICENSING.md](https://github.com/Hellblazer/nexus/blob/main/LICENSING.md).
+[LICENSING.md](LICENSING.md).

@@ -15,12 +15,15 @@ verify(text)` (the single-document, non-corpus-wide form) is the ONE
 function this runbook references that was NOT dropped — it remains live
 server-side for `CatalogRepository.completeIndexRun`'s internal use only.**
 
-Status: **PREP, not yet executable.** Drafted 2026-08-14 against bead
-`nexus-o8dil.31` ("RDR-191 P5: add the FK on CLOUD"). This bead cannot close
-until `nexus-o8dil.29` (the local FK changeset) lands and GATE-5-CLOUD
-(`nexus-o8dil.30`) is satisfied — see "Blocking dependencies" below. This
-document is the turnkey procedure so the cloud leg is a read-and-execute job
-once the Phase 5 engine tag ships, not a re-derivation.
+Status at drafting (2026-08-14): **PREP, not yet executable.** Drafted
+against bead `nexus-o8dil.31` ("RDR-191 P5: add the FK on CLOUD"), when this
+bead could not close until `nexus-o8dil.29` (the local FK changeset) landed
+and GATE-5-CLOUD (`nexus-o8dil.30`) was satisfied — see "Blocking
+dependencies" below for the state as understood at draft time. **This status
+line is stale relative to the EXECUTED banner above** — Phase 5 has since
+shipped (engine-service-v0.1.76, both FKs convalidated, dangling=0 all
+tenants) and this document now serves only as the turnkey procedure's
+historical record, not a live blocker list.
 
 Scope: `docs/rdr/rdr-191-unify-chunk-tables-enable-manifest-fk.md` Phase 5
 (the `catalog_document_chunks -> nexus.chunks` FK), amendments (x) and (xi),

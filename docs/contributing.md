@@ -68,7 +68,7 @@ prereqs are absent the suites self-skip and the gate reports **inconclusive**
 
 - **Python 3.12–3.13**: use `match/case`, `tomllib`, `typing.Protocol`, walrus operator
 - **Type hints everywhere**: all public functions, methods, module-level variables
-- **No ORM**: raw `sqlite3` for T2
+- **No ORM**: raw SQL. T2 is HTTP stores over the engine's Postgres tables (`db/t2/`); legacy `sqlite3` code is migration-source/maintenance-only, never a destination for new state — see AGENTS.md's NO-SQLITE hot rule
 - **Logging**: `structlog` — never `print()` in library code
 - **TDD**: write tests before implementation
 - **Package manager**: `uv` (not pip directly)
@@ -337,6 +337,7 @@ Every step below is **required**. Missing any one of them has caused problems in
    - `.claude-plugin/marketplace.json` — both `plugins[].version` (nx + sn) **and both `plugins[].source.ref`** (the pinned tag that decouples installed users from main HEAD; CI test `TestMarketplaceVersion::test_marketplace_source_ref_matches_pyproject` enforces `source.ref == "v" + pyproject.version`)
    - `conexus/.claude-plugin/plugin.json` — `version` (controls nx plugin cache refresh)
    - `sn/.claude-plugin/plugin.json` — `version` (controls sn plugin cache refresh)
+   - `conexus/PENDING_RELEASE.md` — empty the pending-drift list for every entry this release ships (advancing `source.ref` is what makes those plugin changes live; `tests/test_plugin_release_drift_ledger.py` fails on a stale entry)
 
    Forgetting any one fails CI parity; forgetting `source.ref` ships a release that installed Claude Code users never receive.
 
@@ -423,6 +424,21 @@ Every step below is **required**. Missing any one of them has caused problems in
    doctor wiring only a real subprocess exercises. Must end
    `DATA-TOKEN CLI GATE PASSED`.
 
+7e. **Run the upgrade-shakeout** (~3-5 min; conditional)
+   ```bash
+   ./tests/e2e/upgrade-shakeout.sh run                       # latest stable -> this branch
+   ./tests/e2e/upgrade-shakeout.sh run --from-version 4.34.6 # exercises drift -> reconcile
+   ```
+   Required when this release touches the upgrade path an installed user
+   traverses: hook stanzas (`src/nexus/commands/hooks.py`), `nx doctor`
+   drift checks, plugin name / marketplace.json `source.ref` pinning, or
+   any migration touchpoint. Sandbox smoke (7b) tests one version in
+   isolation; this tests `FROM_VERSION` to this branch. Runnable from any
+   baseline — it detects stanza drift at runtime and cross-checks `nx
+   doctor`'s drift claim against the actual stanza byte-diff, so a doctor
+   false-positive/negative fails the run. Must end `12/12 PASS`.
+   `./tests/e2e/upgrade-shakeout.sh reset` cleans the sandbox.
+
 8. **Commit on a release branch and PR to `main`** (branch protection requires a PR; do NOT direct-push).
    Base the release branch on **develop**, not main — a release PROMOTES develop's accumulated
    state to main (§ Git Workflow above); branching off main would release main's stale tree with
@@ -442,6 +458,21 @@ Every step below is **required**. Missing any one of them has caused problems in
    gh pr create --base main --title "release: conexus X.Y.Z"
    ```
    Wait for CI green, then `gh pr merge <N> --merge` (NOT `--squash` — preserves the release commit SHA). The tag in step 9 points at the merge commit. The human cuts the release; AI prepares the branch.
+
+8a. **Optional: bump `source.sha` post-merge** (defends against tag force-push)
+   Once step 8's merge lands on `main`, the release commit has a known SHA:
+   ```bash
+   git checkout main && git pull
+   RELEASE_SHA=$(git rev-parse HEAD)
+   # edit .claude-plugin/marketplace.json: add "sha": "$RELEASE_SHA"
+   # alongside "ref": "vX.Y.Z" for both plugins
+   git add .claude-plugin/marketplace.json
+   git commit -m "chore(release): pin sha for vX.Y.Z"
+   git push
+   ```
+   Tradeoff: one extra commit on `main`, but guards against someone
+   force-pushing the `vX.Y.Z` tag afterward. For solo/small-team projects
+   `source.ref` alone is usually sufficient — skip if so.
 
 9. **Tag the merge commit and push — this triggers the full release pipeline**
    ```bash
@@ -482,11 +513,45 @@ Every step below is **required**. Missing any one of them has caused problems in
     after tag-push is the moment the merge is conflict-free by construction
     (see `.claude/skills/release/SKILL.md` Step 11b).
 
+11c. **Post-publish: published-bytes upgrade journey**
+    Both commands drive the just-published PyPI bytes, not the working
+    tree — "identical tree" is an argument that the pre-tag battery
+    already ran this; it is not a run of the actual published artifact.
+    Run once step 10 confirms PyPI shows the new version.
+    ```bash
+    tests/e2e/fresh-install-mvv.sh --published X.Y.Z    # FRESH-install axis, published bytes
+    NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade   # UPGRADE axis, published bytes
+    ```
+    The first (nexus-796zn) is the post-publish shakedown for a box that
+    has never run conexus before — it belongs here, not in the pre-tag
+    battery, because nothing is on PyPI yet at that point in the
+    checklist. The second (nexus-86mx2) closes the loop the pre-tag
+    `--package-upgrade` run (step 1) cannot: that run always upgrades to
+    the WORKING-TREE wheel, which proves the code but not the actual
+    bytes PyPI now serves — a packaging/MANIFEST.in/dependency-resolution
+    difference at the real `uv tool install`/`pip install` layer (the
+    nexus-l2ku5 shape) is invisible to a worktree-wheel run by
+    construction. `NEXUS_TARGET_RELEASE=X.Y.Z` makes `run.sh` download the
+    real published wheel from PyPI (sha256-verified against PyPI's own
+    JSON API) and upgrade to THAT instead. Must end `PACKAGE-UPGRADE
+    CONVERGENCE MVV PASSED — ... -> published conexus X.Y.Z -> ...`; a
+    plain `-> working tree` here means `NEXUS_TARGET_RELEASE` was not set
+    and the loop was not actually closed.
+
+12. **Reinstall local tool and verify**
+    ```bash
+    scripts/reinstall-tool.sh    # preserves [local] and other extras
+    nx --version                 # must print X.Y.Z
+    ```
+    `pyproject.toml` bumps the project version but the local `nx` shim
+    keeps the old wheel until this runs — caught on v4.9.11 (`nx
+    --version` reported 4.9.10 even after PyPI showed 4.9.11).
+
 ### Schema/data-migration releases (conditional)
 
 Trigger: this release's tag (client `vX.Y.Z` or engine `engine-service-vX.Y.Z`) carries a schema or data migration — a new Liquibase changeset, a new `upgrade_ladder` rung, or any change to a shape data already has to conform to. Four requirements, none of which the checklist above enforced before this section existed (T2 [22511] gap 9 — no schema-migration protocol existed in any release document; every prior trigger for "is this release safe" reduced to version identity and the standard functional gates, none of which speak to migration risk specifically). Operational checklist form: `.claude/skills/release/SKILL.md` Step 6d (client-side data migrations) and `.claude/skills/engine-release/SKILL.md` Step 5b (engine-side schema DDL). This section is their shared rationale and evidence citations.
 
-1. **Populated-store upgrade rehearsal at a stated, representative scale.** The mechanism is `NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade` (published-bytes mode; see Step 11c below) run against a corpus seeded above a named floor, not the harness's default toy seed (10-30 documents across `rehearse_cold.sh`, `rehearse_acquire.sh`, `rehearse_shakeout.sh`, `rehearse_hole_punch.sh`). State the floor and the actual seed count used in the release relay. If the seed cannot be brought to a genuinely representative scale before deploy, say so explicitly — do not let a toy-scale pass stand in for an at-scale one. RDR-191 is the standing evidence for why this matters: the cloud 385,484-row unify-chunks migration (T2 [22485]) is the only at-scale proof this project has produced for a chunk-table DDL change, and it ran in PRODUCTION — no pre-production rehearsal at that scale has ever happened. Treat that as a named, accepted gap until a representative-scale pre-production rehearsal exists, not a silently inherited one.
+1. **Populated-store upgrade rehearsal at a stated, representative scale.** The mechanism is `NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade` (published-bytes mode; see Step 11c above) run against a corpus seeded above a named floor, not the harness's default toy seed (10-30 documents across `rehearse_cold.sh`, `rehearse_acquire.sh`, `rehearse_shakeout.sh`, `rehearse_hole_punch.sh`). State the floor and the actual seed count used in the release relay. If the seed cannot be brought to a genuinely representative scale before deploy, say so explicitly — do not let a toy-scale pass stand in for an at-scale one. RDR-191 is the standing evidence for why this matters: the cloud 385,484-row unify-chunks migration (T2 [22485]) is the only at-scale proof this project has produced for a chunk-table DDL change, and it ran in PRODUCTION — no pre-production rehearsal at that scale has ever happened. Treat that as a named, accepted gap until a representative-scale pre-production rehearsal exists, not a silently inherited one.
 
 2. **A rollback decision point, settled before the deploy relay fires.** Determine explicitly whether the migration can be rolled back after it commits. Non-transactional DDL (`CREATE INDEX CONCURRENTLY`, any Liquibase changeset that cannot run inside a transaction) forfeits the free atomic rollback a transactional migration gets — RDR-191's `nexus-o8dil.22` names this exactly: "CIC, non-blocking, +11%, cannot run in a transaction, and therefore forfeits the free atomic rollback that the local path gets." When the answer is no, write **IRREVERSIBLE** in the relay verbatim, and attach its substitute: a written rollback/abort runbook (exact statements, abort criteria) that exists and is in the operator's hand before the window opens, not improvised mid-window.
 

@@ -2,11 +2,15 @@
 
 > **Historical (pre-6.0).** This guide covers the 4.34.0 substrate split, when
 > local-mode T3 still ran as a `nx daemon t3` ChromaDB process. As of 6.0 that
-> T3 daemon is retired: T3 serves through the native nexus-service (Postgres 16
-> + pgvector). If you are upgrading to 6.0, ignore the `nx daemon t3` step below
-> and follow [Getting Started § Cloud mode](../getting-started.md#cloud-mode-optional)
-> + `nx init --service`, then run `nx guided-upgrade` (see the
-> [Migration Runbook](../migration-runbook.md)).
+> T3 daemon is retired: T3 serves through the native nexus-service (Postgres 17
+> + pgvector). If you are upgrading from a pre-6.0 install, this guide does not
+> apply to you directly — on the current release the Chroma read path is
+> deleted outright (RDR-155 P4b), so `nx upgrade` here cannot migrate you.
+> Follow the two-hop redirect instead: install the pinned last
+> migration-capable release (`conexus==6.18.1`), run `nx upgrade` there to
+> migrate the data, then upgrade back to the current version. See the
+> [Migration Runbook](../migration-runbook.md) for the full operator
+> procedure.
 
 **TL;DR — one new command after upgrading:**
 

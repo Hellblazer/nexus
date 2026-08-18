@@ -1,5 +1,8 @@
 # Workflow engine + ext-apps — document set
 
+> **Disposition**: historical exploration; candidate for archive. No outcome
+> disposition named in the docs audit — adopt-or-scrap is Hal's call.
+
 Four artifacts on disk, all gitignored, all indexed. Read them in the
 order below; each builds on the previous.
 

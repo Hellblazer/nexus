@@ -1,5 +1,14 @@
 # A2UI Summary — Reader's Brief for Nexus Adoption
 
+> **Disposition**: historical exploration; candidate for archive. Outcome:
+> superseded by RDR-127 (see banner below).
+
+> **SCRAPPED ARCHITECTURE**: this brief is a companion to RDR-118 (surfaces as
+> tuples) and RDR-119 (cockpit UI fabric), both `status: scrapped`. The surviving
+> successor is [RDR-127: Substrate-Decoupled Surface Rendering](../rdr/rdr-127-substrate-decoupled-surface-rendering.md)
+> (`status: accepted`). Kept in-tree as historical record; do NOT use as a
+> current-state reference.
+>
 > **Purpose**: a self-contained reader-friendly summary of A2UI as it
 > applies to the nexus cockpit substrate. Companion to RDR-118 and
 > RDR-119. Locally reviewable before committing to the adoption path.

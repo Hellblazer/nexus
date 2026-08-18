@@ -127,7 +127,7 @@ For questions that require multiple retrieval steps — comparing sources, extra
 
 ### Builtin scenario plans (RDR-078)
 
-`nx catalog setup` seeds YAML plan templates under `conexus/plans/builtin/` — see [plan-centric-retrieval.md](plan-centric-retrieval.md) for the current builtin plan catalog.
+`nx plan reseed` seeds YAML plan templates under `conexus/plans/builtin/` — see [plan-centric-retrieval.md](plan-centric-retrieval.md) for the current builtin plan catalog.
 
 ### Verb skills
 
@@ -155,7 +155,7 @@ Several mechanisms run automatically across all interfaces.
 
 ### Topic-aware ranking
 
-> **Note (6.0):** Topic *discovery*, *rebuild*, and per-document *assignment* run on the nexus-service backend (the default since 6.0) — `nx taxonomy discover` and `nx index repo` work normally (nexus-7ydks). `nx taxonomy split` / `project` and the cross-collection projection pass are still being ported and refuse cleanly on the service.
+> **Note:** Topic *discovery*, *rebuild*, and per-document *assignment* run on the nexus-service backend — `nx taxonomy discover` and `nx index repo` work normally (nexus-7ydks). `nx taxonomy split` / `project` and the cross-collection projection pass are still being ported and refuse cleanly on the service.
 
 After `nx index repo` (or `nx taxonomy discover --all`), topics are clustered via HDBSCAN with Claude-Haiku auto-labels. Topic-aware ranking then works three ways:
 
@@ -193,7 +193,7 @@ Knowledge, docs, and RDR collections fetch 4x the requested result count before 
 
 ### Catalog pre-filtering
 
-When metadata filters have high selectivity (<5% of documents match), Nexus pre-fetches matching file paths from the catalog SQLite database and passes them as a `source_path` filter to the vector store. This reduces the scan space before retrieval, avoiding the latency cliff an ANN index hits in predicate-sparse regions. Automatic when a catalog is available.
+When metadata filters have high selectivity (<5% of documents match), Nexus pre-fetches matching file paths from the catalog (Postgres, served by `nexus-service`) and passes them as a `source_path` filter to the vector store. This reduces the scan space before retrieval, avoiding the latency cliff an ANN index hits in predicate-sparse regions. Automatic when a catalog is available.
 
 ### Multi-probe collection health
 

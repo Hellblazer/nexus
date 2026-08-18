@@ -1,5 +1,9 @@
 # MCP tools vs agents
 
+> **Note**: despite living under `exploration/`, this is a LIVE normative rule
+> — architecture.md:1054 and querying-guide.md:224 delegate to it. Not a
+> candidate for archive.
+
 When should a capability ship as an **MCP tool** versus a **Claude Code agent**?
 This page encodes the boundary rule from RDR-080 and the practical patterns
 that followed.
@@ -37,7 +41,7 @@ sees the terminal output. This isn't multi-turn reasoning getting
 crushed into one turn; it's a deterministic DAG running in one
 subprocess instead of N. Measured win on real corpora: 55-72% latency
 reduction on plans with multiple consecutive operators. See
-[plan-centric-retrieval.md §Operator bundling](plan-centric-retrieval.md#operator-bundling-v4100).
+[plan-centric-retrieval.md §Operator bundling](../plan-centric-retrieval.md#operator-bundling-v4100).
 
 ## Classification table (RDR-080)
 
@@ -129,8 +133,8 @@ tools via the subprocess inheriting `~/.claude`.
 
 ## See also
 
-- [RDR-080](rdr/rdr-080-retrieval-layer-consolidation.md) — the architectural decision
-- [MCP Servers](mcp-servers.md) — full tool catalog
-- [Querying Guide](querying-guide.md) — the `nx_answer` retrieval trunk
-- [Plan Authoring Guide](plan-authoring-guide.md) — for capabilities that
+- [RDR-080](../rdr/rdr-080-retrieval-layer-consolidation.md) — the architectural decision
+- [MCP Servers](../mcp-servers.md) — full tool catalog
+- [Querying Guide](../querying-guide.md) — the `nx_answer` retrieval trunk
+- [Plan Authoring Guide](../plan-authoring-guide.md) — for capabilities that
   compose multiple MCP tools into a reusable plan

@@ -3,7 +3,9 @@
 ## Overview
 
 `nx index repo` walks a git repository and classifies each file by extension, routing code
-and prose to separate ChromaDB collections with purpose-built Voyage AI embedding models.
+and prose to separate T3 collections served by the native `nexus-service` (Postgres 17 +
+pgvector) — embedding happens server-side: bge-768 (ONNX) in local mode, purpose-built Voyage
+AI models (`voyage-code-3` for code, `voyage-context-3` for prose) in managed-cloud mode.
 Code files receive AST-aware chunking via tree-sitter with an embed-only context prefix;
 prose files receive semantic markdown chunking. Git frecency scores are computed in a single
 subprocess and attached to every chunk.
@@ -46,17 +48,20 @@ Each indexed repository produces two T3 collections. Embedding happens server-si
 
 | Collection | Managed-cloud model | Local model | Contents |
 |---|---|---|---|
-| `code__<name>-<hash8>` | `voyage-code-3` | `bge-768` | Code files |
-| `docs__<name>-<hash8>` | `voyage-context-3` (CCE) | `bge-768` | Prose + PDF files |
+| `code__<owner_id>__voyage-code-3__v1` | `voyage-code-3` | `bge-768` | Code files |
+| `docs__<owner_id>__voyage-context-3__v1` | `voyage-context-3` (CCE) | `bge-768` | Prose + PDF files |
 
-`<name>` is the repository basename; `<hash8>` is the first 8 hex characters of the
-SHA-256 digest of the main repository path. Long basenames are truncated to stay within
-the 63-character collection name limit (a nexus naming-convention constraint). Collection names are **stable across git
+Conformant collection names (RDR-103) follow the 4-segment shape
+`<content_type>__<owner_id>__<embedding_model>__v<n>`, where `<owner_id>` is a stable slug
+derived from the repository (e.g. `nexus-1-1`) — see [RDR-103](rdr/rdr-103-catalog-collection-name-authority.md)
+and [Storage Tiers § Collections](storage-tiers.md#collections). Collections created before
+the conformance migration may still carry the legacy 2-segment shape
+(`<content_type>__<repo>-<hash8>`). Collection names are **stable across git
 worktrees** — `git rev-parse --git-common-dir` resolves to the shared `.git` directory,
 so a worktree and its parent produce identical collection names.
 
 Additionally, markdown files under RDR paths (default: `docs/rdr/`) are indexed into a
-separate `rdr__<name>-<hash8>` collection via the batch markdown indexer.
+separate `rdr__*` collection via the batch markdown indexer.
 
 **Note**: All collections use the same embedding model for both index and query. Mixing models produces random noise. `voyage-context-3` uses Contextualized Chunk Embeddings (CCE) for `docs__*`, `rdr__*`, `knowledge__*`. Single-chunk documents are embedded via `contextualized_embed(inputs=[[chunk]])`.
 
@@ -203,7 +208,7 @@ Configuration merges over global config at `~/.config/nexus/config.yml` (repo wi
 ## Staleness and Incremental Indexing
 
 Every chunk stores a `content_hash` (SHA-256 of the file contents) and `embedding_model`
-in its ChromaDB metadata. On re-index, if both match the stored values, the file is skipped
+in its T3 chunk metadata. On re-index, if both match the stored values, the file is skipped
 entirely — no re-chunking, no re-embedding, no API calls.
 
 When a file is deleted from the repository, the pruning pass removes its orphaned chunks
@@ -217,7 +222,7 @@ in the background after each qualifying git operation. Install them with `nx hoo
 
 ## Pipeline Versioning
 
-Every indexed collection stores a `PIPELINE_VERSION` stamp in its ChromaDB metadata. When
+Every indexed collection stores a `PIPELINE_VERSION` stamp in its T3 chunk metadata. When
 the indexing pipeline changes (new chunking logic, updated context prefixes, etc.), the
 version is bumped. This enables targeted re-indexing:
 
@@ -236,6 +241,21 @@ In cloud mode, `nx doctor` reports the pipeline version status of each collectio
 
 Collections without a version stamp were indexed before pipeline versioning was introduced.
 Run `nx index repo --force` once to stamp them.
+
+## Unchunkable Sources and Completion Fencing (7.8/7.9)
+
+The indexer never registers a catalog document for a file it will not chunk. `repo`
+discovery silently skips zero-byte and binary-content files (counted in a
+`skipped_unchunkable` summary line — expected noise in an unbounded walk); the single-file
+forms (`md`, `pdf`, `rdr`) instead fail loud with a clean error naming the file, since the
+operator named that exact file and a silent no-op would mislead.
+
+Every completed index run is verified by the engine before the document is stamped
+`index_state='complete'`; a refused verification leaves the fence at `'indexing'` and a
+subsequent normal run drains it automatically (no `--force` needed). `nx index repo` and
+`nx dt index` exit non-zero when a run ends with any completion refusal, catalog
+manifest-write failure, or similar damage — a change from the prior WARNING-only behavior,
+so scripts gating on exit code should account for it. See [CLI Reference — nx index](cli-reference.md#nx-index) for the full behavior and remedies.
 
 ## Transient Error Resilience
 
@@ -259,17 +279,17 @@ the service path.
 
 When you index a repo, every classified file is automatically registered in the [document catalog](catalog.md) with its tumbler address, content type, file path, and T3 collection name. Code files that match RDR titles by name get `implements-heuristic` links auto-generated.
 
-This means `nx catalog search` and `nx catalog links` work immediately after indexing — no separate setup step needed (assuming `nx catalog setup` was run once).
+This means `nx catalog search` and `nx catalog links` work immediately after indexing — there is no separate setup step at all (`nx catalog setup` is retired; the nexus service owns the catalog and registers documents automatically at index time).
 
 ## Taxonomy Auto-Discovery
 
-> **Note (6.0):** Taxonomy *discovery*, *rebuild*, and per-document
-> *assignment* run on the nexus-service backend (service mode, the default
-> since 6.0): they fetch embeddings server-side and persist topics + centroids
-> through the service (nexus-7ydks). `nx index repo` discovers and assigns
-> normally. Two operations are still being ported (`nexus-7ydks`): `nx taxonomy
-> split` / `project` and the automatic cross-collection projection pass — they
-> remain raw-Chroma-only and refuse cleanly on the service.
+> **Note:** Taxonomy *discovery*, *rebuild*, and per-document
+> *assignment* run on the nexus-service backend: they fetch embeddings
+> server-side and persist topics + centroids through the service (nexus-7ydks).
+> `nx index repo` discovers and assigns normally. Two operations are still
+> being ported (`nexus-7ydks`): `nx taxonomy split` / `project` and the
+> automatic cross-collection projection pass — they are not yet ported to the
+> service backend and refuse cleanly there.
 
 After indexing completes, `nx index repo` automatically runs topic discovery on the new or updated collections. HDBSCAN clusters the collection's embeddings to find natural topic groupings, and each cluster is labeled with a short descriptive phrase using Claude Haiku (when an Anthropic API key is available). The results are stored in T2 and surfaced by `nx search` as topic filters.
 

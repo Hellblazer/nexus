@@ -2,16 +2,29 @@
 
 Nexus runs in three Claude surfaces, all backed by shared host state so it round-trips across them and with the `nx` CLI. This document covers install, first-run behavior, drift detection, and uninstall for each surface. The shared-state substrate is RDR-120; the unified-surface design is RDR-126.
 
-> **Upgrading.** 6.0 moved the permanent vector store (T3) from ChromaDB to
-> the Postgres + pgvector nexus-service. After upgrading the CLI, run
-> **`nx upgrade`** — one trigger provisions and verifies the service if needed,
-> then walks every pending data migration (copy-not-move, rollback-safe; your
-> ChromaDB store is left intact as the source). The signed native service binary + relocatable Postgres bundle
-> are acquired automatically by `nx daemon service install-binary <tag>` / `nx
-> init --service`. **macOS note:** that binary is ad-hoc signed (not
-> Developer-ID/notarized) — `install-binary` fetches it without quarantine, but a
-> copy you download from a GitHub release *page* in a browser is Gatekeeper-
-> blocked; clear it with `xattr -d com.apple.quarantine <file>`.
+> **Upgrading from a pre-PG (Chroma-era) install.** 6.0 moved the permanent
+> vector store (T3) from ChromaDB to the Postgres + pgvector nexus-service;
+> 7.x then deleted the Chroma read path outright (RDR-155 P4b), so **this
+> release's `nx upgrade` cannot read or migrate a Chroma/SQLite install** —
+> running it against unmigrated pre-PG data trips a loud two-hop redirect
+> instead of migrating anything. If you are on a pre-6.0 install (or still
+> carry `chroma.sqlite3` / `t2.db` / `memory.db` on disk), do NOT run a bare
+> `nx upgrade` on this version expecting it to migrate you: install the
+> pinned `conexus==6.18.1` (`uv tool install conexus==6.18.1`), run
+> `nx upgrade` **there** to migrate the data (copy-not-move — the Chroma
+> files stay behind as a rollback source), then upgrade back to this
+> version. See [migration-runbook.md](migration-runbook.md) for the
+> operator's manual order of operations if the guided path blocks.
+>
+> **On an install that is already PG-backed**, `nx upgrade` is the one
+> trigger: it provisions and verifies the service if needed, then walks
+> every pending data migration (idempotent, resumable). The signed native
+> service binary + relocatable Postgres bundle are acquired automatically by
+> `nx daemon service install-binary <tag>` / `nx init`. **macOS note:** that
+> binary is ad-hoc signed (not Developer-ID/notarized) — `install-binary`
+> fetches it without quarantine, but a copy you download from a GitHub
+> release *page* in a browser is Gatekeeper-blocked; clear it with
+> `xattr -d com.apple.quarantine <file>`.
 >
 > **One service.** T2 (notes/plans) and T3 both serve through the native
 > `nexus-service` (Postgres 17 + pgvector) — the RDR-152 hard default, and now
@@ -56,7 +69,7 @@ Install:
 
 1. Download `conexus.mcpb` from the [latest GitHub release](https://github.com/Hellblazer/nexus/releases/latest).
 2. Double-click the file. Claude Desktop registers it under Settings → Connectors → Desktop as "Conexus".
-3. First launch: uv resolves Nexus's dependency stack (~237 packages, including chromadb, pydantic-core, tree-sitter, numpy, torch, onnxruntime). Cold install ~20s on a warm network; warm restarts ~5s.
+3. First launch: uv resolves Nexus's dependency stack (pydantic-core, tree-sitter, numpy, torch, onnxruntime, and friends — `chromadb` was removed from the dependency set at RDR-155 P4b). Cold install ~20s on a warm network; warm restarts ~5s.
 4. **First launch installs and starts nothing else.** `nx-mcp` used to auto-install the T2 daemon here; that path retired with the daemon (`nexus-i711w`). The extension expects the storage service to already exist on the host — provision it once with `nx init`. Without it, tools that reach T2 or T3 fail with an unresolvable-endpoint error rather than silently starting anything.
 
 Tool names: `mcp__conexus__*` (no `plugin_` infix — this is the .mcpb namespace, distinct from the Claude Code plugin's).
@@ -151,15 +164,21 @@ Nothing to uninstall on the Cowork side — sessions inherit whatever Claude Des
 ### Daemon + data (full nuke)
 
 ```
-nx daemon service uninstall --autostart  # remove autostart unit
-nx daemon service stop --with-pg         # stop the nexus-service + Postgres
-rm -rf ~/.config/nexus                   # remove the provisioned Postgres cluster, service binary + config, any legacy SQLite
-# Managed-cloud: your data lives in the managed service, not locally — manage it there.
+nx uninstall                       # DRY RUN: preview what would be removed
+nx uninstall --yes --remove-data   # perform the teardown, including local data
 ```
 
-The `daemon_uninstall` MCP tool does all of the above in one step (with
-`remove_data=true` for the last line), including booting out a legacy
-`com.nexus.t2` unit if one is still present.
+Dry-run by default (`--yes` is required to act). With `--remove-data` it
+also wipes the local nexus data dir (irreversible; a shallow-path guard
+refuses a misconfigured `NEXUS_CONFIG_DIR`). On a local install this stops
+the engine-service + Postgres stack, removes the OS autostart unit, and
+clears the first-run marker. On a managed-only client there is no local
+service to stop — it clears the local endpoint config (`service_url` +
+`service_token`) and never touches the remote tenant's data.
+
+The `daemon_uninstall` MCP tool does the equivalent teardown in one step for
+in-chat use (with `remove_data=true` for the data wipe), including booting
+out a legacy `com.nexus.t2` unit if one is still present.
 
 ## Verification
 
@@ -237,7 +256,7 @@ today's unspecified behaviour would recreate exactly the rot deleted here.
 ## Failure modes
 
 - **uv not on PATH (Claude Desktop chat install)**: `.mcpb` install fails with a cryptic error. Mitigation: README documents `brew install uv` / `pipx install uv` as pre-requisite.
-- **The `.mcpb` reads `config.yml`, NOT your shell env — the mode record and service URL must be persisted, or the extension silently runs local mode** (the single most likely Desktop footgun). Claude Desktop spawns the `.mcpb` as a GUI subprocess that does **not** inherit your interactive shell's environment. `is_local_mode()` resolves the persisted mode record, then `service_url`, then PG credentials — via `~/.config/nexus/config.yml`, never `~/.zshrc`/`~/.bashrc` exports. (It does NOT key on API keys: `VOYAGE_API_KEY` is no longer a client credential at all — the client does no embedding — and `CHROMA_API_KEY` no longer exists.) So a machine whose cloud configuration lives only in shell exports will run the extension in **local mode** (bge-768 local embedder), even though your CLI in a terminal resolves cloud mode fine. Symptoms: searches return "no results" or feel thin, and `~/Library/Logs/Claude/mcp-server-Conexus.log` shows `collection_dimension_mismatch_skipped` / `search_all_collections_dimension_skipped` — typically `got 768` (local bge query) against collections that expect `1024` (voyage). The bge-768 local query simply cannot match cloud voyage-1024 collections. Fix: persist the cloud config via `nx config set` (or re-run `nx init --cloud`).
+- **The `.mcpb` reads `config.yml`, NOT your shell env — the mode record and service URL must be persisted, or the extension silently runs local mode** (the single most likely Desktop footgun). Claude Desktop spawns the `.mcpb` as a GUI subprocess that does **not** inherit your interactive shell's environment. `is_local_mode()` resolves the persisted mode record, then `service_url`, then PG credentials — via `~/.config/nexus/config.yml`, never `~/.zshrc`/`~/.bashrc` exports. (It does NOT key on API keys: `VOYAGE_API_KEY` is no longer a client credential at all — the client does no embedding — and `CHROMA_API_KEY` no longer exists.) So a machine whose cloud configuration lives only in shell exports will run the extension in **local mode** (bge-768 local embedder), even though your CLI in a terminal resolves cloud mode fine. Symptoms: searches return "no results" or feel thin, and `~/Library/Logs/Claude/mcp-server-Conexus.log` shows `collection_dimension_mismatch_skipped` / `search_all_collections_dimension_skipped` — typically `got 768` (local bge query) against collections that expect `1024` (voyage). The bge-768 local query simply cannot match cloud voyage-1024 collections. Fix: persist the cloud config via `nx config set service_url` / `nx config set service_token` (or the interactive wizard, `nx config init`; there is no `nx init --cloud` flag).
 
   **6.0 cloud creds** are the managed nexus-service endpoint + bearer token
   (`NX_SERVICE_URL` + `NX_SERVICE_TOKEN`); embedding runs server-side, so you do
