@@ -2446,7 +2446,9 @@ def search_graph_hop(
     The single-statement unification of the ``query`` tool's ``follow_links`` dance:
     ``nexus.search_graph_hop_<dim>`` runs a ``WITH RECURSIVE`` BFS over
     ``catalog_links`` from *seeds* to *depth* hops, collects the reachable document
-    set, joins ``chunks_<dim>`` and vector-ranks — replacing the app-side graphBFS +
+    set, joins the unified ``nexus.chunks`` table (post-RDR-191; the function keeps
+    its ``_<dim>`` suffix, but the table it joins is no longer a per-dim shard) and
+    vector-ranks — replacing the app-side graphBFS +
     per-collection search + re-join. Document-level results (``id`` is the tumbler),
     deduped to one row per tumbler at the best (nearest) distance. Each row also carries
     the MATCHED chunk's ``chash`` (so the query() repoint populates the RDR-086
