@@ -112,10 +112,15 @@ docker run -it --rm \
 
 if [[ -f "$AUTH_DIR/.credentials.json" ]]; then
     echo ""
-    echo "✓ Credentials saved to tests/e2e/.claude-auth/.credentials.json"
+    echo "AUTH-LOGIN PASSED — credentials saved to tests/e2e/.claude-auth/.credentials.json"
     echo "  Run: ./tests/e2e/run.sh"
 else
+    # nexus-epj0b: this used to print the ✗ line and exit 0 — failure and
+    # success were indistinguishable to any `auth-login.sh && ...` caller,
+    # and the only signal was prose scrolling past a human. A setup helper
+    # still owes callers a truthful exit code and a greppable sentinel.
     echo ""
-    echo "✗ No credentials found — did you complete login and /exit?"
+    echo "AUTH-LOGIN FAILED — no credentials found. Did you complete login and /exit?"
     echo "  Tip: credentials are saved to ~/.claude/.credentials.json inside the container"
+    exit 1
 fi
