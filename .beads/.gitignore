@@ -50,3 +50,9 @@ dolt-access.lock
 # contributors to accidentally commit upstream issue databases.
 # The JSONL files (issues.jsonl, interactions.jsonl) and config files
 # are tracked by git by default since no pattern above ignores them.
+
+# Agent-interaction audit log (append-only, written by bd hooks every session).
+# Beads source of truth for THIS repo is the Dolt remote (bd dolt push); the
+# git-tracked copy was a perpetually-dirty duplicate that blocked branch
+# switches and hitchhiked into commits (nexus-p9blu, Hal directive 2026-08-18).
+interactions.jsonl
