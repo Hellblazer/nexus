@@ -1,50 +1,58 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-121 Phase 2 hook 3: deny ``git add`` wildcard forms.
+"""RDR-121 Phase 2 hook: review-coverage gate for gated-path pushes (nexus-4av2n).
 
-Standing rule (``feedback_no_git_add_all.md``): wildcard adds pull in
-unrelated untracked drafts. Stage by explicit path instead.
+FILENAME/RULE_NAME NOTICE: this file is named
+``git_add_all_redirects_to_explicit_paths.py`` and its ``RULE_NAME`` matches,
+but per the HISTORY note below it now enforces exactly ONE check: the
+review-coverage gate. The name is a historical label kept for
+``registry.yaml`` and ``hooks.json`` compatibility (renaming was explicitly
+out of scope for the split that removed the other two checks — see
+HISTORY) — read it as a label, not a description of current behavior.
 
-Denied forms:
-- ``git add -A``        (and ``-Av``, ``-AV``, etc. -- as a flag group)
-- ``git add .``
-- ``git add --all``
+HISTORY (Hal decision 2026-08-18, nexus-ww9fw): this file used to carry
+THREE checks sharing one script/registry-entry (RDR-121/125 caps
+PreToolUse:Bash routing rules at FOUR cross-plugin, so consolidating
+related checks into one hook avoids acquiring a new rule slot per check):
 
-Allowed:
-- ``git add <path> [<path> ...]`` with explicit path arguments.
-- Any ``git add`` invocation carrying a valid ``# routing-allow:``
-  escape token.
+  1. Wildcard ``git add`` staging (``-A``, ``.``, ``--all``) --
+     ``feedback_no_git_add_all.md``.
+  2. ``git push`` whose EFFECTIVE target is ``main`` -- nexus-vduer.
 
-SECOND RULE, CONSOLIDATED HERE (nexus-vduer, Hal decision 2026-07-25): deny
-``git push`` whose EFFECTIVE target is ``main``.
+Hal ruled both are personal, cross-project workflow preferences, not
+general-purpose plugin features, and moved them OUT of the plugin into
+Hal's own user-level hook config (a standalone script, delivered outside
+this repo, not shipped by conexus). Only the review-coverage gate
+(nexus-4av2n) below stays as a plugin feature — it protects THIS
+project's own review-coverage convention, which is the kind of thing a
+project-shipped hook is for.
 
-Why it lives in this file rather than its own: RDR-121 § Performance
-Expectations caps PreToolUse:Bash routing rules at FOUR (RDR-125 made the cap
-cross-plugin), to honour a <300ms p95 cumulative budget. A fifth rule requires
-consolidation or a budget revision in a successor RDR. Measured worst case for
-five hooks was ~147ms against that 300ms budget, so the budget is not binding —
-but the cap is on rule COUNT, and revising an RDR-owned constant on the strength
-of a floor estimate is not this change's business. Consolidation is the path the
-cap's own message names, so both checks share one script and therefore one
-subprocess spawn per Bash call.
+Incident archaeology preserved from the departed rule 2, since its
+motivating incident is also the reason push-time (not just close-time)
+review verification turned out to matter in practice — the same
+underlying lesson the review-coverage gate below acts on:
 
-THE PUSH INCIDENT (2026-07-23, self-reported). The orchestrator pushed directly
-to main. Session restarts had left the working tree on main and
-verify-branch-before-commit was a MEMORY-ONLY control, so it failed the way
-memory-only controls fail. Nobody typed "main" — the checkout was already on it,
-so a bare ``git push`` inherited the target from the branch's upstream. A matcher
-looking for the literal token would have missed the exact event it prevents,
-which is why the EFFECTIVE target is resolved (explicit refspec, else upstream).
+  THE PUSH INCIDENT (2026-07-23, self-reported). The orchestrator pushed
+  directly to main. Session restarts had left the working tree on main
+  and verify-branch-before-commit was a MEMORY-ONLY control, so it failed
+  the way memory-only controls fail. Nobody typed "main" — the checkout
+  was already on it, so a bare ``git push`` inherited the target from the
+  branch's upstream. A matcher looking for the literal token would have
+  missed the exact event it prevented — which is why the extracted
+  push-to-main check (now nexus-vduer's own script, Hal's user-level
+  config) resolves the EFFECTIVE target (explicit refspec, else upstream)
+  rather than matching a literal token. Tag pushes stayed allowed there
+  too: they are the release publish step, not a branch update.
 
-Tag pushes stay allowed: they are the release publish step, not a branch update.
-
-THIRD RULE, CONSOLIDATED HERE TOO (nexus-4av2n, scope (b)): deny ``git push``
+THE RULE THIS FILE NOW ENFORCES (nexus-4av2n, scope (b)): deny ``git push``
 when the outgoing range carries a commit that touches a GATED path
 (``src/``, ``service/src/main/``, ``conexus/``, ``tests/``) with no
-review-completed coverage. Same cap reasoning as the push-to-main rule above --
-a fourth logical check sharing this script's one registry entry and one
-subprocess spawn, rather than a fifth cross-plugin routing rule the aggregate
-cap (RDR-121/125, currently AT 4) would refuse.
+review-completed coverage. Historically this was one of three checks
+sharing this script's one registry entry to respect the aggregate
+RDR-121/125 cap (currently AT 4); since the 2026-08-18 split (see HISTORY
+above) it is the only check left in this file, but the registry entry
+and script structure were not otherwise reworked — that is out of scope
+for the split.
 
 THE MISS THIS CLOSES (bead nexus-4av2n, filed 2026-07-31): five commits
 reached develop in one session with zero code-review-expert / substantive-
@@ -123,8 +131,10 @@ T2 [21540] both returned FIX-FIRST / not-justified on round 1):
     catch) -- the fix widens WHERE coverage can be found, not WHETHER absence
     still denies.
   - Tag pushes: ROUND 2 fix (Critical-3a, reviewer). The push-to-main check
-    (rule 2, same file) already detects and exempts tag pushes with a
-    documented incident history; this check had NO equivalent, so tagging
+    (rule 2, in this same file at the time -- since extracted to
+    nexus-vduer's own script, see the module docstring's HISTORY note)
+    already detected and exempted tag pushes with a documented incident
+    history; this check had NO equivalent, so tagging
     (release ``vX.Y.Z`` or engine ``engine-service-vX.Y.Z``) from a checkout
     carrying local unpushed-but-gated-and-unmarked commits denied the TAG
     PUSH ITSELF -- the exact "a tag gates delivery, not work" failure class
@@ -136,7 +146,8 @@ T2 [21540] both returned FIX-FIRST / not-justified on round 1):
     correct answer for engine tags via the branch-name-mismatch fallback
     path, and refactoring proven, heavily-tested code was not worth the risk
     here). Kept as an INDEPENDENT implementation rather than extracted from
-    ``_targets_protected``, for the same reason.
+    ``_targets_protected``, for the same reason -- ``_targets_protected``
+    itself has since left this file with the rest of rule 2 (see HISTORY).
   - Release branches: ROUND 2 fix (Critical-2, reviewer). AGENTS.md's own
     "Cutting a release" Step 7 does
     ``git checkout -b release/vX.Y.Z; <bump>; git commit -m "chore(release):
@@ -215,21 +226,25 @@ which a first-pass cache does not help regardless of polarity, so it would
 add complexity without closing the gap the deadline fix already closes.
 Left here as an available future optimization, not a rejected one.
 
-REPO-SCOPE GUARD (nexus-vscgz, 2026-08-07): rules 2 (push-to-main,
-nexus-vduer) and 3 (review-coverage gate, nexus-4av2n) are NEXUS-REPO
-POLICY -- personal standing rules about THIS project's release-branch
-discipline and review coverage. This hook, however, ships in a plugin
-installed GLOBALLY, so its PreToolUse:Bash matcher runs in every repo a
-session touches. EVIDENCE (2026-08-07): in ChiralBehaviors/inviscid (a
-hobby repo -- `master` default branch, no `develop`, no marketplace
-surface) rule 2 blocked a plain `git push origin master` with the
-nexus-vduer deny message; the operator had to reach for the
-`# routing-allow:` escape in a repo that has never heard of nexus-vduer.
+REPO-SCOPE GUARD (nexus-vscgz, 2026-08-07): the review-coverage gate
+(nexus-4av2n) is NEXUS-REPO POLICY -- a standing rule about THIS
+project's gated-path prefixes and review-coverage convention, not
+anything a foreign repo has agreed to. This hook, however, ships in a
+plugin installed GLOBALLY, so its PreToolUse:Bash matcher runs in every
+repo a session touches. EVIDENCE (2026-08-07, observed via the now-
+departed push-to-main check that used to share this file -- see the
+module docstring's HISTORY note): in ChiralBehaviors/inviscid (a hobby
+repo -- `master` default branch, no `develop`, no marketplace surface)
+that check blocked a plain `git push origin master` with a nexus-vduer
+deny message; the operator had to reach for the `# routing-allow:`
+escape in a repo that has never heard of nexus-vduer. The review-
+coverage gate is equally nexus-specific by construction (the gated path
+prefixes and the review-marker convention are THIS project's own), so
+the same scope guard applies to it even though the check that first
+surfaced the bug has since moved out of this file.
 
-``_repo_scope_is_nexus(cwd)`` gates rules 2+3 only -- rule 1 (the
-wildcard-add check) is a personal, repo-agnostic standing rule
-(`feedback_no_git_add_all.md`) and stays GLOBAL, unaffected by this guard.
-Two signals, OR'd (nexus-w3apo: the first cut consulted Signal B only
+``_repo_scope_is_nexus(cwd)`` gates the review-coverage check. Two
+signals, OR'd (nexus-w3apo: the first cut consulted Signal B only
 when Signal A was fully undeterminable, so a nexus checkout with a
 renamed/local origin basename resolved determinately-wrong and silently
 lost the vduer guard inside nexus itself -- substantive-critic Critical,
@@ -259,16 +274,15 @@ pays one extra git call (``rev-parse --show-toplevel``, 2s cap) plus an
 
 Any failure / undeterminable state resolves to False (NOT nexus). This is
 deliberately fail-OPEN for foreign repos: the whole point of this guard is
-that a repo it has never heard of must not be governed by rules that
-assume it is nexus -- the inverse of every OTHER fail-open in this file,
+that a repo it has never heard of must not be governed by a rule that
+assumes it is nexus -- the inverse of every OTHER fail-open in this file,
 which exists to avoid bricking a push this project's own policy should
 allow. The scope check runs ONLY when the command actually contains a
-``git push`` segment: rule 1 needs no git subprocess at all, and paying
-for `remote get-url` on every Bash call would burn into the <300ms budget
-for the common non-push case for no reason. When a push segment exists and
-the repo is NOT nexus, rules 2 and 3 are skipped entirely -- the command is
-treated exactly as though it carried no push segments, so only rule 1 can
-still fire.
+``git push`` segment -- paying for `remote get-url` on every Bash call
+would burn into the <300ms budget for the common non-push case for no
+reason. When a push segment exists and the repo is NOT nexus, the
+review-coverage check is skipped entirely -- the command is treated
+exactly as though it carried no push segments, and this hook allows.
 """
 from __future__ import annotations
 
@@ -286,50 +300,6 @@ import _lib  # noqa: E402
 
 RULE_NAME = "git_add_all_redirects_to_explicit_paths"
 
-
-def _has_wildcard_add(segment_tokens: list[str]) -> bool:
-    """Return True iff this segment is ``git add`` with a wildcard form."""
-    if len(segment_tokens) < 2:
-        return False
-    if segment_tokens[0] != "git" or segment_tokens[1] != "add":
-        return False
-    for token in segment_tokens[2:]:
-        if token == ".":
-            return True
-        if token == "--all":
-            return True
-        # ``-A`` or any short-flag group containing ``A``.
-        if token.startswith("-") and not token.startswith("--") and "A" in token:
-            return True
-    return False
-
-
-def _scan_command(command: str) -> bool:
-    """Return True iff any sub-segment is a wildcard ``git add``."""
-    segments = re.split(r"(?:&&|\|\||;|\s\|\s|\bthen\b|\bdo\b)", command)
-    for segment in segments:
-        try:
-            tokens = shlex.split(segment, posix=True)
-        except ValueError:
-            continue
-        if _has_wildcard_add(tokens):
-            return True
-    return False
-
-
-def _redirect_message() -> str:
-    return (
-        "git add wildcard forms (`-A`, `.`, `--all`) pull in unrelated "
-        "untracked drafts. Stage by explicit path instead:\n"
-        "  git add <path1> <path2> ...\n"
-        "Standing rule: feedback_no_git_add_all.md.\n"
-        "To override, append `# routing-allow: <reason>` (>=8 chars)."
-    )
-
-
-#: Branch names treated as protected. ``master`` included so a repo that has
-#: not renamed is covered by the same rule rather than silently unguarded.
-_PROTECTED: frozenset[str] = frozenset({"main", "master"})
 
 #: ``git push`` flags that take a VALUE argument, which must be skipped when
 #: scanning positional args for a refspec.
@@ -528,94 +498,14 @@ def _repo_scope_is_nexus(cwd: str) -> bool:
         return False
 
 
-def _targets_protected(tokens: list[str], cwd: str) -> bool:
-    """True iff this ``git push`` would update a protected branch.
-
-    Resolution order mirrors git's own: an explicit refspec wins; otherwise the
-    push inherits the current branch's upstream. The second case is the one the
-    incident actually took.
-    """
-    positional: list[str] = []
-    skip_next = False
-    # nexus-cr4lp F1: strip shell redirection tokens BEFORE the flag/
-    # positional scan -- see `_strip_shell_redirections`'s docstring for
-    # the exact LEG A / B1 failure this closes.
-    for tok in _strip_shell_redirections(tokens[1:]):     # drop "push"
-        if skip_next:
-            skip_next = False
-            continue
-        if tok in _VALUED_PUSH_FLAGS:
-            skip_next = True
-            continue
-        if tok.startswith("-"):
-            continue
-        positional.append(tok)
-
-    # positional = [remote, refspec...]; refspecs may be "src:dst".
-    refspecs = positional[1:] if len(positional) > 1 else []
-
-    # TAG FLAGS DO NOT EXEMPT A BRANCH PUSH. The first cut of this returned
-    # False the instant `--tags` or `--follow-tags` appeared anywhere in the
-    # command, BEFORE refspecs were even computed. Verified against real git
-    # (dry-run, checkout on main with an upstream):
-    #
-    #   git push --follow-tags        ->  main -> main  AND the tags
-    #   git push --tags origin main   ->  main -> main  AND the tags
-    #   git push --tags               ->  tags only
-    #
-    # So two of the three exempted forms push the branch, and `--follow-tags`
-    # is BY DEFINITION a branch push that also carries tags -- it is the
-    # incident's own bare-push shape with a flag appended. Only a BARE `--tags`
-    # with no non-tag refspec is a pure tag push.
-    #
-    # Found by review, not by the tests: this hook shipped with zero
-    # `--follow-tags` coverage, so the guard for the 2026-07-23 direct-push
-    # incident exempted the exact case it exists to block.
-    if "--follow-tags" not in tokens and "--tags" in tokens and not refspecs:
-        return False
-    if refspecs:
-        for spec in refspecs:
-            if spec.startswith("refs/tags/") or re.fullmatch(r"v\d+\.\d+\.\d+", spec):
-                continue                          # tag push
-            dst = spec.split(":")[-1].lstrip("+")
-            dst = dst.rsplit("/", 1)[-1]          # refs/heads/main -> main
-            if dst in _PROTECTED:
-                return True
-        return False
-
-    # No refspec: the effective target is the upstream of the current branch.
-    # THIS is the incident's shape — a bare `git push` from a checkout that was
-    # already sitting on main.
-    upstream = _upstream_branch(cwd)
-    if upstream is not None:
-        return upstream in _PROTECTED
-    branch = _current_branch(cwd)
-    if branch is not None:
-        # No upstream configured; `push.default` would use the same name.
-        return branch in _PROTECTED
-    return False                                   # undeterminable -> fail open
-
-
-def _push_deny_message(target_hint: str) -> str:
-    return (
-        f"Direct push to {target_hint} is blocked (nexus-vduer). PRs only — "
-        f"`main` carries the plugin marketplace surface and the develop split "
-        f"protects it from in-flight churn.\n"
-        f"Open a PR against `develop` instead. Releases promote develop to main "
-        f"by MERGE; the single sanctioned direct commit is the release version "
-        f"bump (docs/contributing.md § Release Process).\n"
-        f"Tag pushes are unaffected — `git push origin vX.Y.Z` still works.\n"
-        f"If this IS the release flow, append `# routing-allow: <reason>` "
-        f"(>=8 chars) so the exception is auditable in the routing log."
-    )
-
-
 # ---------------------------------------------------------------------------
 # nexus-4av2n scope (b) round 2: tag-push / release-branch destination
-# resolution, independent of _targets_protected's own inline parsing (left
-# untouched -- it already produces the correct answer for push-to-main
-# purposes; see module docstring "Tag pushes" for why this is a deliberate,
-# separate implementation rather than a shared refactor).
+# resolution. HISTORY: originally kept independent of a sibling
+# `_targets_protected`'s own inline parsing (that function belonged to rule 2,
+# push-to-main -- see the module docstring's HISTORY note; it left this file
+# on 2026-08-18). The independent-implementation choice stands on its own
+# merits now (see module docstring "Tag pushes" bullet for the original
+# reasoning) even though the function it was kept independent FROM is gone.
 # ---------------------------------------------------------------------------
 
 _TAG_REFSPEC_RE = re.compile(r"^(?:v\d+\.\d+\.\d+|engine-service-v\d+\.\d+\.\d+)$")
@@ -1365,55 +1255,45 @@ def body(payload: dict[str, Any]) -> None:
     if not command:
         _lib.allow()
 
-    # nexus-mzvwa.8: match FIRST, escape SECOND. Pre-fix the escape check ran
-    # before the matcher, so ANY '# routing-allow:'-annotated Bash command
-    # logged a phantom escape against this rule (6,130 over the RDR-121 soak
-    # window, zero of which contained a git-add wildcard) -- destroying the
-    # esc% telemetry. An escape event now means exactly "this command WOULD
-    # have been denied and the operator overrode it".
-    wildcard_add = _scan_command(command)
+    # Only pay for the git subprocesses when the command actually carries a
+    # `git push` segment -- the common case (no push at all) costs nothing.
+    cwd = str(payload.get("cwd") or "") or os.getcwd()
+    push_segments = _push_tokens(command)
+    if push_segments and not _repo_scope_is_nexus(cwd):
+        # nexus-vscgz: the review-coverage gate is nexus-repo policy, not a
+        # global standing rule -- no-op in any other repo. Treated as if
+        # there were no push segments at all.
+        push_segments = []
 
-    push_to_main = False
     review_decision, review_message, review_override_used = "ok", "", False
-    if not wildcard_add:
-        # Only pay for the git subprocesses when the cheap check missed.
-        cwd = str(payload.get("cwd") or "") or os.getcwd()
-        push_segments = _push_tokens(command)
-        if push_segments and not _repo_scope_is_nexus(cwd):
-            # nexus-vscgz: rules 2 (push-to-main) and 3 (review-coverage)
-            # are nexus-repo policy, not a global standing rule -- no-op
-            # in any other repo. Treated as if there were no push segments
-            # at all; rule 1 (wildcard add) is untouched by this branch.
-            push_segments = []
-        push_to_main = any(_targets_protected(t, cwd) for t in push_segments)
-        if push_segments and not push_to_main:
-            non_tag_segments = [t for t in push_segments if not _is_pure_tag_push(t)]
-            if not non_tag_segments:
-                # nexus-4av2n round 2 Critical-3a: every segment is a pure
-                # tag push -- exempt, matching the push-to-main check's own
-                # tag handling (silent ok; a tag doesn't create new commits).
-                pass
+    if push_segments:
+        non_tag_segments = [t for t in push_segments if not _is_pure_tag_push(t)]
+        if not non_tag_segments:
+            # nexus-4av2n round 2 Critical-3a: every segment is a pure
+            # tag push -- exempt (silent ok; a tag doesn't create new
+            # commits).
+            pass
+        else:
+            dest_branches = [
+                _push_destination_branches(t, cwd) for t in non_tag_segments
+            ]
+            all_release = bool(dest_branches) and all(
+                dsts and all(d.startswith("release/") for d in dsts)
+                for dsts in dest_branches
+            )
+            if all_release:
+                # nexus-4av2n round 2 Critical-2: release/* is exempt,
+                # but LOUD (release branches are PR-gated + human-
+                # releaser by policy, not silently magic).
+                flat = [d for dsts in dest_branches for d in dsts]
+                review_decision = "warn"
+                review_message = _release_branch_exempt_message(flat)
             else:
-                dest_branches = [
-                    _push_destination_branches(t, cwd) for t in non_tag_segments
-                ]
-                all_release = bool(dest_branches) and all(
-                    dsts and all(d.startswith("release/") for d in dsts)
-                    for dsts in dest_branches
+                review_decision, review_message, review_override_used = (
+                    _review_coverage_check(cwd, payload, command)
                 )
-                if all_release:
-                    # nexus-4av2n round 2 Critical-2: release/* is exempt,
-                    # but LOUD (release branches are PR-gated + human-
-                    # releaser by policy, not silently magic).
-                    flat = [d for dsts in dest_branches for d in dsts]
-                    review_decision = "warn"
-                    review_message = _release_branch_exempt_message(flat)
-                else:
-                    review_decision, review_message, review_override_used = (
-                        _review_coverage_check(cwd, payload, command)
-                    )
 
-    if not wildcard_add and not push_to_main and review_decision != "deny":
+    if review_decision != "deny":
         if review_override_used:
             # nexus-cr4lp F2: every override (env OR inline command-text
             # prefix) is auditable -- a dedicated `escape` event, never
@@ -1444,21 +1324,9 @@ def body(payload: dict[str, Any]) -> None:
         rule=RULE_NAME, outcome="deny", tool_name="Bash",
         command_fragment=command,
     )
-    # Each check keeps its OWN message: consolidating the rules must not
-    # consolidate the diagnosis an operator sees.
-    if push_to_main:
-        _lib.deny(
-            _push_deny_message("main"),
-            summary="direct push to main blocked: open a PR against develop (nexus-vduer).",
-        )
-    if review_decision == "deny":
-        _lib.deny(
-            review_message,
-            summary="push blocked: gated commit(s) lack review-completed coverage (nexus-4av2n).",
-        )
     _lib.deny(
-        _redirect_message(),
-        summary="git add wildcard blocked: stage by explicit path (feedback_no_git_add_all).",
+        review_message,
+        summary="push blocked: gated commit(s) lack review-completed coverage (nexus-4av2n).",
     )
 
 

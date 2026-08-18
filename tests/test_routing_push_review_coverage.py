@@ -713,6 +713,58 @@ class TestRepoScope:
         assert out["permissionDecision"] == "allow", out
         assert not out.get("additionalContext"), out
 
+    def test_trailing_slash_dot_git_origin_is_still_nexus_scoped(self, tmp_path):
+        """Ported from the deleted rule-2 suite (nexus-ww9fw split):
+        normalization-order regression, previously reproduced live --
+        ``.../nexus.git/`` (trailing slash AFTER ``.git``) must still
+        resolve its last path component to ``nexus``. The first cut
+        stripped ``.git`` before the slash, so the suffix survived and a
+        genuine nexus remote read as foreign -- which post-split would
+        silently switch rule 3 OFF. Asserted here via rule 3: a gated-path
+        commit with no coverage must DENY, proving the repo resolved
+        in-scope."""
+        origin = tmp_path / "nexus.git"
+        origin.mkdir()
+        _git("init", "-q", "--bare", "--initial-branch=develop", cwd=origin)
+        work = tmp_path / "work-trailing-slash"
+        work.mkdir()
+        _git("init", "-q", "--initial-branch=develop", cwd=work)
+        _git("remote", "add", "origin", str(origin) + "/", cwd=work)
+        (work / "README.md").write_text("init\n")
+        _git("add", "README.md", cwd=work)
+        _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init", cwd=work)
+        _git("push", "-q", "-u", "origin", "develop", cwd=work)
+        _commit(work, "src/x.py", "feat: x, no bead id, no marker anywhere")
+        fake_bin = _fake_nx(tmp_path)
+        out = _decision(_run("git push", work, path=f"{fake_bin}:/usr/bin:/bin"))
+        assert out["permissionDecision"] == "deny", out
+
+    def test_renamed_origin_with_plugin_marker_still_in_scope(self, tmp_path):
+        """Ported from the deleted rule-2 suite (nexus-ww9fw split):
+        nexus-w3apo -- Signal A resolving DETERMINATELY to a non-``nexus``
+        basename must still consult the marker (Signal B). A nexus
+        checkout behind a renamed/local origin (scratch clone, mirror) is
+        exactly the shape that silently lost its guard when Signal B was
+        fallback-only. Asserted via rule 3: gated-path commit, no
+        coverage, marker present -> DENY."""
+        origin = tmp_path / "nexus-mirror"
+        origin.mkdir()
+        _git("init", "-q", "--bare", "--initial-branch=develop", cwd=origin)
+        work = tmp_path / "work-renamed"
+        work.mkdir()
+        _git("init", "-q", "--initial-branch=develop", cwd=work)
+        _git("remote", "add", "origin", str(origin), cwd=work)
+        marker_dir = work / "conexus" / ".claude-plugin"
+        marker_dir.mkdir(parents=True)
+        (marker_dir / "plugin.json").write_text("{}")
+        _git("add", "conexus/.claude-plugin/plugin.json", cwd=work)
+        _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init", cwd=work)
+        _git("push", "-q", "-u", "origin", "develop", cwd=work)
+        _commit(work, "src/x.py", "feat: x, no bead id, no marker anywhere")
+        fake_bin = _fake_nx(tmp_path)
+        out = _decision(_run("git push", work, path=f"{fake_bin}:/usr/bin:/bin"))
+        assert out["permissionDecision"] == "deny", out
+
 
 class TestF1RedirectionStripping:
     """nexus-cr4lp F1 (T2 nexus/guard-evidence-cluster-root-cause-2026-08-
@@ -914,5 +966,44 @@ class TestRegistryStillAtCap:
         )
         assert "nexus-4av2n" in registry, (
             "the registry rationale does not record the push-review-coverage "
-            "half; a future reader would not know this hook carries a third check"
+            "check; a future reader would not know this hook enforces it"
+        )
+
+
+class TestWiring:
+    """Moved from the now-deleted tests/test_routing_git_add_all.py
+    (nexus-ww9fw, 2026-08-18): these generic hook-wiring checks are not
+    about the wildcard-add rule that used to share this script -- they
+    just confirm the SCRIPT (still named
+    `git_add_all_redirects_to_explicit_paths.py` for registry/hooks.json
+    compatibility, per the module docstring's HISTORY note) is registered
+    and wired. They belong with this file now, since this is the sole
+    surviving check the script enforces."""
+
+    def test_registry_has_rule(self):
+        yaml = pytest.importorskip("yaml")
+        reg = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "registry.yaml"
+        rule = (yaml.safe_load(reg.read_text()) or {}).get("rules", {}).get(
+            "git_add_all_redirects_to_explicit_paths"
+        )
+        assert rule is not None
+
+    def test_hooks_json_registers(self):
+        hooks_json = PROJECT_ROOT / "conexus" / "hooks" / "hooks.json"
+        data = json.loads(hooks_json.read_text())
+        found = any(
+            "git_add_all_redirects_to_explicit_paths.py" in h.get("command", "")
+            for entry in data["hooks"]["PreToolUse"] if entry.get("matcher") == "Bash"
+            for h in entry.get("hooks", [])
+        )
+        assert found
+
+    def test_registry_no_longer_claims_wildcard_add_or_push_to_main_as_live(self):
+        """nexus-ww9fw: the registry rationale must not describe rules 1/2
+        as CURRENT plugin behavior -- only as history."""
+        reg = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "registry.yaml"
+        registry = reg.read_text()
+        assert "HISTORY" in registry
+        assert "nexus-vduer" in registry, (
+            "incident archaeology should still be traceable from the registry"
         )

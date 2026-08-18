@@ -59,3 +59,19 @@ mechanize, it matters enough to ship.
   are (F3, closes LEG D1); the deny Remedy opens with the same
   separate-tool-call warning (F4); the T2 title-only marker fix (B3).
   (nexus-cr4lp, nexus-iwlq4)
+- `conexus/hooks/scripts/routing/git_add_all_redirects_to_explicit_paths.py`
+  and `conexus/hooks/scripts/routing/registry.yaml` — git-policy split (Hal
+  decision 2026-08-18, nexus-ww9fw): rules 1 (wildcard `git add`) and 2
+  (push-to-main, nexus-vduer) REMOVED from the plugin hook, extracted to a
+  standalone script delivered outside this repo as Hal's own user-level
+  PreToolUse hook (not shipped by conexus, not pinned by
+  `marketplace.json` — no drift-ledger entry applies to it). The plugin
+  hook now enforces ONLY the review-coverage gate (nexus-4av2n); its
+  filename/`RULE_NAME` are unchanged (registry.yaml + hooks.json
+  compatibility — renaming was out of scope). Until this release ships,
+  the INSTALLED plugin still enforces all three checks under the old
+  behavior; installers relying on the old push-to-main / wildcard-add
+  denials from the plugin should not assume they are gone until this
+  entry clears. A checked-in copy of the extracted script for CI purposes
+  lives at `tests/fixtures/hal_git_policy_hook.py` (test-only, not part
+  of the plugin surface, drift there is expected and accepted).
