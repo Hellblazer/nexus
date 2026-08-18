@@ -707,9 +707,22 @@ jobs:
         # -n/xdist in-process parallelism, so the no-parallel-tests
         # invariant still holds.
         run: |
+          set -euo pipefail
           uv run pytest tests/ -q --durations=25 \
             --splits 4 --group ${{ matrix.shard }} \
-            --durations-path=.test_durations.json
+            --durations-path=.test_durations.json | tee shard-output.txt
+
+      # nexus-lemv5: per-shard executed-count floor — the same backstop the
+      # lint leg carries (check_lint_leg_non_vacuity.py, nexus-wixar), aimed
+      # at the shard matrix pytest-gate trusts blindly via needs.test. The
+      # marker-scoped conftest guards (scenario / mandatory-pin) cannot see
+      # a mass-skip of the GENERAL corpus; pytest exits 0 on all-skipped.
+      # Floor 1500/shard against ~3290/shard actual (13150 default-selected
+      # / 4, measured 2026-08-18): generous headroom for corpus shrinkage
+      # and split imbalance, structurally impossible for a near-zero shard
+      # to pass.
+      - name: Executed-count floor (nexus-lemv5 — a shard that skipped its corpus must not report green)
+        run: uv run python scripts/check_lint_leg_non_vacuity.py shard-output.txt --floor 1500 --label "test shard ${{ matrix.shard }}"
 
   test-lint:
     # test-suite-compression P0 (nexus-test-cleanup, 2026-08-05): the `lint`
