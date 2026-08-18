@@ -156,6 +156,22 @@ def _render_for(tier: str) -> tuple[Path, str]:
     raise ValueError(f"unknown autostart tier {tier!r}")
 
 
+def rendered_unit_content(tier: str) -> tuple[Path, str]:
+    """Public wrapper over :func:`_render_for` for cross-module drift
+    detection (nexus-rlp0v).
+
+    ``_render_for`` is otherwise an install-path implementation detail,
+    private to this module. :func:`nexus.upgrade_finish.converge_service_autostart_unit`
+    needs the SAME render :func:`install_autostart` uses internally to
+    decide whether an ALREADY-INSTALLED unit has drifted from the current
+    template — duplicating the per-tier render logic there would be the
+    real mistake (two renderers that can silently diverge). This is the
+    one sanctioned cross-module entry point for reading that render
+    without reaching into a private name.
+    """
+    return _render_for(tier)
+
+
 def _activate_cmd(dest: Path) -> list[str]:
     from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 

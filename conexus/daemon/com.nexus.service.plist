@@ -22,6 +22,17 @@
   StandardOutPath / StandardErrorPath are the launchd-captured supervisor
   stream (interpreter/boot crash diagnostics). The bounded primary log is
   ``~/.config/nexus/logs/`` written by the supervisor itself.
+
+  NO ProcessType key (nexus-rlp0v, removed 2026-08-18 — was ``Background``).
+  launchd applies background QoS to a Background-typed job's entire process
+  tree and macOS confines it to the E-cores; measured on an M4 Max against
+  the real bge fp32 embedding model, that alone was a 15x throughput
+  regression (~7.6 chunks/s at normal QoS vs ~0.5 chunks/s under background
+  QoS), exactly reproducing the field-reported slow-indexing symptom.
+  Indexing is user-initiated foreground work, not background maintenance, so
+  the fix is to not classify the tree as background at all — never add this
+  key back. A pin test (tests/daemon/test_service_install.py) asserts its
+  absence.
 -->
 <plist version="1.0">
 <dict>
@@ -69,8 +80,6 @@
     <integer>30</integer>
     <key>ExitTimeOut</key>
     <integer>20</integer>
-    <key>ProcessType</key>
-    <string>Background</string>
     <key>StandardOutPath</key>
     <string>__LOG_DIR__/nexus-service.log</string>
     <key>StandardErrorPath</key>

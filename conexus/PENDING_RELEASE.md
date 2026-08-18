@@ -59,8 +59,12 @@ mechanize, it matters enough to ship.
   are (F3, closes LEG D1); the deny Remedy opens with the same
   separate-tool-call warning (F4); the T2 title-only marker fix (B3).
   (nexus-cr4lp, nexus-iwlq4)
+- `conexus/hooks/scripts/routing/registry.yaml` — git-policy split
+  (nexus-ww9fw): rule metadata updated to match the hook's narrowed
+  review-coverage-only scope; see the next entry for the full decision
+  record.
 - `conexus/hooks/scripts/routing/git_add_all_redirects_to_explicit_paths.py`
-  and `conexus/hooks/scripts/routing/registry.yaml` — git-policy split (Hal
+  — git-policy split (Hal
   decision 2026-08-18, nexus-ww9fw): rules 1 (wildcard `git add`) and 2
   (push-to-main, nexus-vduer) REMOVED from the plugin hook, extracted to a
   standalone script delivered outside this repo as Hal's own user-level
@@ -75,3 +79,11 @@ mechanize, it matters enough to ship.
   entry clears. A checked-in copy of the extracted script for CI purposes
   lives at `tests/fixtures/hal_git_policy_hook.py` (test-only, not part
   of the plugin surface, drift there is expected and accepted).
+- `conexus/daemon/com.nexus.service.plist` — `ProcessType=Background`
+  REMOVED (nexus-rlp0v): launchd was applying background QoS to the whole
+  engine tree, confining ONNX inference to E-cores — measured 15x embedding
+  slowdown (field report, M4 Max, ~0.5 chunks/s). Until this ships AND the
+  installed unit is re-rendered (`nx daemon restart-stale`, or the
+  upgrade-finish convergence note), existing local-mode macOS installs keep
+  the slow unit; a new `nx doctor` check ("Service autostart unit (local
+  mode)") surfaces the drift once the release is installed.

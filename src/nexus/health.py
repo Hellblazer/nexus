@@ -2803,6 +2803,73 @@ def _check_service_launchagent_stray() -> list[HealthResult]:
     )]
 
 
+def _check_service_autostart_drift() -> list[HealthResult]:
+    """nexus-rlp0v (substantive-critic round 1, Significant): backstop for
+    :func:`nexus.upgrade_finish.converge_service_autostart_unit`'s
+    automatic-pass leg, the c0vby/6bmph launchagent-stray checks' sibling.
+
+    That leg only fires on a conexus PACKAGE version transition, and even
+    then it only NAMES the fix (``nx daemon restart-stale``) rather than
+    running it -- it never bounces the service unattended (GH #1419 Issue
+    3b restraint). A user who misses that one-shot NOTE and never runs
+    ``nx daemon restart-stale`` keeps a stale unit (e.g. the
+    ``ProcessType=Background`` 15x-slowdown vintage this bead fixed)
+    installed forever with ZERO product signal otherwise -- exactly the
+    field-report population nexus-rlp0v exists for. This check gives an
+    operator a way to SEE it at any time via plain ``nx doctor``, same
+    convention as ``_check_engine_convergence`` / the launchagent-stray
+    checks above: report-only (never itself bounces the service -- that
+    stays ``nx daemon restart-stale``'s job), silent on not-applicable
+    (non-local mode, or no unit installed) AND on any probe failure
+    (best-effort, must never break ``nx doctor`` -- unlike
+    ``converge_service_autostart_unit``'s louder upgrade-path NEEDS-HUMAN
+    contract, which fits a caller already mid-command; this is a passive
+    surface for an operator who has run neither).
+
+    Delegates entirely to
+    :func:`nexus.upgrade_finish._probe_service_autostart_drift` for the
+    applicability + comparison logic -- the SAME probe the convergence
+    leg itself uses, so this check cannot silently drift from what a real
+    convergence would actually act on.
+    """
+    try:
+        from nexus.upgrade_finish import _probe_service_autostart_drift  # noqa: PLC0415 — deferred to avoid circular import
+
+        probe = _probe_service_autostart_drift()
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_service_autostart_drift_check_failed", error=str(exc))
+        return []
+
+    if probe is None:
+        return []  # not local mode, or no service-tier unit installed here
+
+    dest, existing, rendered = probe
+    if existing == rendered:
+        return [HealthResult(
+            label="Service autostart unit (local mode)",
+            ok=True,
+            detail=f"{dest} matches the current template",
+        )]
+
+    return [HealthResult(
+        label="Service autostart unit (local mode)",
+        ok=False,
+        warn=True,
+        detail=(
+            f"the storage-service autostart unit at {dest} differs from "
+            "the current template -- an installed unit is a rendered COPY "
+            "that a package upgrade alone does not update (launchd/systemd "
+            "only re-read it on bootout+bootstrap / reinstall); a fix that "
+            "changed this template (e.g. nexus-rlp0v's ProcessType="
+            "Background removal, a measured 15x local-mode indexing "
+            "slowdown) needs an explicit convergence to take effect here"
+        ),
+        fix_suggestions=[
+            "nx daemon restart-stale  # reinstalls the autostart unit and restarts the service",
+        ],
+    )]
+
+
 def _check_migration_state(
     creds_path: Path | None = None,
     psql_bin: Path | None = None,
@@ -5194,6 +5261,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_engine_convergence())
     results.extend(_check_t2_launchagent_stray())
     results.extend(_check_service_launchagent_stray())
+    results.extend(_check_service_autostart_drift())
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
     # RDR-185 P0.4: read-only pending-rungs surface (degrades internally).

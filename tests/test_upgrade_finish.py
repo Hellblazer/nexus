@@ -20,6 +20,7 @@ from nexus.upgrade_finish import (
     _parse_etime,
     check_version_transition,
     converge_engine,
+    converge_service_autostart_unit,
     detect_engine_convergence,
     detect_stale_processes,
     enumerate_processes,
@@ -1977,6 +1978,232 @@ class TestUnloadStaleServiceLaunchagent:
         assert len(actions) == 1
         assert "NEEDS HUMAN" in actions[0]
         assert "nx daemon service uninstall --autostart" in actions[0]
+
+
+class TestConvergeServiceAutostartUnit:
+    """nexus-rlp0v: a drifted local-mode service-tier autostart unit (e.g. a
+    stale ProcessType=Background) must converge on `nx daemon restart-stale`
+    without a human hand-editing ~/Library/LaunchAgents, and must never
+    bounce the service from the unattended/dry-run paths."""
+
+    def _dest(self, tmp_path):
+        from pathlib import Path as _P  # noqa: PLC0415 — local import, test-only convenience
+        return _P(tmp_path) / "com.nexus.service.plist"
+
+    def test_nonlocal_mode_untouched(self, tmp_path):
+        with patch("nexus.config.is_local_mode", return_value=False), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed") as probe, \
+             patch("nexus.daemon.installer.uninstall_autostart") as uninstall, \
+             patch("nexus.upgrade_finish.subprocess.run") as sp:
+            actions = converge_service_autostart_unit(tmp_path)
+        assert actions == []
+        probe.assert_not_called()
+        uninstall.assert_not_called()
+        sp.assert_not_called()
+
+    def test_no_unit_installed_is_noop(self, tmp_path):
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=None), \
+             patch("nexus.daemon.installer.uninstall_autostart") as uninstall:
+            actions = converge_service_autostart_unit(tmp_path)
+        assert actions == []
+        uninstall.assert_not_called()
+
+    # ── code-review round 1, Critical: a genuine probe FAILURE must never
+    # collapse into the same [] a benign not-applicable result returns. Each
+    # probe step gets its own case so a regression back to one blanket
+    # except-and-swallow is caught regardless of which step it happens on.
+
+    def test_is_local_mode_raises_is_needs_human_never_silent(self, tmp_path):
+        with patch("nexus.config.is_local_mode", side_effect=RuntimeError("config unreadable")), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed") as probe, \
+             patch("nexus.daemon.installer.uninstall_autostart") as uninstall:
+            actions = converge_service_autostart_unit(tmp_path)
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        assert "config unreadable" in actions[0]
+        probe.assert_not_called()
+        uninstall.assert_not_called()
+
+    def test_unit_lookup_raises_is_needs_human_never_silent(self, tmp_path):
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed",
+                   side_effect=RuntimeError("platform detection exploded")), \
+             patch("nexus.daemon.installer.uninstall_autostart") as uninstall:
+            actions = converge_service_autostart_unit(tmp_path)
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        assert "platform detection exploded" in actions[0]
+        uninstall.assert_not_called()
+
+    def test_render_raises_is_needs_human_never_silent(self, tmp_path):
+        """The reviewer's reproduction case: installer.rendered_unit_content
+        (formerly the private _render_for) raising used to be swallowed by
+        one blanket except and reported as [] — indistinguishable from
+        'already up to date'."""
+        dest = self._dest(tmp_path)
+        dest.write_text("some content\n")
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content",
+                   side_effect=RuntimeError("render blew up")), \
+             patch("nexus.daemon.installer.uninstall_autostart") as uninstall:
+            actions = converge_service_autostart_unit(tmp_path)
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        assert "render blew up" in actions[0]
+        uninstall.assert_not_called()
+
+    def test_dest_read_raises_is_needs_human_never_silent(self, tmp_path):
+        """dest exists per the probe but a read failure (permissions, TOCTOU
+        unlink) must ALSO surface loudly, not read as 'no unit installed'."""
+        from pathlib import Path as _P  # noqa: PLC0415 — local import, test-only convenience
+
+        dest = _P("/nonexistent/does/not/exist/com.nexus.service.plist")
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.uninstall_autostart") as uninstall:
+            actions = converge_service_autostart_unit(tmp_path)
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        uninstall.assert_not_called()
+
+    def test_content_matches_is_noop(self, tmp_path):
+        dest = self._dest(tmp_path)
+        dest.write_text("same content\n")
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "same content\n")), \
+             patch("nexus.daemon.installer.uninstall_autostart") as uninstall, \
+             patch("nexus.upgrade_finish.subprocess.run") as sp:
+            actions = converge_service_autostart_unit(tmp_path)
+        assert actions == []
+        uninstall.assert_not_called()
+        sp.assert_not_called()
+
+    def _drifted(self, tmp_path):
+        dest = self._dest(tmp_path)
+        dest.write_text("old content with ProcessType Background\n")
+        return dest
+
+    def test_drift_unattended_reports_note_never_mutates(self, tmp_path):
+        dest = self._drifted(tmp_path)
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.uninstall_autostart") as uninstall, \
+             patch("nexus.daemon.installer.install_autostart") as install, \
+             patch("nexus.upgrade_finish.subprocess.run") as sp:
+            actions = converge_service_autostart_unit(tmp_path, unattended=True)
+        assert len(actions) == 1
+        assert "NOTE" in actions[0] and "restart-stale" in actions[0]
+        uninstall.assert_not_called()
+        install.assert_not_called()
+        sp.assert_not_called()
+
+    def test_drift_dry_run_reports_note_never_mutates(self, tmp_path):
+        dest = self._drifted(tmp_path)
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.uninstall_autostart") as uninstall, \
+             patch("nexus.daemon.installer.install_autostart") as install, \
+             patch("nexus.upgrade_finish.subprocess.run") as sp:
+            actions = converge_service_autostart_unit(tmp_path, dry_run=True)
+        assert len(actions) == 1
+        assert "NOTE" in actions[0]
+        uninstall.assert_not_called()
+        install.assert_not_called()
+        sp.assert_not_called()
+
+    def test_drift_attended_stops_reinstalls_and_verifies(self, tmp_path):
+        from nexus.daemon.installer import (  # noqa: PLC0415 — local import, test-only convenience
+            InstallResult, InstallStatus, UninstallResult, UninstallStatus,
+        )
+
+        dest = self._drifted(tmp_path)
+        stop_result = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.uninstall_autostart",
+                   return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest)) as uninstall, \
+             patch("nexus.daemon.installer.install_autostart",
+                   return_value=InstallResult(
+                       status=InstallStatus.NEWLY_INSTALLED, dest=dest,
+                       detail="Activated via: launchctl bootstrap ...",
+                   )) as install, \
+             patch("nexus.upgrade_finish.subprocess.run", return_value=stop_result) as sp, \
+             patch("nexus.upgrade_finish._running_engine",
+                   return_value=_RunningEngine(up=True, version=(1, 2, 3))):
+            actions = converge_service_autostart_unit(tmp_path)
+
+        sp.assert_called_once_with(
+            ["nx", "daemon", "service", "stop"],
+            capture_output=True, text=True, timeout=60,
+        )
+        uninstall.assert_called_once_with(tier="service")
+        install.assert_called_once_with(tier="service")
+        assert len(actions) == 1
+        assert "converged" in actions[0]
+        assert str(dest) in actions[0]
+        assert "NEEDS HUMAN" not in actions[0]
+
+    def test_stop_failure_is_needs_human_never_mutates_unit(self, tmp_path):
+        dest = self._drifted(tmp_path)
+        stop_result = MagicMock(returncode=1, stdout="", stderr="boom")
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.uninstall_autostart") as uninstall, \
+             patch("nexus.daemon.installer.install_autostart") as install, \
+             patch("nexus.upgrade_finish.subprocess.run", return_value=stop_result):
+            actions = converge_service_autostart_unit(tmp_path)
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        uninstall.assert_not_called()
+        install.assert_not_called()
+
+    def test_install_raises_is_needs_human_never_raises(self, tmp_path):
+        dest = self._drifted(tmp_path)
+        stop_result = MagicMock(returncode=0, stdout="", stderr="")
+        from nexus.daemon.installer import UninstallResult, UninstallStatus  # noqa: PLC0415 — local import, test-only convenience
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.uninstall_autostart",
+                   return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest)), \
+             patch("nexus.daemon.installer.install_autostart",
+                   side_effect=RuntimeError("bootstrap exploded")), \
+             patch("nexus.upgrade_finish.subprocess.run", return_value=stop_result):
+            actions = converge_service_autostart_unit(tmp_path)
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        assert "bootstrap exploded" in actions[0]
+
+    def test_service_unanswerable_after_restart_is_needs_human(self, tmp_path):
+        from nexus.daemon.installer import (  # noqa: PLC0415 — local import, test-only convenience
+            InstallResult, InstallStatus, UninstallResult, UninstallStatus,
+        )
+
+        dest = self._drifted(tmp_path)
+        stop_result = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.uninstall_autostart",
+                   return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest)), \
+             patch("nexus.daemon.installer.install_autostart",
+                   return_value=InstallResult(status=InstallStatus.NEWLY_INSTALLED, dest=dest, detail="ok")), \
+             patch("nexus.upgrade_finish.subprocess.run", return_value=stop_result), \
+             patch("nexus.upgrade_finish._running_engine",
+                   return_value=_RunningEngine(up=False, version=None, reason="no lease")), \
+             patch("nexus.upgrade_finish.time.sleep"):
+            actions = converge_service_autostart_unit(tmp_path)
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        assert "converged the storage-service autostart unit" in actions[0]
 
 
 class TestUnloadStaleT2Launchagent:
