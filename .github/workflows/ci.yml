@@ -573,6 +573,16 @@ jobs:
       NX_TEST_T2_SUBSTRATE: "none"
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          # The wire-contract pairing lint (tests/test_wire_contract_pairing_lint.py)
+          # walks real release tags and historical commits (git log vX.Y.Z..HEAD,
+          # git show <old sha>). Authored during the leg's vacuous window, it had
+          # never run on CI until nexus-wixar de-vacuated the leg — first real run
+          # failed 5 tests on a tagless depth-1 checkout. `fetch-tags: true` alone
+          # does NOT work at depth 1 (nexus-dhs30, comment at the service-change
+          # job's checkout: tags pointing outside shallow history never
+          # materialise) — full history is required.
+          fetch-depth: 0
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
