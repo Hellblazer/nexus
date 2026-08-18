@@ -69,6 +69,13 @@ This invariant was verified in RDR-067 Phase 1b (T2 `nexus_rdr/067-spike-disposi
 6. Format the excerpts as the `{transcript_excerpts}` substitution block with session ID and line numbers preserved as citations.
 7. Budget cap on the pre-step: ≤10 main-session tool calls. Hitting the cap → fall back to empty slot + note the truncation in the dispatch record.
 
+## Bead Sweeps (nexus-ayfxh)
+
+`bd search` is case-sensitive on RDR tokens: `bd search 'RDR-101'` misses what `bd search 'rdr-101'` finds. Any audit/sweep step that queries beads by RDR id MUST:
+
+1. Query BOTH case forms (`RDR-NNN` and `rdr-NNN`) and union the results — a single-form empty result is NOT a "no open beads" clear.
+2. Never match on the bare number alone: RDR numbers collide across projects (conexus RDR-005 vs nexus RDR-005). Always carry the `RDR-`/`rdr-` prefix, and verify project scope on each hit before counting it.
+
 **Fast path**: if the target project has no `~/.claude/projects/*` directory, or `--no-transcripts` was passed, skip the entire pre-step and dispatch with an empty `{transcript_excerpts}` block. Phase 1b validated that the prompt handles the empty case cleanly.
 
 ## Canonical Prompt
