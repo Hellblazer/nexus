@@ -1,11 +1,15 @@
 ---
 title: "RDR-152 FTS5 to tsvector Parity Contract"
 relates: [RDR-152]
-status: locked
+status: closed
+closed_date: 2026-08-18
+close_reason: "The lock guarded the FTS5-to-tsvector migration this document specifies; that migration completed and SQLite/FTS5 itself was retired by RDR-158. locked_by nexus-gmiaf.2 is preserved below for provenance; the lock no longer guards anything live."
 locked_by: nexus-gmiaf.2
 ---
 
 # RDR-152 FTS5 to tsvector Parity Contract
+
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents FTS5 as the live full-text substrate. That substrate was retired by RDR-158; the decision here is historical record, not current architecture.
 
 ## Purpose
 

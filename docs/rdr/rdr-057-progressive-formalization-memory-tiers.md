@@ -4,7 +4,7 @@ id: RDR-057
 type: Feature
 status: closed
 closed_date: 2026-04-11
-closed_reason: implemented
+close_reason: implemented
 accepted_date: 2026-04-07
 reviewed-by: self
 priority: high

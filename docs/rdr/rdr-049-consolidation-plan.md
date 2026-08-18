@@ -1,7 +1,14 @@
+---
+title: "RDR-049 Consolidation Plan: Collection Merge Strategy"
+id: companion-note
+status: scrapped
+scrap_reason: "Premise void post-RDR-155: T3 moved off ChromaDB (collection-slot scarcity, the problem this plan solved, no longer exists) and the tracking bead (nexus-wowv) is gone. 2026-08-18 audit finding — never had frontmatter or a registered status."
+---
+
 # RDR-049 Consolidation Plan: Collection Merge Strategy
 
-**Status**: Design  
-**Bead**: nexus-wowv  
+**Status**: Design (superseded — see frontmatter `status: scrapped`)
+**Bead**: nexus-wowv (no longer tracked)
 **Prerequisite**: Catalog Phases 1-4 complete, backfill run
 
 ## Problem

@@ -16,6 +16,8 @@ related_rdrs: [RDR-120, RDR-128, RDR-129, RDR-140]
 
 # RDR-146: Catalog Store Behind the Existing T2 Daemon — Close the catalog.db Starvation by Routing Catalog Writes Through the Daemon That Already Serves It
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents `catalog.db` (SQLite) routed through the T2 daemon. That substrate was retired by RDR-152, RDR-158 and RDR-186; the decision here is historical record, not current architecture.
+
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
 

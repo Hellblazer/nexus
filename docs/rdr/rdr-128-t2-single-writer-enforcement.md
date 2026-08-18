@@ -18,6 +18,8 @@ implementation_notes: "Closed implemented 2026-05-25. P0-P3 merged to develop. P
 
 # RDR-128: T2 Single-Writer Enforcement: One Owner for memory.db, or an Enforced Lock Discipline
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents a SQLite-backed `memory.db` fronted by the T2 daemon. That substrate was retired by RDR-152 and RDR-158; the decision here is historical record, not current architecture.
+
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
 

@@ -14,6 +14,8 @@ related_issues: []
 
 # RDR-005: ChromaDB Cloud Quota Enforcement
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents ChromaDB Cloud's quota limits and enforcement machinery. That substrate was retired by RDR-155; the decision here is historical record, not current architecture.
+
 ## Problem
 
 Nexus uses ChromaDB Cloud for T3 storage across all four databases (code, docs, rdr, knowledge).

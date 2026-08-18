@@ -1,3 +1,10 @@
+---
+title: "RDR-152 Decision Record: Catalog git-backing is DROPPED (PG-only)"
+id: companion-note
+parent_rdr: RDR-152
+status: companion-note
+---
+
 # RDR-152 Decision Record: Catalog git-backing is DROPPED (PG-only)
 
 > Companion to RDR-152 (Postgres + Java Storage Service). Resolves the

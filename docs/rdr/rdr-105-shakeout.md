@@ -1,5 +1,8 @@
 ---
 title: "RDR-105 Manual Shakeout Checklist"
+id: companion-note
+parent_rdr: RDR-105
+status: companion-note
 related-rdr: RDR-105
 related-bead: nexus-2ze8
 created: 2026-05-07

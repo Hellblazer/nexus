@@ -17,6 +17,8 @@ related_issues:
 
 # RDR-037: T3 Database Consolidation
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents ChromaDB as the consolidated T3 database. That substrate was retired by RDR-155; the decision here is historical record, not current architecture.
+
 ## Problem Statement
 
 T3 storage currently uses four separate ChromaDB Cloud databases — `{base}_code`, `{base}_docs`, `{base}_rdr`, `{base}_knowledge` — one per content type. This was the original design (RDR-004) but the separation provides no technical benefit: collection names already carry type prefixes (`code__`, `docs__`, `rdr__`, `knowledge__`) that prevent collisions, and embedding functions are configured per-collection, not per-database.

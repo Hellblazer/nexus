@@ -16,6 +16,8 @@ related_issues:
 
 # RDR-041: T1 Scratch Inter-Agent Context Sharing
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents a ChromaDB-backed T1 scratch store. That substrate was retired by RDR-152 and RDR-158; the decision here is historical record, not current architecture.
+
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
 

@@ -13,6 +13,8 @@ reviewed-by: self
 
 # RDR-078: Plan-Centric Retrieval
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents the SQLite+FTS5 plan library, SQLite T2, and ChromaDB T1/T3. That substrate was retired by RDR-152, RDR-155 and RDR-158; the decision here is historical record, not current architecture.
+
 Pickup of the two explicit deferrals in RDR-042, plus the reasoning mechanism that AgenticScholar attributes its quality delta to but RDR-042 did not ship: **multi-hop typed-link traversal as a first-class plan operator.** That RDR shipped the analytical-operator agent, plan library (`plans` table + FTS5), the `/conexus:query` skill, and the self-correction loop. It deferred a semantic layer over the plan library ("Can add T3 semantic layer later if FTS5 matching proves inadequate") and skipped taxonomy-driven planning ("may revisit via lightweight clustering in a future RDR"). RDR-070 shipped HDBSCAN taxonomy discovery across both code and prose corpora; RDR-077 shipped similarity-aware projection quality signals. The blockers RDR-042 cited are now absent.
 
 The center of gravity is the **plan** — a saved query+DAG pair — composed of steps that each operate in one embedding space or walk explicit typed edges between documents. No cross-embedding bridging is attempted; the architecture never requires it. The quality lever is the typed-link traversal step, not the domain-scoped retrieval step.

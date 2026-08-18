@@ -12,6 +12,8 @@ reviewed-by: self
 
 # RDR-076: Idempotent Upgrade Mechanism
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents SQLite T2 stores and ChromaDB T3 as the migration targets. That substrate was retired by RDR-152, RDR-155 and RDR-158; the decision here is historical record, not current architecture.
+
 Nexus has a database, config files, a plugin, and a CLI — but no coherent upgrade path. Schema migrations are ad-hoc `ALTER TABLE` calls scattered across four domain stores. There's no version tracking, no `nx upgrade` command, and no way for the plugin to know it's running against a newer or older CLI. Every new feature that touches T2 schema or T3 metadata must invent its own migration. This doesn't scale.
 
 ## Problem

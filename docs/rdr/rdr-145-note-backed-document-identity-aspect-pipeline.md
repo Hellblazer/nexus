@@ -2,12 +2,14 @@
 title: "Note-Backed Document Identity in the Aspect Pipeline: Stop Unmappable Aspect Orphans from MCP-Stored Knowledge Notes"
 id: RDR-145
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-02
 accepted_date: 2026-06-27
+closed_date: 2026-06-27
+close_reason: "Gate PASSED 2026-06-27 (0 Critical/0 Significant on re-review). Gap-1 closed by RDR-172 (merged to develop 2026-06-27); Gap-3 closed by nexus-kmbys (general-prose-v1 extractor, shipped); remaining Gap-2 normalization + one-time orphan cleanup + Gap-3 regression test closed same-day, commit 85249b964. Zero open beads."
 related_issues: [nexus-pfzgb]
 related_rdrs: [RDR-089, RDR-096, RDR-101, RDR-108, RDR-142]
 supersedes: []

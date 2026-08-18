@@ -14,6 +14,8 @@ related_issues: []
 
 # RDR-004: Four-Store T3 Architecture
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents the ChromaDB-backed T3 four-store design. That substrate was retired by RDR-155; the decision here is historical record, not current architecture.
+
 ## Problem
 
 The original T3 implementation used a single `chromadb.CloudClient` pointed at one

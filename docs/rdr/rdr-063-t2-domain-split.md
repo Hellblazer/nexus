@@ -13,6 +13,8 @@ post_mortem: docs/rdr/post-mortem/063-t2-domain-split.md
 
 # RDR-063: T2 Domain Split — Separating Memory, Plans, Catalog, and Telemetry
 
+> **SUBSTRATE SUPERSEDED (2026-08-18 audit):** this RDR's decision text still presents SQLite as the T2 domain-store substrate. That substrate was retired by RDR-152 and RDR-158; the decision here is historical record, not current architecture.
+
 ## Problem Statement
 
 T2 was originally defined as a single-purpose store: **per-project persistent memory** — notes, session state, and research context for agents. After RDR-058 (plan library), RDR-061 E5 (persistent taxonomy), RDR-061 E2 (retrieval feedback), and RDR-061 E6 (memory consolidation), T2 now holds five tables across four distinct domains:
