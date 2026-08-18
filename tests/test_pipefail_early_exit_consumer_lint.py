@@ -979,7 +979,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # already-fixed line 555: a `| head -1` inside a bare
         # `VAR=$(...)` assignment (propagates through errexit) found by
         # this lint's own authoring sweep.
-        "tests/e2e/local-index-memory-gate.sh:849",
+        "tests/e2e/local-index-memory-gate.sh:912",
         # --- tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh
         # (10 entries, nexus-z0ylb): the CANDIDATE-MIGRATION rehearsal --
         # a locally-built candidate's Liquibase walk over a POPULATED
