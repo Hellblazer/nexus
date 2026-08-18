@@ -68,6 +68,8 @@ nx index repo ./my-project
 | `pdf PATH` | Index a PDF document into T3 `docs__CORPUS` |
 | `md PATH` | Index a Markdown file into T3 `docs__CORPUS` |
 
+**Unchunkable sources (nexus-rqsh1, Hal directive 2026-08-15):** the indexer never registers a catalog document for a file it will not chunk. `repo` discovery silently skips zero-byte and binary-content files (counted in a `skipped_unchunkable` summary line — expected noise in an unbounded walk); the single-file forms (`md`, `pdf`, `rdr`) instead FAIL LOUD with a clean error naming the file (the operator named that exact file, so plain success with nothing registered would mislead), before any catalog write. In `rdr`'s batch walk an unchunkable file fails that file only, counted, never aborting the batch. `repo` staleness also now treats a doc whose catalog `index_state` is `indexing`/`failed` as stale regardless of content-hash match (nexus-cp46b) — a doc stranded by a failed upload drains on the next normal run, no `--force` needed.
+
 **Common flags (all subcommands):**
 
 | Flag | Description |
@@ -1187,16 +1189,17 @@ nx catalog verify --collection knowledge__foo --heal   # interactive fix
 ### nx catalog reconcile-stale
 
 ```
-nx catalog reconcile-stale [--execute recount|tombstone-vanished|tombstone-orphaned] [--dry-run/--no-dry-run] [--confirm] [--json]
+nx catalog reconcile-stale [--execute recount|tombstone-vanished|tombstone-orphaned|tombstone-zero-content] [--dry-run/--no-dry-run] [--confirm] [--json]
 ```
 
 Classify — and optionally repair — catalog documents with unreliable `chunk_count`/manifest state (nexus-cdypx: 61.2% of production catalog docs carried `chunk_count == 0`, so catalog-aware routing ranked over a corpus where most docs had no retrievable content). The default invocation is a pure read-only census: it constructs NO catalog writer. Exit 0 means the report was produced; a nonzero exit (the INCOMPLETE guard shared with `nx catalog verify`) means part of the classification could not be trusted and none of the findings should be acted on. This command is not itself a correctness gate over the findings — `nx catalog verify` is that gate.
 
-Three mutation arms, each printing the classification report first, then its own target list, then acting only with `--no-dry-run --confirm` (the same double gate as `purge-trash`):
+Four mutation arms, each printing the classification report first, then its own target list, then acting only with `--no-dry-run --confirm` (the same double gate as `purge-trash`):
 
 - **recount** — resync `chunk_count` for zero-count docs whose manifest is actually non-empty. Restores the COUNT, not verified content; re-run `nx catalog verify` afterward.
 - **tombstone-vanished** — delete zero-manifest docs in vanished collections. Non-empty-manifest vanished docs are NEVER touched by this arm (nexus-3ck2g).
 - **tombstone-orphaned** — delete zero-count docs whose confirmed on-disk location is gone (file missing, or the owner's repo_root/worktree itself deleted). Docs whose absence could not be CONFIRMED (no repo_root, malformed tumbler, a non-file source_uri, or no provenance at all) are never in this arm's target set — see `unresolvable_provenance` in the report. `store_put_origin` docs (see below) are also never in this arm's target set.
+- **tombstone-zero-content** (nexus-rqsh1) — delete docs classified `zero_content_by_design`: the source file verifiably CAN never chunk (zero bytes by `stat`, or binary content by the same `looks_like_binary_content` sniff the indexer's registration guard uses). These docs never drain via re-indexing (the producer no longer registers such files at all), so without this arm they reappear in every census forever. A source that is merely unreadable (permission error) or missing is NEVER classified into this bucket — absence of proof is not proof of zero content. The bucket also appears as its own count + sample listing in `nx catalog verify` and this census, and stays counted until actually tombstoned (an honest bucket, not a suppression).
 
 The `dishonest` bucket (`chunk_count > 0` but the manifest is empty; diagnosis only, never auto-swept per nexus-wq1e4) carries an `origin` field per document (nexus-0y0gk), checked in this order:
 
@@ -2155,7 +2158,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--phase ID` | With `--check-storage-boundary`, the RDR-120 phase identifier used to record the `120-phase-<phase>-catalog-allowlist-count` T2 metric |
 | `--check-t1` | Diagnose T1 session lease presence + freshness. Checks `~/.config/nexus/t1_session_lease.<session_id>`. Exits 1 only when a session-id resolves AND a lease file exists AND it is expired/corrupt; a resolved session with no lease file at all is informational (a bare CLI legitimately has none — the MCP lifespan mints its own) |
 | `--check-mineru` | Verify MinerU is importable — surfaces a corrupt install at doctor-time instead of waiting for the first math-heavy PDF index to fail |
-| `--json` | Emit machine-parseable JSON (used with `--check-search`, `--check-quotas`) |
+| `--json` | Emit machine-parseable JSON. On the MAIN sweep (no mode flag) this emits `{"checks": [{name, ok, status: ok\|warn\|fail, detail, fatal, fix_suggestions}], "summary": {total, ok, warn, fail}, "local_mode"}` (nexus-0vycz — previously the flag was silently ignored there). Also honored by `--check-search`, `--check-quotas`, `--check-mcp-logs`. Combining `--json` with any other mode flag that cannot honor it is a usage error, never a silent ignore. |
 
 The `--fix` flag retroactively applies HNSW `search_ef` tuning to all existing local-mode collections. New collections get this automatically. In cloud mode (SPANN), prints a skip message — SPANN defaults are adequate.
 

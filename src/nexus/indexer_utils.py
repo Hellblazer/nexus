@@ -632,9 +632,26 @@ class StalenessCache:
     network latency before any actual indexing work. With the cache,
     the entire staleness phase is a single paginated sweep
     (~ceil(total_chunks / 300) calls) plus per-file dict lookups.
+
+    ``never_fresh`` (nexus-cp46b): doc_ids the orchestrator's catalog
+    pass found fenced ``index_state in ('indexing', 'failed')`` — a
+    stranded/failed run (RUNFENCE, nexus-5xn3k.3), never simply
+    "unchanged." Pre-fix, a content-hash match alone made
+    :func:`check_staleness` return True forever for such a doc, since
+    the fence state was never consulted on this path (only
+    ``doc_indexer._index_run_fresh`` did, and this cache's callers
+    — ``code_indexer.py`` / ``prose_indexer.py`` / the repo-path PDF
+    indexer — never call it). A doc_id present here is always treated
+    as a cache MISS regardless of what :attr:`by_doc_id` says, so the
+    next normal ``nx index repo`` re-processes it and its clean
+    completion stamps the fence back to ``'complete'``. Populated once
+    by the orchestrator from data its catalog pass already fetched
+    (no extra HTTP round trip); empty by default, matching prior
+    behavior exactly for every caller that never sets it.
     """
 
     by_doc_id: dict[str, tuple[str, str]] = field(default_factory=dict)
+    never_fresh: frozenset[str] = field(default_factory=frozenset)
 
 
 def build_staleness_cache(col: object) -> StalenessCache:
@@ -885,6 +902,10 @@ def check_staleness(
             # caller). See the nexus-afudo docstring note above — no
             # source_path-keyed cache entry can ever exist to check
             # against, so this is an unconditional "treat as stale."
+            return False
+        if doc_id in cache.never_fresh:
+            # nexus-cp46b: fenced 'indexing'/'failed' overrides a
+            # content-hash match — see StalenessCache.never_fresh.
             return False
         stored = cache.by_doc_id.get(doc_id)
         # Cache miss when the caller has a doc_id heals a ghost

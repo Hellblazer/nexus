@@ -289,8 +289,19 @@ def _run_pdf_gate(monkeypatch, entry: _Entry, *, content_hash: str = CONTENT_HAS
     pdf_chunks_mock = MagicMock(return_value=[])
     monkeypatch.setattr("nexus.doc_indexer._pdf_chunks", pdf_chunks_mock)
 
+    # nexus-1sd0f (round 3): index_pdf now stats the path directly (a
+    # zero-byte pre-registration guard, before any of the mocks above
+    # apply) -- unlike the prose gate above (which calls
+    # _index_document, a level below index_markdown's own guard), the
+    # PDF gate is driven through index_pdf itself, so the fake path
+    # must actually exist with non-zero size.
+    pdf_path = Path("/tmp/nexus-5xn3k-threeway/doc.pdf")
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    if not pdf_path.exists():
+        pdf_path.write_bytes(b"%PDF-1.4 fixture content for the staleness-gate test\n")
+
     result = index_pdf(
-        Path("/tmp/nexus-5xn3k-threeway/doc.pdf"), "testowner", t3,
+        pdf_path, "testowner", t3,
         collection_name=COLLECTION, embed_fn=_dummy_embed, force=False,
         streaming="never",
     )

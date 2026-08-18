@@ -44,6 +44,10 @@ def test_no_lib_dir_leaves_env_untouched(tmp_path: Path) -> None:
 
 def test_defaults_to_os_environ_when_env_none(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("SENTINEL_VAR", "present")
+    # cv2 (imported transitively by other tests sharing this shard) appends
+    # its own lib64 to os.environ["LD_LIBRARY_PATH"] at import time, which
+    # this exact-equality assert would inherit via env=None.
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
     initdb = _bundle(tmp_path)
     env = _bundle_lib_env([str(initdb)], None)
     assert env["SENTINEL_VAR"] == "present"  # inherited os.environ

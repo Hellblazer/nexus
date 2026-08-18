@@ -283,6 +283,157 @@ def test_identity_where_falls_back_when_corpus_owner_missing(tmp_path, monkeypat
     assert where == {"source_path": "/abs/path/x.pdf"}
 
 
+# ── nexus-rqsh1 round 2 (substantive-critic Critical, 2026-08-17): the
+# single-file doc_indexer family (``nx index md``/``rdr``, both routed
+# through ``index_markdown``) must not register a catalog document for
+# a file it will not chunk. Unlike ``nx index repo``'s silent per-file
+# discovery skip, this is an explicit single-file/curated request --
+# fail loud, before any catalog write.
+
+
+class TestIndexMarkdownUnchunkableGuard:
+    def test_zero_byte_file_raises_before_registration(self, tmp_path):
+        from nexus.doc_indexer import index_markdown
+        from nexus.errors import UnchunkableContentError
+
+        p = tmp_path / "empty.md"
+        p.write_bytes(b"")
+        with patch("nexus.doc_indexer._register_or_lookup_doc_id") as mock_register:
+            with pytest.raises(UnchunkableContentError, match=str(p)):
+                index_markdown(p, corpus="test")
+        mock_register.assert_not_called()
+
+    def test_binary_content_file_raises_before_registration(self, tmp_path):
+        from nexus.doc_indexer import index_markdown
+        from nexus.errors import UnchunkableContentError
+
+        p = tmp_path / "binary.md"
+        p.write_bytes(b"prefix\x00suffix binary content, not markdown")
+        with patch("nexus.doc_indexer._register_or_lookup_doc_id") as mock_register:
+            with pytest.raises(UnchunkableContentError, match=str(p)):
+                index_markdown(p, corpus="test")
+        mock_register.assert_not_called()
+
+    def test_real_markdown_file_still_registers(self, sample_md):
+        from nexus.doc_indexer import index_markdown
+
+        with patch(
+            "nexus.doc_indexer._register_or_lookup_doc_id", return_value="1.1",
+        ) as mock_register, patch("nexus.doc_indexer._index_document", return_value=0):
+            index_markdown(sample_md, corpus="test")
+        mock_register.assert_called_once()
+
+    def test_zero_byte_file_never_registers_a_catalog_document(
+        self, tmp_path,
+    ):
+        """End-to-end: the guard fires through the REAL
+        ``_register_or_lookup_doc_id`` / real catalog (autouse T2
+        engine substrate), not just a mocked call -- proves no
+        Document row lands, not merely that a mock wasn't invoked."""
+        from nexus.doc_indexer import index_markdown
+        from nexus.errors import UnchunkableContentError
+
+        p = tmp_path / "empty.md"
+        p.write_bytes(b"")
+        with pytest.raises(UnchunkableContentError):
+            index_markdown(p, corpus="rqsh1-round2-zero-byte")
+        assert documents_by_file_path(str(p.resolve())) == []
+
+
+# ── nexus-1sd0f (round 3, substantive-critic round-2 verification,
+# 2026-08-17): index_pdf calls _register_or_lookup_doc_id
+# unconditionally, before any size check or extraction attempt -- a
+# zero-byte PDF mints the identical phantom chunk_count=0 Document that
+# index_markdown's round-2 guard already closes for md/rdr. PDFs are
+# legitimately binary, so only the zero-byte check is mirrored here --
+# no looks_like_binary_content sniff (that would misclassify every
+# real PDF).
+
+
+class TestIndexPdfUnchunkableGuard:
+    def test_zero_byte_pdf_raises_before_registration(self, tmp_path):
+        from nexus.doc_indexer import index_pdf
+        from nexus.errors import UnchunkableContentError
+
+        p = tmp_path / "empty.pdf"
+        p.write_bytes(b"")
+        with patch("nexus.doc_indexer._register_or_lookup_doc_id") as mock_register:
+            with pytest.raises(UnchunkableContentError, match=str(p)):
+                index_pdf(p, corpus="test")
+        mock_register.assert_not_called()
+
+    def test_zero_byte_pdf_never_registers_a_catalog_document(
+        self, tmp_path,
+    ):
+        """End-to-end: the guard fires through the REAL
+        ``_register_or_lookup_doc_id`` / real catalog (autouse T2
+        engine substrate), not just a mocked call -- proves no
+        Document row lands, not merely that a mock wasn't invoked."""
+        from nexus.doc_indexer import index_pdf
+        from nexus.errors import UnchunkableContentError
+
+        p = tmp_path / "empty.pdf"
+        p.write_bytes(b"")
+        with pytest.raises(UnchunkableContentError):
+            index_pdf(p, corpus="rqsh1-round3-zero-byte-pdf")
+        assert documents_by_file_path(str(p.resolve())) == []
+
+    def test_real_pdf_still_registers(self, sample_pdf, monkeypatch, mock_t3, voyage_client):
+        """A real (non-empty) PDF must still register normally --
+        proves the zero-byte guard doesn't over-fire on legitimate
+        binary PDF content."""
+        from nexus.doc_indexer import index_pdf
+
+        set_credentials(monkeypatch)
+        with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+            with pdf_extract_patches_ctx():
+                with patch(
+                    "nexus.doc_indexer._register_or_lookup_doc_id", return_value="1.1",
+                ) as mock_register:
+                    result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3)
+        # index_pdf calls _register_or_lookup_doc_id twice on the real
+        # (pre-existing, unrelated to this fix) path -- once pre-flight
+        # (content_type="paper") and once again inside the batch upsert
+        # (content_type="pdf"). Assert it was called at all: the guard
+        # under test must not block registration for a real PDF.
+        mock_register.assert_called()
+        assert result == 1
+
+
+class TestBatchIndexMarkdownsUnchunkableFiles:
+    def test_zero_byte_file_marked_failed_and_never_registers(
+        self, tmp_path,
+    ):
+        """``nx index rdr`` (directory or single-file) routes through
+        ``batch_index_markdowns``, which catches every per-file
+        exception and marks it 'failed' rather than aborting the batch
+        (existing, unchanged contract — see
+        ``test_batch_index_markdowns_skips_malformed_frontmatter_and_
+        continues``). The guard raising inside ``index_markdown`` is
+        what prevents registration; the batch wrapper's existing
+        catch-all is what keeps this a counted, logged failure rather
+        than a silent skip (it warns + counts, unlike ``nx index
+        repo``'s debug-only discovery skip)."""
+        from nexus.db.t3 import T3Database
+
+        good = tmp_path / "good.md"
+        good.write_text("# Good\n\nReal content.\n", encoding="utf-8")
+        empty = tmp_path / "empty.md"
+        empty.write_bytes(b"")
+
+        client = make_vector_test_client()
+        t3 = T3Database(_client=client, local_mode=True)
+
+        results = batch_index_markdowns(
+            [empty, good], corpus="rqsh1-round2-batch", t3=t3,
+            collection_name=f"rdr__rqsh1-round2-batch__{_local_token()}__v1",
+            content_type="rdr",
+        )
+        assert results[str(empty)] == "failed"
+        assert results[str(good)] == "indexed"
+        assert documents_by_file_path(str(empty.resolve())) == []
+
+
 class TestCatalogMarkdownHookEphemeralPathGuard:
     """nexus-u8n4r: ``_catalog_markdown_hook`` refuses a brand-new
     registration when the stored ``file_path`` (absolute here, since no

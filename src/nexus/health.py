@@ -116,6 +116,52 @@ def format_health_for_cli(
     return "\n".join(lines), failed
 
 
+def format_health_for_json(
+    results: list[HealthResult], *, local_mode: bool
+) -> str:
+    """JSON rendering of the main doctor sweep (nexus-0vycz).
+
+    One object with a ``checks`` array -- each entry carrying at least
+    ``name``/``ok``/``status``/``detail`` -- plus summary counts, so a
+    machine consumer (the shakedown playbook's S3 signal-density audit)
+    can classify every check without scraping unicode glyphs out of the
+    human-readable report. ``status`` mirrors the three-state model
+    ``format_health_for_cli`` renders as glyphs: ``"ok"`` (✓), ``"warn"``
+    (✗ soft/benign, RDR-129 B4), ``"fail"`` (✗ hard). ``fatal`` is carried
+    through raw so a consumer can reproduce the same pass/fail exit-code
+    semantics this module uses (only ``fatal and not ok`` fails the run --
+    some hard-fail checks are non-fatal by design).
+    """
+    checks = []
+    for r in results:
+        if r.ok:
+            status = "ok"
+        elif r.warn:
+            status = "warn"
+        else:
+            status = "fail"
+        checks.append({
+            "name": r.label,
+            "ok": r.ok,
+            "status": status,
+            "detail": r.detail,
+            "fatal": r.fatal,
+            "fix_suggestions": list(r.fix_suggestions),
+        })
+    summary = {
+        "total": len(checks),
+        "ok": sum(1 for c in checks if c["status"] == "ok"),
+        "warn": sum(1 for c in checks if c["status"] == "warn"),
+        "fail": sum(1 for c in checks if c["status"] == "fail"),
+    }
+    payload = {
+        "checks": checks,
+        "summary": summary,
+        "local_mode": local_mode,
+    }
+    return json.dumps(payload, indent=2)
+
+
 # ── Individual checks ────────────────────────────────────────────────────────
 
 
@@ -4821,14 +4867,17 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
             warn=True,
             detail=(
                 f"{len(stale)} document(s) stranded in index_state='indexing' "
-                f"beyond {_STALE_INDEXING_THRESHOLD_HOURS:.0f}h: {names}. This is "
-                "SAFE (re-indexing never skips an 'indexing' document, "
-                "nexus-lcmbp) but wastes a full re-chunk/re-embed on every "
-                "intervening run — check for a stuck run or a rolling deploy "
-                "that split a begin/complete pair across engine versions."
+                f"beyond {_STALE_INDEXING_THRESHOLD_HOURS:.0f}h: {names}. A "
+                "normal re-index run now clears this automatically, even "
+                "when the document's content is unchanged (nexus-cp46b) — "
+                "for a repo document that means its own repo's next "
+                "`nx index repo` pass, no --force needed. If it keeps "
+                "recurring, check for a stuck run or a rolling deploy that "
+                "split a begin/complete pair across engine versions."
             ),
             fix_suggestions=[
-                "nx index <path> --force   (clears the fence on a clean run)",
+                "nx index <path>   (a normal re-index clears the fence; "
+                "--force is not required)",
             ],
         ))
 

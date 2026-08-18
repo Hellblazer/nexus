@@ -29,6 +29,7 @@ import structlog
 
 from nexus._locking import lock_file, unlock_file
 from nexus.corpus import index_model_for_collection
+from nexus.db.limits import QUOTAS
 from nexus.retry import _vector_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
 from nexus.hook_registry import record_catalog_hook_failure
@@ -68,6 +69,15 @@ DEFAULT_IGNORE: list[str] = _DEFAULT_IGNORE
 #   v1-v3: pre-versioning (no version stamp in collection metadata)
 #   v4:    RDR-028 language registry + RDR-014 CCE prefixes
 PIPELINE_VERSION: str = "4"
+
+# Concurrent ChunkBatcher flush workers during a repo index run. 3 is the
+# empirical choice from the 3midv sweep (sequential flushes cost 76-112s of
+# wall vs. the concurrent path); ``min(...)`` with QUOTAS.MAX_CONCURRENT_WRITES
+# (the per-collection service quota, ``nexus.db.limits``) ties the literal to
+# the ceiling it was chosen to stay under, so a future quota tightening below
+# 3 is caught by the pinning test in test_indexer_flush_concurrency.py rather
+# than silently indexing outside the quota (nexus-dimrz).
+FLUSH_CONCURRENCY: int = min(3, QUOTAS.MAX_CONCURRENT_WRITES)
 
 
 def stamp_collection_version(col: object) -> None:
@@ -882,6 +892,7 @@ def _catalog_hook(
     indexed_files: list[tuple[Path, str, str]],
     on_locked: str = "wait",
     skip_housekeeping: bool = False,
+    stale_fence_doc_ids: set[str] | None = None,
 ) -> dict[Path, str]:
     """Register/update indexed files in catalog. Silently skipped if catalog absent.
 
@@ -891,6 +902,23 @@ def _catalog_hook(
     before per-file indexing runs (RDR-101 Phase 3 PR δ Stage B). The
     return type is additive — existing test call sites that ignore the
     return value continue to work unchanged.
+
+    ``stale_fence_doc_ids`` (nexus-cp46b) is an optional OUT-param: when
+    supplied, every EXISTING document (Pass 1's ``existing is not None``
+    branch below) whose reported ``index_state`` is ``'indexing'`` or
+    ``'failed'`` has its tumbler added to the set in place. This reuses
+    the SAME owner-scoped catalog fetch (``path_to_entry`` /
+    ``cat.by_file_path``) this pass already pays for — no extra per-file
+    or per-run HTTP round trip. The orchestrator threads the populated
+    set into the per-collection ``StalenessCache.never_fresh`` so a doc
+    stranded mid-run (content unchanged, fence stuck at 'indexing'/
+    'failed') is forced stale on the next normal ``nx index repo`` pass
+    instead of being permanently skipped by the content-hash-only
+    staleness check (the bug this bead fixes). A document whose
+    ``index_state`` was never reported at all (pre-fence engine —
+    ``index_state_reported=False``) is excluded, matching the
+    floor-tolerant stance ``doc_indexer._index_run_fresh`` /
+    ``indexer_utils.non_complete_documents`` already use elsewhere.
 
     RDR-146 P2 (nexus-5p2ci.12): this is the background batch producer that
     GH #1046 showed starving a foreground ``nx dt index``. The writer is
@@ -1203,6 +1231,20 @@ def _catalog_hook(
                             "source_mtime": source_mtime,
                         }))
                     file_to_doc_id[abs_path] = str(existing.tumbler)
+                    # nexus-cp46b: a doc fenced 'indexing'/'failed' is a
+                    # stranded run (RUNFENCE, nexus-5xn3k.3), not merely
+                    # "unchanged" — the content-hash staleness cache must
+                    # never skip it just because content still matches.
+                    # ``index_state_reported`` False = pre-fence engine
+                    # (nothing to say, not a stale signal) — same floor-
+                    # tolerant convention as _index_run_fresh/
+                    # non_complete_documents.
+                    if (
+                        stale_fence_doc_ids is not None
+                        and getattr(existing, "index_state_reported", True)
+                        and getattr(existing, "index_state", None) in ("indexing", "failed")
+                    ):
+                        stale_fence_doc_ids.add(str(existing.tumbler))
             except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 # Per-file failure must NOT abort the rest of the loop.
                 # The previous behaviour swallowed every subsequent
@@ -2317,14 +2359,25 @@ def _index_pdf_file(
         _fence_begin(catalog_doc_id, content_hash_hex, collection_name)
 
     with _stage("upload"):
-        db.upsert_chunks_with_embeddings(
-            collection_name=collection_name,
-            ids=ids,
-            documents=documents,
-            embeddings=embeddings,
-            metadatas=metadatas,
-            force_re_embed=force,
-        )
+        try:
+            db.upsert_chunks_with_embeddings(
+                collection_name=collection_name,
+                ids=ids,
+                documents=documents,
+                embeddings=embeddings,
+                metadatas=metadatas,
+                force_re_embed=force,
+            )
+        except Exception as upload_exc:
+            # nexus-bhlfy: mirrors commands/store.py's cotmr fix — stamp
+            # 'failed' unconditionally so the fence does not wedge at
+            # 'indexing' with only the 6h doctor sweep as signal.
+            # _fence_fail never raises, so the re-raise below always
+            # carries the original exception unmasked.
+            if catalog_doc_id:
+                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+                _fence_fail(catalog_doc_id, str(upload_exc))
+            raise
 
         # Post-store hook chains (RDR-095). Both single-doc and batch
         # chains fire from every storage event; consumers register in
@@ -3578,7 +3631,7 @@ def _run_index(
 
     Returns a stats dict with ``rdr_indexed``, ``rdr_current``, ``rdr_failed``.
     """
-    from nexus.classifier import ContentClass, classify_file  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.classifier import ContentClass, classify_file, looks_like_binary_content  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.config import load_config  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.frecency import batch_frecency  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.ripgrep_cache import build_cache  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
@@ -3711,6 +3764,17 @@ def _run_index(
     # share ``repo``'s prefix, raising ValueError. code/prose/pdf files
     # don't hit this because ``_git_ls_files``/rglob fallback both build
     # paths as ``repo / rel`` (unresolved) already.
+    # nexus-rqsh1: files that would register a catalog document but never
+    # produce a chunk (zero-byte, or binary content misclassified as
+    # prose). Tracked separately from skipped_oversize/ContentClass.SKIP
+    # for observability — see the per-skip debug logs below. Declared
+    # here (round 2, substantive-critic Critical 2026-08-17) so the
+    # rdr_md_paths walk below can share it with the candidate_files loop
+    # further down — a SEPARATE discovery pass feeding the SAME
+    # indexed_for_catalog registration, which had no zero-byte guard of
+    # its own.
+    skipped_unchunkable: list[tuple[Path, str]] = []
+
     rdr_md_paths: list[tuple[float, Path]] = []
     for rdr_rel in dict.fromkeys(rdr_paths):  # de-dupe while preserving order
         rdr_dir = repo / rdr_rel
@@ -3720,6 +3784,24 @@ def _run_index(
                     if (delta_changed is not None
                             and str(md_file.relative_to(repo)) not in delta_changed):
                         continue  # nexus-fltb4: outside the delta
+                    # nexus-rqsh1 round 2: a zero-byte RDR file yields zero
+                    # chunks (same mechanism as the candidate_files zero-byte
+                    # guard below) and would otherwise still reach
+                    # indexed_for_catalog, minting an unclearable phantom.
+                    # RDR files are markdown text by construction (unlike
+                    # candidate_files' arbitrary extensions), so a zero-byte
+                    # check alone suffices here — no binary-content sniff
+                    # needed.
+                    try:
+                        if md_file.stat().st_size == 0:
+                            skipped_unchunkable.append((md_file, "zero_byte"))
+                            _log.debug(
+                                "skipped zero-byte RDR file (unchunkable)",
+                                path=str(md_file),
+                            )
+                            continue
+                    except OSError:
+                        pass  # defer to per-file path
                     rdr_md_paths.append((frecency_map.get(md_file, 0.0), md_file))
     rdr_md_paths.sort(key=lambda x: x[0], reverse=True)
     have_rdr_files = bool(rdr_md_paths)
@@ -3759,6 +3841,8 @@ def _run_index(
     # skipped file so the operator can see what got dropped.
     max_file_bytes = int(indexing_config.get("max_file_bytes", 5 * 1024 * 1024))
     skipped_oversize: list[tuple[Path, int]] = []
+    # skipped_unchunkable declared above, before the rdr_md_paths walk —
+    # shared by both discovery passes.
 
     for path in candidate_files:
         if not path.is_file():
@@ -3786,6 +3870,20 @@ def _run_index(
             skipped_oversize.append((path, file_size))
             continue
 
+        # nexus-rqsh1: a zero-byte file yields zero chunks under every
+        # classifier — CODE's chunk_file returns [] (code_indexer.py "if
+        # not chunks: return 0"), PROSE's chunker has no content to split,
+        # PDF parsing yields no pages. Registering a catalog document for
+        # it (below, in indexed_for_catalog) would mint a permanent
+        # chunk_count=0 phantom that no re-index can ever clear — the
+        # indexer must not register a document for a file it will not
+        # chunk (Hal directive 2026-08-15). Skip before classification so
+        # it never reaches any of the code/prose/pdf lists.
+        if file_size == 0:
+            skipped_unchunkable.append((path, "zero_byte"))
+            _log.debug("skipped zero-byte file (unchunkable)", path=str(path))
+            continue
+
         score = frecency_map.get(path, 0.0)
         classification = classify_file(path, indexing_config=indexing_config)
 
@@ -3794,8 +3892,23 @@ def _run_index(
                 code_files.append((score, path))
                 all_text_scored.append((score, path))
             case ContentClass.PROSE:
-                prose_files.append((score, path))
-                all_text_scored.append((score, path))
+                # nexus-rqsh1: extensions unknown to classify_file's
+                # code/skip/binary-asset tables fall through to PROSE
+                # (classifier.py step 8), but binary content (.npz, git
+                # .bundle, ...) decodes as neither UTF-8 nor markdown —
+                # the prose indexer's own read_text() raises and returns
+                # 0 chunks. Sniff for that here, before registration,
+                # rather than minting another un-clearable phantom.
+                if looks_like_binary_content(path):
+                    skipped_unchunkable.append((path, "binary_content"))
+                    _log.debug(
+                        "skipped binary-content file misclassified as prose (unchunkable)",
+                        path=str(path),
+                        ext=path.suffix.lower(),
+                    )
+                else:
+                    prose_files.append((score, path))
+                    all_text_scored.append((score, path))
             case ContentClass.PDF:
                 pdf_files.append((score, path))
                 # PDF files not included in ripgrep text cache
@@ -3838,6 +3951,20 @@ def _run_index(
                 f"{largest[0].relative_to(repo)} at {largest[1] // (1024 * 1024)} MiB. "
                 f"Configure indexing.max_file_bytes to opt up."
             )
+
+    # nexus-rqsh1: summary log for the unchunkable-skip population (zero-
+    # byte files, binary content misclassified as prose). Info level, not
+    # warning — this is the fix draining a known phantom class, not an
+    # anomaly the operator needs to act on.
+    if skipped_unchunkable:
+        _log.info(
+            "indexer_unchunkable_skip",
+            count=len(skipped_unchunkable),
+            sample=[
+                {"path": str(p.relative_to(repo)), "reason": reason}
+                for p, reason in skipped_unchunkable[:5]
+            ],
+        )
 
     # Fire on_start with total non-RDR file count.
     # Note: this fires before the credential check below.  Phase 2 (CLI) must
@@ -4074,6 +4201,10 @@ def _run_index(
     if on_phase is not None:
         on_phase(f"Registering {len(indexed_for_catalog)} catalog entries…")
     _catalog_t0 = time.monotonic()
+    # nexus-cp46b: doc_ids the catalog hook's own owner-scoped fetch (below)
+    # finds fenced 'indexing'/'failed' — reused to force those docs stale in
+    # the staleness caches built further down, no extra catalog round trip.
+    _stale_fence_doc_ids: set[str] = set()
     file_to_doc_id = _catalog_hook(
         repo=repo,
         repo_name=_repo_basename,
@@ -4084,6 +4215,7 @@ def _run_index(
         # nexus-fltb4: miss-counting against a delta-filtered walk would mark
         # every unvisited doc as missing and mass-delete after two runs.
         skip_housekeeping=delta_changed is not None,
+        stale_fence_doc_ids=_stale_fence_doc_ids,
     )
     if on_phase is not None:
         on_phase(
@@ -4142,6 +4274,14 @@ def _run_index(
         # separate physical collection from docs__, so a shared object would
         # cross-contaminate staleness lookups between the two.
         rdr_staleness = _build_with_marker("rdr", rdr_col)
+    if _stale_fence_doc_ids:
+        # nexus-cp46b: a doc_id only ever belongs to one collection's cache,
+        # so sharing the same frozenset across all three is harmless — each
+        # cache only ever looks up doc_ids for files routed to it.
+        _never_fresh = frozenset(_stale_fence_doc_ids)
+        code_staleness.never_fresh = _never_fresh
+        docs_staleness.never_fresh = _never_fresh
+        rdr_staleness.never_fresh = _never_fresh
     _log.info(
         "staleness_caches_built",
         code_doc_ids=len(code_staleness.by_doc_id),
@@ -4375,6 +4515,21 @@ def _run_index(
 
         def _batched_file_failed(_path: str, error: str, _context: object) -> None:
             _log.error("indexed_file_upload_failed", file=_path, error=error)
+            # nexus-bhlfy: ChunkBatcher already fires this callback once
+            # per PERMANENTLY-failed file (settlement at file granularity
+            # — see ``_settle_file_locked``/``_invoke_callbacks``; a
+            # bisected batch retries each half independently so a
+            # genuinely failing file is reported exactly once here, never
+            # for a batch-mate that went on to succeed). The begin stamp
+            # for this file already landed via ``_fire_flush_grain_begin``
+            # (``on_batch_begin``, before the upload) — without this arm
+            # the fence wedged at 'indexing' forever on a flush failure
+            # (the gap this bead closes). ``_fence_fail`` never raises.
+            if isinstance(_context, dict):
+                _cdid = _context.get("catalog_doc_id")
+                if _cdid:
+                    from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+                    _fence_fail(_cdid, error)
 
         def _fire_flush_grain_begin(
             collection: str, _file_contexts: list,
@@ -4568,10 +4723,9 @@ def _run_index(
             on_batch_complete=_fire_flush_grain_hooks,
             on_batch_begin=_fire_flush_grain_begin,
             max_chunks=_cap_for,
-            # 3 concurrent flushes: inside the 10-concurrent-writes
-            # per-collection service quota with headroom; the 3midv
-            # sweep showed sequential flushes cost 76-112s of wall.
-            flush_concurrency=3,
+            # See FLUSH_CONCURRENCY's module-level comment for the
+            # empirical-vs-quota derivation (nexus-dimrz).
+            flush_concurrency=FLUSH_CONCURRENCY,
         )
         _log.info("index_chunk_batching_enabled")
 

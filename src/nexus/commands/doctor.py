@@ -1070,7 +1070,10 @@ def _run_check_mineru() -> None:
     "json_out",
     is_flag=True,
     default=False,
-    help="Emit machine-parseable JSON (used with --check-search, --check-quotas).",
+    help="Emit machine-parseable JSON. Works with the main sweep (no mode "
+         "flag) plus --check-search, --check-quotas, --check-mcp-logs. "
+         "Any other mode flag combined with --json is a usage error "
+         "(nexus-0vycz).",
 )
 @click.option(
     "--trim-telemetry",
@@ -1161,6 +1164,40 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                fail_on_violation: bool,
                phase: str | None) -> None:
     """Verify that all required services and credentials are available."""
+    if json_out:
+        # nexus-0vycz: --json is honored by the main sweep (no mode flag)
+        # plus --check-search / --check-quotas / --check-mcp-logs. Every
+        # other mode silently ignored the flag before this fix -- fail
+        # loud instead of pretending the combination was handled.
+        _json_unsupported_modes = {
+            "--check-schema": check_schema,
+            "--check-resources": check_resources,
+            "--check-taxonomy": check_taxonomy,
+            "--check-plan-library": check_plan_library,
+            "--check-tier-discipline": check_tier_discipline,
+            "--check-storage-boundary": check_storage_boundary,
+            "--trim-telemetry": trim_telemetry,
+            "--check-post-store-hooks": check_post_store_hooks,
+            "--check-mineru": check_mineru,
+            "--check-aspect-queue": check_aspect_queue,
+            "--check-t1": check_t1,
+            "--check-wal-retention": check_wal_retention,
+            "--fix": fix,
+            "--fix-paths": fix_paths,
+            "--clean-checkpoints": clean_checkpoints,
+            "--clean-pipelines": clean_pipelines,
+        }
+        _requested_unsupported = [
+            flag for flag, requested in _json_unsupported_modes.items() if requested
+        ]
+        if _requested_unsupported:
+            raise click.UsageError(
+                "--json is not supported with "
+                f"{', '.join(_requested_unsupported)}. "
+                "--json only works with the main sweep (no mode flag), "
+                "--check-search, --check-quotas, or --check-mcp-logs."
+            )
+
     if check_storage_boundary:
         _run_check_storage_boundary(
             fail_on_violation=fail_on_violation, phase=phase
@@ -1371,11 +1408,16 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     # ── Health check path — delegates to nexus.health ─────────────────────────
-    from nexus.health import run_health_checks, format_health_for_cli  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.health import run_health_checks, format_health_for_cli, format_health_for_json  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     results, is_local = run_health_checks()
     output, failed = format_health_for_cli(results, local_mode=is_local)
-    click.echo(output)
+    if json_out:
+        # nexus-0vycz: machine-parseable JSON on stdout only -- no human
+        # prose mixed in, so the whole of stdout is one parseable document.
+        click.echo(format_health_for_json(results, local_mode=is_local))
+    else:
+        click.echo(output)
 
     # RDR-185 P4.2 (nexus-n7u38.29): the nexus-0rwwv bridge notice is RETIRED
     # here. A pending Chroma→pgvector cutover is reported by the ladder's own

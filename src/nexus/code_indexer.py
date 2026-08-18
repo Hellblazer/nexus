@@ -512,14 +512,25 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
 
     with _stage("upload"):
         _log.debug("upserting", file=str(file_path), chunks=total_chunks)
-        ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]
-            collection_name=ctx.corpus,
-            ids=ids,
-            documents=documents,
-            embeddings=embeddings,
-            metadatas=metadatas,
-            force_re_embed=ctx.force,
-        )
+        try:
+            ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]
+                collection_name=ctx.corpus,
+                ids=ids,
+                documents=documents,
+                embeddings=embeddings,
+                metadatas=metadatas,
+                force_re_embed=ctx.force,
+            )
+        except Exception as upload_exc:
+            # nexus-bhlfy: mirrors commands/store.py's cotmr fix — stamp
+            # 'failed' unconditionally so the fence does not wedge at
+            # 'indexing' with only the 6h doctor sweep as signal.
+            # _fence_fail never raises, so the re-raise below always
+            # carries the original exception unmasked.
+            if catalog_doc_id:
+                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+                _fence_fail(catalog_doc_id, str(upload_exc))
+            raise
 
     with _stage("hooks"):
         # Post-store hook chains (RDR-095). Both single-doc and batch

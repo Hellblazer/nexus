@@ -261,6 +261,9 @@ The canonical structure (in emission order):
 - **Impact**: [Why it matters]
 - **Recommendation**: [How to fix]
 - **Evidence**: [Supporting references from nx store or analysis]
+- **Ship-blocker**: yes | no — "yes" only if shipping AS-IS violates the relay's
+  stated acceptance bar, loses data, wedges an install, or breaks a published
+  contract. Everything else is "no" and becomes a bead, not a reason to hold.
 
 ## Significant Issues
 [Issues that should be addressed. If none: write `None.`]
@@ -288,6 +291,7 @@ Example of a correctly emitted Verdict block for a clean RDR (copy this shape ex
 - **confidence**: high
 - **critical_count**: 0
 - **significant_count**: 0
+- **ship_blockers**: 0
 - **summary**: Problem Statement gaps are addressed with file:line pointers; no scope reduction detected.
 ```
 
@@ -300,17 +304,32 @@ Example for an RDR with a silent-scope-reduction retcon:
 - **confidence**: high
 - **critical_count**: 1
 - **significant_count**: 2
+- **ship_blockers**: 1
 - **summary**: Gap 2 is enumerated in the Problem Statement but silently reframed as out of scope in the Proposed Solution with no ### Gap 2: addressed heading.
 ```
 
 Mapping rule: `critical_count > 0` → `not-justified`. `critical_count == 0` AND `significant_count > 0` → `partial`. Both counts zero → `justified`. Confidence is your own assessment (`high` / `medium` / `low`) based on evidence strength. Summary is ONE sentence, no line breaks, no bullet points inside the summary.
+
+`outcome` is descriptive of finding severity; it is not the gate. `ship_blockers`
+(the count of findings you marked `Ship-blocker: yes`, per § Output Format above)
+is the gate. `outcome: not-justified` with `ship_blockers: 0` is a valid,
+shippable result — it means real issues exist and are worth a bead, but nothing
+in them violates the relay's acceptance bar. Do not inflate `ship_blockers` to
+make the verdict look more actionable, and do not suppress a real one to make it
+look cleaner; the orchestrator may override a marking upward but the definition
+above stays objective.
 
 > Fallback parse rule: if this Verdict block is absent or the `- **outcome**:` line cannot be located verbatim, downstream parsers count `### Issue:` headers under `## Critical Issues` and `## Significant Issues` and derive outcome mechanically. The fallback works but the canonical path is preferred, emit the block exactly as shown above.
 
 ## Operating Principles
 
 - **No fluff**: Every sentence adds value. Skip praise unless genuinely warranted.
-- **No trivial findings**: Do not report obvious style issues or bikeshedding concerns.
+- **Report everything you have evidence for.** Recall is your job; filtering is
+  the orchestrator's. Do not suppress a finding because it seems minor, because
+  you are unsure it blocks, or because the diff is otherwise clean — suppressing
+  on those grounds is how the finding is lost entirely, and a bead is cheap
+  where a missed defect is not. Style nits and bikeshedding still stay out:
+  those are not findings, they are preferences.
 - **Evidence over opinion**: Ground findings in facts, references, or demonstrable logic.
 - **Constructive focus**: You are improving the work, not attacking it.
 - **Matter-of-fact tone**: Low-key, professional, direct. No drama.

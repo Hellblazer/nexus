@@ -29,6 +29,7 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release (pinned: v7.8.0)
+## Awaiting the next release (pinned: v7.9.0)
 
-(none)
+(none — ledger emptied at the 7.9.0 release; the nexus-haf6p Prompt Ratchet
+entries shipped with that pin advance)

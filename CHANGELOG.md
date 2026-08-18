@@ -6,6 +6,69 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.9.0] - 2026-08-17
+
+Client-only release: no engine cut — the pinned engine identity stays
+`engine-service-v0.1.79`, already live in the cloud and gated.
+
+### Indexing correctness (the 7.8.0 shakedown arc)
+
+- **RUNFENCE fail arms** (nexus-bhlfy, nexus-tjf7l): all four indexing
+  producers — the repo-walk ChunkBatcher path, the PDF fallback, and the
+  prose/code legacy fallbacks — now stamp `index_state='failed'` when an
+  upload permanently fails, instead of stranding `'indexing'` forever
+  (root cause of 13 ART docs stranded ~255h by 12 gateway-timeout upload
+  failures on 2026-08-06). A fence-fail never masks the original error and
+  never double-reports across bisect retries.
+- **Repo-path staleness honors the fence** (nexus-cp46b): a doc whose
+  catalog `index_state` is `'indexing'`/`'failed'` is stale regardless of
+  content-hash match, so stranded docs drain on the next normal
+  `nx index repo` run — no `--force` re-embed of the whole repo. No added
+  per-file round trip (the stranded set rides the existing owner-scoped
+  catalog fetch). The doctor stranded-fence warning drops its false
+  "re-indexing never skips" reassurance.
+- **No catalog registration for unchunkable files** (nexus-rqsh1 producer
+  fix, nexus-1sd0f, Hal directive 2026-08-15): repo discovery skips
+  zero-byte and binary-content files (counted, summary-logged); the
+  single-file forms (`nx index md/pdf/rdr`) raise `UnchunkableContentError`
+  BEFORE any catalog write — loud for an explicitly named file, counted
+  per-record in batches. Ends the phantom-registration class (permanent
+  zero-chunk docs reappearing in every census).
+- **`looks_like_binary_content`** disambiguates a truncated sample from
+  true EOF via a one-byte over-read, so multibyte UTF-8 at the 8192-byte
+  boundary can no longer be misclassified as binary — in either direction
+  (nexus-ih383).
+
+### Census and cleanup tooling
+
+- **`zero_content_by_design` bucket** in `nx catalog verify` and
+  `nx catalog reconcile-stale` (nexus-rqsh1): sources that verifiably can
+  never chunk classify into their own honest bucket (counted until
+  tombstoned, never hidden) instead of `reindex_candidate`. New
+  dry-run-gated mutation arm `--execute tombstone-zero-content` with the
+  same double gate as the existing arms.
+- **`nx doctor --json` works on the main sweep** (nexus-0vycz): emits
+  `{checks[], summary, local_mode}` instead of silently ignoring the flag;
+  `--json` combined with a mode flag that cannot honor it is now a usage
+  error. An AST-based exhaustiveness test pins every mode flag to a
+  classification so the silent-ignore cannot return.
+
+### Hardening
+
+- `FLUSH_CONCURRENCY` derived from `QUOTAS.MAX_CONCURRENT_WRITES`
+  (nexus-dimrz; effective value unchanged at 3).
+- `UnchunkableContentError` classified per-record-survivable: one bad file
+  in a batch fails that record only.
+- Fresh-install MVV, package-upgrade convergence MVV, local-service gate,
+  sandbox smoke + shakedown, and upgrade-shakeout all green pre-tag.
+
+### Plugin (see conexus/CHANGELOG.md)
+
+- **The Prompt Ratchet** (nexus-haf6p): bounded review gate, ship-blocker
+  verdict axis, de-compounded reviewer-dispatch scaffolding, two-sided
+  scope clause, delegation split. These plugin-surface changes go LIVE
+  with this release's pin advance.
+
 ## [7.8.0] - 2026-08-17
 
 Paired with `engine-service-v0.1.79` (`REQUIRED_ENGINE_VERSION` → 0.1.79). The
