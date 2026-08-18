@@ -2,7 +2,8 @@
 title: "RDR-156: Vector-Store Capability Leverage — Unify the Retrieval Substrate: Combined Queries, Schema-Enforced Integrity, and Specialized Functions over the RDR-155 pgvector Chunk Tables"
 id: RDR-156
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-08-18
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
