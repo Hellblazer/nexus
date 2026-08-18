@@ -469,9 +469,15 @@ def test_paired_mode_above_floor_passes_with_normal_message(
     assert "PAIRED MODE" not in capsys.readouterr().out
 
 
-def test_paired_mode_incompatible_managed_service_error_accepted(
+def test_paired_mode_generic_managed_service_error_stays_unverifiable(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """Review-round fix (SIGNIFICANT finding 3): a plain ManagedServiceError
+    with NO structured deployed_version (non-200, malformed JSON, etc.) is
+    NOT a genuine below-floor reading and must NOT be folded into paired
+    acceptance, even in explicit --paired-deploy mode. This test used to
+    assert the opposite (rc == 0, accepted) -- that assertion pinned the bug
+    this fix closes; see _classify_probe_failure."""
     from nexus.db.managed_endpoint import ManagedServiceError
 
     with patch.object(gate, "_tag_exists_in_git", return_value=True), \
@@ -479,13 +485,16 @@ def test_paired_mode_incompatible_managed_service_error_accepted(
          patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
          patch.object(
              gate, "probe_managed_service",
-             side_effect=ManagedServiceError("release_version 0.0.1 below floor"),
+             side_effect=ManagedServiceError("service returned HTTP 503"),
          ):
         rc = gate.check_floor(
             url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
         )
-    assert rc == 0
-    assert "PAIRED MODE" in capsys.readouterr().out
+    assert rc == 2
+    out_err = capsys.readouterr()
+    assert "PAIRED MODE" not in out_err.out
+    assert "UNVERIFIABLE" in out_err.err
+    assert "genuine below-floor" in out_err.err.lower()
 
 
 def test_paired_mode_ack_uses_structured_deployed_version_not_full_sentence(
@@ -1194,3 +1203,339 @@ def test_main_accepts_ack_client_lag_flag() -> None:
             ]
         )
     mock_ledger.assert_called_once_with(["nexus-fake", "nexus-other"])
+
+
+# ── Auto-paired mode (--paired-deploy-auto, nexus-gc9ir) ──────────────────
+#
+# v7.10.0 (2026-08-18): release.yml runs check_engine_release_floor.py BARE,
+# with no human to type --paired-deploy <tag>, so a routine paired release's
+# EXPECTED pre-deploy cloud-behind state red'd the publish. --paired-deploy-
+# auto derives the candidate tag from REQUIRED_ENGINE_VERSION and, ONLY when
+# the cloud is confirmed below that floor, runs the IDENTICAL verification
+# battery --paired-deploy already applies. These tests patch the same seams
+# as the --paired-deploy tests above (_tag_exists_in_git /
+# _paired_tag_published / _tag_age_hours / probe_managed_service) plus
+# check_paired_preconditions / check_client_lag_ledger directly where the
+# wiring itself (not the underlying logic, already covered above) is what's
+# under test.
+
+
+def test_auto_paired_derives_tag_from_required_engine_version() -> None:
+    """The candidate tag must be _pinned_engine_tag() -- derived, never a
+    separately hand-typed literal (same discipline as PINNED_SERVICE_TAG)."""
+    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
+         patch.object(gate, "check_client_lag_ledger", return_value=0), \
+         patch.object(gate, "check_paired_preconditions", return_value=0) as mock_precond:
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=_PIN_CURRENT, paired_deploy_auto=True,
+        )
+    assert rc == 0
+    mock_precond.assert_called_once()
+    called_tag = mock_precond.call_args[0][0]
+    assert called_tag == gate._pinned_engine_tag()
+
+
+def test_auto_paired_cloud_meets_floor_is_normal_pass(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The headline 'must not weaken anything' contract: when the cloud
+    already meets the floor, auto mode is a byte-for-byte bare-invocation
+    pass -- the paired machinery (ledger, git/gh tag verification) is never
+    even invoked."""
+    with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())), \
+         patch.object(gate, "check_client_lag_ledger") as mock_ledger, \
+         patch.object(gate, "check_paired_preconditions") as mock_precond:
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=_PIN_CURRENT, paired_deploy_auto=True,
+        )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "PAIRED MODE" not in out
+    assert "current" in out.lower()
+    mock_ledger.assert_not_called()
+    mock_precond.assert_not_called()
+
+
+def test_auto_paired_cloud_meets_floor_still_enforces_pin_currency(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Auto mode must not skip the pin-currency direction either -- an
+    unpinned newer tag still fails the gate even when the cloud is current."""
+    newer = _bump(REQUIRED_ENGINE_VERSION, 3)
+    with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=newer, paired_deploy_auto=True,
+        )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "ENGINE PIN CHECK FAILED" in err
+
+
+def test_auto_paired_below_floor_all_conditions_met_passes_with_auto_ack(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
+         patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
+        )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "PAIRED MODE" in out
+    assert "0.0.1" in out
+    assert _floor_str() in out
+    assert "AUTO-derived" in out
+    assert "--paired-deploy-auto" in out
+
+
+def test_auto_paired_below_floor_managed_service_error_uses_structured_version(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """probe_managed_service fails closed (raises ManagedServiceIncompatible)
+    on a below-floor release_version on the real path -- auto mode must
+    accept via that exception branch too, same as the explicit flag."""
+    from nexus.db.managed_endpoint import ManagedServiceIncompatible
+
+    exc = ManagedServiceIncompatible(
+        "full remedy sentence not for the ack", deployed_version="0.1.5",
+        required_version=_floor_str(),
+    )
+    with patch.object(gate, "probe_managed_service", side_effect=exc), \
+         patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
+        )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "'0.1.5'" in out
+    assert "full remedy sentence" not in out
+
+
+def test_auto_paired_generic_managed_service_error_stays_unverifiable(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Review-round fix (SIGNIFICANT finding 3), auto-mode side: a plain
+    ManagedServiceError with no structured deployed_version (endpoint
+    error, malformed response) must NOT be folded into paired acceptance --
+    same rule as the explicit --paired-deploy path
+    (test_paired_mode_generic_managed_service_error_stays_unverifiable)."""
+    from nexus.db.managed_endpoint import ManagedServiceError
+
+    with patch.object(
+        gate, "probe_managed_service",
+        side_effect=ManagedServiceError("managed service returned HTTP 503"),
+    ):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
+        )
+    assert rc == 2
+    out_err = capsys.readouterr()
+    assert "PAIRED MODE" not in out_err.out
+    assert "UNVERIFIABLE" in out_err.err
+    assert "genuine below-floor" in out_err.err.lower()
+
+
+def test_auto_paired_unparseable_release_version_stays_unverifiable(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Defense-in-depth: the REAL probe never returns a caps with an
+    unparseable release_version (it raises first), but the post-probe
+    comparison branch must not silently accept one either if reached."""
+    with patch.object(gate, "probe_managed_service", return_value=_caps("not-a-version")):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
+        )
+    assert rc == 2
+    out_err = capsys.readouterr()
+    assert "PAIRED MODE" not in out_err.out
+    assert "UNVERIFIABLE" in out_err.err
+    assert "unparseable" in out_err.err.lower()
+
+
+def test_paired_mode_unparseable_release_version_stays_unverifiable(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Explicit-mode mirror of the auto-mode test above."""
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
+         patch.object(gate, "probe_managed_service", return_value=_caps("not-a-version")):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG,
+        )
+    assert rc == 2
+    out_err = capsys.readouterr()
+    assert "PAIRED MODE" not in out_err.out
+    assert "UNVERIFIABLE" in out_err.err
+    assert "unparseable" in out_err.err.lower()
+
+
+def test_auto_paired_below_floor_accepts_without_deploy_liveness_signal_by_design(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """DELIBERATE-BEHAVIOR PIN (review round finding 2) -- do not "fix" this
+    without a conscious decision: auto mode accepts a below-floor cloud on
+    TAG legitimacy alone (published, exactly pinned, newest, fresh). It has
+    NO way to observe whether the deploy relay actually fired or converged
+    -- that is a real, accepted gap, not an oversight. The backstop is the
+    pre-existing DAILY engine-floor-verify job
+    (.github/workflows/scheduled-failure-watch.yml, bare gate against the
+    real public endpoint, protocol-audit [22511] Gap 2), which would catch
+    a still-stale cloud within at most 24h via the "Scheduled workflows are
+    failing silently" tracked GH issue. If a future change adds a
+    deploy-liveness signal to THIS gate, this test must be updated
+    deliberately -- its failure is the tripwire for that decision, not a
+    bug to silence."""
+    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
+         patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
+        )
+    assert rc == 0
+    assert "PAIRED MODE" in capsys.readouterr().out
+
+
+def test_auto_paired_below_floor_draft_release_fails(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
+         patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(
+             gate, "_paired_tag_published",
+             return_value=(False, f"release {gate._pinned_engine_tag()} is still a DRAFT -- not published"),
+         ):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
+        )
+    assert rc == 1
+    assert "DRAFT" in capsys.readouterr().err
+
+
+def test_auto_paired_below_floor_newer_tag_exists_fails(capsys: pytest.CaptureFixture[str]) -> None:
+    newer = _bump(REQUIRED_ENGINE_VERSION, 1)
+    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
+         patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")):
+        rc = gate.check_floor(url=_TEST_URL, newest=newer, paired_deploy_auto=True)
+    assert rc == 1
+    assert "newer engine tag" in capsys.readouterr().err.lower()
+
+
+def test_auto_paired_below_floor_stale_tag_fails(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
+         patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_STALE_AGE_HOURS):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
+        )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert f"{_STALE_AGE_HOURS:.1f}h" in err
+
+
+def test_auto_paired_below_floor_gh_unavailable_fails_closed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
+         patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(
+             gate, "_paired_tag_published",
+             return_value=(gate._TAGS_UNAVAILABLE, "could not invoke `gh`"),
+         ):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
+        )
+    assert rc == 2
+    assert "UNVERIFIABLE" in capsys.readouterr().err
+
+
+def test_auto_paired_below_floor_ledger_blocks_before_preconditions(tmp_path) -> None:
+    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
+    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
+         patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
+         patch.object(gate, "check_paired_preconditions") as mock_precond:
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
+        )
+    assert rc == 1
+    mock_precond.assert_not_called()
+
+
+def test_auto_paired_unreachable_fails_rc2_no_paired_text(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with patch.object(
+        gate, "probe_managed_service",
+        side_effect=ManagedServiceUnreachable("connect timed out"),
+    ):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
+        )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "unreachable" in err.lower()
+    assert "PAIRED MODE" not in err
+
+
+def test_default_mode_unaffected_by_paired_deploy_auto_absence(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """paired_deploy_auto=False (the implicit default) must take the exact
+    pre-gc9ir code path."""
+    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
+        rc = gate.check_floor(url=_TEST_URL)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "PAIRED MODE" not in err
+    assert "FLOOR CHECK FAILED" in err
+
+
+def test_explicit_paired_deploy_takes_priority_over_auto_flag(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When (in Python-API use, not CLI, which enforces mutual exclusion)
+    both are set, the explicit tag wins -- library-level tiebreak documented
+    on check_floor."""
+    other_tag = f"engine-service-v{'.'.join(str(p) for p in _bump(REQUIRED_ENGINE_VERSION, 2))}"
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")):
+        rc = gate.check_floor(
+            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION,
+            paired_deploy=other_tag, paired_deploy_auto=True,
+        )
+    # other_tag != REQUIRED_ENGINE_VERSION -> explicit-mode "wrong pairing"
+    # rejection, proving the explicit tag (not the auto-derived one) drove
+    # the check.
+    assert rc == 1
+    assert "wrong pairing" in capsys.readouterr().err.lower()
+
+
+def test_main_accepts_paired_deploy_auto_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
+         patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
+         patch.object(gate, "check_source_ancestry", return_value=0) as mock_ancestry:
+        rc = gate.main(["--url", _TEST_URL, "--paired-deploy-auto"])
+    assert rc == 0
+    assert "PAIRED MODE" in capsys.readouterr().out
+    # Ancestry must run against the pinned tag -- args.paired_deploy is None
+    # for auto mode, so main()'s `args.paired_deploy or _pinned_engine_tag()`
+    # already resolves correctly with no auto-specific wiring needed.
+    mock_ancestry.assert_called_once_with(gate._pinned_engine_tag())
+
+
+def test_main_rejects_paired_deploy_and_paired_deploy_auto_together() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        gate.main([
+            "--paired-deploy", "engine-service-v0.1.1",
+            "--paired-deploy-auto",
+        ])
+    assert exc_info.value.code == 2

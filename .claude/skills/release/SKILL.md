@@ -30,6 +30,12 @@ If it exits non-zero, STOP — do not proceed with the PyPI release. The gate fa
 
 Re-run (without `--paired-deploy`) until it exits 0 — including the post-tag verify for a paired release.
 
+`release.yml`'s own copy of this gate runs `--paired-deploy-auto` (nexus-gc9ir) instead of bare — it derives the candidate tag from `REQUIRED_ENGINE_VERSION` itself and only engages the paired-acceptance path when the cloud is actually below floor, so the workflow no longer red's during a paired release's expected parallel-deploy window. This pre-tag human invocation still uses the explicit `--paired-deploy <tag>` form above — name the tag deliberately here, where you already know it.
+
+**The core tradeoff:** paired acceptance (either flag) proves the engine TAG is legitimate — it does not prove the deploy has actually landed. That's an accepted, bounded gap: the daily `engine-floor-verify` scheduled job (`.github/workflows/scheduled-failure-watch.yml`) re-probes the real endpoint bare and surfaces a still-stale cloud within ≤24h via the tracked "Scheduled workflows are failing silently" GH issue. See `check_engine_release_floor.py`'s module docstring for the full statement.
+
+**Known CI-side failure mode, no bypass by design:** the workflow's `--paired-deploy-auto` invocation has no `--ack-client-lag` flag (no human present at tag-push to name a bead), so an unacknowledged `docs/wire-contract-pending.md` `## Unshipped` entry fails that step CLOSED during a paired release, before the tag/cloud checks even run — correctly, do not ask for a CI-side bypass. **Re-running the SAME tag via `workflow_dispatch` does NOT fix this** (nexus-55r6o) — the checkout pins the tag's immutable tree, and the ledger check reads the ledger off that same frozen tree, so a same-tag retry re-reads the identical unacknowledged entry and fails identically. Real remedy: (a) cut a FRESH client tag whose tree carries the ledger fix (a new release, not a retry of the failed one), or (b) the structural fix tracked at nexus-55r6o — move this ledger check into PR-gated release-branch CI, before any tag exists. (b) is not implemented; see the bead.
+
 Supplementary context (useful when deciding whether recent `service/` work is cloud-relevant, but the script above is the actual gate):
 
 ```bash

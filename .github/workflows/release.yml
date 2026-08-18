@@ -176,7 +176,63 @@ jobs:
         # needed) -- a transient network blip could block a release
         # momentarily; accepted tradeoff vs. the alternative of silent
         # engine drift.
-        run: uv run python scripts/check_engine_release_floor.py
+        #
+        # --paired-deploy-auto (nexus-gc9ir): under the paired-release
+        # choreography the engine deploy fires AT client-tag push, in
+        # PARALLEL with this publish job -- so a below-floor cloud at this
+        # exact moment is the EXPECTED pre-deploy state for a paired
+        # release, not drift. v7.10.0 (2026-08-18) ran this step bare, with
+        # no human present to type --paired-deploy <tag>, and a routine
+        # paired release red'd the publish outright. --paired-deploy-auto
+        # derives the candidate tag from REQUIRED_ENGINE_VERSION and only
+        # engages the paired-acceptance path when the cloud is confirmed
+        # below that floor -- a cloud that already meets the floor takes
+        # the untouched bare-invocation path, so this is never weaker than
+        # the previous unconditional invocation for a non-paired release.
+        #
+        # GITHUB_TOKEN: the paired-acceptance path (engaged only when the
+        # cloud is below floor) shells out to `gh release view` to verify
+        # the derived tag is a published release -- without this, `gh`
+        # refuses to run unauthenticated in Actions and the paired check
+        # fails closed (UNVERIFIABLE) exactly when it is needed most.
+        #
+        # THE CORE TRADEOFF (review round, 2026-08-18): paired acceptance
+        # here proves the engine TAG is legitimate (published, exactly
+        # pinned, newest, fresh) -- it does NOT prove the deploy relay has
+        # actually landed; this job has no way to observe that (it runs on
+        # a different system, on Hal's side of the AGENTS.md bus). That is
+        # an accepted, bounded gap: the DAILY `engine-floor-verify` job
+        # (.github/workflows/scheduled-failure-watch.yml, 09:23 UTC, bare
+        # gate against the real public endpoint) is the backstop -- a
+        # deploy that never fired, or silently failed, surfaces within at
+        # most 24h via the same "Scheduled workflows are failing silently"
+        # tracked GH issue every other rotted scheduled gate reports
+        # through. See check_engine_release_floor.py's module docstring
+        # for the full statement and its behavior-pinning test.
+        #
+        # KNOWN FAILURE MODE, NO CI-SIDE BYPASS BY DESIGN: this invocation
+        # has no --ack-client-lag flag (there is no human here to name a
+        # bead), so an unacknowledged docs/wire-contract-pending.md
+        # ## Unshipped entry fails this step CLOSED during a paired
+        # release, with the ledger blocking BEFORE the tag/cloud checks
+        # even run. That is correct -- do not add a bypass here.
+        #
+        # REMEDY, CORRECTED (nexus-55r6o, substantive-critic Critical
+        # finding): re-running this SAME tag via `workflow_dispatch` does
+        # NOT pick up a ledger fix -- the checkout step above pins
+        # `ref: ${{ inputs.tag }}`, an IMMUTABLE tag, and
+        # check_client_lag_ledger reads the ledger off that frozen tree, so
+        # a same-tag retry re-reads the identical unacknowledged entry and
+        # fails identically. The two REAL remedies: (a) cut a FRESH client
+        # tag whose tree carries the ledger fix -- this is a new release,
+        # not a retry of the failed one -- or (b) the structural fix
+        # tracked at nexus-55r6o: move this ledger check into PR-gated
+        # release-branch CI, before any tag exists, so an unacknowledged
+        # entry is caught while the tree is still mutable. (b) is NOT
+        # implemented here -- see the bead.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: uv run python scripts/check_engine_release_floor.py --paired-deploy-auto
 
       - name: Build wheel and sdist
         run: uv build --sdist --wheel
