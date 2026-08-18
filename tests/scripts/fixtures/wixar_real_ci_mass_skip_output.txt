@@ -1,0 +1,107 @@
+
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+=
+SERVICE JAR STALE — engine-substrate tests will error: service jar not built: service/target/nexus-service-1.0-SNAPSHOT.jar (run: mvn -f service/pom.xml package -DskipTests)
+Rebuild BEFORE trusting this run, or ~73 errors will surface at the END:
+    mvn -f service/pom.xml package -DskipTests
+(nexus-zryqm: this notice exists because the same 13-minute run was
+ discarded three times in one day for exactly this reason.)
+==============================================================================
+
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [  7%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 15%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 23%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 30%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 38%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 46%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 53%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 61%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 69%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 76%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 84%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 92%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 99%]
+ss                                                                       [100%]
+=============================== warnings summary ===============================
+tests/test_repo_identity_stability.py:18
+  /Users/hal.hildebrand/git/nexus/tests/test_repo_identity_stability.py:18: DeprecationWarning: nexus.registry._repo_identity is deprecated and will be removed in the next major release. Import from nexus.repo_identity instead.
+    from nexus.registry import _repo_identity
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+938 skipped, 13602 deselected, 1 warning in 6.07s

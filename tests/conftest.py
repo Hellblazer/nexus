@@ -273,13 +273,25 @@ def pytest_sessionfinish(session, exitstatus):
 # declared marker NAME — one of which is the literal string ``"scenario"``
 # (since ``scenario`` is itself a declared marker) — so its
 # ``[scenario]`` id collides with the real ``@pytest.mark.scenario`` keyword
-# with NO actual scenario mark applied. In ``test-lint`` (no service jar,
-# no ``NX_T2_SUBSTRATE_EXPECTED``) every test — including that one — is
-# legitimately skipped by the autouse ``_pin_t2_substrate`` fixture, and
-# the false-positive keyword match read that one unrelated lint-test skip
-# as "a scenario journey silently degraded", tripping the budget=0 guard
-# on a job that runs zero real ``scenario`` tests (deselected by ``-m
-# lint``). Reproduced directly: a throwaway
+# with NO actual scenario mark applied. At the time this was found
+# (2026-08-05), ``test-lint`` (no service jar, no
+# ``NX_T2_SUBSTRATE_EXPECTED``) skipped EVERY test — including that one —
+# via the autouse ``_pin_t2_substrate`` fixture, and this comment called
+# that mass-skip "legitimate" for the job. It was not: that same mass-skip
+# was the vacuous-CI-gate bug nexus-wixar found and fixed 2026-08-18 — the
+# entire ``lint``-marked corpus, ~830 tests, was skipping on every real CI
+# run and reporting success (``938 skipped, 13459 deselected``, PR #1459).
+# The fix mirrors the ``test-mode-census`` job's own prior fix for the
+# identical shape (nexus-vdti6, 2026-08-06): ``test-lint`` now sets
+# ``NX_TEST_T2_SUBSTRATE=none`` in its job env (``.github/workflows/
+# ci.yml``), so ``_pin_t2_substrate`` returns before ever calling
+# ``t2_service_env`` for ANY test the job selects, regardless of marker.
+# This comment's own false-positive analysis below is still correct on its
+# own terms — the keyword-collision bug was real and is fixed the way
+# described — but its premise ("legitimately skipped") named the symptom of
+# a second, separate bug without recognizing it as one.
+#
+# Reproduced directly: a throwaway
 # ``@pytest.mark.parametrize("marker", ["scenario"])`` test shows
 # ``"scenario" in item.keywords`` True with ``item.get_closest_marker
 # ("scenario")`` False.
@@ -1015,6 +1027,17 @@ def _pin_t2_substrate(request: pytest.FixtureRequest) -> None:
     backend vars AFTER this one, so they still observe the true default. Any
     test that wants a specific backend sets ``NX_STORAGE_BACKEND[_<store>]``
     itself, which overrides this pin (later ``setenv`` wins).
+
+    ``NX_TEST_T2_SUBSTRATE=none`` (checked immediately below) is how a CI job
+    that deliberately provisions no service jar opts every test OUT of this
+    pin — see the ``test-mode-census`` job's env in ``.github/workflows/
+    ci.yml`` for the precedent, and nexus-wixar for the sibling
+    ``test-lint`` job's own copy of it: without it, ``t2_service_env``'s
+    CI-only graceful-skip branch (``GITHUB_ACTIONS=="true"`` AND no
+    ``NX_T2_SUBSTRATE_EXPECTED`` AND no fresh jar) fires for every single
+    item the job selects — for ``test-lint`` that is its ENTIRE corpus (no
+    other job runs lint-marked tests), so the job reported success having
+    executed zero of them.
     """
     # NX_TEST_T2_SUBSTRATE=none — provision NOTHING (nexus-lom9g / i711w).
     # For tests whose subject needs no T2 store at all: endpoint resolution,

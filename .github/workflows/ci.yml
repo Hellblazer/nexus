@@ -554,6 +554,23 @@ jobs:
     needs: [changes]
     if: success() && needs.changes.outputs.code == 'true'
     timeout-minutes: 10
+    env:
+      # nexus-wixar (2026-08-18): this job provisions NO service jar (by
+      # design — see the comment block above), which made every lint-marked
+      # test hit the autouse `_pin_t2_substrate` fixture's engine-substrate
+      # pin -> `t2_service_env`'s own CI-only graceful skip ("engine
+      # substrate: service JAR not provisioned on CI", fires whenever
+      # GITHUB_ACTIONS=='true' and NX_T2_SUBSTRATE_EXPECTED is unset and no
+      # jar exists -- exactly this job's shape). Real CI run, PR #1459: the
+      # entire ~830-test lint corpus skipped and the job reported SUCCESS
+      # (`938 skipped, 13459 deselected`, 0 executed). Same shape, same fix
+      # as the `test-mode-census` job below (nexus-vdti6, 2026-08-06): lint
+      # tests are pure-Python AST/regex/manifest scanners with no T2
+      # dependency whatsoever, so `NX_TEST_T2_SUBSTRATE=none` is correct,
+      # not a workaround -- see `_pin_t2_substrate`'s own `=none` branch in
+      # tests/conftest.py, which returns before ever calling
+      # `t2_service_env`, bypassing the jar check entirely.
+      NX_TEST_T2_SUBSTRATE: "none"
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
@@ -576,7 +593,16 @@ jobs:
         run: uv sync --group dev
 
       - name: Run lint-marked tests
-        run: uv run pytest -m lint -q
+        run: uv run pytest -m lint -q | tee lint-output.txt
+
+      - name: Enforce lint-leg non-vacuity floor
+        # nexus-wixar: a 938-skipped/0-executed run exits 0 (skip is not a
+        # pytest failure) and reported SUCCESS on real CI -- the exact
+        # vacuous-gate class this step exists to make structurally
+        # impossible, not just less likely. scripts/check_lint_leg_non_
+        # vacuity.py has its own unit tests (tests/test_check_lint_leg_non_
+        # vacuity.py) covering both the floor-trip and floor-clear paths.
+        run: uv run python scripts/check_lint_leg_non_vacuity.py lint-output.txt
 
   test-mode-census:
     # nexus-vdti6 (candidate 1, chosen over: candidate 2 — an out-of-band
