@@ -1,0 +1,281 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-156 P5.2 (bead nexus-70r3c.18) — server-side RRF-fusion function
+    nexus.hybrid_search_384/768/1024, implementing the P5.1 TDD-RED contract
+    (HybridSearchFunctionParityIntegrationTest, bead nexus-70r3c.17).
+
+    Signature: hybrid_search_<dim>(p_query vector(<dim>), p_query_text text,
+    p_collections text[], p_where jsonb, p_n int) RETURNS TABLE(id text,
+    content text, collection text, score float8). id is the chunk chash
+    (hex) — chunk-level, same identity convention as search_topic_scoped_
+    <dim> (vectors-005/catalog-006), NOT the document tumbler
+    search_metadata_scoped_<dim> returns.
+
+    score, not distance (deliberate naming break from every sibling combined-
+    query function): RRF fuses per-leg RANKS via 1/(k+rank), k=60, summed
+    across three legs (vector / tsvector / trigram) and is DESC/higher-is-
+    better, unlike the sibling functions' ASC raw cosine distance.
+
+    ALL THREE RANKS ARE COMPUTED WITHIN THE SAME MATERIALIZED TEXT GATE
+    (RDR-156 Decision 3: "within the text-gated candidate set, fuse per-leg
+    ranks"), exactly mirroring the shipped Java lcogi path's own semantics
+    (PgVectorRepository#hybridSearch, bead nexus-lcogi/nexus-eap5l): a row
+    with no FTS lexeme match AND no word-trigram similarity above
+    pg_trgm.word_similarity_threshold never appears, however close its
+    vector — RRF fuses ranks WITHIN that gate, it does not widen
+    eligibility. The vector leg's rank is therefore EXACT cosine distance
+    over the gate (row_number() OVER (ORDER BY embedding_<dim> <=> p_query)
+    within the `gate` CTE) — byte-identical ranking criterion to lcogi's own
+    "ORDER BY distance ASC" selective-gate branch, which is what makes the
+    P5.1 recall-floor parity test achievable: both paths rank the IDENTICAL
+    candidate set by the IDENTICAL distance criterion for the vector leg: RRF
+    only reorders within that set via the two additional text-relevance
+    signals, it does not substitute an approximate/differently-scoped vector
+    ranking for the exact one. pg_trgm.word_similarity_threshold is
+    CALLER-set (this is a LANGUAGE sql function — it cannot SET LOCAL its
+    own GUC), identically to the Java path's own SET LOCAL before calling
+    hybridSearch.
+
+    SELECTIVITY-AWARE BY CONSTRUCTION (RDR-156 Decision 3, the lcogi
+    regression class this bead names explicitly): `gate` materializes the
+    COMPLETE text-gated candidate set FIRST (no LIMIT) and ranks all three
+    legs over it exactly — a selective gate (a handful of matches in a huge
+    corpus) can never be starved past hnsw.max_scan_tuples the way the
+    retired HNSW-first plan was, because row PRESENCE in the result is
+    governed entirely by `gate`, and its own vector-leg ranking never
+    touches the HNSW index either (exact computation over an already-
+    materialized small set has no reason to consult an ANN index).
+
+    NO SEPARATE HNSW-REACHABILITY PROBE (revised 2026-08-18, orchestrator
+    completion review, T1/nexus-70r3c.18 handoff — supersedes the original
+    P5.2 design, which carried an UNFILTERED `ann_probe` CTE purely to make
+    an EXPLAIN assertion pass). That probe never fed the score — it only
+    broke exact ties — so it was already documented as unable to affect
+    which rows were selected; measurement showed it cost roughly half of
+    hybrid_search_384's total p95 (see the CHANGE LOG entry below). Removed
+    outright rather than kept "just in case": for the SELECTIVE gate this
+    function is built for (Decision 3/lcogi regression class), never
+    touching the HNSW index is the CORRECT shape, not a compromise —
+    HybridSelectiveGateTest already establishes that precedent for the
+    Java-side selective-gate plan (its own javadoc: the fix's whole point is
+    that the HNSW index is "never touched" for a selective gate). Finding
+    5a (HNSW engages when the probe vector is a plan-time argument) is
+    Research groundwork the sibling combined-query functions
+    (search_metadata_scoped_<dim> etc., catalog-006/vectors-005) already
+    exercise on every call via their own un-gated `ORDER BY <=> LIMIT`
+    shape; it did not need a second, redundant proof point riding in this
+    function's own hot path. explain_hybridSearchInlines_hnswIndexReachable
+    was amended to match (see that test's own comment) — it now asserts the
+    exact-over-gate NO-HNSW plan shape as the correct selective-regime
+    result, alongside its original (still load-bearing) no-Function-Scan
+    inlining check.
+
+    Tombstone-filtered — DEAD-SET single-NOT-EXISTS form, NOT the older
+    two-EXISTS form (revised 2026-08-18, code-review-expert finding on this
+    changeset's first pass, T1/nexus-70r3c.18 handoff). This changeset's
+    original predicate was copied from search_topic_scoped_<dim>'s
+    OR-EXISTS shape (vectors-005-5), which is what
+    PgVectorRepository#hybridSearch itself used to run too — but
+    PgVectorRepository.liveChunksPredicate() (~PgVectorRepository.java:3177)
+    was rewritten AWAY from that shape after nexus-msz9i measured it
+    regressing production p50 (~744ms -> ~1000ms at the v0.1.63 deploy,
+    cost GROWING with corpus size — see that method's own javadoc for the
+    full EXPLAIN trace). The two forms are logically equivalent
+    (live <=> NOT EXISTS(dead parent) OR EXISTS(live parent) ==
+    NOT EXISTS(dead parent AND no live parent), proven in
+    liveChunksPredicate's own comment) but NOT performance-equivalent: the
+    dead-set form bounds its EXISTS check by the TOMBSTONED population
+    instead of scanning the whole manifest per query. This function now
+    carries the SAME dead-set form liveChunksPredicate() emits (alias
+    substituted for this function's own `c`) — true parity with the
+    shipped Java path on BOTH the gate logic AND the tombstone leg, so
+    P5.G's production-scale comparison measures against the CURRENT
+    Java baseline, not a stale one. A chunk backed ONLY by tombstoned
+    documents is excluded; a manifest-less note chunk (no catalog row at
+    all) stays live (unchanged semantics — only the SQL shape changed).
+    Never a JOIN to the nexus.live_chunks view — that would drop the
+    GIN/HNSW index binds on the base table. (search_topic_scoped_<dim>
+    itself still carries the older OR-EXISTS form — NOT touched here; that
+    sweep is tracked as its own bead, per explicit scope instruction.)
+
+    embedding_<dim> IS NOT NULL guard in both CTEs (nexus-74zvm precedent,
+    vectors-006): nexus.chunks is a mixed-dim table (exactly one embedding_*
+    column non-null per row, vectors-004's CHECK), and the text gate has no
+    dim awareness, so a foreign-dim row could otherwise match the gate with a
+    NULL distance.
+
+    p_where jsonb: chunk-metadata equality via JSONB containment
+    (c.metadata @> p_where), byte-for-byte the same predicate catalog-008/
+    catalog-012/vectors-006 use. NULL-tolerant pass-through (p_where IS NULL
+    OR ...) — the P5.1 suite always passes NULL::jsonb; no invented scope
+    beyond what the contract test exercises.
+
+    LANGUAGE sql, STABLE, SECURITY INVOKER, NOT STRICT (a NULL p_where must
+    not null the whole result) — same discipline as every sibling combined-
+    query function. SECURITY INVOKER means FORCE RLS on nexus.chunks /
+    catalog_document_chunks / catalog_documents is the tenant-isolation
+    boundary, not this function. Deliberately no function-level SET clause
+    (would disable planner inlining, see catalog-007's own header on
+    RECURSIVE CTEs and non-inlinability) — pg_trgm.word_similarity_threshold
+    is caller-set per the contract above.
+
+    Stable tie-break: score DESC, id (hex chash) ASC.
+
+    EXECUTE defaults to PUBLIC for functions (catalog-006 precedent); no
+    explicit GRANT EXECUTE issued here — SECURITY INVOKER means the
+    underlying table grants (grants-nexus-svc.xml) are the real boundary.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-007-1" author="nexus-70r3c.18">
+        <comment>hybrid_search_384/768/1024: server-side RRF fusion (vector + tsvector + trigram ranks) over the lcogi text gate, RDR-156 Decision 3</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.hybrid_search_384(
+    p_query       vector(384),
+    p_query_text  text,
+    p_collections text[],
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, score float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH gate AS (
+        SELECT encode(c.chash, 'hex') AS id,
+               c.chunk_text,
+               c.collection,
+               row_number() OVER (ORDER BY c.embedding_384 &lt;=&gt; p_query, c.chash ASC) AS vec_rank,
+               row_number() OVER (ORDER BY ts_rank_cd(c.chunk_tsv, plainto_tsquery('english', p_query_text)) DESC, c.chash ASC) AS ts_rank,
+               row_number() OVER (ORDER BY word_similarity(p_query_text, c.chunk_text) DESC, c.chash ASC) AS trgm_rank
+          FROM nexus.chunks c
+         WHERE c.collection = ANY(p_collections)
+           AND c.embedding_384 IS NOT NULL
+           AND (p_where IS NULL OR c.metadata @&gt; p_where)
+           AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text &lt;% c.chunk_text)
+           AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                             JOIN nexus.catalog_documents d
+                               ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                            WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                              AND d.deleted_at IS NOT NULL
+                              AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                                JOIN nexus.catalog_documents d2
+                                                  ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                               WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                                 AND d2.deleted_at IS NULL)))
+    )
+    SELECT g.id,
+           g.chunk_text,
+           g.collection,
+           (1.0 / (60 + g.vec_rank)
+              + 1.0 / (60 + g.ts_rank)
+              + 1.0 / (60 + g.trgm_rank))::float8 AS score
+      FROM gate g
+     ORDER BY score DESC, g.id ASC
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.hybrid_search_768(
+    p_query       vector(768),
+    p_query_text  text,
+    p_collections text[],
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, score float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH gate AS (
+        SELECT encode(c.chash, 'hex') AS id,
+               c.chunk_text,
+               c.collection,
+               row_number() OVER (ORDER BY c.embedding_768 &lt;=&gt; p_query, c.chash ASC) AS vec_rank,
+               row_number() OVER (ORDER BY ts_rank_cd(c.chunk_tsv, plainto_tsquery('english', p_query_text)) DESC, c.chash ASC) AS ts_rank,
+               row_number() OVER (ORDER BY word_similarity(p_query_text, c.chunk_text) DESC, c.chash ASC) AS trgm_rank
+          FROM nexus.chunks c
+         WHERE c.collection = ANY(p_collections)
+           AND c.embedding_768 IS NOT NULL
+           AND (p_where IS NULL OR c.metadata @&gt; p_where)
+           AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text &lt;% c.chunk_text)
+           AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                             JOIN nexus.catalog_documents d
+                               ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                            WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                              AND d.deleted_at IS NOT NULL
+                              AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                                JOIN nexus.catalog_documents d2
+                                                  ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                               WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                                 AND d2.deleted_at IS NULL)))
+    )
+    SELECT g.id,
+           g.chunk_text,
+           g.collection,
+           (1.0 / (60 + g.vec_rank)
+              + 1.0 / (60 + g.ts_rank)
+              + 1.0 / (60 + g.trgm_rank))::float8 AS score
+      FROM gate g
+     ORDER BY score DESC, g.id ASC
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.hybrid_search_1024(
+    p_query       vector(1024),
+    p_query_text  text,
+    p_collections text[],
+    p_where       jsonb,
+    p_n           int
+) RETURNS TABLE(id text, content text, collection text, score float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH gate AS (
+        SELECT encode(c.chash, 'hex') AS id,
+               c.chunk_text,
+               c.collection,
+               row_number() OVER (ORDER BY c.embedding_1024 &lt;=&gt; p_query, c.chash ASC) AS vec_rank,
+               row_number() OVER (ORDER BY ts_rank_cd(c.chunk_tsv, plainto_tsquery('english', p_query_text)) DESC, c.chash ASC) AS ts_rank,
+               row_number() OVER (ORDER BY word_similarity(p_query_text, c.chunk_text) DESC, c.chash ASC) AS trgm_rank
+          FROM nexus.chunks c
+         WHERE c.collection = ANY(p_collections)
+           AND c.embedding_1024 IS NOT NULL
+           AND (p_where IS NULL OR c.metadata @&gt; p_where)
+           AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text &lt;% c.chunk_text)
+           AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                             JOIN nexus.catalog_documents d
+                               ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                            WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                              AND d.deleted_at IS NOT NULL
+                              AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                                JOIN nexus.catalog_documents d2
+                                                  ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                               WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                                 AND d2.deleted_at IS NULL)))
+    )
+    SELECT g.id,
+           g.chunk_text,
+           g.collection,
+           (1.0 / (60 + g.vec_rank)
+              + 1.0 / (60 + g.ts_rank)
+              + 1.0 / (60 + g.trgm_rank))::float8 AS score
+      FROM gate g
+     ORDER BY score DESC, g.id ASC
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.hybrid_search_384(vector, text, text[], jsonb, int);
+DROP FUNCTION IF EXISTS nexus.hybrid_search_768(vector, text, text[], jsonb, int);
+DROP FUNCTION IF EXISTS nexus.hybrid_search_1024(vector, text, text[], jsonb, int);
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
