@@ -21,6 +21,7 @@ from scheduled_workflow_watchdog import (  # noqa: E402
     Finding,
     classify,
     fetch_latest_runs,
+    name_claim_findings,
     render,
     scheduled_paths,
 )
@@ -204,3 +205,52 @@ def test_real_workflow_dir_parses_and_the_detector_binds() -> None:
         "no workflow in this repo declares an on.schedule trigger — either they "
         "were all removed, or the detector broke. Both need a human."
     )
+
+
+# ── name-claims-cadence (nexus-idtjs) ────────────────────────────────────────
+
+
+def _write_wf(tmp_path: Path, name_line: str, on_block: str) -> Path:
+    d = tmp_path / "workflows"
+    d.mkdir(exist_ok=True)
+    (d / "wf.yml").write_text(f"name: {name_line}\non:\n{on_block}\njobs: {{}}\n")
+    return d
+
+
+def test_name_claiming_weekly_with_dispatch_only_trigger_is_a_finding(tmp_path) -> None:
+    """nexus-idtjs RED case: the exact live specimen (era-hop-mvv titled
+    'weekly' with a workflow_dispatch-only on: block, invisible to
+    scheduled_paths by construction)."""
+    d = _write_wf(tmp_path, "Journey (weekly + on ladder-path changes)", "  workflow_dispatch:")
+    findings = name_claim_findings(d)
+    kinds = {f.kind for f in findings}
+    assert kinds == {"name-claims-cadence"}
+    details = " | ".join(f.detail for f in findings)
+    assert "weekly" in details
+    assert "on ladder-path changes" in details  # both claims reported
+
+
+def test_name_claiming_weekly_with_a_real_schedule_is_clean(tmp_path) -> None:
+    d = _write_wf(tmp_path, "Journey (weekly)", "  schedule:\n    - cron: '0 0 * * 1'\n  workflow_dispatch:")
+    assert name_claim_findings(d) == []
+
+
+def test_on_changes_claim_satisfied_by_push_or_pull_request(tmp_path) -> None:
+    d = _write_wf(tmp_path, "Gate (on migration-path changes)", "  push:\n    paths: ['src/**']")
+    assert name_claim_findings(d) == []
+    d2 = _write_wf(tmp_path, "Gate (on migration-path changes)", "  pull_request:")
+    assert name_claim_findings(d2) == []
+
+
+def test_unclaiming_name_with_dispatch_only_is_clean(tmp_path) -> None:
+    d = _write_wf(tmp_path, "Journey (dispatch-only parts donor)", "  workflow_dispatch:")
+    assert name_claim_findings(d) == []
+
+
+def test_real_workflow_dir_has_no_lying_names() -> None:
+    """Live wiring pin: every workflow name in this repo must currently tell
+    the truth about its triggers (era-hop-mvv and guided-upgrade-mvv were
+    renamed to the truth in the same diff that added this detector)."""
+    repo_workflows = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+    findings = name_claim_findings(repo_workflows)
+    assert findings == [], [f"{f.workflow}: {f.detail}" for f in findings]
