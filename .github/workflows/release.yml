@@ -225,11 +225,21 @@ jobs:
         # a same-tag retry re-reads the identical unacknowledged entry and
         # fails identically. The two REAL remedies: (a) cut a FRESH client
         # tag whose tree carries the ledger fix -- this is a new release,
-        # not a retry of the failed one -- or (b) the structural fix
-        # tracked at nexus-55r6o: move this ledger check into PR-gated
-        # release-branch CI, before any tag exists, so an unacknowledged
-        # entry is caught while the tree is still mutable. (b) is NOT
-        # implemented here -- see the bead.
+        # not a retry of the failed one -- or (b) implemented (nexus-55r6o):
+        # ci.yml's `release-ledger-gate` job runs the identical ledger-only
+        # check (check_engine_release_floor.py --ledger-only) on EVERY PR
+        # targeting main, before any tag exists -- not narrowed to
+        # `release/*`-named branches, so a hand-named branch promoting to
+        # main is covered too. That job is wired into `pytest-gate`'s
+        # `needs:` (ci.yml), and `pytest-gate` is main's actual required
+        # branch-protection check -- so this is mechanically MERGE-BLOCKING
+        # on the release PR, not advisory, with no separate GitHub
+        # repo-settings change needed. By the time this step runs at Step 8
+        # on a frozen tag, a genuinely unacknowledged entry has already
+        # failed the release PR at Step 7 and could not have merged, while
+        # the tree was still mutable. This step's own unbypassable behavior
+        # remains the correct backstop for whatever still reaches it (e.g.
+        # a ledger entry added between PR merge and tag push).
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: uv run python scripts/check_engine_release_floor.py --paired-deploy-auto

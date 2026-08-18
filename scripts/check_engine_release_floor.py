@@ -1121,18 +1121,40 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         default=None,
         metavar="BEAD-ID",
-        help="Only with --paired-deploy or --paired-deploy-auto (nexus-1vogq; "
-        "auto mode's below-floor path runs the identical ledger check, "
-        "nexus-gc9ir). Explicit acknowledgment that a both-halves commit's "
-        "client half is not yet in a published release -- names the OWNING "
-        "BEAD of a docs/wire-contract-pending.md ## Unshipped entry. Repeat "
-        "for each entry. Without this, a non-empty ledger blocks the deploy "
-        "-- release.yml's own auto invocation has no way to supply this flag "
-        "(see its step comment for the operator remedy).",
+        help="With --paired-deploy, --paired-deploy-auto, or --ledger-only "
+        "(nexus-1vogq; auto mode's below-floor path runs the identical "
+        "ledger check, nexus-gc9ir). Explicit acknowledgment that a "
+        "both-halves commit's client half is not yet in a published "
+        "release -- names the OWNING BEAD of a docs/wire-contract-pending.md "
+        "## Unshipped entry. Repeat for each entry. Without this, a "
+        "non-empty ledger blocks -- release.yml's own auto invocation has "
+        "no way to supply this flag (see its step comment for the operator "
+        "remedy).",
+    )
+    parser.add_argument(
+        "--ledger-only",
+        action="store_true",
+        help="Pre-tag mode (nexus-55r6o). Runs ONLY check_client_lag_ledger "
+        "-- the tree-static docs/wire-contract-pending.md read, no network "
+        "probe, no git-ancestry check -- and exits with its result. For "
+        "release-branch PR CI: catches an unacknowledged ## Unshipped "
+        "entry while the tree is still mutable, mirroring the exact check "
+        "that would otherwise fail closed at tag-push time (release.yml's "
+        "--paired-deploy-auto step) with no CI-side remedy once the tag is "
+        "immutable. Mutually exclusive with --url, --paired-deploy, and "
+        "--paired-deploy-auto; combine with --ack-client-lag exactly like "
+        "those modes.",
     )
     args = parser.parse_args(argv)
     if args.paired_deploy is not None and args.paired_deploy_auto:
         parser.error("--paired-deploy and --paired-deploy-auto are mutually exclusive")
+    if args.ledger_only:
+        if args.paired_deploy is not None or args.paired_deploy_auto or args.url is not None:
+            parser.error(
+                "--ledger-only is mutually exclusive with --url, "
+                "--paired-deploy, and --paired-deploy-auto"
+            )
+        return check_client_lag_ledger(args.ack_client_lag)
     rc = check_floor(
         url=args.url,
         paired_deploy=args.paired_deploy,

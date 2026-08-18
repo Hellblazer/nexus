@@ -1539,3 +1539,64 @@ def test_main_rejects_paired_deploy_and_paired_deploy_auto_together() -> None:
             "--paired-deploy-auto",
         ])
     assert exc_info.value.code == 2
+
+
+# ── nexus-55r6o: --ledger-only pre-tag CLI entry point ────────────────────
+#
+# The publish-time gate (release.yml's --paired-deploy-auto invocation) has
+# no --ack-client-lag path (no human present) -- an unacknowledged
+# docs/wire-contract-pending.md ## Unshipped entry fails CLOSED on a FROZEN
+# tag tree with no CI-side remedy (a workflow_dispatch retry re-checks out
+# the same immutable tag; a ledger fix landed after the tag exists is
+# invisible to it). --ledger-only moves the identical check_client_lag_ledger
+# semantics into PR-gated release-branch CI, where the tree is still
+# mutable, WITHOUT the network probe (check_floor) or the git-only ancestry
+# check (check_source_ancestry) -- purely the tree-static ledger read.
+
+
+def test_ledger_only_runs_check_client_lag_ledger_and_nothing_else(tmp_path) -> None:
+    ledger = _write_ledger(tmp_path)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
+         patch.object(gate, "check_floor") as mock_floor, \
+         patch.object(gate, "check_source_ancestry") as mock_ancestry, \
+         patch.object(gate, "probe_managed_service") as mock_probe:
+        rc = gate.main(["--ledger-only"])
+    assert rc == 0
+    mock_floor.assert_not_called()
+    mock_ancestry.assert_not_called()
+    mock_probe.assert_not_called()
+
+
+def test_ledger_only_blocks_on_unacknowledged_entry(
+    capsys: pytest.CaptureFixture[str], tmp_path
+) -> None:
+    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        rc = gate.main(["--ledger-only"])
+    assert rc == 1
+    assert "nexus-fake" in capsys.readouterr().err
+
+
+def test_ledger_only_accepts_ack_client_lag(tmp_path) -> None:
+    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        rc = gate.main(["--ledger-only", "--ack-client-lag", "nexus-fake"])
+    assert rc == 0
+
+
+def test_ledger_only_rejects_url_together() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        gate.main(["--ledger-only", "--url", _TEST_URL])
+    assert exc_info.value.code == 2
+
+
+def test_ledger_only_rejects_paired_deploy_together() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        gate.main(["--ledger-only", "--paired-deploy", "engine-service-v0.1.1"])
+    assert exc_info.value.code == 2
+
+
+def test_ledger_only_rejects_paired_deploy_auto_together() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        gate.main(["--ledger-only", "--paired-deploy-auto"])
+    assert exc_info.value.code == 2
