@@ -296,7 +296,10 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # instead of a generic T3 connection error.
         t3_for_probe = make_t3()
         try:
-            collection = t3_collection_name(collection, t3=t3_for_probe)
+            # for_write=True (nexus-35ok4): promote WRITES the T2 entry
+            # into T3 — a genuinely new corpus mints strictly (raises
+            # loud if local.embed_model is voyage-shaped with no key).
+            collection = t3_collection_name(collection, t3=t3_for_probe, for_write=True)
         finally:
             close = getattr(t3_for_probe, "close", None)
             if callable(close):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 import structlog
 
@@ -172,6 +173,31 @@ def canonical_embedding_model(content_type: str) -> str:
     )
 
 
+class LocalVoyageCredentialMissingError(RuntimeError):
+    """``local.embed_model`` is voyage-shaped but no ``voyage_api_key`` is
+    configured (nexus-35ok4 / GH #1461).
+
+    Raised at WRITE time from :func:`effective_embedding_model_for_writes`
+    (and, deliberately, ONLY from write-classified callers of
+    :func:`t3_collection_name` — see its ``for_write`` parameter) rather
+    than silently minting a collection name the engine will 422 on first
+    write, or — worse — silently falling back to bge and indexing with a
+    model the user did not ask for (the no-silent-fallbacks hot rule: a
+    local install choosing voyage and getting bge anyway is a correctness
+    bug, not a degraded-but-working state).
+
+    MUST NEVER surface from a read path (search / store list / store get
+    / store delete): looking at pre-existing data must not require a
+    credential the user may not have configured, or may have removed
+    since the data was written (code-review-expert CRITICAL, nexus-35ok4
+    round 2 — this exception used to fire unconditionally from
+    :func:`t3_collection_name`'s promoted-name construction, before any
+    ``collection_exists`` check, breaking reads against perfectly
+    readable pre-existing bge/minilm collections on any half-configured
+    voyage install).
+    """
+
+
 def effective_embedding_model_for_writes(content_type: str) -> str:
     """Return the embedding-model token to write into NEW collection
     names and per-chunk metadata for ``content_type``.
@@ -181,7 +207,31 @@ def effective_embedding_model_for_writes(content_type: str) -> str:
     invariant is preserved. Local mode returns the active local
     embedder's normalized token (``minilm-l6-v2-384`` or
     ``bge-base-en-v15-768``) so a fresh local-mode index produces
-    collection names that match the bytes inside.
+    collection names that match the bytes inside — UNLESS the user has
+    opted local mode into Voyage via ``local.embed_model=voyage-*``
+    (nexus-35ok4 / GH #1461), in which case this mirrors cloud mode
+    exactly: it delegates to :func:`canonical_embedding_model` so the
+    per-content-type voyage-code-3/voyage-context-3 split matches what
+    the engine's ``EmbedderRouter`` actually does once
+    ``NX_VOYAGE_API_KEY`` is plumbed (Main.java boots a PURE-voyage
+    router — no per-content-type choice on the engine side either, so
+    delegating here is not a guess, it is the same policy the engine
+    already applies).
+
+    ``local_embed_model_is_voyage()`` (:mod:`nexus.config`) is the SAME
+    predicate the storage-service supervisor uses to decide whether to
+    plumb ``NX_VOYAGE_API_KEY`` into the engine at spawn
+    (:mod:`nexus.daemon.storage_service_daemon`) — the two conditions
+    are structurally incapable of disagreeing now.
+
+    Raises :class:`LocalVoyageCredentialMissingError` when
+    ``local.embed_model`` is voyage-shaped but no ``voyage_api_key`` is
+    configured. THIS FUNCTION IS UNCONDITIONALLY WRITE-SHAPED — every
+    caller MUST already know it is about to mint/require a real,
+    about-to-be-written collection identity; it is not safe to call from
+    a read path. :func:`t3_collection_name` (the read/write-shared
+    resolver) does NOT call this function for read-classified requests —
+    see its ``for_write`` parameter and ``_promoted_model_token_for_read``.
 
     Read paths must continue to dispatch off the physical collection
     name via :func:`voyage_model_for_collection` /
@@ -190,6 +240,19 @@ def effective_embedding_model_for_writes(content_type: str) -> str:
     """
     from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (config)
     if is_local_mode():
+        from nexus.config import local_embed_model_is_voyage  # noqa: PLC0415 — circular-dep avoidance (config)
+        if local_embed_model_is_voyage():
+            from nexus.config import get_credential, local_embed_model_choice  # noqa: PLC0415 — circular-dep avoidance (config)
+            if not get_credential("voyage_api_key"):
+                raise LocalVoyageCredentialMissingError(
+                    f"local.embed_model={local_embed_model_choice()!r} requires a "
+                    "Voyage API key, but none is configured. Set one with "
+                    "`nx config set voyage_api_key <key>` (or export "
+                    "VOYAGE_API_KEY), then restart the local service so the "
+                    "engine re-reads it: `nx daemon service stop && nx daemon "
+                    "service start`."
+                )
+            return canonical_embedding_model(content_type)
         # nexus-xq8f9: in service-vector mode (the 6.0 default) the nexus-service
         # embeds server-side with bge-768 (RDR-160), independent of whether the
         # CLIENT has the [local]/fastembed extra. Naming the collection from the
@@ -205,7 +268,195 @@ def effective_embedding_model_for_writes(content_type: str) -> str:
     return canonical_embedding_model(content_type)
 
 
-def docs_leaf_fallback_collection_name(corpus: str) -> str:
+def _promoted_model_token_for_read(content_type: str) -> str:
+    """The read-path counterpart of :func:`effective_embedding_model_for_writes`.
+
+    Computing a CANDIDATE collection name to probe with
+    ``collection_exists()`` is not the same as committing to write under
+    it — a read must never need a Voyage credential just to construct a
+    string to check for existence (code-review-expert CRITICAL,
+    nexus-35ok4 round 2). When ``local.embed_model`` is voyage-shaped
+    this returns :func:`canonical_embedding_model` directly, BYPASSING
+    the credential gate entirely — deliberately, regardless of whether
+    ``voyage_api_key`` is currently configured, so a pre-existing
+    voyage-named collection (created back when the key WAS present) is
+    still a probeable candidate on a keyless read. When
+    ``local.embed_model`` is not voyage-shaped this delegates to
+    :func:`effective_embedding_model_for_writes`, which never raises on
+    that branch (unaffected by this nexus-35ok4 change).
+    """
+    from nexus.config import is_local_mode, local_embed_model_is_voyage  # noqa: PLC0415 — circular-dep avoidance (config)
+    if is_local_mode() and local_embed_model_is_voyage():
+        return canonical_embedding_model(content_type)
+    return effective_embedding_model_for_writes(content_type)
+
+
+def resolve_read_embedding_model(content_type: str) -> str:
+    """Public wrapper around :func:`_promoted_model_token_for_read` for
+    callers OUTSIDE this module that need a credential-free CANDIDATE
+    name to probe for existence — never to commit a write under.
+
+    nexus-o5x2c (nexus-35ok4 round 4): ``indexer.py``'s
+    ``_migration_source_candidates`` builds a list of names to CHECK
+    whether legacy/pre-migration data already lives there — a read/probe
+    shape, not a write mint — so it uses this, not
+    :func:`resolve_write_embedding_model`. Symmetric public counterpart
+    to that function: reads go through here, writes go through there,
+    and neither reaches into this module's underscore-prefixed internals
+    from another module.
+    """
+    return _promoted_model_token_for_read(content_type)
+
+
+def _resolve_promoted_model_token(content_type: str, *, for_write: bool) -> str:
+    """Dispatch to the write-shaped or read-shaped model resolver.
+
+    Single chokepoint inside :func:`t3_collection_name` so its two
+    internal call sites (the ambiguous-bare-prefix picker and the main
+    promoted-name builder) cannot independently drift on which resolver
+    they use. ``for_write=True`` is the ONLY path that can raise
+    :class:`LocalVoyageCredentialMissingError`.
+    """
+    if for_write:
+        return effective_embedding_model_for_writes(content_type)
+    return _promoted_model_token_for_read(content_type)
+
+
+def _probe_local_token_collections(
+    collection_exists: Callable[[str], bool],
+) -> str | None:
+    """Iterate :data:`LOCAL_EMBEDDING_MODELS` (bounded, 2 entries),
+    calling *collection_exists* with each token; return the first token
+    it accepts, or ``None`` if none match.
+
+    The ONE shared iteration primitive for the local-token grandfather
+    probe — used by both :func:`resolve_write_embedding_model` (below)
+    and :func:`t3_collection_name`'s own read-path probe, so the bounded
+    token set, iteration order, and per-candidate exception handling are
+    never independently re-implemented (nexus-o5x2c).
+    """
+    for local_token in sorted(LOCAL_EMBEDDING_MODELS):
+        try:
+            if collection_exists(local_token):
+                return local_token
+        except Exception as exc:  # noqa: BLE001 — best-effort probe; one broken candidate must not block the others or the caller's fallback
+            # nexus-o5x2c (code-review-expert Important): loud at debug
+            # level so an operator can tell "the probe substrate is
+            # unreachable" apart from "genuinely nothing to grandfather
+            # onto" when resolve_write_embedding_model raises next —
+            # both look identical from the caller's exception alone.
+            _log.debug(
+                "local_token_collection_probe_failed",
+                local_token=local_token,
+                error=str(exc),
+                message=(
+                    "grandfather probe raised for this candidate token; "
+                    "treated as no-match and the next candidate (or the "
+                    "strict resolver) was tried instead."
+                ),
+            )
+            continue
+    return None
+
+
+def resolve_write_embedding_model(
+    content_type: str,
+    *,
+    collection_exists: Callable[[str], bool] | None = None,
+) -> str:
+    """THE single chokepoint every write-path caller uses to resolve the
+    embedding-model token for a collection it is about to write into.
+
+    nexus-o5x2c (nexus-35ok4 round 4, substantive-critic SHIP-BLOCKER):
+    the grandfather-or-raise truth table (round 2/3: local mode +
+    local.embed_model voyage-shaped + no key configured + a pre-existing
+    bge/minilm collection already exists -> the write grandfathers onto
+    it instead of raising) previously lived ONLY inside
+    :func:`t3_collection_name`'s internals. Six other call sites build
+    their OWN collection name and called
+    :func:`effective_embedding_model_for_writes` DIRECTLY, with no
+    grandfathering at all — catalog registration
+    (``catalog/http_catalog_client.py:collection_for_repo``, the hot path
+    for ``nx index repo`` on an already-registered repo),
+    :func:`docs_leaf_fallback_collection_name` below (``nx index
+    md``/``pdf`` without ``--collection``), ``indexer.py``'s ad-hoc
+    fallbacks, ``repo_identity.py``'s synthesis fallback, and
+    ``commands/dt.py``'s DEVONthink import. Each of those crashed
+    (``LocalVoyageCredentialMissingError``, an uncaught ``RuntimeError``)
+    on a keyless voyage-configured local install instead of grandfathering
+    onto the caller's existing bge/minilm collection — live-repro'd for
+    both ``nx index repo`` and ``nx index md``.
+
+    This function is that single chokepoint. :func:`t3_collection_name`'s
+    OWN write path (``for_write=True``) calls THIS function too (not a
+    re-implementation — see its internals), so the grandfather-or-raise
+    DECISION exists in exactly one place; only the read-path probe (which
+    has a genuinely different truth-table row: reads always probe,
+    regardless of key state) has its own call, sharing the bounded
+    iteration primitive :func:`_probe_local_token_collections` rather
+    than the decision logic.
+
+    ``collection_exists`` lets EACH caller supply its OWN way to answer
+    "does a collection already exist for THIS content_type+owner under
+    local model token X" — called with each of
+    :data:`LOCAL_EMBEDDING_MODELS` in turn (T3-backed callers close over
+    ``t3.collection_exists`` against their own built name; the
+    catalog-tier caller closes over its own tuple-registration lookup,
+    since it has no T3 vector client at hand). ``None`` means no probe is
+    available — matches :func:`t3_collection_name`'s historical
+    ``t3=None`` "stay pure, always strict" contract.
+
+    Truth table (mode = local, local.embed_model voyage-shaped; every
+    other mode/config is unaffected and delegates straight through to
+    :func:`effective_embedding_model_for_writes`, unchanged — see
+    docs/cli-reference.md "Local mode with Voyage" for the full table,
+    including the read-path row this write-only function does not own):
+
+    ==========================  ==============================================
+    key / probe state           Result
+    ==========================  ==============================================
+    key ABSENT, probe finds a   that local token (grandfather onto the
+    local-token collection      existing collection)
+    key ABSENT, nothing found   raises :class:`LocalVoyageCredentialMissingError`
+    / no probe supplied         (genuine new mint, misconfigured)
+    key PRESENT (any probe      the canonical voyage token (new sibling — the
+    state)                      engine is voyage-only once restarted, so
+                                 grandfathering onto bge would silently strand
+                                 the write with no restart-remedy sentinel;
+                                 see nexus-ddmfg)
+    ==========================  ==============================================
+    """
+    from nexus.config import get_credential, is_local_mode, local_embed_model_is_voyage  # noqa: PLC0415 — circular-dep avoidance (config)
+    if is_local_mode() and local_embed_model_is_voyage():
+        key_present = bool(get_credential("voyage_api_key"))
+        if not key_present and collection_exists is not None:
+            found = _probe_local_token_collections(collection_exists)
+            if found is not None:
+                # nexus-o5x2c (code-review-expert Important): the ONE
+                # place every grandfather actually taken is logged,
+                # regardless of which of the 7 call sites triggered it —
+                # names the content_type and the local token grandfathered
+                # onto so an operator sees WHY a write landed in an
+                # existing bge/minilm collection instead of minting voyage.
+                _log.debug(
+                    "resolve_write_embedding_model_grandfathered",
+                    content_type=content_type,
+                    grandfathered_token=found,
+                    message=(
+                        "local.embed_model is voyage-shaped with no "
+                        "voyage_api_key configured; a pre-existing local "
+                        "collection was found for this content_type, so "
+                        "the write is grandfathered onto its model "
+                        "instead of raising."
+                    ),
+                )
+                return found
+    return effective_embedding_model_for_writes(content_type)
+
+
+def docs_leaf_fallback_collection_name(
+    corpus: str, *, collection_exists: Callable[[str], bool] | None = None,
+) -> str:
     """Return the conformant ``docs__<corpus>__<model>__v1`` collection
     name for the RDR-103 Phase 5 leaf fallback: an ad-hoc/dry-run/
     diagnostic call site that has no ``collection_name``/``--collection``
@@ -229,9 +480,30 @@ def docs_leaf_fallback_collection_name(corpus: str) -> str:
 
     The owner segment is the corpus tag with underscores rewritten to
     hyphens (``_`` is the conformant grammar's segment separator).
+
+    ``collection_exists`` (nexus-o5x2c, nexus-35ok4 round 4
+    SHIP-BLOCKER): optional grandfather probe forwarded to
+    :func:`resolve_write_embedding_model`. ``None`` (the default)
+    preserves the historical strict/pure behavior — REQUIRED for the
+    ``_index_run_refused_message`` diagnostic comparison above, which
+    must compute the strict "expected" name regardless of what already
+    exists, or a real mismatch would be masked by grandfathering. The
+    two production write-target callers (``doc_indexer.py``'s
+    ``collection_name is None`` fallbacks) pass a real probe so ``nx
+    index md``/``pdf`` without ``--collection`` grandfathers onto a
+    pre-existing bge/minilm collection exactly like ``nx store put``,
+    instead of crashing on a keyless voyage-configured local install
+    (the live-repro'd bug this parameter fixes).
     """
     owner_segment = corpus.replace("_", "-")
-    return f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
+    model = resolve_write_embedding_model(
+        "docs",
+        collection_exists=(
+            None if collection_exists is None
+            else lambda token: collection_exists(f"docs__{owner_segment}__{token}__v1")
+        ),
+    )
+    return f"docs__{owner_segment}__{model}__v1"
 
 
 def embedding_model_for_collection_name(collection_name: str) -> str | None:
@@ -317,7 +589,9 @@ def embedding_model_for_collection(collection_name: str) -> str:
 index_model_for_collection = embedding_model_for_collection
 
 
-def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
+def t3_collection_name(
+    user_arg: str, *, t3: object | None = None, for_write: bool = False,
+) -> str:
     """Resolve a --collection argument to a T3 collection name.
 
     Inputs land in one of three shapes:
@@ -345,6 +619,28 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
     policy ("pre-existing legacy collections remain readable") and
     extends it to operator-typed write inputs so a put + list
     round-trip cannot land in two different collections.
+
+    ``for_write`` (nexus-35ok4 / GH #1461 round 2, code-review-expert
+    CRITICAL): callers that are about to WRITE new content under the
+    returned name — ``nx store put``, the MCP ``store_put`` tool, ``nx
+    memory promote``, the indexers — MUST pass ``for_write=True``. All
+    other callers (search/query corpus resolution, ``store_get``,
+    ``store_list``, ``store_delete``, ``store_get_many``, and their CLI
+    equivalents) leave it at the default ``False``.
+
+    This flag governs ONLY whether :class:`LocalVoyageCredentialMissingError`
+    is allowed to propagate. With ``for_write=False`` the resolver NEVER
+    raises: candidate names are built via the read-shaped, credential-free
+    resolver (:func:`_resolve_promoted_model_token` with
+    ``for_write=False``), so LOOKING AT pre-existing data never needs a
+    Voyage key — a keyless local install with ``local.embed_model``
+    voyage-shaped still finds and reads a pre-existing bge/minilm-named
+    collection for the same corpus (probed as an extra candidate below).
+    With ``for_write=True``, if no pre-existing collection is found to
+    grandfather onto (this IS a brand-new mint), the identity is
+    recomputed strictly via :func:`effective_embedding_model_for_writes`,
+    which raises loud when ``local.embed_model`` is voyage-shaped and no
+    key is configured — never silently falls back to bge.
     """
     if is_conformant_collection_name(user_arg):
         return user_arg
@@ -398,9 +694,13 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
         # the operator sees the choice and can pass a more specific
         # name on subsequent calls.
         if len(matches) > 1 and user_arg != "knowledge":
+            # nexus-35ok4: this is picking among ALREADY-EXISTING live
+            # matches, never minting anything new — read-shaped
+            # resolution regardless of the caller's for_write, so this
+            # picker can never raise on a misconfigured voyage key.
             preferred_4seg = (
                 f"{user_arg}__{user_arg}__"
-                f"{effective_embedding_model_for_writes(user_arg)}__v1"
+                f"{_resolve_promoted_model_token(user_arg, for_write=False)}__v1"
             )
             preferred_2seg = f"{user_arg}__{user_arg}"
             picked: str | None = None
@@ -433,9 +733,26 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
         return user_arg
 
     owner_segment = rest.replace("_", "-")
-    promoted = f"{ct}__{owner_segment}__{effective_embedding_model_for_writes(ct)}__v1"
+    # nexus-35ok4 CRITICAL fix (code-review-expert round 2): build the
+    # CANDIDATE name for existence-probing via the read-shaped resolver,
+    # which never requires a Voyage credential — computing a string to
+    # check ``collection_exists()`` against is not the same as committing
+    # to write under it. The strict, potentially-raising resolver
+    # (:func:`effective_embedding_model_for_writes`) is only invoked
+    # below, and only when this IS a write with nothing pre-existing to
+    # grandfather onto.
+    promoted = f"{ct}__{owner_segment}__{_resolve_promoted_model_token(ct, for_write=False)}__v1"
 
-    if t3 is None or user_arg == promoted:
+    if t3 is None:
+        if for_write:
+            # Pure write-shaped call with no t3 to probe against (e.g.
+            # the indexers) — no legacy collection could possibly be
+            # grandfathered onto without a live probe, so the identity
+            # must be the STRICT one: raises loud if local.embed_model
+            # is voyage-shaped with no key configured.
+            return f"{ct}__{owner_segment}__{effective_embedding_model_for_writes(ct)}__v1"
+        return promoted
+    if user_arg == promoted:
         return promoted
     try:
         if not t3.collection_exists(promoted):  # type: ignore[attr-defined]
@@ -479,12 +796,78 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
                 and t3.collection_exists(legacy_two_segment)  # type: ignore[attr-defined]
             ):
                 return legacy_two_segment
+            # nexus-35ok4 (GH #1461 round 2, gated round 3, delegated
+            # round 4 / nexus-o5x2c): local.embed_model may have MOVED to
+            # voyage-* since this corpus was last indexed under a local
+            # bge/minilm token — probe the other known local tokens too,
+            # so a read finds a pre-existing local-model collection
+            # regardless of what local.embed_model CURRENTLY says.
+            # Bounded (LOCAL_EMBEDDING_MODELS is a 2-entry frozenset) and
+            # scoped tightly to the voyage-switch scenario (never fires
+            # for a plain bge<->minilm install, which keeps its own
+            # deliberate `nx init` migration UX unchanged).
+            #
+            # TRUTH TABLE (mode: local + local.embed_model voyage-shaped;
+            # all other modes/configs never reach this line — full table
+            # incl. the read-path row shared with docs/cli-reference.md
+            # "Local mode with Voyage"):
+            #
+            #   for_write=False (read), key ABSENT or PRESENT  -> PROBE.
+            #       Reads must always find whatever exists — a credential
+            #       is never required just to look at data. (This is a
+            #       genuinely different row from resolve_write_embedding_
+            #       model's table below — reads probe unconditionally,
+            #       writes only when keyless — so this branch keeps its
+            #       own call rather than delegating.)
+            #   for_write=True (write)  -> delegates to
+            #       resolve_write_embedding_model() (nexus-o5x2c), THE
+            #       single chokepoint every other write-path caller
+            #       (catalog registration, ad-hoc corpus fallbacks, dt
+            #       import, ...) also goes through — see its docstring
+            #       for the full key-present/absent truth table. Kept
+            #       here, not just re-implemented, so this function's
+            #       write branch and every external caller are
+            #       PROVABLY the same decision, not two copies that
+            #       happen to agree today.
+            def _bge_candidate_exists(local_token: str) -> bool:
+                candidate = f"{ct}__{owner_segment}__{local_token}__v1"
+                return candidate != promoted and t3.collection_exists(candidate)  # type: ignore[attr-defined]
+
+            from nexus.config import is_local_mode, local_embed_model_is_voyage  # noqa: PLC0415 — circular-dep avoidance (config)
+            if is_local_mode() and local_embed_model_is_voyage():
+                if not for_write:
+                    found_token = _probe_local_token_collections(_bge_candidate_exists)
+                    if found_token is not None:
+                        return f"{ct}__{owner_segment}__{found_token}__v1"
+                else:
+                    resolved_token = resolve_write_embedding_model(
+                        ct, collection_exists=_bge_candidate_exists,
+                    )
+                    if resolved_token in LOCAL_EMBEDDING_MODELS:
+                        return f"{ct}__{owner_segment}__{resolved_token}__v1"
+                    # Not a local token: either the key IS configured
+                    # (resolve_write_embedding_model returned the voyage
+                    # token — identical to `promoted`, already computed
+                    # above, so nothing more to do here) or nothing to
+                    # grandfather onto (it re-raised
+                    # LocalVoyageCredentialMissingError from its own
+                    # strict fallback — caught by this function's
+                    # best-effort except-block below and re-raised
+                    # cleanly by the for_write recompute at the bottom
+                    # of this function, so the caller sees ONE raise,
+                    # not a probe-time one).
     except Exception:  # noqa: BLE001 — best-effort collection_exists probe; falls through to auto-promoted shape on any backend failure
         # collection_exists probe is best-effort. On failure (cloud
         # quota error, transient network) fall through to the
         # auto-promoted shape; legacy reads still work via T3's
         # existing-collection bypass on read paths.
         pass
+    if for_write:
+        # Nothing pre-existing to grandfather onto: this IS a brand-new
+        # mint. Recompute strictly — raises loud if local.embed_model is
+        # voyage-shaped with no key configured, never silently falls
+        # back to bge.
+        return f"{ct}__{owner_segment}__{effective_embedding_model_for_writes(ct)}__v1"
     return promoted
 
 

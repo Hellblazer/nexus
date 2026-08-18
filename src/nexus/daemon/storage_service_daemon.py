@@ -744,9 +744,17 @@ class StorageServiceSupervisor:
         # recorded (pre-init / legacy voyage-local installs keep today's
         # behavior). Explicit NX_VOYAGE_API_KEY still always passes through.
         if not env.get("NX_VOYAGE_API_KEY"):
-            from nexus.config import get_credential, local_embed_model_choice  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+            from nexus.config import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+                get_credential,
+                local_embed_model_choice,
+                local_embed_model_is_voyage,
+            )
             embed_choice = local_embed_model_choice() or ""
-            if embed_choice and not embed_choice.lower().startswith("voyage"):
+            # nexus-35ok4: this condition and corpus.effective_embedding_model_for_writes'
+            # local-mode branch both dispatch off local_embed_model_is_voyage() — the
+            # single shared predicate — so "plumb the key into the engine" and "mint
+            # voyage-* collection names" can never disagree again.
+            if embed_choice and not local_embed_model_is_voyage():
                 _log.info(
                     "storage_service_voyage_key_not_plumbed",
                     configured_embed_model=embed_choice,

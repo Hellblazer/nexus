@@ -89,7 +89,10 @@ def put_cmd(
     # nexus-hmxi: pass t3 so the resolver grandfathers an existing
     # legacy 2-segment collection ahead of the auto-promoted
     # conformant shape, keeping store/list/search aligned.
-    col_name = t3_collection_name(collection, t3=db)
+    # for_write=True (nexus-35ok4): this command WRITES new content —
+    # a genuinely new corpus mints strictly (raises loud if
+    # local.embed_model is voyage-shaped with no key configured).
+    col_name = t3_collection_name(collection, t3=db, for_write=True)
 
     # RDR-101 Phase 3 PR δ Stage B.4: pre-register the catalog entry
     # so the T3 chunk can carry the resulting tumbler as ``doc_id``

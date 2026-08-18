@@ -2525,6 +2525,39 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             model_version=new_version,
         )
 
+    def _tuple_registered(
+        self, content_type: str, owner: "Tumbler | str", embedding_model: str,
+    ) -> bool:
+        """Return True if a collection is ALREADY REGISTERED in the
+        catalog for ``(content_type, owner, embedding_model)``.
+
+        nexus-o5x2c (nexus-35ok4 round 4 SHIP-BLOCKER): this HTTP
+        catalog client has no T3 vector client to run a
+        ``collection_exists()`` probe against — it's the catalog tier,
+        not the vector tier. This is its OWN substrate-appropriate
+        existence probe: the same ``/collections/for_tuple`` lookup
+        :meth:`collection_for` performs internally to compute
+        ``existing_version``, factored out here as a plain boolean so
+        :meth:`collection_for_repo`'s grandfather probe
+        (:func:`nexus.corpus.resolve_write_embedding_model`) can reuse
+        it without a second, differently-shaped round trip.
+        """
+        owner_id = owner_segment_for_tumbler(owner)
+        if not owner_id:
+            return False
+        try:
+            result = self._get(
+                "/collections/for_tuple",
+                content_type=content_type,
+                owner_id=owner_id,
+                embedding_model=embedding_model,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return False
+            raise
+        return bool(result and result.get("name"))
+
     def collection_for_repo(
         self,
         repo: Path,
@@ -2535,7 +2568,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # Mirrors canonical _DocumentOps.collection_for_repo:
         # look up the owner by repo_hash, then resolve the embedding model.
         from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — circular-dep avoidance
-        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — circular-dep avoidance
+        from nexus.corpus import resolve_write_embedding_model  # noqa: PLC0415 — circular-dep avoidance
 
         _, repo_hash = _repo_identity(repo)
         owner = self.owner_for_repo(repo_hash)
@@ -2544,7 +2577,18 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 f"collection_for_repo: no owner registered for repo_hash {repo_hash!r} "
                 f"(repo {repo!s}). Call ensure_owner_for_repo() first."
             )
-        embedding_model = effective_embedding_model_for_writes(content_type)
+        # nexus-o5x2c: THE chokepoint (see resolve_write_embedding_model's
+        # docstring for the full truth table) — grandfathers onto a
+        # pre-existing bge/minilm registration when local.embed_model is
+        # voyage-shaped and no key is configured, instead of crashing.
+        # This is the hot path for `nx index repo` on an ALREADY
+        # catalog-registered repo (live-repro'd bug).
+        embedding_model = resolve_write_embedding_model(
+            content_type,
+            collection_exists=lambda token: self._tuple_registered(
+                content_type, owner, token,
+            ),
+        )
         return self.collection_for(content_type, owner, embedding_model, bump=bump)
 
     def supersede_collection(

@@ -47,6 +47,18 @@ class _RecordingT3:
         self.requested_names.append(name)
         return self._col
 
+    def collection_exists(self, name: str) -> bool:
+        # nexus-o5x2c: _index_document now resolves its write client
+        # BEFORE the leaf-fallback derivation and passes
+        # db.collection_exists as the grandfather probe — this stub
+        # reports nothing pre-existing, matching a genuinely fresh
+        # recording double (the probe is exercised directly in
+        # tests/test_rdr_109_phase2_dispatch.py; this file only needs
+        # the attribute to exist so real production wiring doesn't
+        # AttributeError on a test double that's missing a method every
+        # real T3 client has).
+        return False
+
 
 def test_direct_helper_rewrites_underscores_to_hyphens() -> None:
     """Baseline: the shared helper itself, for the corpus shape this file

@@ -215,7 +215,14 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # with the module it tested (nexus.db.voyage_ef) — client-side Voyage
 # embedding is retired (Hal determination 2026-07-28: "we do no embedding
 # on the client"). SHRINK, downward-only.
-_MODE_LINT_EXCLUDE_FILES_CEILING = 58
+# 58 -> 59 (nexus-35ok4 / nexus-o5x2c, 2026-08-18): +1,
+# test_o5x2c_write_chokepoint_repros.py — reason "mode-self-test". Every
+# test in the file pins LOCAL mode explicitly and asserts the local-
+# install-can-use-Voyage write/read chokepoint's keyless-grandfather /
+# keyed-mint truth table; cloud_mode (forcing is_local_mode() False) is
+# the wrong declaration for a file whose entire subject is what happens
+# when it's True. Rationale in conftest.py beside the entry.
+_MODE_LINT_EXCLUDE_FILES_CEILING = 59
 # 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
 # — cloud_mode's fake credentials broke them against the live Voyage API
 # (their mode declaration is the requires-key gating; see conftest entry).
@@ -321,7 +328,17 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 58
 # commits ran targeted path-scoped batteries, and this census is only
 # non-vacuous on a whole-session collection. Rationale also recorded beside
 # the entries in conftest.py.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 45
+# 45 -> 47 (nexus-35ok4 / nexus-o5x2c, 2026-08-18): +2, both new
+# TestSpawnServiceVoyageKeyPlumbing tests in
+# tests/daemon/test_storage_service_daemon.py (test_shared_predicate_
+# true_drives_both_sites_to_voyage, test_shared_predicate_false_drives_
+# both_sites_to_local) — reason "mode-self-test", the same class as
+# test_local_mode.py: both pin LOCAL mode explicitly to prove the shared
+# voyage predicate drives the engine-key-plumbing decision and the
+# client-side naming decision identically; Popen is mocked in both, no
+# real embedder or cloud call is made. Rationale in conftest.py beside
+# the entries.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 47
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:
