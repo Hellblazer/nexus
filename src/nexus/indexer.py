@@ -3796,7 +3796,7 @@ def _run_index(
                         if md_file.stat().st_size == 0:
                             skipped_unchunkable.append((md_file, "zero_byte"))
                             _log.debug(
-                                "skipped zero-byte RDR file (unchunkable)",
+                                "unchunkable_zero_byte_rdr_skipped",
                                 path=str(md_file),
                             )
                             continue
@@ -3881,7 +3881,7 @@ def _run_index(
         # it never reaches any of the code/prose/pdf lists.
         if file_size == 0:
             skipped_unchunkable.append((path, "zero_byte"))
-            _log.debug("skipped zero-byte file (unchunkable)", path=str(path))
+            _log.debug("unchunkable_zero_byte_skipped", path=str(path))
             continue
 
         score = frecency_map.get(path, 0.0)
@@ -3902,7 +3902,7 @@ def _run_index(
                 if looks_like_binary_content(path):
                     skipped_unchunkable.append((path, "binary_content"))
                     _log.debug(
-                        "skipped binary-content file misclassified as prose (unchunkable)",
+                        "unchunkable_binary_content_skipped",
                         path=str(path),
                         ext=path.suffix.lower(),
                     )
