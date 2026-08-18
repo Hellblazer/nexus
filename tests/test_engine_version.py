@@ -340,7 +340,18 @@ class TestRequiredEngineVersion:
         # stale native-smoke probe, 78 by the diag-grants strip, both fixed
         # and gated at 79). The same release ships the catalog-030 client
         # half (3b2901141, nexus-o8dil.33) per the wire-contract ledger.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 79)
+        #
+        # BUMPED to (0,1,80) 2026-08-18: the RDR-156 P5 co-release
+        # (conexus 7.10.0, paired choreography) — v0.1.80 cut from
+        # 25de2c688 carries vectors-007 (nexus.hybrid_search_384/768/1024,
+        # additive-only SQL functions; no client caller yet, no wire
+        # coupling). Fully gated BEFORE this bump: full engine suite green
+        # on the byte-identical service/ tree, --shakeout CANDIDATE
+        # SHAKEOUT PASSED, --candidate-migration PASSED (delta=1,
+        # invariants EXACT), published-client write gate PASSED (7.9.0 x
+        # candidate), post-publish --acquire PASSED. Deploy relay arms at
+        # the v7.10.0 client-tag push.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 80)
 
 
 class TestParseEngineVersion:
