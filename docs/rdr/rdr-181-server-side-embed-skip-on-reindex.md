@@ -540,6 +540,29 @@ resource.
 - `src/nexus/db/http_vector_client.py:589-1135`
 - RDR-108 (content-addressed chunks), RDR-155 (pgvector), RDR-160 (embedder)
 
+## Post-Closure Residue (registered 2026-08-18, nexus-hd0gb adjudication)
+
+The 2026-08-18 RDR true-state audit found two open beads contesting this
+RDR's closure. Adjudicated: the closure STANDS — the mechanism shipped,
+is exercised, and neither bead demonstrates it not working — and both
+contests are registered here as known residue rather than silently
+orbiting the closed record:
+
+- **nexus-29kr0 (P1, open)** — the skip has never been PROVEN to fire on
+  the re-index path specifically (the Steve-report hours-on-reindex prime
+  suspect). This is an unverified suspicion plus a missing warm-reindex
+  regression gate, not evidence of a defect; until that gate exists, the
+  "hours → minutes for unchanged content" outcome claimed by this RDR is
+  implemented-but-unmeasured on that path.
+- **nexus-bmrb9 (P2, open)** — the onnx-local `per_collection_chunk_cap=16`
+  routes files >16 chunks off the combined-write path onto the legacy
+  two-call shape, silently narrowing the atomicity this RDR's write path
+  assumed. A documented scope narrowing, not a correctness break.
+
+If nexus-29kr0's gate lands RED (the skip genuinely does not fire on
+re-index), that is grounds to REOPEN this RDR — the core claim would be
+unimplemented on its titular path, not residue.
+
 ## Revision History
 
 - 2026-07-05: Created (draft) from the duoak.11 embed-reduction research.
