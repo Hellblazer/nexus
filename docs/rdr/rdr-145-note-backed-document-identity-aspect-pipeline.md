@@ -3,6 +3,7 @@ title: "Note-Backed Document Identity in the Aspect Pipeline: Stop Unmappable As
 id: RDR-145
 type: Architecture
 status: closed
+postmortem_waiver: "Administrative closure by the 2026-08-18 true-state audit: gate PASSED 2026-06-27, Gap-1 closed via RDR-172, Gap-3 via nexus-kmbys, Gap-2 shipped in 85249b964 (PR #1338), zero open beads. Status flip only; closure evidence in T2 nexus_rdr/145 + the audit record."
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self

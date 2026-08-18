@@ -3,6 +3,7 @@ title: "Client-Persistence Closure: PG in Every Mode — Retire Every SQLite Sub
 id: RDR-186
 type: Architecture
 status: closed
+postmortem_waiver: "Administrative closure by the 2026-08-18 true-state audit: retirement shipped (8ca47f664, 02bf9891b, 474fe6ba2), gate PASSED 2026-07-18. Residue nexus-146xx.22 registered in this file. Status flip only; evidence in T2 rdr_process/audit-nexus-2026-08-18."
 accepted_date: 2026-07-18
 closed_date: 2026-07-30
 close_reason: "Retirement shipped: commits 02bf9891b/474fe6ba2 (2026-07-18), 8ca47f664 (2026-07-30). Gate PASSED 2026-07-18 (delta re-gate of the P0 inventory-adjudication amendment nexus-146xx.1; 0 Critical, both re-review Significants fixed pre-commit; Hal ratified all three P0 forks same day)."

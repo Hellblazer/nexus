@@ -112,7 +112,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-087](rdr-087-collection-observability-surfaces.md) | Collection Observability and Curation Surfaces | Feature | Closed | 2026-04-17 |
 | [RDR-088](rdr-088-agenticscholar-operator-completion.md) | AgenticScholar Operator-Set Completion | Feature | Closed (Phases 1+2 implemented; Phase 3 closed by spike) | 2026-04-17 |
 | [RDR-089](rdr-089-structured-aspect-extraction-at-ingest.md) | Structured Aspect Extraction at Ingest | Feature | Closed (implemented) | 2026-04-25 |
-| [RDR-090](rdr-090-realistic-agenticscholar-benchmark.md) | Realistic AgenticScholar Benchmark | Feature | Accepted | 2026-04-27 |
+| [RDR-090](rdr-090-realistic-agenticscholar-benchmark.md) | Realistic AgenticScholar Benchmark | Feature | Closed | 2026-04-27 |
 | [RDR-091](rdr-091-scope-aware-plan-matching.md) | Scope-Aware Plan Matching (nexus-zs1d Phase 2) | Feature | Closed (implemented) | 2026-04-23 |
 | [RDR-092](rdr-092-plan-match-text-from-dimensional-identity.md) | Plan Match-Text from Dimensional Identity | Feature | Closed (implemented) | 2026-04-23 |
 | [RDR-093](rdr-093-groupby-aggregate-operators.md) | GroupBy and Aggregate Operators | Feature | Closed (implemented) | 2026-04-24 |
@@ -142,7 +142,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-121](rdr-121-hook-enforced-tool-routing.md) | Hook-Enforced Tool Routing: PreToolUse as Backstop for Soft Guidance | Architecture | Closed 2026-05-20 (shipped in 4.33.0) | 2026-05-19 |
 | [RDR-125](rdr-125-routing-hook-plugin-ownership.md) | Routing-Hook Plugin Ownership: Each Plugin Ships Its Own Rules | Architecture | Closed 2026-05-21 (shipped in 4.33.1) | 2026-05-20 |
 | [RDR-126](rdr-126-claude-desktop-deployment-unified-chat-cowork.md) | Claude Desktop Deployment: Unified Chat and Cowork Surface | Architecture | Closed | 2026-05-23 |
-| [RDR-127](rdr-127-substrate-decoupled-surface-rendering.md) | Substrate-Decoupled Surface Rendering | Architecture | Draft | 2026-05-24 |
+| [RDR-127](rdr-127-substrate-decoupled-surface-rendering.md) | Substrate-Decoupled Surface Rendering | Architecture | Accepted | 2026-05-24 |
 | [RDR-128](rdr-128-t2-single-writer-enforcement.md) | T2 Single-Writer Enforcement: One Owner for memory.db, or an Enforced Lock Discipline | Architecture | Closed 2026-05-25 (implemented, shipped 5.1.0) | 2026-05-25 |
 | [RDR-129](rdr-129-t2-daemon-serving-path-cross-store-contention.md) | T2 Daemon Write-Path Hardening: Guaranteed-Single-Daemon Enforcement and Contention-Free Internal Serialization | Architecture | Closed | 2026-05-25 |
 | [RDR-130](rdr-130-command-preambles-via-nx-cli.md) | Command Preambles via the nx CLI: Thin Commands, Tested Logic, No Inlined Bash | Architecture | Accepted 2026-05-26 | 2026-05-26 |
@@ -160,9 +160,9 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-142](rdr-142-migration-completeness-vs-version-row.md) | Migration Completeness vs the Version Row: apply_pending Advances `_nexus_version` While Deferred/Gated Steps Remain | Architecture | Closed | 2026-06-01 |
 | [RDR-143](rdr-143-plugin-cli-version-lockstep.md) | Plugin↔CLI Version Lockstep: a SessionStart Version-Marker Hook That Keeps the nx CLI in Sync With the conexus Plugin | Architecture | Closed | 2026-06-01 |
 | [RDR-144](rdr-144-guided-onboarding-embedder-provisioning.md) | Guided Install / Onboarding & Local-Embedder Provisioning (nx init): Make the 384-vs-768 Embedder an Explicit Guided Choice | Architecture | Closed | 2026-06-01 |
-| [RDR-145](rdr-145-note-backed-document-identity-aspect-pipeline.md) | Note-Backed Document Identity in the Aspect Pipeline: Stop Unmappable Aspect Orphans from MCP-Stored Knowledge Notes | Architecture | Accepted | 2026-06-27 |
+| [RDR-145](rdr-145-note-backed-document-identity-aspect-pipeline.md) | Note-Backed Document Identity in the Aspect Pipeline: Stop Unmappable Aspect Orphans from MCP-Stored Knowledge Notes | Architecture | Closed | 2026-06-27 |
 | [RDR-146](rdr-146-catalog-store-behind-daemon.md) | Catalog Store Behind the Existing T2 Daemon: Close the catalog.db Starvation by Routing Catalog Writes Through the Daemon That Already Serves It | Architecture | Closed | 2026-06-03 |
-| [RDR-147](rdr-147-multihop-entity-resolution-retrieval.md) | Multi-Hop Entity-Resolution Retrieval: Ingest-Time Entity-Linker + Traverse Resolution Hop, Gated by a Query-Time Type-Mismatch Trigger | Architecture | Accepted | 2026-06-03 |
+| [RDR-147](rdr-147-multihop-entity-resolution-retrieval.md) | Multi-Hop Entity-Resolution Retrieval: Ingest-Time Entity-Linker + Traverse Resolution Hop, Gated by a Query-Time Type-Mismatch Trigger | Architecture | Deferred | 2026-06-03 |
 | [RDR-148](rdr-148-mineru-endpoint-discovery-and-subprocess-resilience.md) | MinerU Endpoint Discovery + Subprocess-Fallback Resilience: Stop Formula-PDF Extraction from Silently Degrading onto a Broken In-Process Path | Bug Fix | Closed | 2026-06-03 |
 | [RDR-149](rdr-149-unified-service-registry-substrate.md) | Unified Leased Service-Registry Substrate for T1/T2/T3 Daemon Lifecycle: End the Recurring Discovery / Single-Writer / Self-Heal Bug Class | Architecture | Closed | 2026-06-04 |
 | [RDR-150](rdr-150-qwen-mcp-figure-augmentation.md) | Qwen-MCP Figure Augmentation Hook — Single-Path VL via MCP-Client Integration | Architecture | Draft | 2026-06-03 |
@@ -201,8 +201,8 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-183](rdr-183-storage-service-supervisor-ownership-topology.md) | Storage-Service Supervisor Ownership Topology: Eliminate Session-Teardown Churn and launchd/Autostart Races | Architecture | Closed | 2026-07-15 |
 | [RDR-184](rdr-184-orchestration-protocol-hardening.md) | Multi-Agent Orchestration Protocol Hardening: Completion Reporting, Directive-Race Immunity, and Singleton-Resource Discipline | Process | Closed | 2026-07-15 |
 | [RDR-185](rdr-185-single-ladder-convergent-upgrade.md) | Single-Ladder Convergent Upgrade: One Version, Auto-Applied Data Migrations, Delete the Upgrade Ceremony | Architecture | Closed | 2026-07-16 |
-| [RDR-186](rdr-186-client-persistence-closure-no-sqlite.md) | Client-Persistence Closure: PG in Every Mode — Retire Every SQLite Substrate Outside RDR-158's Seven-Domain Scope, and End Self-Granted Exemptions | Architecture | Accepted | 2026-07-18 |
-| [RDR-187](rdr-187-retire-chash-index-router-table.md) | Retire chash_index: the Chunks Tables Are the Chash-Keyed Store — Drop the Router Remnant of the Split-Store Architecture | Architecture | Accepted | 2026-07-20 |
+| [RDR-186](rdr-186-client-persistence-closure-no-sqlite.md) | Client-Persistence Closure: PG in Every Mode — Retire Every SQLite Substrate Outside RDR-158's Seven-Domain Scope, and End Self-Granted Exemptions | Architecture | Closed | 2026-07-18 |
+| [RDR-187](rdr-187-retire-chash-index-router-table.md) | Retire chash_index: the Chunks Tables Are the Chash-Keyed Store — Drop the Router Remnant of the Split-Store Architecture | Architecture | Closed | 2026-07-20 |
 | [RDR-188](rdr-188-server-side-rerank.md) | Server-Side Reranking: Retire the Last Client-Side Voyage Consumer So the Client Carries Zero Voyage Credentials | Architecture | Closed | 2026-07-22 |
 | [RDR-189](rdr-189-target-definition-layer.md) | Target-Definition Layer for NL-to-X Querying: Answer-Object Families, Target Contracts, and Witness Obligations over the Existing Plan/Operator Realization Layer | Architecture | Draft | 2026-07-25 |
 | [RDR-190](rdr-190-plan-ir-loop-collect-primitives.md) | Plan-IR Fan-Out and Fold: Add `loop` and `collect` Step Primitives So Plans Can Process More Than 100 Items Without Truncating or Round-Tripping Through the Agent | Architecture | Draft | 2026-07-26 |

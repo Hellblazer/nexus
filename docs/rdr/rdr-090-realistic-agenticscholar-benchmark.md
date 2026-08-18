@@ -3,6 +3,7 @@ title: "RDR-090: Realistic AgenticScholar Benchmark"
 id: RDR-090
 type: Feature
 status: closed
+postmortem_waiver: "Administrative closure by the 2026-08-18 true-state audit, not a fresh implementation close: Phase 1 shipped 2026-04 (6 closed beads + spike commit 12b5285be), phases 2-3 deferred at P4 with epic nexus-ic83 DEFERRED since 2026-05-17. No new outcome to post-mortem; evidence in T2 rdr_process/audit-nexus-2026-08-18."
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
