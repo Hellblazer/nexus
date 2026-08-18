@@ -1716,6 +1716,7 @@ def index_repository(
     on_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
     on_phase: Callable[[str], None] | None = None,
+    on_flush: "Callable[[int, int, str, float, str | None], None] | None" = None,
     on_stage_timers: Callable[[Path, "StageTimers"], None] | None = None,
     hooks: "HookRegistry | None" = None,
 ) -> dict[str, int]:
@@ -1740,6 +1741,13 @@ def index_repository(
     *on_locked* controls behaviour when another process holds the repo lock:
     ``'wait'`` (default) blocks until the lock is released; ``'skip'`` returns
     ``{}`` immediately without indexing.  Frecency-only runs bypass the lock.
+
+    *on_flush* (nexus-rhwg5): fires once per settled MID-LOOP chunk-batch
+    flush -- ``(flush_num, chunks, collection, elapsed_s, error)`` --
+    threaded straight to ``ChunkBatcher(on_flush=...)``. Never fires for
+    the end-of-run drain (that has its own ``on_phase``-driven progress
+    via ``_drain_batcher_with_markers``) or for a bisect attempt (only
+    the resulting settled halves). ``None`` is a complete no-op.
 
     Returns a stats dict (empty for frecency_only runs) with keys:
     ``rdr_indexed``, ``rdr_current``, ``rdr_failed``, and ``files_changed``
@@ -1784,7 +1792,7 @@ def index_repository(
             _run_index_frecency_only(repo, registry)
             stats: dict[str, int] = {}
         else:
-            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, since_head=since_head, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_stage_timers=on_stage_timers, hooks=hooks)
+            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, since_head=since_head, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks)
             _set_owner_head_hash(repo, _current_head(repo))
         return stats
     finally:
@@ -3664,6 +3672,7 @@ def _run_index(
     on_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
     on_phase: Callable[[str], None] | None = None,
+    on_flush: "Callable[[int, int, str, float, str | None], None] | None" = None,
     on_stage_timers: Callable[[Path, "StageTimers"], None] | None = None,
     hooks: "HookRegistry | None" = None,
 ) -> dict[str, int]:
@@ -4770,6 +4779,7 @@ def _run_index(
             on_file_failed=_batched_file_failed,
             on_batch_complete=_fire_flush_grain_hooks,
             on_batch_begin=_fire_flush_grain_begin,
+            on_flush=on_flush,
             max_chunks=_cap_for,
             # See FLUSH_CONCURRENCY's module-level comment for the
             # empirical-vs-quota derivation (nexus-dimrz).

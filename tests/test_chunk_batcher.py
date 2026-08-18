@@ -801,3 +801,200 @@ class TestFlushInstrumentation:
         assert b.stats["flush_seconds"] == pytest.approx(wall, abs=0.05)
         # abs=1e-3: the event rounds to 3dp, the counter does not.
         assert b.stats["begin_hook_seconds"] == pytest.approx(e["begin_hook_s"], abs=1e-3)
+
+
+class TestOnFlushHook:
+    """nexus-rhwg5 / GH #1432 ask 3 residue: mid-loop flushes (dispatched
+    from ``add()``'s overflow path, not ``drain()``) had NO progress hook
+    at all — only ``drain()``'s ``on_progress`` existed, and the
+    end-of-run drain covers a small fraction of a real run's flushes
+    (measured: 3 of 53). ``on_flush`` mirrors that contract at
+    construction time (``add()`` dispatches flushes internally across
+    many calls, so a per-call callback like ``drain(on_progress=...)``
+    has no call site to attach to) and fires once per SETTLED flush
+    (never for a bisect attempt, matching ``chunk_flush_complete``'s own
+    contract) with ``(flush_num, chunks, collection, elapsed, error)``.
+
+    Mutual exclusion with ``drain()``'s own ``on_progress`` (same
+    two-liveness-voices class ``_ETATicker``/``_PhaseHeartbeat`` hit,
+    nexus-1iw8k): a flush dispatched by ``add()`` but still in flight
+    when ``drain()`` starts is already covered by drain's own progress
+    callback (its docstring: "awaited" futures count too), so
+    ``on_flush`` must NOT also fire for it.
+    """
+
+    def test_on_flush_fires_once_per_mid_loop_flush_with_advancing_chunks(self) -> None:
+        rec = Recorder()
+        calls: list[tuple[int, int, str, float, str | None]] = []
+        b = ChunkBatcher(
+            flush=rec.flush,
+            on_file_complete=rec.on_complete,
+            on_file_failed=rec.on_failed,
+            on_flush=lambda n, chunks, coll, elapsed, err: calls.append((n, chunks, coll, elapsed, err)),
+            max_chunks=3,
+        )
+        # Each add() below fills exactly one cap-sized batch, forcing a
+        # mid-loop overflow flush from INSIDE add() -- never touching
+        # drain() at all.
+        b.add("a.py", "code__x", *_mk(3, "a"))
+        b.add("b.py", "code__x", *_mk(3, "b"))
+        b.add("c.py", "code__x", *_mk(3, "c"))
+        assert len(calls) == 3, (
+            "count of on_flush emissions must equal the count of actual "
+            "flush calls -- the exact gap this bead exists to close"
+        )
+        nums = [c[0] for c in calls]
+        assert nums == sorted(nums) and len(set(nums)) == 3, "flush_num must be monotonic and distinct"
+        assert [c[1] for c in calls] == [3, 3, 3]
+        assert all(c[2] == "code__x" for c in calls)
+        assert all(c[4] is None for c in calls), "no failures injected -- error must be None"
+
+    def test_on_flush_reports_failure_at_occurrence(self) -> None:
+        rec = Recorder(fail_batches={0})
+        calls: list[tuple[int, int, str, float, str | None]] = []
+        b = ChunkBatcher(
+            flush=rec.flush,
+            on_file_complete=rec.on_complete,
+            on_file_failed=rec.on_failed,
+            on_flush=lambda n, chunks, coll, elapsed, err: calls.append((n, chunks, coll, elapsed, err)),
+            max_chunks=3,
+        )
+        # Single file per batch (cap=3, exactly 3 chunks): a failure here
+        # cannot bisect (bisection needs >= 2 files in the batch), so it
+        # settles as a genuine failure and on_flush must see it BEFORE
+        # drain/end-of-run ever runs.
+        b.add("a.py", "code__x", *_mk(3, "a"))
+        assert len(calls) == 1
+        assert calls[0][4] is not None and "boom" in calls[0][4]
+
+    def test_on_flush_not_fired_during_drain(self) -> None:
+        """drain()'s own on_progress already covers drain-time flushes
+        (both newly-drained leftover buffers and futures dispatched
+        earlier by add() that are still outstanding) -- on_flush firing
+        too would be the exact two-liveness-voices class nexus-1iw8k
+        fixed for the ETA ticker / phase heartbeat."""
+        rec = Recorder()
+        calls: list[tuple] = []
+        b = ChunkBatcher(
+            flush=rec.flush,
+            on_file_complete=rec.on_complete,
+            on_file_failed=rec.on_failed,
+            on_flush=lambda *a: calls.append(a),
+            max_chunks=100,
+        )
+        # Below cap: nothing flushes until drain().
+        b.add("a.py", "code__x", *_mk(3, "a"))
+        assert calls == [], "on_flush must not fire before any flush happens"
+        drain_progress: list[tuple[int, int]] = []
+        b.drain(on_progress=lambda done, total: drain_progress.append((done, total)))
+        assert drain_progress == [(1, 1)], "drain's own progress voice must still fire"
+        assert calls == [], "on_flush must stay silent for drain-triggered flushes"
+
+    def test_on_flush_defaults_to_none_safely(self) -> None:
+        """Backward compat: every existing caller omits on_flush."""
+        rec = Recorder()
+        b = _batcher(rec, max_chunks=3)
+        b.add("a.py", "code__x", *_mk(3, "a"))  # must not raise
+        assert len(rec.calls) == 1
+
+    def test_on_flush_not_fired_for_bisected_attempt(self) -> None:
+        """A bisected batch's OWN failed attempt never settles as itself
+        (chunk_flush_complete's documented contract); on_flush must mirror
+        that -- fire once per resulting HALF, never for the bisect
+        parent. Triggered via add()'s OWN mid-loop overflow (never
+        drain()), so this also exercises bisection outside the
+        drain-suppression window."""
+        rec = Recorder(fail_batches={0})
+        calls: list[tuple] = []
+        b = ChunkBatcher(
+            flush=rec.flush,
+            on_file_complete=rec.on_complete,
+            on_file_failed=rec.on_failed,
+            on_flush=lambda *a: calls.append(a),
+            max_chunks=5,
+        )
+        # a.py + b.py (2+2=4 chunks) stay pending (< cap 5). c.py's add()
+        # would overflow (4+2=6 > 5), so add() flushes the pending 2-file
+        # a+b batch FIRST, synchronously, mid-loop. That flush (call idx
+        # 0 in Recorder) fails and bisects into 2 single-file halves
+        # (idx 1 = a.py, idx 2 = b.py), each of which succeeds.
+        b.add("a.py", "code__x", *_mk(2, "a"))
+        b.add("b.py", "code__x", *_mk(2, "b"))
+        b.add("c.py", "code__x", *_mk(2, "c"))
+        assert len(calls) == 2, "exactly the 2 settled halves, never the failed bisect parent"
+        assert all(c[4] is None for c in calls), "both halves succeeded"
+        assert {c[2] for c in calls} == {"code__x"}
+
+    def test_on_flush_fires_for_pool_dispatched_flushes(self) -> None:
+        """Review remediation (both reviewers, SIGNIFICANT): every test
+        above ran at the implicit flush_concurrency=1 default. Production
+        runs at FLUSH_CONCURRENCY=3 (indexer.py) -- pool mode is the ONLY
+        config production ever uses, and it is the exact race the
+        ``_draining`` flag exists to guard (a flush completing on a POOL
+        THREAD, not the caller's own thread). Prove on_flush fires there
+        too, not just in the synchronous default this class otherwise
+        exercises."""
+        import time as _time
+
+        calls: list[tuple] = []
+
+        def quick_flush(collection, ids, docs, metas, file_contexts=None):
+            pass  # near-instant; exercises real pool dispatch without a sleep
+
+        b = ChunkBatcher(
+            flush=quick_flush,
+            on_flush=lambda *a: calls.append(a),
+            max_chunks=3,
+            flush_concurrency=3,
+        )
+        # Each add() below fills exactly one cap-sized batch -- 3 distinct
+        # mid-loop overflow flushes, all dispatched to the pool.
+        b.add("a.py", "code__x", *_mk(3, "a"))
+        b.add("b.py", "code__x", *_mk(3, "b"))
+        b.add("c.py", "code__x", *_mk(3, "c"))
+        deadline = _time.monotonic() + 5.0
+        while len(calls) < 3 and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+        assert len(calls) == 3, f"only {len(calls)}/3 pool flushes reported on_flush"
+        assert {c[2] for c in calls} == {"code__x"}
+        assert all(c[4] is None for c in calls)
+        b.drain()  # pool cleanup; nothing pending or in-flight by now
+
+    def test_on_flush_suppressed_for_in_flight_flush_settling_during_drain(self) -> None:
+        """The EXACT race the ``_draining`` flag exists for (not the
+        simplified below-cap shape ``test_on_flush_not_fired_during_drain``
+        covers): a flush dispatched by add()'s POOL overflow is still
+        in-flight -- gated open, not yet settled -- when drain() starts
+        waiting on it. drain()'s own on_progress must be the ONLY voice
+        that reports it; on_flush firing too would double-voice the same
+        flush, the class nexus-1iw8k fixed for the ETA ticker / phase
+        heartbeat. Mirrors
+        TestDrainProgress::test_pooled_drain_reports_every_flush_including_in_flight's
+        gated_flush pattern exactly, with the on_flush assertion added."""
+        import threading as _t
+
+        gate = _t.Event()
+
+        def gated_flush(collection, ids, docs, metas, file_contexts=None):
+            gate.wait(5.0)
+
+        on_flush_calls: list[tuple] = []
+        b = ChunkBatcher(
+            flush=gated_flush,
+            on_flush=lambda *a: on_flush_calls.append(a),
+            max_chunks=3,
+            flush_concurrency=3,
+        )
+        # Dispatched to the pool immediately by add()'s overflow; blocks
+        # on the gate, so it is still outstanding (not done) when drain()
+        # is called below.
+        b.add("a.py", "code__x", *_mk(3, "a"))
+        drain_progress: list[tuple[int, int]] = []
+        _t.Timer(0.05, gate.set).start()  # release once drain() is waiting
+        b.drain(on_progress=lambda done, total: drain_progress.append((done, total)))
+        assert drain_progress == [(1, 1)], "drain's own progress voice must still fire"
+        assert on_flush_calls == [], (
+            "on_flush must stay silent for a flush drain() is already "
+            "reporting -- firing here would be the two-liveness-voices "
+            "class nexus-1iw8k fixed for the ETA ticker / phase heartbeat"
+        )
