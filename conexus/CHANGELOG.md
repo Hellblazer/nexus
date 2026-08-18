@@ -4,6 +4,48 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.9.0] - 2026-08-17
+
+### The Prompt Ratchet (nexus-haf6p) — review-flow changes, live with this pin
+
+Synthesized from Anthropic's Opus 5 prompting guidance, adversarially
+brainstormed, and hypothesis-tested against ten days of transcript history
+before adoption (T2 nexus/prompt-ratchet-history-test-2026-08-17).
+
+- **Bounded review gate**: the relay states a one-line acceptance bar before
+  any reviewer runs (never "no criticals"); round 1 reviews in full; round 2
+  is a Confirmation Pass over named findings; a ship-blocking defect
+  introduced by the fix itself may receive exactly one orchestrator-authorized
+  extension pass (`ext=fix-introduced`); round 3+ requires the human to ask by
+  name, recorded in `review-round` scratch markers. Test-only fixes are exempt
+  UNLESS they weaken or remove an assertion. The recall counter-metric ships
+  with the bound: findings-per-round must rise while rounds fall.
+- **Ship-blocker axis**: findings carry `Ship-blocker: yes|no`; the critic's
+  verdict block gains `ship_blockers: N` (additive; outcome enum, mapping
+  rule, and section skeleton unchanged). `not-justified` with
+  `ship_blockers: 0` is a valid, shippable result. Reviewers report
+  everything evidenced; triage is the orchestrator's, upward-only override.
+- **De-compounded chains**: the unconditional "dispatch code-review-expert +
+  substantive-critic + test-validator" blocks are gone from developer.md /
+  code-review-expert.md (+ the development skill); one conditional-escalation
+  rule lives in CONTEXT_PROTOCOL. Ten days of transcripts showed the
+  boilerplate never once triggered a dispatch — gating is (and remains)
+  the caller's standing policy, mechanically enforced by the push guard.
+- **Two-sided scope clause** (CONTEXT_PROTOCOL § Scope): goal-met is a stop;
+  a blast radius exploding mid-flight (>~20 tests broken, a repair fleet
+  forming) is a stop-and-surface; narrowing without a DEVIATION line remains
+  a defect.
+- **Delegation split** (orchestration skill): restraint for lookup/exploratory
+  dispatch; explicit license for the two-reviewer gate and independent fork
+  fleets; more than 3 concurrent agents on one bead is a stop-and-surface.
+- **Deliverable-length calibration**: structural contracts exempt; prose
+  carries verdict, file:line findings, evidence chain, what was not checked.
+  Reviewers falsify tests themselves (FALSIFIED/NOT FALSIFIED).
+
+Defended core untouched: both-reviewers-always, the critic's parsed output
+contract, adversarial first-pass briefing, the falsifiability rubric, the
+standing dispatch authorization.
+
 ## [7.8.0] - 2026-08-17
 
 - T2 context injection (SessionStart/SubagentStart) repointed from the dead
