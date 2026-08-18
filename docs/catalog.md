@@ -365,6 +365,8 @@ nx catalog link-bulk-delete --type implements-heuristic --created-by indexer --d
 
 Preview and bulk-delete links by type and/or creator. Always use `--dry-run` first.
 
+For a single link pair, `nx catalog unlink <from> <to> [--type <link_type>]` removes it directly (both endpoints accept tumblers or titles; omit `--type` to remove every link type between the pair).
+
 ### Discovery and observability
 
 ```bash
@@ -392,7 +394,6 @@ Normal `nx index repo` runs generate links incrementally (only for newly indexed
 ```bash
 nx catalog gc                           # delete entries missed in 2+ index runs
 nx catalog gc --dry-run                 # preview
-nx catalog compact                      # remove tombstones from JSONL
 ```
 
 The indexer automatically tracks `miss_count` for each catalog entry. Files deleted or renamed are detected: renames (same content hash at a new path) transfer links to the new entry; true deletions are evicted after 2 consecutive missed index runs. `gc` provides the manual escape hatch.
@@ -408,9 +409,9 @@ After upgrading to RDR-060, run `--fix-paths` once to migrate existing absolute 
 
 ### Troubleshooting
 
-**SQLite cache disappeared:** Delete `.catalog.db` (or let it be deleted). The system rebuilds it by replaying `events.jsonl` on next access — no data lost.
+**Catalog and T3 disagree** (a document's manifest references chunks T3 no longer has, or vice versa): there is no local cache to delete or rebuild — the catalog lives in the engine's Postgres and every read/write goes there directly (see [How it's stored](#how-its-stored)). Run `nx catalog verify` to reconcile against T3 on the chash identity (`--collection <name>` to scope to one physical collection, `--heal` for per-document repair prompts). For manifest gaps specifically (a document with more chunks than manifest rows), `nx catalog reconcile` rebuilds the missing rows from T3.
 
-**JSONL and SQLite disagree:** Delete `.catalog.db` and let it rebuild. `events.jsonl` is always the source of truth (legacy `owners.jsonl`/`documents.jsonl`/`links.jsonl` are back-compat only).
+**Catalog entries missing after data recovery:** Run `nx catalog backfill` to re-populate catalog entries from T3 metadata and registered repos.
 
 **Links point to deleted documents:** Run `nx catalog link-audit` to find orphans. Decide whether to keep them (historical record) or delete with `link-bulk-delete`.
 

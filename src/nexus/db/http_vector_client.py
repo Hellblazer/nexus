@@ -959,6 +959,35 @@ def _managed_remedy() -> str | None:
     )
 
 
+def _local_voyage_restart_remedy(code: int, err_message: str) -> str | None:
+    """Remedy text for the nexus-35ok4 (GH #1461) restart race.
+
+    A local install with ``local.embed_model`` freshly set to a
+    voyage-shaped value mints voyage-* collection names off STATIC
+    config the instant it's saved (:func:`nexus.corpus.
+    effective_embedding_model_for_writes`), but the ALREADY-RUNNING
+    engine only reads ``NX_VOYAGE_API_KEY`` at process spawn — until the
+    service is restarted it is still serving in bge-only (``onnx-local``)
+    mode and refuses the write with HTTP 422. The engine's own refusal
+    (``EmbedderRouter.resolveEmbedderStrict``, service/src/main/java/dev/
+    nexus/service/vectors/EmbedderRouter.java) names this exact case with
+    an ``NX_VOYAGE_API_KEY`` substring in its message — a specific,
+    engine-emitted marker, not a generic 422 guess — so this reframing
+    fires ONLY for that shape and leaves every other 422 (a genuinely
+    absent local model, a malformed collection name, ...) with its
+    original message unchanged.
+    """
+    if code != 422 or "NX_VOYAGE_API_KEY" not in err_message:
+        return None
+    return (
+        "this looks like the local.embed_model-just-changed-to-voyage "
+        "race (nexus-35ok4): the running engine has not picked up "
+        "NX_VOYAGE_API_KEY yet — it is only read at process spawn. "
+        "Restart the local service so the engine re-reads it: "
+        "`nx daemon service stop && nx daemon service start`."
+    )
+
+
 def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120) -> Any:
     """POST JSON to the service endpoint, return parsed response body.
 
@@ -982,6 +1011,8 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
             err = {"error": body_bytes.decode(errors="replace")}
         msg = f"POST {path} → HTTP {e.code}: {err.get('error', err)}"
         remedy = _managed_remedy() if e.code in (401, 403) else None
+        if remedy is None:
+            remedy = _local_voyage_restart_remedy(e.code, str(err.get("error", err)))
         if remedy:
             msg += f"\n{remedy}"
         raise VectorServiceError(msg, code=e.code) from e
@@ -1009,6 +1040,8 @@ def _get(path: str, *, tenant: str = "default") -> Any:
             err = {"error": body_bytes.decode(errors="replace")}
         msg = f"GET {path} → HTTP {e.code}: {err.get('error', err)}"
         remedy = _managed_remedy() if e.code in (401, 403) else None
+        if remedy is None:
+            remedy = _local_voyage_restart_remedy(e.code, str(err.get("error", err)))
         if remedy:
             msg += f"\n{remedy}"
         raise VectorServiceError(msg, code=e.code) from e

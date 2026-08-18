@@ -4,10 +4,12 @@ The one operator-facing map of how the nexus agent is installed, runs, upgrades,
 and is removed. It is a navigator, not a design record: each section links out to
 the authoritative RDR for rationale rather than restating it.
 
-"The agent" here is the local nexus stack: the `nx` CLI, the T2 daemon
-(notes/plans/taxonomy over SQLite), and the T3 storage service (the native
-`nexus-service` binary over Postgres 17 + pgvector). Since RDR-155 P4a, T3 serves
-exclusively through that service stack in both local and cloud mode.
+"The agent" here is the local nexus stack: the `nx` CLI and the native
+`nexus-service` binary (Postgres 17 + pgvector), which serves T1 scratch, T2
+(notes/plans/taxonomy), and T3 vectors alike. The old T2 daemon
+(SQLite-backed, RDR-120) is retired (nexus-i711w) — T2 has served through
+this same Postgres-backed `nexus-service` since RDR-152, exactly as T3 has
+since RDR-155 P4a, in both local and cloud mode.
 
 ## State model
 
@@ -27,7 +29,15 @@ exclusively through that service stack in both local and cloud mode.
 - **installed** — the `nexus-service` binary is fetched + positioned; `nx` resolvable.
 - **provisioned** — Postgres 17 + pgvector provisioned, schema migrated (Liquibase), embedder wired (bge-768 local, or Voyage in cloud mode).
 - **running** — the supervisor publishes a `storage_service` lease; T2 + T3 serve.
-- **upgrading** — a transient state during `nx upgrade`, while the ladder walks its pending rungs (T2 schema, the Chroma → service substrate move, chunk identity, embedder era).
+- **upgrading** — a transient state during `nx upgrade`, while the stateless
+  preconditions (package, engine, process) converge and the ladder walks
+  whatever data rungs are pending. The ladder is currently EMPTY
+  (`upgrade_ladder/registry.py`): the T2-schema and Chroma→service
+  substrate-move rungs died with the Chroma/client-SQLite migration
+  machinery at RDR-155 P4b, and the RDR-180 chash-rekey rung that survived
+  them was itself retired (nexus-lgdel.l1) once it had converged on every
+  live install. The ladder stands ready for whatever future data transition
+  needs a rung, not a fixed pipeline.
 
 The running-state machinery (lease publish/heartbeat/relinquish, single-writer
 discovery, version-skew) is the shared service-registry primitive
@@ -41,7 +51,7 @@ discovery, version-skew) is the shared service-registry primitive
 |-------|---------------|-----------|
 | Install | `nx init` (collapsed flow), `nx daemon service install-binary <tag>`, `nx daemon service install --autostart` | RDR-157 (distribution), RDR-161 (native-only), RDR-174 (collapsed init + autostart), RDR-175 (OS-init watchdog) |
 | Provision | bundled PG17 + pgvector, Liquibase migrate, bge-768 ONNX fetch | RDR-155 (pgvector substrate), RDR-160 (bge-768 embedder) |
-| Run | T2 daemon + T3 `nexus-service`; lease lifecycle | RDR-149 (daemon lifecycle), RDR-152 (endpoint discovery) |
+| Run | `nexus-service` (T1 + T2 + T3 alike, no separate T2 daemon); lease lifecycle | RDR-149 (daemon lifecycle), RDR-152 (endpoint discovery) |
 | Upgrade | `nx upgrade` — the single trigger for every data transition; `nx doctor` reports pending rungs | RDR-185 (the ladder), RDR-159 (the inherited ETL engine), RDR-162 (cross-model) |
 | Uninstall | `nx uninstall` (CLI), `daemon_uninstall` (MCP) | RDR-165 (this RDR) |
 
@@ -64,7 +74,7 @@ works) and offers to register the OS autostart unit (RDR-174 decide-first;
 It embeds with bge-768 locally; in the managed-cloud deployment, embeddings run
 server-side via Voyage with `NX_VOYAGE_API_KEY` plumbed from the nexus credential
 chain. See
-[getting-started.md](../getting-started.md#first-time-setup-the-storage-backend) for the
+[getting-started.md](../getting-started.md#install) for the
 full walkthrough and [container-integration.md](../container-integration.md) for
 reaching the service from a container.
 
@@ -85,18 +95,20 @@ at the endpoint with an operator-provisioned token; no install, no provision.
   chunk ids) from the release that ships the detector rather than on migration
   day.
 
-The Chroma → service move is one of those rungs, not a separate journey: detect
+The Chroma → service move **was** one of those rungs (on the migration-capable
+release, conexus 6.0 through 6.18.1) — not a separate journey: detect
 footprint, migrate (T2, then each T3 leg with its catalog ref-remap), validate,
 unlock — copy-not-move, with the Chroma source left byte-untouched as the
-rollback origin (RDR-176). Cross-model collections (e.g. legacy minilm) are
-re-embedded into the target model (RDR-162); same-model voyage collections are
+rollback origin (RDR-176). Cross-model collections (e.g. legacy minilm) were
+re-embedded into the target model (RDR-162); same-model voyage collections were
 copied verbatim, skipping the billed re-embed (RDR-166). Legacy (pre-RDR-108)
-chunk ids are recomputed on the wire from the chunk text — no re-index, no
-source files needed (RDR-185). The engine below it is RDR-159's, inherited; the
+chunk ids were recomputed on the wire from the chunk text — no re-index, no
+source files needed (RDR-185). That engine was RDR-159's, inherited; the
 `nx guided-upgrade` / `nx migrate-to-service` verbs that used to front it were
-demoted internal primitives and then deleted outright by RDR-155 P4b — not
-present in this release. A pre-PG install is redirected to the pinned last
-migration-capable release instead. See
+demoted internal primitives and then **deleted outright by RDR-155 P4b — not
+present in this release.** On the current release, a pre-PG install is
+redirected to the pinned last migration-capable release instead, where it runs
+`nx upgrade` to perform the move described above, then upgrades forward. See
 [migration-runbook.md](../migration-runbook.md) for the operator's manual
 order of operations.
 
@@ -118,8 +130,9 @@ nx uninstall --yes --remove-data   # ALSO wipe the local data dir (notes + index
 ```
 
 - **Local service present:** stops the engine-service + Postgres stack
-  (`nx daemon service stop --with-pg`), stops the T2 daemon, removes the OS
-  autostart unit, clears the first-run marker. With `--remove-data`, also wipes
+  (`nx daemon service stop --with-pg`, which carries T1/T2/T3 alike — there
+  is no separate T2 daemon to stop), removes the OS autostart unit, clears
+  the first-run marker. With `--remove-data`, also wipes
   the local data dir (irreversible; a shallow-path guard refuses a misconfigured
   `NEXUS_CONFIG_DIR`).
 - **Managed-only client:** clears the managed endpoint config

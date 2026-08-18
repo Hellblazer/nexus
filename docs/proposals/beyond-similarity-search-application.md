@@ -1,5 +1,8 @@
 # Proposal: Applying "Beyond Similarity Search" to Nexus
 
+> **UNRESOLVED DRAFT (2026-05-31)**; substrate claims predate RDR-155/158;
+> disposition pending.
+
 **Status:** draft — proposal only, no code or doc changes yet
 **Author:** synthesis of /nx:research run 2026-05-17
 **Source paper:** Budigi & Sirigiri, *Beyond Similarity Search: A Unified Data Layer for Production RAG Systems*, arXiv:2605.03275 (2026)

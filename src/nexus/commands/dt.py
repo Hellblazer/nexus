@@ -55,12 +55,37 @@ def _resolve_dt_collection(
     to conformant 4-segment names so the strict-naming guard at
     ``T3Database.get_or_create_collection`` accepts them.
     """
-    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — command-local import (effective_embedding_model_for_writes)
+    from nexus.corpus import resolve_write_embedding_model  # noqa: PLC0415 — command-local import (resolve_write_embedding_model)
 
     if collection:
         return collection
     owner = corpus.replace("_", "-")
-    model = effective_embedding_model_for_writes("knowledge" if ext == ".pdf" else "docs")
+    content_type = "knowledge" if ext == ".pdf" else "docs"
+    suffix = f"{owner}-papers" if ext == ".pdf" else owner
+
+    _db_cache: list = []  # nexus-o5x2c: memoize make_t3() across candidates below
+
+    def _local_token_collection_exists(token: str) -> bool:
+        # nexus-o5x2c: no live T3 handle in scope here — best-effort
+        # construct one purely to probe for a pre-existing collection to
+        # grandfather onto (a keyless voyage-configured local install
+        # with an existing DT-sourced bge/minilm collection must not
+        # crash on the next `nx dt index`). Wrapped by
+        # resolve_write_embedding_model's own try/except. Constructed
+        # ONCE and reused across every candidate in LOCAL_EMBEDDING_MODELS
+        # (reviewer follow-up), not once per candidate.
+        if not _db_cache:
+            from nexus.db import make_t3  # noqa: PLC0415 — deferred, probe-local
+            _db_cache.append(make_t3())
+        candidate = (
+            f"knowledge__{suffix}__{token}__v1" if ext == ".pdf"
+            else f"docs__{suffix}__{token}__v1"
+        )
+        return _db_cache[0].collection_exists(candidate)
+
+    model = resolve_write_embedding_model(
+        content_type, collection_exists=_local_token_collection_exists,
+    )
     if ext == ".pdf":
         return f"knowledge__{owner}-papers__{model}__v1"
     return f"docs__{owner}__{model}__v1"

@@ -67,9 +67,9 @@ over time:
   [Configuration § Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry).
 - **`PromotionReport`** on `nx scratch promote` and `T1.promote()` — the
   promotion result reports `action=new` when the T2 destination is clean
-  or `action=overlap_detected` when an FTS5 scan finds a similar entry
-  under a different title. The promoted row is still written; the report
-  only signals that a manual merge may be warranted.
+  or `action=overlap_detected` when a full-text scan (Postgres, server-side)
+  finds a similar entry under a different title. The promoted row is still
+  written; the report only signals that a manual merge may be warranted.
 - **Contradiction flagging** during T3 search — `search_cross_corpus`
   adds `[CONTRADICTS ANOTHER RESULT]` to any result pair where two
   high-similarity chunks come from different `source_agent` provenance,
@@ -120,7 +120,7 @@ T2 is the persistent local layer that bridges sessions. Notes, project state, an
 - **Developer notes** — hypotheses, findings, decisions-in-progress via `nx memory put`
 - **Project memory** — design notes, working state, active decisions. Store with `nx memory put`, retrieve with `nx memory get`. 
 - **RDR metadata** — status, type, priority, dates for each RDR document. See [RDR: Nexus Integration](rdr.md#nexus-integration).
-- **Plan library** — saved query execution plans with project scoping, FTS5 search, dimensional identity (`verb`, `scope`, `strategy` + optional axes), and optional TTL. Fourteen builtin templates are seeded at `nx catalog setup` (5 legacy + 9 RDR-078 scenario plans for `verb: research` / `review` / `analyze` / `debug` / `document` + 4 meta-seeds). Access via `plan_save` / `plan_search` MCP tools, or indirectly via `nx_answer` (the retrieval trunk — see [Plan-Centric Retrieval](plan-centric-retrieval.md)). Note: auto-growth of the library from successful ad-hoc plans is filed as RDR-084 (draft, not yet implemented) — today the library stays at the 14 seed templates plus any manually-authored YAMLs.
+- **Plan library** — saved query execution plans with project scoping, full-text search, dimensional identity (`verb`, `scope`, `strategy` + optional axes), and optional TTL. Fourteen builtin templates are seeded via `nx plan reseed` (5 legacy + 9 RDR-078 scenario plans for `verb: research` / `review` / `analyze` / `debug` / `document` + 4 meta-seeds; idempotent by default — only previously-missing builtins insert, `--force` reloads all of them). Access via `plan_save` / `plan_search` MCP tools, or indirectly via `nx_answer` (the retrieval trunk — see [Plan-Centric Retrieval](plan-centric-retrieval.md)). Note: auto-growth of the library from successful ad-hoc plans is filed as RDR-084 (draft, not yet implemented) — today the library stays at the 14 seed templates plus any manually-authored YAMLs.
 - **Agent relay** — context passed between agent invocations
 - **Promoted scratch** — T1 entries flagged during a session are auto-flushed to T2 at session end
 
@@ -201,15 +201,19 @@ earlier MiniLM-384), not an opt-in extra. Run `nx daemon service start` to
 bring the stack up and `nx daemon service status` to verify health (lease, PG
 cluster, `/version` handshake with `embedding_mode`).
 
-> **The legacy ChromaDB serving path is retired.** Pre-RDR-155, T3 was backed by
+> **The legacy ChromaDB serving path is gone.** Pre-RDR-155, T3 was backed by
 > `chromadb.PersistentClient` (local) or `chromadb.CloudClient` + Voyage
-> (cloud). That path (`db/t3.py`, `nx daemon t3`) still registers but serves
-> nothing — it survives only as the immutable migration *source* until RDR-155
-> P4b deletes it. Existing Chroma data migrates onto the service via the
-> ladder's substrate rung — run `nx upgrade` (see
-> [`cli-reference.md` § nx upgrade](cli-reference.md#nx-upgrade); the
-> [Migration Runbook](migration-runbook.md) is the operator's manual order of
-> operations, not the user path).
+> (cloud). RDR-155 P4b (shipped 2026-07-25) deleted that path outright: the
+> `chromadb` dependency is dropped (absent from `uv.lock`), and `nx daemon t3`
+> no longer exists as a command (`nx daemon --help` lists only `service` and
+> `aspect-worker`). `db/t3.py` survives as a module, but repurposed — it now
+> backs the in-process `InMemoryVectorClient` test double used by the unit
+> suite, not a Chroma-backed serving path. A pre-PG install upgrading straight
+> to a current release is detected and refused with a two-hop redirect rather
+> than migrated automatically — see [Getting Started § Upgrading an existing
+> install](getting-started.md#upgrading-an-existing-install-skip-this-if-this-is-your-first-install).
+> Frozen Chroma directories on disk remain untouched rollback artifacts, not a
+> live migration source in this version.
 
 ### Collections
 
@@ -237,12 +241,11 @@ A collection is indexed and queried under the same embedding model — mixing mo
 
 ## T3 Backup and Migration (Export/Import)
 
-> **Scope: legacy ChromaDB only.** `nx store export` / `import` operate on the
-> **ChromaDB migration source** (pre-6.0 data), not the live pgvector T3 store.
-> On a migrated 6.0 install they will read/write the Chroma source (which may be
-> empty or stale after migration), **not** your live knowledge. To back up live
-> 6.0 T3 data, use a Postgres `pg_dump` of the `nexus` database; the `.nxexp`
-> format is not compatible with the pgvector serving path.
+`nx store export` / `import` operate on **live T3** — both read and write
+through `make_t3()`, which resolves to `HttpVectorClient` (the pgvector
+serving path) in both local and managed-cloud mode. This is a real backup
+path for your current knowledge store, not a legacy-ChromaDB-only tool: a
+`.nxexp` file exported today round-trips through the current service.
 
 Collections can be exported to portable `.nxexp` files that preserve all documents, metadata, and embeddings. Importing restores the collection without re-embedding — saving Voyage AI API costs and time.
 

@@ -320,7 +320,7 @@ def _resolve_repo_collection(
                 content_type=content_type,
                 error=str(exc),
             )
-    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
+    from nexus.corpus import resolve_write_embedding_model  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
 
     if content_type not in ("code", "docs", "rdr"):
         raise ValueError(
@@ -328,7 +328,30 @@ def _resolve_repo_collection(
         )
     name, path_hash = _repo_identity(repo)
     sanitised = _sanitise_owner_segment(name)
-    model = effective_embedding_model_for_writes(content_type)
+
+    _db_cache: list = []  # nexus-o5x2c: memoize make_t3() across candidates below
+
+    def _local_token_collection_exists(token: str) -> bool:
+        # nexus-o5x2c: this NO-CATALOG / unregistered-owner synthesis
+        # fallback has no live T3 handle in scope — best-effort construct
+        # one purely to probe for a pre-existing collection to
+        # grandfather onto. Wrapped by resolve_write_embedding_model's
+        # own try/except, so a failure here degrades to the pre-fix
+        # behavior (no grandfather found), never a crash of its own.
+        # Constructed ONCE and reused across every candidate in
+        # LOCAL_EMBEDDING_MODELS (reviewer follow-up), not once per
+        # candidate.
+        if not _db_cache:
+            from nexus.db import make_t3  # noqa: PLC0415 — deferred, probe-local
+            _db_cache.append(make_t3())
+        candidate = _safe_collection(
+            f"{content_type}__", sanitised, path_hash, suffix=f"__{token}__v1",
+        )
+        return _db_cache[0].collection_exists(candidate)
+
+    model = resolve_write_embedding_model(
+        content_type, collection_exists=_local_token_collection_exists,
+    )
     return _safe_collection(
         f"{content_type}__", sanitised, path_hash, suffix=f"__{model}__v1",
     )

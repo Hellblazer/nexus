@@ -93,14 +93,16 @@ query(question="database design", follow_links="cites", depth=1)  # + citation g
 | `follow_links` | string | Link type to follow (e.g., `cites`) — enriches with linked documents |
 | `depth` | integer | Hops to follow in the link graph (default 1) |
 | `limit` | integer | Maximum results (default 10) |
-| `where` | string | Vector-store metadata filter (e.g. `bib_year>=2020,section_type!=references`) |
+| `where` | string | Vector-store metadata filter. Any operator (`bib_year>=2020,section_type!=references`) when NO catalog param is set. Equality-only (`tags=arch`) when combined with a catalog param (`author`/`content_type`/`follow_links`/`subtree`) — the combined-query path applies it as JSONB containment; an operator shape combined with a catalog param is a loud error, not a silent drop. |
 | `structured` | boolean | Return a structured dict instead of the human-readable string (plan-runner use; default false) |
 
 ### How catalog routing works
 
+Catalog params (`author`, `content_type`, `follow_links`, `subtree`) require service mode (pgvector) — a non-service T3 with any of these set returns a loud error naming the requirement, not a degraded local search.
+
 1. If `author`, `content_type`, or `subtree` is set: query the catalog for matching documents, extract their `physical_collection` values, and search only those collections.
 2. If `follow_links` is set: find matching documents, BFS-traverse their link graph to `depth`, collect all linked collections.
-3. If no catalog parameters: fall through to corpus-based search (same as `nx search`).
+3. If no catalog parameters: fall through to corpus-based search (same as `nx search`) — this path works in both service and local/Chroma-shaped mode, and supports the full `where` operator set.
 
 `query(question="X", author="Fagin")` is faster and more precise than `query(question="X")` — fewer collections to search, hits constrained by the catalog before embedding.
 
@@ -127,7 +129,7 @@ For questions that require multiple retrieval steps — comparing sources, extra
 
 ### Builtin scenario plans (RDR-078)
 
-`nx catalog setup` seeds YAML plan templates under `conexus/plans/builtin/` — see [plan-centric-retrieval.md](plan-centric-retrieval.md) for the current builtin plan catalog.
+`nx plan reseed` seeds YAML plan templates under `conexus/plans/builtin/` — see [plan-centric-retrieval.md](plan-centric-retrieval.md) for the current builtin plan catalog.
 
 ### Verb skills
 
@@ -155,7 +157,7 @@ Several mechanisms run automatically across all interfaces.
 
 ### Topic-aware ranking
 
-> **Note (6.0):** Topic *discovery*, *rebuild*, and per-document *assignment* run on the nexus-service backend (the default since 6.0) — `nx taxonomy discover` and `nx index repo` work normally (nexus-7ydks). `nx taxonomy split` / `project` and the cross-collection projection pass are still being ported and refuse cleanly on the service.
+> **Note:** Topic *discovery*, *rebuild*, and per-document *assignment* run on the nexus-service backend — `nx taxonomy discover` and `nx index repo` work normally (nexus-7ydks). `nx taxonomy split` / `project` and the cross-collection projection pass are still being ported and refuse cleanly on the service.
 
 After `nx index repo` (or `nx taxonomy discover --all`), topics are clustered via HDBSCAN with Claude-Haiku auto-labels. Topic-aware ranking then works three ways:
 
@@ -193,7 +195,7 @@ Knowledge, docs, and RDR collections fetch 4x the requested result count before 
 
 ### Catalog pre-filtering
 
-When metadata filters have high selectivity (<5% of documents match), Nexus pre-fetches matching file paths from the catalog SQLite database and passes them as a `source_path` filter to the vector store. This reduces the scan space before retrieval, avoiding the latency cliff an ANN index hits in predicate-sparse regions. Automatic when a catalog is available.
+When metadata filters have high selectivity (<5% of documents match), Nexus pre-fetches matching file paths from the catalog (Postgres, served by `nexus-service`) and passes them as a `source_path` filter to the vector store. This reduces the scan space before retrieval, avoiding the latency cliff an ANN index hits in predicate-sparse regions. Automatic when a catalog is available.
 
 ### Multi-probe collection health
 

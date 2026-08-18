@@ -6,6 +6,68 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.10.0] - 2026-08-18
+
+Paired release: engine identity moves to `engine-service-v0.1.80`
+(vectors-007), deployed to the managed service at this tag's push per the
+paired-release choreography.
+
+### Fixed
+
+- **Local-mode macOS embedding was up to 15x slower than the hardware
+  allows** (nexus-rlp0v, field report): the launchd unit set
+  `ProcessType=Background`, confining the engine's ONNX inference to
+  E-cores (measured 2.1s vs 31.7s per 16-chunk page). Key removed;
+  existing installs converge via the post-upgrade note,
+  `nx daemon restart-stale`, or the new `nx doctor` check "Service
+  autostart unit (local mode)". Linux unaffected (no equivalent clamp).
+- **`local.embed_model voyage-code-3` + `voyage_api_key` now take effect
+  on local-mode installs** (nexus-35ok4 / nexus-o5x2c, GH #1461): the
+  client previously kept minting bge collection names regardless of the
+  configured model; the only workaround flipped global mode via
+  `NX_SERVICE_URL`. One write-resolution chokepoint now owns the
+  grandfather-or-raise decision for every entry point (`store put`,
+  `memory promote`, MCP `store_put`, `index repo/md/pdf`, dt import):
+  reads never require a credential and always resolve pre-existing
+  collections; keyed writes target the voyage collection (reindex to
+  migrate existing bge data); keyless brand-new mints fail loud. A 422
+  from a not-yet-restarted engine carries restart guidance. Full
+  resolution table: docs/cli-reference.md "Local mode with Voyage".
+- Plugin release-drift ledger parser miss: `registry.yaml` was declared
+  in a two-path bullet the parser could not read (nexus-fi2ms).
+
+### Changed
+
+- **`query` with catalog params (author/content_type/follow_links/subtree)
+  is combined-query only** (RDR-156 P4.2c, nexus-2bqpn): the app-side
+  catalog-dance fallback is deleted. Operator-shaped `where`
+  (`$and`/`$or`/comparison operators) combined with catalog params now
+  returns an explicit error naming the alternatives (equality-only
+  `where`, the chunk-level `search` tool, or dropping the catalog
+  params); non-service T3 with catalog params errors like the sibling
+  combined-query tools.
+
+### Added (engine-service-v0.1.80)
+
+- `nexus.hybrid_search_384/768/1024` (RDR-156 P5, gate GO): server-side
+  RRF fusion (vector + tsvector + trigram) over the text-gated candidate
+  set in one round-trip, query-vector-as-argument, tombstone-filtered,
+  RLS-scoped; a selective gate can never be starved by
+  `hnsw.max_scan_tuples` (the production regression class that motivated
+  it). No client caller yet; the dense-gate dispatch follow-up is
+  tracked (nexus-76352).
+
+### Plugin changes going live at this pin
+
+Everything the drift ledger accumulated since v7.9.0: both reviewers
+routed unconditionally in every routing surface (nexus-0yeer); the
+guard-evidence cluster hook fixes — shell-redirection tokens no longer
+parse as refspecs, audited inline override, option-value bead ids never
+demanded as close targets, T2 title-only markers count (nexus-cr4lp,
+nexus-iwlq4); the personal git-policy split — the plugin hook now
+enforces only the review-coverage gate (nexus-ww9fw); the launchd
+`ProcessType=Background` removal (nexus-rlp0v).
+
 ## [7.9.0] - 2026-08-17
 
 Client-only release: no engine cut — the pinned engine identity stays

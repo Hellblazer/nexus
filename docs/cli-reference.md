@@ -1975,6 +1975,62 @@ points you at `nx config init` for credentials.
 the degraded case where `local.embed_model` is `BAAI/bge-base-en-v1.5` but the `[local]`
 extra is missing (so search silently runs at 384-dim).
 
+**Local mode with Voyage (nexus-35ok4 / GH #1461).** `nx init`'s guided
+prompt only offers the two on-device embedders above, but a local install
+CAN use Voyage instead: set `local.embed_model` to a voyage-shaped value
+directly and configure a key —
+
+```
+nx config set local.embed_model voyage-code-3
+nx config set voyage_api_key <key>
+nx daemon service stop && nx daemon service start   # re-plumb the key into the engine
+```
+
+The engine only reads `NX_VOYAGE_API_KEY` at process spawn (the supervisor
+resolves it from the credential chain and injects it into the native
+binary's environment), so **a restart is required** after either command
+above for the change to take effect — `nx config set` alone does not
+reach an already-running engine. Once restarted, the engine boots into
+Voyage-only mode for every collection (no local ONNX fallback), and
+`nx index`/`nx store` mint `voyage-code-3`/`voyage-context-3` collection
+names to match, exactly like cloud mode.
+
+**What happens to a corpus you already indexed under bge/minilm** depends
+on whether the key is configured yet, not just on `local.embed_model`:
+
+| `local.embed_model` | `voyage_api_key` | Read (search / list / get) | Write (index / store put) |
+|---|---|---|---|
+| bge/minilm (default) | — | bge/minilm collection, as always | bge/minilm collection, as always |
+| voyage-* | absent | finds the existing bge/minilm collection | **grandfathers onto the existing bge/minilm collection** (the engine has no key yet, so it's still serving bge — writing there still works) |
+| voyage-* | present, no voyage collection yet | finds the existing bge/minilm collection | **targets the voyage collection — a NEW sibling**, never the old bge/minilm one |
+| voyage-* | present, voyage collection already exists | **finds ONLY the voyage collection** — the bge/minilm one is no longer checked, even if it still holds data (see caveat below) | targets the (already-existing) voyage collection |
+
+The "targets a new sibling" row is the one to plan around: once the key is
+configured (whether or not the engine has been restarted yet), a write
+does not extend your existing bge/minilm corpus — it starts a separate
+`voyage-code-3`/`voyage-context-3` collection alongside it. Indexing
+without a configured `voyage_api_key` in this state fails loud at write
+time rather than silently falling back to bge. Pre-existing bge/minilm
+collections are never deleted or migrated automatically; once the engine
+is actually restarted and running voyage-only, they become unreadable
+through it entirely (not just unwritable) until you reindex — so switch
+before you have a corpus you care about, or budget time to reindex it
+into the new voyage collection.
+
+**Caveat — reads stop checking bge once a voyage sibling exists.** The
+"finds the existing bge/minilm collection" read behavior above holds only
+*until* the first keyed write creates the voyage collection. From that
+point on, reads resolve directly to the voyage collection and never fall
+back to check bge again — even though the bge collection is still there
+and may still hold data nothing has migrated. `nx search`/`nx store list`
+resolve to ONE physical collection per corpus, so this is not a
+multi-collection merge; anything left in the old bge collection after a
+keyed write is effectively invisible to reads until you reindex it into
+the voyage collection. This is the same underlying gap tracked as a
+follow-up in nexus-ddmfg (the engine's voyage-only-mode-flip after
+restart) — that bead's scope now explicitly includes this stale/orphaned
+bge-data-after-a-keyed-write case, not just the engine-restart case.
+
 ---
 
 ## nx config

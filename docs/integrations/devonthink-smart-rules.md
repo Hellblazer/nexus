@@ -161,6 +161,9 @@ do shell script ¬
 
 ## Concurrency caveat
 
+> **Caution:** the quota/path details below predate the PG serving path (ChromaDB is no
+> longer a live substrate, RDR-155 P4b) — re-derivation tracked in nexus-d2m19.
+
 The trailing `&` in `do shell script` backgrounds each `nx dt index`
 invocation. For trickle-feed ingest (one PDF every few seconds), this
 is exactly right; for a bulk import (you drag 20 PDFs in at once), it
@@ -204,9 +207,9 @@ other stages keep working.
 
 ## Cross-references
 
-- [RDR-099](rdr/rdr-099-devonthink-integration.md): the design
+- [RDR-099](../rdr/rdr-099-devonthink-integration.md): the design
   decision behind `nx dt`.
-- [`tests/e2e/devonthink-manual.md`](../tests/e2e/devonthink-manual.md):
+- [`tests/e2e/devonthink-manual.md`](../../tests/e2e/devonthink-manual.md):
   the manual smoke runbook used to verify the full surface.
 - DT's smart-rule reference:
   `Help > Documentation > Automation > Smart Rules`.

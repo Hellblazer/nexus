@@ -1580,6 +1580,73 @@ class TestSpawnServiceVoyageKeyPlumbing:
         get_cred.assert_called_once_with("voyage_api_key")
         assert env["NX_VOYAGE_API_KEY"] == "chain-key"
 
+    # -- nexus-35ok4 round 2 (code-review-expert IMPORTANT 1): prove the
+    # engine-plumbing decision (this module) and the client-naming
+    # decision (nexus.corpus.effective_embedding_model_for_writes) are
+    # driven by the SAME shared predicate, not two independently-written
+    # checks that happen to agree today. Patches
+    # ``nexus.config.local_embed_model_is_voyage`` DIRECTLY (not the
+    # underlying ``local_embed_model_choice``) so a future edit that
+    # makes either call site stop calling the shared predicate (e.g.
+    # reverting to its own inline ``.startswith("voyage")``) breaks this
+    # test instead of passing silently.
+
+    # nexus-35ok4 round 3 (code-review-expert): the ORIGINAL version of
+    # this pair patched ``local_embed_model_choice`` AND
+    # ``local_embed_model_is_voyage`` to CONSISTENT values (a
+    # voyage-shaped string alongside predicate=True, a bge-shaped string
+    # alongside predicate=False) — so a call site that had been reverted
+    # to its own inline ``.startswith("voyage")`` re-derivation would
+    # agree with the patched predicate anyway and pass regardless
+    # (reviewer falsified this live). Below, the string and the
+    # predicate are set to DISAGREE in both directions: only a call site
+    # that genuinely dispatches off ``local_embed_model_is_voyage()``
+    # (not off the string shape) can pass both.
+
+    def test_shared_predicate_true_drives_both_sites_to_voyage(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.corpus import effective_embedding_model_for_writes
+
+        monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        # Predicate says voyage...
+        monkeypatch.setattr("nexus.config.local_embed_model_is_voyage", lambda: True)
+        # ...but the underlying string is NOT voyage-shaped — a naive
+        # inline ``.startswith("voyage")`` re-derivation would say False
+        # here and skip; only genuinely calling the predicate passes.
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "BAAI/bge-base-en-v1.5")
+        with patch("nexus.config.get_credential", return_value="shared-key"):
+            env = self._spawn_env(config_dir, clock, monkeypatch)
+            client_model = effective_embedding_model_for_writes("code")
+        # Engine side: key plumbed (voyage-capable engine).
+        assert env["NX_VOYAGE_API_KEY"] == "shared-key"
+        # Client side: mints the matching voyage token, not bge.
+        assert client_model == "voyage-code-3"
+
+    def test_shared_predicate_false_drives_both_sites_to_local(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.corpus import LOCAL_EMBEDDING_MODELS, effective_embedding_model_for_writes
+
+        monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
+        monkeypatch.setenv("VOYAGE_API_KEY", "ambient-key-must-not-be-used")
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        # Predicate says NOT voyage...
+        monkeypatch.setattr("nexus.config.local_embed_model_is_voyage", lambda: False)
+        # ...but the underlying string IS voyage-shaped — a naive inline
+        # ``.startswith("voyage")`` re-derivation would say True here and
+        # plumb/mint; only genuinely calling the predicate stays local.
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
+        with patch("nexus.config.get_credential") as get_cred:
+            env = self._spawn_env(config_dir, clock, monkeypatch)
+            client_model = effective_embedding_model_for_writes("code")
+        # Engine side: no key plumbed (bge-only engine).
+        get_cred.assert_not_called()
+        assert "NX_VOYAGE_API_KEY" not in env
+        # Client side: still the local bge/minilm token, never voyage.
+        assert client_model in LOCAL_EMBEDDING_MODELS
+
 
 class TestCredsReloadAfterBackfill:
     """nexus-hzhgl round 3 review Significant-1: ``_backfill_provision_grants()``

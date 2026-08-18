@@ -1,10 +1,19 @@
 # Migration directory
 
-## Active operator-facing guides
+## Historical index
+
+Every guide in this directory documents a **completed, historical** migration.
+None is a live, currently-followable operator procedure — for the current
+upgrade path see [`docs/migration-runbook.md`](../migration-runbook.md)
+(the operator's manual order of operations) and
+[`cli-reference.md` § nx upgrade](../cli-reference.md#nx-upgrade) (the
+one-command user path).
 
 - **[Upgrading to 4.34.x](upgrading-to-4.34.md)** — RDR-120 storage
-  substrate split: the daemon model, the one new command after upgrade,
-  schema-version handshake, container/Cowork integration, rollback.
+  substrate split (2026, pre-6.0): the T2/T3 daemon model, the daemon
+  install command, schema-version handshake, container/Cowork integration,
+  rollback. The daemons this guide describes are themselves retired since
+  RDR-152/RDR-155.
 
 ## Historical forensic records
 

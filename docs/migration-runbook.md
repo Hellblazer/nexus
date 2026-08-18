@@ -57,8 +57,11 @@ The lower-level verbs this runbook's history refers to — `nx guided-upgrade`,
 **deleted outright** by RDR-155 P4b along with the rest of the Chroma read
 path: they are not present in this release. On 7.x, an install still carrying
 pre-PG data is DETECTED at every entry point and refused with the two-hop
-redirect — install `conexus==6.18.1`, run `nx guided-upgrade` there, then
-return to 7.x. The demoted-not-deleted survivors of the old upgrade graph are
+redirect — install `conexus==6.18.1`, run `nx upgrade` there (the shipped
+remedy — `src/nexus/stranded_install.py` — names `nx upgrade`, not the
+hidden `nx guided-upgrade`: a user-facing message must name a verb the user
+can find in `--help`), then return to 7.x. The demoted-not-deleted survivors
+of the old upgrade graph are
 `nx migration`, `nx collection backfill-hash`, and `nx hooks update-all`. See
 [`cli-reference.md` § Internal upgrade primitives](cli-reference.md#internal-upgrade-primitives).
 
@@ -163,12 +166,16 @@ process actually crashed).
 ## 1. Before you start: the quiescent window
 
 > **Every `nx storage migrate ...` / `nx migrate-to-service` command block in
-> sections 1-7 below runs only on the pinned `conexus==6.18.1` migration hop**
-> (§0 above). RDR-155 P4b deleted the `nx storage` migrate group and
-> `nx migrate-to-service` from this release outright — on 7.x an operator
-> reaches this playbook via the stranded-install redirect, drives it from the
-> 6.18.1 install, then returns to current. Do not run these commands against
-> a 7.x checkout; `Error: No such command` is the expected result there.
+> sections 1-8 below (including §8.1's rollback branch) runs only on the
+> pinned `conexus==6.18.1` migration hop** (§0 above). RDR-155 P4b deleted
+> the `nx storage` migrate group and `nx migrate-to-service` from this
+> release outright — on 7.x an operator reaches this playbook via the
+> stranded-install redirect, drives it from the 6.18.1 install, then returns
+> to current. Do not run these commands against a 7.x checkout; `Error: No
+> such command` is the expected result there. (§8's `nx upgrade` / `nx index
+> repo` / `nx doctor` commands are the exception — those run on the CURRENT
+> release, not the pin; only §8.1's rollback branch reverts to the pinned
+> `nx storage migrate vectors --rollback`.)
 
 The vector ETL's post-write verification compares an exact source count
 against an exact target count per collection

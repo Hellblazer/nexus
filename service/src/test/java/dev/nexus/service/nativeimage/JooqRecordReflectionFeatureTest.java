@@ -128,7 +128,13 @@ class JooqRecordReflectionFeatureTest {
     // changeset existing at all is +1 (DiagChashConformanceRecord),
     // regardless of the view's own column set never having changed.
     // This is the deliberate bump the assertion message demands.
-    private static final int EXPECTED_RECORD_TYPES = 62;
+    // 62 -> 65: RDR-156 P5.2 (bead nexus-70r3c.18,
+    // vectors-007-hybrid-search-functions.xml) added
+    // nexus.hybrid_search_384/768/1024 — three new RETURNS TABLE
+    // functions (server-side RRF-fusion search), one generated Record
+    // type each (HybridSearch_384Record/HybridSearch_768Record/
+    // HybridSearch_1024Record), +3.
+    private static final int EXPECTED_RECORD_TYPES = 65;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

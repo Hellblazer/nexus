@@ -4,7 +4,7 @@ Running nexus from inside a container — Docker dev container, Claude
 Cowork VM, CI agent, multi-agent Co-Work session — and sharing T1 / T2 /
 T3 state with the host CLI Claude and any other nexus consumers.
 
-This page assumes a 6.x install on the host.
+This page assumes a service-mode install on the host (conexus 6.0+, current through 7.x).
 
 > **Post-RDR-152 topology — there is one service to reach.** All three
 > storage tiers now serve through the native **nexus-service** (Java +
@@ -302,7 +302,7 @@ token itself (RDR-005 bound tokens).
 | `NX_SERVICE_TOKEN` | bearer token (required with `NX_SERVICE_URL`) | lease / `pg_credentials`, host-side only |
 | `NX_SERVICE_HOST` / `NX_SERVICE_PORT` | host + port halves (always `http`); alternative to `NX_SERVICE_URL` for local-supervisor setups | lease |
 | `NX_SERVICE_BIND` | **host-side, read by the Java service**: bind address override (e.g. `0.0.0.0`) for container hosting; non-loopback logs a security warning | `127.0.0.1` |
-| `NX_STORAGE_BACKEND` / `NX_STORAGE_BACKEND_<STORE>` | `service` (default) or `sqlite` (legacy opt-out; see below). Per-store overrides global. Invalid values fail loud | `service` |
+| `NX_STORAGE_BACKEND` / `NX_STORAGE_BACKEND_<STORE>` | `service` (the only live value; per-store overrides global). Setting `sqlite` is a **hard error** carrying the stranded-install redirect (RDR-158 P3 — see [Legacy (SQLite backend)](#legacy-sqlite-backend--retired) below) | `service` |
 | `NX_T1_SESSION` / `NX_T1_SESSION_ID` | join an existing T1 scratch session (exported by a live MCP to its subprocesses) | CLI mints its own dedicated session |
 | `NX_T1_ISOLATED` | retired (nexus-4lkmz) — any truthy value hard-fails with `T1IsolatedLegRetiredError` | unset |
 | `NX_NEXUS_TENANT` | tenant stamped on T1 scratch requests | `default` |

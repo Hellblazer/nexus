@@ -1712,6 +1712,19 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # embedder ran — no Voyage call, no credential, no embedder mode
     # involved anywhere in the file. Reason class "string-literal-as-name".
     "test_h1zu0_dim_routing.py",
+    # nexus-35ok4 / nexus-o5x2c (GH #1461, local-mode voyage resolution):
+    # every test in this file pins LOCAL mode explicitly
+    # (monkeypatch.setattr("nexus.config.is_local_mode", lambda: True))
+    # and references voyage-code-3/voyage-context-3 DELIBERATELY — the
+    # whole point of the file is the local-install-can-use-Voyage
+    # write/read chokepoint (resolve_write_embedding_model,
+    # docs_leaf_fallback_collection_name, HttpCatalogClient.
+    # collection_for_repo) and its keyless-grandfather / keyed-mint truth
+    # table. ``cloud_mode`` would be the WRONG declaration here: it forces
+    # ``is_local_mode()`` False, which is the exact condition these tests
+    # exist to exercise as True. Reason class "mode-self-test" (mirrors
+    # ``test_local_mode.py`` above).
+    "test_o5x2c_write_chokepoint_repros.py",
 })
 
 _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
@@ -1974,6 +1987,21 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/catalog/test_manifest_write_many.py::TestCombinedWriteReadTimeoutNotRetried::test_read_timeout_raises_converted_type_after_exactly_one_post",
     "tests/catalog/test_manifest_write_many.py::TestCombinedWriteReadTimeoutNotRetried::test_converted_exception_is_not_classified_as_connectivity",
     "tests/catalog/test_manifest_write_many.py::TestCombinedWriteReadTimeoutNotRetried::test_connection_reset_still_propagates_unconverted_for_retry",
+    #
+    # nexus-35ok4 / nexus-o5x2c (GH #1461) — reason class "mode-self-test".
+    # Both tests pin LOCAL mode explicitly
+    # (monkeypatch.setattr("nexus.config.is_local_mode", lambda: True))
+    # to prove the shared voyage predicate
+    # (nexus.config.local_embed_model_is_voyage) drives BOTH the storage-
+    # service supervisor's engine-key-plumbing decision and
+    # nexus.corpus.effective_embedding_model_for_writes's client-side
+    # naming decision identically — the whole point is asserting local-
+    # mode-with-voyage-configured behavior, which cloud_mode (forcing
+    # is_local_mode() False) would directly contradict. Popen is mocked
+    # in both (via the class's `_spawn_env` helper); no real embedder or
+    # cloud call is ever made.
+    "tests/daemon/test_storage_service_daemon.py::TestSpawnServiceVoyageKeyPlumbing::test_shared_predicate_true_drives_both_sites_to_voyage",
+    "tests/daemon/test_storage_service_daemon.py::TestSpawnServiceVoyageKeyPlumbing::test_shared_predicate_false_drives_both_sites_to_local",
 })
 
 

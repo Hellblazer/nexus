@@ -1,5 +1,10 @@
 # RDR-079 Execution Plan — Operator Dispatch + Plan Execution End-to-End
 
+> **Executed, historical.** RDR-079 itself is `status: abandoned`
+> (superseded by `nexus.operators.dispatch`, PR #168) — the substrate work this
+> plan drove landed under the superseding design. This document is a record of
+> the phased plan, not current guidance.
+
 **RDR**: `docs/rdr/rdr-079-operator-dispatch-and-execution.md` (status: accepted, 2026-04-15)
 **Epic bead**: `nexus-wc3`
 **Branch convention**: `feature/nexus-<bead-id>-<short-desc>`

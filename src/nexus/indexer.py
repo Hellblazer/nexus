@@ -499,7 +499,7 @@ def _conformant_name_for_repo(repo: Path, content_type: str) -> str:
     canonical model for ``content_type``; version is always v1 for
     ad-hoc fallbacks.
     """
-    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+    from nexus.corpus import resolve_write_embedding_model  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
     from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
     if content_type not in ("code", "docs", "rdr"):
@@ -513,7 +513,32 @@ def _conformant_name_for_repo(repo: Path, content_type: str) -> str:
     # segment. The two synthesis points share the same rule so a repo
     # gets the same name from either entry point.
     sanitised = basename.replace("_", "-")
-    model = effective_embedding_model_for_writes(content_type)
+
+    _db_cache: list = []  # nexus-o5x2c: memoize make_t3() across candidates below
+
+    def _local_token_collection_exists(token: str) -> bool:
+        # nexus-o5x2c: this NO-CATALOG / unregistered-owner fallback has
+        # no live T3 handle in scope (unlike the catalog-aware primary
+        # path) — best-effort construct one purely to probe for a
+        # pre-existing collection to grandfather onto. Wrapped by
+        # resolve_write_embedding_model's own try/except, so a failure
+        # here (no service configured, network) degrades to the
+        # pre-fix behavior (no grandfather found), never a crash of its
+        # own. Constructed ONCE and reused across every candidate in
+        # LOCAL_EMBEDDING_MODELS (reviewer follow-up) rather than once
+        # per candidate — the probe never spans more than one T3 client.
+        if not _db_cache:
+            from nexus.db import make_t3  # noqa: PLC0415 — deferred, probe-local
+            _db_cache.append(make_t3())
+        candidate = _safe_collection(
+            prefix=f"{content_type}__", name=sanitised, path_hash=repo_hash,
+            suffix=f"__{token}__v1",
+        )
+        return _db_cache[0].collection_exists(candidate)
+
+    model = resolve_write_embedding_model(
+        content_type, collection_exists=_local_token_collection_exists,
+    )
     return _safe_collection(
         prefix=f"{content_type}__",
         name=sanitised,
@@ -575,7 +600,7 @@ def _migration_source_candidates(
     already crossed the Phase-5 strict-flip and accumulated synth-shape
     collections.
     """
-    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+    from nexus.corpus import resolve_read_embedding_model  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
     from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
     if content_type not in ("code", "docs", "rdr"):
@@ -584,7 +609,14 @@ def _migration_source_candidates(
         )
     basename, repo_hash = _repo_identity(repo)
     sanitised = basename.replace("_", "-")
-    model = effective_embedding_model_for_writes(content_type)
+    # nexus-o5x2c: this builds a CANDIDATE name to CHECK for pre-migration
+    # data — a read/probe shape, not a write mint — so it uses the
+    # credential-free read resolver, never
+    # effective_embedding_model_for_writes directly (which used to crash
+    # this whole migration-detection path on a keyless voyage-configured
+    # local install; caught only by an incidental outer except in the
+    # caller, per nexus-o5x2c's item #4).
+    model = resolve_read_embedding_model(content_type)
     return [
         # Pre-RDR-103 legacy 2-segment.
         _safe_collection(f"{content_type}__", basename, repo_hash),
@@ -645,10 +677,11 @@ def _migrate_legacy_collections(
     # nexus-8g79.10 (V5): import from peer module instead of reaching
     # up into commands/. The CLI wrapper in commands/collection.py
     # adds the ``t3_db=_t3()`` default; we pass ``t3_db`` explicitly.
+    from nexus.catalog.collection_name import owner_segment_for_tumbler  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.collection_name)
     from nexus.collection_rename import (  # noqa: PLC0415  — circular-dep avoidance (nexus.collection_rename)
         rename_collection_data_plane,
     )
-    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+    from nexus.corpus import resolve_write_embedding_model  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
     from nexus.db.collection_state import CollectionState, probe_collection_state  # noqa: PLC0415  — circular-dep avoidance (nexus.db.collection_state)
     from nexus.repo_identity import _repo_identity  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
@@ -675,10 +708,25 @@ def _migrate_legacy_collections(
         return result
 
     for ct in _MIGRATION_CONTENT_TYPES:
+        owner_id = owner_segment_for_tumbler(owner)
+        # nexus-o5x2c: THE chokepoint — grandfathers onto a pre-existing
+        # bge/minilm collection in T3 (this function's own substrate,
+        # same as the probe_collection_state calls just below) instead
+        # of crashing when local.embed_model is voyage-shaped and no key
+        # is configured. Previously reached only because an outer
+        # ``except Exception`` in the caller (nx index repo) happened to
+        # swallow the raise, not by design.
         conformant = cat_obj.collection_for(
             content_type=ct,
             owner=owner,
-            embedding_model=effective_embedding_model_for_writes(ct),
+            embedding_model=resolve_write_embedding_model(
+                ct,
+                collection_exists=(
+                    lambda token, _owner_id=owner_id, _ct=ct: t3_db.collection_exists(
+                        f"{_ct}__{_owner_id}__{token}__v1"
+                    )
+                ),
+            ),
         ).render()
 
         # nexus-7vuw: pick the first source candidate that exists in T3.

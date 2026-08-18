@@ -1,5 +1,12 @@
 # Postmortem: RDR-110/111/112/113 deep-review remediation chain
 
+> **SCRAPPED ARCHITECTURE**: RDR-110/111/112/113 (and the related RDR-118/119) are
+> all `status: scrapped`. The surviving successor is [RDR-127: Substrate-Decoupled
+> Surface Rendering](../rdr/rdr-127-substrate-decoupled-surface-rendering.md)
+> (`status: accepted`). This postmortem remains accurate as a historical record of
+> the remediation chain itself; do NOT use the underlying substrate design as a
+> current-state reference.
+
 **Date**: 2026-05-16
 **Severity**: N/A — planned remediation arc, not an incident
 **Scope**: Cockpit + tuplespace + daemon substrate, post-PR #786 review fallout

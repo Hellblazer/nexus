@@ -1207,6 +1207,33 @@ def _upsert_skip_reembed(
     return len(new_idx)
 
 
+def _resolve_write_db(t3: Any) -> Any:
+    """Resolve the T3-like client an indexer will write through.
+
+    nexus-o5x2c (nexus-35ok4 round 4 SHIP-BLOCKER): factored out so the
+    three ``docs_leaf_fallback_collection_name`` call sites below
+    (``_index_document``, ``index_pdf``, ``index_markdown``) can resolve
+    the client BEFORE deriving a fallback collection name — needed to
+    supply ``docs_leaf_fallback_collection_name``'s ``collection_exists``
+    grandfather probe — and then reuse the SAME instance for the actual
+    write, instead of resolving it twice (once, uselessly, discarded).
+
+    RDR-152 Seam B: when *t3* is None, route through ``get_t3()`` in
+    service mode so ``HttpVectorClient`` is used instead of a daemon
+    ``T3Database``, preventing the split-brain where indexing writes to
+    daemon-Chroma but search reads service-Chroma. In non-service mode,
+    ``make_t3()`` preserves existing test-mock contracts (tests patch
+    ``nexus.doc_indexer.make_t3``).
+    """
+    if t3 is not None:
+        return t3
+    from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
+    if is_vector_service_mode():
+        from nexus.mcp_infra import get_t3  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
+        return get_t3()
+    return make_t3()
+
+
 def _index_document(
     file_path: Path,
     corpus: str,
@@ -1305,6 +1332,12 @@ def _index_document(
 
     sp = source_key if source_key is not None else str(file_path)
     content_hash = _sha256(file_path)
+    # RDR-152 Seam B: resolve the write client BEFORE the collection-name
+    # fallback below (moved up, nexus-o5x2c) so it can also serve as the
+    # grandfather-probe for docs_leaf_fallback_collection_name; reused as
+    # ``db`` for the actual write, not resolved twice. See
+    # _resolve_write_db's docstring for the service/non-service dispatch.
+    db = _resolve_write_db(t3)
     if collection_name is None:
         # RDR-103 Phase 5 leaf fallback. ``corpus`` is a string (the
         # repo basename or operator-supplied corpus tag), not a Path;
@@ -1320,22 +1353,12 @@ def _index_document(
         # for ad-hoc paths.
         from nexus.corpus import docs_leaf_fallback_collection_name  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
 
-        collection_name = docs_leaf_fallback_collection_name(corpus)
-    # RDR-152 Seam B: when t3 is None, route through get_t3() in service mode
-    # so HttpVectorClient is used instead of T3Database(daemon), preventing the
-    # split-brain where indexing writes to daemon-Chroma but search reads
-    # service-Chroma.  In non-service mode, preserve make_t3() to keep existing
-    # mocks working (tests patch 'nexus.doc_indexer.make_t3').
-    # Lazy import avoids a circular import cycle with mcp_infra.
-    if t3 is not None:
-        db = t3
-    else:
-        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
-        if is_vector_service_mode():
-            from nexus.mcp_infra import get_t3  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
-            db = get_t3()
-        else:
-            db = make_t3()
+        # nexus-o5x2c: pass the grandfather probe so a keyless
+        # voyage-configured local install with a pre-existing bge/minilm
+        # collection reuses it instead of crashing (live-repro'd bug).
+        collection_name = docs_leaf_fallback_collection_name(
+            corpus, collection_exists=lambda name: db.collection_exists(name),
+        )
     col = db.get_or_create_collection(collection_name)
 
     target_model = index_model_for_collection(collection_name)
@@ -2086,6 +2109,10 @@ def index_pdf(
         )
 
     content_hash = _sha256(pdf_path)
+    # RDR-152 Seam B: resolve the write client BEFORE the collection-name
+    # fallback below (moved up, nexus-o5x2c) — see _index_document /
+    # _resolve_write_db for the full rationale.
+    db = _resolve_write_db(t3)
     # RDR-103 Phase 5 leaf fallback (see _index_document for the
     # full rationale). Synthesises a conformant 4-segment name for
     # ad-hoc invocations; production hot paths always pass
@@ -2094,19 +2121,10 @@ def index_pdf(
         col_name = collection_name
     else:
         from nexus.corpus import docs_leaf_fallback_collection_name  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
-        col_name = docs_leaf_fallback_collection_name(corpus)
-    # RDR-152 Seam B: when t3 is None, route through get_t3() in service mode —
-    # see _index_document for full rationale.  In non-service mode, use make_t3()
-    # to preserve existing test mock contracts (patch 'nexus.doc_indexer.make_t3').
-    if t3 is not None:
-        db = t3
-    else:
-        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
-        if is_vector_service_mode():
-            from nexus.mcp_infra import get_t3  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
-            db = get_t3()
-        else:
-            db = make_t3()
+        # nexus-o5x2c: grandfather probe — see _index_document.
+        col_name = docs_leaf_fallback_collection_name(
+            corpus, collection_exists=lambda name: db.collection_exists(name),
+        )
     col = db.get_or_create_collection(col_name)
     target_model = index_model_for_collection(col_name)
     if local_target_model is not None:
@@ -2841,7 +2859,22 @@ def index_markdown(
         col_name = collection_name
     else:
         from nexus.corpus import docs_leaf_fallback_collection_name  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
-        col_name = docs_leaf_fallback_collection_name(corpus)
+        # nexus-o5x2c: grandfather probe (see _index_document) — this is
+        # the live-repro'd `nx index md` without --collection crash.
+        # LAZY on purpose: _resolve_write_db(t3) must NOT run here
+        # unconditionally — this line runs before _index_document's own
+        # credentials check further down, and a test
+        # (test_index_raises_credentials_missing_when_cloud_mode_explicit)
+        # pins that a misconfigured non-service/non-local install raises
+        # CredentialsMissingError WITHOUT ever touching T3. Wrapping in a
+        # lambda defers both the db resolution AND the attribute access
+        # until resolve_write_embedding_model's probe loop actually needs
+        # it (local mode + voyage-shaped + no key) — which this
+        # credentials-failure config never reaches.
+        col_name = docs_leaf_fallback_collection_name(
+            corpus,
+            collection_exists=lambda name: _resolve_write_db(t3).collection_exists(name),
+        )
     # RDR-102 Phase A: pre-flight catalog registration. Resolve doc_id BEFORE
     # _index_document's staleness check so a fresh index lands chunks with
     # doc_id populated at write time. Idempotent on re-index via

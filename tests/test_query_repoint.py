@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-156 P4 follow-on (nexus-rzqto): query() service-mode repoint tests.
+"""RDR-156 P4 follow-on (nexus-rzqto, nexus-2bqpn): query() service-mode
+repoint + dance-deletion tests.
 
-Pins: service-mode catalog-param paths route through search_metadata_scoped /
-search_graph_hop; fallback to search_cross_corpus in local mode or no catalog
-params; exact structured key-set parity {ids, tumblers, distances, collections,
-chunk_collections, chunk_text_hash}; guards (subtree depth>=3, catalog-not-init,
-empty-filters) preserved.
+Pins: catalog-param paths route through search_metadata_scoped /
+search_graph_hop UNCONDITIONALLY — RDR-156 P4.2c (nexus-2bqpn) deleted the
+app-side catalog-dance + search_cross_corpus fallback, so non-service T3 or
+an operator-shaped `where` combined with a catalog param now loud-reject
+instead of falling back to anything; exact structured key-set parity {ids,
+tumblers, distances, collections, chunk_collections, chunk_text_hash};
+guards (subtree depth>=3, catalog-not-init, empty-filters) preserved.
+search_cross_corpus still runs for queries with NO catalog params — that
+path is untouched (out of nexus-2bqpn's scope) and is pinned separately
+below.
 """
 from __future__ import annotations
 
@@ -512,11 +518,11 @@ class TestQueryRepointGraphHop:
         assert isinstance(result, dict)
         assert result["ids"] == ["1.2.3"]
 
-    def test_follow_links_operator_where_still_dances(self, monkeypatch):
-        """nexus-7ndh3 critique CRITICAL-1: operator-shaped where cannot be
-        expressed as JSONB containment — it must keep the dance path (whose
-        search_cross_corpus leg translates operators to SQL), NOT silently
-        containment-fail through search_graph_hop."""
+    def test_follow_links_operator_where_is_loud_rejected(self, monkeypatch):
+        """RDR-156 P4.2c (nexus-2bqpn): operator-shaped where cannot be
+        expressed as JSONB containment, and the dance that used to translate
+        it to real SQL is deleted — catalog params + an operator where now
+        return a loud error instead of silently falling back to anything."""
         import nexus.search_engine as se
 
         cross_called = []
@@ -530,9 +536,12 @@ class TestQueryRepointGraphHop:
         _wire(monkeypatch, t3, ["c1"], cat, service=True)
         monkeypatch.setattr(se, "search_cross_corpus", _fake_cross)
 
-        core.query("q", follow_links="cites", where="bib_year>=2020", corpus="c1")
+        result = core.query("q", follow_links="cites", where="bib_year>=2020", corpus="c1")
 
-        assert cross_called, "operator where must take the dance"
+        assert isinstance(result, str)
+        assert "operator-shaped" in result
+        assert "equality-only" in result
+        assert not cross_called, "no dance to fall back to — the dance is deleted"
         assert not t3.graph_calls, "search_graph_hop must NOT receive an operator where"
         assert not t3.meta_calls, "search_metadata_scoped must NOT receive an operator where"
 
@@ -598,11 +607,17 @@ class TestQueryGuards:
 # FALLBACK: LOCAL MODE (non-service) must NOT call combined-query functions
 # ═════════════════════════════════════════════════════════════════════════════
 
-class TestQueryDancePathCollectionsSorted:
-    """H1: dance path `collections` must also be sorted for cross-mode parity."""
+class TestQueryNoCatalogParamsCollectionsSorted:
+    """H1: the surviving no-catalog-params search_cross_corpus path's
+    `collections` must also be sorted for cross-mode parity. RDR-156 P4.2c
+    (nexus-2bqpn) deleted the catalog-params dance; this test carries no
+    catalog params (author/content_type/follow_links/subtree all unset), so
+    it always exercised the plain corpus-based path, not the dance —
+    `service=False` here is incidental (the no-catalog-params path runs the
+    same in either mode) and was never a fallback-FROM-service-mode case."""
 
-    def test_dance_path_collections_sorted(self, monkeypatch):
-        """H1: dance path structured['collections'] is sorted (not arbitrary set order)."""
+    def test_no_catalog_params_collections_sorted(self, monkeypatch):
+        """H1: structured['collections'] is sorted (not arbitrary set order)."""
         import nexus.search_engine as se
 
         class _FakeResult:
@@ -622,8 +637,8 @@ class TestQueryDancePathCollectionsSorted:
         monkeypatch.setattr(se, "search_cross_corpus",
                             lambda *a, **kw: results)
 
-        # corpus="all" causes the dance to build target from all_names=["z_col","a_col"]
-        # via the "all" expansion path (resolve_corpus exact-matches each prefix).
+        # corpus="all" builds target from all_names=["z_col","a_col"] via the
+        # "all" expansion path (resolve_corpus exact-matches each prefix).
         result = core.query("q", structured=True, corpus="all")
 
         # H1: must be sorted, not arbitrary iteration order
@@ -631,10 +646,14 @@ class TestQueryDancePathCollectionsSorted:
 
 
 class TestQueryFallbackLocalMode:
-    """LOCAL MODE: is_service_backed=False → existing dance + search_cross_corpus runs."""
+    """LOCAL MODE: is_service_backed=False + catalog params → loud reject
+    (RDR-156 P4.2c / nexus-2bqpn deleted the app-side dance that used to
+    absorb this combination via search_cross_corpus)."""
 
-    def test_local_mode_with_catalog_params_uses_cross_corpus(self, monkeypatch):
-        """Non-service mode + catalog params: search_cross_corpus is called, not combined funcs."""
+    def test_local_mode_with_catalog_params_is_loud_rejected(self, monkeypatch):
+        """Non-service mode + catalog params: no dance to fall back to —
+        query() returns a loud error naming service mode, and calls neither
+        the combined-query functions nor search_cross_corpus."""
         import nexus.search_engine as se
 
         t3 = _FakeLocalT3()
@@ -669,7 +688,10 @@ class TestQueryFallbackLocalMode:
 
         result = core.query("q", author="Alice")
 
-        assert cross_called, "search_cross_corpus must be called in local mode"
+        assert isinstance(result, str)
+        assert "service mode" in result
+        assert "pgvector" in result
+        assert not cross_called, "no dance left — search_cross_corpus must NOT be called"
         assert not t3.meta_calls, "search_metadata_scoped must NOT be called in local mode"
         assert not t3.graph_calls, "search_graph_hop must NOT be called in local mode"
 

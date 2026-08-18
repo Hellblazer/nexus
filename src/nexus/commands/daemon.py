@@ -1455,13 +1455,18 @@ def restart_stale_cmd(dry_run: bool) -> None:
     DDL). It also removes a stray ``com.nexus.t2`` LaunchAgent on a
     service-mode box (nexus-c0vby, GH #1405 defect 2 — a service-mode
     box's T2 daemon never starts, so a leftover agent's KeepAlive would
-    otherwise respawn an immediately-exiting process forever). Runs
+    otherwise respawn an immediately-exiting process forever), and
+    converges a drifted local-mode service-tier autostart unit (nexus-rlp0v
+    — e.g. a stale ``ProcessType=Background``: an installed launchd/systemd
+    unit is a rendered copy that a package upgrade alone does not update;
+    this re-renders and re-bootstraps it, bouncing the service). Runs
     automatically on the first ``nx`` invocation after a version change;
     this is the manual form (also the re-run path for convergence outside
     a version transition, e.g. after remediating a chash-poison block).
     """
     from nexus.upgrade_finish import (  # noqa: PLC0415 — deferred import
         converge_engine,
+        converge_service_autostart_unit,
         detect_engine_convergence,
         detect_stale_processes,
         heal_diag_view,
@@ -1566,3 +1571,21 @@ def restart_stale_cmd(dry_run: bool) -> None:
                     click.echo(f"  {line}")
         except Exception as exc:  # noqa: BLE001 — one leg's failure must not block the others
             click.echo(f"T2 LaunchAgent unload failed ({exc}) — skipping this leg.", err=True)
+
+    # nexus-rlp0v: independent leg, same defense-in-depth pattern as the
+    # legs above — converges a drifted local-mode service-tier autostart
+    # unit (e.g. a stale ProcessType=Background) by stopping the service,
+    # reinstalling the unit via the existing installer machinery, and
+    # restarting. Bounces the service, so it does not run under --dry-run.
+    try:
+        autostart_actions = converge_service_autostart_unit(config_dir, dry_run=dry_run)
+        if not autostart_actions:
+            click.echo(
+                "service autostart unit: no action needed (not local mode, "
+                "no unit installed, or already up to date)."
+            )
+        else:
+            for line in autostart_actions:
+                click.echo(f"  {line}")
+    except Exception as exc:  # noqa: BLE001 — one leg's failure must not block the others
+        click.echo(f"service autostart convergence failed ({exc}) — skipping this leg.", err=True)

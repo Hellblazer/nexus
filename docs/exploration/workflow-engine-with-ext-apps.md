@@ -1,5 +1,8 @@
 # Workflow engine + ext-apps: human-in-the-loop without durable state at v1
 
+> **Disposition**: historical exploration; candidate for archive. No outcome
+> disposition named in the docs audit — adopt-or-scrap is Hal's call.
+
 A design note exploring how a Parmar-style MCP workflow engine combines with
 [`modelcontextprotocol/ext-apps`](https://github.com/modelcontextprotocol/ext-apps)
 to support human-in-the-loop steps, and how cross-session survival can be

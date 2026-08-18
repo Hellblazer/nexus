@@ -47,6 +47,14 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     │     pdf:   auto-detect routing (Docling → MinerU → PyMuPDF) → table/formula detection → bib enrichment → voyage-context-3 → docs__<corpus>
     │     skip:  .xml/.json/.yml/.html/.css/.lock/etc → silently ignored
     │
+    │     Model names above (`voyage-code-3`, `voyage-context-3`) label the
+    │     target model, not a client-side API call — the embed request is
+    │     always issued through the nexus-service (`HttpVectorClient` →
+    │     `/v1/vectors`): cloud installs route to Voyage AI server-side,
+    │     local installs use the bundled bge-768 ONNX model. Direct
+    │     client-side Voyage calls (`_voyage_with_retry`) are retired code
+    │     with no live caller.
+    │
     ├── Search: query → retrieve → rerank → topic-boost → group → format
     │     semantic, hybrid (+ frecency + ripgrep)
     │     topic boost: same-topic -0.1, linked-topic -0.05 distance adjustment
@@ -377,7 +385,7 @@ Two hash fields look similar but mean very different things. Confusing them prod
 | `source_path` | document | absolute or repo-relative file path | indexer | display + grep targets; legacy path predating `source_uri` |
 | `chunk_start_char` / `chunk_end_char` | chunk | char offsets in the source file | indexer per chunk | `chunk:char` span resolution; UI highlight |
 | `section_title` / `section_type` | chunk | tree-sitter / Markdown section header | code/prose chunkers | search-time filtering (`section_type!=references`) |
-| `embedding_model` | document | model id string | every write through `T3Database` | `voyage-code-3` vs `voyage-context-3` routing; quota validation |
+| `embedding_model` | document | model id string | every write through the T3 client (`HttpVectorClient`; `T3Database`/`db/t3.py` is the retired serving path kept only as a test facade — see Storage row above) | `voyage-code-3` vs `voyage-context-3` routing; embedding-model drift/staleness detection (`nx doctor`, `indexer_utils.py` re-embed check) |
 | `extraction_method` | chunk | PDF-extractor identity string | PDF chunks only, via `pipeline_stages._enrich_metadata_from_extraction` post-pass (streaming) / `doc_indexer._pdf_chunks` (legacy batch path) | retroactively scoping extractor regressions — `docling` \| `mineru` \| `pymupdf_normalized`, or the honest mixed aggregate `mineru+docling-degraded` when an `--on-formula-oom docling` per-page degrade fired (nexus-1oguj, new-writes-only — see epistemic-hole note below) |
 
 `doc_id`, `chunk_index`, and `chunk_count` were ALSO chunk-level metadata pre-[RDR-108](rdr/rdr-108-graph-identity-normalization.md). [RDR-108](rdr/rdr-108-graph-identity-normalization.md) Phase 3 retired them; the catalog `document_chunks` manifest is the single source of truth for chunk position within a document. Read paths that need chunk order consult `Catalog.get_manifest(doc_id)` (see `_attach_doc_ids_from_catalog` in `search_engine.py` for the standard fallback).

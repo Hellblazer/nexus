@@ -713,6 +713,242 @@ class TestRepoScope:
         assert out["permissionDecision"] == "allow", out
         assert not out.get("additionalContext"), out
 
+    def test_trailing_slash_dot_git_origin_is_still_nexus_scoped(self, tmp_path):
+        """Ported from the deleted rule-2 suite (nexus-ww9fw split):
+        normalization-order regression, previously reproduced live --
+        ``.../nexus.git/`` (trailing slash AFTER ``.git``) must still
+        resolve its last path component to ``nexus``. The first cut
+        stripped ``.git`` before the slash, so the suffix survived and a
+        genuine nexus remote read as foreign -- which post-split would
+        silently switch rule 3 OFF. Asserted here via rule 3: a gated-path
+        commit with no coverage must DENY, proving the repo resolved
+        in-scope."""
+        origin = tmp_path / "nexus.git"
+        origin.mkdir()
+        _git("init", "-q", "--bare", "--initial-branch=develop", cwd=origin)
+        work = tmp_path / "work-trailing-slash"
+        work.mkdir()
+        _git("init", "-q", "--initial-branch=develop", cwd=work)
+        _git("remote", "add", "origin", str(origin) + "/", cwd=work)
+        (work / "README.md").write_text("init\n")
+        _git("add", "README.md", cwd=work)
+        _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init", cwd=work)
+        _git("push", "-q", "-u", "origin", "develop", cwd=work)
+        _commit(work, "src/x.py", "feat: x, no bead id, no marker anywhere")
+        fake_bin = _fake_nx(tmp_path)
+        out = _decision(_run("git push", work, path=f"{fake_bin}:/usr/bin:/bin"))
+        assert out["permissionDecision"] == "deny", out
+
+    def test_renamed_origin_with_plugin_marker_still_in_scope(self, tmp_path):
+        """Ported from the deleted rule-2 suite (nexus-ww9fw split):
+        nexus-w3apo -- Signal A resolving DETERMINATELY to a non-``nexus``
+        basename must still consult the marker (Signal B). A nexus
+        checkout behind a renamed/local origin (scratch clone, mirror) is
+        exactly the shape that silently lost its guard when Signal B was
+        fallback-only. Asserted via rule 3: gated-path commit, no
+        coverage, marker present -> DENY."""
+        origin = tmp_path / "nexus-mirror"
+        origin.mkdir()
+        _git("init", "-q", "--bare", "--initial-branch=develop", cwd=origin)
+        work = tmp_path / "work-renamed"
+        work.mkdir()
+        _git("init", "-q", "--initial-branch=develop", cwd=work)
+        _git("remote", "add", "origin", str(origin), cwd=work)
+        marker_dir = work / "conexus" / ".claude-plugin"
+        marker_dir.mkdir(parents=True)
+        (marker_dir / "plugin.json").write_text("{}")
+        _git("add", "conexus/.claude-plugin/plugin.json", cwd=work)
+        _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init", cwd=work)
+        _git("push", "-q", "-u", "origin", "develop", cwd=work)
+        _commit(work, "src/x.py", "feat: x, no bead id, no marker anywhere")
+        fake_bin = _fake_nx(tmp_path)
+        out = _decision(_run("git push", work, path=f"{fake_bin}:/usr/bin:/bin"))
+        assert out["permissionDecision"] == "deny", out
+
+
+class TestF1RedirectionStripping:
+    """nexus-cr4lp F1 (T2 nexus/guard-evidence-cluster-root-cause-2026-08-
+    18, LEG A): shell redirection tokens (``2>&1``, ``>``, etc.) must not
+    be read as phantom refspecs. Pre-fix, ``git push -u origin
+    release/v7.9.0 2>&1`` read the destination list as
+    ``['release/v7.9.0', '2>&1']``, and the release/* exemption's
+    ``all(d.startswith('release/'))`` failed on the bogus second entry --
+    denying a legitimate, PR-gated release-branch push."""
+
+    def test_release_branch_push_with_trailing_stderr_redirect_stays_exempt(
+        self, repo, tmp_path
+    ):
+        _git("checkout", "-q", "-b", "release/v9.9.9", cwd=repo)
+        _commit(repo, "conexus/PENDING_RELEASE.md", "chore(release): conexus 9.9.9")
+        fake_bin = _fake_nx(tmp_path)  # would deny a normal branch push
+        out = _decision(_run(
+            "git push -u origin release/v9.9.9 2>&1",
+            repo, path=f"{fake_bin}:/usr/bin:/bin",
+        ))
+        assert out["permissionDecision"] == "allow", out
+        assert "release" in out.get("additionalContext", "").lower()
+
+
+class TestF2EnvPrefixOverride:
+    """nexus-cr4lp F2: an inline ``NX_REVIEW_GATE_OVERRIDE=1`` prefix on
+    the push command itself must be PARSED (the push segment recognized,
+    rules apply) and HONORED as an override -- not a silent, unaudited
+    no-op via a parser miss (B2: pre-fix, ``_push_tokens`` required
+    ``tokens[0] == "git"``, so the env-prefixed form was invisible and the
+    whole coverage check silently never ran)."""
+
+    def test_inline_env_prefixed_push_is_recognized_and_overridden(
+        self, repo, tmp_path
+    ):
+        _commit(repo, "src/nexus/foo.py", "feat: add foo (nexus-abc12)")
+        fake_bin = _fake_nx(tmp_path)  # both sources empty -- would deny
+        out = _decision(_run(
+            "NX_REVIEW_GATE_OVERRIDE=1 git push", repo, path=f"{fake_bin}:/usr/bin:/bin",
+        ))
+        assert out["permissionDecision"] == "allow", out
+        assert "OVERRIDE" in out.get("additionalContext", ""), out
+
+    def test_inline_override_emits_an_escape_routing_event(self, repo, tmp_path):
+        _commit(repo, "src/nexus/foo.py", "feat: add foo (nexus-abc12)")
+        fake_bin = _fake_nx(tmp_path)
+        out = _decision(_run(
+            "NX_REVIEW_GATE_OVERRIDE=1 git push", repo, path=f"{fake_bin}:/usr/bin:/bin",
+        ))
+        assert out["permissionDecision"] == "allow", out
+        log = tmp_path / "log.jsonl"
+        events = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
+        assert any(e["outcome"] == "escape" for e in events), events
+
+    def test_ambient_env_override_also_emits_an_escape_routing_event(self, repo, tmp_path):
+        """Every override -- inline OR ambient env -- is audited the same
+        way; this is the non-regression counterpart to the inline test
+        above."""
+        _commit(repo, "src/nexus/foo.py", "feat: add foo (nexus-abc12)")
+        fake_bin = _fake_nx(tmp_path)
+        out = _decision(_run(
+            "git push", repo, path=f"{fake_bin}:/usr/bin:/bin",
+            env_extra={"NX_REVIEW_GATE_OVERRIDE": "1"},
+        ))
+        assert out["permissionDecision"] == "allow", out
+        log = tmp_path / "log.jsonl"
+        events = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
+        assert any(e["outcome"] == "escape" for e in events), events
+
+
+class TestF4RemedySeparateCallWarning:
+    """nexus-cr4lp F4: the shared root cause of every report in the
+    guard-evidence cluster is a PreToolUse deny aborting the WHOLE Bash
+    call, remedy bundled ahead of the gated command included. Every deny
+    message's Remedy block must lead with that warning."""
+
+    def test_uncovered_deny_remedy_opens_with_separate_call_warning(self, repo, tmp_path):
+        _commit(repo, "src/nexus/foo.py", "feat: add foo (nexus-abc12)")
+        fake_bin = _fake_nx(tmp_path)
+        out = _decision(_run("git push", repo, path=f"{fake_bin}:/usr/bin:/bin"))
+        assert out["permissionDecision"] == "deny", out
+        reason = out["permissionDecisionReason"]
+        assert "SEPARATE tool call" in reason, reason
+        assert reason.index("Remedy") < reason.index("SEPARATE tool call")
+
+    def test_deadline_scan_remedy_opens_with_separate_call_warning(self, repo, tmp_path):
+        ids = [f"nexus-bud{i:02d}" for i in range(5)]
+        for i, bid in enumerate(ids):
+            _commit(repo, f"src/f{i}.py", f"feat: f{i} ({bid})")
+        fake_bin = _fake_nx(tmp_path, scratch="No scratch entries.", sleep_seconds=0.35)
+        out = _decision(_run(
+            "git push", repo, path=f"{fake_bin}:/usr/bin:/bin",
+            env_extra={"NX_PUSH_GATE_DEADLINE_SECONDS": "0.5"},
+        ))
+        assert out["permissionDecision"] == "deny", out
+        reason = out["permissionDecisionReason"]
+        assert "SEPARATE tool call" in reason, reason
+        assert reason.index("Remedy") < reason.index("SEPARATE tool call")
+
+
+class TestB3T2TitleOnlyMarker:
+    """nexus-cr4lp B3 (latent, found during guard-evidence-cluster
+    forensics): a T2 marker whose bead id lives ONLY in the TITLE (this
+    hook's OWN printed ``-t review-<bead-id>`` form) must satisfy
+    coverage even when the CONTENT carries no bare bead id."""
+
+    def test_t2_marker_covers_when_bead_id_is_only_in_the_title(self, repo, tmp_path):
+        _commit(repo, "src/nexus/foo.py", "feat: add foo (nexus-b3ttl)")
+        fake_bin = _fake_nx(
+            tmp_path,
+            scratch="No scratch entries.",
+            memory_by_query={
+                "nexus-b3ttl": _t2_marker(
+                    "nexus/review-nexus-b3ttl",
+                    "review-completed: clean, no bead id restated here",
+                )
+            },
+        )
+        out = _decision(_run("git push", repo, path=f"{fake_bin}:/usr/bin:/bin"))
+        assert out["permissionDecision"] == "allow", out
+
+
+class TestF5RemedyRoundTripReal:
+    """nexus-cr4lp F5: each remedy string the hook PRINTS, executed via
+    the REAL ``nx`` CLI (THIS checkout's dev build -- never the live
+    production install, see
+    feedback_check_install_mode_before_diagnosing.md) as its OWN
+    subprocess call, must actually satisfy the hook's own T1/T2 lookup
+    afterward. Uses the real engine-backed T2/T1 substrate
+    (``t2_service_env``, tests/_engine_substrate.py) -- skips cleanly if
+    the dev ``nx`` console script cannot be found next to
+    ``sys.executable`` (e.g. a non-uv invocation)."""
+
+    @staticmethod
+    def _real_nx_dir() -> pathlib.Path | None:
+        d = pathlib.Path(sys.executable).parent
+        return d if (d / "nx").exists() else None
+
+    @pytest.mark.parametrize("remedy_kind", ["t1_range_marker", "t2_bead_marker"])
+    def test_printed_remedy_satisfies_the_hooks_own_lookup(
+        self, remedy_kind, repo, t2_service_env
+    ):
+        real_nx_dir = self._real_nx_dir()
+        if real_nx_dir is None:
+            pytest.skip("dev checkout `nx` console script not found next to sys.executable")
+        real_nx = str(real_nx_dir / "nx")
+
+        bead_id = f"nexus-r5{'a' if remedy_kind == 't1_range_marker' else 'b'}01"
+        sha = _commit(repo, "src/nexus/f5.py", f"feat: f5 remedy round-trip ({bead_id})")
+
+        session_id = f"cr4lp-f5-{remedy_kind}"
+        write_env = os.environ.copy()
+        write_env["NX_SESSION_ID"] = session_id
+        write_env["NX_T1_ALLOW_SHARED_FALLBACK"] = "1"
+
+        if remedy_kind == "t1_range_marker":
+            write_cmd = [
+                real_nx, "scratch", "put", f"review-completed: range {sha}",
+                "--tags", "review-completed",
+            ]
+        else:
+            write_cmd = [
+                real_nx, "memory", "put", f"review-completed: {bead_id}",
+                "-p", "nexus-cr4lp-f5-test", "-t", f"review-{bead_id}",
+            ]
+
+        # The remedy write is ITS OWN subprocess call -- never bundled
+        # with the gated command. That bundling is the shared root cause
+        # every report in the guard-evidence cluster traces to (T2
+        # nexus/guard-evidence-cluster-root-cause-2026-08-18).
+        wproc = subprocess.run(
+            write_cmd, cwd=repo, env=write_env, capture_output=True, text=True, timeout=60,
+        )
+        assert wproc.returncode == 0, wproc.stderr
+
+        out = _decision(_run(
+            "git push", repo, path=f"{real_nx_dir}:/usr/bin:/bin",
+            env_extra={
+                "NX_SESSION_ID": session_id,
+                "NX_T1_ALLOW_SHARED_FALLBACK": "1",
+            },
+        ))
+        assert out["permissionDecision"] == "allow", out
+
 
 class TestRegistryStillAtCap:
     def test_no_new_routing_registry_entry_added(self):
@@ -730,5 +966,44 @@ class TestRegistryStillAtCap:
         )
         assert "nexus-4av2n" in registry, (
             "the registry rationale does not record the push-review-coverage "
-            "half; a future reader would not know this hook carries a third check"
+            "check; a future reader would not know this hook enforces it"
+        )
+
+
+class TestWiring:
+    """Moved from the now-deleted tests/test_routing_git_add_all.py
+    (nexus-ww9fw, 2026-08-18): these generic hook-wiring checks are not
+    about the wildcard-add rule that used to share this script -- they
+    just confirm the SCRIPT (still named
+    `git_add_all_redirects_to_explicit_paths.py` for registry/hooks.json
+    compatibility, per the module docstring's HISTORY note) is registered
+    and wired. They belong with this file now, since this is the sole
+    surviving check the script enforces."""
+
+    def test_registry_has_rule(self):
+        yaml = pytest.importorskip("yaml")
+        reg = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "registry.yaml"
+        rule = (yaml.safe_load(reg.read_text()) or {}).get("rules", {}).get(
+            "git_add_all_redirects_to_explicit_paths"
+        )
+        assert rule is not None
+
+    def test_hooks_json_registers(self):
+        hooks_json = PROJECT_ROOT / "conexus" / "hooks" / "hooks.json"
+        data = json.loads(hooks_json.read_text())
+        found = any(
+            "git_add_all_redirects_to_explicit_paths.py" in h.get("command", "")
+            for entry in data["hooks"]["PreToolUse"] if entry.get("matcher") == "Bash"
+            for h in entry.get("hooks", [])
+        )
+        assert found
+
+    def test_registry_no_longer_claims_wildcard_add_or_push_to_main_as_live(self):
+        """nexus-ww9fw: the registry rationale must not describe rules 1/2
+        as CURRENT plugin behavior -- only as history."""
+        reg = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "registry.yaml"
+        registry = reg.read_text()
+        assert "HISTORY" in registry
+        assert "nexus-vduer" in registry, (
+            "incident archaeology should still be traceable from the registry"
         )

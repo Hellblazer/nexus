@@ -1722,7 +1722,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # collection. Operators wanting to keep indexing into a
             # legacy 2-segment collection rename it first via
             # ``nx catalog rename-collection``.
-            collection = t3_collection_name(collection)
+            # for_write=True (nexus-35ok4): indexing WRITES new content —
+            # raises loud if local.embed_model is voyage-shaped with no
+            # key configured, never silently mints a bge collection.
+            collection = t3_collection_name(collection, for_write=True)
 
         total = len(pdfs)
         total_chunks = 0
@@ -1864,8 +1867,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     # Without this, chunks end up in unsearchable bare collections.
     # nexus-hmxi note: no ``t3=`` probe here either; see the batch-mode
     # path above for the rationale.
+    # for_write=True (nexus-35ok4): indexing WRITES new content — raises
+    # loud if local.embed_model is voyage-shaped with no key configured.
     if collection is not None:
-        collection = t3_collection_name(collection)
+        collection = t3_collection_name(collection, for_write=True)
 
     path = path.resolve()
 
@@ -1945,7 +1950,14 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             col_name = collection
         else:
             from nexus.corpus import docs_leaf_fallback_collection_name  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.corpus)
-            col_name = docs_leaf_fallback_collection_name(corpus)
+            # nexus-o5x2c: grandfather probe for consistency; the
+            # ephemeral dry-run store is always empty so this never
+            # actually finds anything to grandfather onto — a keyless
+            # voyage-misconfigured dry-run still fails loud, correctly
+            # (there is genuinely nothing to grandfather onto here).
+            col_name = docs_leaf_fallback_collection_name(
+                corpus, collection_exists=lambda name: local_t3.collection_exists(name),
+            )
         col = local_t3.get_or_create_collection(col_name)
         result = col.get(include=["documents", "metadatas"])
         docs: list[str] = result.get("documents") or []
@@ -2138,7 +2150,9 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
     # in unsearchable bare collections. When --collection is absent, pass
     # collection_name=None so index_markdown derives docs__<corpus> as before.
     if collection is not None:
-        collection = t3_collection_name(collection)
+        # for_write=True (nexus-35ok4): indexing WRITES new content —
+        # raises loud if local.embed_model is voyage-shaped with no key.
+        collection = t3_collection_name(collection, for_write=True)
         # Warn when routing into knowledge__*: the registered aspect extractor
         # uses the scholarly-paper-v1 schema (title, abstract, methods, venue).
         # For paper-shaped Markdown this is correct. For general prose / design

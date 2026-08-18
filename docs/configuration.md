@@ -145,13 +145,7 @@ taxonomy:
 
 ## Daemon environment variables
 
-Since conexus 4.34.0 (RDR-120 storage substrate split), the CLI and
-MCP server route T2 through the T2 daemon. The daemon publishes its
-address via a discovery file at `~/.config/nexus/t2_addr.<uid>`; T3
-routes through the native nexus-service (`nx daemon service`, RDR-155),
-discovered via `~/.config/nexus/storage_service_addr.<uid>` and
-overridden with `NX_SERVICE_URL` (see [Managed-Cloud Credentials](#managed-cloud-credentials)).
-Clients honour these env-var overrides:
+T2 and T3 both route through the single native `nexus-service` (`nx daemon service`, RDR-152/RDR-155), discovered via `~/.config/nexus/storage_service_addr.<uid>` and overridden with `NX_SERVICE_URL` (see [Managed-Cloud Credentials](#managed-cloud-credentials)). This unified the earlier RDR-120 (conexus 4.34.0) split, where the CLI and MCP server routed T2 through a separate T2 daemon publishing `~/.config/nexus/t2_addr.<uid>`; that daemon and discovery file are retired (RDR-158 — see the `NX_T2_ADDR`/`NX_T2_SOCK` note below). Clients honour these env-var overrides:
 
 | Variable | Effect | Default |
 |----------|--------|---------|
@@ -386,8 +380,8 @@ If no marker file is found and no command is configured, the test check is skipp
 | `~/.config/nexus/config.yml` | Global config and credentials |
 | `~/.local/share/nexus/chroma/` | Legacy ChromaDB store — migration source only as of 6.0 (read by `nx upgrade`'s substrate rung); not live T3 data |
 | `~/.config/nexus/postgres/` | The nx-provisioned Postgres cluster the service serves T3 from (local `nx init`) |
-| `~/.config/nexus/memory.db` | T2 SQLite database |
-| `~/.config/nexus/catalog/.catalog.db` | Catalog: canonical repo→collection registration, documents, and links (`nx index repo` writes here). Replaced `repos.json` as the source of truth in 5.4.0 (RDR-137); a one-shot migration on `nx upgrade` folds any legacy `repos.json` into the catalog and removes it. |
+| `~/.config/nexus/memory.db` | **Deleted (RDR-158 P4).** Historical: the pre-migration T2 SQLite database — a frozen migration source only, for installs that have not yet moved off it. Live T2 is a Postgres table set served by `nexus-service`; there is no client-local T2 file. See [Storage Tiers § T2](storage-tiers.md#t2----memory-bank). |
+| `~/.config/nexus/catalog/.catalog.db` | **Deleted (RDR-158 P4).** Historical: the local SQLite catalog (replaced `repos.json` as the source of truth in 5.4.0, RDR-137). Live catalog data is Postgres-backed, served by `nexus-service` via `HttpCatalogClient` — see [Document Catalog](catalog.md). |
 | `~/.config/nexus/sessions/` | JSON session records (T1 server address, session ID, `created_at`, `tmpdir`) + `session.lock` |
 | `~/.config/nexus/index.log` | Background indexing log (written by git hooks) |
 | `~/.config/nexus/cli_lockstep_marker` | Last CLI version confirmed in lockstep with the plugin (RDR-143). Written by the version-lockstep SessionStart hook only after a confirmed upgrade; absence or a stale value triggers a re-nudge next session. |

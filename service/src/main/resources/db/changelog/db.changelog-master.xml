@@ -750,6 +750,16 @@
          header for the full D1 trace and the FK-shape derivation. -->
     <include file="db/changelog/taxonomy-012-doc-id-chunk-fk.xml"/>
 
+    <!-- RDR-156 P5.2 (bead nexus-70r3c.18): nexus.hybrid_search_384/768/1024
+         server-side RRF-fusion functions, implementing the P5.1 TDD-RED
+         contract (nexus-70r3c.17). Placed after taxonomy-012-doc-id-chunk-fk.xml
+         (current tail) and before the grants-nexus-svc.xml runAlways block,
+         matching the established late-append convention (see catalog-032's /
+         taxonomy-012's own <include> comments for the identical reasoning).
+         Depends only on nexus.chunks/catalog_document_chunks/catalog_documents,
+         all of which exist well before this point in the chain. -->
+    <include file="db/changelog/vectors-007-hybrid-search-functions.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

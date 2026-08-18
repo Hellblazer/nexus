@@ -444,5 +444,6 @@ the `"all"` wildcard end up agnostic (`scope_tags=""`) in that case.
 - `src/nexus/plans/schema.py` — the validator enforcing this schema.
 - `src/nexus/plans/runner.py` — `plan_run` implementation.
 - `src/nexus/plans/matcher.py` — `plan_match` (T1 cosine + FTS5 fallback).
-- `src/nexus/db/t2/plan_library.py::_synthesize_match_text`, the
-  hybrid match-text synthesiser (RDR-092 Phase 1 + Phase 3).
+- `src/nexus/plans/match_text.py::_synthesize_match_text`, the
+  hybrid match-text synthesiser (RDR-092 Phase 1 + Phase 3; lifted out of
+  the now-deleted `db/t2/plan_library.py` at nexus-i711w Stage 2).

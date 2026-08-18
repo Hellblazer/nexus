@@ -1,5 +1,8 @@
 # RDR-080 Migration Scope — Agent/Skill Files Touched in P2a/P3/P4
 
+> **Executed, historical.** RDR-080 is `status: closed`. This document is a
+> record of the phased migration, not current guidance.
+
 ## P2a (DONE — commit 7a4fcbc)
 
 | File | Action | Before | After |

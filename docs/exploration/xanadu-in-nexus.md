@@ -4,7 +4,7 @@ Nexus borrows ideas from Ted Nelson's Project Xanadu, the original vision of a u
 
 To be clear: this is a linking system, not an attempt to build Xanadu. We needed permanent document addresses, typed relationships, and durable sub-document references. Nelson's model provided all three in a form that was simple, well-studied, and easy to implement. We could have used RDF triples, property graphs, or ad-hoc foreign keys. We chose tumblers and typed links because they map cleanly onto the problems our RDR process and agent suite actually face: tracing where a decision came from, what code implements a design, and which findings have been superseded. The Xanadu lineage gives us a coherent vocabulary and a set of proven design principles without requiring us to build the full docuverse.
 
-This document explains what we took, what we deliberately left out, and how the result works in practice. The full design rationale is in [RDR-053: Xanadu Fidelity](rdr/rdr-053-xanadu-fidelity.md), with its [post-mortem](rdr/post-mortem/053-xanadu-fidelity.md) documenting lessons learned during implementation.
+This document explains what we took, what we deliberately left out, and how the result works in practice. The full design rationale is in [RDR-053: Xanadu Fidelity](../rdr/rdr-053-xanadu-fidelity.md), with its [post-mortem](../rdr/post-mortem/053-xanadu-fidelity.md) documenting lessons learned during implementation.
 
 ## The problem: cross-document linkage in a vector database
 
@@ -14,9 +14,9 @@ This is the cross-document linkage problem. In Nexus it's especially acute: ever
 
 Taxonomies and collection-level metadata help, but they operate at the wrong granularity. Knowing that a collection contains code and another contains design docs doesn't tell you *which* code implements *which* design. You need chunk-to-chunk linkage across collection boundaries.
 
-The link graph provides this. Every typed link is an edge between two documents, and optionally between two specific chunks. The graph gives the [query planner](querying-guide.md) traversable structure: "find this RDR, follow `implements` links to the code, search those collections for the user's question."
+The link graph provides this. Every typed link is an edge between two documents, and optionally between two specific chunks. The graph gives the [query planner](../querying-guide.md) traversable structure: "find this RDR, follow `implements` links to the code, search those collections for the user's question."
 
-The result is search that knows structure before it runs. The [query planner](querying-guide.md) uses the link graph to scope, route, and compose queries, finding relevant documents in the catalog first, then searching their collections. This is faster and more precise than hoping the embedding space puts related chunks close together.
+The result is search that knows structure before it runs. The [query planner](../querying-guide.md) uses the link graph to scope, route, and compose queries, finding relevant documents in the catalog first, then searching their collections. This is faster and more precise than hoping the embedding space puts related chunks close together.
 
 This is the role Xanadu fills in Nexus. Not a hypertext system, but a linking substrate that gives structure to an otherwise flat vector store.
 
@@ -28,25 +28,25 @@ The catalog is the connective tissue between Nexus's [storage tiers](../storage-
 
 **Other agents do the same thing.** A research synthesizer `cites` source papers. Debugger and analyst agents `relates` findings to each other. The knowledge tidier `supersedes` duplicates when consolidating. Agents can link at the chunk level when search results provide specific passages, but most links today are document-to-document.
 
-**The [query planner](querying-guide.md) uses the catalog to optimize search.** Instead of searching everything and hoping for relevance, the planner resolves matching documents in the catalog first, by author, content type, document subtree, or link relationships, then searches only their collections. For multi-step analytical queries, it composes graph traversal with search to maximize the quality of retrieved content: following citation chains, crossing collection boundaries, and scoping each step to the documents that actually matter.
+**The [query planner](../querying-guide.md) uses the catalog to optimize search.** Instead of searching everything and hoping for relevance, the planner resolves matching documents in the catalog first, by author, content type, document subtree, or link relationships, then searches only their collections. For multi-step analytical queries, it composes graph traversal with search to maximize the quality of retrieved content: following citation chains, crossing collection boundaries, and scoping each step to the documents that actually matter.
 
-**Link audit maintains graph health.** [`nx catalog link-audit`](catalog.md#link-health) verifies that content-hash spans resolve, detects orphaned links to deleted documents, and flags positional spans that may have gone stale. Existing collections can be backfilled with content hashes without re-embedding.
+**Link audit maintains graph health.** [`nx catalog link-audit`](../catalog.md#link-health) verifies that content-hash spans resolve, detects orphaned links to deleted documents, and flags positional spans that may have gone stale. Existing collections can be backfilled with content hashes without re-embedding.
 
 ## What we borrowed
 
 ### Tumbler addressing
 
-Every document in Nexus gets a permanent hierarchical address called a tumbler. The format is `store.owner.document`, optionally extended with `.chunk` for sub-document addressing. For example, `1.2.5` means store 1, owner 2 (a repository or knowledge source), document 5. Adding `.3` gives you chunk 3 of that document. See the [catalog guide](catalog.md#tumbler-addressing) for the full segment table and examples.
+Every document in Nexus gets a permanent hierarchical address called a tumbler. The format is `store.owner.document`, optionally extended with `.chunk` for sub-document addressing. For example, `1.2.5` means store 1, owner 2 (a repository or knowledge source), document 5. Adding `.3` gives you chunk 3 of that document. See the [catalog guide](../catalog.md#tumbler-addressing) for the full segment table and examples.
 
 Tumblers are assigned once and never reused. If you delete document `1.2.5` and compact the catalog, the number 5 is retired. The next document under that owner gets `1.2.6`. Any reference to a tumbler, whether in a link, in an agent's memory, or in a conversation, remains valid indefinitely.
 
-Nelson's tumblers were more ambitious. They supported inserting new addresses between existing ones using a specialized number system. We use simple integer segments instead. This covers our actual use cases and avoids significant complexity. The trade-off is documented in [RDR-053](rdr/rdr-053-xanadu-fidelity.md).
+Nelson's tumblers were more ambitious. They supported inserting new addresses between existing ones using a specialized number system. We use simple integer segments instead. This covers our actual use cases and avoids significant complexity. The trade-off is documented in [RDR-053](../rdr/rdr-053-xanadu-fidelity.md).
 
 ### Typed links between documents
 
-Nelson envisioned a universal link graph where every connection between documents is typed, bidirectional, and permanent. Nexus ships with seven built-in link types: five that agents create automatically (`cites`, `implements`, `implements-heuristic`, `supersedes`, `relates`) and two for human annotation (`quotes`, `comments`). The link type field is a free-form string at the API level, so custom types can be added without code changes. See the [catalog guide](catalog.md#link-types) for when to use each type.
+Nelson envisioned a universal link graph where every connection between documents is typed, bidirectional, and permanent. Nexus ships with seven built-in link types: five that agents create automatically (`cites`, `implements`, `implements-heuristic`, `supersedes`, `relates`) and two for human annotation (`quotes`, `comments`). The link type field is a free-form string at the API level, so custom types can be added without code changes. See the [catalog guide](../catalog.md#link-types) for when to use each type.
 
-A debugger agent creates `relates` links between a root cause analysis and prior findings. A developer agent creates `implements` links between code and the design document it realizes. Citation links are auto-generated from Semantic Scholar metadata during [enrichment](cli-reference.md#nx-enrich).
+A debugger agent creates `relates` links between a root cause analysis and prior findings. A developer agent creates `implements` links between code and the design document it realizes. Citation links are auto-generated from Semantic Scholar metadata during [enrichment](../cli-reference.md#nx-enrich).
 
 Every link carries `created_by` provenance, so you can always distinguish auto-generated links from manual ones and filter by creator.
 
@@ -58,21 +58,21 @@ Nelson's docuverse was explicitly append-only; bytes are never truly deleted. Ne
 
 Nelson's most radical idea was transclusion: including content from one document in another by reference, not by copy. The referenced content stays in its original location; the inclusion is a live pointer.
 
-Nexus doesn't implement full transclusion, but it does implement span-addressed links. These point not just to a document but to a specific passage within it. This lets an agent say "this finding cites lines 42-57 of that paper" rather than just "this finding cites that paper." See the [span lifecycle section](catalog.md#span-lifecycle-and-staleness) for the full durability guide.
+Nexus doesn't implement full transclusion, but it does implement span-addressed links. These point not just to a document but to a specific passage within it. This lets an agent say "this finding cites lines 42-57 of that paper" rather than just "this finding cites that paper." See the [span lifecycle section](../catalog.md#span-lifecycle-and-staleness) for the full durability guide.
 
 **Positional spans** (`42-57` for line ranges, `3:100-250` for chunk character ranges) are simple and human-readable, but they break when the document is re-indexed. If the content shifts, the line numbers point to the wrong text.
 
-**Content-addressed spans** (`chash:<sha256hex>`) identify a passage by the hash of its text. They survive re-indexing as long as the content doesn't change. Use these for any reference that needs to last. For sub-chunk precision, `chash:<sha256hex>:<start>-<end>` references a character range within the hashed chunk. The hash pins which chunk; the range pins where within it. Existing collections can be [backfilled](cli-reference.md#nx-collection) without re-embedding.
+**Content-addressed spans** (`chash:<sha256hex>`) identify a passage by the hash of its text. They survive re-indexing as long as the content doesn't change. Use these for any reference that needs to last. For sub-chunk precision, `chash:<sha256hex>:<start>-<end>` references a character range within the hashed chunk. The hash pins which chunk; the range pins where within it. Existing collections can be [backfilled](../cli-reference.md#nx-collection) without re-embedding.
 
-The [link audit](catalog.md#link-health) system tracks both: positional spans that may have gone stale after re-indexing, and content-hash spans that no longer resolve. Content-addressed spans are validated when created. A hash that doesn't resolve in the collection is rejected immediately.
+The [link audit](../catalog.md#link-health) system tracks both: positional spans that may have gone stale after re-indexing, and content-hash spans that no longer resolve. Content-addressed spans are validated when created. A hash that doesn't resolve in the collection is rejected immediately.
 
 ## What we left out
 
-Nelson's Xanadu was a complete alternative to the file system. Nexus is a catalog that sits alongside existing storage. The deliberate departures are documented in [RDR-053's deviations register](rdr/rdr-053-xanadu-fidelity.md):
+Nelson's Xanadu was a complete alternative to the file system. Nexus is a catalog that sits alongside existing storage. The deliberate departures are documented in [RDR-053's deviations register](../rdr/rdr-053-xanadu-fidelity.md):
 
-**No tumbler arithmetic.** Nelson's system could insert new addresses between existing ones using a specialized number system. We use simple integer comparison instead. Parent documents sort before their children; `sorted()` on a list of tumblers gives the right order. The trade-off: span widths can't be computed by subtraction. If span-weighted reranking is needed later, that would require additional work, documented in [RDR-053](rdr/rdr-053-xanadu-fidelity.md).
+**No tumbler arithmetic.** Nelson's system could insert new addresses between existing ones using a specialized number system. We use simple integer comparison instead. Parent documents sort before their children; `sorted()` on a list of tumblers gives the right order. The trade-off: span widths can't be computed by subtraction. If span-weighted reranking is needed later, that would require additional work, documented in [RDR-053](../rdr/rdr-053-xanadu-fidelity.md).
 
-**No byte-level addressing.** Nelson's spans could reference arbitrary byte ranges within any document version. Our spans reference chunks, the semantic units produced by the [indexing pipeline](repo-indexing.md). This is coarser but matches how the system actually stores and retrieves content.
+**No byte-level addressing.** Nelson's spans could reference arbitrary byte ranges within any document version. Our spans reference chunks, the semantic units produced by the [indexing pipeline](../repo-indexing.md). This is coarser but matches how the system actually stores and retrieves content.
 
 **No version tracking.** Xanadu preserved every version of every document. Nexus tracks the current state via content hashes and detects when documents change, but does not store historical versions. Git handles version history for source files; the catalog tracks the current indexed state.
 
@@ -84,10 +84,10 @@ Nelson's Xanadu was a complete alternative to the file system. Nexus is a catalo
 
 ## Further reading
 
-- [Document Catalog guide](catalog.md) — full user guide for the catalog system
-- [Querying Guide](querying-guide.md) — `nx search` vs `query()` MCP vs `/conexus:query` skill
-- [Architecture](architecture.md) — module map and design decisions
-- [RDR-049: Git-Backed Catalog](rdr/rdr-049-git-backed-catalog.md) — catalog architecture design
-- [RDR-051: Link Lifecycle](rdr/rdr-051-link-lifecycle.md) — full CRUD for typed links
-- [RDR-052: Catalog-First Query Routing](rdr/rdr-052-catalog-first-query-routing.md) — three-path dispatch
-- [RDR-053: Xanadu Fidelity](rdr/rdr-053-xanadu-fidelity.md) — tumbler arithmetic + content-addressed spans
+- [Document Catalog guide](../catalog.md) — full user guide for the catalog system
+- [Querying Guide](../querying-guide.md) — `nx search` vs `query()` MCP vs `/conexus:query` skill
+- [Architecture](../architecture.md) — module map and design decisions
+- [RDR-049: Git-Backed Catalog](../rdr/rdr-049-git-backed-catalog.md) — catalog architecture design
+- [RDR-051: Link Lifecycle](../rdr/rdr-051-link-lifecycle.md) — full CRUD for typed links
+- [RDR-052: Catalog-First Query Routing](../rdr/rdr-052-catalog-first-query-routing.md) — three-path dispatch
+- [RDR-053: Xanadu Fidelity](../rdr/rdr-053-xanadu-fidelity.md) — tumbler arithmetic + content-addressed spans

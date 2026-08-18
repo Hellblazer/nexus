@@ -1,5 +1,8 @@
 # Brainstorming brief — adjacent design space for the workflow engine
 
+> **Disposition**: historical exploration; candidate for archive. No outcome
+> disposition named in the docs audit — adopt-or-scrap is Hal's call.
+
 12 angles surfaced by architect-planner agent (run abe8e36d) on the workflow-engine design doc, May 2026.
 
 ## 1. nx plan library *is* the BlueprintStore

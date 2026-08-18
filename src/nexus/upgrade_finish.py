@@ -1550,6 +1550,218 @@ def unload_stale_service_launchagent(config_dir: Path) -> list[str]:
     return actions
 
 
+def _autostart_probe_failure_action(exc: Exception) -> str:
+    """NEEDS HUMAN line for a genuine (non-benign) failure while probing the
+    service-tier autostart unit for drift -- used by
+    :func:`converge_service_autostart_unit` when
+    :func:`_probe_service_autostart_drift` raises."""
+    return (
+        f"NEEDS HUMAN: could not check the storage-service autostart unit "
+        f"for drift ({exc}) -- run `nx daemon service install --autostart "
+        "--force` if you believe the installed unit is stale, or `nx "
+        "doctor` to investigate further."
+    )
+
+
+def _probe_service_autostart_drift() -> tuple[Path, str, str] | None:
+    """Probe the LOCAL-mode service-tier autostart unit for content drift.
+
+    Returns ``None`` for a BENIGN not-applicable result: this box is not
+    local mode, or no service-tier unit is installed here. Returns
+    ``(dest, existing, rendered)`` when a unit IS installed -- callers
+    compare ``existing == rendered`` themselves rather than this function
+    returning a bare bool, because the two current callers have
+    DIFFERENT reactions to a match/mismatch (one is verbose and offers to
+    converge; the other is a silent ``nx doctor`` row) and collapsing that
+    into a bool here would just move the comparison, not remove it.
+
+    Raises on a genuine probe failure (``is_local_mode()`` / the unit
+    lookup / the render / the read blowing up) -- this function does NOT
+    itself degrade a failure to "not applicable". That collapse is exactly
+    the code-review Critical this split exists to prevent: a probe
+    failure must never read the same as "nothing to do". Callers decide
+    how loud to be about a raised exception (:func:`converge_service_autostart_unit`
+    surfaces a NEEDS HUMAN line; ``nx health._check_service_autostart_drift``
+    degrades silently -- the standing convention for every OTHER doctor
+    check in that module, e.g. ``_check_engine_convergence``).
+
+    Shared by :func:`converge_service_autostart_unit` (nexus-rlp0v) and
+    :func:`nexus.health._check_service_autostart_drift` (its ``nx doctor``
+    backstop, substantive-critic round 1) so the applicability + comparison
+    logic exists in exactly one place -- the doctor check cannot silently
+    drift from what the automatic/manual convergence path actually acts on.
+    """
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred, circular-dep avoidance
+
+    if not is_local_mode():
+        return None
+
+    from nexus.commands.daemon import _service_autostart_unit_installed  # noqa: PLC0415 — deferred, CLI startup cost
+
+    dest = _service_autostart_unit_installed()
+    if dest is None:
+        return None
+
+    from nexus.daemon import installer  # noqa: PLC0415 — deferred, CLI startup cost
+
+    _, rendered = installer.rendered_unit_content(tier="service")
+    existing = dest.read_text()
+    return dest, existing, rendered
+
+
+def converge_service_autostart_unit(
+    config_dir: Path, *, dry_run: bool = False, unattended: bool = False,
+) -> list[str]:
+    """Re-render + re-activate a LOCAL-mode service-tier autostart unit
+    whose installed content has drifted from the current template.
+
+    nexus-rlp0v: ``conexus/daemon/com.nexus.service.plist`` dropped
+    ``ProcessType=Background`` (launchd applied background QoS to the whole
+    storage-service tree, confining the ONNX embedding inference to the
+    E-cores -- a measured 15x throughput regression on an M4 Max, exactly
+    reproducing the field-reported ~0.5 chunks/s local-mode indexing
+    symptom). An installed unit is a RENDERED COPY under the OS autostart
+    dir; launchd only re-reads it on bootout+bootstrap, and a plain package
+    upgrade that overwrites the template in the wheel does not, by itself,
+    touch an already-loaded launchd job. This leg closes that gap for an
+    existing local install. Generalises past this one fix: any future
+    template change converges the same way.
+
+    Gated on ``is_local_mode()`` -- a managed/cloud box's stray service unit
+    is :func:`unload_stale_service_launchagent`'s job, not this one. Returns
+    ``[]`` (not applicable) when no service-tier unit is installed, or when
+    the installed content already matches the current template (the
+    overwhelmingly common case once a fix has rolled out once).
+
+    On drift: ``unattended`` (the automatic post-upgrade finish pass) or
+    ``dry_run`` never bounces the service -- same GH #1419 Issue 3b
+    restraint :func:`converge_engine` already applies to a live restart --
+    it only NAMES the manual command. The human path (``nx daemon
+    restart-stale``) performs the actual convergence, reusing EXISTING
+    machinery only: stop the service (the same ``nx daemon service stop``
+    :func:`_restart_and_verify` already shells out to), tear down the stale
+    unit via :func:`nexus.daemon.installer.uninstall_autostart` (bootout on
+    macOS / disable on Linux -- the same removal path
+    ``unload_stale_service_launchagent`` and ``daemon_uninstall`` already
+    use), then reinstall via :func:`nexus.daemon.installer.install_autostart`
+    (write + activate -- ``launchctl bootstrap`` with ``RunAtLoad`` /
+    ``systemctl --user enable --now``, either of which starts the process
+    itself). No separate ``nx daemon service start`` call: issuing one right
+    after activation would race the freshly-bootstrapped process publishing
+    its own lease against ``ensure_storage_supervisor``'s Popen fallback,
+    risking a second supervisor. Convergence is instead OBSERVED via the
+    same lease/``/version`` probe :func:`_restart_and_verify` polls with.
+
+    Never raises -- every failure degrades to a NEEDS HUMAN action line.
+    code-review round 1, Critical: the applicability probe (is_local_mode ->
+    unit lookup -> render -> read) used to sit under ONE blanket
+    ``except Exception: return []``, which could not tell "genuinely not
+    applicable" (not local mode, no unit installed -- true []s) apart from
+    "a probe call raised" (e.g. the render blowing up) -- the latter
+    silently claimed "no action needed" exactly like the former,
+    contradicting this docstring and the no-silent-fallbacks hot rule.
+    :func:`_probe_service_autostart_drift` now carries that distinction on
+    its own terms (``None`` return vs. a raised exception) -- a BENIGN
+    not-applicable result returns ``[]`` directly (no exception involved),
+    while an exception from the probe is a genuine FAILURE and always
+    produces a NEEDS HUMAN line, never a silent [].
+    """
+    try:
+        probe = _probe_service_autostart_drift()
+    except Exception as exc:  # noqa: BLE001 — genuine probe failure, never a silent []
+        _log.warning("service_autostart_convergence_probe_failed", error=str(exc))
+        return [_autostart_probe_failure_action(exc)]
+    if probe is None:
+        return []  # benign: not local mode, or no service-tier unit installed here
+    dest, existing, rendered = probe
+
+    if existing == rendered:
+        return []  # benign: already up to date
+
+    note = (
+        f"the storage-service autostart unit at {dest} differs from the "
+        "current template"
+    )
+    if unattended or dry_run:
+        return [
+            f"NOTE: {note}. Not reinstalling it here -- run `nx daemon "
+            "restart-stale` to converge it (stops the service, reinstalls "
+            "the autostart unit, and restarts it)."
+        ]
+
+    manual_fallback = (
+        "run `nx daemon service stop && nx daemon service uninstall "
+        "--autostart && nx daemon service install --autostart` yourself, "
+        "then `nx doctor` to confirm the service came back up."
+    )
+
+    try:
+        stop = subprocess.run(
+            ["nx", "daemon", "service", "stop"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort convergence; surfaced in the line
+        return [f"NEEDS HUMAN: {note}, but stopping it raised {exc} -- {manual_fallback}"]
+    if stop.returncode != 0:
+        detail = (stop.stderr or stop.stdout or "").strip()
+        return [
+            f"NEEDS HUMAN: {note}, but `nx daemon service stop` exited "
+            f"{stop.returncode} ({detail}) -- {manual_fallback}"
+        ]
+
+    try:
+        from nexus.daemon import installer  # noqa: PLC0415 — deferred, CLI startup cost
+
+        uninstall_result = installer.uninstall_autostart(tier="service")
+        if uninstall_result.status not in (
+            installer.UninstallStatus.REMOVED,
+            installer.UninstallStatus.NOT_INSTALLED,
+        ):
+            return [
+                f"NEEDS HUMAN: {note}, but removing the stale unit reported "
+                f"{uninstall_result.status} -- {manual_fallback}"
+            ]
+        install_result = installer.install_autostart(tier="service")
+    except Exception as exc:  # noqa: BLE001 — never let convergence crash the finish pass
+        _log.warning("service_autostart_convergence_failed", error=str(exc))
+        return [f"NEEDS HUMAN: {note}, and converging it raised {exc} -- {manual_fallback}"]
+
+    # The freshly-activated unit does not publish its lease instantly; bound
+    # the wait the same way _restart_and_verify does rather than declaring
+    # victory on returncode alone (nexus-4yf4u's lesson, one leg over). Bound
+    # by BOTH an attempt count and a wall-clock deadline — the attempt cap is
+    # what keeps this deterministic and instant under a patched `time.sleep`
+    # in tests; the deadline is what still bounds it in production.
+    settle_s, poll_s = 20.0, 1.0
+    running = _running_engine(config_dir)
+    if not running.up:
+        deadline = time.time() + settle_s
+        for _ in range(max(1, int(settle_s / poll_s) + 1)):
+            if time.time() >= deadline:
+                break
+            time.sleep(poll_s)
+            running = _running_engine(config_dir)
+            if running.up:
+                break
+
+    if running.up:
+        actions = [
+            f"converged the storage-service autostart unit at "
+            f"{install_result.dest} ({install_result.detail}) — verified "
+            "the service came back up"
+        ]
+    else:
+        actions = [
+            f"NEEDS HUMAN: converged the storage-service autostart unit at "
+            f"{install_result.dest} ({install_result.detail}), but the "
+            f"service is not answering after the restart ({running.reason or 'no answer'}) "
+            "-- check `nx daemon service status` and `nx doctor`."
+        ]
+    for w in getattr(install_result, "warnings", ()) or ():
+        actions.append(f"note: {w}")
+    return actions
+
+
 def unload_stale_t2_launchagent(config_dir: Path) -> list[str]:
     """Remove a stray ``com.nexus.t2`` LaunchAgent left by an older install.
 
@@ -1797,6 +2009,16 @@ def check_version_transition(
         )
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
         _log.warning("engine_convergence_failed", exc_info=True)
+    # nexus-rlp0v: a drifted service-tier autostart unit (e.g. a stale
+    # ProcessType=Background) needs the same "never bounces the service
+    # unattended" restraint as engine convergence above — report-only here,
+    # same as converge_engine's unattended=True branch.
+    try:
+        actions = actions + converge_service_autostart_unit(
+            config_dir, unattended=True, dry_run=preview,
+        )
+    except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
+        _log.warning("service_autostart_convergence_failed", exc_info=True)
     if preview:
         # These two legs REMEDIATE (PG grant/ownership repair, launchd unit
         # removal) and have no plan-only form. Under `--dry-run` they are not

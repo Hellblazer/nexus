@@ -125,27 +125,50 @@ except Exception:
 # require literal `bd close|done|create` as the FIRST TWO tokens of a
 # segment -- a quoted string that merely CONTAINS those words never
 # tokenizes that way.
+# nexus-cr4lp F2: skip leading NAME=VALUE env-assignment tokens before
+# requiring the literal 'bd' verb -- `NX_REVIEW_GATE_OVERRIDE=1 bd close
+# nexus-x` pre-fix tokenized as tokens[0]=='NX_REVIEW_GATE_OVERRIDE=1', so
+# has_close_or_done stayed False and the WHOLE hook fast-no-op'd below
+# (the whole coverage check silently never ran -- B2, T2 nexus/guard-
+# evidence-cluster-root-cause-2026-08-18). Also detects the SAME inline
+# assignment here (one tokenisation pass) so OVERRIDE below can honor it
+# even though this hook's own os.environ never observes a shell-inline
+# `NAME=VALUE cmd` assignment (that scoping belongs to the child process
+# the shell would spawn, not this hook).
 BD_VERBS=$(printf '%s' "$TOOL_INPUT" | python3 -c "
 import json, re, shlex, sys
 cmd = sys.stdin.read()
 segments = re.split(r'(?:&&|\|\||;|\s\|\s|\bthen\b|\bdo\b)', cmd)
 has_create = False
 has_close_or_done = False
+inline_override = False
+env_assign_re = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 for seg in segments:
     try:
         tokens = shlex.split(seg, posix=True)
     except ValueError:
         continue
-    if len(tokens) >= 2 and tokens[0] == 'bd':
-        if tokens[1] == 'create':
+    i = 0
+    while i < len(tokens) and env_assign_re.match(tokens[i]):
+        if tokens[i] == 'NX_REVIEW_GATE_OVERRIDE=1':
+            inline_override = True
+        i += 1
+    rest = tokens[i:]
+    if len(rest) >= 2 and rest[0] == 'bd':
+        if rest[1] == 'create':
             has_create = True
-        elif tokens[1] in ('close', 'done'):
+        elif rest[1] in ('close', 'done'):
             has_close_or_done = True
-print(json.dumps({'has_create': has_create, 'has_close_or_done': has_close_or_done}))
-" 2>/dev/null || echo '{"has_create": false, "has_close_or_done": false}')
+print(json.dumps({
+    'has_create': has_create,
+    'has_close_or_done': has_close_or_done,
+    'inline_override': inline_override,
+}))
+" 2>/dev/null || echo '{"has_create": false, "has_close_or_done": false, "inline_override": false}')
 
 HAS_CREATE=$(printf '%s' "$BD_VERBS" | python3 -c "import json,sys; print(json.load(sys.stdin).get('has_create', False))" 2>/dev/null || echo False)
 HAS_CLOSE_OR_DONE=$(printf '%s' "$BD_VERBS" | python3 -c "import json,sys; print(json.load(sys.stdin).get('has_close_or_done', False))" 2>/dev/null || echo False)
+INLINE_OVERRIDE=$(printf '%s' "$BD_VERBS" | python3 -c "import json,sys; print(json.load(sys.stdin).get('inline_override', False))" 2>/dev/null || echo False)
 
 if [[ "$HAS_CREATE" != "True" && "$HAS_CLOSE_OR_DONE" != "True" ]]; then
     allow
@@ -302,15 +325,59 @@ fi
 # verification (never a false "passed").
 # ---------------------------------------------------------------------------
 
+# nexus-cr4lp F3: the blanket whole-string regex scan above (pre-fix) also
+# harvested a bead id that appeared ONLY inside a --reason/--description/
+# --notes/-m OPTION VALUE elsewhere in the same compound command -- e.g.
+# `bd close nexus-wixar --reason="... Residue: nexus-lemv5 ..."` harvested
+# nexus-lemv5 as a REQUIRED-coverage id even though it is prose, not a
+# close target (T2 nexus/guard-evidence-cluster-root-cause-2026-08-18 LEG
+# D1). Fixed: per-segment shlex tokenisation (same &&/;/|/then/do split the
+# push-gate hook uses), skip the VALUE token of any of those four flags
+# (both `--flag value` and `--flag=value` forms -- the latter is ONE shlex
+# token, skipped whole), scan everything else. The `for b in ...; do bd
+# close $b; done` loop-variable recovery (datum i) still works: those ids
+# sit in the `for ... in` segment as bare positional tokens, never a flag
+# value, so they are never skipped.
 BEAD_IDS_JSON=$(printf '%s' "$TOOL_INPUT" | python3 -c "
-import json, re, sys
+import json, re, shlex, sys
 cmd = sys.stdin.read()
+VALUE_FLAGS = {'--reason', '--description', '--notes', '-m'}
+BEAD_RE = re.compile(r'\bnexus-[a-z0-9]+\b', re.IGNORECASE)
+segments = re.split(r'(?:&&|\|\||;|\s\|\s|\bthen\b|\bdo\b)', cmd)
 seen, ids = set(), []
-for m in re.finditer(r'\bnexus-[a-z0-9]+\b', cmd, re.IGNORECASE):
-    tok = m.group(0).lower()
-    if tok not in seen:
-        seen.add(tok)
-        ids.append(tok)
+
+def _scan_text(text):
+    for m in BEAD_RE.finditer(text):
+        tok = m.group(0).lower()
+        if tok not in seen:
+            seen.add(tok)
+            ids.append(tok)
+
+for seg in segments:
+    try:
+        tokens = shlex.split(seg, posix=True)
+    except ValueError:
+        # Malformed quoting for this segment -- fall back to a raw scan
+        # rather than losing the segment's ids entirely.
+        _scan_text(seg)
+        continue
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        bare = tok.split('=', 1)[0]
+        if bare in VALUE_FLAGS:
+            if '=' in tok:
+                # --reason=value form: flag and value are ONE token; skip
+                # it whole, do not scan.
+                i += 1
+                continue
+            # --reason value form: skip the flag token AND its separate
+            # value token.
+            i += 2
+            continue
+        _scan_text(tok)
+        i += 1
+
 print(json.dumps(ids))
 " 2>/dev/null || echo '[]')
 
@@ -320,10 +387,48 @@ fi
 
 ALL_IDS_SPACE=$(printf '%s' "$BEAD_IDS_JSON" | python3 -c "import json,sys; print(' '.join(json.load(sys.stdin)))" 2>/dev/null || true)
 
+# nexus-cr4lp F2: OVERRIDE is honored from the hook's own process env OR
+# an inline `NX_REVIEW_GATE_OVERRIDE=1` prefix in the command text itself
+# (INLINE_OVERRIDE, detected above alongside the bd-verb tokenisation) --
+# the latter is otherwise invisible to `${NX_REVIEW_GATE_OVERRIDE:-}`
+# entirely, since a shell-inline assignment scopes to the child process
+# the shell would spawn, never to this hook's own environment.
 OVERRIDE=0
-if [[ "${NX_REVIEW_GATE_OVERRIDE:-}" == "1" ]]; then
+if [[ "${NX_REVIEW_GATE_OVERRIDE:-}" == "1" || "$INLINE_OVERRIDE" == "True" ]]; then
     OVERRIDE=1
 fi
+
+# nexus-cr4lp F2: every override use is auditable -- a logged routing
+# event, via the same JSONL sink the python routing hooks share
+# (`_lib.log_routing_event`, `conexus/hooks/scripts/routing/_lib.py`).
+# This hook is not itself a `routing/` rule, so it has no such
+# integration pre-fix; imported here on the override path only (never on
+# the hot fast-no-op path above) so this adds no extra `nx` spawn and no
+# cost to the common case.
+_log_override_escape() {
+    local ids="$1"
+    # Resolve the sibling `routing/_lib.py` off THIS SCRIPT's own real
+    # location, never off CLAUDE_PLUGIN_ROOT: tests deliberately fake that
+    # var to redirect the read_verification_config.py lookup earlier in
+    # this file, and following it here would silently miss the import
+    # (caught below, so the miss would otherwise be invisible).
+    local script_dir
+    script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+    NX_HOOK_ROUTING_DIR="$script_dir/routing" NX_HOOK_LOG_IDS="$ids" NX_HOOK_LOG_CMD="$TOOL_INPUT" \
+        python3 -c "
+import os, sys
+sys.path.insert(0, os.environ.get('NX_HOOK_ROUTING_DIR', ''))
+try:
+    import _lib
+    _lib.log_routing_event(
+        rule='pre_close_verification_hook', outcome='escape', tool_name='Bash',
+        command_fragment=os.environ.get('NX_HOOK_LOG_CMD', ''),
+        escape_reason='NX_REVIEW_GATE_OVERRIDE=1: ' + os.environ.get('NX_HOOK_LOG_IDS', ''),
+    )
+except Exception:
+    pass
+" 2>/dev/null || true
+}
 
 _stamp_ids() {
     # _stamp_ids <space-separated ids> <state> <reason> — best-effort bd
@@ -456,10 +561,21 @@ def _parse_entries(raw):
     return entries
 
 def _t2_covers(bead_id, header, content):
+    # nexus-cr4lp B3: a T2 marker whose bead id lives ONLY in the TITLE
+    # (-t review-nexus-t5uol -- this hook's OWN printed remedy form) used
+    # to fail the strict lookbehind, because the hyphen in
+    # review-<bead-id> sits immediately left of the id. A second,
+    # narrower alternate matches that literal review-<bead-id> shape
+    # specifically without loosening the general match elsewhere.
     combined = f'{header} {content}'.lower()
     if 'review-completed' not in combined:
         return False
-    pat = re.compile(r'(?<![A-Za-z0-9-])' + re.escape(bead_id) + r'(?![A-Za-z0-9-])', re.IGNORECASE)
+    escaped = re.escape(bead_id)
+    pat = re.compile(
+        r'(?<![A-Za-z0-9-])' + escaped + r'(?![A-Za-z0-9-])'
+        r'|(?<![A-Za-z0-9])review-' + escaped + r'(?![A-Za-z0-9-])',
+        re.IGNORECASE,
+    )
     return bool(pat.search(combined))
 
 t1_reachable = False
@@ -546,6 +662,10 @@ if [[ "$OVERRIDE" -eq 1 && ( -n "$MISSING_SPACE" || -n "$UNCERTAIN_SPACE" || -n 
     _stamp_ids "$COVERED_SPACE" "passed" "review-completed marker verified at close"
     NOT_COVERED_SPACE="$MISSING_SPACE $UNCERTAIN_SPACE $DEADLINE_SPACE"
     _stamp_ids "$NOT_COVERED_SPACE" "overridden" "NX_REVIEW_GATE_OVERRIDE=1; no confirmed review-completed coverage in T1 or T2 for: $NOT_COVERED_SPACE"
+    # nexus-cr4lp F2: every override use is auditable, logged BEFORE the
+    # allow (env-sourced OR inline-command-text-sourced -- both routes
+    # through the same OVERRIDE flag, same log call).
+    _log_override_escape "$NOT_COVERED_SPACE"
     allow "OVERRIDE (NX_REVIEW_GATE_OVERRIDE=1): no confirmed review-completed coverage in T1 scratch or T2 memory for $NOT_COVERED_SPACE — closing anyway. Stamped verification=overridden for those ids. This bypass is deliberate and audited."
 fi
 
@@ -574,7 +694,11 @@ if deadline_ids:
         'stops itself deterministically rather than risk the harness PreToolUse timeout killing it '
         'mid-check, nexus-4av2n round 3).'
     )
-lines.append('Remedy: run the stacked reviewers (code-review-expert + substantive-critic), then write the')
+lines.append(
+    'Remedy: Run the marker write as a SEPARATE tool call -- this deny aborts the '
+    'ENTIRE command, including any marker write bundled ahead of it '
+    '(nexus-cr4lp F4). Run the stacked reviewers (code-review-expert + substantive-critic), then write the'
+)
 lines.append('marker to T1 scratch AND/OR T2 memory (write to T2 when the CLI T1 lease is known-stale), e.g.:')
 lines.append('  nx scratch put \"review-completed: <bead-id>\" --tags \"review-completed,<bead-id>\"')
 lines.append('  nx memory put \"review-completed: <bead-id>\" -p <project> -t review-<bead-id>')

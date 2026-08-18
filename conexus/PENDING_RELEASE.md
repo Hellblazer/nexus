@@ -29,14 +29,6 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release (pinned: v7.9.0)
+## Awaiting the next release (pinned: v7.10.0)
 
-- `conexus/skills/orchestration/SKILL.md` — Quick Routing table's "Review
-  code" row routed to substantive-critic only "(if critical)", contradicting
-  the mandatory both-reviewers-always gate stated elsewhere in this file and
-  in `~/.claude/CLAUDE.md` § Review Discipline. Now routes unconditionally.
-  (nexus-0yeer)
-- `conexus/skills/orchestration/reference.md` — the same conditional-critic
-  shape in its routing digraph (`[label="if critical"]`) and Quick Reference
-  table row, found by BOTH round-1 reviewers of the SKILL.md fix; edited to
-  the same always-both wording. (nexus-0yeer round-1 ship-blocker)
+(none)

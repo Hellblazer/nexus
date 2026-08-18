@@ -350,3 +350,64 @@ class TestServicePlistRespawnPosture:
         assert ka == {"SuccessfulExit": False}
         assert data["ThrottleInterval"] == 30
         assert data["RunAtLoad"] is True
+
+
+class TestNoBackgroundProcessType:
+    """nexus-rlp0v: ``ProcessType=Background`` in the launchd unit made
+    macOS apply background QoS to the whole storage-service tree, confining
+    the ONNX embedding inference to the E-cores — measured 15x slowdown
+    (~7.6 chunks/s at normal QoS vs ~0.5 chunks/s under background QoS on an
+    M4 Max), reproducing the field-reported ~0.5 chunks/s local-mode
+    indexing symptom. Indexing is user-initiated work, not background
+    maintenance — the key must never come back on any nexus autostart unit.
+    """
+
+    def test_macos_plist_template_has_no_process_type(self) -> None:
+        import plistlib
+        import re
+
+        template = (
+            Path(__file__).resolve().parents[2]
+            / "conexus" / "daemon" / "com.nexus.service.plist"
+        )
+        raw = re.sub(rb"<!--.*?-->", b"", template.read_bytes(), flags=re.S)
+        data = plistlib.loads(raw)
+        assert "ProcessType" not in data, (
+            "ProcessType must not be set on the nexus service launchd unit "
+            "(nexus-rlp0v: Background QoS confines embedding inference to "
+            "E-cores, a measured 15x slowdown) — indexing is user-initiated "
+            "foreground work, raise per-thread QoS if background posture is "
+            "ever needed, don't reintroduce this key"
+        )
+
+    def test_rendered_service_plist_has_no_process_type(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same assertion against the actually-INSTALLED (post-substitution)
+        content, not just the template on disk — belt and suspenders against
+        a future ``_render_for_service`` that re-adds the key at render time."""
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        import plistlib
+        import re
+
+        dest, rendered = installer.rendered_unit_content(tier="service")
+        raw = re.sub(rb"<!--.*?-->", b"", rendered.encode(), flags=re.S)
+        data = plistlib.loads(raw)
+        assert "ProcessType" not in data
+
+    def test_linux_unit_has_no_cpu_qos_clamp(self) -> None:
+        """Linux was already clean (no Nice=/CPUSchedulingPolicy=/
+        IOSchedulingClass=) — nexus-rlp0v made no change there; this pins
+        that it stays that way."""
+        template = (
+            Path(__file__).resolve().parents[2]
+            / "conexus" / "daemon" / "nexus-service.service"
+        )
+        text = template.read_text()
+        for directive in ("Nice=", "CPUSchedulingPolicy=", "IOSchedulingClass=", "CPUWeight="):
+            assert directive not in text, (
+                f"{directive} found in the systemd unit — this would clamp "
+                "the storage service the same way ProcessType=Background did "
+                "on macOS (nexus-rlp0v)"
+            )

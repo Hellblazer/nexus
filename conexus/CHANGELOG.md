@@ -4,6 +4,30 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.10.0] - 2026-08-18
+
+### Fixed
+
+- **launchd unit no longer sets `ProcessType=Background`** (nexus-rlp0v):
+  background QoS confined the engine's ONNX inference to E-cores — a
+  measured 15x embedding slowdown on Apple Silicon local installs.
+  Existing installs converge via the post-upgrade note,
+  `nx daemon restart-stale`, or the new `nx doctor` drift check.
+- Reviewer routing: both reviewers (code-review-expert AND
+  substantive-critic) route unconditionally in every routing surface —
+  the "critic only if critical" wording is gone (nexus-0yeer).
+- Guard-evidence hook cluster (nexus-cr4lp, nexus-iwlq4): shell-redirection
+  tokens no longer parse as phantom refspecs; inline
+  `NX_REVIEW_GATE_OVERRIDE=1` is honored and audited; `--reason`/`--notes`
+  option values are never harvested as close targets; a T2 marker whose
+  bead id lives only in its title satisfies coverage.
+
+### Changed
+
+- Personal git policy (push-to-main denial, wildcard-add redirect) moved
+  out of the plugin to a user-level hook; the plugin hook enforces only
+  the review-coverage gate (nexus-ww9fw).
+
 ## [7.9.0] - 2026-08-17
 
 ### The Prompt Ratchet (nexus-haf6p) — review-flow changes, live with this pin

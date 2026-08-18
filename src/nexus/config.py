@@ -583,6 +583,27 @@ def local_embed_model_choice() -> str | None:
     return None
 
 
+def local_embed_model_is_voyage() -> bool:
+    """Return True if ``local.embed_model`` is configured to a voyage-* model.
+
+    SINGLE SHARED PREDICATE (nexus-35ok4 / GH #1461) for the two decisions
+    that must never diverge: whether the storage-service supervisor plumbs
+    ``NX_VOYAGE_API_KEY`` into the engine at spawn
+    (:mod:`nexus.daemon.storage_service_daemon`) and whether the client
+    mints voyage-* collection names on writes
+    (:func:`nexus.corpus.effective_embedding_model_for_writes`). Before
+    this helper existed the two call sites hand-duplicated the same
+    ``.lower().startswith("voyage")`` check — the client side was simply
+    never written, which is exactly how GH #1461 happened: the engine
+    picked up the key (voyage-capable) while the client kept minting bge
+    collection names, and the only working remedy was flipping
+    ``is_local_mode()`` False globally via a hand-exported
+    ``NX_SERVICE_URL``.
+    """
+    choice = local_embed_model_choice() or ""
+    return choice.lower().startswith("voyage")
+
+
 def catalog_path() -> Path:
     """Return the catalog directory path.
 
