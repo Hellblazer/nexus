@@ -16,7 +16,18 @@ Ack convention (agreed with conexus 2026-08-16, verified against the real
 nexus-wrwb7/nexus-w374z beads): the receiving side files a nexus bead whose
 DESCRIPTION carries the T2 relay's numeric id (e.g. "[20682]") and/or the
 relay's full title verbatim (e.g. "conexus-to-nexus-REQUEST-nx-mcp-self-
-minting-client-gap-2026-07-12"). A bead carrying either counts as an ack.
+minting-client-gap-2026-07-12"). A bead carrying either counts as an ack —
+UNLESS it is a bulk enumeration: one bead referencing BULK_ACK_THRESHOLD+
+of the current stale set is a sweep artifact, reported but never counted
+as per-relay acks (T2 [22836]).
+
+ANSWER-ack arm (protocol of record 2026-08-18, T2 conexus [22834] QUESTION
+-> [22835] ANSWER, option (a) amended): QUESTION/QUESTIONS relays also
+close via a T2 ANSWER entry whose BODY references the question title
+verbatim (anchored). A grandfathered exact title-suffix-pair form exists
+for pre-protocol history only (questions stamped before PROTOCOL_CUTOVER).
+REQUEST/ASK/P1 always require a bead, id recorded back to the sender
+(conexus-bgpi).
 
 Enumeration: ``nx memory list -p conexus`` (unpaginated — verified against
 a live 509-entry project population, no truncation footer). Ack check:
@@ -126,6 +137,100 @@ def parse_memory_list_output(raw: str) -> list[RelayEntry]:
     return entries
 
 
+#: Question-shaped markers the ANSWER-ack protocol applies to. Protocol of
+#: record (2026-08-18, T2 conexus [22834] QUESTION -> [22835] ANSWER, option
+#: (a) amended): a QUESTION relay closes via a T2 ANSWER entry whose BODY
+#: references the QUESTION title (match by reference, not title convention);
+#: no bead required unless the answer spawned real work (then the ANSWER
+#: names the bead). REQUEST (and the request-shaped ASK/P1) relays ALWAYS
+#: require a bead, id recorded back to the sender (conexus-bgpi).
+ANSWERABLE_MARKERS = {"QUESTION", "QUESTIONS"}
+
+#: The marker token must occupy the MARKER POSITION (immediately after the
+#: direction prefix), mirroring classify_relay_title's anchoring — an
+#: unanchored "-ANSWER-" scan misclassified titles that merely CONTAIN the
+#: word (e.g. a QUESTION about the nx_answer tool), feeding false answer
+#: candidates into the body matcher. REPLY/RESPONSE are live answer-shaped
+#: variants in the corpus (e.g. conexus-to-nexus-REPLY-BUG-0148-...).
+_ANSWER_TITLE_RX = re.compile(
+    r"^[a-z]+-to-[a-z]+-(?:ANSWER|ANSWERS|REPLY|RESPONSE)-", re.IGNORECASE
+)
+
+
+def is_answer_title(title: str) -> bool:
+    """True for relay-shaped titles whose MARKER slot carries an
+    answer-shaped token, either direction (conexus-to-nexus-ANSWER-*
+    answers our questions; the protocol reply itself arrived that way)."""
+    return _ANSWER_TITLE_RX.match(title) is not None
+
+
+def parse_answer_titles(raw: str) -> list[tuple[str, str]]:
+    """(project, title) pairs for every ANSWER-marked relay title in a
+    ``nx memory list`` output."""
+    out: list[tuple[str, str]] = []
+    for line in raw.splitlines():
+        m = _MEMORY_LINE_RX.match(line.rstrip())
+        if not m:
+            continue
+        if is_answer_title(m.group("title")):
+            out.append((m.group("project"), m.group("title")))
+    return out
+
+
+def answer_acks_question(answer_body: str, question_title: str) -> bool:
+    """The protocol's match-by-reference rule: the ANSWER's body must carry
+    the QUESTION title verbatim, ANCHORED — the title must not continue
+    into more title characters (a title that is a PREFIX of another title,
+    e.g. ``...-2026-06-25`` vs ``...-2026-06-25-r2``, must not be acked by
+    an answer that references only the longer one). Same standing policy
+    as :func:`id_probe_matches`: every string-containment ack check in this
+    file anchors; unanchored substring matching is the false-ack class the
+    gate exists to prevent."""
+    return re.search(re.escape(question_title) + r"(?![A-Za-z0-9-])", answer_body) is not None
+
+
+def _relay_suffix(title: str) -> str | None:
+    """The part after the direction prefix and marker token:
+    ``conexus-to-nexus-QUESTION-foo-bar-2026-07-06`` -> ``foo-bar-2026-07-06``.
+    None when the title is not marker-shaped."""
+    m = re.match(r"^[a-z]+-to-[a-z]+-([A-Z0-9]+)-(.+)$", title)
+    return m.group(2) if m else None
+
+
+#: The ack protocol's agreement date ([22834] -> [22835]). QUESTION entries
+#: STAMPED BEFORE this date may be acked by the grandfathered suffix-pair
+#: form below; entries from the protocol era onward must use the mandated
+#: body reference — the counterparty's ANSWER explicitly rejected title
+#: convention as the standing match key ("titles drift, references don't"),
+#: and ordinary future exchanges often reuse the suffix across the
+#: direction swap, so an ungated pair-check would silently bypass the
+#: reference check for the common case (substantive-critic, T2 [22836]).
+PROTOCOL_CUTOVER = dt.datetime(2026, 8, 19, tzinfo=dt.timezone.utc)
+
+
+def answer_title_pairs_question(
+    answer_title: str, question_title: str, question_ts: str = "",
+) -> bool:
+    """GRANDFATHERED ack form for PRE-PROTOCOL history only (2026-07 era):
+    an ANSWER whose title suffix EXACTLY equals the question's title suffix
+    (``...-QUESTION-nexus-ehc4q-status-2026-07-06`` answered by
+    ``...-ANSWER-nexus-ehc4q-status-2026-07-06``). Exact equality only —
+    never fuzzy — and ONLY for questions stamped before PROTOCOL_CUTOVER;
+    post-cutover questions require the body reference (see
+    PROTOCOL_CUTOVER's comment). Historical answers reference the SUBJECT,
+    not the title, which is the sole reason this form exists."""
+    if question_ts:
+        try:
+            if parse_timestamp(question_ts) >= PROTOCOL_CUTOVER:
+                return False
+        except ValueError:
+            return False  # unparseable stamp: no grandfather, safe direction
+    if not is_answer_title(answer_title):
+        return False
+    qs, ans = _relay_suffix(question_title), _relay_suffix(answer_title)
+    return qs is not None and qs == ans
+
+
 def parse_timestamp(ts: str) -> dt.datetime:
     return dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
@@ -230,6 +335,17 @@ def _bd_json(args: list[str]) -> list:
     return data if isinstance(data, list) else []
 
 
+def fetch_memory_body(project: str, title: str) -> str:
+    """Body text of one T2 entry, or "" when unfetchable (the caller treats
+    an unfetchable ANSWER candidate as not-an-ack — the flag stays up, the
+    safe over-inclusive direction)."""
+    try:
+        r = _run(["nx", "memory", "get", "-p", project, "-t", title])
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return ""
+    return r.stdout if r.returncode == 0 else ""
+
+
 def bd_desc_search(probe: str) -> bool:
     return len(_bd_json(["search", "nexus-", "--desc-contains", probe, "--status", "all", "--json"])) > 0
 
@@ -238,12 +354,54 @@ def bd_desc_id_search(relay_id: str) -> bool:
     """Numeric-id ack probe: bd's --desc-contains is substring-only, so its
     hits are re-verified client-side with :func:`id_probe_matches` anchoring
     (nexus-w374z critique: unanchored, id 2137 false-acks against 21374)."""
+    return bool(bd_desc_id_ack_beads(relay_id))
+
+
+def bd_desc_id_ack_beads(relay_id: str) -> set[str]:
+    """Bead ids whose description/title carries an ANCHORED reference to
+    *relay_id* — the id-granular form the bulk-ack demotion needs."""
     rows = _bd_json(["search", "nexus-", "--desc-contains", relay_id, "--status", "all", "--json"])
-    return any(
-        id_probe_matches(str(row.get("description", "")) + " " + str(row.get("title", "")), relay_id)
+    return {
+        str(row.get("id", ""))
         for row in rows
         if isinstance(row, dict)
-    )
+        and id_probe_matches(str(row.get("description", "")) + " " + str(row.get("title", "")), relay_id)
+        and row.get("id")
+    }
+
+
+#: A single bead referencing this many (or more) of the CURRENT stale relay
+#: set is an enumeration artifact (a sweep report pasted into one umbrella
+#: bead — e.g. this sweep's own first triage bead, nexus-g03an), not N
+#: per-relay acks. Counting it as acks let the sweep print clean the same
+#: day it shipped while zero of the six relays had been triaged — a silent
+#: all-clear manufactured by the tool's own remedy text (substantive-critic
+#: ship-blocker, T2 [22836]). Bulk trackers are REPORTED, and the relays
+#: they cover stay findings until each gets a dedicated ack or the bulk
+#: bead is split.
+BULK_ACK_THRESHOLD = 3
+
+
+def demote_bulk_ack_beads(
+    acks_by_relay: dict[str, set[str]], threshold: int = BULK_ACK_THRESHOLD,
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """Split per-relay bead acks into (dedicated, bulk). A bead appearing in
+    *threshold*+ relays' ack sets is bulk; it is removed from every relay's
+    dedicated set and reported separately. Pure — unit-testable."""
+    counts: dict[str, int] = {}
+    for beads in acks_by_relay.values():
+        for b in beads:
+            counts[b] = counts.get(b, 0) + 1
+    bulk_beads = {b for b, n in counts.items() if n >= threshold}
+    dedicated = {
+        rid: {b for b in beads if b not in bulk_beads}
+        for rid, beads in acks_by_relay.items()
+    }
+    bulk = {
+        rid: {b for b in beads if b in bulk_beads}
+        for rid, beads in acks_by_relay.items()
+    }
+    return dedicated, bulk
 
 
 def bd_title_search(probe: str) -> bool:
@@ -312,16 +470,64 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    # ANSWER-ack arm (protocol of record, [22834]->[22835]): QUESTION-shaped
+    # relays close via an ANSWER entry whose body references the question
+    # title. Candidate bodies are fetched lazily and cached; an unfetchable
+    # body is not an ack.
+    answer_candidates = parse_answer_titles(raw)
+    _body_cache: dict[tuple[str, str], str] = {}
+
+    def _answered(entry: RelayEntry) -> bool:
+        if entry.marker not in ANSWERABLE_MARKERS:
+            return False
+        for proj, title in answer_candidates:
+            if answer_title_pairs_question(title, entry.title, entry.timestamp):
+                return True  # grandfathered exact suffix pair (pre-cutover only)
+            key = (proj, title)
+            if key not in _body_cache:
+                _body_cache[key] = fetch_memory_body(proj, title)
+            if answer_acks_question(_body_cache[key], entry.title):
+                return True
+        return False
+
     findings: list[str] = []
     try:
+        # Pass 1: collect id-granular bead acks for every stale entry, then
+        # demote enumeration/bulk beads (BULK_ACK_THRESHOLD) — a sweep
+        # report pasted into one umbrella bead must not blanket-clear its
+        # whole list (T2 [22836] ship-blocker).
+        acks_by_relay: dict[str, set[str]] = {
+            e.id: bd_desc_id_ack_beads(e.id) for e in stale
+        }
+        dedicated, bulk = demote_bulk_ack_beads(acks_by_relay)
+
         for entry in stale:
-            if is_acked(entry, bd_desc_search, bd_title_search, bd_desc_id_search):
+            if dedicated.get(entry.id):
+                continue
+            if is_acked(entry, bd_desc_search, bd_title_search, lambda _p: False):
+                # title-verbatim / title-in-bead-title forms (id form is
+                # handled granularly above; the injected no-op keeps
+                # is_acked from re-running the un-demoted id probe).
+                continue
+            if _answered(entry):
                 continue
             age = age_in_days(entry, now)
+            bulk_note = ""
+            if bulk.get(entry.id):
+                bulk_note = (
+                    f" (bulk-tracking bead(s) {sorted(bulk[entry.id])} reference it "
+                    "as part of an enumeration — NOT counted as a per-relay ack; "
+                    "triage it there or give it a dedicated ack)"
+                )
+            remedy = (
+                "answer it with a T2 ANSWER entry referencing this title in its body, "
+                "or file a bead if it spawned work"
+                if entry.marker in ANSWERABLE_MARKERS
+                else "file a bead and record the T2 id + relay title in its description as the ack"
+            )
             findings.append(
                 f"{entry.id} ({entry.marker}, {age:.1f}d old): {entry.project}/{entry.title} "
-                "has no referencing nexus bead — file one and record the T2 id + relay title "
-                "in its description as the ack"
+                f"has no dedicated ack — {remedy}{bulk_note}"
             )
     except SweepUnrunnableError as exc:
         print(f"BD-UNAVAILABLE: {exc}")

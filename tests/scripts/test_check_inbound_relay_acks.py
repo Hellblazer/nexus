@@ -241,6 +241,7 @@ def test_main_exit_1_when_stale_request_has_no_ack(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(gate, "fetch_memory_listing", lambda project: listing)
     monkeypatch.setattr(gate, "bd_desc_search", lambda probe: False)
     monkeypatch.setattr(gate, "bd_desc_id_search", lambda probe: False)
+    monkeypatch.setattr(gate, "bd_desc_id_ack_beads", lambda rid: set())
     monkeypatch.setattr(gate, "bd_title_search", lambda probe: False)
     assert gate.main(["--max-age-days", "7"]) == 1
 
@@ -255,6 +256,7 @@ def test_main_exit_0_when_stale_request_has_a_matching_bead(monkeypatch: pytest.
     monkeypatch.setattr(gate, "fetch_memory_listing", lambda project: listing)
     monkeypatch.setattr(gate, "bd_desc_search", lambda probe: probe == "20682")
     monkeypatch.setattr(gate, "bd_desc_id_search", lambda probe: probe == "20682")
+    monkeypatch.setattr(gate, "bd_desc_id_ack_beads", lambda rid: {"nexus-wrwb7"} if rid == "20682" else set())
     monkeypatch.setattr(gate, "bd_title_search", lambda probe: False)
     assert gate.main(["--max-age-days", "7"]) == 0
 
@@ -273,6 +275,7 @@ def test_main_exit_2_when_bd_unavailable_during_ack_check(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(gate, "bd_desc_search", _boom)
     monkeypatch.setattr(gate, "bd_desc_id_search", _boom)
+    monkeypatch.setattr(gate, "bd_desc_id_ack_beads", _boom)
     monkeypatch.setattr(gate, "_grep_jsonl_fallback", lambda probe: False)
     assert gate.main(["--max-age-days", "7"]) == 2
 
@@ -320,3 +323,234 @@ class TestIdProbeAnchoring:
         # Without the anchored injection the substring behavior remains
         # (back-compat arm — documents WHY main() must pass it).
         assert gate.is_acked(entry, substring_hits, never) is True
+
+
+# ── ANSWER-ack protocol arm ([22834] -> [22835], option (a) amended) ─────────
+
+
+class TestAnswerAckProtocol:
+    """Protocol of record 2026-08-18: QUESTION-shaped relays close via a T2
+    ANSWER entry whose BODY references the QUESTION title (match by
+    reference, not title convention). REQUEST/ASK/P1 stay bead-only."""
+
+    def test_answer_title_recognized_both_directions(self) -> None:
+        assert gate.is_answer_title("conexus-to-nexus-ANSWER-relay-ack-protocol-2026-08-18")
+        assert gate.is_answer_title("nexus-to-conexus-ANSWER-foo")
+        assert not gate.is_answer_title("conexus-to-nexus-QUESTION-foo")
+        assert not gate.is_answer_title("random-note-about-ANSWER-keys")  # no -to- relay shape... 
+    def test_body_reference_is_the_match_key(self) -> None:
+        q = "conexus-to-nexus-QUESTION-topic-x-2026-07-02"
+        assert gate.answer_acks_question(f"ANSWER to {q} [123]: yes.", q)
+        assert not gate.answer_acks_question("ANSWER to a different question.", q)
+
+    def test_question_marker_is_answerable_request_is_not(self) -> None:
+        assert "QUESTION" in gate.ANSWERABLE_MARKERS
+        assert "QUESTIONS" in gate.ANSWERABLE_MARKERS
+        assert "REQUEST" not in gate.ANSWERABLE_MARKERS
+        assert "ASK" not in gate.ANSWERABLE_MARKERS  # request-shaped: bead-only
+        assert "P1" not in gate.ANSWERABLE_MARKERS
+
+    def test_main_clears_a_question_with_body_referencing_answer(self, monkeypatch) -> None:
+        """Answer suffix deliberately different from the question's so the
+        BODY reference (the protocol's primary form), not the grandfathered
+        suffix pair, is what clears the flag here."""
+        q_title = "conexus-to-nexus-QUESTION-old-topic"
+        listing = (
+            "[100] conexus/" + q_title + "  (relay, 2026-07-01T00:00:00Z)\n"
+            "[101] conexus/conexus-to-nexus-ANSWER-with-different-suffix  (relay, 2026-07-01T01:00:00Z)\n"
+        )
+        monkeypatch.setattr(gate, "fetch_memory_listing", lambda project: listing)
+        monkeypatch.setattr(gate, "bd_desc_search", lambda probe: False)
+        monkeypatch.setattr(gate, "bd_desc_id_search", lambda probe: False)
+        monkeypatch.setattr(gate, "bd_desc_id_ack_beads", lambda rid: set())
+        monkeypatch.setattr(gate, "bd_title_search", lambda probe: False)
+        monkeypatch.setattr(
+            gate, "fetch_memory_body",
+            lambda proj, title: f"ANSWER to {q_title}: resolved inline.",
+        )
+        assert gate.main(["--max-age-days", "7"]) == 0
+
+    def test_main_still_flags_a_question_whose_answer_does_not_reference_it(
+        self, monkeypatch,
+    ) -> None:
+        """The July false-clean shape: an ANSWER entry exists but its body
+        never names the question — match-by-reference must NOT credit it."""
+        q_title = "conexus-to-nexus-QUESTION-old-topic"
+        listing = (
+            "[100] conexus/" + q_title + "  (relay, 2026-07-01T00:00:00Z)\n"
+            "[101] conexus/conexus-to-nexus-ANSWER-unrelated  (relay, 2026-07-01T01:00:00Z)\n"
+        )
+        monkeypatch.setattr(gate, "fetch_memory_listing", lambda project: listing)
+        monkeypatch.setattr(gate, "bd_desc_search", lambda probe: False)
+        monkeypatch.setattr(gate, "bd_desc_id_search", lambda probe: False)
+        monkeypatch.setattr(gate, "bd_desc_id_ack_beads", lambda rid: set())
+        monkeypatch.setattr(gate, "bd_title_search", lambda probe: False)
+        monkeypatch.setattr(gate, "fetch_memory_body", lambda proj, title: "about something else")
+        assert gate.main(["--max-age-days", "7"]) == 1
+
+    def test_request_relay_never_answer_acked(self, monkeypatch) -> None:
+        """A REQUEST with a perfectly-referencing ANSWER body still needs a
+        bead (protocol amendment 2 / conexus-bgpi)."""
+        r_title = "conexus-to-nexus-REQUEST-do-the-thing"
+        listing = (
+            "[100] conexus/" + r_title + "  (relay, 2026-07-01T00:00:00Z)\n"
+            "[101] conexus/conexus-to-nexus-ANSWER-x  (relay, 2026-07-01T01:00:00Z)\n"
+        )
+        monkeypatch.setattr(gate, "fetch_memory_listing", lambda project: listing)
+        monkeypatch.setattr(gate, "bd_desc_search", lambda probe: False)
+        monkeypatch.setattr(gate, "bd_desc_id_search", lambda probe: False)
+        monkeypatch.setattr(gate, "bd_desc_id_ack_beads", lambda rid: set())
+        monkeypatch.setattr(gate, "bd_title_search", lambda probe: False)
+        monkeypatch.setattr(gate, "fetch_memory_body", lambda proj, title: f"covers {r_title}")
+        assert gate.main(["--max-age-days", "7"]) == 1
+
+    def test_unfetchable_answer_body_is_not_an_ack(self, monkeypatch) -> None:
+        """Suffix deliberately DIFFERENT from the question's, so the
+        grandfathered pair form cannot ack — only the body could, and the
+        body is unfetchable."""
+        q_title = "conexus-to-nexus-QUESTION-old-topic"
+        listing = (
+            "[100] conexus/" + q_title + "  (relay, 2026-07-01T00:00:00Z)\n"
+            "[101] conexus/conexus-to-nexus-ANSWER-other-subject  (relay, 2026-07-01T01:00:00Z)\n"
+        )
+        monkeypatch.setattr(gate, "fetch_memory_listing", lambda project: listing)
+        monkeypatch.setattr(gate, "bd_desc_search", lambda probe: False)
+        monkeypatch.setattr(gate, "bd_desc_id_search", lambda probe: False)
+        monkeypatch.setattr(gate, "bd_desc_id_ack_beads", lambda rid: set())
+        monkeypatch.setattr(gate, "bd_title_search", lambda probe: False)
+        monkeypatch.setattr(gate, "fetch_memory_body", lambda proj, title: "")
+        assert gate.main(["--max-age-days", "7"]) == 1
+
+    def test_grandfathered_exact_suffix_pair_acks(self) -> None:
+        assert gate.answer_title_pairs_question(
+            "nexus-to-conexus-ANSWER-nexus-ehc4q-status-2026-07-06",
+            "conexus-to-nexus-QUESTION-nexus-ehc4q-status-2026-07-06",
+        )
+
+    def test_suffix_pair_is_exact_never_fuzzy(self) -> None:
+        assert not gate.answer_title_pairs_question(
+            "nexus-to-conexus-ANSWER-nexus-ehc4q-status-2026-07-07",  # date drift
+            "conexus-to-nexus-QUESTION-nexus-ehc4q-status-2026-07-06",
+        )
+        assert not gate.answer_title_pairs_question(
+            "conexus-to-nexus-QUESTION-x-1",  # not an answer title
+            "conexus-to-nexus-QUESTION-x-1",
+        )
+
+
+# ── bulk-ack demotion (T2 [22836] ship-blocker) + gated grandfather ──────────
+
+
+class TestBulkAckDemotion:
+    """A sweep report pasted into ONE umbrella bead (the live specimen:
+    nexus-g03an enumerating all 6 relay ids it was filed to triage) must
+    not blanket-clear its whole list — that manufactured a silent all-clear
+    the same day the mechanism shipped."""
+
+    def test_bead_referencing_threshold_relays_is_demoted(self) -> None:
+        acks = {
+            "100": {"nexus-bulk1"},
+            "101": {"nexus-bulk1"},
+            "102": {"nexus-bulk1"},
+            "103": {"nexus-bulk1", "nexus-real"},
+        }
+        dedicated, bulk = gate.demote_bulk_ack_beads(acks, threshold=3)
+        assert dedicated["100"] == set() and bulk["100"] == {"nexus-bulk1"}
+        assert dedicated["103"] == {"nexus-real"}  # dedicated ack survives
+
+    def test_below_threshold_beads_stay_dedicated(self) -> None:
+        acks = {"100": {"nexus-a"}, "101": {"nexus-a"}, "102": {"nexus-b"}}
+        dedicated, bulk = gate.demote_bulk_ack_beads(acks, threshold=3)
+        assert dedicated == acks
+        assert all(not v for v in bulk.values())
+
+    def test_main_flags_relays_whose_only_ack_is_an_enumeration_bead(
+        self, monkeypatch,
+    ) -> None:
+        listing = "".join(
+            f"[10{i}] conexus/conexus-to-nexus-REQUEST-topic-{i}  (relay, 2026-07-01T00:00:00Z)\n"
+            for i in range(3)
+        )
+        monkeypatch.setattr(gate, "fetch_memory_listing", lambda project: listing)
+        monkeypatch.setattr(gate, "bd_desc_search", lambda probe: False)
+        monkeypatch.setattr(gate, "bd_title_search", lambda probe: False)
+        monkeypatch.setattr(
+            gate, "bd_desc_id_ack_beads", lambda rid: {"nexus-umbrella"},
+        )
+        rc = gate.main(["--max-age-days", "7"])
+        assert rc == 1  # all three stay findings
+
+    def test_main_clears_a_relay_with_a_dedicated_bead(self, monkeypatch) -> None:
+        listing = (
+            "[100] conexus/conexus-to-nexus-REQUEST-topic-a  (relay, 2026-07-01T00:00:00Z)\n"
+        )
+        monkeypatch.setattr(gate, "fetch_memory_listing", lambda project: listing)
+        monkeypatch.setattr(gate, "bd_desc_search", lambda probe: False)
+        monkeypatch.setattr(gate, "bd_title_search", lambda probe: False)
+        monkeypatch.setattr(
+            gate, "bd_desc_id_ack_beads", lambda rid: {"nexus-dedicated"},
+        )
+        assert gate.main(["--max-age-days", "7"]) == 0
+
+
+class TestGrandfatherCutover:
+    """The suffix-pair form is for PRE-PROTOCOL history only — the
+    counterparty mandated match-by-reference, and ordinary future
+    exchanges reuse suffixes across the direction swap, so an ungated
+    pair-check would bypass the reference check for the common case."""
+
+    def test_pre_cutover_question_may_pair(self) -> None:
+        assert gate.answer_title_pairs_question(
+            "nexus-to-conexus-ANSWER-topic-x-2026-07-06",
+            "conexus-to-nexus-QUESTION-topic-x-2026-07-06",
+            "2026-07-06T00:00:00Z",
+        )
+
+    def test_post_cutover_question_never_pairs(self) -> None:
+        assert not gate.answer_title_pairs_question(
+            "nexus-to-conexus-ANSWER-topic-x-2026-09-01",
+            "conexus-to-nexus-QUESTION-topic-x-2026-09-01",
+            "2026-09-01T00:00:00Z",
+        )
+
+    def test_unparseable_stamp_never_pairs(self) -> None:
+        assert not gate.answer_title_pairs_question(
+            "nexus-to-conexus-ANSWER-topic-x",
+            "conexus-to-nexus-QUESTION-topic-x",
+            "not-a-date",
+        )
+
+
+class TestAnchoredBodyReference:
+    """code-review-expert Critical: prefix-title collision — an answer
+    referencing only ...-2026-06-25-r2 must not ack ...-2026-06-25."""
+
+    def test_prefix_title_does_not_false_ack(self) -> None:
+        short = "conexus-to-nexus-QUESTION-catalog-drift-2026-08-01"
+        assert not gate.answer_acks_question(
+            f"ANSWER to {short}-followup: resolved.", short,
+        )
+
+    def test_exact_reference_still_acks(self) -> None:
+        short = "conexus-to-nexus-QUESTION-catalog-drift-2026-08-01"
+        assert gate.answer_acks_question(f"ANSWER to {short}: resolved.", short)
+        assert gate.answer_acks_question(f"re {short} [123] — see below", short)
+
+
+class TestAnswerTitleMarkerPosition:
+    """code-review-expert Important-1: the marker must occupy the MARKER
+    SLOT — a QUESTION about the nx_answer tool is not an answer candidate."""
+
+    def test_question_about_nx_answer_tool_is_not_a_candidate(self) -> None:
+        assert not gate.is_answer_title(
+            "conexus-to-nexus-QUESTION-nx-answer-tool-latency-2026-08-10"
+        )
+
+    def test_reply_and_response_variants_are_candidates(self) -> None:
+        assert gate.is_answer_title("conexus-to-nexus-REPLY-BUG-0148-diagnostics-2026-07-19")
+        assert gate.is_answer_title("nexus-to-conexus-RESPONSE-something-2026-08-01")
+
+    def test_trailing_lowercase_answer_word_is_not_a_candidate(self) -> None:
+        assert not gate.is_answer_title(
+            "nexus-to-conexus-prod-cloud-token-answer-2026-06-29"
+        )
