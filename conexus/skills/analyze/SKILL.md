@@ -7,7 +7,7 @@ effort: medium
 **Tier-aware discipline** — apply at session start and before every major step:
 
 1. **Read** widest → narrowest before duplicating effort:
-   - T3 (cross-project): `mcp__plugin_conexus_nexus__nx_answer(...)` for verb-shape questions; `mcp__plugin_conexus_nexus__search(...)` for keyword lookup.
+   - T3 (cross-project): `mcp__plugin_conexus_nexus__search(...)` for the check itself (tier checks use `search`, not `nx_answer`); reach for `nx_answer` only when the answer must be reduced from many documents.
    - T2 (project): `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`.
    - T1 (siblings, this session): `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`.
 2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_conexus_nexus__plan_search(query="<task>", limit=3)`.
@@ -19,10 +19,11 @@ effort: medium
 
 # analyze
 
-**You MUST call `nx_answer` for cross-corpus synthesis or ranking. Direct
-`search` returns unstructured chunks; analytical questions need the
-search → extract → rank → generate composition that the analyze plans
-provide.** This is the one verb where bundling gives the biggest wins:
+**Call `nx_answer` for cross-corpus synthesis or ranking that must be
+reduced from many documents** — the search → extract → rank → generate
+composition the analyze plans provide. A single-corpus lookup is a
+`search` call — see "When direct `search` is fine" below. This is the
+one verb where bundling gives the biggest wins:
 a 3-op chain collapses from ~45s of per-step spawns to ~15s in a single
 `claude -p` call.
 

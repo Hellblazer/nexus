@@ -7,7 +7,7 @@ effort: medium
 **Tier-aware discipline** — apply at session start and before every major step:
 
 1. **Read** widest → narrowest before duplicating effort:
-   - T3 (cross-project): `mcp__plugin_conexus_nexus__nx_answer(...)` for verb-shape questions; `mcp__plugin_conexus_nexus__search(...)` for keyword lookup.
+   - T3 (cross-project): `mcp__plugin_conexus_nexus__search(...)` for the check itself (tier checks use `search`, not `nx_answer`); reach for `nx_answer` only when the answer must be reduced from many documents.
    - T2 (project): `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`.
    - T1 (siblings, this session): `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`.
 2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_conexus_nexus__plan_search(query="<task>", limit=3)`.
@@ -19,10 +19,10 @@ effort: medium
 
 # document
 
-**You MUST call `nx_answer` for documentation-coverage questions. Direct
-`search` calls against docs corpora skip the cross-reference traversal
-that produces coverage gaps — you will miss the structure the skill
-exists to surface.**
+**Call `nx_answer` for documentation-coverage questions that need the
+cross-reference traversal** (docs linking to code, code linking to
+RDRs) to surface gaps. A single "where is X documented" lookup is a
+`search` call — see "When direct `search` is fine" below.
 
 ## The call
 

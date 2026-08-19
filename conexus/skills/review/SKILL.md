@@ -6,9 +6,10 @@ effort: medium
 
 # review
 
-**You MUST call `nx_answer` for critique/audit/review work. Direct
-`search` against RDRs or code skips the decision-evolution traversal
-and extract → compare pipeline that reviews actually need.**
+**Call `nx_answer` when a review must align multiple RDRs against a
+change set** (decision-evolution traversal + extract → compare). A
+single "where does RDR-NNN state X" lookup is a `search` call — see
+"When direct `search` is fine" below.
 
 ## The call
 

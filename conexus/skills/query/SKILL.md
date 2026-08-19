@@ -1,13 +1,13 @@
 ---
 name: query
-description: Use when answering any analytical question over the conexus knowledge collections. This is the canonical entry point; direct search/query calls for analytical questions are an anti-pattern.
+description: Use when an analytical question's answer must be reduced from many documents (cross-corpus synthesis, ranking/comparing, RDR research). Not for file:line, single-fact, or already-answered questions — search/query cover those directly, in seconds.
 effort: medium
 ---
 
 **Tier-aware discipline** — apply at session start and before every major step:
 
 1. **Read** widest → narrowest before duplicating effort:
-   - T3 (cross-project): `mcp__plugin_conexus_nexus__nx_answer(...)` for verb-shape questions; `mcp__plugin_conexus_nexus__search(...)` for keyword lookup.
+   - T3 (cross-project): `mcp__plugin_conexus_nexus__search(...)` for the check itself (tier checks use `search`, not `nx_answer`); reach for `nx_answer` only when the answer must be reduced from many documents.
    - T2 (project): `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`.
    - T1 (siblings, this session): `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`.
 2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_conexus_nexus__plan_search(query="<task>", limit=3)`.
@@ -19,10 +19,12 @@ effort: medium
 
 # Query
 
-**This skill wraps one MCP call — `nx_answer`. If you are asked an
-analytical question ("how does…", "what tradeoffs…", "compare X and
-Y…", "why was this designed…"), you MUST call `nx_answer` rather than
-`search` or `query` directly.**
+**This skill wraps one MCP call — `nx_answer`, for when the answer must
+be reduced from many documents (cross-corpus synthesis, ranking/
+comparing, RDR research). For file:line, single-fact, or already-in-
+T2/bead/RDR questions, call `search` or `query` directly (seconds; mean ~8s, tail to ~45s) —
+routing those through `nx_answer` (p50 80s, p95 217s, can time out at
+300s) costs minutes for no benefit.**
 
 ## The call
 
@@ -86,8 +88,9 @@ plain `/conexus:query` skill when no verb cleanly fits.
 
 ## Anti-patterns
 
-- **Calling `search` for "how does X work" or "what are the tradeoffs
-  in Y".** That's an analytical question. Use `nx_answer`.
+- **Calling `search` for a question whose answer must be reduced from
+  many documents** ("how does X work across the corpus", "what are
+  the tradeoffs in Y"). Use `nx_answer`.
 - **Skipping to the inline planner because "it's faster than matching
   a plan".** Plan-match costs ~100ms of T1 cosine lookup. Bundling
   makes matched-plan execution substantially faster than inline

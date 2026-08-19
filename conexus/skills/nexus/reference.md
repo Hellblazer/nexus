@@ -62,7 +62,7 @@ Use `search` for chunk-level retrieval. Use `query` when you need to know **whic
 
 ### nx_answer
 
-Plan-match-first analytical retrieval (RDR-080). Primary front door for research / review / analyze / debug verb skills. Internally: `plan_match` → (on hit) run matched plan via `plan_run`; (on miss) dispatch inline `claude -p` planner. Every run logged to T2 `nx_answer_runs`.
+Plan-match-first analytical retrieval (RDR-080), reserved for answers that must be reduced from many documents (cross-corpus synthesis, ranking/comparing, RDR research) — not for file:line, single-fact, or already-in-T2 questions (use `search`/`query`, seconds (mean ~8s)). Internally: `plan_match` → (on hit) run matched plan via `plan_run`; (on miss) dispatch inline `claude -p` planner. Every run logged to T2 `nx_answer_runs`. Measured cost: p50 80s, p95 217s, can time out at 300s.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -118,7 +118,7 @@ mcp__plugin_conexus_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus
 
 ### operator_summarize
 
-Summarize content via `claude -p` (default timeout 120s). Set `cited=True` for a citations list in the output.
+Summarize content via `claude -p` (default timeout 300s; nx_plan_audit/nx_tidy 600s). Set `cited=True` for a citations list in the output.
 
 ```
 mcp__plugin_conexus_nexus__operator_summarize(content="<text>"

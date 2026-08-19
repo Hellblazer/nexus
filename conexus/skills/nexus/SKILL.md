@@ -36,7 +36,7 @@ mcp__plugin_conexus_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus
 mcp__plugin_conexus_nexus__traverse(seeds=["1.1.635"], link_types=["implements","cites"], depth=2
 mcp__plugin_conexus_nexus__traverse(seeds="1.1.635", purpose="find-implementations"          # link_types XOR purpose
 
-# Analytical operators — each spawns `claude -p` (default timeout 120s)
+# Analytical operators — each spawns `claude -p` (default timeout 300s; nx_plan_audit/nx_tidy 600s)
 mcp__plugin_conexus_nexus__operator_summarize(content="...", cited=True
 mcp__plugin_conexus_nexus__operator_extract(inputs=["doc1","doc2"], fields="title,year,author"
 mcp__plugin_conexus_nexus__operator_rank(items=["a","b","c"], criterion="relevance to X"
@@ -73,7 +73,7 @@ mcp__plugin_conexus_nexus__plan_save(query="...", plan_json="{...}", verb="resea
 
 ## When to reach for each
 
-- **`nx_answer`** — analytical questions, cross-corpus synthesis. Primary front door for research / review / analyze / debug verb skills. Plan-match-first; falls through to inline planner on miss.
+- **`nx_answer`** — only when the answer must be reduced from many documents (cross-corpus synthesis, ranking/comparing, RDR research); p50 80s, p95 217s, can time out at 300s. Not for file:line, single-fact, or already-in-T2 questions — use `search`/`query` (seconds; mean ~8s, tail to ~45s). Plan-match-first; falls through to inline planner on miss.
 - **`search` vs `query`** — `search` returns chunks (finest grain), `query` returns documents grouped by source. Use `search` for fragment hunting, `query` for literature scoping + catalog traversal.
 - **`traverse`** — walk the typed link graph from known tumblers. `link_types` XOR `purpose`; depth ≤ 3.
 - **`store_get_many`** — batch-hydrate chunk IDs from `search(structured=True)` or `traverse`. Safe past the 300-record write cap.
