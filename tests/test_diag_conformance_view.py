@@ -256,9 +256,11 @@ def test_grants_changeset_view_era_revokes_tables():
     # which INSERTED a changelog row per boot on a runAlways changeset — see
     # tests/test_changelog_markran_lint.py) + 5 prose mentions, + 4 from the
     # nexus-lhuhe view re-grant in -3 (1 GRANT target + 3 comment/NOTICE
-    # mentions). Exact pin so a NEW writer of this name is a conscious edit
+    # mentions), + 1 comment mention in grants-nexus-diag-4 (d9b917fb2:
+    # audit-table grants; its comment cites the view's CHASH_BEARING_TABLES
+    # scoping). Exact pin so a NEW writer of this name is a conscious edit
     # here, not silent drift.
-    assert xml.count("diag_chash_conformance") == 11
+    assert xml.count("diag_chash_conformance") == 12
     # Both changesets must stay runAlways with the era test in the BODY. Parsed,
     # not substring-matched: this file's header documents the rejected
     # alternatives verbatim, so `"runOnChange" not in xml` would fail on the
@@ -278,6 +280,12 @@ def test_grants_changeset_view_era_revokes_tables():
         # SELECT changeset -- deliberately its own changeset, not folded
         # into -1's era-gated body (see that changeset's own comment).
         "grants-nexus-diag-3",
+        # d9b917fb2 (2026-08-19): audit-table SELECT grants (gc_audit,
+        # search_telemetry, ...) so nexus_diag can read the tables its
+        # forensics path checks. hook_failures deliberately NOT granted
+        # (unscrubbed str(exc) capture + BYPASSRLS — see the changeset
+        # comment; do not re-add for symmetry).
+        "grants-nexus-diag-4",
     ]
     for cs in diag_sets:
         assert cs.get("runAlways") == "true", (
