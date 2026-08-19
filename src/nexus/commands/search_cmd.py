@@ -28,7 +28,8 @@ from nexus.filters import parse_where as _parse_where_core
 
 
 def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
-    """Parse ``KEY{op}VALUE`` strings into a ChromaDB where dict.
+    """Parse ``KEY{op}VALUE`` strings into a metadata-filter where dict
+    (Chroma-heritage operator shape, served by the engine).
 
     Wraps shared ``parse_where`` with Click-specific error handling.
     """

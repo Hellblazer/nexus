@@ -42,7 +42,7 @@ def _doc_id_to_file_path(doc_id: str) -> str:
 
 @click.group()
 def collection() -> None:
-    """Manage ChromaDB collections (list, info, verify, delete)."""
+    """Manage T3 vector collections (list, info, verify, delete)."""
 
 
 @collection.command("list")
@@ -409,11 +409,11 @@ def rename_collection_data_plane(
     ),
 )
 def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
-    """Rename a collection in-place via ChromaDB's native modify(name=).
+    """Rename a collection in-place via the engine's native rename.
 
-    O(1) metadata update — no embedding re-upload, no Voyage cost,
-    no ChromaDB egress. Cascades the new name through T2 taxonomy,
-    chash_index, and catalog (JSONL + SQLite).
+    O(1) metadata update — no embedding re-upload, no Voyage cost.
+    Cascades the new name through T2 taxonomy, chash_index, and the
+    catalog.
 
     Cross-prefix renames (e.g. ``code__`` ↔ ``docs__``) change the
     embedding-model space and are rejected unless ``--force-prefix-change``
@@ -1048,7 +1048,7 @@ def _backfill_chunk_text_hash(
 def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
     """Add chunk_text_hash to chunks missing it (no re-embedding).
 
-    Reads each chunk's stored text from ChromaDB and computes
+    Reads each chunk's stored text from T3 and computes
     sha256(text.encode()).hexdigest(). Updates metadata in-place —
     embeddings and documents are untouched.
 
@@ -1487,7 +1487,7 @@ def audit_cmd(name: str, fmt: str, live: bool, live_n: int) -> None:
     """Deep-dive audit for a single collection (RDR-087 Phase 4.2).
 
     Five sections: distance histogram (30d telemetry, ``--live`` to
-    probe ChromaDB when telemetry is cold), top-5 cross-projections,
+    probe T3 when telemetry is cold), top-5 cross-projections,
     orphan chunks (>30d, no incoming links), top-10 cross-collection
     hub topic assignments, chash_index coverage.
     """

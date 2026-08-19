@@ -1009,7 +1009,7 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
     RDR-151 Phase 3 (nexus-uzay8): the T3 fetch + MiniLM reembed + KMeans
     clustering happens locally (compute phase), then the pure-T2 persist
     (DELETE parent assignments + INSERT children) is routed through the
-    daemon via t2_index_write.  Chroma centroid operations happen locally
+    daemon via t2_index_write.  Centroid vector operations happen locally
     before and after the routed persist using the returned child IDs.
     """
     from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load

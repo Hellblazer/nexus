@@ -161,7 +161,7 @@ def get_cmd(entry_id: str) -> None:
 def search_cmd(query: str, n: int) -> None:
     """Search T1 scratch entries.
 
-    Semantic (cosine distance) on the ChromaDB-backed path; full-text
+    Semantic (cosine distance) on the vector-backed path; full-text
     (Postgres tsvector, ranked server-side by ts_rank) on the service-backed
     path — the service does not expose that rank score to clients, so no
     score is shown for service-backed results. See ``HttpScratchStore.search``.
