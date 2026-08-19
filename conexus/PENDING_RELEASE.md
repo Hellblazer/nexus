@@ -29,40 +29,6 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release (pinned: v7.11.0)
+## Awaiting the next release (pinned: v7.12.0)
 
-nexus-h33x8.6 (b): nx_answer mandate narrowed everywhere in the guidance layer to
-reduce-from-many-documents shapes, with its measured cost (executed p50 80s). The
-"ALL analytical questions" / "verb-shaped MUST" / "anti-pattern" claims are gone from
-the session-start skill, the subagent preflight, every agent's pre-flight, and the
-entry-point skills. Files:
-- `conexus/agents/architect-planner.md`
-- `conexus/agents/code-review-expert.md`
-- `conexus/agents/codebase-deep-analyzer.md`
-- `conexus/agents/debugger.md`
-- `conexus/agents/deep-analyst.md`
-- `conexus/agents/deep-research-synthesizer.md`
-- `conexus/agents/developer.md`
-- `conexus/agents/strategic-planner.md`
-- `conexus/agents/substantive-critic.md`
-- `conexus/agents/test-validator.md`
-- `conexus/hooks/scripts/subagent-start.sh`
-- `conexus/skills/analyze/SKILL.md`
-- `conexus/skills/debug/SKILL.md`
-- `conexus/skills/deep-analysis/SKILL.md`
-- `conexus/skills/document/SKILL.md`
-- `conexus/skills/knowledge-tidying/SKILL.md`
-- `conexus/skills/nexus/reference.md`
-- `conexus/skills/nexus/SKILL.md`
-- `conexus/skills/plan-first/SKILL.md`
-- `conexus/skills/query/SKILL.md`
-- `conexus/skills/research-synthesis/SKILL.md`
-- `conexus/skills/research/SKILL.md`
-- `conexus/skills/review/SKILL.md`
-- `conexus/skills/using-nx-skills/SKILL.md`
-
-Sequential-thinking guidance made unconditional (Sam directive 2026-08-19: "use it at every
-decision point"; every prior mention was scoped to "non-trivial"/"complex"/"obstacles", which
-measured to zero top-level calls in a full session). Files beyond the list above:
-- `conexus/agents/test-validator.md`
-- `conexus/agents/deep-analyst.md`
+(nothing pending)

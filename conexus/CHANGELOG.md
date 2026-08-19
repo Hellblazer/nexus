@@ -4,6 +4,19 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.12.0] - 2026-08-19
+
+Plugin version aligned with conexus 7.12.0. Advancing `source.ref` to
+`v7.12.0` makes live in installed sessions: the `nx_answer` mandate narrowed
+to reduce-from-many-documents shapes with its measured cost (p50 80s), across
+`using-nx-skills`, the subagent preflight (`subagent-start.sh`, new
+`NX_ANSWER` heredoc), all ten agent pre-flights and the entry-point skills
+(query/analyze/research/document/review/debug/plan-first, nexus/SKILL.md +
+reference.md, incl. the stale "120s" operator timeout corrected to
+300s/600s); sequential-thinking guidance made unconditional ("before every
+decision", the scoped wording measured to zero top-level calls); two new
+builtin plans (`document-discovery`, `corpus-coverage-check`).
+
 ## [7.11.0] - 2026-08-19
 
 Plugin version aligned with conexus 7.11.0. Advancing `source.ref` to
