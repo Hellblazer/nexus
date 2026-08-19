@@ -558,7 +558,18 @@ _CODE_UPSERT_CHUNK_CAP = 300
 #: (280,871 tokens) would, at this same 3.0 bytes/token estimate,
 #: correspond to a ~842,600-byte request — several times this budget, so
 #: this constant would have started paging that batch long before it ever
-#: reached Voyage's ceiling.
+#: reached Voyage's ceiling. That check covers ONE observed workload
+#: (typical PHP source); it is NOT a proof for adversarial content.
+#: Token-dense inputs (CJK-heavy source, base64 blobs, minified bundles)
+#: can run well below 3.0 bytes/token, and at ~1.5 bytes/token this
+#: 180,000-byte page is back at the 120,000-token ceiling with the 2x
+#: headroom fully consumed. Against a Phase-2 engine that case costs a
+#: typed-400 halving round trip; against a pre-Phase-2 engine it is the
+#: residual failure the RDR concedes (§Approach "residual risk"). The
+#: observed bytes-per-token ratio is to be MEASURED during the MVV
+#: (nexus-kmtlp.13) and this value recalibrated if real corpora sit below
+#: the estimate — do not treat the reproduction sanity check as evidence
+#: for the general case.
 _CODE_UPSERT_BYTE_BUDGET: int = 180_000
 
 #: Hardcoded onnx-local memory-safety default (nexus-33hpq) — the ONE
