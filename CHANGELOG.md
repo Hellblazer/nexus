@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **CLI search never attached catalog document identity** (`nexus-mw2kg`,
+  found by the 7.11.0 post-release shakedown's live parity probe): the CLI
+  passed no catalog into `search_cross_corpus`, so `doc_id`, `chunk_count`
+  and `_display_path` never attached on CLI results. Four behaviors repaired
+  at once: the hybrid chunk-count file-size penalty is live on the CLI (it
+  had been silently inert since RDR-108 Phase 3 — CLI ranked by pure
+  distance while MCP penalized), `--max-file-chunks` actually filters
+  Phase-3 chunks (it was always a no-op for them), `--path` scoping matches
+  post-prune chunks via `_display_path`, and formatters resolve display
+  paths. CLI single-collection ordering now matches MCP. A catalog-factory
+  failure degrades loudly for `--max-file-chunks` (stderr warning that the
+  filter is under-filtering) instead of the previous crash.
+
 ## [7.11.0] - 2026-08-19
 
 Engine identity moves to `engine-service-v0.1.82` (cut, published, deployed
