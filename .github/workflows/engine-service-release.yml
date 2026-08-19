@@ -544,7 +544,28 @@ jobs:
               fi
               ;;
             mac-*)
-              otool -l "$asset" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print "Mach-O "$0; f=0}' || true
+              # nexus-0n3vt: this arm was `|| true` — purely informational,
+              # the ABI floor enforced on linux (cheap to catch) and
+              # unenforced on the platform where toolchain drift is most
+              # likely AND the binary ships with no smoke (nexus-4xf5m).
+              # Now enforced: minos must parse (an empty probe is a FAIL,
+              # never a silent pass) and must not exceed the supported
+              # local-install floor.
+              minos=$(otool -l "$asset" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; f=0}')
+              if [ -z "$minos" ]; then
+                echo "FAIL: could not read LC_BUILD_VERSION minos from $asset — the ABI probe produced nothing; refusing to publish an unproven binary" >&2
+                exit 1
+              fi
+              echo "Mach-O minos: $minos"
+              # Oldest macOS a local `nx init --service` install is expected
+              # to run (dated 2026-08-18): Sonoma. A GraalVM/SDK bump that
+              # raises minos beyond this strands existing local installs at
+              # download time, far from the cause.
+              ceiling="14.0"
+              if [ "$(printf '%s\n%s\n' "$minos" "$ceiling" | sort -V | tail -1)" != "$ceiling" ]; then
+                echo "FAIL: binary requires macOS $minos > supported floor $ceiling" >&2
+                exit 1
+              fi
               ;;
             *)
               echo "FAIL: unhandled arch '${{ matrix.target.arch }}' — no ABI floor check defined" >&2

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import re
+
 import yaml
 
 WORKFLOW = (
@@ -186,4 +188,33 @@ def test_signing_job_is_environment_scoped() -> None:
     assert "APPLE_DEV_ID_CERT_P12" in step_env_blobs, (
         "the codesign secrets are no longer read by build-publish — move this "
         "environment assertion to whichever job now reads them"
+    )
+
+
+def test_mac_abi_floor_arm_is_enforced_not_informational() -> None:
+    """nexus-0n3vt: the mac-* arm of "Assert binary ABI floor" was
+    `otool ... || true` — purely informational while every linux arm
+    exits 1, on the one platform whose binary also ships unsmoked
+    (nexus-4xf5m). Pin the enforced shape: the mac arm extracts minos,
+    FAILS on an empty probe (a probe that produced nothing must never
+    read as a pass), and FAILS above the dated ceiling."""
+    text = _text()
+    start = text.index("mac-*)")
+    end = text.index(";;", start)
+    # Comment lines are allowed to NARRATE the old `|| true` bug; only
+    # executable lines are pinned.
+    arm = "\n".join(
+        ln for ln in text[start:end].splitlines()
+        if not ln.lstrip().startswith("#")
+    )
+    assert "|| true" not in arm, (
+        "the mac ABI arm regressed to informational-only (`|| true`)"
+    )
+    assert arm.count("exit 1") >= 2, (
+        "the mac ABI arm must fail BOTH on an unparseable minos probe and "
+        "on a floor violation"
+    )
+    assert "could not read LC_BUILD_VERSION" in arm
+    assert re.search(r'ceiling="\d+\.\d+"', arm), (
+        "the mac ABI arm must carry an explicit numeric macOS ceiling"
     )
