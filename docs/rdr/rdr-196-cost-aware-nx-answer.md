@@ -400,8 +400,9 @@ test against the engine substrate, not a mock.
 
 #### Step 1: `--strict-mcp-config` + empty `--mcp-config` in `claude_dispatch`'s base argv; test asserts the opt-in `mcp_servers` path still passes its own config
 
-**Status: landing under nexus-h33x8.6 in the sibling session's release batch (2026-08-19, Sam's
-call; commit SHA recorded here when pushed).** RDR-196 does not re-implement it; Phase 1's
+**Status: LANDED by nexus-h33x8.6, commit f1ae257d0 (2026-08-19, on develop; Sam's call to fold it
+into the in-flight release). Argv now always carries `--strict-mcp-config`; tool-free default =>
+zero servers, opt-in `mcp_servers` => only those.** RDR-196 does not re-implement it; Phase 1's
 telemetry records the post-fix baseline.
 #### Step 2: replace `_PER_PAPER_COST_USD` literal with a measured per-dispatch figure (or derive from Phase 1 history once available)
 
