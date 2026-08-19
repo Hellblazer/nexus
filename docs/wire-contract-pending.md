@@ -41,7 +41,7 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
-(none)
+- `f1c669b4792b43dc15d48dce344c48fa695bf287` -- bead nexus-zu4ma -- engine tag `engine-service-v0.1.81` -- Bge768 padded-token-area sub-batching (deployed + cloud-gated 2026-08-19); client half (http_telemetry_store.py touch) rides the next client release with the (0,1,81) floor bump (nexus-5uoxu conditions 2+4)
 
 ## Shipped
 
