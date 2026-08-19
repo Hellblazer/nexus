@@ -974,6 +974,45 @@ class TestErrorHandling:
         proc.kill.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_timeout_fires_when_streams_eof_but_process_never_exits(self) -> None:
+        """nexus-h33x8.6 review round 2 (code-review on dca12e1e3): a3 moved
+        the final ``await proc.wait()`` to AFTER the ``asyncio.wait_for``
+        that guards the read loop, mirroring the shape but not the
+        SCOPE of CPython's own ``Process.communicate()`` (which calls
+        ``self.wait()`` from INSIDE the coroutine tree it awaits). Both
+        streams reaching EOF does not guarantee the child has actually
+        exited -- it can close its stdout/stderr fds before its own
+        process exit completes. A ``proc.wait()`` left outside the
+        timeout guard then hangs forever with no kill ever firing.
+
+        Both streams EOF immediately (the default one-shot reader on
+        empty stdout/stderr), but ``proc.wait()`` never returns within
+        the budget -- this must still time out and kill, not hang.
+        """
+        from nexus.operators.dispatch import claude_dispatch, OperatorTimeoutError
+
+        proc = _make_proc(stdout=b"", stderr=b"")
+        call_count = {"n": 0}
+
+        async def wait_side_effect() -> int:
+            # First call (inside the guarded scope) hangs past the budget
+            # and must be cancelled by wait_for. The post-kill reap call
+            # in the except-block returns immediately -- the real
+            # transport reaps cleanly once the process is actually dead.
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                await asyncio.sleep(999)
+            return 0
+
+        proc.wait = wait_side_effect
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorTimeoutError):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=0.05)
+
+        proc.kill.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_nonzero_exit_raises_operator_error(self) -> None:
         """Non-zero returncode raises OperatorError containing stderr text."""
         from nexus.operators.dispatch import claude_dispatch, OperatorError
@@ -1005,6 +1044,51 @@ class TestErrorHandling:
         with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorError, match="error_during_execution"):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_surfaces_claude_error_text_not_ndjson_envelope(self) -> None:
+        """GH #1414 REGRESSION (nexus-h33x8.6 review round 2, code-review on
+        dca12e1e3): a3 switched stdout to NDJSON (stream-json), but this
+        error path still read the RAW joined bytes for the snippet/detail/
+        durable-log fields -- mostly ``system``/``assistant`` envelope JSON
+        now, not claude's own error text. That is exactly the opacity class
+        the original GH #1414 fix existed to end, reintroduced one layer
+        down.
+
+        A realistic multi-line NDJSON stream ending in an ``is_error``
+        result must surface THAT result's own ``result`` text, not the
+        preceding envelope noise.
+        """
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        ndjson = "\n".join([
+            '{"type":"system","subtype":"init","cwd":"/tmp","session_id":"s1"}',
+            '{"type":"assistant","message":{"role":"assistant","content":'
+            '[{"type":"text","text":"thinking about the request"}]}}',
+            '{"type":"result","is_error":true,'
+            '"result":"claude reported: rate limit exceeded for this account",'
+            '"subtype":"error_during_execution","structured_output":null}',
+        ])
+        proc = _make_proc(stdout=ndjson.encode(), returncode=1, stderr=b"")
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        message = str(exc.value)
+        assert "rate limit exceeded for this account" in message, (
+            f"claude's own error text is missing from the surfaced message: {message!r}"
+        )
+        assert '"type":"system"' not in message, (
+            f"NDJSON envelope noise leaked into the surfaced message: {message!r}"
+        )
+        assert '"type":"assistant"' not in message, (
+            f"NDJSON envelope noise leaked into the surfaced message: {message!r}"
+        )
+        assert "thinking about the request" not in message, (
+            f"an intermediate assistant turn leaked into the surfaced message, "
+            f"not the terminal result: {message!r}"
+        )
 
     @pytest.mark.asyncio
     async def test_nonzero_exit_reports_both_streams_when_both_spoke(self) -> None:

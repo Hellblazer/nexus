@@ -273,12 +273,16 @@ async def _drain_pipe(pipe: asyncio.StreamReader | None) -> bytes:
         return b""
 
 
-def _capped(raw: bytes) -> str:
-    """Decode a subprocess stream for the failure log, marking any cut."""
-    text = raw.decode(errors="replace").strip()
+def _capped_text(text: str) -> str:
+    """Cap an already-decoded string for the failure log, marking any cut."""
     if len(text) <= _LOG_STREAM_CAP:
         return text
     return text[:_LOG_STREAM_CAP] + _TRUNCATION_MARKER
+
+
+def _capped(raw: bytes) -> str:
+    """Decode a subprocess stream for the failure log, marking any cut."""
+    return _capped_text(raw.decode(errors="replace").strip())
 
 
 def _persist_timeout_log(
@@ -684,16 +688,29 @@ async def claude_dispatch(
         # leaves whatever was appended intact.
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(
-                    _feed_stdin(proc, prompt),
-                    _drain_stream(proc.stdout, stdout_chunks),
-                    _drain_stream(proc.stderr, stderr_chunks),
-                ),
-                timeout=timeout,
+
+        async def _run_io() -> None:
+            # nexus-h33x8.6 review round 2 (code-review on dca12e1e3):
+            # proc.wait() MUST be inside this wait_for-guarded coroutine,
+            # not after it -- mirrors CPython's own Process.communicate()
+            # shape, which calls self.wait() from INSIDE the coroutine
+            # tree it awaits, not after returning from it. Both streams
+            # reaching EOF does not guarantee the child has actually
+            # exited: a process can close its stdout/stderr fds before
+            # its own exit completes. A proc.wait() left outside the
+            # timeout guard would then hang forever with no kill ever
+            # firing -- a real deadlock, not merely a slow path (verified:
+            # a fake proc whose streams EOF immediately but whose wait()
+            # never returns hung the caller indefinitely pre-fix).
+            await asyncio.gather(
+                _feed_stdin(proc, prompt),
+                _drain_stream(proc.stdout, stdout_chunks),
+                _drain_stream(proc.stderr, stderr_chunks),
             )
             await proc.wait()
+
+        try:
+            await asyncio.wait_for(_run_io(), timeout=timeout)
         except asyncio.TimeoutError:
             # Search review I-6: reach the whole process group so any claude
             # children (nested planners, tool subprocesses) get reaped too.
@@ -751,11 +768,34 @@ async def claude_dispatch(
             # STDOUT, so a stderr-only message rendered as the bare, useless
             # "claude -p exited 1:" — twice, for nx_plan_audit, with nothing in
             # mcp.log either. Report whichever stream spoke.
+            #
+            # nexus-h33x8.6 review round 2 (code-review on dca12e1e3): a3
+            # switched stdout to NDJSON (stream-json), but this branch kept
+            # reading the RAW joined bytes for the snippet/detail/durable-log
+            # fields -- mostly system/assistant envelope JSON now, not
+            # claude's own error text, which is exactly the opacity #1414
+            # fixed, reintroduced one layer down. Parse first; prefer the
+            # terminal result event's own `result` field (labelling whether
+            # it carried `is_error`); fall back to the raw bytes only when no
+            # result line parsed at all (process died before ever emitting
+            # one -- crash before the first event, non-JSON output, etc).
+            final_result, _partial_text, _event_count = _parse_stream_json_output(
+                stdout.decode(errors="replace")
+            )
+            if final_result is not None and isinstance(final_result.get("result"), str):
+                stdout_text = final_result["result"].strip()
+                out_label = (
+                    "stdout(claude-error)" if final_result.get("is_error")
+                    else "stdout(claude-result)"
+                )
+            else:
+                stdout_text = stdout.decode(errors="replace").strip()
+                out_label = "stdout"
             err_snippet = stderr.decode(errors="replace").strip()[:300]
-            out_snippet = stdout.decode(errors="replace").strip()[:300]
+            out_snippet = stdout_text[:300]
             parts = [
                 f"{label}: {text}"
-                for label, text in (("stderr", err_snippet), ("stdout", out_snippet))
+                for label, text in (("stderr", err_snippet), (out_label, out_snippet))
                 if text
             ]
             # Silence must READ as silence: a bare trailing colon is
@@ -792,7 +832,7 @@ async def claude_dispatch(
             emit(
                 "operator_dispatch_failed",
                 returncode=proc.returncode,
-                stdout=_capped(stdout),
+                stdout=_capped_text(stdout_text),
                 stderr=_capped(stderr),
             )
             # nexus-ri56e: (a) origin unambiguity — a populated message now
