@@ -10,6 +10,7 @@ tests/db/test_health_service_integration.py and require the real JAR + PG16.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 from pathlib import Path
@@ -2315,6 +2316,322 @@ class TestCheckChashConformanceReport:
         r = self._run(monkeypatch, cat, t3=t3)
         assert r.ok is False and r.warn is True
         assert "3 chunk row(s)" in r.detail, r.detail
+
+
+class TestCheckGcAuditNonEmptyAfterPurge:
+    """nexus-sybbh (client half): ``nexus.gc_audit`` was found completely
+    empty on the live store despite real purges having run. This check
+    cross-references a LOCAL breadcrumb of ``nx catalog purge-trash``
+    executions (``nexus.gc_purge_marker``) against the engine's
+    ``gc_audit/list`` route, degrading honestly (RDR-129 B4 house style —
+    same shape as ``TestCheckChashConformanceReport`` above, its closest
+    sibling) rather than ever rendering a false clean pass.
+    """
+
+    def _markers(self, n: int = 1) -> list[dict]:
+        return [
+            {"ts": "2026-08-19T00:00:00+00:00", "older_than_days": 30,
+             "result": {"documents_purged": 1}}
+            for _ in range(n)
+        ]
+
+    def _cat(
+        self, *, entries: list[dict] | None = None,
+        raise_status: int | None = None, raise_exc: Exception | None = None,
+    ):
+        import httpx
+
+        class _Cat:
+            def gc_audit_list(self, *, operation: str | None = None, **kwargs) -> list[dict]:  # noqa: ANN003
+                if raise_status is not None:
+                    request = httpx.Request("GET", "https://engine.example/v1/catalog/gc_audit/list")
+                    response = httpx.Response(raise_status, request=request)
+                    raise httpx.HTTPStatusError(
+                        f"{raise_status} error", request=request, response=response,
+                    )
+                if raise_exc is not None:
+                    raise raise_exc
+                rows = entries if entries is not None else []
+                # Mirror CatalogRepository#listGcAudit's exact-match
+                # operation filter server-side, so a fake with an
+                # unrelated-operation row behaves like the real engine.
+                if operation is not None:
+                    rows = [e for e in rows if e.get("operation") == operation]
+                return rows
+        return _Cat()
+
+    def _run(self, monkeypatch, *, markers=None, cat=None):
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.gc_purge_marker.read_recent_purge_markers",
+            lambda **k: (markers if markers is not None else []), raising=False,
+        )
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: (cat if cat is not None else self._cat()), raising=False,
+        )
+        return h._check_gc_audit_non_empty_after_purge()[0]
+
+    def test_no_local_purge_evidence_is_a_named_skip_not_a_warn(self, monkeypatch) -> None:
+        r = self._run(monkeypatch, markers=[])
+        assert r.ok is True
+        assert r.warn is False
+        assert "no local" in r.detail.lower()
+        assert "nothing to cross-check" in r.detail
+
+    def test_purge_evidence_and_gc_audit_empty_warns_loud(self, monkeypatch) -> None:
+        """The defect this check exists to catch: a purge ran, and
+        ``gc_audit`` has NOTHING for it — never a silent/false clean."""
+        r = self._run(monkeypatch, markers=self._markers(2), cat=self._cat(entries=[]))
+        assert r.ok is False and r.warn is True
+        assert "2 local" in r.detail
+        assert "gc_audit is EMPTY" in r.detail, r.detail
+        assert "nexus-sybbh" in r.detail
+        assert any("purge-trash" in f for f in r.fix_suggestions)
+
+    def test_purge_evidence_and_gc_audit_populated_is_clean(self, monkeypatch) -> None:
+        r = self._run(
+            monkeypatch, markers=self._markers(1),
+            cat=self._cat(entries=[{
+                "id": 1, "operation": "purge_trash",
+                "created_at": "2026-08-19T01:00:00+00:00",
+            }]),
+        )
+        assert r.ok is True
+        assert r.warn is False
+        assert "audited" in r.detail
+
+    def test_gc_audit_row_for_unrelated_operation_does_not_false_clean(self, monkeypatch) -> None:
+        """critique 2026-08-19 (both reviewers): a gc_audit row from a
+        DIFFERENT operation (e.g. the routine sweep_superseded_chunks
+        producer, now wired for all 4 producers) must not make this check
+        report 'audited' for a purge_trash execution it never covered.
+        Pre-fix, ``gc_audit_list(limit=1)`` had no ``operation`` filter, so
+        ANY historical row (any operation, any time) false-cleaned forever."""
+        r = self._run(
+            monkeypatch, markers=self._markers(1),
+            cat=self._cat(entries=[{
+                "id": 5, "operation": "sweep_superseded_chunks",
+                "created_at": "2026-08-19T00:10:00+00:00",
+            }]),
+        )
+        assert r.ok is False and r.warn is True
+        assert "gc_audit is EMPTY" in r.detail, r.detail
+
+    def test_gc_audit_purge_trash_row_older_than_local_evidence_does_not_false_clean(
+        self, monkeypatch,
+    ) -> None:
+        """A purge_trash row that predates the local marker (e.g. a stale
+        row from before the writer-side bug regressed again) must not be
+        credited as auditing THIS purge — no created_at-vs-marker-ts
+        comparison pre-fix meant any past purge_trash row cleared the check
+        forever, regardless of recency."""
+        r = self._run(
+            monkeypatch,
+            markers=[{
+                "ts": "2026-08-19T12:00:00+00:00", "older_than_days": 30,
+                "result": {"documents_purged": 1},
+            }],
+            cat=self._cat(entries=[{
+                "id": 3, "operation": "purge_trash",
+                "created_at": "2026-08-18T00:00:00+00:00",
+            }]),
+        )
+        assert r.ok is False and r.warn is True
+
+    def test_writer_regression_after_a_prior_good_audit_is_caught(
+        self, monkeypatch,
+    ) -> None:
+        """critique 2026-08-19 round 2 (both reviewers): with multiple
+        markers in the 7-day window, anchoring on the OLDEST marker let a
+        stale gc_audit row from an earlier, WORKING audit satisfy the check
+        even though the writer regressed for a later purge in the same
+        window — a rolling blind spot. Must anchor on the NEWEST marker so
+        a regression after a prior good audit is still caught."""
+        r = self._run(
+            monkeypatch,
+            markers=[
+                {"ts": "2026-08-10T00:00:00+00:00", "older_than_days": 30,
+                 "result": {"documents_purged": 1}},
+                {"ts": "2026-08-19T00:00:00+00:00", "older_than_days": 30,
+                 "result": {"documents_purged": 1}},
+            ],
+            cat=self._cat(entries=[{
+                "id": 9, "operation": "purge_trash",
+                "created_at": "2026-08-10T00:05:00+00:00",
+            }]),
+        )
+        assert r.ok is False and r.warn is True
+        assert "does not cover it" in r.detail, r.detail
+
+    def test_healthy_no_op_purge_does_not_false_alarm(self, monkeypatch) -> None:
+        """critique 2026-08-19 round 2: a marker records every REAL purge
+        invocation regardless of whether anything was actually purged, but
+        ``nexus.purge_trash``'s own audit INSERT is gated on nonzero effect
+        (``v_chunk_count > 0 OR v_count > 0``, catalog-033-1) and writes NO
+        row on a genuine no-op — the common case, since most real purges
+        find nothing newly eligible. Must not warn 'gc_audit is EMPTY' for
+        a marker whose own stored result shows zero effect."""
+        r = self._run(
+            monkeypatch,
+            markers=[{
+                "ts": "2026-08-19T00:00:00+00:00", "older_than_days": 30,
+                "result": {
+                    "dry_run": False, "documents_purged": 0,
+                    "documents_eligible": 0,
+                    "chunks_384_stranded": 0, "chunks_768_stranded": 0,
+                    "chunks_1024_stranded": 0,
+                },
+            }],
+            cat=self._cat(entries=[]),
+        )
+        assert r.ok is True
+        assert r.warn is False
+        assert "no-op" in r.detail.lower() or "zero-effect" in r.detail.lower()
+
+    def test_effective_markers_ignore_no_op_siblings_in_the_window(
+        self, monkeypatch,
+    ) -> None:
+        """A no-op marker alongside a real-effect marker in the same window
+        must not corrupt the anchor — only the effectful marker counts."""
+        r = self._run(
+            monkeypatch,
+            markers=[
+                {"ts": "2026-08-19T00:00:00+00:00", "older_than_days": 30,
+                 "result": {"documents_purged": 0, "chunks_384_stranded": 0}},
+                {"ts": "2026-08-15T00:00:00+00:00", "older_than_days": 30,
+                 "result": {"documents_purged": 2}},
+            ],
+            cat=self._cat(entries=[{
+                "id": 11, "operation": "purge_trash",
+                "created_at": "2026-08-15T00:02:00+00:00",
+            }]),
+        )
+        assert r.ok is True and r.warn is False
+        assert "1 local" in r.detail, r.detail
+
+    def test_engine_predating_gc_audit_route_renders_skipped_with_warning(
+        self, monkeypatch,
+    ) -> None:
+        r = self._run(monkeypatch, markers=self._markers(1), cat=self._cat(raise_status=404))
+        assert r.ok is False and r.warn is True
+        assert "SKIPPED" in r.detail
+        assert "gc_audit/list route" in r.detail, r.detail
+        assert "NOT a clean signal" in r.detail, r.detail
+
+    def test_other_transport_failure_renders_warn_not_clean(self, monkeypatch) -> None:
+        r = self._run(monkeypatch, markers=self._markers(1), cat=self._cat(raise_status=500))
+        assert r.ok is False and r.warn is True
+        assert "SKIPPED" in r.detail
+
+    def test_unexpected_exception_renders_warn_not_a_false_clean(self, monkeypatch) -> None:
+        r = self._run(
+            monkeypatch, markers=self._markers(1),
+            cat=self._cat(raise_exc=RuntimeError("engine unreachable")),
+        )
+        assert r.ok is False and r.warn is True
+        assert "SKIPPED" in r.detail, r.detail
+
+    def test_catalog_unavailable_degrades_to_warn_not_clean(self, monkeypatch) -> None:
+        """Unlike the chash-conformance check's reader-returns-None branch
+        (a benign no-catalog-configured state), local purge evidence
+        already exists here — a catalog we cannot reach to cross-check it
+        against is a could-not-check state, never ok=True."""
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.gc_purge_marker.read_recent_purge_markers",
+            lambda **k: self._markers(1), raising=False,
+        )
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader",
+            lambda *a, **k: None, raising=False,
+        )
+        r = h._check_gc_audit_non_empty_after_purge()[0]
+        assert r.ok is False and r.warn is True
+        assert "no catalog reader" in r.detail.lower()
+
+    def test_catalog_factory_raising_warns_not_a_false_clean(self, monkeypatch) -> None:
+        import nexus.health as h
+
+        def _boom(*a, **k):
+            raise RuntimeError("factory exploded")
+
+        monkeypatch.setattr(
+            "nexus.gc_purge_marker.read_recent_purge_markers",
+            lambda **k: self._markers(1), raising=False,
+        )
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader", _boom, raising=False,
+        )
+        r = h._check_gc_audit_non_empty_after_purge()[0]
+        assert r.ok is False and r.warn is True
+        assert "factory exploded" in r.detail
+
+    def test_never_fails_the_run(self, monkeypatch) -> None:
+        """RDR-129 B4: warn never marks the doctor run failed."""
+        import nexus.health as h
+        r = self._run(monkeypatch, markers=self._markers(1), cat=self._cat(entries=[]))
+        rendered, failed = h.format_health_for_cli([r], local_mode=True)
+        assert failed is False
+        assert "gc_audit is EMPTY" in rendered
+
+
+class TestGcPurgeMarker:
+    """``nexus.gc_purge_marker`` — the local breadcrumb file
+    :func:`nexus.health._check_gc_audit_non_empty_after_purge` cross-
+    references. Exercises the module directly (not through the CLI verb):
+    round-trip, staleness cutoff, and honest degradation on a missing or
+    corrupt file.
+    """
+
+    def test_round_trip_records_and_reads_back(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        import nexus.gc_purge_marker as m
+
+        m.record_purge_marker({"documents_purged": 3}, older_than_days=30)
+        markers = m.read_recent_purge_markers(within_days=7)
+        assert len(markers) == 1
+        assert markers[0]["result"]["documents_purged"] == 3
+        assert markers[0]["older_than_days"] == 30
+
+    def test_missing_file_reads_as_no_evidence(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        import nexus.gc_purge_marker as m
+
+        assert m.read_recent_purge_markers(within_days=7) == []
+
+    def test_markers_older_than_cutoff_are_excluded(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        import nexus.gc_purge_marker as m
+        from datetime import UTC, datetime, timedelta
+
+        path = tmp_path / "gc_purge_markers.jsonl"
+        old_ts = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        path.write_text(json.dumps({
+            "ts": old_ts, "older_than_days": 30, "result": {},
+        }) + "\n")
+        assert m.read_recent_purge_markers(within_days=7) == []
+
+    def test_corrupt_line_is_skipped_not_fatal(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        import nexus.gc_purge_marker as m
+
+        path = tmp_path / "gc_purge_markers.jsonl"
+        path.write_text("not json at all\n")
+        assert m.read_recent_purge_markers(within_days=7) == []
+
+    def test_record_failure_is_swallowed_not_raised(self, tmp_path, monkeypatch) -> None:
+        """Best-effort: a marker-write failure must never break the purge
+        itself, which has already happened by the time this is called."""
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "does" / "not" / "exist"))
+        import nexus.gc_purge_marker as m
+
+        # Blocked by a FILE occupying the parent path component so
+        # mkdir(parents=True) raises — proves the swallow, not just the
+        # happy path.
+        blocker = tmp_path / "does"
+        blocker.write_text("i am a file, not a directory")
+        m.record_purge_marker({"documents_purged": 1}, older_than_days=30)  # must not raise
 
 
 class TestManifestNullCollectionExclusionIsMechanical:
