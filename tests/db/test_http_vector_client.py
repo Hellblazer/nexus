@@ -1847,6 +1847,50 @@ class TestServiceModeDefault:
         assert is_vector_service_mode() is False, "chroma must be the explicit opt-out"
 
 
+# ── RDR-195 nexus-kmtlp.11: typed upstream error detail survives to the caller ─
+
+
+class TestPostTypedErrorDetail:
+    """A structured error body (the engine's 422 for TOO_MANY_TOKENS_IN_BATCH,
+    RDR-195 Phase 2 fix-up) must reach the caller with its detail intact —
+    keeping only the top-level ``error`` string would launder the upstream
+    message exactly the way the pre-RDR-195 bare 500 did, one layer up."""
+
+    def _http_error(self, code: int, body: bytes):
+        import io
+        import urllib.error
+        return urllib.error.HTTPError(
+            url="http://svc/v1/x", code=code, msg="err", hdrs={},
+            fp=io.BytesIO(body),
+        )
+
+    def test_422_body_detail_and_fields_reach_the_message(self, monkeypatch):
+        import json as _json
+        import nexus.db.http_vector_client as hv
+        body = _json.dumps({
+            "error": "TOO_MANY_TOKENS_IN_BATCH",
+            "detail": "Your batch has 280871 tokens after truncation. Max allowed tokens per batch is 120000.",
+            "sub_requests": 64, "batch_size": 1, "model": "voyage-code-3",
+        }).encode()
+        monkeypatch.setattr(hv, "_request", lambda *a, **k: (_ for _ in ()).throw(self._http_error(422, body)))
+        with pytest.raises(VectorServiceError) as exc:
+            hv._post("/v1/vectors/upsert-chunks", {})
+        text = str(exc.value)
+        assert exc.value.code == 422
+        assert "TOO_MANY_TOKENS_IN_BATCH" in text
+        assert "280871 tokens after truncation" in text
+        assert "sub_requests=64" in text
+        assert "batch_size=1" in text
+        assert "model=voyage-code-3" in text
+
+    def test_plain_error_body_message_unchanged(self, monkeypatch):
+        import nexus.db.http_vector_client as hv
+        monkeypatch.setattr(hv, "_request", lambda *a, **k: (_ for _ in ()).throw(self._http_error(500, b'{"error":"internal server error"}')))
+        with pytest.raises(VectorServiceError) as exc:
+            hv._post("/v1/vectors/search", {})
+        assert str(exc.value) == "POST /v1/vectors/search → HTTP 500: internal server error"
+
+
 # ── RDR-001 nexus-kf679: managed-endpoint failure reframing ───────────────────
 
 

@@ -1164,6 +1164,22 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
         except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
             err = {"error": body_bytes.decode(errors="replace")}
         msg = f"POST {path} → HTTP {e.code}: {err.get('error', err)}"
+        # RDR-195 (nexus-kmtlp.11): a STRUCTURED error body — the engine's
+        # 422 for Voyage TOO_MANY_TOKENS_IN_BATCH carries detail/sub_requests/
+        # batch_size/model — must reach the caller intact. Keeping only the
+        # top-level ``error`` string would launder the upstream message the
+        # same way the pre-RDR-195 bare 500 did, one layer up. Generic on
+        # purpose: any error body with a ``detail`` field gets the same
+        # treatment; plain ``{"error": ...}`` bodies render exactly as before.
+        if isinstance(err, dict) and err.get("detail"):
+            msg += f" — {err['detail']}"
+            extras = [
+                f"{k}={err[k]}"
+                for k in ("sub_requests", "batch_size", "model")
+                if err.get(k) is not None
+            ]
+            if extras:
+                msg += f" ({', '.join(extras)})"
         remedy = _managed_remedy() if e.code in (401, 403) else None
         if remedy is None:
             remedy = _local_voyage_restart_remedy(e.code, str(err.get("error", err)))
