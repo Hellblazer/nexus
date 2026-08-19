@@ -342,4 +342,108 @@ $$;
         </rollback>
     </changeSet>
 
+    <changeSet id="grants-nexus-diag-4" author="nexus-diag-audit-grants" runAlways="true">
+        <comment>
+            2026-08-19 — production-confirmed gap (v0.1.82 deploy, conexus
+            relay): nexus_diag got InsufficientPrivilege on
+            SELECT ... FROM nexus.gc_audit — the diagnostic/forensics path
+            could not read the very audit table it exists to check. Same
+            defect CLASS as the nexus-lhuhe v0.1.78 zero-grants bug
+            (grants-nexus-diag-3 above), one generation later: -3's re-grant
+            list is scoped EXACTLY to CHASH_BEARING_TABLES (the five tables
+            nexus.diag_chash_conformance reads internally), because that
+            changeset was written to fix ONE bug (the view went dark) — it
+            was never meant to be, and is not, the general view-era
+            allowlist for nexus_diag. Nothing else re-grants a table once
+            grants-nexus-diag-2's per-relation REVOKE loop (plus its
+            `ALTER DEFAULT PRIVILEGES ... REVOKE SELECT`) strips it, so
+            EVERY table created after that loop first ran stays permanently
+            unreadable by nexus_diag unless explicitly re-listed somewhere
+            — a live census against a full changelog walk
+            (ScratchDiagGrantCensusTest, throwaway diagnostic, RDR-182-
+            adjacent) found 31 of 36 tables in nexus+t1 in that state, most
+            of them CORRECTLY so (memory, plans, document_aspects,
+            catalog_documents, session_tokens/service_tokens, pdf_*, etc. —
+            real content or credentials the RDR-182 s5 content boundary is
+            supposed to keep nexus_diag away from).
+
+            THE FIX grants exactly the two tables independently VERIFIED
+            content-free at the row/write-path level:
+            CatalogRepository.java's {@code NEXUS_DIAG_READABLE_TABLES} —
+            search_telemetry (query_hash is a genuine sha256, never raw
+            query text) and gc_audit (its INSERT extracts only the chash,
+            `jsonb_agg(elem-&gt;&gt;'chash')` in
+            catalog-033-gc-audit-producers.xml — the in-memory sample also
+            carries a title field, but title never reaches the persisted
+            row; nexus-kgft3 claimed otherwise and was closed as a
+            confirmed false positive, 2026-08-19). relevance_log is already
+            granted above (a CHASH_BEARING table). This is NOT a
+            default-privileges fix and deliberately not a bulk ON ALL
+            TABLES grant: default privileges stay revoked in the view era
+            on purpose (a brand-new CONTENT table must not become silently
+            readable the day it is created).
+
+            CORRECTED PREMISE (2026-08-19, substantive-critic Significant
+            #2): an earlier revision of this changeset reused
+            CatalogRepository.java's {@code AUDIT_ONLY_TABLES}
+            (nexus-34wrg's rename/merge-emptiness-check exemption set) as
+            if it answered the SAME question as "safe for a BYPASSRLS
+            diagnostic role to read every tenant's rows in" — it does not;
+            those are two different questions about two different
+            operations, and reusing one set for the other silently
+            transplanted a premise nobody had verified for the second
+            question. {@code NEXUS_DIAG_READABLE_TABLES} is now a
+            SEPARATE, independently-verified set (see its own javadoc) —
+            deliberately NOT a filtered view of {@code AUDIT_ONLY_TABLES}.
+
+            {@code hook_failures} is deliberately EXCLUDED from this grant:
+            {@code hook_registry.fire_single} passes full document content
+            into every post-store hook, and its failure path persists
+            {@code str(exc)[:2000]} verbatim — a Postgres DETAIL clause or
+            parse error can echo document text into
+            {@code hook_failures.error}, which a BYPASSRLS role would then
+            expose cross-tenant (code-review-expert finding, T2
+            nexus/2026-08-19-code-review-gc-audit-diag-grant-fix [22860]).
+            Granting it requires scrubbing that capture site first; that
+            precondition is what gates a future grant, not a ticket.
+
+            COVERED BY CONSTRUCTION: GrantsNexusDiagViewAccessIntegrationTest
+            iterates {@code NEXUS_DIAG_READABLE_TABLES} directly (rather
+            than keep a second, driftable Java-side copy) and asserts every
+            entry is live-SELECTable by nexus_diag. A future table added to
+            that set without a matching GRANT here fails that test against
+            a real changelog walk, exactly the way
+            GrantsNexusDiagViewAccessIntegrationTest already catches
+            CHASH_BEARING_TABLES drift for -3 above — the established
+            anti-rot mechanism in this file, not a new one.
+
+            No foreign-owner guard needed (matches -3's own reasoning):
+            nexus_admin creates search_telemetry and gc_audit
+            (telemetry-001-baseline.xml / catalog-018-gc-audit.xml) via
+            ordinary forward DDL and always owns them.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_diag') THEN
+        RAISE NOTICE 'nexus_diag absent — audit-only table grants skipped (created by pg_provision/DBA; self-heals next boot)';
+        RETURN;
+    END IF;
+
+    -- Era-independent by design (unlike -1/-2/-3's view-era dance): these
+    -- two tables carry no content-boundary concern at all (verified
+    -- individually — see CatalogRepository.NEXUS_DIAG_READABLE_TABLES),
+    -- so nexus_diag should see them whether or not the counts view
+    -- exists. hook_failures is deliberately NOT granted here (see comment
+    -- above) -- do not add it for symmetry with -3's five-table list.
+    GRANT SELECT ON nexus.search_telemetry TO nexus_diag;
+    GRANT SELECT ON nexus.gc_audit         TO nexus_diag;
+END
+$$;
+        </sql>
+        <rollback>
+            <!-- Revoke is a DBA operation; not automated. -->
+        </rollback>
+    </changeSet>
+
 </databaseChangeLog>

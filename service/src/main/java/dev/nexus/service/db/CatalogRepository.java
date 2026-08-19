@@ -6412,9 +6412,50 @@ public final class CatalogRepository {
      * "it still holds data" is then misleading: there is no data and no merge hazard, only
      * an audit breadcrumb. {@link #blockingTable} names WHICH table blocked so a caller can
      * tell the two apart; this set is what turns that name into an actionable distinction.
+     *
+     * <p><strong>NOT the nexus_diag grant allowlist</strong> (corrected 2026-08-19,
+     * nexus-kgft3): an earlier revision of this changeset widened this set to {@code public}
+     * and reused it directly as the set of tables {@code grants-nexus-diag-4} grants
+     * {@code nexus_diag} (BYPASSRLS, cross-tenant) SELECT on. That was a premise transplant —
+     * "safe to excuse from a rename's emptiness check" (this set's actual question) is not
+     * the same claim as "safe for a BYPASSRLS diagnostic role to read cross-tenant" (what the
+     * grant needs). See {@link #NEXUS_DIAG_READABLE_TABLES} for the latter, deliberately kept
+     * as a separate, independently-verified set rather than a filtered view of this one.
      */
     private static final java.util.Set<String> AUDIT_ONLY_TABLES =
         java.util.Set.of("relevance_log", "search_telemetry", "hook_failures", "gc_audit");
+
+    /**
+     * Tables {@code grants-nexus-diag-4} grants {@code nexus_diag} (BYPASSRLS, cross-tenant)
+     * direct SELECT on — verified INDIVIDUALLY at the row/write-path level, not merely
+     * classified by {@link #AUDIT_ONLY_TABLES}'s "no content" label (those are different
+     * questions; see that field's own javadoc). {@code relevance_log} is not repeated here:
+     * it is already granted by {@code grants-nexus-diag-3} as a CHASH_BEARING_TABLE
+     * (src/nexus/db/chash_tables.py).
+     *
+     * <ul>
+     *   <li>{@code search_telemetry.query_hash} is a genuine sha256 the caller pre-hashes,
+     *       never raw query text (confirmed by reading {@code TelemetryHandler}).</li>
+     *   <li>{@code gc_audit.chashes} was investigated after nexus-kgft3 claimed it embeds
+     *       document titles: {@code gc_quarantine_orphans}'s in-memory sample DOES carry a
+     *       {@code title} field, but the INSERT into {@code gc_audit} extracts only the chash
+     *       ({@code jsonb_agg(elem->>'chash')}, catalog-033-gc-audit-producers.xml) — title
+     *       never reaches the persisted row. Confirmed false positive, closed 2026-08-19.</li>
+     * </ul>
+     *
+     * <p><strong>{@code hook_failures} is deliberately EXCLUDED, not omitted by
+     * oversight — do not re-add it for symmetry.</strong> {@code hook_registry.fire_single}
+     * (src/nexus/hook_registry.py) passes full document content into every post-store hook;
+     * on failure, {@code _record_hook_failure} persists {@code str(exc)[:2000]} verbatim.
+     * A Postgres DETAIL clause or a parse error can echo document text into
+     * {@code hook_failures.error}, and {@code nexus_diag} is BYPASSRLS — a leak there crosses
+     * every tenant (code-review-expert finding, T2
+     * {@code nexus/2026-08-19-code-review-gc-audit-diag-grant-fix} [22860]). Re-adding it
+     * requires scrubbing that capture site first (or auditing the exception surface the hook
+     * set can actually raise) — that precondition, not a tracking ticket, is what gates it.
+     */
+    public static final java.util.Set<String> NEXUS_DIAG_READABLE_TABLES =
+        java.util.Set.of("search_telemetry", "gc_audit");
 
     /**
      * nexus-34wrg option (c): which table blocked an emptiness check, and whether it is one

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CatalogRepository;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -16,6 +17,7 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.TreeSet;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -52,6 +54,37 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * (src/nexus/db/chash_tables.py) every boot, making the grants the final
  * word regardless of what -1/-2/taxonomy-011-8 did earlier in the same
  * walk.
+ *
+ * <p><strong>SECOND falsified bug (2026-08-19, production-confirmed on
+ * engine-service-v0.1.82): {@code nexusDiagCanSelectEveryDiagReadableTable}
+ * below.</strong> {@code grants-nexus-diag-3}'s re-grant list is scoped
+ * EXACTLY to {@code CHASH_BEARING_TABLES} — it was written to fix the view
+ * going dark, never meant as the general view-era allowlist. Every OTHER
+ * table nexus_admin owns stays revoked forever once
+ * {@code grants-nexus-diag-2}'s per-relation REVOKE loop first strips it
+ * (confirmed by a live census: 31 of 36 tables in nexus+t1 unreadable by
+ * nexus_diag after a full changelog walk). Most of those 31 are correctly
+ * denied (real content or credentials); {@code gc_audit} and
+ * {@code search_telemetry} are not — both independently VERIFIED
+ * content-free at the row/write-path level (see
+ * {@link CatalogRepository#NEXUS_DIAG_READABLE_TABLES}'s javadoc for the
+ * per-table evidence). {@code hook_failures} shares
+ * {@link CatalogRepository#AUDIT_ONLY_TABLES}'s "no content" CLASSIFICATION
+ * (nexus-34wrg option (c)) but is deliberately NOT granted here — that
+ * classification was found to be an unverified premise for THIS question
+ * (nexus-kgft3's substantive-critic finding: a hook failure's captured
+ * exception text can echo document content, which a BYPASSRLS role would
+ * then read cross-tenant). Fix lives in {@code grants-nexus-diag-4},
+ * era-independent (no view-existence guard needed, unlike -1/-2/-3): it
+ * grants SELECT on the two {@code NEXUS_DIAG_READABLE_TABLES} entries
+ * {@code grants-nexus-diag-3} does not already cover via
+ * {@code CHASH_BEARING_TABLES} ({@code relevance_log} is covered by -3).
+ * This test reads {@link CatalogRepository#NEXUS_DIAG_READABLE_TABLES}
+ * directly (a set separate from, and answering a different question than,
+ * {@code AUDIT_ONLY_TABLES} — see both fields' javadoc) rather than keeping
+ * a second, driftable copy — a future table added to that Java set without
+ * a matching {@code GRANT} in {@code grants-nexus-diag-4} fails this test
+ * against a live schema.
  */
 class GrantsNexusDiagViewAccessIntegrationTest {
 
@@ -72,38 +105,7 @@ class GrantsNexusDiagViewAccessIntegrationTest {
     void nexusDiagCanSelectTheDiagViewAndEveryUnderlyingTable() throws Exception {
         try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
              Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-
-            // Canonical two-phase provisioning split (mirrors
-            // GrantsSvcForeignOwnedRelationTest / SchemaMigratorIntegrationTest):
-            // a plain non-superuser admin role owns every schema object it
-            // creates, matching production.
-            exec(su, "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '" + ADMIN_PASS
-                + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-            exec(su, "GRANT CREATE ON DATABASE postgres TO " + ADMIN_ROLE);
-            exec(su, "GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
-            exec(su, "GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
-            // nexus_svc is superuser-created too (matches dbaBootstrap /
-            // GrantsSvcForeignOwnedRelationTest) -- role-001-nexus-svc.xml's
-            // own CREATE ROLE is a clean-skip when it already exists; the
-            // admin role here never gets CREATEROLE, matching production.
-            exec(su, "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
-                + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-            exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
-            exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
-
-            // nexus_diag is superuser-created in production (BYPASSRLS
-            // requires superuser, nexus-vounk) — never by Liquibase.
-            exec(su, "CREATE ROLE " + DIAG_ROLE + " LOGIN PASSWORD '" + DIAG_PASS
-                + "' NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS");
-
-            // Two boots: the first lands directly in view era (taxonomy-011-8
-            // self-heals the view before grants-nexus-diag-1 ever runs in the
-            // SAME walk); the second reproduces the steady-state reboot a
-            // real cluster experiences and is where the pre-fix bug actually
-            // bites (grants-nexus-diag-2's REVOKE loop re-fires every boot).
-            liquibaseUpdate(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS);
-            liquibaseUpdate(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS);
+            provisionAndMigrate(pg, su);
 
             try (Connection diag = DriverManager.getConnection(
                     pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
@@ -131,6 +133,84 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                     .isEmpty();
             }
         }
+    }
+
+    /**
+     * The gc_audit-class production defect (2026-08-19, v0.1.82): falsifies against a live
+     * schema that {@code nexus_diag} holds SELECT on every table
+     * {@link CatalogRepository#NEXUS_DIAG_READABLE_TABLES} names, reading that set directly
+     * (not a second hardcoded copy) so a table added there without a matching GRANT in
+     * {@code grants-nexus-diag-4} fails HERE rather than reopening the gap silently in
+     * production. Non-vacuous: {@code NEXUS_DIAG_READABLE_TABLES} is asserted non-empty
+     * first, and this test fails against the pre-fix tree (confirmed: reverting
+     * grants-nexus-diag-4 reproduces {@code permission denied for table gc_audit} for
+     * exactly the two tables that changeset grants).
+     */
+    @Test
+    void nexusDiagCanSelectEveryDiagReadableTable() throws Exception {
+        assertThat(CatalogRepository.NEXUS_DIAG_READABLE_TABLES)
+            .as("NEXUS_DIAG_READABLE_TABLES must be non-empty or this test guards nothing")
+            .isNotEmpty();
+
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+             Connection su = pg.createConnection("")) {
+            provisionAndMigrate(pg, su);
+
+            try (Connection diag = DriverManager.getConnection(
+                    pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
+                List<String> denied = new ArrayList<>();
+                for (String table : new TreeSet<>(CatalogRepository.NEXUS_DIAG_READABLE_TABLES)) {
+                    try {
+                        count(diag, "SELECT count(*) FROM nexus." + table);
+                    } catch (Exception e) {
+                        denied.add(table + ": " + e.getMessage());
+                    }
+                }
+                assertThat(denied)
+                    .as("nexus_diag must hold direct SELECT on every "
+                        + "CatalogRepository.NEXUS_DIAG_READABLE_TABLES entry — each was "
+                        + "independently verified content-free at the write-path level "
+                        + "(not merely classified by AUDIT_ONLY_TABLES), live-schema "
+                        + "evidence for the production gc_audit InsufficientPrivilege "
+                        + "incident")
+                    .isEmpty();
+            }
+        }
+    }
+
+    /**
+     * Canonical two-phase provisioning split (mirrors
+     * GrantsSvcForeignOwnedRelationTest / SchemaMigratorIntegrationTest): a plain
+     * non-superuser admin role owns every schema object it creates, matching production.
+     * Runs the changelog TWICE — the first boot lands directly in view era (taxonomy-011-8
+     * self-heals the view before grants-nexus-diag-1 ever runs in the SAME walk); the
+     * second reproduces the steady-state reboot a real cluster experiences and is where the
+     * pre-fix bugs actually bite (grants-nexus-diag-2's REVOKE loop re-fires every boot).
+     */
+    private static void provisionAndMigrate(PostgreSQLContainer<?> pg, Connection su) throws Exception {
+        su.setAutoCommit(true);
+
+        exec(su, "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '" + ADMIN_PASS
+            + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
+        exec(su, "GRANT CREATE ON DATABASE postgres TO " + ADMIN_ROLE);
+        exec(su, "GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
+        exec(su, "GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
+        // nexus_svc is superuser-created too (matches dbaBootstrap /
+        // GrantsSvcForeignOwnedRelationTest) -- role-001-nexus-svc.xml's
+        // own CREATE ROLE is a clean-skip when it already exists; the
+        // admin role here never gets CREATEROLE, matching production.
+        exec(su, "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' "
+            + "NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+        exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
+        exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
+
+        // nexus_diag is superuser-created in production (BYPASSRLS
+        // requires superuser, nexus-vounk) — never by Liquibase.
+        exec(su, "CREATE ROLE " + DIAG_ROLE + " LOGIN PASSWORD '" + DIAG_PASS
+            + "' NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS");
+
+        liquibaseUpdate(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS);
+        liquibaseUpdate(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS);
     }
 
     /**
