@@ -333,6 +333,14 @@ to derive that:
   `/v1/vectors/embed` parity endpoint is the one caller that accepts arbitrary text and could
   present such an item. Cheap insurance regardless: cap total sub-requests per original batch and
   fail loudly on exhaustion, so no input can turn one logical embed into unbounded upstream spend.
+  Specified (gate remediation, 2026-08-19): a constant `MAX_SUB_REQUESTS_PER_BATCH = 64` beside the
+  planner's other constants — ≥ `2 * log2(n)` for any n the 1,000-input API cap admits, with a wide
+  margin over the ~`ceil(1000/300)`-to-tens range the planner produces in practice, so it can only
+  fire on adversarial input, never on calibration drift. On exhaustion the embed fails with the
+  typed oversize error carrying the sub-request count and the offending batch's size — same loud
+  path as the single-unsplittable-text rethrow, never a silent partial result.
+  `VoyageEmbedderBatchSplitTest` includes an exhaustion case (cap forced low via the test seam)
+  asserting the typed error and the absence of further upstream calls.
 - **Retry budgets do not multiply.** `callApi` retries only 429/5xx (`:223`), so the split must
   live **above** `callApi`, in the caller owning the sub-batch list. The split path and the
   transient-retry path are then orthogonal: each sub-request keeps its own independent 3-attempt
@@ -587,7 +595,9 @@ Independent delivery path (normal PyPI release) and the version-skew half.
 #### Step 1: Byte-aware paging
 
 Convert the `upsert_chunks` paging loop (`:1563-1567`) to an accumulator bounded by count and bytes,
-gated to non-CCE / non-onnx-local collections via the existing helpers. Preserve `embeddings`
+gated to non-CCE / non-onnx-local collections via the existing helpers. Pages carrying
+caller-supplied `embeddings` are exempt from the byte bound (they never reach Voyage — see
+Technical Design); count-cap paging applies to them unchanged. Preserve `embeddings`
 lockstep slicing and per-page logging. The byte budget carries deliberate extra headroom below the
 engine's per-model token budget — see Technical Design; equal sizing is the one tuning choice this
 phase must not make.
@@ -595,7 +605,9 @@ phase must not make.
 #### Step 2: Tests
 
 Page boundaries fall where bytes dictate; a single oversize chunk still ships; CCE and onnx-local
-paging is byte-for-byte unchanged; `embeddings` passthrough stays aligned with ids.
+paging is byte-for-byte unchanged; `embeddings` passthrough stays aligned with ids; a
+passthrough-page batch larger than the byte budget pages by count alone (the exemption is
+observable, not decorative).
 
 ### Phase 2: Engine planner and typed error
 
@@ -707,10 +719,16 @@ RED before GREEN (a deliberately disabled planner must fail the invocation-count
 ### Performance Expectations
 
 Measurement strategy, not estimates. During implementation, record from the MVV run: the number of
-Voyage requests per upsert page, the count of adaptive-split events, and the observed
-bytes-per-token ratio for PHP source. The ratio calibrates the divisor; a non-zero steady-state
-adaptive-split count indicates the divisor is too optimistic, and a request count materially above
-the theoretical minimum indicates it is too pessimistic. No throughput target is asserted here.
+Voyage requests per upsert page, the count of adaptive-split events, the observed
+bytes-per-token ratio for PHP source, **and the 429 count** (gate remediation, 2026-08-19: the
+request-rate paragraph in Technical Design concedes sub-batching makes rate-limit pressure
+"strictly worse" — conexus-ddh0 is the live precedent — so the run that calibrates the divisor
+must also count 429s; `callApi`'s retry path already logs them, the MVV records the total). A
+non-zero 429 count on the MVV's single-repository run triggers the caller-pacing remedy named in
+Technical Design before Phase 3 activation, not after a field incident. The ratio calibrates the
+divisor; a non-zero steady-state adaptive-split count indicates the divisor is too optimistic, and
+a request count materially above the theoretical minimum indicates it is too pessimistic. No
+throughput target is asserted here.
 
 ## Finalization Gate
 
@@ -850,6 +868,19 @@ operational signal (adaptive-split rate) called out rather than N/A'd away.
 
 Gate findings are appended here to keep the design sections clean. Each gate round gets a dated
 subsection.
+
+### In-house gate — 2026-08-19 — PASSED (0 critical, 3 significant remediated in place)
+
+First gate run with T2-verifiable results (the contributed rounds below were self-attested from a
+fork). Layers 1–2 passed (structure complete; the one unverified assumption carries an explicit
+risk assessment and a blocking spike). Layer 3 adversarial critique: 0 critical, 3 significant,
+3 observations (full critique: T2 `nexus_rdr/195-gate-critique-2026-08-19`). All three
+significants remediated in this document rather than filed: (1) the passthrough byte-budget
+exemption propagated into Phase 1 Step 1 and its tests (the same section-drift class gate round 2
+fixed for the headroom constraint); (2) Performance Expectations now records the 429 count during
+the MVV, with a pre-Phase-3 pacing trigger (the design concedes rate pressure gets strictly worse;
+conexus-ddh0 is the precedent); (3) the sub-request cap is now specified — constant, value with
+derivation, exhaustion contract on the typed-error path, and an exhaustion test.
 
 ### Maintainer adoption — 2026-08-19
 
