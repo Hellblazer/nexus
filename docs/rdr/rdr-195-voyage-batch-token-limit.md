@@ -246,8 +246,8 @@ engine for any pre-existing token accounting.
 
 Two changes, at two layers, for two distinct reasons.
 
-**1. Engine — a token-aware sub-batch planner in `VoyageEmbedder`, plus a typed oversize-batch
-error with adaptive halving.** This is the authoritative enforcement point: it is below every
+1. **Engine**: a token-aware sub-batch planner in `VoyageEmbedder`, plus a typed oversize-batch
+error with adaptive halving. This is the authoritative enforcement point: it is below every
 caller (`PgVectorRepository`, `CombinedWriteService`, the `/v1/vectors/embed` parity endpoint,
 `StagingHandler`) and cannot be bypassed. It follows the `nexus-zu4ma` planner already established
 in this package.
@@ -255,7 +255,7 @@ in this package.
 The planner is a *throughput* mechanism and the typed error is the *correctness* mechanism. That
 split is the core of this design; it is argued once, canonically, in Decision Rationale.
 
-**2. Client — a byte budget on the `upsert_chunks` paging loop.** Justified **not** as
+2. **Client**: a byte budget on the `upsert_chunks` paging loop. Justified **not** as
 defense-in-depth but by version skew: the engine and the Python client ship on **decoupled release
 lifecycles** (AGENTS.md documents the engine-service release as an explicitly separate cadence). A
 client release reaching a user whose engine predates the engine half is a legitimate, unpreventable
