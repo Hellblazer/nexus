@@ -60,6 +60,10 @@ For the full module map, post-store hook contracts, T2 schema, and design herita
 - **No ORM.** Raw SQL. (Existing T2 SQLite code: raw `sqlite3`, WAL on open — maintenance only, see the NO-SQLITE hot rule.)
 - **Composition over inheritance.** Protocols, not deep hierarchies. Constructor injection — no global singletons, no service locators.
 - **TDD.** Test file before implementation. Deterministic: seeded randomness, fixed clocks, `port=0` for dynamic allocation.
+- **Gates fail loud on absent dependencies.** A gate that skip-passes when
+  its dependency is absent must carry a max-skip / non-vacuity assert; a
+  sweep that found nothing to check is a failure, not a pass (the
+  nexus-moht0 vacuous-gate doctrine).
 - **Integration over mocks.** Hit real substrates — mocks hide boundary bugs. For existing SQLite-backed stores that means a real tmp-path SQLite (maintenance only); NEW persistence targets PG via the engine (see the NO-SQLITE hot rule), so its tests hit PG, not a new SQLite fixture.
 - **Structured logging only.** `structlog.get_logger(__name__)`. Never `print()` in library code; CLI commands use `click.echo()`.
 - **`uv` as package manager.** `pyproject.toml` for deps. Don't bump `llama-index-core` or `tree-sitter-language-pack` without exercising the chunking pipeline — they have known breaking incompatibilities.
@@ -104,6 +108,31 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
   **The EXPECT row is MECHANIZED and LIVE** (nexus-qc4p1, shipped at the 7.0.0 plugin pin; verified 2026-08-02: 70/70 recognized, 0 undeclared): a PreToolUse hook on the Agent tool (`conexus/hooks/scripts/agent-dispatch-expect.sh`) writes it from the dispatch's own `subagent_type` + `run_in_background`. **Do NOT hand-write EXPECT rows** — the ledger matches N EXPECT rows of a type against N STARTs of that type, so a manual duplicate inflates the credit pool and can mask an undeclared start. Hand-call `expectations_expect` ONLY for a dispatch the hook cannot see, keyed on the **subagent type verbatim, colon included** — never an invented name (the Agent tool has no `name` parameter; nexus-nu7fo). `conexus/skills/orchestration/SKILL.md` is canonical for the dispatch-time contract; this entry exists so the *surface* is discoverable — two 2026-07 sessions concluded the ledger was unavailable and skipped it, and it was available both times.
 - **Worktree-dispatched agents run `scripts/agent-worktree-preflight.sh [required-sha]` as their FIRST action and stop on any `PREFLIGHT_FAIL` line.** The harness cuts `isolation:worktree` worktrees from the DEFAULT branch's tip, not the session's current branch, so a fresh worktree can be silently stale relative to `develop` by construction (nexus-5kwkf); the script also refuses outright if the agent turns out to be in the shared primary checkout, not a worktree at all. `required-sha` is optional — when omitted it defaults to local `develop` if that branch exists, else `origin/develop`, else refuses (`PREFLIGHT_FAIL_BAD_SHA`); local is checked first because this project's own batched-push workflow routinely runs local `develop` ahead of `origin/develop`. It recovers a stale-but-clean worktree via `git merge --ff-only`; a dirty or diverged worktree is refused untouched. The conexus SubagentStart hook injects this instruction for `isolation:worktree` dispatches once the plugin ships it (`conexus/PENDING_RELEASE.md`); until then this bullet is the delivery path.
 - **Daemon-lifecycle fixes land in the shared primitive, never one tier's copy.** Discovery / single-writer / self-heal / version-skew for T1/T2/T3 all live in `src/nexus/daemon/service_registry.py` + the conformance suite `tests/daemon/test_rdr149_lifecycle_conformance.py` (RDR-149). Editing a single tier's lifecycle without touching both is the recurring bug class. Mechanically enforced by `tests/daemon/test_lifecycle_gate.py`. See [`src/nexus/daemon/AGENTS.md`](src/nexus/daemon/AGENTS.md).
+
+## CI Cost Discipline
+
+Project policy, cited by name from the workflows (nexus-jndz0 landed it here
+so those citations resolve inside the repo; origin: the 2026-07-06 billing
+incident — 24 CI runs + 4 engine tags in one day, macOS at ~10x rates, the
+same tree tested four times en route to PyPI. Reference implementation:
+PRs #1375/#1376):
+
+- **Never test the same tree twice.** A tree that passed a PR's required
+  checks does not re-run CI on the merge-push or at tag time. Tag/release
+  workflows publish — they do not re-test.
+- **Expensive jobs run only when their inputs changed.** Per-job path
+  filters on native builds, from-source compiles, platform matrices.
+  Required checks stay satisfied via job-level skip (skipped == success for
+  branch protection) or always-run-report-skip WITH a non-vacuity assert.
+- **Never rebuild deterministic artifacts.** Version-pinned compiles (PG
+  bundles, models, toolchains) are cached or prebuilt, keyed on exact
+  inputs; rebuild only on key miss.
+- **macOS/premium runners only where the artifact requires the platform**
+  (release/tag artifact builds), never in routine push/PR CI.
+- **Every workflow has a concurrency group; superseded runs cancel.**
+- **Full matrix breadth only at merge boundaries.** PRs run the full
+  matrix; interior branch pushes run the minimal representative.
+- **Tag cadence is a cost decision.** Batch related work into one cut.
 
 ## Workflows
 
