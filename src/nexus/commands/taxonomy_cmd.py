@@ -1032,6 +1032,7 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
 
         collection_name = topic["collection"]
         t3 = make_t3()
+        parent_doc_count = len(doc_ids)
 
         # nexus-9pqoj: the store's split_topic does the full fetch -> compute
         # -> persist -> centroid round-trip via the service, which is the
@@ -1045,6 +1046,17 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
         child_count = db.taxonomy.split_topic(topic_id, k, t3)  # boundary-allow: service single-writer persist
         click.echo(f"Split '{topic_label}' into {child_count} sub-topics.")
         if child_count:
+            # nexus-i6eg8: report the redistribution so an operator can see
+            # the split was conservation-safe at a glance, rather than
+            # having to trust a bare child-topic count the way the
+            # 2026-07-27 incident (1,330 -> 60, reported as success) did.
+            children = db.taxonomy.get_topics(parent_id=topic_id)
+            child_counts = [int(c.get("doc_count") or 0) for c in children]
+            retained = parent_doc_count - sum(child_counts)
+            redistribution = "/".join(str(c) for c in child_counts) or "0"
+            note = f" ({retained} retained on parent)" if retained else ""
+            click.echo(f"Redistribution: {parent_doc_count} -> {redistribution}{note}")
+
             coll_scope = collection_name or collection
             scope = f" -c {coll_scope}" if coll_scope else ""
             click.echo(

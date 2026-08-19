@@ -1785,6 +1785,49 @@ class TestOrchestrators:
         labels = {t["label"] for t in client.get_all_topics(collection="c")}
         assert {"c0", "c1"} <= labels
 
+    def test_split_topic_raises_split_conservation_violated_when_compute_split_contract_regresses(
+        self, client, monkeypatch,
+    ) -> None:
+        """code-review-expert crit-fix critique 2026-08-19: the conservation-
+        guard invariant right before ``persist_split`` (``compute_split``
+        must partition every fetched embedding into exactly one child
+        cluster) was a bare ``assert`` — a no-op under ``python -O`` that
+        would let a regressed ``compute_split`` proceed straight to
+        ``persist_split`` with mismatched data. Pins the fix: this is now a
+        real, always-active exception (``SplitConservationViolatedError``,
+        never ``AssertionError``), and the parent's centroid is never
+        touched on the way out (same refuse-before-persist discipline as
+        the fetch-coverage guard above it)."""
+        from nexus.errors import SplitConservationViolatedError
+
+        client.import_topic(
+            src_id=11, label="parent", parent_id=None, collection="c", centroid_hash=None,
+            doc_count=2, created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None)
+        client.assign_topic("d1", 11, "hdbscan")
+        client.assign_topic("d2", 11, "hdbscan")
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 11, "embedding": [1.0, 0.0], "label": "parent", "doc_count": 2},
+        ])
+        # Both d1 and d2 fetch cleanly (the fetch-coverage guard above this
+        # one passes), but the mocked compute_split's child_specs only
+        # covers 1 of the 2 fetched docs — the exact contract regression
+        # this invariant exists to catch.
+        monkeypatch.setattr(
+            _hts, "compute_split",
+            lambda *a, **k: {"topic_id": 11, "collection_name": "c",
+                             "child_specs": [
+                                 {"label": "c0", "terms_json": "[]", "doc_count": 1,
+                                  "doc_ids": ["d1"], "centroid": [1.0, 0.0],
+                                  "created_at": "2026-01-01T00:00:00Z"},
+                             ]})
+        fake_client = _FakeChromaClient({"c": _FakeChromaColl(
+            documents={"d1": "t1", "d2": "t2"},
+            embeddings={"d1": [1.0, 0.0], "d2": [0.0, 1.0]},
+        )})
+        with pytest.raises(SplitConservationViolatedError):
+            store.split_topic(11, 2, fake_client)
+        assert store._centroid_store.calls == []
+
     def test_split_refuses_when_store_has_no_vectors(self, client, monkeypatch) -> None:
         """No stored vectors -> DECLINE the split; never re-embed to fill the gap.
 
@@ -1872,13 +1915,20 @@ class TestOrchestrators:
 
         def _spy_compute_split(topic_id, doc_ids_arg, texts, fetched_ids, embeddings_arr, collection_name, k):  # noqa: ANN001
             seen_fetched_ids.extend(fetched_ids)
+            # nexus-i6eg8: cover every fetched id across the two children —
+            # a real compute_split always partitions every fetched embedding
+            # into exactly one cluster, and split_topic now asserts that
+            # invariant, so a mock returning a coverage-incomplete result
+            # would trip a conservation check this test is not about.
+            evens = [d for d in fetched_ids if int(d.removeprefix("d")) % 2 == 0]
+            odds = [d for d in fetched_ids if int(d.removeprefix("d")) % 2 == 1]
             return {
                 "topic_id": topic_id,
                 "collection_name": collection_name,
                 "child_specs": [
-                    {"label": "c0", "terms_json": "[]", "doc_count": 1, "doc_ids": [doc_ids[0]],
+                    {"label": "c0", "terms_json": "[]", "doc_count": len(evens), "doc_ids": evens,
                      "centroid": [1.0, 0.0], "created_at": "2026-01-01T00:00:00Z"},
-                    {"label": "c1", "terms_json": "[]", "doc_count": 1, "doc_ids": [doc_ids[1]],
+                    {"label": "c1", "terms_json": "[]", "doc_count": len(odds), "doc_ids": odds,
                      "centroid": [0.0, 1.0], "created_at": "2026-01-01T00:00:00Z"},
                 ],
             }
@@ -1918,6 +1968,56 @@ class TestOrchestrators:
         fake_client = _FakeChromaClient({"c": _OverReturningColl()})
         with pytest.raises(AssertionError):
             store.split_topic(10, 2, fake_client)
+
+    def test_split_service_backed_refuses_when_fetch_is_partial(self, client, monkeypatch) -> None:
+        """nexus-i6eg8: service-backed split_topic must refuse rather than
+        silently persist a partial split when T3 cannot return the topic's
+        full assignment set.
+
+        Production incident (2026-07-27): a 1,330-doc topic's split
+        reported success while its children covered only 60 docs — 1,270
+        assignments silently vanished, because ``persist_split``'s
+        DELETE-parent-then-INSERT-children contract deletes ALL of the
+        parent's assignments unconditionally. The service-backed fetch
+        (``_svc_fetch_by_ids``) can legitimately return fewer ids than
+        requested (deleted rows, service-side gaps); nothing downstream
+        checked that this had happened before the destructive persist ran
+        — only ``len(texts) < k`` was checked, which a partial-but-still-
+        k-sized fetch sails past. This pins the fix: fetched < requested
+        must refuse the split outright, not just short-circuit on `< k`.
+        """
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        client.import_topic(
+            src_id=20, label="parent", parent_id=None, collection="c", centroid_hash=None,
+            doc_count=5, created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None)
+        doc_ids = [f"d{i}" for i in range(5)]
+        for d in doc_ids:
+            client.assign_topic(d, 20, "hdbscan")
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 20, "embedding": [1.0, 0.0], "label": "parent", "doc_count": 5},
+        ])
+
+        class _PartialStub:
+            """Simulates the production symptom: the service only resolves
+            2 of the 5 requested ids (rows unavailable/deleted server-side)."""
+
+            def get(self, ids=None, include=None, limit=None, offset=None):  # noqa: ANN001
+                found = (ids or [])[:2]
+                return {"ids": found, "documents": [f"t-{i}" for i in found]}
+
+        t3 = HttpVectorClient(tenant="default")
+        monkeypatch.setattr(t3, "get_or_create_collection", lambda name: _PartialStub())  # noqa: ARG005
+        monkeypatch.setattr(
+            t3, "get_embeddings",
+            lambda collection_name, ids, on_progress=None: np.array(  # noqa: ARG005
+                [[1.0, 0.0] for _ in ids], dtype=np.float32))
+
+        assert store.split_topic(20, 2, t3) == 0
+        # Refused BEFORE any destructive write: the parent's centroid must
+        # survive a refused split untouched — same contract as the
+        # non-service branch's vectors_unavailable refusal.
+        assert store._centroid_store.calls == []
 
     def test_project_against_match_and_novel(self, client) -> None:
         store = self._store(client, [

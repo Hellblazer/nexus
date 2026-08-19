@@ -397,6 +397,14 @@ _COMMAND_LEVEL_REASONS: dict[str, str] = {
         "reachable from nx dt index / nx index pdf --dir's doc_indexer-"
         "based per-record ingest call stack."
     ),
+    "SplitConservationViolatedError": (
+        "Raised only from HttpTaxonomyStore.split_topic's defense-in-"
+        "depth compute_split conservation check (db/t2/"
+        "http_taxonomy_store.py, nexus-i6eg8) -- a taxonomy topic-split "
+        "internal invariant, not reachable from any dt.py/index.py "
+        "per-record ingest loop. `nx taxonomy split` operates on ONE "
+        "named topic per invocation, no batch to protect."
+    ),
 }
 
 

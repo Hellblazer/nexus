@@ -2419,6 +2419,64 @@ class TestSplitTopic:
         assert parent["doc_count"] == 0
 
 
+class TestSplitCLI:
+    """CLI test for `nx taxonomy split` (nexus-i6eg8 acceptance criterion 3,
+    code-review-expert crit-fix critique 2026-08-19): the command must print
+    a 'Redistribution:' line breaking down how many docs landed on each
+    child topic, not just a bare child-topic count — the 2026-07-27
+    incident (a 1,330-doc split reporting bare success while covering only
+    60 docs) is invisible to an operator without this line. Previously
+    untested at the CLI layer (only the store-level `split_topic` return
+    value was covered)."""
+
+    def test_split_reports_redistribution_line(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+        from nexus.db.local_ef import LocalEmbeddingFunction
+
+        db_path = tmp_path / "memory.db"
+        collection = "test__split-cli"
+        texts_a = [f"machine learning gradient descent {i}" for i in range(15)]
+        texts_b = [f"database query sql index {i}" for i in range(15)]
+        texts = texts_a + texts_b
+        doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(30)]
+
+        with T2Database(db_path) as db:
+            parent_id = _seed_topic(
+                db.taxonomy, "mixed-topic", collection=collection, doc_count=30,
+            )
+            for did in doc_ids:
+                _seed_assignment(db.taxonomy, did, parent_id)
+
+        chroma = make_vector_test_client()
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        coll = chroma.get_or_create_collection(collection, embedding_function=None)
+        coll.add(ids=doc_ids, documents=texts, embeddings=ef(texts))
+
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch("nexus.db.make_t3", return_value=chroma),
+        ):
+            result = runner.invoke(taxonomy, ["split", "mixed-topic", "--k", "2"])
+
+        assert result.exit_code == 0, result.output
+        assert "Split 'mixed-topic' into 2 sub-topics." in result.output
+
+        with T2Database(db_path) as db:
+            children = sorted(
+                db.taxonomy.get_topics(parent_id=parent_id), key=lambda c: c["id"],
+            )
+        child_counts = [int(c.get("doc_count") or 0) for c in children]
+        # Non-vacuity: every fetched doc landed on a child, nothing dropped.
+        assert sum(child_counts) == 30
+        expected_redistribution = "/".join(str(c) for c in child_counts)
+        assert f"Redistribution: 30 -> {expected_redistribution}" in result.output
+
+
 class TestGetAllTopics:
     """get_all_topics / get_topics: roots-only vs every-row, with collection filter.
 

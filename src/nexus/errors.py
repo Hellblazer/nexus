@@ -338,6 +338,50 @@ class IndexRunVerifyRefused(NexusError):
         super().__init__(message)
 
 
+class SplitConservationViolatedError(NexusError):
+    """A topic split's ``compute_split`` output does not conservation-match
+    its fetched embeddings — an internal contract violation, not an
+    expected external condition.
+
+    ``compute_split`` (:mod:`nexus.db.t2.taxonomy_compute`) is documented to
+    partition every fetched embedding into exactly one non-empty child
+    cluster; if the sum of ``child_specs`` doc_counts diverges from the
+    fetched count, that contract has regressed. Raised by
+    ``HttpTaxonomyStore.split_topic`` as a defense-in-depth check
+    IMMEDIATELY before ``persist_split`` — persisting mismatched
+    child_specs against the parent's assignment set is exactly the silent
+    data-loss shape nexus-i6eg8 exists to close (2026-07-27 incident: a
+    1,330-doc split reported success while covering 60 docs).
+
+    Formerly a bare ``assert`` (code-review-expert crit-fix critique
+    2026-08-19): a no-op under ``python -O`` that would have let
+    ``split_topic`` proceed to persist corrupted output had this contract
+    ever actually regressed, instead of surfacing it. This is distinct
+    from the fetch-coverage conservation guard earlier in ``split_topic``
+    (an EXPECTED external gap — missing/unfetchable T3 rows — which
+    refuses gracefully by returning 0 and leaving the parent untouched):
+    this exception fires for an INTERNAL bug in the clustering step
+    itself, so it is raised loudly rather than silently swallowed as
+    "0 topics split."
+
+    Attributes:
+        topic_id: The topic being split.
+        total_child_docs: Sum of ``child_specs[*]['doc_count']``.
+        fetched_count: Number of embeddings actually fetched and clustered.
+    """
+
+    def __init__(self, *, topic_id: int, total_child_docs: int, fetched_count: int) -> None:
+        self.topic_id = topic_id
+        self.total_child_docs = total_child_docs
+        self.fetched_count = fetched_count
+        super().__init__(
+            f"split conservation violated: {total_child_docs} docs across "
+            f"child_specs != {fetched_count} fetched docs for topic "
+            f"{topic_id} -- compute_split must partition every fetched "
+            f"embedding into exactly one child cluster"
+        )
+
+
 class CombinedWriteEmbedTimeoutError(NexusError):
     """A ``httpx.ReadTimeout`` on the combined write's chunk-carrying POST
     (``HttpCatalogClient.write_manifest_many``'s ``chunks=`` branch,

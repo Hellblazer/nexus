@@ -58,6 +58,8 @@ import httpx
 import numpy as np
 import structlog
 
+from nexus.errors import SplitConservationViolatedError
+
 # nexus-i711w Stage 2 Phase 0: these all live in taxonomy_compute (the
 # RDR-158 P1 move); catalog_taxonomy merely re-exported them. Importing from
 # the source lets the dying module go without touching this one again — the
@@ -1403,12 +1405,79 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
             embeddings = np.asarray(vectors, dtype=np.float32)
 
+        # nexus-i6eg8 CONSERVATION GUARD: both fetch branches above can
+        # legitimately return fewer fetched_ids than doc_ids (rows deleted
+        # or unavailable server-side, embeddings missing) without raising —
+        # the only prior check was `len(texts) < k`, which a partial-but-
+        # still-k-sized fetch sails straight past. persist_split's contract
+        # is DELETE every one of the parent's assignments, then INSERT only
+        # what child_specs cover; a fetch gap here becomes silently lost
+        # assignments the instant persist_split runs (production incident
+        # 2026-07-27: a 1,330-doc topic split reported success while
+        # covering 60 docs, 1,270 assignments vanished with no warning).
+        # Refuse before any write reaches the destructive persist rather
+        # than reconstruct a story about which docs are "confidently
+        # unassignable" after the fact — the parent's assignments are left
+        # completely untouched, exactly as if the split had never run.
+        if len(fetched_ids) != len(doc_ids):
+            missing = sorted(set(doc_ids) - set(fetched_ids))
+            _log.warning(
+                "split_conservation_violation_refused",
+                collection=collection_name,
+                topic_id=topic_id,
+                requested=len(doc_ids),
+                fetched=len(fetched_ids),
+                missing=len(missing),
+                missing_sample=missing[:10],
+                detail=(
+                    "topic's assignment set could not be fully fetched from "
+                    "T3 for the split; refusing to persist a partial split "
+                    "that would silently drop the unfetched assignments — "
+                    "the parent topic is left untouched"
+                ),
+            )
+            return 0
+
         split_result = self.compute_split(
             topic_id, doc_ids, texts, fetched_ids, embeddings, collection_name, k,
         )
         child_specs = split_result.get("child_specs", [])
         if not child_specs:
             return 0
+
+        # Defense-in-depth: KMeans partitions every fetched embedding into
+        # exactly one non-empty cluster, so this can only fail if
+        # compute_split's clustering contract regresses — catch that here
+        # rather than let a future change silently reopen this class of bug.
+        #
+        # code-review-expert crit-fix critique 2026-08-19: this used to be a
+        # bare `assert`, a no-op under `python -O` that would let a
+        # regressed compute_split proceed straight to persist_split with
+        # mismatched data — silently reopening the exact data-loss shape
+        # nexus-i6eg8 exists to close. Now a real, always-active exception,
+        # logged structurally first (same shape as the fetch-coverage guard
+        # above) so the failure is visible in `nx doctor`/log aggregation
+        # even when the exception is caught upstream.
+        total_child_docs = sum(spec["doc_count"] for spec in child_specs)
+        if total_child_docs != len(fetched_ids):
+            _log.warning(
+                "split_conservation_invariant_violated",
+                collection=collection_name,
+                topic_id=topic_id,
+                total_child_docs=total_child_docs,
+                fetched_count=len(fetched_ids),
+                detail=(
+                    "compute_split's child_specs do not conservation-match "
+                    "the fetched embeddings — an internal contract "
+                    "regression, not an expected external condition; "
+                    "refusing to persist"
+                ),
+            )
+            raise SplitConservationViolatedError(
+                topic_id=topic_id,
+                total_child_docs=total_child_docs,
+                fetched_count=len(fetched_ids),
+            )
 
         child_ids = self.persist_split(split_result)
 
