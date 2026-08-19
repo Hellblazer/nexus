@@ -350,6 +350,20 @@ def search_cmd(
     )
     rerank_meta: dict[str, dict] = {}
 
+    # nexus-mw2kg: build the catalog reader ONCE and pass it into
+    # search_cross_corpus so _attach_doc_ids_from_catalog actually runs.
+    # Found by the 7.11.0 live parity probe: without catalog= here, CLI
+    # results carried doc_id/chunk_count/_display_path all None, so the
+    # --max-file-chunks pass, apply_ranking_boosts' chunk-count penalty
+    # (nexus-dxly), and --path _display_path scoping all keyed on metadata
+    # that was never attached. Failure degrades to None — the documented
+    # no-op path in _attach_doc_ids_from_catalog.
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; catalog only needed on this path
+    try:
+        _search_catalog = make_catalog_reader()
+    except Exception:  # noqa: BLE001 — catalog optional for search; degrade to None on any failure
+        _search_catalog = None
+
     def _retrieve(q: str) -> list[SearchResult]:
         # Pass taxonomy for topic grouping + topic boost (RDR-070)
         from nexus.commands._helpers import default_db_path as _db_path  # noqa: PLC0415 — deferred import; only needed in this branch
@@ -358,6 +372,7 @@ def search_cmd(
             raw = search_cross_corpus(
                 q, target_collections, n_results=n, t3=db,
                 where=where_filter, link_boost=False,
+                catalog=_search_catalog,
                 taxonomy=_t2.taxonomy,
                 threshold_override=threshold_override,
                 diagnostics_out=diagnostics_out,
@@ -411,8 +426,20 @@ def search_cmd(
     # Pre-Phase-3 chunks that still carry chunk_count fall back to
     # the metadata read so the legacy contract still works.
     if max_file_chunks is not None:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; catalog factory only needed in this branch
-        _cat = make_catalog_reader()
+        _cat = _search_catalog  # nexus-mw2kg: reuse the reader passed to search_cross_corpus
+        if _cat is None:
+            # Pre-mw2kg this site built its own reader UNGUARDED and crashed
+            # on factory failure; the hoisted guarded reader degrades to None
+            # instead. Say so: with no catalog, chunks whose count cannot be
+            # resolved are KEPT, so the filter under-filters rather than
+            # failing — silent under-filtering is the fail-loud posture's
+            # least-favourite shape.
+            click.echo(
+                "Warning: --max-file-chunks has no catalog available "
+                "(factory failed); chunks without a resolvable count are "
+                "kept, not filtered.",
+                err=True,
+            )
         chunk_count_cache: dict[str, int] = {}
 
         def _doc_chunk_count(r: SearchResult) -> int | None:
@@ -457,12 +484,7 @@ def search_cmd(
     # nexus-dxly: pass catalog so the code__ file-size penalty can
     # resolve chunk_count via documents.chunk_count for Phase-3 chunks
     # (RDR-108 dropped chunk_count from chunk metadata).
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; catalog factory only needed in this branch
-    _scoring_cat = None
-    try:
-        _scoring_cat = make_catalog_reader()
-    except Exception:  # noqa: BLE001 — scoring catalog optional; degrade to None on any failure
-        _scoring_cat = None
+    _scoring_cat = _search_catalog  # nexus-mw2kg: reuse the reader passed to search_cross_corpus
     # nexus: hybrid scoring + RDR-055 E2 quality boost — shared with the MCP
     # search()/query() paths via apply_ranking_boosts (search_engine.py) so
     # both surfaces rank identically for identical inputs.

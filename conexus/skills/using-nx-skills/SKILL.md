@@ -43,9 +43,16 @@ After a successful pipeline:
 - Critique reasoning soundness → `/conexus:substantive-critique`
 - Tests written → `/conexus:test-validate`
 
-**ALL analytical questions go through `nx_answer`.** A verb-shaped question ("how does X work", "what tradeoffs in Y", "compare X across projects", "why was Z designed this way") routes to a skill that calls `nx_answer`. `nx_answer` composes search/query/operators under a plan-match-first gate — composed retrieval is strictly more useful than raw chunks. Raw `search` is for keyword lookup only ("find X in collection Y").
+**`nx_answer` is for questions whose answer must be REDUCED FROM MANY DOCUMENTS.** It composes search/query plus `claude -p` operators under a plan-match gate. Use it for:
+- cross-corpus synthesis over `knowledge__` / `docs__` / `rdr__` ("what approaches to X appear across this corpus")
+- ranking or comparing across many documents ("which of these papers does Y best")
+- RDR research phases, where the deliverable is a synthesis and minutes are acceptable
 
-- "how does…" / "tradeoffs…" / "compare…" / "why was this designed…" → `/conexus:query`
+Do NOT use it for: file:line answers (Serena/Grep), anything already in a local RDR / bead / T2 memory, or single-fact lookups (`search` / `query`, seconds (mean ~8s)).
+
+**Measured cost (n=142 executed runs, 2026-04..2026-08; T2 `nexus/nx-answer-capability-analysis-2026-08-19`):** p50 80s, p95 217s, max 371s; 0.7% finish under 5s. 35% miss the plan gate and pay ~53s more (p50) for an inline planner. A call can hit its 300s timeout and return nothing. Budget minutes, not seconds. The trade is worth it when the alternative is twenty minutes of reading — not when it is one grep.
+
+- Reduce-from-many-documents questions ("what approaches to X appear in…", "tradeoffs across…", "compare… across the corpus") → `/conexus:query`
 - Design walks from concept to code → `/conexus:research`
 - Critique a change set → `/conexus:review`
 - Cross-corpus synthesis or ranking → `/conexus:analyze`
@@ -66,10 +73,10 @@ After a successful pipeline:
 
 ## Essential MCP Tools (always available)
 
-**Sequential Thinking** (`mcp__plugin_conexus_sequential-thinking__sequentialthinking`) — use for any non-trivial decision: debugging hypotheses, design choices, plan evaluation, risk assessment. Workflow: hypothesis → evidence → evaluate → branch or proceed. `needsMoreThoughts: true` to continue, `isRevision: true` to correct, `branchFromThought: N` + `branchId` to explore alternatives.
+**Sequential Thinking** (`mcp__plugin_conexus_sequential-thinking__sequentialthinking`) — call it BEFORE every decision, not only "non-trivial" ones (that qualifier measured to zero top-level calls in a full session, 2026-08-19): what to dispatch, which fix, how to read a reviewer's verdict or a measurement, whether to push. The orchestrator holds itself to the same rule it writes into briefs. Workflow: hypothesis → evidence → evaluate → branch or proceed. `needsMoreThoughts: true` to continue, `isRevision: true` to correct, `branchFromThought: N` + `branchId` to explore alternatives.
 
 **Conexus Storage Tiers — check before any work, write your findings back.** Read widest → narrowest:
-- **T3** `nx search` / `nx_answer`: permanent knowledge across all sessions and projects — **check before researching from scratch**.
+- **T3** `nx search`: permanent knowledge across all sessions and projects — **check before researching from scratch**. (Tier checks use `search`; `nx_answer` is for synthesis, not for looking whether something exists.)
 - **T2** `nx memory`: project decisions, findings, session context — **check before project work**.
 - **T1** `nx scratch`: this session's discoveries, shared across all sibling agents — **check before duplicating sibling work**.
 
@@ -79,10 +86,10 @@ Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (sur
 
 | Mistake | Correction |
 |---------|------------|
-| `search(query="how does X work", …)` for an analytical question | `nx_answer(question="how does X work", …)` via `/conexus:query` or a verb skill |
-| `search(query="tradeoffs in Y")` | `nx_answer` via `/conexus:analyze` — `search` returns chunks, you need composition |
-| `search(query="compare X across projects")` | `nx_answer` via `/conexus:analyze` — cross-corpus compare is what plan operators do |
-| Researching from scratch without checking T3 | `nx search` / `nx_answer` first — prior sessions may have already answered |
+| `search(query="tradeoffs across the X papers")` when you need them reduced, not listed | `nx_answer` via `/conexus:analyze` — budget minutes |
+| `search(query="compare X across projects")` | `nx_answer` via `/conexus:analyze` — cross-corpus compare is the shape operators earn their cost on |
+| `nx_answer` for a file:line, single-fact, or already-in-T2 question | `search` / `query` (seconds; mean ~8s, tail to ~45s) or Serena — `nx_answer`'s p50 is 80s |
+| Researching from scratch without checking T3 | `nx search` first (seconds) — prior sessions may have already answered |
 | Returning findings without storing them | `store_put` (T3) or `memory_put` (T2) before returning |
 | Test fails → try a different fix | `/conexus:debug` |
 | Implement undesigned work without brainstorming-gate | `brainstorming-gate` first (unless a design of record exists) |
@@ -99,6 +106,6 @@ Thoughts that mean STOP — you are rationalizing past a tier check:
 |---------|---------|
 | "Let me explore the codebase first" | T3 `nx search` first — prior research may already cover it. |
 | "I can just grep for it" | T2 `nx memory` first if it's a project decision; T3 if it's general. |
-| "I'll just answer this quickly" | Verb-shape question? → `nx_answer`. Even quick answers benefit from composed retrieval. |
+| "I'll just answer this quickly" | Fine when the answer is local and you can point at it. If it has to be reduced from many documents, that is `nx_answer` — and it costs minutes. |
 | "I know what that means" | Knowing the concept ≠ knowing this project's history with it. Check T2/T3. |
 | "This finding isn't worth storing" | Findings not stored are findings lost. The next session will redo your work. |

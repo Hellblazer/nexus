@@ -6,18 +6,22 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.net.ProxySelector;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * RDR-152 bead nexus-gmiaf.20 — CLOUD Voyage AI standard embedder (voyage-code-3).
@@ -39,18 +43,49 @@ import java.util.Map;
  *   <li>{@code input_type: null}, {@code output_dtype: null}, {@code output_dimension: null}
  *       — sent EXPLICITLY: the Python SDK serializes the unset params as JSON nulls, it
  *       does NOT omit them (captured wire body, voyageai 0.3.7, nexus-f4wcg 2026-07-07)</li>
- *   <li>{@code truncation: true} — LOAD-BEARING: omitting gives cosine ≈ 0.99995 drift</li>
+ *   <li>{@code truncation: true} — the API default, sent explicitly for byte parity with the
+ *       SDK. The earlier "omitting gives cosine ≈ 0.99995 drift" rationale is NOT supported:
+ *       omission is semantically identical to {@code true}, and a toggle-only probe (RDR-195
+ *       spike, nexus-kmtlp.1, 2026-08-19; 3000-char text, 3x each) put omitted-vs-true pairs
+ *       at 0.99998..1.0, the same band as true-vs-true repeats — i.e. the repeat-variance band
+ *       described in the next item, not a flag effect.</li>
  *   <li>Request body is BYTE-faithful to the Python SDK's (key order, {@code ", "}/{@code ": "}
- *       separators, ensure_ascii escaping): Voyage serves per-request stable results that can
- *       differ across byte-different-but-semantically-equal bodies by ~4e-5 cosine
- *       (region-dependent; broke the linux parity gate while macOS stayed bit-exact,
- *       nexus-f4wcg). Byte identity keeps both legs on the same serving identity.</li>
+ *       separators, ensure_ascii escaping): Voyage can differ across
+ *       byte-different-but-semantically-equal bodies by ~4e-5 cosine (region-dependent;
+ *       broke the linux parity gate while macOS stayed bit-exact, nexus-f4wcg). Byte identity
+ *       keeps both legs on the same serving identity. Scope of that stability (measured
+ *       2026-08-19, nexus-kmtlp.1, T2 {@code nexus_rdr/195-research-3}): byte-identical SINGLE
+ *       short-input requests repeat bit-exact (20/20); ~2 KB single inputs and any BATCHED
+ *       request repeat across 1-2 discrete variants, up to ~5e-5 cosine for 2-125 inputs and
+ *       down to 0.99978 for a 263-input/101K-token near-ceiling batch. Batch composition was
+ *       never seen to move a vector outside that repeat-variance band. Any live-Voyage equality
+ *       assertion on batched output must tolerate ~2e-4 cosine, not demand bit-equality.</li>
  *   <li>Sort response {@code data[]} by {@code index} (API may return out-of-order)</li>
  *   <li>Retry on 429 / 5xx with exponential backoff (max 3 attempts)</li>
  * </ul>
  *
  * <p>REST endpoint: {@code POST https://api.voyageai.com/v1/embeddings}
  * Headers: {@code Authorization: Bearer <key>}, {@code Content-Type: application/json}.
+ *
+ * <p><b>RDR-195 — token-aware sub-batch planning.</b> Every bound upstream of this class
+ * was historically a row count; Voyage's actual limit is a per-request token ceiling
+ * ({@code MAX_BATCH_ESTIMATED_TOKENS_BY_MODEL}, resolved per {@link #model} with a
+ * fail-safe default) that no layer here previously respected. {@link #embed},
+ * {@link #embedWithUsage}, and {@link #embedDouble} now route every call through
+ * {@link #planBatches}, a greedy sub-batch planner mirroring
+ * {@link Bge768Embedder#embedSubBatched} in shape (never re-orders, never emits an empty
+ * batch, degrades to exactly one request when the whole input already fits). A batch that
+ * still trips Voyage's {@code TOO_MANY_TOKENS_IN_BATCH} 400 (the estimator is provisional
+ * by design — see the RDR's Decision Rationale) is caught and adaptively halved by
+ * {@link #collectWithHalving}, bounded by {@link #maxSubRequestsPerBatch} PER PLANNED
+ * BATCH (see that constant's javadoc for the exact scope and worst-case total) so no
+ * single input can turn one logical embed into unbounded upstream spend. {@code
+ * buildJson} itself is untouched: each sub-batch is serialized by the exact same
+ * byte-contract method, whether or not splitting ever engages. A batch that cannot be
+ * split further (a lone oversize text, or budget exhaustion) escapes as {@link
+ * VoyageTooManyTokensException}, which {@code VectorHandler} maps to HTTP 422 with the
+ * structured detail intact (gate remediation, 2026-08-19) — never the opaque 500 that
+ * predates this RDR.
  *
  * <p>Stateless: each {@link #embed} call is independent.  Thread-safe.
  */
@@ -62,11 +97,120 @@ public final class VoyageEmbedder implements Embedder {
     private static final int    MAX_RETRIES = 3;
     private static final long   RETRY_BASE_MS = 500L;
 
+    /**
+     * Voyage {@code /v1/embeddings} hard input-count cap (Voyage AI docs, verified via
+     * Context7 during RDR-195 research). Requests above it are rejected, never silently
+     * truncated — mirrors {@link VoyageReranker#MAX_DOCS_PER_REQUEST}. The 1,000-input cap
+     * is never the binding constraint in practice: the Python client already pages at 300
+     * chunks (RDR-195 Problem Statement); the binding constraint is the TOKEN ceiling below.
+     */
+    static final int MAX_BATCH_TEXTS = 1000;
+
+    /**
+     * Per-model documented Voyage {@code /v1/embeddings} token-per-request ceiling
+     * (RDR-195 Technical Design, verified against Voyage AI docs via Context7). Two tiers
+     * exist among the models this class is ever instantiated with ({@link EmbedderRouter}
+     * uses {@code voyage-code-3} and {@code voyage-3}): 120,000 for {@code voyage-code-3}
+     * (and the other 120K-tier models Voyage documents), 320,000 for the
+     * {@code voyage-3.5}/{@code voyage-2} tier. {@code voyage-3} deliberately does NOT
+     * appear here — Voyage's current published limit table does not cover it at all — so it
+     * falls through to {@link #DEFAULT_MAX_BATCH_ESTIMATED_TOKENS} below, the conservative
+     * direction (over-split costs round trips; under-split costs a failure).
+     */
+    private static final Map<String, Long> MAX_BATCH_ESTIMATED_TOKENS_BY_MODEL = Map.of(
+            "voyage-code-3", 120_000L,
+            "voyage-3-large", 120_000L,
+            "voyage-finance-2", 120_000L,
+            "voyage-law-2", 120_000L,
+            "voyage-3.5", 320_000L,
+            "voyage-2", 320_000L
+    );
+
+    /**
+     * Fail-safe default token budget for any {@link #model} absent from
+     * {@link #MAX_BATCH_ESTIMATED_TOKENS_BY_MODEL} — the TIGHTEST documented ceiling, so an
+     * unknown model (including {@code voyage-3}) can only ever be over-split, never
+     * under-split. Deliberately not tuned per-model when the model is unknown: guessing
+     * a looser ceiling for an undocumented model risks the exact failure this RDR fixes.
+     */
+    private static final long DEFAULT_MAX_BATCH_ESTIMATED_TOKENS = 120_000L;
+
+    /**
+     * PROVISIONAL bytes-per-token divisor for {@link #estimateTokens}. No JVM-native Voyage
+     * BPE tokenizer exists (RDR-195 research; the only tokenizer available is the Python
+     * SDK's), so this is a starting estimate for English/code UTF-8 text, explicitly
+     * self-correcting: because {@link #collectWithHalving} adaptively halves on an actual
+     * Voyage 400, a wrong divisor only ever costs extra round trips (a throughput/cost
+     * defect, measured during the MVV per the RDR's Performance Expectations), never a
+     * failed index. Recalibrate this constant if that measurement shows steady-state
+     * adaptive splits (divisor too optimistic) or a request count far above the
+     * theoretical minimum on the common path (divisor too pessimistic).
+     */
+    private static final long PROVISIONAL_BYTES_PER_TOKEN = 4L;
+
+    /**
+     * Hard ceiling on adaptive-halving sub-requests <strong>per PLANNED sub-batch</strong>
+     * (RDR-195 gate remediation, 2026-08-19; re-scoped 2026-08-19 per the substantive-critic's
+     * finding 1, T2 {@code substantive-critique-rdr195-phase2-da9c61781-2026-08-19}).
+     *
+     * <p><b>Scope, stated precisely because getting this wrong is exactly the bug being
+     * fixed here.</b> {@link #executeWithHalving} mints a FRESH budget counter for EVERY
+     * entry in {@link #planBatches}'s output — this constant bounds the halving tree of
+     * ONE planned batch, not the whole top-level {@link #embed}/{@link #embedWithUsage}/
+     * {@link #embedDouble} call. A single planned batch's halving tree reaches size 1 in
+     * at most {@code ceil(log2(n))} levels, and — per the RDR's "single pathological item"
+     * analysis — a batch with one over-budget chunk among many costs about
+     * {@code 2 * log2(n)} sub-requests total (one failure plus one success per level),
+     * where {@code n} is that ONE planned batch's own size, itself bounded by {@link
+     * #MAX_BATCH_TEXTS} (1,000): {@code 2 * log2(1000) ≈ 20}. 64 gives more than 3x margin
+     * over that PER-PLANNED-BATCH figure.
+     *
+     * <p><b>Worst-case TOTAL across a top-level call is therefore {@code k * 64}</b>, where
+     * {@code k} is the number of planned batches {@link #planBatches} produced for that
+     * call — never a single shared 64 across the whole call (the pre-fix defect: a shared
+     * counter meant a call's LATER planned batches could be starved by an EARLIER one's
+     * halving, and — the critic's quantified concern — a systematically-miscalibrated
+     * {@link #PROVISIONAL_BYTES_PER_TOKEN} applied uniformly across all {@code k} batches
+     * could approach the 64 ceiling on realistic, non-adversarial input, not just
+     * adversarial input as this javadoc previously claimed). {@code k} is bounded above by
+     * {@link #MAX_BATCH_TEXTS} (a planned batch can degenerate to one text each), but in
+     * practice ranges from {@code ceil(1000/300)} (~4, the Python client's own page cap) up
+     * to low tens for a pathologically small per-model budget against many small chunks —
+     * and a planned batch that is itself a single text can only ever consume ONE attempt
+     * (it cannot halve below size 1), so the realistic total is far below {@code k * 64}
+     * except when MULTIPLE planned batches are simultaneously miscalibrated. This
+     * per-planned-batch scoping is what makes the cap fire only on genuinely adversarial
+     * or badly-miscalibrated input, never on one early batch's ordinary halving starving a
+     * later, independent batch. On exhaustion the embed fails with {@link
+     * VoyageTooManyTokensException} carrying the attempted sub-request count (for THIS
+     * planned batch) and the offending sub-batch's size — the same loud,
+     * no-silent-partial-result path as the single-unsplittable-text rethrow.
+     */
+    static final int MAX_SUB_REQUESTS_PER_BATCH = 64;
 
     private final String     apiKey;
     private final String     model;
+    private final String     url;
+    private final long       retryBaseMs;
     private final HttpClient http;
     private final ObjectMapper mapper;
+
+    /**
+     * Non-vacuity test instrument (RDR-195, mirrors {@link Bge768Embedder#onnxInvocationCount}):
+     * counts every REAL Voyage POST this instance has sent (including internal 429/5xx
+     * retries within a single {@link #callApi} call), since construction or the last
+     * {@link #resetVoyageRequestCount()}. This is how {@code VoyageEmbedderBatchSplitTest}
+     * proves a split actually happened rather than merely not throwing.
+     */
+    private final AtomicInteger voyageRequestCount = new AtomicInteger(0);
+
+    /**
+     * Mutable only for exhaustion testing (RDR-195 test scenario 10, package-private test
+     * seam via {@link #setMaxSubRequestsPerBatchForTest}): defaults to
+     * {@link #MAX_SUB_REQUESTS_PER_BATCH}. Forcing it low lets a test reach exhaustion
+     * without needing 64 real halving levels of fake-server scripting.
+     */
+    private int maxSubRequestsPerBatch = MAX_SUB_REQUESTS_PER_BATCH;
 
     /**
      * @param apiKey Voyage AI API key
@@ -75,18 +219,33 @@ public final class VoyageEmbedder implements Embedder {
      *                  omits input_type by using {@code input_type=None})
      */
     public VoyageEmbedder(String apiKey, String model, String inputType) {
-        this.apiKey  = apiKey;
-        this.model   = model;
+        this(apiKey, model, VOYAGE_URL, RETRY_BASE_MS, EgressProxy.selector());
         // inputType deliberately NOT stored: production VoyageAIEmbeddingFunction
         // always passes input_type=None (field omitted from request), matching what
         // the Voyage API uses as its "unspecified" default.
+    }
+
+    /**
+     * Full wiring, the single build path (RDR-195 test seam, mirrors
+     * {@link VoyageReranker#VoyageReranker(String, String, String, long, Optional)}): tests
+     * inject a fake upstream URL, a fast retry base, and {@code Optional.empty()} so an
+     * ambient {@code HTTPS_PROXY} can never route the localhost upstream. Production uses
+     * the 3-arg constructor above. Before this constructor existed, {@code VoyageEmbedder}
+     * had no injectable URL and no fake-server test of this class was possible at all.
+     */
+    public VoyageEmbedder(String apiKey, String model, String url, long retryBaseMs,
+                          Optional<ProxySelector> proxy) {
+        this.apiKey  = apiKey;
+        this.model   = model;
+        this.url     = url;
+        this.retryBaseMs = retryBaseMs;
         // nexus-... egress proxy: java.net.http.HttpClient ignores https.proxyHost
         // system properties unless a proxy is set explicitly on the client. The cloud
         // deploy routes api.voyageai.com through squid (private subnet has no NAT), so
         // set the proxy from env (HTTPS_PROXY / NX_HTTPS_PROXY); absent = direct.
         var builder = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10));
-        EgressProxy.selector().ifPresent(builder::proxy);
+        proxy.ifPresent(builder::proxy);
         this.http = builder.build();
         this.mapper = new ObjectMapper();
     }
@@ -99,10 +258,13 @@ public final class VoyageEmbedder implements Embedder {
     @Override
     public List<float[]> embed(List<String> texts) {
         if (texts == null || texts.isEmpty()) return List.of();
-        String json = buildJson(texts);
-        String responseBody = callApi(json);
+        List<SubBatchResponse> responses = executeWithHalving(texts);
         try {
-            return parseResponseFloat(responseBody);
+            List<float[]> result = new ArrayList<>(texts.size());
+            for (SubBatchResponse r : responses) {
+                result.addAll(parseResponseFloat(r.body()));
+            }
+            return result;
         } catch (Exception e) {
             throw new RuntimeException("Voyage embed parse failed", e);
         }
@@ -110,17 +272,23 @@ public final class VoyageEmbedder implements Embedder {
 
     /**
      * Embed a batch of texts and return vectors plus the token count from
-     * {@code usage.total_tokens} in the Voyage response (bead nexus-ehc4q).
-     *
-     * <p>Reuses the same {@link #callApi} / parse path; no second HTTP call.
+     * {@code usage.total_tokens} in the Voyage response (bead nexus-ehc4q), summed across
+     * every sub-request RDR-195's planner/halving issues (mirrors
+     * {@link CceEmbedder#embedWithUsage}'s multi-call accumulation).
      */
     @Override
     public EmbedResult embedWithUsage(List<String> texts) {
         if (texts == null || texts.isEmpty()) return new EmbedResult(List.of(), 0L);
-        String json = buildJson(texts);
-        String responseBody = callApi(json);
+        List<SubBatchResponse> responses = executeWithHalving(texts);
         try {
-            return parseResponseWithUsage(responseBody);
+            List<float[]> result = new ArrayList<>(texts.size());
+            long totalTokens = 0L;
+            for (SubBatchResponse r : responses) {
+                EmbedResult one = parseResponseWithUsage(r.body());
+                result.addAll(one.embeddings());
+                totalTokens += one.tokens();
+            }
+            return new EmbedResult(result, totalTokens);
         } catch (Exception e) {
             throw new RuntimeException("Voyage embedWithUsage parse failed", e);
         }
@@ -136,13 +304,226 @@ public final class VoyageEmbedder implements Embedder {
      */
     public List<double[]> embedDouble(List<String> texts) {
         if (texts == null || texts.isEmpty()) return List.of();
-        String json = buildJson(texts);
-        String responseBody = callApi(json);
+        List<SubBatchResponse> responses = executeWithHalving(texts);
         try {
-            return parseResponseDouble(responseBody);
+            List<double[]> result = new ArrayList<>(texts.size());
+            for (SubBatchResponse r : responses) {
+                result.addAll(parseResponseDouble(r.body()));
+            }
+            return result;
         } catch (Exception e) {
             throw new RuntimeException("Voyage embedDouble parse failed", e);
         }
+    }
+
+    // ── RDR-195: sub-batch planning and adaptive halving ────────────────────────
+
+    /** One request/response unit after planning and any adaptive halving: the exact
+     * sub-batch of texts sent and the raw JSON body Voyage returned for it. Consecutive
+     * units across a whole {@link #executeWithHalving} call cover the original input
+     * contiguously and in order — {@link #planBatches} never re-orders, and {@link
+     * #collectWithHalving} recurses left-half-then-right-half, so simple in-order
+     * concatenation by the three {@code embed*} methods is correct. */
+    private record SubBatchResponse(List<String> texts, String body) {}
+
+    /**
+     * Top-level RDR-195 entry point shared by {@link #embed}, {@link #embedWithUsage}, and
+     * {@link #embedDouble}: asserts {@link #MAX_BATCH_TEXTS} (via {@link #planBatches}),
+     * plans sub-batches under the per-model token budget, and executes each with adaptive
+     * halving on a fresh sub-request budget PER PLANNED BATCH (a new {@link AtomicInteger}
+     * minted for every entry in {@code planned} — see {@link #MAX_SUB_REQUESTS_PER_BATCH}'s
+     * javadoc for why this scope is load-bearing, not incidental: sharing one counter
+     * across every planned batch of a call was the gate-remediation defect the
+     * substantive-critic found). Each planned batch's own counter is itself local to that
+     * batch's call, never shared across concurrent calls on the same instance — the
+     * class's thread-safety guarantee depends on that.
+     */
+    private List<SubBatchResponse> executeWithHalving(List<String> texts) {
+        List<List<String>> planned = planBatches(texts);
+        List<SubBatchResponse> out = new ArrayList<>();
+        for (List<String> batch : planned) {
+            AtomicInteger subRequestBudget = new AtomicInteger(0);
+            collectWithHalving(batch, subRequestBudget, out, 0);
+        }
+        return out;
+    }
+
+    /**
+     * Greedy sub-batch planner (RDR-195), mirrors {@link Bge768Embedder#embedSubBatched}'s
+     * shape: never re-orders, never emits an empty batch, a single over-budget text still
+     * gets its own batch (the estimator alone cannot refuse it — only
+     * {@link #collectWithHalving}'s single-text rethrow can, and only on an actual Voyage
+     * 400). Degrades to exactly one batch — and therefore exactly one POST — when the whole
+     * input already fits, byte-identical to the pre-RDR-195 behavior.
+     *
+     * @throws IllegalArgumentException more than {@link #MAX_BATCH_TEXTS} texts — refused,
+     *         never silently truncated (mirrors {@link VoyageReranker#MAX_DOCS_PER_REQUEST}).
+     */
+    List<List<String>> planBatches(List<String> texts) {
+        if (texts.size() > MAX_BATCH_TEXTS) {
+            throw new IllegalArgumentException(
+                    "Voyage embed request has " + texts.size() + " texts; the Voyage API cap is "
+                    + MAX_BATCH_TEXTS + " — refusing to silently truncate. Trim the batch before"
+                    + " embedding.");
+        }
+        long budget = maxBatchEstimatedTokens();
+        int n = texts.size();
+        List<List<String>> batches = new ArrayList<>();
+        int start = 0;
+        while (start < n) {
+            int end = start + 1;
+            long groupTokens = estimateTokens(texts.get(start));
+            while (end < n) {
+                long candidateTokens = groupTokens + estimateTokens(texts.get(end));
+                if (candidateTokens > budget) break;
+                groupTokens = candidateTokens;
+                end++;
+            }
+            batches.add(texts.subList(start, end));
+            start = end;
+        }
+        // RDR-195 gate remediation (nexus-kmtlp.11 fix 3): fires unconditionally, INCLUDING
+        // the single-planned-batch fast path (planned=1) — the substantive-critic found
+        // this event previously guarded by `end - start < n`, so the dominant unsplit case
+        // left NO log line, at any level, confirming a Voyage POST was even planned.
+        for (int i = 0; i < batches.size(); i++) {
+            List<String> b = batches.get(i);
+            long estTokens = b.stream().mapToLong(VoyageEmbedder::estimateTokens).sum();
+            log.info("event=voyage_subbatch_planned index={} size={} estTokens={} totalBatch={} planned={} model={}",
+                    i, b.size(), estTokens, n, batches.size(), model);
+        }
+        return batches;
+    }
+
+    /** This instance's token budget, resolved from {@link #model} against
+     * {@link #MAX_BATCH_ESTIMATED_TOKENS_BY_MODEL} with the fail-safe default. */
+    private long maxBatchEstimatedTokens() {
+        return MAX_BATCH_ESTIMATED_TOKENS_BY_MODEL.getOrDefault(model, DEFAULT_MAX_BATCH_ESTIMATED_TOKENS);
+    }
+
+    /** PROVISIONAL token estimate: UTF-8 byte length / {@link #PROVISIONAL_BYTES_PER_TOKEN},
+     * floored at 1 for any non-empty text so an all-tiny-text batch still accumulates a
+     * budget instead of appearing free. See {@link #PROVISIONAL_BYTES_PER_TOKEN}'s javadoc
+     * for why exactness here is not load-bearing. */
+    static long estimateTokens(String text) {
+        if (text == null || text.isEmpty()) return 0L;
+        long byteLen = text.getBytes(StandardCharsets.UTF_8).length;
+        return Math.max(byteLen / PROVISIONAL_BYTES_PER_TOKEN, 1L);
+    }
+
+    /**
+     * Sends {@code batch}, catching {@link VoyageTooManyTokensException} and adaptively
+     * halving (RDR-195 Technical Design: placement above {@link #callApi} keeps this split
+     * path orthogonal to {@code callApi}'s own transient 429/5xx retry budget — halving
+     * contributes a separate O(log) factor rather than compounding into it). Recurses
+     * left-half-then-right-half so results append to {@code out} in input order. A
+     * single-text batch that still trips the ceiling is DEFENSIVE — genuinely un-splittable
+     * — and is rethrown with the upstream detail intact rather than silently dropped.
+     *
+     * @param depth halving depth for this call — 0 for a batch taken straight from {@link
+     *              #planBatches}, incremented on every recursive halve. Instrumentation
+     *              only (RDR-195 gate remediation fix 3): distinguishes a planned request
+     *              from an adaptively-split one in {@code event=voyage_subrequest_sent}.
+     */
+    private void collectWithHalving(List<String> batch, AtomicInteger subRequestBudget,
+                                     List<SubBatchResponse> out, int depth) {
+        String body;
+        try {
+            body = sendSubBatch(batch, subRequestBudget, depth);
+        } catch (VoyageTooManyTokensException e) {
+            if (batch.size() <= 1) {
+                throw e; // un-splittable — fail loud, never silently drop the text
+            }
+            int mid = batch.size() / 2;
+            log.warn("event=voyage_adaptive_split original_size={} left_size={} right_size={} model={}",
+                    batch.size(), mid, batch.size() - mid, model);
+            collectWithHalving(new ArrayList<>(batch.subList(0, mid)), subRequestBudget, out, depth + 1);
+            collectWithHalving(new ArrayList<>(batch.subList(mid, batch.size())), subRequestBudget, out, depth + 1);
+            return;
+        }
+        out.add(new SubBatchResponse(batch, body));
+    }
+
+    /**
+     * Checks {@link #maxSubRequestsPerBatch} BEFORE issuing the call, so exhaustion never
+     * makes a further upstream request — then serializes and sends {@code batch} via the
+     * UNMODIFIED {@link #buildJson}/{@link #callApi}. On success, emits the RDR-195 gate
+     * remediation fix-3 per-sub-request instrumentation event ({@code
+     * event=voyage_subrequest_sent}) — fires for EVERY real upstream POST, including the
+     * common single-planned-batch fast path, pairing the request's estimated tokens and
+     * byte size with the response's actual {@code usage.total_tokens} so the MVV (bead
+     * nexus-kmtlp.13) can measure requests-per-page and recalibrate {@link
+     * #PROVISIONAL_BYTES_PER_TOKEN} — the gap the critic found (finding 3): the
+     * pre-remediation instrumentation could not pair those two numbers for the dominant,
+     * non-split case at all.
+     *
+     * @throws VoyageTooManyTokensException if the sub-request budget for this PLANNED
+     *         BATCH (see {@link #MAX_SUB_REQUESTS_PER_BATCH}'s javadoc for the exact scope)
+     *         is exhausted, carrying the attempted count and the offending batch size
+     */
+    private String sendSubBatch(List<String> batch, AtomicInteger subRequestBudget, int depth) {
+        int attemptNum = subRequestBudget.incrementAndGet();
+        if (attemptNum > maxSubRequestsPerBatch) {
+            throw new VoyageTooManyTokensException(
+                    "Voyage embed exhausted the adaptive-split sub-request budget ("
+                    + maxSubRequestsPerBatch + ") before this batch converged; offending"
+                    + " sub-batch size=" + batch.size() + ", sub-requests already attempted="
+                    + (attemptNum - 1) + ". Refusing further upstream calls rather than risking"
+                    + " unbounded spend — no partial result was returned.",
+                    "TOO_MANY_TOKENS_IN_BATCH", model, batch.size(), attemptNum - 1);
+        }
+        String json = buildJson(batch);
+        String body = callApi(json, batch.size(), attemptNum);
+        long estTokens = batch.stream().mapToLong(VoyageEmbedder::estimateTokens).sum();
+        log.info("event=voyage_subrequest_sent model={} texts={} requestBytes={} estTokens={}"
+                + " usageTokens={} attempt={} splitDepth={}",
+                model, batch.size(), json.getBytes(StandardCharsets.UTF_8).length, estTokens,
+                peekUsageTokens(body), attemptNum, depth);
+        return body;
+    }
+
+    /**
+     * Best-effort peek at {@code usage.total_tokens} from a raw Voyage response body, for
+     * the {@code event=voyage_subrequest_sent} instrumentation event only (RDR-195 gate
+     * remediation fix 3). Never throws — a parse miss returns {@code -1} (a value no real
+     * token count can take), distinguishable in logs from a genuine {@code 0}. Deliberately
+     * independent of {@link #parseResponseWithUsage}: that method's contract is to FAIL
+     * LOUD on a malformed body (it is on the correctness path); this one must never let a
+     * logging concern perturb the actual embed result.
+     */
+    private long peekUsageTokens(String body) {
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> root = mapper.readValue(body, Map.class);
+            Object usage = root.get("usage");
+            if (usage instanceof Map<?, ?> u) {
+                Object total = u.get("total_tokens");
+                if (total instanceof Number n) return n.longValue();
+            }
+        } catch (Exception e) {
+            // instrumentation only — never let a log field derail the request
+        }
+        return -1L;
+    }
+
+    /** Test-only: number of {@code callApi()} HTTP POSTs sent since construction or the
+     * last {@link #resetVoyageRequestCount()}, including internal 429/5xx retries.
+     * Package-private (see {@link #voyageRequestCount}'s javadoc). */
+    int voyageRequestCount() {
+        return voyageRequestCount.get();
+    }
+
+    /** Test-only: zero the request counter. Package-private (see
+     * {@link #voyageRequestCount}'s javadoc). */
+    void resetVoyageRequestCount() {
+        voyageRequestCount.set(0);
+    }
+
+    /** Test-only: force {@link #maxSubRequestsPerBatch} lower than
+     * {@link #MAX_SUB_REQUESTS_PER_BATCH} so a test can reach exhaustion without scripting
+     * 64 real halving levels (RDR-195 test scenario 10). Package-private. */
+    void setMaxSubRequestsPerBatchForTest(int cap) {
+        this.maxSubRequestsPerBatch = cap;
     }
 
     // ── Request / response helpers ────────────────────────────────────────────
@@ -156,6 +537,8 @@ public final class VoyageEmbedder implements Embedder {
         // ensure_ascii (non-ASCII as backslash-u escapes). Byte identity is load-bearing, not
         // cosmetic: Voyage serves per-request stable results that can differ across
         // byte-different-but-equal bodies by ~4e-5 cosine (nexus-f4wcg linux gate).
+        // RDR-195: unmodified by sub-batch planning/halving — every sub-batch is serialized
+        // by this exact method, so the byte contract holds per request regardless of split.
         StringBuilder sb = new StringBuilder(128 + texts.size() * 64);
         sb.append("{\"input\": [");
         for (int i = 0; i < texts.size(); i++) {
@@ -203,18 +586,35 @@ public final class VoyageEmbedder implements Embedder {
     // nexus-ehc4q billing note: on transient-error retries, usage.total_tokens is
     // taken from the final successful response only; tokens from prior failed
     // attempts are not accumulated — a billing UNDER-count on retried calls (safe
-    // direction: under-charges the customer). Documented, not corrected.
-    private String callApi(String json) {
+    // direction: under-charges the customer). Documented, not corrected. RDR-195: this
+    // stance now also applies across adaptive-split sub-requests — a rejected oversize
+    // attempt's tokenization is billed by Voyage but never appears in the summed
+    // usage.total_tokens returned to the caller. Same safe direction, not a new divergence.
+    /**
+     * @param batchSize  the sub-batch's text count — used ONLY to populate {@link
+     *                   VoyageTooManyTokensException}'s structured fields if this call
+     *                   trips the token ceiling; never used for retry/split logic here
+     *                   (RDR-195 Technical Design: this method never learns whether IT is
+     *                   the halvable case or the un-splittable escape — {@link
+     *                   #collectWithHalving} decides that from {@code batch.size()}).
+     * @param attemptNum this sub-batch's 1-based attempt number within its PLANNED
+     *                   BATCH's own sub-request budget (see {@link
+     *                   #MAX_SUB_REQUESTS_PER_BATCH}'s javadoc for scope) — populated into
+     *                   the same exception, and also carried by the caller's
+     *                   {@code event=voyage_subrequest_sent} log line.
+     */
+    private String callApi(String json, int batchSize, int attemptNum) {
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
                 HttpRequest req = HttpRequest.newBuilder()
-                        .uri(URI.create(VOYAGE_URL))
+                        .uri(URI.create(url))
                         .header("Authorization", "Bearer " + apiKey)
                         .header("Content-Type", "application/json")
                         .POST(HttpRequest.BodyPublishers.ofString(json))
                         .timeout(Duration.ofSeconds(120))
                         .build();
 
+                voyageRequestCount.incrementAndGet();
                 HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
                 int status = resp.statusCode();
 
@@ -222,7 +622,7 @@ public final class VoyageEmbedder implements Embedder {
 
                 boolean retryable = (status == 429 || status >= 500);
                 if (retryable && attempt < MAX_RETRIES) {
-                    long delay = RETRY_BASE_MS * (1L << (attempt - 1));
+                    long delay = retryBaseMs * (1L << (attempt - 1));
                     log.warn("event=voyage_retry attempt={} status={} delay_ms={}", attempt, status, delay);
                     Thread.sleep(delay);
                     continue;
@@ -234,6 +634,16 @@ public final class VoyageEmbedder implements Embedder {
                             "Voyage AI rejected the service's API key (HTTP " + status
                             + "): the key is invalid, expired, or lacks scope. Rotate the"
                             + " service's Voyage key and restart. body=" + resp.body());
+                }
+                if (status == 400 && isTooManyTokensBatchError(resp.body())) {
+                    // RDR-195 Gap 2: a precisely described, actionable 400 — surfaced typed
+                    // so the sub-batch caller (collectWithHalving) can halve and retry,
+                    // instead of falling through to the generic RuntimeException below.
+                    throw new VoyageTooManyTokensException(
+                            "Voyage AI rejected the batch as exceeding the per-request token"
+                            + " ceiling (HTTP 400, error_code=TOO_MANY_TOKENS_IN_BATCH): "
+                            + resp.body(),
+                            "TOO_MANY_TOKENS_IN_BATCH", model, batchSize, attemptNum);
                 }
                 throw new RuntimeException(
                         "Voyage AI request failed: HTTP " + status + " body=" + resp.body());
@@ -247,7 +657,7 @@ public final class VoyageEmbedder implements Embedder {
                 if (attempt == MAX_RETRIES) {
                     throw new RuntimeException("Voyage embed failed after " + MAX_RETRIES + " attempts", e);
                 }
-                try { Thread.sleep(RETRY_BASE_MS * (1L << (attempt - 1))); }
+                try { Thread.sleep(retryBaseMs * (1L << (attempt - 1))); }
                 catch (InterruptedException ix) {
                     Thread.currentThread().interrupt();
                     throw new RuntimeException("interrupted", ix);
@@ -255,6 +665,24 @@ public final class VoyageEmbedder implements Embedder {
             }
         }
         throw new RuntimeException("Voyage embed: exhausted retries"); // unreachable
+    }
+
+    /**
+     * Recognizes Voyage's {@code TOO_MANY_TOKENS_IN_BATCH} discriminator
+     * (RDR-195 Key Discoveries: verified — source, the stable machine-readable
+     * {@code error_code} field in the captured 400 response). Never throws on a malformed
+     * or unexpected body — falls back to {@code false} so callApi's generic 400 handling
+     * still applies (this check must never be the reason a genuinely different 400 is
+     * mis-surfaced as a splittable-batch error).
+     */
+    @SuppressWarnings("unchecked")
+    private boolean isTooManyTokensBatchError(String body) {
+        try {
+            Map<String, Object> root = mapper.readValue(body, Map.class);
+            return "TOO_MANY_TOKENS_IN_BATCH".equals(root.get("error_code"));
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     @SuppressWarnings("unchecked")

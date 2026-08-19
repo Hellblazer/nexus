@@ -34,7 +34,7 @@ def _params(title: str) -> dict[str, str]:
     pool (higher rate limits, more stable latency)."""
     params: dict[str, str] = {
         "search": title,
-        "per-page": "1",
+        "per-page": str(_TITLE_SEARCH_CANDIDATES),
     }
     mailto = os.environ.get("OPENALEX_MAILTO", "").strip()
     if mailto:
@@ -131,7 +131,42 @@ _TITLE_STOPWORDS: frozenset[str] = frozenset({
 #   * intersection == 0: reject. Disjoint vocabularies almost certainly
 #     mean different papers.
 _TITLE_MIN_INTERSECTION_FOR_AUTO_ACCEPT: int = 2
-_TITLE_MAX_SHORT_SET_SIZE: int = 2
+# 2026-08-19 (nexus-ov5tc critique): was 2 — a 2-token source sharing ONE
+# token with a long stranger ("Attention Is All You Need" -> {attention,
+# need} vs "Attention Mechanisms in Convolutional Vision Models") accepted.
+# The relaxation exists for a source that IS the single rare token
+# ("Pbeegees", "Hex Bloom"); it is now limited to exactly that shape.
+_TITLE_MAX_SHORT_SET_SIZE: int = 1
+
+# 2026-08-19 (knowledge__semantic-operators mis-attribution): a raw ">= 2
+# shared tokens" accept is the wrong shape for the two places it guards.
+# A DOI scraped from a paper's REFERENCE LIST resolves to a work in the
+# same subfield by construction, so it shares vocabulary ("Rethinking Query
+# Optimization for Multi-Agent Systems" vs the cited "LIMAO: ... Learned
+# Query Optimization" — 2 tokens, accepted, wrong authors stamped on 76
+# chunks + the catalog row). OpenAlex title search likewise ranks a
+# vocabulary-sharing stranger first when the real paper is #2 ("Edge
+# Intelligence: Paving the Last Mile ..." for the NL2Pipe title). The
+# multi-token overlap must also be the BULK of the shorter title: the
+# intersection divided by the smaller token set must reach this ratio.
+# Genuine variants (subtitle added/dropped, punctuation drift, filename-
+# truncated source) keep containment near 1.0; same-subfield strangers sit
+# at 0.2-0.35. The single-token short-source relaxation below is unchanged.
+_TITLE_MIN_CONTAINMENT: float = 0.5
+
+# A 2-token shorter side is trivially "contained" (2/2 = 1.0) in ANY longer
+# title that carries both words — "Query Optimization" vs "LIMAO: ... Learned
+# Query Optimization" (nexus-ov5tc critique, C2). When the shorter side has
+# exactly _TITLE_MIN_INTERSECTION_FOR_AUTO_ACCEPT tokens, the longer side may
+# be at most this many times longer (+1) or the overlap is treated as the
+# generic-vocabulary coincidence it usually is. Genuine short-title variants
+# ("Deep Learning" vs "Deep Learning: A New Approach", 2 vs 3) still accept.
+_TITLE_SHORT_SIDE_MAX_EXPANSION: int = 2
+
+# OpenAlex fuzzy title search: fetch this many ranked candidates and stamp
+# the FIRST one that passes :func:`_titles_compatible`, instead of trusting
+# ``results[0]`` (2026-08-19: the real paper was ranked #2 behind a stranger).
+_TITLE_SEARCH_CANDIDATES: int = 5
 
 # nexus-5cez: denylist of common single-word title coincidences.
 # When the source title's only substantive token is one of these
@@ -173,8 +208,12 @@ def _titles_compatible(source: str, returned: str) -> bool:
     paper's metadata. Empty inputs are treated as incompatible (caller
     should fall through, not stamp empty bib).
 
-    The rule (4.21.2): two-or-more substantive token matches always
-    accept; a single-token match accepts only when one side is short
+    The rule (4.21.2, tightened 2026-08-19): two-or-more substantive token
+    matches accept only when the intersection is also at least
+    ``_TITLE_MIN_CONTAINMENT`` of the SHORTER title's token set (same-
+    subfield strangers — a reference-list DOI, OpenAlex's rank-1 search
+    hit — share 2 tokens out of 7 and are rejected; genuine variants sit
+    near 1.0); a single-token match accepts only when one side is short
     enough that the match is the bulk of the title (catches
     filename-derived short source titles like "Pbeegees" matching the
     full OpenAlex title "pBeeGees: A Prudent Approach to ...");
@@ -186,6 +225,14 @@ def _titles_compatible(source: str, returned: str) -> bool:
         return False
     intersection = a & b
     if len(intersection) >= _TITLE_MIN_INTERSECTION_FOR_AUTO_ACCEPT:
+        short, long_ = min(len(a), len(b)), max(len(a), len(b))
+        # Containment on the shorter side (see _TITLE_MIN_CONTAINMENT).
+        if len(intersection) / short < _TITLE_MIN_CONTAINMENT:
+            return False
+        # Generic 2-token shorter side vs a much longer title (see
+        # _TITLE_SHORT_SIDE_MAX_EXPANSION).
+        if short <= _TITLE_MIN_INTERSECTION_FOR_AUTO_ACCEPT:
+            return long_ <= short * _TITLE_SHORT_SIDE_MAX_EXPANSION + 1
         return True
     if len(intersection) == 1:
         # nexus-5cez: when the source title is just ONE substantive
@@ -337,24 +384,34 @@ def enrich(title: str) -> dict[str, Any]:
             data = resp.json().get("results") or []
             if not data:
                 return {}
-            result = _build_result(data[0])
-            lookup_title = result.pop("_lookup_title", "")
             # nexus-yy1m: OpenAlex title search returns SOMETHING for
             # almost every query, ranked by its relevance score. When
             # the real paper isn't indexed (preprint, not yet accepted),
             # the first result is whatever happens to share some tokens
             # with the query, frequently a completely unrelated paper.
             # Apply the same title-validation guard as the by-id paths
-            # to refuse wildly-mismatched fuzzy matches.
-            if not _titles_compatible(title, lookup_title):
-                _log.warning(
-                    "openalex_title_search_rejected",
-                    query_title=title,
-                    returned_title=lookup_title,
-                    rejected_openalex_id=result.get("openalex_id", ""),
-                )
-                return {}
-            return result
+            # to refuse wildly-mismatched fuzzy matches. 2026-08-19: walk
+            # the top _TITLE_SEARCH_CANDIDATES in rank order and stamp the
+            # first compatible one — the genuine paper is routinely ranked
+            # behind a vocabulary-sharing stranger.
+            first_rejected: dict[str, Any] | None = None
+            for work in data[:_TITLE_SEARCH_CANDIDATES]:
+                result = _build_result(work)
+                lookup_title = result.pop("_lookup_title", "")
+                if _titles_compatible(title, lookup_title):
+                    return result
+                if first_rejected is None:
+                    first_rejected = {
+                        "returned_title": lookup_title,
+                        "rejected_openalex_id": result.get("openalex_id", ""),
+                    }
+            _log.warning(
+                "openalex_title_search_rejected",
+                query_title=title,
+                candidates=len(data[:_TITLE_SEARCH_CANDIDATES]),
+                **(first_rejected or {}),
+            )
+            return {}
         except (
             httpx.HTTPError,
             httpx.TimeoutException,

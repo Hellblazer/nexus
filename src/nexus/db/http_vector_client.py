@@ -517,6 +517,61 @@ _GATEWAY_RETRY_CODES = frozenset({502, 503, 504})
 _CCE_UPSERT_CHUNK_CAP = 64
 _CODE_UPSERT_CHUNK_CAP = 300
 
+#: RDR-195 Phase 1 (client half) — byte budget for a single
+#: ``/v1/vectors/upsert-chunks`` POST that will cause a SERVER-SIDE embed
+#: against Voyage's standard ``/v1/embeddings`` endpoint (the ``code__*``
+#: path, ``voyage-code-3``). This is a proxy for Voyage's documented
+#: 120,000-token-per-request ceiling for that model — the client cannot
+#: tokenize, so it estimates in bytes instead (see
+#: :func:`_upsert_byte_budget`).
+#:
+#: SIZED WITH DELIBERATE HEADROOM BELOW the engine's per-model token
+#: budget, NOT tuned to the same target — this is a REQUIREMENT, not a
+#: tuning preference (RDR-195 §Approach, "residual risk" note). The engine
+#: half (Phase 2, a separate `engine-service` release) adds a typed 400 +
+#: adaptive-halving backstop; THIS constant has no such backstop, because a
+#: client shipped ahead of that engine tag can and does reach engines that
+#: predate it (decoupled release lifecycles — AGENTS.md §Engine-service
+#: release). Equal sizing to the engine's 120,000-token ceiling would
+#: leave a skewed (new-client/old-engine) user with no margin at all —
+#: "the worst of both worlds: no headroom where there is no backstop"
+#: (RDR-195). So the layer without a safety net is the more conservative
+#: one, by construction.
+#:
+#: DERIVATION (both numbers below are provisional estimates, like the
+#: engine's own bytes-to-tokens divisor — RDR-195 §Decision Rationale
+#: explicitly designates this ratio non-load-bearing for correctness; a
+#: miscalibrated proxy costs extra round trips on a Phase-2 engine, never
+#: a failure — the residual-risk case above is the one place a bad
+#: estimate still matters, which is exactly why the headroom below exists
+#: independent of ratio accuracy):
+#:   * Target token budget: 50% of the 120,000-token ceiling = 60,000
+#:     tokens — deliberate headroom, not the whole ceiling.
+#:   * Bytes-per-token: 3.0, a CONSERVATIVE (token-dense) estimate chosen
+#:     below the ~3.6 bytes/token this RDR's own worst-case arithmetic
+#:     implies (300 chunks * up to SAFE_CHUNK_BYTES=12,288 = 3.6 MB "on the
+#:     order of 1M tokens" — RDR-195 §Enumerated gaps, Gap 1). A lower
+#:     ratio assumes MORE tokens for a given byte count, erring toward
+#:     paging earlier rather than later.
+#:   * 60,000 tokens * 3.0 bytes/token = 180,000 bytes (~176 KiB).
+#: Sanity check against the RDR's own reproduction: the observed failure
+#: (280,871 tokens) would, at this same 3.0 bytes/token estimate,
+#: correspond to a ~842,600-byte request — several times this budget, so
+#: this constant would have started paging that batch long before it ever
+#: reached Voyage's ceiling. That check covers ONE observed workload
+#: (typical PHP source); it is NOT a proof for adversarial content.
+#: Token-dense inputs (CJK-heavy source, base64 blobs, minified bundles)
+#: can run well below 3.0 bytes/token, and at ~1.5 bytes/token this
+#: 180,000-byte page is back at the 120,000-token ceiling with the 2x
+#: headroom fully consumed. Against a Phase-2 engine that case costs a
+#: typed-400 halving round trip; against a pre-Phase-2 engine it is the
+#: residual failure the RDR concedes (§Approach "residual risk"). The
+#: observed bytes-per-token ratio is to be MEASURED during the MVV
+#: (nexus-kmtlp.13) and this value recalibrated if real corpora sit below
+#: the estimate — do not treat the reproduction sanity check as evidence
+#: for the general case.
+_CODE_UPSERT_BYTE_BUDGET: int = 180_000
+
 #: Hardcoded onnx-local memory-safety default (nexus-33hpq) — the ONE
 #: value :func:`_resolve_onnx_local_upsert_chunk_cap` falls back to when
 #: ``NX_ONNX_LOCAL_UPSERT_CHUNK_CAP`` is unset, and the floor its
@@ -713,15 +768,33 @@ def per_collection_chunk_cap(collection: str) -> int:
     gate-adequacy tracked in nexus-97dp4).
 
     Why row-count alone is not a crude proxy, and why no separate token-budget
-    cap is added here: one long chunk pads EVERY row in its batch up to that
-    chunk's length, so a batch of 16 short chunks is far cheaper than 16 chunks
-    each near the 512-token ceiling. The arithmetic above already assumes the
-    WORST case (every row at ``maxLen=512``) — a token-budget bound could only
-    let batches grow bigger on the (common) case where chunks are shorter than
-    512 tokens; it cannot tighten the worst-case guarantee this cap already
-    provides. Treated as a throughput optimization for a future pass, not a
-    correctness gap: nothing above assumes chunks average anywhere near 512
-    tokens, it only bounds what happens if they do.
+    cap is added HERE (this function, this onnx-local branch): one long chunk
+    pads EVERY row in its batch up to that chunk's length, so a batch of 16
+    short chunks is far cheaper than 16 chunks each near the 512-token
+    ceiling. The arithmetic above already assumes the WORST case (every row at
+    ``maxLen=512``) — a token-budget bound could only let batches grow bigger
+    on the (common) case where chunks are shorter than 512 tokens; it cannot
+    tighten the worst-case guarantee this cap already provides. Treated as a
+    throughput optimization for a future pass, not a correctness gap: nothing
+    above assumes chunks average anywhere near 512 tokens, it only bounds what
+    happens if they do.
+
+    THIS REASONING DOES NOT TRANSFER TO THE VOYAGE (non-onnx-local) PATH
+    (RDR-195, recorded here per its Finalization Gate's "Standing, and
+    deliberate" note, so the distinction lives at the code and not only in
+    the RDR): the onnx-local argument above rests on a LOCAL, per-row,
+    memory-bound worst case with a fixed 512-token truncation — the cap
+    already assumes every row is as expensive as it could ever be, so a
+    token budget cannot tighten it further. Voyage's ``voyage-code-3``
+    ceiling is the opposite shape — a HARD REMOTE per-request token total
+    (120,000 tokens), unrelated to local memory, that row-count paging alone
+    does not bound at all: 300 chunks at up to ``SAFE_CHUNK_BYTES`` (12,288)
+    is "on the order of 1M tokens" against that 120,000 ceiling (RDR-195
+    §Enumerated gaps, Gap 1) — the observed failure was 280,871 tokens, a
+    real production 400. For that path a byte-budget IS a correctness
+    control, not a throughput one: see ``_CODE_UPSERT_BYTE_BUDGET`` and
+    :func:`_upsert_byte_budget`, applied in :meth:`HttpVectorClient.upsert_chunks`
+    alongside (never instead of) this row-count cap.
 
     Applies to EVERY prefix, not just CCE: nexus-w3hzw's mistake generalizes —
     ``code`` collections return 300 unconditionally (see below) and reach the
@@ -757,6 +830,87 @@ def per_collection_chunk_cap(collection: str) -> int:
     # split — never widen a batch on a guess): slow server-side contextual
     # embedding behind the managed 30s gateway.
     return _CCE_UPSERT_CHUNK_CAP
+
+
+def _upsert_byte_budget(collection: str) -> int | None:
+    """Byte budget for a single ``/v1/vectors/upsert-chunks`` POST against
+    *collection*, or ``None`` when no budget applies (RDR-195 Phase 1).
+
+    Gated identically to :func:`per_collection_chunk_cap` — the SAME two
+    checks, deliberately, so the two functions can never disagree about
+    which collections are "the code path": onnx-local serving has its own
+    memory-derived cap (nexus-33hpq) and is a LOCAL process, not a Voyage
+    network call, so a Voyage-token-derived byte proxy has no meaning
+    there; CCE (``docs``/``knowledge``/``rdr``, voyage-context-3) issues
+    one API call per text (``CceEmbedder.java:200-233``), so it cannot
+    exceed a *batch* token ceiling by construction — RDR-195 states this
+    explicitly ("This RDR does not change CCE"). Only the remaining case —
+    Voyage/unknown serving mode, non-CCE prefix — routes to a genuine
+    multi-text Voyage standard-embeddings batch, the ONLY case this budget
+    exists to bound.
+    """
+    if _serving_embedding_mode() == "onnx-local":
+        return None
+    prefix = collection.split("__", 1)[0]
+    if prefix in _CCE_COLLECTION_PREFIXES:
+        return None
+    return _CODE_UPSERT_BYTE_BUDGET
+
+
+def _upsert_page_bounds(
+    n: int, cap: int, byte_budget: int | None, chunk_bytes: list[int] | None,
+) -> list[tuple[int, int]]:
+    """Partition ``range(n)`` into ``[start, end)`` pages (RDR-195 Phase 1).
+
+    Replaces the prior fixed-stride ``range(0, n, cap)`` with an
+    accumulator: a page closes when adding the NEXT chunk would exceed
+    EITHER the count cap or the byte budget, whichever binds first. Pure
+    and side-effect-free so it is directly unit-testable without a fake
+    HTTP layer.
+
+    Invariants:
+      * Every page has AT LEAST ONE chunk — the first chunk of a page is
+        always accepted regardless of its own byte size (the byte check
+        below only runs once a page already holds >=1 chunk), so a single
+        chunk larger than the entire budget still ships, alone, exactly as
+        the pre-existing count-only paging already guaranteed for a chunk
+        at the ``SAFE_CHUNK_BYTES`` ceiling.
+      * ``byte_budget is None`` (CCE, onnx-local, or a passthrough page —
+        see :func:`_upsert_byte_budget` and the ``embeddings is not None``
+        exemption at the call site) degrades this to PURE count paging,
+        byte-for-byte identical to the old ``range(0, n, cap)`` — the same
+        page boundaries, in the same order, for the same ``cap``.
+      * "Exceeded" is strict (``>``): a page that lands EXACTLY on the
+        byte budget is not closed early — matches the RDR's own wording,
+        "closes a page when EITHER the count cap OR a byte budget would be
+        EXCEEDED".
+
+    *chunk_bytes* is ignored (and may be ``None``) when *byte_budget* is
+    ``None`` — callers on the CCE/onnx-local/passthrough paths never pay
+    the ``str.encode()`` cost of computing it.
+    """
+    if n <= 0:
+        return []
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    while start < n:
+        end = start
+        page_bytes = 0
+        while end < n:
+            would_exceed_count = (end - start) >= cap
+            would_exceed_bytes = (
+                byte_budget is not None
+                and end > start
+                and page_bytes + chunk_bytes[end] > byte_budget  # type: ignore[index]
+            )
+            if would_exceed_count or would_exceed_bytes:
+                break
+            if byte_budget is not None:
+                page_bytes += chunk_bytes[end]  # type: ignore[index]
+            end += 1
+        bounds.append((start, end))
+        start = end
+    return bounds
 
 
 def _serving_embedding_mode() -> str | None:
@@ -1010,6 +1164,22 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
         except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
             err = {"error": body_bytes.decode(errors="replace")}
         msg = f"POST {path} → HTTP {e.code}: {err.get('error', err)}"
+        # RDR-195 (nexus-kmtlp.11): a STRUCTURED error body — the engine's
+        # 422 for Voyage TOO_MANY_TOKENS_IN_BATCH carries detail/sub_requests/
+        # batch_size/model — must reach the caller intact. Keeping only the
+        # top-level ``error`` string would launder the upstream message the
+        # same way the pre-RDR-195 bare 500 did, one layer up. Generic on
+        # purpose: any error body with a ``detail`` field gets the same
+        # treatment; plain ``{"error": ...}`` bodies render exactly as before.
+        if isinstance(err, dict) and err.get("detail"):
+            msg += f" — {err['detail']}"
+            extras = [
+                f"{k}={err[k]}"
+                for k in ("sub_requests", "batch_size", "model")
+                if err.get(k) is not None
+            ]
+            if extras:
+                msg += f" ({', '.join(extras)})"
         remedy = _managed_remedy() if e.code in (401, 403) else None
         if remedy is None:
             remedy = _local_voyage_restart_remedy(e.code, str(err.get("error", err)))
@@ -1351,6 +1521,30 @@ class _ServiceCollectionStub:
             "metadatas": result.get("metadatas", []),
         }
 
+    def update(self, ids: list[str], metadatas: list[dict]) -> dict:
+        """Metadata-only update of existing chunks, Chroma-collection shape.
+
+        2026-08-19: ``nx enrich bib`` (``commands/enrich.py::run_bib_enrichment``)
+        calls ``col.update(ids=..., metadatas=...)`` on this handle; the stub
+        shipped without it, so every service-mode bib-enrichment run died with
+        ``AttributeError`` at the first resolved title — unusable since the
+        Chroma retirement. ONE request to ``/v1/vectors/update-metadata`` (the
+        endpoint :meth:`HttpVectorClient.update_chunks` also uses) with the ids
+        exactly as given — NO paging and NO ``missing``-list interpretation or
+        logging here, unlike ``update_chunks``; the sole caller already pages
+        at 200 and discards the return. Returns the engine's
+        ``{"updated": N, "missing": [...]}`` body verbatim. Raises
+        :class:`VectorServiceError` on transport/HTTP failure (caller owns
+        the boundary, same as :meth:`delete`).
+        """
+        if not ids:
+            return {"updated": 0, "missing": []}
+        return _post(
+            "/v1/vectors/update-metadata",
+            {"collection": self._name, "ids": ids, "metadatas": metadatas},
+            tenant=self._tenant,
+        )
+
     def delete(self, ids: list[str]) -> int:
         """Delete chunks by ID from the service.
 
@@ -1560,12 +1754,25 @@ class HttpVectorClient:
         # CONFLICT dedup + full-file staleness retry heal a partial mid-paging
         # failure next run. Same-model vector PASSTHROUGH (nexus-hxry2): supplied
         # vectors are sliced in lockstep with the ids.
+        #
+        # RDR-195 Phase 1: a page ALSO closes on a byte budget when the page
+        # will cause a server-side Voyage embed (see _upsert_byte_budget) —
+        # never for CCE, onnx-local, or a PASSTHROUGH page (``embeddings``
+        # supplied never reaches Voyage, so a Voyage-token-derived budget
+        # would shrink it for no upstream benefit; count-cap paging still
+        # applies to passthrough pages unchanged). This makes the stride
+        # variable, so ``pages`` below is the ACTUAL page count from the
+        # materialized boundary list, not a precomputed formula.
         cap = per_collection_chunk_cap(collection)
         metas = metadatas or [{}] * len(ids)
         n = len(ids)
-        pages = (n + cap - 1) // cap if n else 0
-        for page_num, start in enumerate(range(0, n, cap), start=1):
-            end = min(start + cap, n)
+        byte_budget = None if embeddings is not None else _upsert_byte_budget(collection)
+        chunk_bytes = (
+            [len(doc.encode("utf-8")) for doc in documents] if byte_budget is not None else None
+        )
+        page_bounds = _upsert_page_bounds(n, cap, byte_budget, chunk_bytes)
+        pages = len(page_bounds)
+        for page_num, (start, end) in enumerate(page_bounds, start=1):
             page_ids = ids[start:end]
             body: dict[str, Any] = {
                 "collection": collection,

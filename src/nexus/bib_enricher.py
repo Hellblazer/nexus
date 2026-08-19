@@ -15,7 +15,10 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 _BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
-_FIELDS = "year,venue,authors,citationCount,externalIds,references.paperId"
+_FIELDS = "title,year,venue,authors,citationCount,externalIds,references.paperId"
+# 2026-08-19 (nexus-ov5tc): walk the top-N relevance hits and stamp the first
+# whose title is compatible with the query — never data[0] blindly.
+_SEARCH_CANDIDATES = 5
 _TIMEOUT = 10.0  # 10s for authenticated bulk use; 3s was too aggressive
 
 
@@ -44,7 +47,7 @@ def enrich(title: str) -> dict[str, Any]:
         try:
             resp = httpx.get(
                 _BASE_URL,
-                params={"query": title, "fields": _FIELDS, "limit": 1},
+                params={"query": title, "fields": _FIELDS, "limit": _SEARCH_CANDIDATES},
                 headers=_s2_headers(),
                 timeout=_TIMEOUT,
             )
@@ -57,7 +60,30 @@ def enrich(title: str) -> dict[str, Any]:
             data = resp.json().get("data", [])
             if not data:
                 return {}
-            paper = data[0]
+            # nexus-ov5tc (2026-08-19): this backend had NO title validation —
+            # the OpenAlex backend's nexus-yy1m guard never applied here, and
+            # ``auto`` picks S2 whenever S2_API_KEY is set (the recommended
+            # config), so the at-index-time ``--enrich`` path and every S2 run
+            # stamped whatever S2 ranked first. Same guard, same top-N walk.
+            from nexus.bib_enricher_openalex import _titles_compatible  # noqa: PLC0415 — sibling backend; deferred to keep the two modules import-independent
+
+            paper = None
+            first_rejected = ""
+            for cand in data[:_SEARCH_CANDIDATES]:
+                cand_title = str((cand or {}).get("title") or "")
+                if _titles_compatible(title, cand_title):
+                    paper = cand
+                    break
+                if not first_rejected:
+                    first_rejected = cand_title
+            if paper is None:
+                _log.warning(
+                    "s2_title_search_rejected",
+                    query_title=title,
+                    candidates=len(data[:_SEARCH_CANDIDATES]),
+                    returned_title=first_rejected,
+                )
+                return {}
             refs = [
                 r.get("paperId", "") for r in (paper.get("references") or [])
                 if r and r.get("paperId")

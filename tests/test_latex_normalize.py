@@ -13,9 +13,11 @@ Rules under test:
 """
 from pathlib import Path
 
+from nexus.indexer_utils import resolve_pdf_title
 from nexus.pdf_extractor import (
     PDFExtractor,
     _normalize_mineru_latex,
+    _unwrap_mineru_font_tags,
     normalize_latex_spacing,
 )
 
@@ -458,3 +460,74 @@ def test_gtltb_control_still_clean_alongside_escapes() -> None:
     out = _normalize_mineru_latex(r"$$a + b$$ some prose here $c$ more prose $d$ end.")
     assert "some prose here" in out, out
     assert "more prose" in out, out
+
+
+# ── MinerU small-caps <sub>/<sup> shredding (papers/2512.11001.pdf, 2026-08-19) ──
+#
+# MinerU renders ACM small-caps headings, run-in paragraph heads, and figure/
+# table captions as letter-interleaved HTML subscript spans:
+#   ``## 5<sub>.</sub>2 U<sub>n</sub>ifi<sub>e</sub>d C<sub>os</sub>t M<sub>o</sub>d<sub>e</sub>l<sub>s</sub>``
+# Measured on that paper: 30/70 chunks and 17/35 headings carried the tags;
+# the embedded tokens are word fragments, so heading retrieval is destroyed.
+# MinerU emits real math as LaTeX, so HTML sub/sup in its markdown are font-
+# size heuristics, not semantics — unwrapping keeps the inner text verbatim.
+
+
+def test_unwrap_shredded_heading_exact() -> None:
+    md = "## 5<sub>.</sub>2 U<sub>n</sub>ifi<sub>e</sub>d C<sub>os</sub>t M<sub>o</sub>d<sub>e</sub>l<sub>s</sub>"
+    assert _unwrap_mineru_font_tags(md) == "## 5.2 Unified Cost Models"
+
+
+def test_unwrap_caption_and_runin_head() -> None:
+    md = (
+        "Fi<sub>gure</sub> 2<sub>:</sub> P<sub>are</sub>t<sub>o</sub> f<sub>ron</sub>ti<sub>er</sub>\n"
+        "T<sub>rans</sub>f<sub>orma</sub>ti<sub>ons.</sub> $G^{*}$ may differ.\n"
+        "<sup>\\*</sup>Helium [29] caches outputs."
+    )
+    out = _unwrap_mineru_font_tags(md)
+    assert out == (
+        "Figure 2: Pareto frontier\n"
+        "Transformations. $G^{*}$ may differ.\n"
+        "\\*Helium [29] caches outputs."
+    )
+
+
+def test_unwrap_leaves_other_html_and_math_alone() -> None:
+    md = "Let $x_{i}$ and <b>bold</b> and a <subtle> word stay."
+    assert _unwrap_mineru_font_tags(md) == md
+
+
+def test_unwrap_idempotent_and_case_insensitive() -> None:
+    md = "CO<SUB>2</SUB> and x<Sup>2</Sup>"
+    once = _unwrap_mineru_font_tags(md)
+    assert once == "CO2 and x2"
+    assert _unwrap_mineru_font_tags(once) == once
+
+
+# ── PDF title resolution: H1 fallback before filename stem (2026-08-19) ──────
+
+def test_resolve_pdf_title_prefers_extractor_then_h1_then_stem() -> None:
+    p = Path("/data/2512.11001.pdf")
+    body = "# Rethinking Query Optimization for Multi-Agent Systems [Vision]\n\nZoi Kaoudi\n"
+    # extractor metadata wins
+    assert resolve_pdf_title({"docling_title": "Docling Title"}, p, body) == "Docling Title"
+    assert resolve_pdf_title({"docling_title": "", "pdf_title": "XMP Title"}, p, body) == "XMP Title"
+    # MinerU path: both empty -> first H1 of the markdown body
+    assert resolve_pdf_title({"docling_title": "", "pdf_title": ""}, p, body) == (
+        "Rethinking Query Optimization for Multi-Agent Systems [Vision]"
+    )
+    # no H1 anywhere -> normalised stem
+    assert resolve_pdf_title({}, p, "plain text only") == "2512.11001"
+    assert resolve_pdf_title({}, Path("/d/attention-is-all.pdf"), "") == "Attention Is All"
+
+
+def test_resolve_pdf_title_section_heading_h1_falls_to_stem() -> None:
+    """A body whose first H1 is ``# Abstract``/``# 1 Introduction`` has no title
+    heading; stamping that word as the catalog title would wedge it behind
+    the curated-title stem-guard. Fall to the stem instead."""
+    p = Path("/data/2512.11001.pdf")
+    assert resolve_pdf_title({}, p, "# ABSTRACT\n\nWe study...\n# Real Title Later\n") == "2512.11001"
+    assert resolve_pdf_title({}, p, "# 1 Introduction\n\nBody") == "2512.11001"
+    assert resolve_pdf_title({}, p, "# Related Work:\n") == "2512.11001"
+    # a genuine title H1 that merely CONTAINS such a word still wins
+    assert resolve_pdf_title({}, p, "# Abstract Interpretation of Agents\n") == "Abstract Interpretation of Agents"

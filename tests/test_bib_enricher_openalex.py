@@ -570,3 +570,106 @@ def test_enrich_by_arxiv_id_title_validation_rejects_mismatch():
         )
 
     assert result == {}
+
+
+# ── 2026-08-19 live mis-attribution on knowledge__semantic-operators ─────────
+#
+# One `nx enrich bib` run stamped three WRONG works onto three papers (644
+# chunks + 3 catalog rows), all through the "≥2 shared substantive tokens"
+# auto-accept: a reference-list DOI resolving to a cited paper in the SAME
+# subfield shares vocabulary by construction, and OpenAlex's title search
+# ranks a vocabulary-sharing stranger first when the real paper is #2.
+# Same-subfield titles need a CONTAINMENT ratio, not a raw overlap count.
+
+def test_titles_compatible_rejects_same_subfield_citation_doi():
+    """Rethinking-QO (source) cites LIMAO; DOI 10.14778/3749646.3749712 was
+    scraped from its references and accepted on {query, optimization}."""
+    from nexus.bib_enricher_openalex import _titles_compatible
+
+    assert not _titles_compatible(
+        "Rethinking Query Optimization for Multi-Agent Systems [Vision]",
+        "LIMAO: A Framework for Lifelong Modular Learned Query Optimization",
+    )
+
+
+def test_titles_compatible_rejects_title_search_vocabulary_strangers():
+    from nexus.bib_enricher_openalex import _titles_compatible
+
+    # OpenAlex result #1 for the NL2Pipe title (shares {last, mile})
+    assert not _titles_compatible(
+        "Bridge the Last Mile Gap to Semantic Analytics  Compiling Natural Language Queries into Semantic Operator Pipelines",
+        "Edge Intelligence: Paving the Last Mile of Artificial Intelligence With Edge Computing",
+    )
+    # OpenAlex result #1 for the NL-to-X IR vision paper (shares {natural, language})
+    assert not _titles_compatible(
+        "Natural Language to What  A Vision for Intermediate Representations in NL to X Querying",
+        "Natural Language Parsing as Statistical Pattern Recognition",
+    )
+
+
+def test_titles_compatible_still_accepts_genuine_variants():
+    from nexus.bib_enricher_openalex import _titles_compatible
+
+    # exact paper, punctuation/hyphen drift (the real OpenAlex #2 above)
+    assert _titles_compatible(
+        "Bridge the Last Mile Gap to Semantic Analytics  Compiling Natural Language Queries into Semantic Operator Pipelines",
+        "Bridge the Last-Mile Gap to Semantic Analytics: Compiling Natural-Language Queries into Semantic Operator Pipelines",
+    )
+    # filename-truncated source vs full returned title
+    assert _titles_compatible(
+        "Natural Language to What  A Vision for Intermediat",
+        "Natural Language to What? A Vision for Intermediate Representations in NL-to-X Querying",
+    )
+    # source carries a subtitle the index lacks
+    assert _titles_compatible(
+        "Attention Is All You Need: Transformers for Sequence Transduction",
+        "Attention Is All You Need",
+    )
+
+
+def test_title_search_picks_first_compatible_of_top_results():
+    """The fuzzy path must not stamp results[0] blindly: OpenAlex ranked a
+    vocabulary-sharing stranger first and the real paper second."""
+    from unittest.mock import MagicMock, patch
+
+    from nexus.bib_enricher_openalex import enrich
+
+    stranger = {
+        "id": "https://openalex.org/W2950865323",
+        "display_name": "Edge Intelligence: Paving the Last Mile of Artificial Intelligence With Edge Computing",
+        "publication_year": 2019, "authorships": [], "cited_by_count": 1,
+        "primary_location": {"source": {"display_name": "Proceedings of the IEEE"}},
+    }
+    real = {
+        "id": "https://openalex.org/W7163719900",
+        "display_name": "Bridge the Last-Mile Gap to Semantic Analytics: Compiling Natural-Language Queries into Semantic Operator Pipelines",
+        "publication_year": 2025, "authorships": [], "cited_by_count": 0,
+        "primary_location": {"source": {"display_name": "PVLDB"}},
+    }
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"results": [stranger, real]}
+    with patch("nexus.bib_enricher_openalex.httpx.get", return_value=resp) as get:
+        out = enrich("Bridge the Last Mile Gap to Semantic Analytics  Compiling Natural Language Queries into Semantic Operator Pipelines")
+    assert out.get("openalex_id") == "W7163719900", out
+    assert int(get.call_args.kwargs["params"]["per-page"]) > 1
+
+
+def test_titles_compatible_short_generic_source_vs_long_stranger_rejects():
+    """nexus-ov5tc critique C2: a 2-token source is trivially 'contained' in
+    any longer title carrying both words; cap the longer side's expansion.
+    The single-token relaxation is limited to a source that IS the token."""
+    from nexus.bib_enricher_openalex import _titles_compatible
+
+    assert not _titles_compatible(
+        "Query Optimization",
+        "LIMAO: A Framework for Lifelong Modular Learned Query Optimization",
+    )
+    assert not _titles_compatible(
+        "Attention Is All You Need",
+        "Attention Mechanisms in Convolutional Vision Models",
+    )
+    # short genuine variants still accept
+    assert _titles_compatible("Deep Learning", "Deep Learning: A New Approach")
+    assert _titles_compatible("Attention Is All You Need", "Attention Is All You Need")
+    # the rare single-token source still accepts against a long returned title
+    assert _titles_compatible("Hex Bloom", "HEX-BLOOM: An Efficient Method for Authenticity and Integrity Verification in Privacy-preserving Computing")

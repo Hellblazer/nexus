@@ -60,7 +60,7 @@ Run these four reads BEFORE substantive work. Skipping on the grounds that "this
 
 1. **Plan reuse**: `mcp__plugin_conexus_nexus__plan_search(query="<your task>", limit=3)`, if a match returns, reuse it as a starting structure.
 2. **T2 (project)**: `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`, prior project decisions, findings, session context.
-3. **T3 (cross-project)**: `mcp__plugin_conexus_nexus__nx_answer(question="<verb-shape question>", scope="<corpus>")` for any "how / why / tradeoffs / compare" question; raw `mcp__plugin_conexus_nexus__search(...)` only for single-step keyword lookups.
+3. **T3 (cross-project)**: `mcp__plugin_conexus_nexus__search(query="<topic>", corpus="knowledge")` for the check itself; reach for `mcp__plugin_conexus_nexus__nx_answer(question="<question>", scope="<corpus>")` only when the answer must be reduced from many documents (cross-corpus synthesis, ranking/comparing, RDR research) — p50 80s, p95 217s, can time out at 300s.
 4. **T1 (siblings)**: `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`, sibling agents in the current session may have done this work already.
 
 The only valid skip is structural inapplicability (a tier physically cannot have what you need). A no-match in <300 ms still counts as a check, and frequently surfaces the unexpected.
@@ -160,7 +160,7 @@ Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought
    - Acceptance criteria
    - Dependencies (use /beads:dep add)
    - Knowledge base search terms for executing agent
-   - Reminder to use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` for complex work
+   - Reminder to use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` before every planning decision (not only "complex" work)
    - Context pointers to nx memory, nx store, or documentation
 
 ### Review Gates (MANDATORY in every plan)
@@ -336,7 +336,7 @@ Example: If 2 of 5 beads fail to create, note in response: "3 beads created succ
 
 ### Include in Every Bead
 - Reminder to SPAWN parallel agents to conserve context
-- Reminder to use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` for complex analysis
+- Reminder to use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` before every planning decision (not only "complex" analysis)
 - Reminder to maintain TDD discipline
 - Reminder to update continuation state
 - Reminder sub-agents can spawn children for intensive work (use judiciously)

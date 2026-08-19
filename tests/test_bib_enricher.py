@@ -87,7 +87,7 @@ def test_enrich_timeout():
     from nexus.bib_enricher import enrich
 
     with patch("httpx.get", side_effect=httpx.TimeoutException("timed out")):
-        result = enrich("Some Paper Title")
+        result = enrich("Attention Is All You Need")
 
     assert result == {}
 
@@ -120,7 +120,7 @@ def test_enrich_rate_limit_429():
         patch("httpx.get", return_value=mock_resp),
         patch("time.sleep", side_effect=sleep_calls.append),
     ):
-        result = enrich("Some Paper")
+        result = enrich("Attention Is All You Need")
 
     assert result == {}
     # Backoff schedule: attempt 0 waits 5s, attempt 1 waits 10s,
@@ -136,7 +136,7 @@ def test_enrich_network_error():
     from nexus.bib_enricher import enrich
 
     with patch("httpx.get", side_effect=httpx.ConnectError("connection refused")):
-        result = enrich("Some Paper")
+        result = enrich("Attention Is All You Need")
 
     assert result == {}
 
@@ -161,7 +161,7 @@ def test_enrich_authors_truncated():
     mock_resp = _make_response(200, {"data": [paper]})
 
     with patch("httpx.get", return_value=mock_resp):
-        result = enrich("Multi-Author Paper")
+        result = enrich("Attention Is All You Need")
 
     names = [n.strip() for n in result["authors"].split(",")]
     assert len(names) == 5
@@ -179,7 +179,7 @@ def test_enrich_malformed_json():
     mock_resp.json.side_effect = ValueError("No JSON object could be decoded")
 
     with patch("httpx.get", return_value=mock_resp):
-        result = enrich("Some Paper Title")
+        result = enrich("Attention Is All You Need")
 
     assert result == {}
 
@@ -192,8 +192,32 @@ def test_enrich_null_references_and_authors():
     mock_resp = _make_response(200, {"data": [paper]})
 
     with patch("httpx.get", return_value=mock_resp):
-        result = enrich("Paper With Null Fields")
+        result = enrich("Attention Is All You Need")
 
     assert result["references"] == []
     assert result["authors"] == ""
     assert result["semantic_scholar_id"] == "abc123"
+
+
+# ── nexus-ov5tc (2026-08-19): S2 backend gets the same title guard as OpenAlex ──
+
+def test_enrich_rejects_title_mismatch():
+    """S2 ranks SOMETHING first for every query; a vocabulary stranger must not be stamped."""
+    from nexus.bib_enricher import enrich
+
+    stranger = dict(_VALID_PAPER, title="LIMAO: A Framework for Lifelong Modular Learned Query Optimization")
+    mock_resp = _make_response(200, {"data": [stranger]})
+    with patch("httpx.get", return_value=mock_resp):
+        assert enrich("Rethinking Query Optimization for Multi-Agent Systems [Vision]") == {}
+
+
+def test_enrich_picks_first_compatible_of_top_results():
+    from nexus.bib_enricher import enrich
+
+    stranger = dict(_VALID_PAPER, paperId="bad", title="Attention Mechanisms in Convolutional Vision Models")
+    real = dict(_VALID_PAPER, paperId="good", title="Attention Is All You Need")
+    mock_resp = _make_response(200, {"data": [stranger, real]})
+    with patch("httpx.get", return_value=mock_resp) as get:
+        out = enrich("Attention Is All You Need")
+    assert out["semantic_scholar_id"] == "good"
+    assert get.call_args.kwargs["params"]["limit"] > 1

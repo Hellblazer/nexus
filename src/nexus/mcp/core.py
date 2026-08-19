@@ -6249,16 +6249,31 @@ async def nx_answer(
     3. **Execute plan**: run via ``plan_run``.
     4. **Record**: write run metrics to T2 ``nx_answer_runs``.
 
-    **Latency.** This is NOT a sub-second call in the general case.
-    Each operator step (extract, rank, summarize, generate, …) spawns a
-    ``claude -p`` subprocess with a 300-second timeout. Empirical
-    distribution from 100 production runs (memory: tier-discipline-
-    audit-2026-05-06): 32% finish under 5s, 5% in 5–30s, 40% in
-    30s–2min, 23% in 2–5min. The plan-miss path adds an inline-planner
-    subprocess (also up to 300s) on top. ``plan_run`` emits per-step
-    structured ``nx_answer_step_start`` / ``nx_answer_step_complete``
-    events to ``structlog`` (nexus-0qi9) so callers tailing
-    ``~/.config/nexus/logs/mcp.log`` can see progress in real time.
+    **Latency.** This is NOT a sub-second call in the general case, and
+    the figures below correct an earlier docstring version that
+    overstated the fast end by ~45x (it counted degenerate zero-step
+    error rows, p50 0.7s, as successes). Re-measured directly from the
+    ``nx_answer_runs`` T2 table (nexus-h33x8.6 DO 1-3, T2 memory
+    ``nexus/nx-answer-capability-analysis-2026-08-19``), executed plans
+    only (n=142, excludes the zero-step error rows): p50 80.1s, p95
+    217.1s, p99 316.7s, mean 97.7s; only 0.7% finish under 5s, 88.7%
+    take >= 30s, 33.8% take >= 2min. Each operator step (extract, rank,
+    summarize, generate, …) spawns a ``claude -p`` subprocess with a
+    300-second timeout (a single round trip has an ~11s floor
+    independent of workload — this is the substrate's own session
+    bootstrap cost, not reducible without leaving it). The plan-miss
+    path adds an inline-planner subprocess (also up to 300s) on top —
+    the miss tax is ~53s at p50 (plan-hit p50 64.1s vs plan-miss p50
+    117.2s). The documented single-step fast path (``query()`` alone,
+    mean ~2s) fires only when the matched plan is a single ``tool:
+    query`` step — see the seeded ``document-discovery`` /
+    ``corpus-coverage-check`` builtin templates (nexus-h33x8.6 a1) for
+    the question shapes that route onto it; a composed/operator plan
+    pays the durations above regardless of question phrasing.
+    ``plan_run`` emits per-step structured ``nx_answer_step_start`` /
+    ``nx_answer_step_complete`` events to ``structlog`` (nexus-0qi9) so
+    callers tailing ``~/.config/nexus/logs/mcp.log`` can see progress in
+    real time.
 
     Args:
         question: Natural-language question to answer.

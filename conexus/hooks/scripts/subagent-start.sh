@@ -190,7 +190,7 @@ cat <<'NX_TIERS'
 ## nx storage (call as mcp__plugin_conexus_nexus__<tool>; paged: footer shows offset=N)
 
 Read widest -> narrowest BEFORE any work; check before duplicating effort:
-  T3 search/nx_answer  all sessions/projects   <- check before researching
+  T3 search            all sessions/projects   <- check before researching
   T2 memory            project-scoped          <- check before project work
   T1 scratch           shared with siblings    <- check before duplicating sibling work
 NX_TIERS
@@ -207,11 +207,15 @@ T3: search (where, cluster_by, topic), query (catalog-aware; follow_links, depth
 Plans (T2): plan_search, plan_save
 Hint: where="section_type!=references" filters noise.
 
-Verb-shape question (how / why / tradeoffs / compare)? -> nx_answer (composed > raw).
-Raw search is for keyword lookup only ("find X in collection Y").
-
 WRITE-BACK: findings not stored = findings lost. store_put (T3) or memory_put (T2) before returning.
 NX_T3
+
+cat <<'NX_ANSWER'
+
+nx_answer ONLY when the answer must be REDUCED FROM MANY DOCUMENTS (cross-corpus
+synthesis, ranking/comparing across documents, RDR research). Measured p50 80s, p95 217s,
+can time out at 300s: budget minutes. File:line, single-fact, already in T2 -> search/query (seconds; mean ~8s, tail to ~45s).
+NX_ANSWER
 
 cat <<'NX_AUTOLINK'
 
@@ -256,8 +260,11 @@ cat <<'SEQTHINK'
 ## Sequential Thinking
 
 Tool: mcp__plugin_conexus_sequential-thinking__sequentialthinking
-Use for: debugging hypotheses, design choices, plan evaluation, risk assessment.
-Params: needsMoreThoughts=true (continue), isRevision=true+revisesThought=N (correct), branchFromThought=N+branchId="alt" (explore).
+Call it BEFORE every decision (what to read, which fix, how to read a result, what to
+report) — not only "complex" ones; the qualifier is how it goes unused. The thought is
+the visible record of your reasoning.
+Params: needsMoreThoughts=true (continue), isRevision=true+revisesThought=N (correct),
+branchFromThought=N+branchId="alt" (explore).
 SEQTHINK
 
 if [[ $SKIP_OPERATORS -eq 0 ]]; then
@@ -265,7 +272,8 @@ cat <<'OPERATORS'
 
 ## Analytical operators (RDR-080)
 
-5 ops wrap claude -p (120s default). Call directly, no Agent dispatch:
+5 ops wrap claude -p (300s default; nx_plan_audit/nx_tidy 600s). One claude -p round
+trip costs ~11s minimum before any real work. Call directly, no Agent dispatch:
   operator_summarize, operator_extract, operator_rank, operator_compare, operator_generate
 
 Multi-step retrieval (plan-match gate): nx_answer.

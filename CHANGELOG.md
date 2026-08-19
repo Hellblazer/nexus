@@ -6,6 +6,93 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.12.0] - 2026-08-19
+
+Engine identity moves to `engine-service-v0.1.83` (paired release: engine tag
+cut first, floor bump rides this release, deploy fires at client-tag push).
+Local-mode installs receive that engine on every path.
+
+### Fixed
+
+- **Voyage embedding no longer fails on large batches** (RDR-195, GH #1465,
+  author Gerasimos Pollatos / PR #1466; beads `nexus-kmtlp`). The engine sent
+  every upsert page to Voyage as one request and a page over the 120,000-token
+  ceiling came back as an opaque 500 that no retry could fix. Engine half
+  (`engine-service-v0.1.83`): a token-aware sub-batch planner with per-model
+  budgets (120K / 320K tiers, fail-safe default for unknown models), a typed
+  `TOO_MANY_TOKENS_IN_BATCH` error handled by adaptive halving above the retry
+  loop, a per-planned-batch sub-request cap (64) that fails loud on
+  exhaustion, HTTP 422 with structured detail (`error`, `detail`,
+  `sub_requests`, `batch_size`, `model`) instead of the bare 500, and a
+  per-sub-request log event carrying request bytes and billed tokens. Client
+  half: `upsert_chunks` pages on a byte budget (`_CODE_UPSERT_BYTE_BUDGET`,
+  180,000 B, sized with headroom below the engine budget because a client
+  reaching a pre-fix engine has no typed-400 backstop) as well as the count
+  cap, passthrough-embedding pages exempt, CCE/onnx paging unchanged; the 422
+  detail reaches the user. Validated live: a 3,160-file PHP repository
+  (laravel/framework) indexed with zero `TOO_MANY_TOKENS_IN_BATCH`, zero 429s,
+  74 Voyage requests over 78 pages (T2 `nexus/rdr-195-mvv-measurements`); the
+  MVV is reproducible via `tests/e2e/rdr195-voyage-mvv.sh`. Voyage's own
+  serving variance (~2e-4 cosine on byte-identical batched repeats) was
+  measured during the prerequisite spike and is recorded in the RDR.
+- **Operator subprocess timeouts now preserve partial output** (`nexus-h33x8.6`
+  a3). `claude -p` dispatch used `--output-format json`, which buffers until
+  the turn completes, so a subprocess killed at its 300s/600s timeout had
+  written zero bytes by construction and the timeout log never captured a
+  byte. Dispatch now uses `stream-json`, drains stdout/stderr incrementally
+  (the prior `.communicate()` discarded its buffer on cancellation), keeps
+  `proc.wait()` inside the timeout guard, and surfaces claude's own error
+  text on a non-zero exit instead of NDJSON envelope noise.
+  `OperatorTimeoutError` carries `partial_text` / `event_count` / `log_path`.
+- **Operator subprocesses load no ambient MCP servers** (`--strict-mcp-config`;
+  RDR-196 Gap 4, measured by the sibling session: ~92K -> ~45K context tokens
+  and roughly half the cost per tool-free operator call).
+- **`nx_answer` single-query fast path is reachable**: two seeded
+  retrieval-only plans (`document-discovery`, `corpus-coverage-check`) route
+  document-lookup phrasings to `query()` in seconds; a negative guard keeps
+  synthesis-shaped questions off them (a real false-reroute on "...in the
+  corpus" was found and fixed before ship).
+
+### Fixed
+
+- **CLI search never attached catalog document identity** (`nexus-mw2kg`,
+  found by the 7.11.0 post-release shakedown's live parity probe): the CLI
+  passed no catalog into `search_cross_corpus`, so `doc_id`, `chunk_count`
+  and `_display_path` never attached on CLI results. Four behaviors repaired
+  at once: the hybrid chunk-count file-size penalty is live on the CLI (it
+  had been silently inert since RDR-108 Phase 3 — CLI ranked by pure
+  distance while MCP penalized), `--max-file-chunks` actually filters
+  Phase-3 chunks (it was always a no-op for them), `--path` scoping matches
+  post-prune chunks via `_display_path`, and formatters resolve display
+  paths. CLI single-collection ordering now matches MCP. A catalog-factory
+  failure degrades loudly for `--max-file-chunks` (stderr warning that the
+  filter is under-filtering) instead of the previous crash.
+- **PDF / bibliography indexing** (`nexus-ov5tc`): MinerU small-caps `<sub>`/
+  `<sup>` heading shredding unwrapped; stem-only PDF catalog titles resolved
+  from the document (stem-guard backfill of title/author/year); service-mode
+  `nx enrich bib` was dead (stub had no `update`) and, once alive,
+  mis-attributed papers via a weak title guard — both fixed.
+
+### Changed
+
+- **Agent guidance: `nx_answer` mandate narrowed to reduce-from-many-documents
+  shapes** (`nexus-h33x8.6` (b)). The tool's own run table (n=142 executed)
+  puts it at p50 80s, p95 217s, 0.7% under 5s; the guidance layer claimed
+  "ALL analytical questions" and "composed retrieval is strictly more useful
+  than raw chunks". Every surface (session-start skill, subagent preflight,
+  all agent pre-flights, the entry-point skills, nexus/SKILL.md + reference)
+  now states the narrowed claim and the measured cost.
+- **Agent guidance: sequential-thinking before every decision**, not only
+  "non-trivial"/"complex" ones — the qualifier measured to zero top-level
+  calls in a full orchestrator session.
+- `nx_answer` docstring latency figures replaced with the measured ones.
+
+### Plugin (now live with `source.ref` = `v7.12.0`)
+
+The `conexus/PENDING_RELEASE.md` ledger is emptied: the nx_answer narrowing
+and the sequential-thinking rewrite across 10 agents, 14 skills and the
+subagent preflight become active in installed sessions with this pin.
+
 ## [7.11.0] - 2026-08-19
 
 Engine identity moves to `engine-service-v0.1.82` (cut, published, deployed

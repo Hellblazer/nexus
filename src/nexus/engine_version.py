@@ -348,7 +348,19 @@ from __future__ import annotations
 #: v0.1.71 gates on this tree: engine suite 1974/0/0 (1 skipped),
 #: run.sh --shakeout CANDIDATE SHAKEOUT PASSED, and
 #: run.sh --acquire ACQUIRE GATE PASSED against the published bytes.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 82)
+#: BUMPED TO (0, 1, 83) — conexus 7.12.0, paired release (2026-08-19). The
+#: engine half of RDR-195 (nexus-kmtlp: token-aware Voyage sub-batch
+#: planner, typed TOO_MANY_TOKENS_IN_BATCH -> adaptive halving, 422 with
+#: structured detail instead of a bare 500, per-sub-request instrumentation)
+#: plus grants-nexus-diag.xml. Gates on the tagged tree 119f6441b: engine
+#: suite 2151/0/0, run.sh --shakeout CANDIDATE SHAKEOUT PASSED, run.sh
+#: --candidate-migration REHEARSAL PASSED (floor v0.1.82 populated store,
+#: delta=1, invariants exact), published-client-write-gate PASSED (7.11.0
+#: client), RDR-195 MVV PASSED (laravel/framework, 0 TOO_MANY_TOKENS, 0 429).
+#: The client half (byte-aware upsert paging, 422 detail surfaced) rides THIS
+#: release; an engine below this floor answers the oversize case with a
+#: bare 500, which is the defect this release fixes.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 83)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

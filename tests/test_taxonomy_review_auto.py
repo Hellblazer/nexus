@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -1047,11 +1047,41 @@ class TestDispatchFailureRollup:
 
     @staticmethod
     def _failing_proc():
-        proc = AsyncMock()
+        # nexus-h33x8.6 a3: claude_dispatch no longer calls .communicate()
+        # (see nexus.operators.dispatch._drain_stream's docstring) -- it
+        # reads via proc.stdin.write/drain/close + proc.stdout.read(n) /
+        # proc.stderr.read(n) + proc.wait(). An unconfigured AsyncMock's
+        # child attributes are themselves AsyncMock, which are truthy and
+        # never compare equal to b"" -- _drain_stream's `if not chunk:
+        # return` EOF check never fires against one, so this proc must
+        # explicitly speak the streaming interface or the drain loop spins
+        # forever appending mock objects (confirmed: an unfixed version of
+        # this helper OOM'd a test run).
+        proc = MagicMock()
         proc.returncode = 1
-        proc.communicate = AsyncMock(
-            return_value=(b'{"type":"result","subtype":"error"}', b""),
-        )
+        proc.stdin = MagicMock()
+        proc.stdin.write = MagicMock()
+        proc.stdin.drain = AsyncMock(return_value=None)
+        proc.stdin.close = MagicMock()
+
+        stdout_bytes = b'{"type":"result","subtype":"error"}'
+        served = {"stdout": False}
+
+        async def _read_stdout(n: int = -1) -> bytes:
+            if served["stdout"]:
+                return b""
+            served["stdout"] = True
+            return stdout_bytes
+
+        async def _read_stderr(n: int = -1) -> bytes:
+            return b""
+
+        proc.stdout = MagicMock()
+        proc.stdout.read = _read_stdout
+        proc.stderr = MagicMock()
+        proc.stderr.read = _read_stderr
+        proc.wait = AsyncMock(return_value=1)
+        proc.kill = MagicMock()
         return proc
 
     @pytest.mark.asyncio

@@ -1,0 +1,62 @@
+# nexus-h33x8.6 a1 — single-query fast path.
+#
+# Sibling of document-discovery.yml: same single-`query`-step shape (see
+# that file's header for the fast-path rationale), covering the adjacent
+# "does the corpus contain anything on X" coverage-check phrasing rather
+# than the "find me the specific documents" discovery phrasing. Kept as
+# a separate template rather than folded into document-discovery so the
+# matcher has two distinct description vectors to rank against — the two
+# phrasings embed close but not identically, and either one reaching the
+# top match is sufficient to hit the single_query classification.
+#
+# Description text follows the abstract-themes.yml precedent (RDR-098):
+# a dense bag of short natural question-form phrasings — see
+# document-discovery.yml's header for the full rationale.
+#
+# DISCRIMINATOR TUNING (nexus-h33x8.6 critic round, 2026-08-19): the
+# original 4-sentence description ("What does the corpus have on this?
+# What does the knowledge base have on this? ...") false-matched
+# synthesis-shaped questions that happen to mention "corpus" -- e.g.
+# "what are the tradeoffs of eventual consistency in the corpus" scored
+# 0.4117, above the RDR-079 0.40 gate, and would have silently rerouted
+# a synthesis request onto a bare document list. The fix leans on VERB
+# shape ("does X cover this / have anything / yes-or-no") rather than
+# repeating the noun "corpus", since the noun is exactly what a
+# synthesis question sharing the same corpus/topic vocabulary also
+# contains. Empirically tuned (tests/test_document_lookup_seed_plans.py
+# ::TestDocumentDiscoverySeedPlansDoNotCatchSynthesisQuestions) against
+# the real bundled-MiniLM cosine path, not by inspection -- MiniLM's
+# short-text similarity is dominated by shared vocabulary, not verb
+# semantics, so small wording changes move scores non-monotonically;
+# "Yes or no:" as an explicit yes/no framing turned out to be the
+# strongest discriminator found. The margin on the closest adversarial
+# pair ("does the corpus cover session memory" 0.43 vs "tradeoffs of
+# eventual consistency in the corpus" 0.38) is real but not huge --
+# a future description edit MUST re-run that test file's full
+# parametrized suite, not just the positive half.
+
+name: corpus-coverage-check
+description: >-
+  Does the corpus cover this? Yes or no: does the corpus have
+  anything about this at all? Simply, is there anything in the corpus
+  about this?
+dimensions:
+  verb: research
+  scope: global
+  strategy: corpus-coverage-check
+required_bindings:
+  - question
+optional_bindings:
+  - corpus
+  - limit
+default_bindings:
+  corpus: knowledge
+  limit: 10
+tags: builtin-template,nexus-h33x8,single-step,fast-path
+plan_json:
+  steps:
+    - tool: query
+      args:
+        question: $question
+        corpus: $corpus
+        limit: $limit

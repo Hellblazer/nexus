@@ -7,7 +7,7 @@ effort: medium
 **Tier-aware discipline** — apply at session start and before every major step:
 
 1. **Read** widest → narrowest before duplicating effort:
-   - T3 (cross-project): `mcp__plugin_conexus_nexus__nx_answer(...)` for verb-shape questions; `mcp__plugin_conexus_nexus__search(...)` for keyword lookup.
+   - T3 (cross-project): `mcp__plugin_conexus_nexus__search(...)` for the check itself (tier checks use `search`, not `nx_answer`); reach for `nx_answer` only when the answer must be reduced from many documents.
    - T2 (project): `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`.
    - T1 (siblings, this session): `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`.
 2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_conexus_nexus__plan_search(query="<task>", limit=3)`.
@@ -19,11 +19,12 @@ effort: medium
 
 # research
 
-**You MUST call `nx_answer` for research questions. Direct `search`/`query`
-calls for design/architecture/planning work are an anti-pattern.** The
-plan library contains research-shape templates that compose retrieval +
-extract + synthesis; direct search skips the composition and returns
-chunks without the structure a research question needs.
+**Call `nx_answer` for research questions whose answer must be reduced
+from many documents** (design context spanning multiple RDRs/docs,
+cross-project comparison). The plan library contains research-shape
+templates that compose retrieval + extract + synthesis. For a single-
+source lookup, use `search`/`query` directly — see "When direct
+`search` is fine" below.
 
 ## The call
 

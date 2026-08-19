@@ -368,7 +368,23 @@ class TestRequiredEngineVersion:
         # regressions, gc_audit producers confirmed firing in production);
         # record-deploy written, cloud-client-path gate PASSED 3/3. So this
         # is NOT a paired bump: the engine was already live when 7.11.0 cut.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 82)
+        # BUMPED to (0,1,83) 2026-08-19: conexus 7.12.0, a PAIRED bump.
+        # v0.1.83 cut from 119f6441b carries the RDR-195 engine half
+        # (nexus-kmtlp .7-.12: token-aware Voyage sub-batch planner, typed
+        # TOO_MANY_TOKENS_IN_BATCH -> adaptive halving above callApi,
+        # per-planned-batch cap 64, HTTP 422 with structured detail instead
+        # of the bare 500, per-sub-request voyage_subrequest_sent
+        # instrumentation) plus grants-nexus-diag.xml (d9b917fb2). Gated
+        # BEFORE this bump on the tagged tree: engine suite 2151/0/0,
+        # --shakeout CANDIDATE SHAKEOUT PASSED, --candidate-migration
+        # REHEARSAL PASSED (floor v0.1.82 populated store, delta=1,
+        # invariants EXACT), published-client write gate PASSED (7.11.0 x
+        # candidate), RDR-195 MVV PASSED live (laravel/framework: 0
+        # TOO_MANY_TOKENS_IN_BATCH, 0 429, T2 nexus/rdr-195-mvv-measurements).
+        # The client half (byte-aware upsert paging + 422 detail surfaced)
+        # rides 7.12.0; deploy fires at the client tag push (paired-release
+        # choreography), post-tag --acquire and the cloud gates follow.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 83)
 
 
 class TestParseEngineVersion:

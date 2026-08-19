@@ -1049,3 +1049,80 @@ def test_silent_zero_notes_failed_collections(
     assert result.exit_code == 0, result.output
     assert "excluded by service errors" in result.output
     assert "knowledge__seam" in result.output
+
+
+# ── Catalog wiring into search_cross_corpus (nexus-mw2kg) ───────────────────
+#
+# The 7.11.0 shakedown's live parity probe found CLI results carrying
+# doc_id/chunk_count/_display_path all None: search_cmd's _retrieve never
+# passed catalog= to search_cross_corpus, so _attach_doc_ids_from_catalog
+# no-op'd and every downstream consumer keyed on doc_id (the
+# --max-file-chunks pass, apply_ranking_boosts' chunk-count penalty, the
+# --path _display_path scoping) ran on metadata that was never attached.
+# The MCP path passes its catalog; the 1ccaea204 parity test feeds identical
+# fixture LISTS to both sides so it structurally cannot catch this
+# input-construction divergence — this test pins the input construction.
+
+
+def test_search_cmd_passes_catalog_to_search_cross_corpus(
+    runner: CliRunner, cloud_env,
+) -> None:
+    mock_t3 = _mock_t3(["code__myrepo"])
+    sentinel_catalog = object()
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]) as ms, \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=sentinel_catalog) as mk, \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(main, ["search", "query", "--corpus", "code"])
+    assert result.exit_code == 0, result.output
+    assert ms.call_args is not None
+    assert ms.call_args.kwargs.get("catalog") is sentinel_catalog, (
+        "search_cmd must pass the catalog reader into search_cross_corpus — "
+        "without it _attach_doc_ids_from_catalog no-ops and doc_id/"
+        "chunk_count/_display_path never attach (nexus-mw2kg)"
+    )
+    # One reader, reused: the fix hoisted the three per-site constructions
+    # into a single build shared by retrieval, --max-file-chunks and scoring.
+    assert mk.call_count == 1, (
+        f"make_catalog_reader called {mk.call_count}x — the hoisted reader "
+        "must be built once and reused (nexus-mw2kg)"
+    )
+
+
+def test_search_cmd_catalog_failure_degrades_to_none(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """A catalog factory failure must not break search — catalog=None is the
+    documented no-op degrade path in _attach_doc_ids_from_catalog."""
+    mock_t3 = _mock_t3(["code__myrepo"])
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]) as ms, \
+         patch("nexus.catalog.factory.make_catalog_reader", side_effect=RuntimeError("no catalog")), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(main, ["search", "query", "--corpus", "code"])
+    assert result.exit_code == 0, result.output
+    assert ms.call_args is not None
+    assert ms.call_args.kwargs.get("catalog") is None
+
+
+def test_max_file_chunks_warns_when_catalog_unavailable(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """nexus-mw2kg review finding: pre-fix the max-file-chunks site crashed on
+    catalog-factory failure; post-fix it degrades to None — which must WARN
+    (under-filtering, not failing, is the quiet outcome) and keep results."""
+    mock_t3 = _mock_t3(["code__myrepo"])
+    fake_results = [SearchResult(
+        id="c1", content="x", distance=0.1, collection="code__myrepo",
+        metadata={},
+    )]
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=fake_results), \
+         patch("nexus.catalog.factory.make_catalog_reader", side_effect=RuntimeError("no catalog")), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(
+            main, ["search", "query", "--corpus", "code", "--max-file-chunks", "10"],
+        )
+    assert result.exit_code == 0, result.output
+    assert "no catalog available" in result.output
+    assert "c1" in result.output or "x" in result.output

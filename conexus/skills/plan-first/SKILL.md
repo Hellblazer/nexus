@@ -1,12 +1,13 @@
 ---
 name: plan-first
-description: Use when starting any retrieval task — route it through `mcp__plugin_conexus_nexus__nx_answer`, which runs the plan-match-first gate internally (match against the plan library, execute on hit, inline-plan on miss). Optionally `plan_search` first to inspect candidate plans. Raw `search` for keyword lookup only. Skipping nx_answer for a verb-shaped question is a defect.
+description: Use when starting a retrieval task whose answer must be reduced from many documents — route it through `mcp__plugin_conexus_nexus__nx_answer`, which runs the plan-match-first gate internally (match against the plan library, execute on hit, inline-plan on miss). Optionally `plan_search` first to inspect candidate plans. Raw `search`/`query` for file:line, single-fact, or keyword lookups (seconds vs nx_answer's p50 80s).
 effort: low
 ---
 
 # plan-first
 
-**Hard gate.** Every retrieval-shaped task routes through
+**Gate for reduce-from-many-documents retrieval.** A retrieval task
+whose answer must be reduced from many documents routes through
 `mcp__plugin_conexus_nexus__nx_answer`. The plan-match-first logic
 (library match → execute → inline planner on miss → auto-save) lives
 INSIDE `nx_answer` — there are no separately exposed `plan_match` /
@@ -21,8 +22,9 @@ INSIDE `nx_answer` — there are no separately exposed `plan_match` /
    dimensions={verb: "<verb>"} when known)`. On a library hit it executes the
    matched plan; on a miss it inline-plans and auto-saves the new plan, so the
    next identical intent is a cache hit.
-3. Raw `search` is for keyword lookup only ("find X in collection Y") — never
-   for analytical / verb-shaped questions.
+3. Raw `search`/`query` covers file:line, single-fact, or keyword lookups
+   ("find X in collection Y") — reach for `nx_answer` only when the answer
+   must be reduced from many documents.
 
 ## When to pass bindings
 

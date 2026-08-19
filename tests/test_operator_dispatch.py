@@ -29,13 +29,51 @@ import pytest
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
+def _one_shot_reader(data: bytes):
+    """Async ``read(n)``-shaped callable: returns *data* whole on the
+    first call, then ``b""`` (EOF) on every call after."""
+    state = {"served": False}
+
+    async def _read(n: int = -1) -> bytes:
+        if state["served"]:
+            return b""
+        state["served"] = True
+        return data
+
+    return _read
+
+
 def _make_proc(stdout: bytes = b'{"ok": true}', returncode: int = 0,
                stderr: bytes = b'') -> MagicMock:
-    """Return a mock asyncio.subprocess.Process."""
+    """Return a mock asyncio.subprocess.Process.
+
+    Exposes the stdin/stdout/stderr streaming interface claude_dispatch's
+    manual drain loop uses (``_feed_stdin`` / ``_drain_stream``) -- NOT
+    ``.communicate()``. nexus-h33x8.6 a3 found that ``communicate()``'s
+    internal ``read(-1)`` loop buffers into a coroutine-local list that a
+    ``wait_for()``-driven timeout cancellation discards (and the bytes
+    are already popped out of the StreamReader's own buffer by then
+    too), which made the nexus-1at5 timeout drain structurally empty
+    regardless of output format. claude_dispatch now reads via its own
+    accumulator that survives cancellation, so the mock speaks that
+    interface instead.
+    """
     proc = MagicMock()
     proc.returncode = returncode
-    proc.communicate = AsyncMock(return_value=(stdout, stderr))
+    proc.stdin = MagicMock()
+    proc.stdin.write = MagicMock()
+    proc.stdin.drain = AsyncMock(return_value=None)
+    proc.stdin.close = MagicMock()
+    proc.stdout = MagicMock()
+    proc.stdout.read = _one_shot_reader(stdout)
+    proc.stderr = MagicMock()
+    proc.stderr.read = _one_shot_reader(stderr)
+    proc.wait = AsyncMock(return_value=returncode)
     proc.kill = MagicMock()
+    # A handful of tests still stub .communicate directly for scenarios
+    # written before the manual drain loop existed; harmless to leave
+    # wired since nothing in claude_dispatch calls it any more.
+    proc.communicate = AsyncMock(return_value=(stdout, stderr))
     return proc
 
 
@@ -79,13 +117,18 @@ class TestEventLoopSafety:
                 ticks += 1
                 await asyncio.sleep(0)
 
-        async def yielding_communicate(input: bytes | None = None):  # noqa: A002
-            # Simulate I/O wait that yields the event loop.
-            await asyncio.sleep(0.005)
-            return b'{"result": "ok"}', b''
-
         proc = _make_proc()
-        proc.communicate = yielding_communicate
+        served = {"n": 0}
+
+        async def yielding_stdout_read(n: int = -1) -> bytes:
+            # Simulate I/O wait that yields the event loop.
+            if served["n"] == 0:
+                served["n"] += 1
+                await asyncio.sleep(0.005)
+                return b'{"result": "ok"}'
+            return b""
+
+        proc.stdout.read = yielding_stdout_read
 
         with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             counter_task = asyncio.create_task(counter())
@@ -206,6 +249,15 @@ class TestOptInToolAccess:
         argv = captured[0]
         assert "--allowedTools" not in argv, "default dispatch must be tool-free"
         assert "--mcp-config" not in argv, "default dispatch must not inject MCP servers"
+        # RDR-196 Gap 4 (nexus-0d, 2026-08-19): without --strict-mcp-config
+        # the tool-free child still LOADS the user's entire MCP server set
+        # (.mcp.json / user settings) -- measured ~92K context tokens and
+        # 2x the dollars per operator call vs ~45K with a strict empty
+        # config -- for a subprocess that has no tools to call them with.
+        assert "--strict-mcp-config" in argv, (
+            "tool-free dispatch must pass --strict-mcp-config so the child "
+            "loads ZERO MCP servers (no --mcp-config + strict = none)"
+        )
 
     @pytest.mark.asyncio
     async def test_allowed_tools_emits_flag(self) -> None:
@@ -254,6 +306,10 @@ class TestOptInToolAccess:
 
         argv = list(captured[0])
         assert "--mcp-config" in argv
+        # Opt-in servers are the ONLY servers: strict keeps the user's
+        # ambient .mcp.json / settings servers out of the child even when
+        # a caller grants specific ones (RDR-196 Gap 4).
+        assert "--strict-mcp-config" in argv
         cfg = json.loads(argv[argv.index("--mcp-config") + 1])
         assert cfg == {"mcpServers": {"nexus": {"command": "nx-mcp", "args": []}}}
 
@@ -501,10 +557,10 @@ class TestSubprocessContract:
         with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             await claude_dispatch("my unique prompt text", _SIMPLE_SCHEMA)
 
-        proc.communicate.assert_called_once()
-        stdin_bytes = proc.communicate.call_args[0][0]
+        proc.stdin.write.assert_called_once()
+        stdin_bytes = proc.stdin.write.call_args[0][0]
         assert b"my unique prompt text" in stdin_bytes, (
-            "Prompt not found in stdin bytes passed to communicate()"
+            "Prompt not found in stdin bytes passed to stdin.write()"
         )
 
     @pytest.mark.asyncio
@@ -907,18 +963,70 @@ class TestErrorHandling:
         """Timeout must kill the subprocess and raise OperatorTimeoutError."""
         from nexus.operators.dispatch import claude_dispatch, OperatorTimeoutError
 
-        proc = MagicMock()
-        proc.kill = MagicMock()
+        proc = _make_proc()
+        call_count = {"n": 0}
 
-        async def hang(input: bytes | None = None):  # noqa: A002
-            await asyncio.sleep(999)
-            return b'', b''
+        async def hang(n: int = -1) -> bytes:
+            # Only the FIRST call (the drain loop's own read, which is what
+            # must be cancelled by the timeout) hangs. Every later call
+            # (whichever of stdout/stderr didn't win the race, plus the
+            # post-kill mop-up reads) returns immediately -- mirrors the
+            # real dead-transport EOF behaviour after kill+wait.
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                await asyncio.sleep(999)
+            return b""
 
-        proc.communicate = hang
+        proc.stdout.read = hang
+        proc.stderr.read = hang
 
         with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorTimeoutError):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=0.01)
+
+        proc.kill.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_timeout_fires_when_streams_eof_but_process_never_exits(self) -> None:
+        """nexus-h33x8.6 review round 2 (code-review on dca12e1e3): a3 moved
+        the final ``await proc.wait()`` to AFTER the ``asyncio.wait_for``
+        that guards the read loop, mirroring the shape but not the
+        SCOPE of CPython's own ``Process.communicate()`` (which calls
+        ``self.wait()`` from INSIDE the coroutine tree it awaits). Both
+        streams reaching EOF does not guarantee the child has actually
+        exited -- it can close its stdout/stderr fds before its own
+        process exit completes. A ``proc.wait()`` left outside the
+        timeout guard then hangs forever with no kill ever firing.
+
+        Both streams EOF immediately (the default one-shot reader on
+        empty stdout/stderr), but ``proc.wait()`` never returns within
+        the budget -- this must still time out and kill, not hang.
+        """
+        from nexus.operators.dispatch import claude_dispatch, OperatorTimeoutError
+
+        proc = _make_proc(stdout=b"", stderr=b"")
+        call_count = {"n": 0}
+
+        async def wait_side_effect() -> int:
+            # First call (inside the guarded scope) hangs past the budget
+            # and must be cancelled by wait_for. The post-kill reap call
+            # in the except-block returns immediately -- the real
+            # transport reaps cleanly once the process is actually dead.
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                await asyncio.sleep(999)
+            return 0
+
+        proc.wait = wait_side_effect
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorTimeoutError):
+                # Outer bound: on a real regression (wait() back outside the
+                # guard) the dispatch hangs for the mock's 999s sleep; fail
+                # fast instead of stalling a worker (no pytest-timeout here).
+                await asyncio.wait_for(
+                    claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=0.05), timeout=2
+                )
 
         proc.kill.assert_called_once()
 
@@ -954,6 +1062,51 @@ class TestErrorHandling:
         with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorError, match="error_during_execution"):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_surfaces_claude_error_text_not_ndjson_envelope(self) -> None:
+        """GH #1414 REGRESSION (nexus-h33x8.6 review round 2, code-review on
+        dca12e1e3): a3 switched stdout to NDJSON (stream-json), but this
+        error path still read the RAW joined bytes for the snippet/detail/
+        durable-log fields -- mostly ``system``/``assistant`` envelope JSON
+        now, not claude's own error text. That is exactly the opacity class
+        the original GH #1414 fix existed to end, reintroduced one layer
+        down.
+
+        A realistic multi-line NDJSON stream ending in an ``is_error``
+        result must surface THAT result's own ``result`` text, not the
+        preceding envelope noise.
+        """
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        ndjson = "\n".join([
+            '{"type":"system","subtype":"init","cwd":"/tmp","session_id":"s1"}',
+            '{"type":"assistant","message":{"role":"assistant","content":'
+            '[{"type":"text","text":"thinking about the request"}]}}',
+            '{"type":"result","is_error":true,'
+            '"result":"claude reported: rate limit exceeded for this account",'
+            '"subtype":"error_during_execution","structured_output":null}',
+        ])
+        proc = _make_proc(stdout=ndjson.encode(), returncode=1, stderr=b"")
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        message = str(exc.value)
+        assert "rate limit exceeded for this account" in message, (
+            f"claude's own error text is missing from the surfaced message: {message!r}"
+        )
+        assert '"type":"system"' not in message, (
+            f"NDJSON envelope noise leaked into the surfaced message: {message!r}"
+        )
+        assert '"type":"assistant"' not in message, (
+            f"NDJSON envelope noise leaked into the surfaced message: {message!r}"
+        )
+        assert "thinking about the request" not in message, (
+            f"an intermediate assistant turn leaked into the surfaced message, "
+            f"not the terminal result: {message!r}"
+        )
 
     @pytest.mark.asyncio
     async def test_nonzero_exit_reports_both_streams_when_both_spoke(self) -> None:
@@ -1110,6 +1263,198 @@ class TestErrorHandling:
         with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorOutputError):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+
+# ── stream-json parsing (nexus-h33x8.6 a3) ──────────────────────────────────
+#
+# ``claude -p --output-format json`` buffers the ENTIRE response and writes
+# nothing until the turn completes, so a subprocess killed at timeout has
+# written exactly zero bytes BY CONSTRUCTION -- the nexus-1at5 partial-output
+# drain has never preserved one. Switching to ``--output-format stream-json``
+# (NDJSON, one event per line) puts bytes on the wire as they happen. The
+# terminal ``{"type":"result", ...}`` line is byte-identical in shape to the
+# single object ``--output-format json`` returns -- verified empirically
+# against the captured fixture pair below (same prompt, same schema, both
+# formats, same run family) -- so claude_dispatch's return contract for
+# callers is unchanged; only the wire format and the read mechanism differ.
+
+import pathlib  # noqa: E402 - deferred: only needed by the fixture-reading tests below
+
+_FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
+
+
+def _load_fixture_lines(name: str) -> list[str]:
+    text = (_FIXTURES_DIR / name).read_text()
+    return [line for line in text.splitlines() if line.strip()]
+
+
+class TestStreamJsonParsing:
+    """Unit tests for ``_parse_stream_json_output`` against a captured
+    fixture pair (tests/fixtures/claude_dispatch_{json,stream_json}_mode_
+    sample.*) -- one real ``claude -p`` invocation of the same trivial
+    prompt/schema, captured once in each output format."""
+
+    def test_final_result_matches_json_mode_output_shape(self) -> None:
+        """The reconstructed terminal event must carry the same
+        is_error/result/structured_output the plain json-mode call
+        returned for the identical prompt+schema -- proving the parser
+        doesn't change claude_dispatch's return contract."""
+        from nexus.operators.dispatch import _parse_stream_json_output
+
+        stream_raw = "\n".join(_load_fixture_lines("claude_dispatch_stream_json_sample.ndjson"))
+        json_mode = json.loads(
+            (_FIXTURES_DIR / "claude_dispatch_json_mode_sample.json").read_text()
+        )
+
+        final_result, partial_text, event_count = _parse_stream_json_output(stream_raw)
+
+        assert final_result is not None, "no terminal result event found in fixture"
+        assert final_result["is_error"] == json_mode["is_error"]
+        assert final_result["result"] == json_mode["result"]
+        assert final_result["structured_output"] == json_mode["structured_output"]
+        assert final_result["type"] == "result"
+        assert event_count == len(_load_fixture_lines("claude_dispatch_stream_json_sample.ndjson"))
+
+    def test_reconstructs_partial_text_when_killed_before_result(self) -> None:
+        """Feed every fixture line EXCEPT the terminal result event
+        (simulating a SIGKILL before the turn finished) and confirm the
+        parser reconstructs the in-flight structured-output JSON from the
+        ``input_json_delta`` stream events -- the dominant partial-content
+        shape for a schema-constrained dispatch (every real
+        claude_dispatch call passes json_schema, so the model answers via
+        a StructuredOutput tool call, not free text)."""
+        from nexus.operators.dispatch import _parse_stream_json_output
+
+        lines = _load_fixture_lines("claude_dispatch_stream_json_sample.ndjson")
+        pre_result_lines = [l for l in lines if json.loads(l).get("type") != "result"]
+        raw = "\n".join(pre_result_lines)
+
+        final_result, partial_text, event_count = _parse_stream_json_output(raw)
+
+        assert final_result is None, "no result line was fed -- must not fabricate one"
+        assert event_count == len(pre_result_lines)
+        # The fixture's input_json_delta chunks assemble to '{"ok": true}'.
+        assert '"ok"' in partial_text
+        assert "true" in partial_text
+
+    def test_skips_malformed_trailing_line_without_raising(self) -> None:
+        """A line truncated mid-write by SIGKILL (the writer died between
+        two fwrite() calls) must be skipped, not raise -- the whole point
+        of reconstructing partial output is resilience to a cut stream."""
+        from nexus.operators.dispatch import _parse_stream_json_output
+
+        lines = _load_fixture_lines("claude_dispatch_stream_json_sample.ndjson")
+        well_formed = [l for l in lines if json.loads(l).get("type") != "result"]
+        truncated = '{"type":"stream_event","event":{"type":"content_block_delta"'  # cut mid-object
+        raw = "\n".join(well_formed + [truncated])
+
+        final_result, partial_text, event_count = _parse_stream_json_output(raw)
+
+        assert final_result is None
+        assert event_count == len(well_formed), (
+            "the truncated trailing line must not count as a parsed event"
+        )
+
+    def test_empty_input_returns_none_and_zero_events(self) -> None:
+        from nexus.operators.dispatch import _parse_stream_json_output
+
+        final_result, partial_text, event_count = _parse_stream_json_output("")
+
+        assert final_result is None
+        assert partial_text == ""
+        assert event_count == 0
+
+    def test_no_result_line_and_no_recognized_events_yields_none(self) -> None:
+        """A plain single-blob payload (no ``type`` field at all -- the
+        shape every pre-a3 test in this file used, and still uses via
+        _make_proc's fallback default) must yield final_result=None so
+        claude_dispatch falls back to parsing it as a bare JSON blob."""
+        from nexus.operators.dispatch import _parse_stream_json_output
+
+        final_result, partial_text, event_count = _parse_stream_json_output(
+            '{"ok": true}'
+        )
+
+        assert final_result is None
+        assert partial_text == ""
+        assert event_count == 1
+
+
+class TestTimeoutPartialCapture:
+    """De-vacuation of the nexus-1at5 timeout drain (nexus-h33x8.6 a3).
+
+    Fake subprocess: stdout.read() returns a chunk of real captured
+    stream-json bytes (pre-result-event fixture lines, i.e. what a
+    SIGKILL-before-completion would have left on the wire) on its first
+    call, then hangs forever -- simulating a process that is still
+    running past the timeout budget with partial output already emitted.
+    """
+
+    @pytest.mark.asyncio
+    async def test_timeout_log_receives_reconstructed_partial_text(self) -> None:
+        from nexus.operators.dispatch import claude_dispatch, OperatorTimeoutError
+
+        lines = _load_fixture_lines("claude_dispatch_stream_json_sample.ndjson")
+        pre_result_lines = [l for l in lines if json.loads(l).get("type") != "result"]
+        partial_bytes = ("\n".join(pre_result_lines) + "\n").encode()
+
+        proc = _make_proc()
+        call_count = 0
+
+        async def stdout_read(n: int = -1) -> bytes:
+            # Call 1 (inside the drain loop): the partial NDJSON already on
+            # the wire when the timeout fires -- returns immediately, gets
+            # appended to the drain loop's accumulator.
+            # Call 2: the drain loop asks for more; the subprocess is still
+            # "thinking" past the timeout budget, so this hangs until
+            # asyncio.wait_for cancels it.
+            # Call 3+ (the post-kill mop-up read in claude_dispatch's
+            # timeout except-block): mirrors the real post-EOF behaviour a
+            # dead transport gives a StreamReader -- returns immediately,
+            # empty.
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return partial_bytes
+            if call_count == 2:
+                await asyncio.sleep(999)
+            return b""
+
+        proc.stdout.read = stdout_read
+
+        captured_log_calls: list[tuple] = []
+
+        def fake_persist(timeout: float, partial_text: str, stderr: bytes, event_count: int) -> str:
+            captured_log_calls.append((timeout, partial_text, stderr, event_count))
+            return "/fake/log/path.log"
+
+        with (
+            patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
+            patch("nexus.operators.dispatch._persist_timeout_log", side_effect=fake_persist),
+        ):
+            with pytest.raises(OperatorTimeoutError) as exc_info:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=0.05)
+
+        # nexus-h33x8.6 critic (a4 precondition): the reconstructed partial
+        # must be a STRUCTURED attribute on the exception, not only baked
+        # into the message string or persisted to the log file -- a4 (hard
+        # budget + partial results) needs to consume it directly.
+        from pathlib import Path
+
+        err = exc_info.value
+        assert err.partial_text != "", "OperatorTimeoutError.partial_text is empty"
+        assert '"ok"' in err.partial_text
+        assert err.event_count == len(pre_result_lines)
+        assert err.log_path == Path("/fake/log/path.log")
+
+        assert captured_log_calls, "_persist_timeout_log was never called"
+        _timeout, partial_text, _stderr, event_count = captured_log_calls[0]
+        assert partial_text != "", (
+            "the timeout log's reconstructed partial text is empty -- this is "
+            "exactly the nexus-1at5 vacuous-drain bug a3 exists to fix"
+        )
+        assert '"ok"' in partial_text
+        assert event_count == len(pre_result_lines)
 
 
 # ── MCP operator tools ─────────────────────────────────────────────────────
