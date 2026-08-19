@@ -39,12 +39,23 @@ import java.util.Map;
  *   <li>{@code input_type: null}, {@code output_dtype: null}, {@code output_dimension: null}
  *       — sent EXPLICITLY: the Python SDK serializes the unset params as JSON nulls, it
  *       does NOT omit them (captured wire body, voyageai 0.3.7, nexus-f4wcg 2026-07-07)</li>
- *   <li>{@code truncation: true} — LOAD-BEARING: omitting gives cosine ≈ 0.99995 drift</li>
+ *   <li>{@code truncation: true} — the API default, sent explicitly for byte parity with the
+ *       SDK. The earlier "omitting gives cosine ≈ 0.99995 drift" rationale is NOT supported:
+ *       omission is semantically identical to {@code true}, and a toggle-only probe (RDR-195
+ *       spike, nexus-kmtlp.1, 2026-08-19; 3000-char text, 3x each) put omitted-vs-true pairs
+ *       at 0.99998..1.0, the same band as true-vs-true repeats — i.e. the repeat-variance band
+ *       described in the next item, not a flag effect.</li>
  *   <li>Request body is BYTE-faithful to the Python SDK's (key order, {@code ", "}/{@code ": "}
- *       separators, ensure_ascii escaping): Voyage serves per-request stable results that can
- *       differ across byte-different-but-semantically-equal bodies by ~4e-5 cosine
- *       (region-dependent; broke the linux parity gate while macOS stayed bit-exact,
- *       nexus-f4wcg). Byte identity keeps both legs on the same serving identity.</li>
+ *       separators, ensure_ascii escaping): Voyage can differ across
+ *       byte-different-but-semantically-equal bodies by ~4e-5 cosine (region-dependent;
+ *       broke the linux parity gate while macOS stayed bit-exact, nexus-f4wcg). Byte identity
+ *       keeps both legs on the same serving identity. Scope of that stability (measured
+ *       2026-08-19, nexus-kmtlp.1, T2 {@code nexus_rdr/195-research-3}): byte-identical SINGLE
+ *       short-input requests repeat bit-exact (20/20); ~2 KB single inputs and any BATCHED
+ *       request repeat across 1-2 discrete variants, up to ~5e-5 cosine for 2-125 inputs and
+ *       down to 0.99978 for a 263-input/101K-token near-ceiling batch. Batch composition was
+ *       never seen to move a vector outside that repeat-variance band. Any live-Voyage equality
+ *       assertion on batched output must tolerate ~2e-4 cosine, not demand bit-equality.</li>
  *   <li>Sort response {@code data[]} by {@code index} (API may return out-of-order)</li>
  *   <li>Retry on 429 / 5xx with exponential backoff (max 3 attempts)</li>
  * </ul>

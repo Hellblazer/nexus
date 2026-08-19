@@ -180,14 +180,33 @@ engine for any pre-existing token accounting.
 
 ### Critical Assumptions
 
-- [ ] Voyage's `/v1/embeddings` embeds each input independently, so partitioning a batch does not
-  change any individual vector — **Status**: **Unverified — Spike REQUIRED before implementation**
-  — **Method**: currently Docs Only, which this document's own Method definitions declare
-  insufficient for a load-bearing assumption. Recorded as unverified deliberately, because this is
-  the **only** assumption here whose failure is *silent*: wrong vectors would be stored with no
-  error, no 400, and no log line. Every other failure mode in this RDR is loud.
+- [x] Voyage's `/v1/embeddings` embeds each input independently, so partitioning a batch does not
+  change any individual vector — **Status**: **Verified — Live Spike (2026-08-19, nexus-kmtlp.1)**
+  — **Method**: live `voyage-code-3` calls with the engine's exact `buildJson` body shape; record
+  T2 `nexus_rdr/195-research-3`. Five probe texts (56 B to 9 KB, code/prose/unicode) embedded
+  alone, inside a 125-input/65K-token batch, inside a 29-input batch, and (round 3) inside a
+  263-input/101K-token near-ceiling batch, at different positions; worst cross-composition
+  cosine 0.99994, max-abs 1.1e-3, and the 9 KB and 2.2 KB probes bit-exact across compositions.
+  What the evidence supports, stated no more strongly than measured: a text's vector takes one
+  of a small number of discrete, numerically-equivalent variants (≤ 2.2e-4 cosine apart) that
+  byte-identical repeated requests ALSO cycle through — 20 identical single-input repeats gave
+  1–2 distinct vectors per text, 20 identical 2-input repeats gave 2 per text, and the identical
+  near-ceiling batch repeated gave 168/263 bit-identical vectors with min cosine 0.99978 — so
+  every cross-composition deviation observed (≥ 0.99994) is SMALLER than the variance the same
+  request exhibits on repeat. Composition was never seen to move a vector outside that band, and
+  shuffled vs different-filler vs alone comparisons gave identical or near-identical results
+  (no dependence on neighbour content). That is the property the design needs: splitting a
+  batch changes nothing beyond the variance the unsplit request already carries, and the status
+  quo (300-text batches, bisect re-composition) already lives with it. Whether the variants come
+  from replica, kernel path, or padding shape is not established and is not load-bearing.
+  Consequence for tests: any live-Voyage equality assertion on batched output must tolerate
+  ~2e-4 cosine; `1 - 1e-6` is the ONNX bar, not Voyage's.
 
-  Three pieces of supporting evidence, none of which is a substitute for the spike:
+  This was recorded as unverified deliberately until the spike ran, because it is the **only**
+  assumption here whose failure is *silent*: wrong vectors would be stored with no error, no 400,
+  and no log line. Every other failure mode in this RDR is loud.
+
+  The three pieces of pre-spike supporting evidence, kept for the record:
   (a) The architecture itself is the strongest signal — cross-input context is what the *separate*
   contextualized endpoint and model exist to provide. `CceEmbedder.java:202` states outright that
   batching multiple texts into one CCE call "produces different embeddings due to cross-document
@@ -201,8 +220,8 @@ engine for any pre-existing token accounting.
   analogy, not corroboration of Voyage's remote behavior. Labelling it as corroboration was an
   overclaim in the first draft of this RDR.
 
-  **The spike**: embed one fixed text alone, then inside a large batch, and diff the vectors. Cheap,
-  decisive, and it must run before implementation begins.
+  **The spike** (run, see Status above): embed one fixed text alone, then inside a large batch,
+  and diff the vectors. Cheap, decisive, and it ran before implementation began.
 - [x] The `nexus-f4wcg` byte contract survives, because `buildJson` is not modified and each
   sub-batch is serialized by the same unmodified method — **Status**: Verified — **Method**: Source
   Search (`VoyageEmbedder.java:150-169`; `VoyageEmbedderBodyTest` asserts `buildJson` output only).
@@ -565,22 +584,26 @@ implementation phase precisely because of its independent delivery path.
 
 ### Prerequisites
 
-- [ ] **Composition spike (blocking).** Embed one fixed text alone and inside a large batch against
+- [x] **Composition spike (blocking).** Embed one fixed text alone and inside a large batch against
   live Voyage; diff the vectors. This verifies Critical Assumption 1, the only assumption here whose
   failure is silent. Implementation must not begin until it passes — gate round 1 reclassified this
   from a false "Verified (Docs Only)" and it is the reason that gate round returned BLOCKED.
+  **PASSED 2026-08-19** (nexus-kmtlp.1; result and the measured repeat-variance band in Critical
+  Assumption 1 and T2 `nexus_rdr/195-research-3`).
 - [x] All *other* load-bearing Critical Assumptions verified by Source Search; the one remaining
   unverified item (the bytes-per-token ratio) is explicitly non-load-bearing — see Decision
   Rationale.
 - [ ] `VoyageEmbedder` test-seam constructor added — no fake-server test of the class is possible
   without it.
-- [ ] A JDK provisioned in the implementation environment. Verified absent at authoring time
+- [x] A JDK provisioned in the implementation environment. Verified absent at authoring time
   (`/usr/libexec/java_home` finds no runtime), which blocks `./mvnw test`, the engine build, AND —
   via the gate-jar freshness check — the entire Python unit suite. Local mode runs a *downloaded
   signed native binary* (RDR-161), so a user can run the engine without a JDK but cannot build one;
-  this prerequisite is therefore easy to overlook until the suite errors at setup.
-- [ ] `scripts/build-gate-jar.sh` run after engine edits (the substrate freshness gate rejects a
-  stale jar and the whole Python suite errors at setup). Requires the JDK above.
+  this prerequisite is therefore easy to overlook until the suite errors at setup. (Maintainer box:
+  GraalVM 25.0.3 present, `./mvnw -q test-compile` green — nexus-kmtlp.2, 2026-08-19.)
+- [x] `scripts/build-gate-jar.sh` run after engine edits (the substrate freshness gate rejects a
+  stale jar and the whole Python suite errors at setup). Requires the JDK above. (Rebuilt
+  2026-08-19, suite reaches collection — nexus-kmtlp.2; re-run after every Phase 2 engine edit.)
 
 ### Minimum Viable Validation
 
@@ -753,14 +776,16 @@ only here.
 
 ### Assumption Verification
 
-**One load-bearing assumption remains unverified, and it gates implementation.** Gate round 1
-(see Revision History) found that assumption 1 — batch partitioning does not change any individual
-vector — was marked Verified on the strength of "Docs Only, corroborated by in-repo precedent",
-where the precedent was `Bge768BatchCompositionTest`, a *different embedder*. That was an
-overclaim, and it landed on the one assumption in this document whose failure is **silent**: wrong
-vectors stored, no error raised. It is now correctly recorded as **Unverified — Spike required
-before implementation**, and appears as the first Prerequisite. The spike is cheap and decisive:
-embed one fixed text alone, then inside a large batch, and diff the vectors.
+**The one load-bearing assumption that gated implementation is now verified by live spike
+(2026-08-19).** Gate round 1 (see Revision History) found that assumption 1 — batch partitioning
+does not change any individual vector — was marked Verified on the strength of "Docs Only,
+corroborated by in-repo precedent", where the precedent was `Bge768BatchCompositionTest`, a
+*different embedder*. That was an overclaim, and it landed on the one assumption in this document
+whose failure is **silent**: wrong vectors stored, no error raised. It was recorded as **Unverified
+— Spike required before implementation** and placed as the first Prerequisite; the spike then ran
+(nexus-kmtlp.1) and passed: every cross-composition deviation (≥ 0.99994 cosine) is smaller than
+the variance byte-identical repeated requests exhibit on their own (down to 0.99978 for a
+near-ceiling batch). Detail in Critical Assumption 1.
 
 Of the remaining four: three are Verified by Source Search (byte contract preserved because
 `buildJson` is untouched; the parity corpora never split; `TOO_MANY_TOKENS_IN_BATCH` is the
@@ -769,8 +794,8 @@ discriminator). The fourth — the bytes-per-token ratio — is intentionally un
 an incorrect ratio degrades throughput and cannot cause failure. It is measured during
 implementation per Performance Expectations.
 
-So: one Unverified-and-load-bearing (spike-gated, blocking), one Unverified-and-not-load-bearing
-(measured, non-blocking), three Verified.
+So, after the spike: four Verified, one Unverified-and-not-load-bearing (the bytes-per-token
+ratio, measured during implementation, non-blocking).
 
 #### API Verification
 
@@ -869,6 +894,26 @@ operational signal (adaptive-split rate) called out rather than N/A'd away.
 
 Gate findings are appended here to keep the design sections clean. Each gate round gets a dated
 subsection.
+
+### Prerequisite spike — 2026-08-19 — PASSED (nexus-kmtlp.1 / .2)
+
+Critical Assumption 1 flipped Unverified → Verified (Live Spike); Prerequisites 1, 4, 5 ticked.
+Three rounds against live `voyage-code-3`, engine-exact body shape. Round 1: five probes alone
+vs inside 125-input and 29-input mixed batches, worst cosine 0.99994. Round 2: byte-identical
+batched requests repeated give 0.99996–0.99997, identical single short inputs repeat bit-exact,
+several cross-composition pairs exactly 1.0. Round 3 (after the substantive-critic flagged the
+causal wording as under-evidenced and the near-ceiling regime as untested, T2
+`nexus_rdr/195-critique-kmtlp1-composition-spike-2026-08-19`): 20 identical repeats give 1–2
+discrete vectors per text; a 263-input/101K-token batch repeated gives 168/263 bit-identical,
+min cosine 0.99978; probes inside it vs alone 0.99994–1.0 (2.2 KB probe bit-identical to an
+alone variant). Conclusion stated as measured: cross-composition deviation never exceeds the
+same request's repeat variance; no dependence on neighbour content. Side finding: the
+`VoyageEmbedder.java` rationale "omitting `truncation` gives 0.99995 drift" is within that
+band (only that field toggled, 3x each) — and `truncation` is the API default, so omission is
+semantically identical and the 3000-char probe is below the per-text context where the flag
+could act; Javadoc corrected in place (field kept for SDK byte parity). Tolerance guidance for
+any live-Voyage batched equality assertion: ≥ 2e-4 cosine. Record: T2
+`nexus_rdr/195-research-3`.
 
 ### In-house gate — 2026-08-19 — PASSED (0 critical, 3 significant remediated in place)
 
