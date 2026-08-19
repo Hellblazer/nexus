@@ -3478,6 +3478,153 @@ class TestEdgeCases:
         assert canonical_chunk_id("doc-a") in result.output
         assert canonical_chunk_id("doc-b") in result.output
 
+    def test_show_cmd_assignments_flag_displays_quality_columns(self) -> None:
+        """nx taxonomy show <id> --assignments (nexus-92uh0): wires
+        ``HttpTaxonomyStore.get_assignment_details`` (nexus-onjvy quality
+        columns, zero callers before this) to a CLI surface. Mocked store —
+        no engine substrate — asserts the CLI calls the right store methods
+        and renders the returned quality columns."""
+        from unittest.mock import MagicMock, patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        mock_taxonomy = MagicMock()
+        mock_taxonomy.get_topic_doc_ids.return_value = [
+            canonical_chunk_id("doc-a"), canonical_chunk_id("doc-b"),
+        ]
+        mock_taxonomy.get_assignment_details.return_value = [
+            {
+                "doc_id": canonical_chunk_id("doc-a"),
+                "topic_id": 42,
+                "assigned_by": "hdbscan",
+                "similarity": 0.8734,
+                "source_collection": "proj",
+                "assigned_at": "2026-08-19T00:00:00Z",
+            },
+            {
+                "doc_id": canonical_chunk_id("doc-b"),
+                "topic_id": 42,
+                "assigned_by": "assign_single",
+                "similarity": None,
+                "source_collection": "proj",
+                "assigned_at": "2026-08-19T00:01:00Z",
+            },
+        ]
+        mock_db = MagicMock()
+        mock_db.taxonomy = mock_taxonomy
+        mock_db.__enter__.return_value = mock_db
+        mock_db.__exit__.return_value = False
+
+        runner = CliRunner()
+        with patch("nexus.commands.taxonomy_cmd._T2Database", return_value=mock_db):
+            result = runner.invoke(taxonomy, ["show", "42", "--assignments"])
+
+        assert result.exit_code == 0, result.output
+        mock_taxonomy.get_topic_doc_ids.assert_called_once_with(42, limit=20)
+        mock_taxonomy.get_assignment_details.assert_called_once_with(
+            [canonical_chunk_id("doc-a"), canonical_chunk_id("doc-b")],
+        )
+        assert "2 assignments" in result.output
+        assert canonical_chunk_id("doc-a") in result.output
+        assert canonical_chunk_id("doc-b") in result.output
+        assert "0.8734" in result.output
+        assert "hdbscan" in result.output
+        assert "assign_single" in result.output
+        assert "proj" in result.output
+        assert "2026-08-19T00:00:00Z" in result.output
+
+    def test_show_cmd_assignments_flag_filters_to_requested_topic(self) -> None:
+        """A doc_id returned by get_assignment_details for a DIFFERENT
+        topic_id than requested (e.g. reassigned between the two calls)
+        must not be displayed — the defensive client-side filter."""
+        from unittest.mock import MagicMock, patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        mock_taxonomy = MagicMock()
+        mock_taxonomy.get_topic_doc_ids.return_value = [canonical_chunk_id("doc-a")]
+        mock_taxonomy.get_assignment_details.return_value = [
+            {
+                "doc_id": canonical_chunk_id("doc-a"),
+                "topic_id": 99,  # reassigned away from the requested topic
+                "assigned_by": "hdbscan",
+                "similarity": 0.5,
+                "source_collection": "proj",
+                "assigned_at": "2026-08-19T00:00:00Z",
+            },
+        ]
+        mock_db = MagicMock()
+        mock_db.taxonomy = mock_taxonomy
+        mock_db.__enter__.return_value = mock_db
+        mock_db.__exit__.return_value = False
+
+        runner = CliRunner()
+        with patch("nexus.commands.taxonomy_cmd._T2Database", return_value=mock_db):
+            result = runner.invoke(taxonomy, ["show", "42", "--assignments"])
+
+        assert result.exit_code == 0, result.output
+        assert "No assignment details for topic 42." in result.output
+
+    def test_show_cmd_assignments_flag_no_docs(self) -> None:
+        """--assignments on a topic with no assigned docs reports plainly."""
+        from unittest.mock import MagicMock, patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        mock_taxonomy = MagicMock()
+        mock_taxonomy.get_topic_doc_ids.return_value = []
+        mock_db = MagicMock()
+        mock_db.taxonomy = mock_taxonomy
+        mock_db.__enter__.return_value = mock_db
+        mock_db.__exit__.return_value = False
+
+        runner = CliRunner()
+        with patch("nexus.commands.taxonomy_cmd._T2Database", return_value=mock_db):
+            result = runner.invoke(taxonomy, ["show", "42", "--assignments"])
+
+        assert result.exit_code == 0, result.output
+        assert "No documents in topic 42." in result.output
+        mock_taxonomy.get_assignment_details.assert_not_called()
+
+    def test_show_cmd_assignments_flag_real_rows_round_trip(self, tmp_path: Path) -> None:
+        """Substrate test (nexus-92uh0): seed a real assignment with
+        similarity/source_collection/assigned_by against the engine, then
+        confirm `nx taxonomy show --assignments` surfaces those exact
+        quality columns end-to-end (CLI -> HttpTaxonomyStore ->
+        /v1/taxonomy/assignments/details -> engine)."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        doc_id = canonical_chunk_id("quality-doc-a")
+        with T2Database(db_path) as db:
+            tid = _seed_topic(db.taxonomy, "quality-topic", collection="proj", doc_count=1)
+            _seed_assignment(
+                db.taxonomy, doc_id, tid,
+                assigned_by="hdbscan", similarity=0.9123, source_collection="proj",
+            )
+
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(taxonomy, ["show", str(tid), "--assignments"])
+
+        assert result.exit_code == 0, result.output
+        assert doc_id in result.output
+        assert "0.9123" in result.output
+        assert "hdbscan" in result.output
+        assert "proj" in result.output
+
 
 class TestTopicLinksTable:
     """topic_links T2 table for search-time linked-topic boost."""

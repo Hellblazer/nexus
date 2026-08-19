@@ -1369,6 +1369,7 @@ nx taxonomy discover -c docs__nexus --force     # re-discover (preserves operato
 nx taxonomy list                                # topic tree
 nx taxonomy list -c docs__nexus                 # topic tree for one collection
 nx taxonomy show 5                              # docs assigned to topic 5
+nx taxonomy show 5 --assignments                # per-assignment quality: chunk/confidence/provenance
 nx taxonomy review                              # interactive: accept/rename/merge/delete/skip
 nx taxonomy review --auto                       # unattended: batched claude_dispatch verdicts
 nx taxonomy review --auto --dry-run             # preview verdicts, apply nothing
@@ -1391,6 +1392,22 @@ nx taxonomy validate-refs docs/**/*.md                        # stale-reference 
 nx taxonomy backfill-source-collection                        # dry-run: backfill legacy source_collection rows
 nx taxonomy backfill-source-collection --apply                # commit the backfill (irreversible)
 ```
+
+### `nx taxonomy show --assignments`
+
+`nx taxonomy show TOPIC_ID --assignments [-n/--limit N]` (nexus-92uh0) shows
+per-assignment quality instead of a plain doc-id list: chunk (doc_id),
+confidence (`similarity`, blank when the assign path recorded none),
+`source_collection`, `assigned_by`, and `assigned_at` (UTC ISO-8601). This is
+the read path for `topic_assignments.similarity` / `source_collection` /
+`assigned_at` — written by every assign path (discover, `assign`,
+`assign_single`, projection) but previously visible nowhere; without it an
+operator could see a doc was assigned to a topic but not how confident the
+assignment was, when it was made, or which collection it came from
+(nexus-onjvy). `--limit` bounds how many of the topic's doc_ids are looked up
+(same default as the plain `show`, 20); rows are additionally filtered to the
+requested topic id defensively, in case a doc_id was reassigned between the
+doc-id lookup and the detail fetch.
 
 ### `nx taxonomy assign`
 
