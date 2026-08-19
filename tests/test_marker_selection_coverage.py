@@ -120,17 +120,35 @@ def _logical_lines(path: Path) -> list[str]:
     return logical
 
 
-def _is_real_selection_line(marker: str, line: str) -> bool:
-    """True if ``line`` is a genuine ``pytest -m <marker>`` invocation.
+_M_ARG_RE = re.compile(r"""-m[= ]\s*(?:"([^"]*)"|'([^']*)'|(\S+))""")
 
-    Anchored on ``pytest`` actually appearing before the ``-m`` flag, which
-    in turn must precede the marker name as a whole word, all within the
-    same logical line. This rejects prose/echo lines that merely mention
-    ``-m <marker>`` without a real pytest command — the exact overclaim
-    the first cut of this test made (nexus-s6dei code review, 2026-08-02).
+
+def _is_affirmative_selection_line(marker: str, line: str) -> bool:
+    """True iff ``line`` is a genuine ``pytest -m`` invocation that
+    AFFIRMATIVELY selects *marker*: pytest precedes ``-m``, the marker
+    appears in the ``-m`` expression NOT under a ``not``, and the
+    invocation is not ``--collect-only``.
+
+    nexus-vqnls: the previous matcher counted ANY ``pytest ... -m ...
+    <marker>`` co-occurrence — including ``-m "integration and not
+    lived_in"`` and collect-only counts — so a marker whose every
+    reference DESELECTED it still reported WIRED while its tests had zero
+    executing runner. "Someone references it" and "something executes it"
+    are different properties; the module header promises the second.
     """
-    pattern = re.compile(rf"\bpytest\b[^\n]*-m\b[^\n]*\b{re.escape(marker)}\b")
-    return bool(pattern.search(line))
+    if not re.search(r"\bpytest\b", line):
+        return False
+    if "--collect-only" in line or "--co" in line.split():
+        return False
+    m = _M_ARG_RE.search(line)
+    if not m:
+        return False
+    expr = next(g for g in m.groups() if g is not None)
+    if not re.search(rf"\b{re.escape(marker)}\b", expr):
+        return False
+    if re.search(rf"\bnot\s+{re.escape(marker)}\b", expr):
+        return False
+    return True
 
 
 def _iter_files(dirs: tuple[str, ...], globs: tuple[str, ...]) -> list[Path]:
@@ -147,7 +165,7 @@ def _iter_files(dirs: tuple[str, ...], globs: tuple[str, ...]) -> list[Path]:
 def _marker_is_selected(marker: str) -> bool:
     for path in _iter_files(_SELECTION_SEARCH_DIRS, _SELECTION_GLOBS):
         for line in _logical_lines(path):
-            if _is_real_selection_line(marker, line):
+            if _is_affirmative_selection_line(marker, line):
                 return True
     return False
 
@@ -171,30 +189,45 @@ def _marker_is_consumed_programmatically(marker: str) -> bool:
 # silently regress back to the overclaiming version.
 
 
-class TestIsRealSelectionLine:
+class TestIsAffirmativeSelectionLine:
     def test_real_pytest_invocation_is_selected(self) -> None:
-        assert _is_real_selection_line("slow", "uv run pytest -m slow -q")
+        assert _is_affirmative_selection_line("slow", "uv run pytest -m slow -q")
 
     def test_real_invocation_with_combined_expression_is_selected(self) -> None:
-        assert _is_real_selection_line(
+        assert _is_affirmative_selection_line(
             "lived_in", 'uv run pytest -m "integration and lived_in" -q'
         )
 
-    def test_negated_marker_in_a_real_invocation_still_counts(self) -> None:
-        # `-m "integration and not lived_in"` is a real command wired
-        # around lived_in, even though this particular invocation
-        # deselects it — the marker is demonstrably load-bearing here,
-        # unlike a marker that appears in no command at all.
-        assert _is_real_selection_line(
+    def test_negated_marker_does_NOT_count_as_wiring(self) -> None:
+        """FLIPPED PIN (nexus-vqnls). The previous version of this test
+        pinned the opposite — that a deselection counts as wiring — which
+        is exactly how lived_in reported WIRED with 39 tests and zero
+        executing runner. A deselection proves someone knows the marker
+        exists; it does not execute a single test carrying it."""
+        assert not _is_affirmative_selection_line(
             "lived_in", 'uv run pytest -m "integration and not lived_in" -q'
+        )
+
+    def test_collect_only_does_NOT_count_as_wiring(self) -> None:
+        """Collected is not executed (nexus-no210 bound drift, not
+        execution — 39 collected is still 39 never run)."""
+        assert not _is_affirmative_selection_line(
+            "lived_in",
+            'uv run pytest -m "integration and lived_in" --collect-only -q',
+        )
+
+    def test_negation_of_another_marker_still_counts_for_this_one(self) -> None:
+        assert _is_affirmative_selection_line(
+            "integration",
+            'uv run pytest -m "integration and not lived_in" -q',
         )
 
     def test_bare_flag_without_pytest_token_is_not_selected(self) -> None:
         """The exact overclaim this test caught in review: a non-comment
         line mentioning ``-m <marker>`` with no real pytest invocation
         must NOT count as wiring."""
-        assert not _is_real_selection_line("slow", 'echo "-m slow"')
-        assert not _is_real_selection_line(
+        assert not _is_affirmative_selection_line("slow", 'echo "-m slow"')
+        assert not _is_affirmative_selection_line(
             "slow", 'echo "run with -m slow explicitly"'
         )
 
@@ -230,7 +263,7 @@ class TestIsRealSelectionLine:
         try:
             logical = _logical_lines(path)
             assert any(
-                _is_real_selection_line("slow", line) for line in logical
+                _is_affirmative_selection_line("slow", line) for line in logical
             ), "continuation-joined pytest -m slow invocation must be detected"
         finally:
             path.unlink()
@@ -238,11 +271,53 @@ class TestIsRealSelectionLine:
 
 # ── Repo-wide coverage check ─────────────────────────────────────────────────
 
+#: ACKNOWLEDGED-DARK markers (nexus-vqnls): declared, tests exist, and NO
+#: affirmative executing selection exists — a named, tracked state, never a
+#: silent false-WIRED. Each entry carries the owning decision bead; the
+#: staleness guard below deletes entries the moment a real runner appears,
+#: so this table can only shrink truthfully, never hide new darkness.
+_ACKNOWLEDGED_DARK: dict[str, str] = {
+    "lived_in": (
+        "39 tests need a lived-in install; local-service-gate deliberately "
+        "runs -m 'integration and not lived_in'. Runner decision: nexus-699ot"
+    ),
+    "cloud_mode": (
+        "3 tests need a cloud-mode box; absence acknowledged in "
+        "local-service-gate.sh. Runner decision: nexus-699ot"
+    ),
+}
+
+
+@pytest.mark.parametrize("marker", sorted(_ACKNOWLEDGED_DARK))
+def test_acknowledged_dark_entries_are_still_dark(marker: str) -> None:
+    """Ratchet staleness: the moment an acknowledged-dark marker gains a
+    real affirmative runner, its entry must be REMOVED — a stale entry
+    could later hide a regression back to darkness."""
+    # Both halves of the OR the main gate uses (substantive-critic wave-2
+    # Significant: checking only the selection half would let a marker
+    # that gains a get_closest_marker() consumer keep its stale dark
+    # entry, silently defeating the ratchet's own guarantee).
+    assert not (
+        _marker_is_selected(marker) or _marker_is_consumed_programmatically(marker)
+    ), (
+        f"'{marker}' is now WIRED (affirmative selection or programmatic "
+        f"consumer) — remove it from _ACKNOWLEDGED_DARK (and close/annotate "
+        f"its decision bead)."
+    )
+    assert marker in set(_declared_markers()), (
+        f"'{marker}' is no longer declared in pyproject.toml — remove the "
+        "stale _ACKNOWLEDGED_DARK entry."
+    )
+
 
 @pytest.mark.parametrize("marker", _declared_markers())
 def test_marker_is_wired_to_a_real_invocation(marker: str) -> None:
-    """Every marker declared in pyproject.toml is selected or consumed
-    somewhere real — never dark-by-construction (nexus-s6dei)."""
+    """Every marker declared in pyproject.toml is AFFIRMATIVELY selected or
+    programmatically consumed somewhere real — never dark-by-construction
+    (nexus-s6dei), and never WIRED-by-deselection (nexus-vqnls: a negated
+    or collect-only reference proves awareness, not execution)."""
+    if marker in _ACKNOWLEDGED_DARK:
+        pytest.skip(f"acknowledged dark: {_ACKNOWLEDGED_DARK[marker]}")
     wired = _marker_is_selected(marker) or _marker_is_consumed_programmatically(
         marker
     )
