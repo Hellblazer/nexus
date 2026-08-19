@@ -118,6 +118,12 @@ class PgVectorRepositoryGcQuarantineTest {
             su.createStatement().execute("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute("GRANT USAGE ON SEQUENCE nexus.catalog_links_id_seq TO " + SVC_ROLE);
+            // nexus-sybbh: gc_quarantine_orphans/gc_expire_quarantine now INSERT a
+            // gc_audit row in the same transaction as their move/expire (catalog-033-2/
+            // -3). The "ALL TABLES" grant above covers the table itself, but gc_audit.id
+            // is a BIGSERIAL -- INSERT needs USAGE on its backing sequence separately,
+            // same as catalog_links_id_seq above.
+            su.createStatement().execute("GRANT USAGE ON SEQUENCE nexus.gc_audit_id_seq TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.gc_quarantine_orphans(int, text, text, text, text, int) TO " + SVC_ROLE);
             su.createStatement().execute(

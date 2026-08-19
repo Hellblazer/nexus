@@ -679,7 +679,25 @@ public final class TaxonomyRepository {
         int dim = dev.nexus.service.vectors.PgVectorRepository.dimForCollection(collection);
         String[] chashArr = chashes.toArray(new String[0]);
 
-        return tenantScope.withTenant(tenant, ctx -> {
+        // nexus-0uuit: belt, mirroring assignMany's own DeadlockRetry wrap above.
+        // taxonomy-013-doc-count-lock-order.xml fixes the topics.doc_count trigger's
+        // OWN lock-order self-conflict (Hal's named production root cause). That fix
+        // alone is PROVABLY INSUFFICIENT though (TopicsDocCountDeadlockConcurrencyTest,
+        // real PG: still 20/20 rounds deadlock even with a perfectly ordered, join-free,
+        // single-row-at-a-time trigger lock loop) — see that changelog's own
+        // IMPLEMENTATION NOTE for the confirmed second mechanism: the INSERT below
+        // (inside assign_from_chashes_<dim>'s `persisted` CTE) carries an FK to
+        // nexus.topics(id), and Postgres takes an implicit FOR KEY SHARE lock on each
+        // referenced topics row AS EACH inserted row is processed, in `nearest`'s own
+        // `ORDER BY c.chash, ...` order — uncorrelated with topic_id. Two concurrent
+        // callers touching an overlapping topic set acquire those implicit locks in
+        // arbitrary per-call order BEFORE the trigger's own ordered loop ever runs, so
+        // the trigger cannot retroactively reorder a lock a still-earlier statement in
+        // the SAME transaction already holds. Idempotent: `persisted`'s INSERT is
+        // ON CONFLICT DO NOTHING and the deadlock loser's whole transaction is rolled
+        // back by Postgres before this retry re-runs, so a retry can never double-assign
+        // or double-count.
+        return DeadlockRetry.run("taxonomy.assignFromChashes", () -> tenantScope.withTenant(tenant, ctx -> {
             // chunks_<dim>.chash is bytea (RDR-180); the HTTP/route boundary carries
             // hex text, so the existence probe goes through ChashHex.hex(...) — the
             // house-blessed jOOQ seam that binds hex->bytes / fetches bytes->hex
@@ -710,7 +728,7 @@ public final class TaxonomyRepository {
             out.put("cross_assigned", crossAssigned);
             out.put("unmatched_chashes", unmatched);
             return out;
-        });
+        }));
     }
 
     /**

@@ -798,10 +798,42 @@ public final class VectorHandler implements HttpHandler {
         String collection           = requireString(body, "collection");
         String quarantineCollection = requireString(body, "quarantine_collection");
         String quarantinedAt        = requireString(body, "quarantined_at");
-        int sampleLimit             = optInt(body, "sample_limit", 20);
+        // nexus-0uuit/sybbh crit-fix critique 2026-08-19 (code-review-expert):
+        // sample_limit was caller-supplied with no upper bound, unlike every
+        // other gc_audit producer -- clamp server-side to the same forensic
+        // UPPER BOUND gc_audit's writers already honor (defense in depth:
+        // the SQL side, nexus.gc_quarantine_orphans / catalog-033-2, also
+        // enforces this ceiling independently, AND floors a negative value
+        // to 0 -- something this clamp alone does not do, see
+        // #clampSampleLimit's javadoc).
+        int sampleLimit = clampSampleLimit(optInt(body, "sample_limit", 20));
 
         var outcome = repo.quarantineOrphans(tenant, collection, quarantineCollection, quarantinedAt, sampleLimit);
         HttpUtil.send(ex, 200, json(Map.of("moved", outcome.moved(), "sample", outcome.sample())));
+    }
+
+    /**
+     * Upper-bound clamp for {@code handleGcQuarantineOrphans}'s caller-supplied
+     * {@code sample_limit} (nexus-0uuit/sybbh crit-fix critique 2026-08-19, round 2:
+     * code-review-expert found the inline {@code Math.min} had zero direct coverage —
+     * the one existing test, {@code CatalogGcAuditProducersTest
+     * #quarantineOrphans_oversizedSampleLimitRequest_clampsAndFlagsTruncation}, calls
+     * {@link PgVectorRepository#quarantineOrphans} directly and only exercises the
+     * SQL-side clamp, redundantly re-capping at the identical ceiling — a revert of
+     * THIS method would go undetected by any prior test). Extracted to a
+     * package-private static method so it is directly unit-testable without an HTTP
+     * round trip or a database: see {@code VectorHandlerSampleLimitClampTest}.
+     *
+     * <p>UPPER-BOUND ONLY, by design, not full parity with the SQL clamp: unlike
+     * {@code nexus.gc_quarantine_orphans}'s own {@code LEAST(GREATEST(...,0),5000)}
+     * (catalog-033-2), this does not floor a negative {@code requested} value to 0 —
+     * {@code Math.min(-1, GC_AUDIT_MAX_CHASHES)} returns {@code -1} unchanged. That is
+     * safe end-to-end ONLY because the SQL function's own independent floor is what
+     * actually neutralizes a negative value before it reaches {@code LIMIT}; a future
+     * caller of this method for some OTHER purpose must not assume it floors.
+     */
+    static int clampSampleLimit(int requested) {
+        return Math.min(requested, dev.nexus.service.db.CatalogRepository.GC_AUDIT_MAX_CHASHES);
     }
 
     /**

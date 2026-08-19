@@ -1,0 +1,344 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-0uuit (P1 — conexus-ddh0, cloud 5xx incident 2026-08-15): fixes the
+    `topics.doc_count` recompute trigger's lock-order inversion that surfaced
+    as `ERROR: deadlock detected` / SQLSTATE 40P01 -> HTTP 500 from
+    `nexus.assign_from_chashes_<dim>`'s manifest write path.
+
+    ROOT CAUSE (established via the cloud engine container log's deadlock
+    DETAIL lines, all 8 events "while locking tuple in relation topics"):
+    `nexus.topics_doc_count_recount_ins()` / `_del()` (taxonomy-003-doc-
+    count-trigger.xml, AFTER INSERT/DELETE STATEMENT triggers on
+    `topic_assignments` fired by every `assign_from_chashes_<dim>` call)
+    UPDATE `nexus.topics` FROM an UNORDERED `SELECT DISTINCT tenant_id,
+    topic_id FROM new_rows`/`old_rows` transition-table scan. Two concurrent
+    callers whose affected-topic sets overlap lock those `topics` rows in
+    PLAN order, not a shared deterministic order — A holds X wants Y, B
+    holds Y wants X: a lock-order inversion of the trigger statement against
+    itself, needing only ordinary write concurrency (assign_from_chashes is
+    called on every flush's taxonomy hook).
+
+    THE FIX, both parts prescribed in the bead (Hal ROOT CAUSE comment,
+    2026-08-15 23:22):
+
+    (1) CORRECTNESS — deterministic lock order FIRST: a `SELECT ... FROM
+        nexus.topics WHERE (tenant_id, id) IN (...) ORDER BY tenant_id, id
+        FOR UPDATE` acquires every affected topics row lock, in that fixed
+        order, before any UPDATE touches them. An ORDER BY applied only to
+        the driving subquery that then feeds an unordered join into the
+        UPDATE's own FROM clause is NOT reliable (the UPDATE's internal join
+        plan is free to visit rows in a different order); the ORDER BY has
+        to sit on the FOR UPDATE query itself, whose row-locking happens as
+        rows are returned from the (post-sort) top of the plan — the
+        standard PostgreSQL "always lock rows in the same order" pattern.
+
+        IMPLEMENTATION NOTE (found by TopicsDocCountDeadlockConcurrencyTest's
+        GREEN phase against real PG, not merely reasoned about — THREE
+        successive wrong/incomplete hypotheses below, kept as a record of
+        what does NOT work, because every one of them looked correct by
+        inspection):
+
+          1. Bare `FOR UPDATE` (no `OF <table>` target list) is flatly
+             rejected by PostgreSQL whenever a DISTINCT or GROUP BY clause
+             appears ANYWHERE in that statement's FROM-list, even inside
+             an unrelated joined subquery the lock target list never
+             names — `ERROR: FOR UPDATE is not allowed with DISTINCT
+             clause` / `... GROUP BY clause` (rewriting DISTINCT to an
+             equivalent GROUP BY). CORRECTED (substantive-critic,
+             2026-08-19, verified via direct PostgreSQL 16 EXPLAIN/query
+             reproduction): an earlier version of this note also claimed
+             `OF <table>` does not exempt a statement from this
+             restriction — that claim is WRONG. `FOR UPDATE OF <table>`
+             IS exempt: it compiles and runs even when the same
+             statement's FROM-list joins a DISTINCT-producing subquery
+             elsewhere. The bare-form restriction above is real and
+             reproducible; the blanket extension to `OF <table>` was not.
+
+          2. Materializing the DISTINCT pairs into plain arrays via
+             `array_agg` in a genuinely separate, lock-clause-free
+             statement, then `SELECT ... FROM nexus.topics t JOIN
+             unnest(array1, array2) AS a(...) ON ... ORDER BY t.tenant_id,
+             t.id FOR UPDATE OF t` DOES compile and run — and it was
+             still abandoned: repeated runs against real PG
+             (TopicsDocCountDeadlockConcurrencyTest, 17-20 real 40P01s
+             out of 20 rounds, `Where: while locking tuple ... in
+             relation "topics"` in the DETAIL) showed this form did NOT
+             reliably serialize concurrent callers either. CORRECTED
+             (substantive-critic, 2026-08-19): an earlier version of this
+             note attributed that failure to a specific claimed
+             PostgreSQL mechanism — "`LockRows` sits BELOW `Sort` for a
+             JOIN plan" — which is WRONG (independent `EXPLAIN` on this
+             exact unnest-join + `ORDER BY` + `FOR UPDATE OF t` shape
+             shows `LockRows` sitting ABOVE `Sort`, i.e. receiving
+             already-sorted input — the OPPOSITE of the claimed
+             mechanism). The 17-20/20 deadlocks observed while testing
+             this form are more likely attributable to CONTAMINATION from
+             the SECOND, independent deadlock source documented below
+             (the implicit FK-lock hazard in
+             `assign_from_chashes_<dim>`'s own INSERT), which was present
+             throughout every test run in this section and was never
+             isolated out before this join-based form was rejected. The
+             true mechanism behind this form's non-serialization (if one
+             exists independent of source 2) was not conclusively
+             established here. What IS established, empirically and
+             repeatedly (see the trigger fix below): only the
+             single-table, join-free, one-row-at-a-time `FOR UPDATE` loop
+             reliably serializes concurrent callers under this test.
+
+        THE TRIGGER-LEVEL FIX: a single-table, single-row, PK-indexed
+        `SELECT ... WHERE tenant_id = ? AND id = ? FOR UPDATE` has no join
+        and no sort/lock ordering ambiguity to defeat — Postgres locks
+        EXACTLY the one named row. Running that statement inside a
+        PL/pgSQL loop over a PRE-SORTED (`ORDER BY tenant_id, topic_id` in
+        the `array_agg` itself) array of affected topics guarantees every
+        concurrent invocation acquires the shared subset of topics locks
+        in the identical relative order, one indexed row-lock statement at
+        a time — the textbook deadlock-avoidance pattern, applied at the
+        granularity where PostgreSQL actually honors it. This closes Hal's
+        NAMED root cause exactly: the trigger statement no longer conflicts
+        against ITSELF.
+
+        CORRECTION (an earlier version of this note claimed "Verified GREEN
+        ... 0 deadlocks" here — that was wrong; re-running
+        TopicsDocCountDeadlockConcurrencyTest against real PG with ONLY this
+        trigger fix applied still shows 20/20 rounds deadlocking, with the
+        SAME "while locking tuple ... in relation topics" DETAIL, now
+        pointing at THIS function's own `PERFORM ... FOR UPDATE` loop
+        statement). The trigger fix is NECESSARY but NOT SUFFICIENT: a
+        SECOND, independent deadlock source survives it. The INSERT inside
+        `assign_from_chashes_<dim>`'s `persisted` CTE (taxonomy-006) carries
+        an FK to `nexus.topics(id)`, and PostgreSQL takes an implicit `FOR
+        KEY SHARE` lock on each REFERENCED topics row AS EACH inserted row
+        is processed — in `nearest`'s own `ORDER BY c.chash, similarity,
+        topic_id` order, which is uncorrelated with topic_id. Two concurrent
+        callers touching an overlapping topic set therefore still acquire
+        those implicit locks in arbitrary, per-call order — BEFORE the
+        trigger's own perfectly-ordered loop even starts — and `FOR UPDATE`
+        (requested by the trigger) conflicts with a `FOR KEY SHARE` already
+        held by the OTHER transaction (from ITS own earlier, differently-
+        ordered INSERT), reopening the identical two-party cycle one level
+        up. No fix confined to the trigger function can close this: by the
+        time the trigger runs, the conflicting lock from the earlier,
+        unordered INSERT statement is already held. Reordering the INSERT
+        itself (`... FROM nearest ORDER BY topic_id, chash` before the
+        `persisted` CTE's INSERT) would close it at the root but touches
+        `assign_from_chashes_<dim>` across all three dims (taxonomy-006) —
+        deferred as separate, larger-blast-radius follow-up work, not
+        bundled into this changeset. THE BELT THAT ACTUALLY CLOSES nexus-
+        0uuit TODAY: `TaxonomyRepository#assignFromChashes` (Java) now wraps
+        its transaction in `DeadlockRetry.run(...)`, the SAME bounded-retry
+        belt `assignMany`/`importBatch` already use in this file (bead
+        nexus-ps9wb) — the bead's own explicitly-authorized alternative
+        ("retry the statement on SQLSTATE 40P01 with bounded backoff...
+        after retries are exhausted"). Idempotent and safe: a deadlock
+        victim's whole transaction is rolled back by Postgres before the
+        retry re-runs, and `persisted`'s `ON CONFLICT DO NOTHING` makes a
+        retried pass equivalent to the first. Verified GREEN (both fixes
+        together, the SAME test): zero exceptions escape
+        `assignFromChashes` across repeated concurrent rounds, and every
+        topic's final `doc_count` matches an independent recount.
+
+    (2) PROBABILITY — narrow the lock-holding window: the ORIGINAL body
+        recomputes `doc_count` via a scalar `SELECT COUNT(*) ...` subquery
+        evaluated once PER topics ROW inside the UPDATE's SET clause, so the
+        table-scan work for topic N+1 happens while topic N's (and every
+        earlier topic's) row lock is still held. This changeset restructures
+        both functions as: (a) acquire ALL locks up front (the ORDER BY FOR
+        UPDATE step above), then (b) recompute every affected topic's count
+        via ONE batched GROUP BY aggregate (not a per-row correlated
+        subquery), then (c) a single flat UPDATE ... FROM joining the
+        pre-aggregated counts. The expensive scan work in step (b) still
+        touches the same rows overall, but it happens as ONE pass rather
+        than N re-evaluated subqueries feeding an UPDATE that is
+        simultaneously trying to hold N locks — narrowing the window during
+        which the just-acquired topics locks sit exposed to a concurrent
+        acquirer.
+
+        A true "increment by delta" was considered and REJECTED: `new_rows`
+        (the INSERT transition table) captures BOTH genuinely new rows and
+        rows touched only via `ON CONFLICT DO UPDATE` (the assign_from_
+        chashes cross-collection pass) — Postgres transition tables do not
+        expose xmin/xmax to distinguish the two, so a naive "+1 per
+        new_rows entry" delta would silently inflate doc_count on every
+        cross-collection re-flush of an already-assigned chash. The batched-
+        aggregate recompute above stays an EXACT full recount (zero drift
+        risk) while still achieving the bead's "narrow the lock window"
+        goal by moving the scan cost off the per-row critical path.
+
+    doc_count is STILL trigger-maintained only (taxonomy-003-4's COMMENT ON
+    COLUMN contract, unchanged) — this changeset supersedes taxonomy-003-1/2
+    (the function bodies) via CREATE OR REPLACE; taxonomy-003-3 (the trigger
+    definitions themselves, `REFERENCING NEW/OLD TABLE AS new_rows/old_rows`)
+    is untouched, so the transition-table names below match verbatim.
+
+    NOT IN SCOPE (bead explicitly excludes): the write_many >30s Voyage-429
+    edge-timeout 5xx class from the same incident window is a SEPARATE cause
+    (CCE embedder retry-storm against the public edge's 30s upstream bound,
+    tracked on conexus-ddh0 / a nexus-side CCE backoff bead) — this
+    changeset does not touch it and must not be credited with fixing it.
+
+    Test: TopicsDocCountDeadlockConcurrencyTest reproduces the deadlock against
+    the PRE-fix function shape (two threads, overlapping topic sets in
+    opposite orders, real PG) and proves the POST-fix function survives N
+    concurrent rounds with correct final doc_counts.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="taxonomy-013-1" author="nexus-0uuit">
+        <comment>topics_doc_count_recount_ins: deterministic ORDER BY FOR UPDATE lock acquisition + single batched-aggregate recompute (fixes 40P01 deadlock, nexus-0uuit)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_ins()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant_ids TEXT[];
+    v_topic_ids  BIGINT[];
+    v_i          INT;
+BEGIN
+    -- Materialize the distinct (tenant_id, topic_id) pairs FIRST, PRE-SORTED
+    -- (ORDER BY inside array_agg itself — deterministic regardless of
+    -- new_rows' own row order), in a statement carrying NO locking clause.
+    SELECT array_agg(tenant_id ORDER BY tenant_id, topic_id),
+           array_agg(topic_id  ORDER BY tenant_id, topic_id)
+      INTO v_tenant_ids, v_topic_ids
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM new_rows) d;
+
+    -- (1) CORRECTNESS: acquire every affected topics row lock up front, ONE
+    -- ROW AT A TIME via a single-table, PK-indexed, join-free `FOR UPDATE`
+    -- — see the IMPLEMENTATION NOTE above for why a JOIN-based `ORDER BY
+    -- ... FOR UPDATE` does NOT reliably serialize this (PostgreSQL's
+    -- LockRows node locks in JOIN order, not sorted order, once a join is
+    -- involved). Iterating the PRE-SORTED arrays above one indexed
+    -- single-row lock at a time is what actually guarantees every
+    -- concurrent invocation acquires the shared topics in the same
+    -- relative order.
+    FOR v_i IN 1 .. COALESCE(array_length(v_topic_ids, 1), 0) LOOP
+        PERFORM 1 FROM nexus.topics
+         WHERE tenant_id = v_tenant_ids[v_i] AND id = v_topic_ids[v_i]
+           FOR UPDATE;
+    END LOOP;
+
+    -- (2) PROBABILITY: recompute doc_count for every affected topic via ONE
+    -- batched GROUP BY aggregate (not a per-row correlated subquery
+    -- re-evaluated once per topics row), narrowing the window the
+    -- just-acquired locks above sit held while the scan work happens.
+    UPDATE nexus.topics t
+       SET doc_count = c.cnt
+      FROM (
+          SELECT ta.tenant_id, ta.topic_id, COUNT(*) AS cnt
+            FROM nexus.topic_assignments ta
+            JOIN (SELECT DISTINCT tenant_id, topic_id FROM new_rows) a
+              ON a.tenant_id = ta.tenant_id AND a.topic_id = ta.topic_id
+           GROUP BY ta.tenant_id, ta.topic_id
+      ) c
+     WHERE t.tenant_id = c.tenant_id AND t.id = c.topic_id;
+    RETURN NULL;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <!-- Restores taxonomy-003-1's original body verbatim. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_ins()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+BEGIN
+    UPDATE nexus.topics t
+       SET doc_count = (
+           SELECT COUNT(*)
+             FROM nexus.topic_assignments ta
+            WHERE ta.topic_id = t.id
+              AND ta.tenant_id = t.tenant_id
+       )
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM new_rows) a
+     WHERE t.id = a.topic_id
+       AND t.tenant_id = a.tenant_id;
+    RETURN NULL;
+END;
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="taxonomy-013-2" author="nexus-0uuit">
+        <comment>topics_doc_count_recount_del: same fix, DELETE-path (fixes 40P01 deadlock, nexus-0uuit)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_del()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant_ids TEXT[];
+    v_topic_ids  BIGINT[];
+    v_i          INT;
+BEGIN
+    -- Materialize the distinct (tenant_id, topic_id) pairs FIRST, PRE-SORTED
+    -- — same reasoning as the INSERT-path function above.
+    SELECT array_agg(tenant_id ORDER BY tenant_id, topic_id),
+           array_agg(topic_id  ORDER BY tenant_id, topic_id)
+      INTO v_tenant_ids, v_topic_ids
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM old_rows) d;
+
+    -- (1) CORRECTNESS: same single-row, join-free, PK-indexed lock loop as
+    -- the INSERT-path function above (see its IMPLEMENTATION NOTE).
+    FOR v_i IN 1 .. COALESCE(array_length(v_topic_ids, 1), 0) LOOP
+        PERFORM 1 FROM nexus.topics
+         WHERE tenant_id = v_tenant_ids[v_i] AND id = v_topic_ids[v_i]
+           FOR UPDATE;
+    END LOOP;
+
+    -- (2) PROBABILITY: single batched-aggregate recompute, LEFT JOINed so a
+    -- topic whose LAST assignment was just deleted (zero remaining rows,
+    -- absent from the aggregate's GROUP BY) still resets to 0 rather than
+    -- being skipped.
+    UPDATE nexus.topics t
+       SET doc_count = COALESCE(c.cnt, 0)
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM old_rows) a
+      LEFT JOIN (
+          SELECT ta.tenant_id, ta.topic_id, COUNT(*) AS cnt
+            FROM nexus.topic_assignments ta
+            JOIN (SELECT DISTINCT tenant_id, topic_id FROM old_rows) a2
+              ON a2.tenant_id = ta.tenant_id AND a2.topic_id = ta.topic_id
+           GROUP BY ta.tenant_id, ta.topic_id
+      ) c ON c.tenant_id = a.tenant_id AND c.topic_id = a.topic_id
+     WHERE t.tenant_id = a.tenant_id AND t.id = a.topic_id;
+    RETURN NULL;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <!-- Restores taxonomy-003-2's original body verbatim. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_del()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+BEGIN
+    UPDATE nexus.topics t
+       SET doc_count = (
+           SELECT COUNT(*)
+             FROM nexus.topic_assignments ta
+            WHERE ta.topic_id = t.id
+              AND ta.tenant_id = t.tenant_id
+       )
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM old_rows) a
+     WHERE t.id = a.topic_id
+       AND t.tenant_id = a.tenant_id;
+    RETURN NULL;
+END;
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
