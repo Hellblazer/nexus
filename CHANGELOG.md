@@ -6,6 +6,73 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.11.0] - 2026-08-19
+
+Engine identity moves to `engine-service-v0.1.82` (cut, published, deployed
+and cloud-gated 2026-08-19; recall 12/12 exact, zero parity regressions).
+Local-mode installs receive that engine on every path.
+
+This release is the client half of a silent-failure sweep: several shipped
+features turned out to be fully built with a wire that never carried current,
+so they did nothing. Those are wired here.
+
+### Fixed
+
+- **Agent-facing search was unranked.** `apply_hybrid_scoring` and
+  `apply_quality_boost` had exactly one call site, the CLI, so MCP `search`
+  and `query` sorted by raw vector distance. Frecency scores written on every
+  code chunk, the dedicated frecency-only reindex path, per-repo `.nexus.yml`
+  scoring weights, and the bibliographic quality boost had never affected an
+  agent query. Both boosts now run on the MCP path via a single shared
+  `search_engine.apply_ranking_boosts`, and a parity test pins MCP ordering to
+  the CLI's. Catalog-routed paths are documented out (engine combined-query
+  rows carry no frecency or bibliographic fields); `structured=True` keeps raw
+  distances; `query()` document grouping keys on hybrid score.
+- **`nx taxonomy label` aborted its whole run on the first HTTP 409** and
+  re-selected already-relabelled topics forever, making roughly one topic of
+  net progress per run while reporting hundreds of renames. Failures are now
+  caught per topic and per batch, and a selection filter excludes topics whose
+  label has already moved off the discovery-time pattern.
+- **The taxonomy label run log was zero bytes** across every rotation while the
+  command printed a pointer to it. Failures now reach it.
+- **`nx taxonomy split` silently dropped assignments** when the T3 fetch
+  returned fewer documents than requested: the persist step deletes the parent's
+  assignments unconditionally, so a partial fetch destroyed the remainder. The
+  split now refuses when coverage is incomplete, leaving the parent untouched,
+  and prints the redistribution.
+- **`nx doctor --check-mcp-logs` scanned the wrong directory**, walking Claude
+  Code's cache rather than nexus's own `mcp.log`, so none of nexus's error
+  signatures had an automated consumer.
+- **Twelve `nx doctor --check-*` modes were opt-in only** and absent from the
+  default run, including the aspect-queue check. Five now run by default as a
+  supplementary section; the rest stay opt-in with a documented reason.
+- **`nexus.gc_audit` was empty for the store's entire history** despite a full
+  schema, so no reap or purge was auditable and chunk losses could not be
+  attributed. Engine-side producers now write an audit row in the same
+  transaction as their delete (engine half in `engine-service-v0.1.82`);
+  client-side, `nx catalog purge-trash` records a marker and a doctor check
+  cross-references it against the audit trail.
+- **`assign_from_chashes_<dim>` deadlocked under concurrent callers**, surfacing
+  as HTTP 500s in production. Engine half in `engine-service-v0.1.82`.
+- **The retrieval drift gate measured below the boost layer**, so a total loss
+  of the topic boost was invisible to it in both directions. A second gate now
+  measures through `apply_topic_boost`. Its fixture's environment pin was also
+  being silently overwritten by an autouse fixture, which means the original
+  raw-layer gate had likely never produced a real signal.
+
+### Added
+
+- `nx taxonomy show TOPIC_ID --assignments` surfaces per-assignment quality
+  (similarity, source collection, assigning agent, timestamp) through the
+  `assignments/details` route, which had no caller since it was built.
+
+### Changed
+
+- The migration rehearsal derives `PREV_RELEASE` and `PREV_ENGINE_TAG` from git
+  history instead of hand-typed literals, so the harness can no longer be
+  rotated onto an engine tag no release ever pinned, or drift two releases
+  behind, without anything noticing.
+
 ## [7.10.0] - 2026-08-18
 
 Paired release: engine identity moves to `engine-service-v0.1.80`

@@ -395,9 +395,18 @@ class TestConsoleHealthTwin:
         cfg = tmp_path / "cfg"
         (cfg / "catalog").mkdir(parents=True)
         (cfg / "catalog" / ".catalog.db").write_bytes(b"")
-        # collect_health_data imports nexus_config_dir function-locally, so patch
-        # the source module rather than an attribute the module does not hold.
-        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: cfg)
+        # Redirect via env, NOT monkeypatch.setattr("nexus.config.
+        # nexus_config_dir", ...): nexus_config_dir() reads NEXUS_CONFIG_DIR
+        # at call time, so setenv reaches every consumer — including modules
+        # FIRST-imported during this test. The setattr form leaked: the
+        # health run below first-imports nexus.gc_purge_marker (deferred
+        # import in _check_gc_audit_non_empty_after_purge), whose module-level
+        # `from nexus.config import nexus_config_dir` captured the patch
+        # lambda BY VALUE; teardown restored nexus.config but not that
+        # binding, pinning every later purge-marker read/write in the process
+        # to this test's tmp dir (broke TestGcPurgeMarker on CI shard 3,
+        # v7.11.0 release PR #1467).
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
         monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
 
         with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
