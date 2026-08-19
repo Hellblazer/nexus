@@ -1376,11 +1376,30 @@ async def test_mcp_server_round_trip():
          if k.startswith(("NX_", "NEXUS_", "CHROMA_", "VOYAGE_"))}
     )
     env.pop("NX_SERVICE_URL", None)
+    # The autouse _isolate_t1_sessions fixture minted NX_T1_SESSION /
+    # NX_T1_SESSION_ID against the TEST SUBSTRATE engine; forwarding them
+    # makes the child's T1 routing take USE_INHERITED and present a token
+    # the pinned endpoint below never issued (401 on /v1/t1/put, no lease
+    # to self-heal from in the isolated config dir). Strip them so the
+    # spawned server MINTS its own session against the endpoint it is
+    # actually pointed at. Latent since the fixture landed; first surfaced
+    # when c847182ce made this test actually RUN under the gate.
+    for t1_var in ("NX_T1_SESSION", "NX_T1_SESSION_ID", "NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED"):
+        env.pop(t1_var, None)
+    # With the inherited token gone the child takes the MINT branch, which
+    # needs a resolvable session id (NX_SESSION_ID — resolve_active_session_id's
+    # env tier; CLAUDE_CODE_SESSION_ID is not forwarded and the isolated config
+    # dir has no session file). A fresh uuid makes the child mint its own
+    # session against the endpoint pinned below — the same MINT code path a
+    # real MCP spawn executes at session start (production usually resolves
+    # the id via CLAUDE_CODE_SESSION_ID instead; the mint itself is identical).
+    from uuid import uuid4
     env.update({
         "NX_STORAGE_BACKEND": "service",
         "NX_SERVICE_HOST": host,
         "NX_SERVICE_PORT": str(port),
         "NX_SERVICE_TOKEN": token,
+        "NX_SESSION_ID": str(uuid4()),
     })
     server_params = StdioServerParameters(command=str(nx_mcp), args=[], env=env)
     async with stdio_client(server_params) as (read_stream, write_stream):
