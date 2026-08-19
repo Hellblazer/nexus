@@ -4,6 +4,17 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.11.0] - 2026-08-19
+
+Plugin version aligned with conexus 7.11.0. Advancing `source.ref` to
+`v7.11.0` makes the previously-pending guard fixes live in installed
+sessions: the nexus-2e874 quoting-bypass repairs across the routing guards
+(`git_add_all_redirects_to_explicit_paths`,
+`subagent_git_write_requires_orchestrator`, `pre_close_verification_hook`)
+and their shared `degraded_token_variants()` helper plus its vendored `sn`
+copy, and the nexus-ayfxh rdr-audit skill correction (bead sweeps must query
+both case forms of RDR tokens and never bare numbers).
+
 ## [7.10.0] - 2026-08-18
 
 ### Fixed

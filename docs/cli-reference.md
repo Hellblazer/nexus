@@ -2190,6 +2190,23 @@ Health check for all dependencies.
 nx doctor
 ```
 
+**Supplementary checks (new in 7.11.0).** After the default sweep prints its
+own result, `nx doctor` additionally runs the cheap, read-only subset of the
+`--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
+`aspect-queue`, and `t1`. Before 7.11.0 all fourteen `--check-*` modes were
+opt-in only, so a real backlog was invisible unless an operator happened to
+run its exact flag (the motivating case: an aspect-queue throwing hundreds of
+claim failures while nothing in the default run watched it). These are
+visibility-only and never change the sweep's exit code: their failure
+semantics are not uniform, so gating on them would be an unreviewed policy
+change. Each runs isolated, so one crashing cannot hide the rest, and the
+section ends by naming the flags a default run still does NOT cover
+(`--check-schema`, `--check-search`, `--check-quotas`, `--check-mcp-logs`,
+`--check-tier-discipline`, `--check-storage-boundary`,
+`--check-post-store-hooks`, `--check-mineru`, `--check-wal-retention`) so the
+blind spots stay explicit. The section is printed on the human-readable path
+only; `--json` output shape is unchanged.
+
 Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and (local-service mode only) the service cross-encoder reranker model.
 
 Data-token self-minting (nexus-wrwb7, RDR-005 2a): a `mint_token` presence + reachability check that always runs (not behind a `--check-*` flag). Unconfigured (the default — most installs) reports a loud-but-passing skip line, since self-minting is optional and the static `service_token` path runs unchanged. When `mint_token` IS configured it routes through `DataTokenManager`'s own process-wide, TTL-cached singleton (never a throwaway manager — nexus-ssqk9 fixed a residue-discipline bug where the check used to mint a FRESH token on every single `nx doctor` invocation) and reports which of three things happened on success, plus the granted TTL: MINTED a fresh token, REUSED one already live in-process, or REUSED one borrowed from the cross-process lease file (nexus-9c7t9, below). A real `nx doctor` invocation is its own fresh subprocess with an empty in-process cache, so its own two outcomes are "minted a fresh" (no lease existed yet, or it had gone stale) or "reused the cached (lease file)" (a prior `nx` invocation's mint is still fresh); "reused the cached (in-process)" is observable only inside a long-lived process such as the MCP server. Degrades to a soft warning (never fatal, never a silent "ok") on an unresolvable endpoint or a rejected mint. If the credential is bound to a tenant other than `"default"` (see `mint_tenant` above), configure `mint_tenant` too — the doctor check mints against `mint_tenant` (or `"default"`) exactly like every other call site; an unconfigured `mint_tenant` against a mint-locked credential bound to a different tenant surfaces as the same 403 the `mint_tenant` table entry above documents. IMPORTANT caveat baked into the success line's wording: pre-cutover on the managed cloud path the edge still strips client `Authorization` and injects its own credential (RDR-005 2a staged cutover), so a successful round trip through the edge does not yet prove this credential's own authority — treat it as reachability, not proof, until the cutover.
@@ -2224,7 +2241,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--check-resources` | Probe POSIX semaphore headroom and report orphan multiprocessing-tracker pressure. Exits 2 with `Errno 28` when the namespace is exhausted (MinerU workers / orphan chroma children / trackers re-parented to init after ungraceful MCP shutdowns) |
 | `--check-taxonomy` | Verify the `topic_links` ≡ projection-assignment invariant (GH #252). Exits 1 on drift |
 | `--check-tier-discipline` | Audit tier-write activity for the current session: prints the tier-write summary and warns when a substantive session has no write-back (Phase 1B nexus-a52i) |
-| `--check-mcp-logs` | Scan Claude Code's per-server MCP cache for nx-mcp silent-death signatures (`STDIO connection dropped`, `stdio transport error`). macOS only; skips cleanly elsewhere (RDR-094 Phase H, nexus-50u5) |
+| `--check-mcp-logs` | Summarize ERROR/CRITICAL events in nexus's OWN structured MCP log (`<NEXUS_CONFIG_DIR>/logs/mcp.log` plus rotations), counted by event name with the most-recent example per event. Until 7.11.0 this scanned ONLY Claude Code's per-server cache, so nexus's own error signatures had no automated consumer at all; that cache scan survives as a clearly-labeled secondary section, since it carries a distinct signal the nexus-side log cannot (client-side stdio transport death: `STDIO connection dropped`, `stdio transport error`, macOS only, skips cleanly elsewhere — RDR-094 Phase H, nexus-50u5) |
 | `--mcp-log-hours N` | Lookback window in hours for `--check-mcp-logs` (default: 24) |
 | `--check-storage-boundary` | RDR-120 P0.A AST-scan for direct `sqlite3.connect` / `voyageai.Client` calls and `T2Database`/`T3Database` constructions outside the named allowlists in `storage_boundary_lint.py`. The per-line `# epsilon-allow:` escape token is retired (RDR-186 P4): surviving sites are enumerated per file with exact counts; a new site is a hard violation |
 | `--fail-on-violation` | With `--check-storage-boundary`, exit 1 if any violation is found (otherwise the lint is informational) |

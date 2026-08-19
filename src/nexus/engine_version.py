@@ -348,7 +348,7 @@ from __future__ import annotations
 #: v0.1.71 gates on this tree: engine suite 1974/0/0 (1 skipped),
 #: run.sh --shakeout CANDIDATE SHAKEOUT PASSED, and
 #: run.sh --acquire ACQUIRE GATE PASSED against the published bytes.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 80)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 82)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

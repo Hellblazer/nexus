@@ -351,7 +351,24 @@ class TestRequiredEngineVersion:
         # invariants EXACT), published-client write gate PASSED (7.9.0 x
         # candidate), post-publish --acquire PASSED. Deploy relay arms at
         # the v7.10.0 client-tag push.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 80)
+        #
+        # BUMPED to (0,1,82) 2026-08-19: conexus 7.11.0. v0.1.82 cut from
+        # 433246839 carries nexus-0uuit (topics.doc_count deadlock: the
+        # taxonomy-013 ordered single-row FOR UPDATE loop plus a
+        # DeadlockRetry belt on assignFromChashes, closing the live cloud
+        # 500s from the 2026-08-15 incident) and nexus-sybbh (catalog-033
+        # gc_audit producers on every reap/purge path, in the same
+        # transaction as their deletes). Fully gated BEFORE this bump: full
+        # engine suite 2148/0/0 twice on the tagged tree, --shakeout
+        # CANDIDATE SHAKEOUT PASSED, --candidate-migration PASSED (delta=5,
+        # row invariants EXACT over a populated v0.1.80 floor store),
+        # published-client write gate PASSED (published 7.10.0 x candidate),
+        # post-publish --acquire PASSED 12/12. DEPLOYED and cloud-gated
+        # 2026-08-19 BEFORE this release (recall 12/12 exact, zero parity
+        # regressions, gc_audit producers confirmed firing in production);
+        # record-deploy written, cloud-client-path gate PASSED 3/3. So this
+        # is NOT a paired bump: the engine was already live when 7.11.0 cut.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 82)
 
 
 class TestParseEngineVersion:
