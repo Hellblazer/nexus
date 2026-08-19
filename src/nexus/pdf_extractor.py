@@ -411,6 +411,33 @@ def _normalize_mineru_latex(md: str) -> str:
     return md
 
 
+_MINERU_FONT_TAG_RE = re.compile(r"</?su[bp]\s*>", re.IGNORECASE)
+
+
+def _unwrap_mineru_font_tags(md: str) -> str:
+    """Drop MinerU's HTML ``<sub>``/``<sup>`` tags, keeping their text verbatim.
+
+    MinerU renders small-caps headings, run-in paragraph heads, and figure/
+    table captions (ACM/arXiv templates) as letter-interleaved subscript
+    spans — ``U<sub>n</sub>ifi<sub>e</sub>d C<sub>os</sub>t`` for
+    "Unified Cost" — because the small-cap glyphs sit below the line's
+    nominal font size. Measured on papers/2512.11001.pdf (2026-08-19):
+    30/70 chunks and 17/35 headings carried the tags, so heading retrieval
+    embedded word fragments instead of words.
+
+    MinerU emits real math as LaTeX (``$o_{1}$``), so HTML sub/sup in its
+    markdown are a font-size heuristic, not semantics; unwrapping costs at
+    most a chemical-formula subscript (``CO<sub>2</sub>`` -> ``CO2``) and
+    restores whole words everywhere else. Only the ``sub``/``sup`` tag
+    names match — ``<subtle>`` or ``<b>`` are untouched. Idempotent.
+
+    Called from ``PDFExtractor._extract_with_mineru`` per page, next to
+    ``_normalize_mineru_latex``, before lengths are measured. Existing
+    indexed chunks need a re-index to pick up the clean text.
+    """
+    return _MINERU_FONT_TAG_RE.sub("", md)
+
+
 @dataclass
 class ExtractionResult:
     """Result of PDF text extraction."""
@@ -1291,7 +1318,7 @@ class PDFExtractor:
                 return
             # Success. Normalize before measuring length so per_page_lengths is
             # consistent with the stored normalized text.
-            md = _normalize_mineru_latex(md)
+            md = _unwrap_mineru_font_tags(_normalize_mineru_latex(md))
             if span <= 1:
                 _append_page(s, md, content_list, pdf_info)
             else:
@@ -1826,7 +1853,7 @@ class PDFExtractor:
         page_count = len(pdf_info)
 
         # md_text is already normalized: _extract_with_mineru applies
-        # _normalize_mineru_latex per-page so per_page_lengths and
+        # _normalize_mineru_latex + _unwrap_mineru_font_tags per-page so per_page_lengths and
         # page_boundaries are consistent with the stored text.
         total_len = len(md_text)
 

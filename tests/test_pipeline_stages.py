@@ -1049,3 +1049,45 @@ def test_pipeline_data_kept_on_enrichment_failure(db) -> None:
     ro = MagicMock(spec=ExtractionResult)
     ro.text, ro.metadata, ro.title = "some text", {"page_count": 1, "docling_title": "Test"}, "Test"
     assert _enrich_metadata_from_extraction("h1", ro, Path("/test.pdf"), t3, col, "docs__test") is False
+
+
+class TestStreamingCatalogHookTitle:
+    """The streaming tail used to read ``metadata["title"]`` / ``["author"]``
+    — keys no extractor writes (they are ``docling_title`` / ``pdf_title`` /
+    ``pdf_author``) — so every streamed PDF reached ``_catalog_pdf_hook``
+    with ``title=stem, author=""``. Resolve through the one shared chain
+    (``resolve_pdf_title``) and the real author key (2026-08-19,
+    papers/2512.11001.pdf registered as "2512.11001")."""
+
+    def test_hook_receives_resolved_title_and_author(self, db) -> None:
+        fr = _er(1)
+        fr.metadata["docling_title"] = "My Paper Title"
+        fr.metadata["pdf_author"] = "Jane Doe"
+        with patch("nexus.pipeline_stages._catalog_pdf_hook") as hook:
+            _run_with_col(
+                db,
+                col_get_return={"ids": ["abc_0"], "metadatas": [
+                    {"title": "", "content_hash": "abc123", "page_number": 1}]},
+                fake_result=fr,
+                fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
+                pdf_path="/paper.pdf")
+        assert hook.call_count == 1
+        kw = hook.call_args.kwargs
+        assert kw["title"] == "My Paper Title"
+        assert kw["author"] == "Jane Doe"
+
+    def test_hook_falls_back_to_h1_when_extractor_titles_empty(self, db) -> None:
+        """MinerU path: both metadata titles empty, markdown opens with # H1."""
+        fr = _er(1)
+        fr.text = "# Rethinking Query Optimization\n\n" + fr.text
+        fr.metadata["docling_title"] = ""
+        fr.metadata["pdf_title"] = ""
+        with patch("nexus.pipeline_stages._catalog_pdf_hook") as hook:
+            _run_with_col(
+                db,
+                col_get_return={"ids": ["abc_0"], "metadatas": [
+                    {"title": "", "content_hash": "abc123", "page_number": 1}]},
+                fake_result=fr,
+                fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
+                pdf_path="/2512.11001.pdf")
+        assert hook.call_args.kwargs["title"] == "Rethinking Query Optimization"

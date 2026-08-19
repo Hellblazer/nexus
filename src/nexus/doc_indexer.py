@@ -1839,12 +1839,8 @@ def _pdf_chunks(
     # Compute source_title once before the loop so bib lookup uses the same value.
     # nexus-8l6 fallback: extractor metadata wins; otherwise derive from
     # first H1 or normalised filename (preserves initialisms like RDR, API).
-    from nexus.indexer_utils import derive_title  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-    source_title = (
-        str(result.metadata.get("docling_title") or "").strip()
-        or str(result.metadata.get("pdf_title") or "").strip()
-        or derive_title(pdf_path, body=None)
-    )
+    from nexus.indexer_utils import resolve_pdf_title  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    source_title = resolve_pdf_title(result.metadata, pdf_path, result.text)
     bib: dict = {}
     if bib_enrich_enabled:
         from nexus.bib_enricher import enrich as bib_enrich  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import

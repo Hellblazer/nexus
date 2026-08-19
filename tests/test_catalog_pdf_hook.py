@@ -99,3 +99,94 @@ class TestPdfCatalogHook:
         assert rows[0] == 1
         rows = (only_document().physical_collection,)
         assert rows[0] == "docs__v2"
+
+
+class TestPdfCatalogHookTitleBackfill:
+    """Mirror of nexus-ivzw8 for PDFs (papers/2512.11001.pdf, 2026-08-19).
+
+    The RDR-102 D1 pre-flight registers every PDF with ``title=stem`` before
+    extraction runs, so the post-index hook always takes the ``existing``
+    branch — which wrote only chunk_count/indexed_at/mtime. The extracted
+    title/author/year therefore NEVER reached the catalog for any PDF; it
+    only looked right when the filename happened to be the title. The
+    update branch must stem-guard backfill exactly like the markdown hook.
+    """
+
+    def test_reindex_backfills_stem_placeholder(self, tmp_path, monkeypatch):
+        from nexus.pipeline_stages import _catalog_pdf_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        # pre-flight shape: no title yet -> stem placeholder
+        _catalog_pdf_hook(
+            pdf_path=Path("/data/2512.11001.pdf"),
+            collection_name="knowledge__x",
+            title="",
+        )
+        assert only_document().title == "2512.11001"
+
+        _catalog_pdf_hook(
+            pdf_path=Path("/data/2512.11001.pdf"),
+            collection_name="knowledge__x",
+            title="Rethinking Query Optimization for Multi-Agent Systems [Vision]",
+            author="Zoi Kaoudi, Ioana Giurgiu",
+            year=2025,
+            chunk_count=78,
+        )
+        doc = only_document()
+        assert doc.title == "Rethinking Query Optimization for Multi-Agent Systems [Vision]"
+        assert doc.author == "Zoi Kaoudi, Ioana Giurgiu"
+        assert doc.year == 2025
+        assert doc.chunk_count == 78
+
+    def test_reindex_never_clobbers_curated_title(self, tmp_path, monkeypatch):
+        from nexus.pipeline_stages import _catalog_pdf_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        _catalog_pdf_hook(
+            pdf_path=Path("/data/paper.pdf"), collection_name="knowledge__x",
+            title="Curated Title", author="A. Author", year=2020,
+        )
+        _catalog_pdf_hook(
+            pdf_path=Path("/data/paper.pdf"), collection_name="knowledge__x",
+            title="Re-extracted Different Title", author="B. Other", year=2021,
+        )
+        doc = only_document()
+        assert doc.title == "Curated Title"
+        assert doc.author == "A. Author"
+        assert doc.year == 2020
+
+    def test_reindex_with_empty_title_keeps_existing(self, tmp_path, monkeypatch):
+        from nexus.pipeline_stages import _catalog_pdf_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        _catalog_pdf_hook(
+            pdf_path=Path("/data/paper.pdf"), collection_name="knowledge__x",
+            title="Real Title",
+        )
+        _catalog_pdf_hook(
+            pdf_path=Path("/data/paper.pdf"), collection_name="knowledge__x",
+            title="",
+        )
+        assert only_document().title == "Real Title"
+
+    def test_normalised_stem_is_also_a_placeholder(self, tmp_path, monkeypatch):
+        """resolve_pdf_title falls to derive_title's NORMALISED stem when no
+        extractor/H1 title exists; that must not be backfilled-then-locked
+        (nexus-ov5tc critique S1): a later real title still lands."""
+        from nexus.pipeline_stages import _catalog_pdf_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        p = Path("/data/attention-is-all.pdf")
+        _catalog_pdf_hook(pdf_path=p, collection_name="knowledge__x", title="")   # pre-flight shape
+        _catalog_pdf_hook(pdf_path=p, collection_name="knowledge__x", title="Attention Is All")  # normalised stem
+        assert only_document().title in ("attention-is-all", "Attention Is All")
+        _catalog_pdf_hook(pdf_path=p, collection_name="knowledge__x", title="Attention Is All You Need")
+        assert only_document().title == "Attention Is All You Need"

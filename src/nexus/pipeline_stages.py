@@ -645,13 +645,34 @@ def _catalog_pdf_hook(
         except OSError:
             source_mtime = 0.0
         if existing:
-            writer.update(
-                existing.tumbler,
+            update_kwargs: dict[str, Any] = dict(
                 physical_collection=collection_name,
                 chunk_count=chunk_count,
                 indexed_at=datetime.now(UTC).isoformat(),
                 source_mtime=source_mtime,
             )
+            # Stem-guard backfill, mirroring nexus-ivzw8's markdown hook: the
+            # RDR-102 D1 pre-flight registers every PDF with title=stem BEFORE
+            # extraction, so this branch is the ONLY place the extracted
+            # title/author/year can reach the catalog. Fill them only when the
+            # row still carries the placeholder (or nothing) — a curated
+            # title is never clobbered by a re-index (2026-08-19,
+            # papers/2512.11001.pdf landed as "2512.11001").
+            # Placeholder shapes: the raw pre-flight stem AND derive_title's
+            # normalised stem ("attention-is-all" -> "Attention Is All"), which
+            # resolve_pdf_title returns when no extractor/H1 title exists —
+            # otherwise that normalised stem would be backfilled once and then
+            # locked in as "curated" (nexus-ov5tc critique, S1).
+            from nexus.indexer_utils import derive_title  # noqa: PLC0415 - circular-dep avoidance (nexus.indexer_utils)
+            _placeholders = {"", pdf_path.stem, derive_title(pdf_path, body=None)}
+            existing_title = (existing.title or "").strip()
+            if title and title not in _placeholders and existing_title in _placeholders:
+                update_kwargs["title"] = title
+            if author and not (getattr(existing, "author", "") or "").strip():
+                update_kwargs["author"] = author
+            if year and not getattr(existing, "year", 0):
+                update_kwargs["year"] = year
+            writer.update(existing.tumbler, **update_kwargs)
         else:
             # nexus-u8n4r: refuse a brand-new registration when
             # ``file_path_str`` (always absolute — see the resolve()
@@ -1048,20 +1069,20 @@ def pipeline_index_pdf(
         )
 
     # Catalog hook: register PDF in catalog (opt-in, graceful absence)
-    title = (
-        extraction_result.title
-        if hasattr(extraction_result, "title") and extraction_result.title
-        else extraction_result.metadata.get("title", "")
-        if hasattr(extraction_result, "metadata")
-        else ""
-    ) or pdf_path.stem
-    author = extraction_result.metadata.get("author", "") if hasattr(extraction_result, "metadata") else ""
+    # 2026-08-19: this used to read ``metadata["title"]`` / ``["author"]`` —
+    # keys no extractor writes (``docling_title``/``pdf_title``/``pdf_author``
+    # are the real ones) — so every streamed PDF registered as its filename
+    # stem with no author. One shared chain for all PDF title resolution.
+    from nexus.indexer_utils import resolve_pdf_title  # noqa: PLC0415 - circular-dep avoidance (nexus.indexer_utils)
+    _meta = getattr(extraction_result, "metadata", None) or {}
+    title = resolve_pdf_title(_meta, pdf_path, getattr(extraction_result, "text", None))
+    author = str(_meta.get("pdf_author") or _meta.get("author") or "")
     # Extract year from pdf_creation_date or explicit year field
     year_raw = 0
-    if hasattr(extraction_result, "metadata"):
-        year_raw = extraction_result.metadata.get("year", 0)
+    if _meta:
+        year_raw = _meta.get("year", 0)
         if not year_raw:
-            creation_date = extraction_result.metadata.get("pdf_creation_date", "")
+            creation_date = _meta.get("pdf_creation_date", "")
             if creation_date:
                 import re as _re  # noqa: PLC0415 - branch-local; deferred to call time
                 m = _re.search(r"(\d{4})", str(creation_date))
@@ -1139,11 +1160,8 @@ def _enrich_metadata_from_extraction(
     page_count = meta.get("page_count", 0) or 1
     text_len = len(result.text) if result.text else 0
 
-    source_title = (
-        meta.get("docling_title", "")
-        or meta.get("pdf_title", "")
-        or pdf_path.stem.replace("_", " ").replace("-", " ")
-    )
+    from nexus.indexer_utils import resolve_pdf_title  # noqa: PLC0415 — circular-dep avoidance (nexus.indexer_utils)
+    source_title = resolve_pdf_title(meta, pdf_path, result.text)
 
     # `title`, `source_author`, (nexus-1oguj) `extraction_method`, and
     # (nexus-wi1uv round-2) `quality_gate_overridden` are the only

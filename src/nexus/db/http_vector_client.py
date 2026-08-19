@@ -1521,6 +1521,30 @@ class _ServiceCollectionStub:
             "metadatas": result.get("metadatas", []),
         }
 
+    def update(self, ids: list[str], metadatas: list[dict]) -> dict:
+        """Metadata-only update of existing chunks, Chroma-collection shape.
+
+        2026-08-19: ``nx enrich bib`` (``commands/enrich.py::run_bib_enrichment``)
+        calls ``col.update(ids=..., metadatas=...)`` on this handle; the stub
+        shipped without it, so every service-mode bib-enrichment run died with
+        ``AttributeError`` at the first resolved title — unusable since the
+        Chroma retirement. ONE request to ``/v1/vectors/update-metadata`` (the
+        endpoint :meth:`HttpVectorClient.update_chunks` also uses) with the ids
+        exactly as given — NO paging and NO ``missing``-list interpretation or
+        logging here, unlike ``update_chunks``; the sole caller already pages
+        at 200 and discards the return. Returns the engine's
+        ``{"updated": N, "missing": [...]}`` body verbatim. Raises
+        :class:`VectorServiceError` on transport/HTTP failure (caller owns
+        the boundary, same as :meth:`delete`).
+        """
+        if not ids:
+            return {"updated": 0, "missing": []}
+        return _post(
+            "/v1/vectors/update-metadata",
+            {"collection": self._name, "ids": ids, "metadatas": metadatas},
+            tenant=self._tenant,
+        )
+
     def delete(self, ids: list[str]) -> int:
         """Delete chunks by ID from the service.
 
