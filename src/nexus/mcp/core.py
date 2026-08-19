@@ -1661,6 +1661,26 @@ def search(
 ) -> "str | dict":
     """Semantic search across T3 collections. Paged results (``offset=N`` for next page).
 
+    Ranking: with ``cluster_by=""`` (the default), results are ranked by
+    ``hybrid_score`` — vector similarity blended with ``frecency_score``
+    (code__ collections, honouring the ``.nexus.yml`` ``[tuning]`` weights
+    resolved from THIS MCP SERVER PROCESS'S OWN LAUNCH DIRECTORY, not the
+    repo the caller may be asking about, and the ``search.hybrid_default``
+    flag) plus the RDR-055 bibliographic quality boost (knowledge__/docs__/
+    rdr__ collections with citation metadata) — via
+    ``search_engine.apply_ranking_boosts``, the same function ``nx search``
+    calls. ``distances`` in ``structured=True`` output is always the raw
+    vector distance, unaffected by the boost — only result ORDER changes.
+
+    ``cluster_by="semantic"`` is DIFFERENT: it preserves the cluster-grouped
+    display order ``search_cross_corpus`` produced (topic/Ward clustering,
+    each cluster's own internal ordering), full stop — the hybrid/bib boost
+    is still computed but its reordering is fully discarded to keep same-
+    cluster results contiguous for the text renderer, so in this mode the
+    boost has NO effect on what the caller sees, in either text or
+    ``structured=True`` output (``hybrid_score`` is not surfaced there
+    either). Use ``cluster_by=""`` when boosted ranking matters.
+
     Args:
         query: Search query string
         corpus: Corpus prefixes or collection names, comma-separated. "all" for everything.
@@ -1679,9 +1699,9 @@ def search(
             threshold-drop on dense-prose collections.
     """
     try:
-        from nexus.config import load_config  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        from nexus.config import get_tuning_config, load_config  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
         from nexus.filters import sanitize_query  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-        from nexus.search_engine import search_cross_corpus  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        from nexus.search_engine import apply_ranking_boosts, search_cross_corpus  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
         cfg = load_config()
         if cfg.get("search", {}).get("query_sanitizer", True):
@@ -1765,10 +1785,30 @@ def search(
                     telemetry=_t2_db.telemetry,
                     diagnostics_out=diag,
                 )
-            # Only sort by distance for flat (non-clustered) results.
-            # Clustered results arrive in cluster-grouped order.
-            if not clustered:
-                results.sort(key=lambda r: r.distance)
+            # hybrid scoring + RDR-055 E2 quality boost — parity
+            # with the CLI (search_cmd.py), which has applied both since
+            # RDR-055 / the frecency-scoring work. Before this fix the MCP
+            # path ranked by raw vector distance only and never read
+            # frecency_score or bib_citation_count at all.
+            _cluster_order = [r.id for r in results] if clustered else None
+            results = apply_ranking_boosts(
+                results,
+                hybrid=cfg.get("search", {}).get("hybrid_default", False),
+                tuning=get_tuning_config(),
+                catalog=_get_catalog(),
+            )
+            if clustered:
+                # apply_ranking_boosts sorts by hybrid_score globally, which
+                # would scatter same-cluster results apart — the text
+                # renderer below assumes cluster labels appear CONTIGUOUSLY
+                # (the `current_cluster` grouping further down). Boosted
+                # hybrid_score values are kept on each result; only the
+                # display ORDER is restored to the cluster-grouped order
+                # search_cross_corpus produced.
+                _by_id = {r.id: r for r in results}
+                results = [_by_id[i] for i in _cluster_order if i in _by_id]
+            # Non-clustered results are now ranked by hybrid_score
+            # (apply_ranking_boosts' own sort) rather than raw distance.
             _page_cache_put(cache_key, results, fetch_n, diag)
         if not results:
             if structured:
@@ -2511,6 +2551,21 @@ def query(
     semantics and cross-model raw-cosine-distance caveat as
     ``search_metadata_scoped`` / ``search_graph_hop``.
 
+    Ranking: on the plain corpus-based path (no catalog
+    params), both the winning chunk per document and the document order are
+    chosen by ``hybrid_score`` — vector similarity blended with
+    ``frecency_score`` (honouring ``.nexus.yml`` ``[tuning]`` weights
+    resolved from THIS MCP SERVER PROCESS'S OWN LAUNCH DIRECTORY, not the
+    repo the caller may be asking about) and the RDR-055 bibliographic
+    quality boost, via ``search_engine.apply_ranking_boosts`` (the same
+    function ``nx search`` calls) — not by raw distance. The per-document
+    ``distance`` field reported in output is still the raw vector distance
+    of that winning chunk, unaffected by the boost. The CATALOG-PARAM path
+    (author, content_type, follow_links, subtree) does NOT apply this
+    boost: its rows come from the engine's SQL combined-query functions and
+    carry only ``(id, content, distance, collection, chash)`` — no
+    ``frecency_score`` or ``bib_citation_count`` to boost with.
+
     Args:
         question: Natural-language research question
         corpus: Corpus prefix or full collection name (default: knowledge).
@@ -2534,9 +2589,9 @@ def query(
         subtree: Tumbler prefix to scope search to a subtree
     """
     try:
-        from nexus.config import load_config  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        from nexus.config import get_tuning_config, load_config  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
         from nexus.filters import sanitize_query  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-        from nexus.search_engine import search_cross_corpus  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        from nexus.search_engine import apply_ranking_boosts, search_cross_corpus  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
         cfg = load_config()
         if cfg.get("search", {}).get("query_sanitizer", True):
@@ -2877,7 +2932,17 @@ def query(
                 telemetry=_t2_db.telemetry,
                 diagnostics_out=qdiag,
             )
-        results.sort(key=lambda r: r.distance)
+        # hybrid scoring + RDR-055 E2 quality boost — parity
+        # with the CLI (search_cmd.py). Chunk-level ranking (and, below,
+        # the per-document "best chunk" pick + document ordering) is now by
+        # hybrid_score, not raw distance; previously this tool never read
+        # frecency_score or bib_citation_count at all.
+        results = apply_ranking_boosts(
+            results,
+            hybrid=cfg.get("search", {}).get("hybrid_default", False),
+            tuning=get_tuning_config(),
+            catalog=_get_catalog(),
+        )
         if not results:
             if structured:
                 empty_result: dict = {
@@ -2988,6 +3053,11 @@ def query(
                     "title": meta.get("title") or doc_key[:40],
                     "collection": r.collection,
                     "distance": r.distance,
+                    # tracks the "best chunk"/doc-order key —
+                    # hybrid_score (vector + frecency + quality boost), not
+                    # raw distance. ``distance`` above stays the winning
+                    # chunk's raw vector distance for display.
+                    "hybrid_score": r.hybrid_score,
                     "snippet": r.content[:300].replace("\n", " "),
                     "bib_year": meta.get("bib_year", ""),
                     "bib_authors": meta.get("bib_authors", ""),
@@ -3019,13 +3089,14 @@ def query(
                         or meta.get("source_path", "")
                     ),
                 }
-            elif r.distance < docs[doc_key]["distance"]:
+            elif r.hybrid_score > docs[doc_key]["hybrid_score"]:
                 # Better matching chunk — update snippet
                 docs[doc_key]["distance"] = r.distance
+                docs[doc_key]["hybrid_score"] = r.hybrid_score
                 docs[doc_key]["snippet"] = r.content[:300].replace("\n", " ")
 
-        # Sort by best match distance, limit
-        all_docs = sorted(docs.values(), key=lambda d: d["distance"])
+        # Sort by best match hybrid_score (), limit
+        all_docs = sorted(docs.values(), key=lambda d: d["hybrid_score"], reverse=True)
         sorted_docs = all_docs[:limit]
         total = len(all_docs)
 

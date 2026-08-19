@@ -328,6 +328,138 @@ def test_search_no_threshold_kwarg_passes_none():
     assert captured[0].get("threshold_override") is None
 
 
+# ── MCP path applies hybrid scoring + quality boost ───────────
+#
+# Pre-fix, apply_hybrid_scoring/apply_quality_boost had exactly one call
+# site (search_cmd.py, CLI-only); the MCP search()/query() paths ranked by
+# raw vector distance and never read frecency_score or bib_citation_count.
+# These tests pin the fix: both tools now call the shared
+# search_engine.apply_ranking_boosts() and rank accordingly.
+
+_HYBRID_DEFAULT_ON_CFG = {"search": {"hybrid_default": True, "query_sanitizer": False}}
+
+# Three code__ chunks where raw-distance order and hybrid-score order
+# diverge: the mid-distance chunk's huge frecency_score should outrank the
+# closer-but-unfrecent chunk once frecency is blended in.
+_DIVERGENT_RESULTS = [
+    SearchResult(id="low_dist_no_boost", content="a", distance=0.10,
+                 collection="code__test", metadata={"frecency_score": 0.0}),
+    SearchResult(id="mid_dist_high_frecency", content="b", distance=0.30,
+                 collection="code__test", metadata={"frecency_score": 100.0}),
+    SearchResult(id="high_dist_no_boost", content="c", distance=0.90,
+                 collection="code__test", metadata={"frecency_score": 0.0}),
+]
+
+
+def test_search_ranks_by_hybrid_score_not_raw_distance():
+    """MCP ``search()`` must rank via hybrid_score (frecency-boosted), not
+    raw distance. Raw-distance order would be low/mid/high; hybrid scoring
+    (vector_weight=0.7/frecency_weight=0.3) promotes the high-frecency
+    mid-distance chunk to the top."""
+    _mock_t3([{"name": "code__test", "count": 3}])
+
+    def fake(*_a, **_kw):
+        return [SearchResult(id=r.id, content=r.content, distance=r.distance,
+                              collection=r.collection, metadata=dict(r.metadata))
+                for r in _DIVERGENT_RESULTS]
+
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = search(query="hybrid ranking pin", corpus="code__test",
+                      cluster_by="", structured=True)
+    assert out["ids"] == [
+        "mid_dist_high_frecency", "low_dist_no_boost", "high_dist_no_boost",
+    ]
+
+
+def test_query_ranks_documents_by_hybrid_score_not_raw_distance():
+    """MCP ``query()``'s document-level grouping must pick the "best chunk"
+    per document, and order documents, by hybrid_score — same divergent
+    fixture as the ``search()`` pin above, one doc per chunk (distinct
+    doc_key via distinct titles)."""
+    _mock_t3([{"name": "code__test", "count": 3}])
+
+    def fake(*_a, **_kw):
+        results = []
+        for r in _DIVERGENT_RESULTS:
+            meta = dict(r.metadata)
+            meta["title"] = r.id
+            results.append(SearchResult(id=r.id, content=r.content, distance=r.distance,
+                                         collection=r.collection, metadata=meta))
+        return results
+
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="hybrid ranking pin", corpus="code__test", structured=True)
+    assert out["ids"][0] == "mid_dist_high_frecency"
+
+
+def test_search_and_cli_helper_rank_identically():
+    """Parity: the same corpus+query, scored by the same shared
+    search_engine.apply_ranking_boosts() the CLI (search_cmd.py) calls,
+    ranks identically through the MCP search() path."""
+    from nexus.config import get_tuning_config
+    from nexus.search_engine import apply_ranking_boosts
+
+    _mock_t3([{"name": "code__test", "count": 3}])
+
+    def fake(*_a, **_kw):
+        return [SearchResult(id=r.id, content=r.content, distance=r.distance,
+                              collection=r.collection, metadata=dict(r.metadata))
+                for r in _DIVERGENT_RESULTS]
+
+    # "CLI helper" side: apply the exact function search_cmd.py calls,
+    # with the same hybrid flag + tuning the MCP path resolves.
+    cli_side = apply_ranking_boosts(
+        [SearchResult(id=r.id, content=r.content, distance=r.distance,
+                      collection=r.collection, metadata=dict(r.metadata))
+         for r in _DIVERGENT_RESULTS],
+        hybrid=True, tuning=get_tuning_config(), catalog=None,
+    )
+    cli_order = [r.id for r in cli_side]
+
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        mcp_out = search(query="parity pin", corpus="code__test",
+                          cluster_by="", structured=True)
+
+    assert mcp_out["ids"] == cli_order
+
+
+def test_cluster_by_semantic_discards_the_boosted_order():
+    """critique 2026-08-19 (both reviewers): ``cluster_by="semantic"``
+    computes the hybrid/bib boost (real cost: catalog lookup, tuning
+    resolution, scoring) but its reordering is fully discarded to keep
+    same-cluster results contiguous for the text renderer — pins the
+    truthful behavior the corrected docstring now describes: the boost is
+    genuinely inert for this mode. Same divergent fixture as
+    ``test_search_ranks_by_hybrid_score_not_raw_distance`` above, which
+    pins the OPPOSITE outcome (boosted order wins) for ``cluster_by=""``
+    — the two tests together pin that the divergence is real, not
+    incidental fixture noise."""
+    _mock_t3([{"name": "code__test", "count": 3}])
+
+    def fake(*_a, **_kw):
+        return [SearchResult(id=r.id, content=r.content, distance=r.distance,
+                              collection=r.collection, metadata=dict(r.metadata))
+                for r in _DIVERGENT_RESULTS]
+
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = search(query="cluster order pin", corpus="code__test",
+                      cluster_by="semantic", structured=True)
+
+    # NOT the hybrid-boosted order (mid/low/high) — the pre-boost order
+    # search_cross_corpus produced, which is this fixture's own declaration
+    # order (low/mid/high).
+    assert out["ids"] == [
+        "low_dist_no_boost", "mid_dist_high_frecency", "high_dist_no_boost",
+    ]
+    # structured=True never surfaces hybrid_score, in ANY cluster_by mode —
+    # so even the inert boost computation leaves no trace in the output.
+    assert "hybrid_score" not in out
+
+
 # ── Store ────────────────────────────────────────────────────────────────────
 
 def test_store_put(t3):

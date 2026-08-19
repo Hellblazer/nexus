@@ -11,7 +11,7 @@ from nexus.scoring import (
     min_max_normalize,
     round_robin_interleave,
 )
-from nexus.search_engine import _attach_display_paths, search_cross_corpus
+from nexus.search_engine import _attach_display_paths, apply_ranking_boosts, search_cross_corpus
 from nexus.types import SearchResult
 
 
@@ -1394,3 +1394,83 @@ class TestThresholdGateServiceMode:
         t3 = _ThresholdFakeT3(self._ROWS, voyage=False)
         results = search_cross_corpus("test", ["code__nexus"], 10, t3)
         assert {r.id for r in results} == {"a", "b"}
+
+
+# ── apply_ranking_boosts ─────────────────────────────────────
+#
+# Single shared implementation of the CLI's post-retrieval ranking boosts
+# (hybrid scoring + RDR-055 quality boost), called by both search_cmd.py
+# and the MCP search()/query() paths.
+
+
+class TestApplyRankingBoosts:
+    def test_empty_results_returns_empty(self):
+        assert apply_ranking_boosts([]) == []
+
+    def test_composes_hybrid_scoring_then_quality_boost(self):
+        """Pins the two-step contract: hybrid scoring computes hybrid_score
+        (and sorts by it), quality boost then adds on top without
+        re-sorting — exactly the order search_cmd.py applied them in
+        before this refactor."""
+        results = [
+            SearchResult(
+                id="low_dist_no_boost", content="a", distance=0.10,
+                collection="code__r", metadata={"frecency_score": 0.0},
+            ),
+            SearchResult(
+                id="mid_dist_high_frecency", content="b", distance=0.30,
+                collection="code__r", metadata={"frecency_score": 100.0},
+            ),
+            SearchResult(
+                id="high_dist_no_boost", content="c", distance=0.90,
+                collection="code__r", metadata={"frecency_score": 0.0},
+            ),
+        ]
+        out = apply_ranking_boosts(results, hybrid=True)
+        # frecency pulls the mid-distance/high-frecency chunk to the top,
+        # ahead of the closer-but-unfrecent chunk — raw distance order
+        # would have put low_dist_no_boost first.
+        assert [r.id for r in out] == [
+            "mid_dist_high_frecency", "low_dist_no_boost", "high_dist_no_boost",
+        ]
+
+    def test_quality_boost_applies_to_knowledge_collections(self):
+        results = [
+            SearchResult(
+                id="unenriched", content="a", distance=0.10,
+                collection="knowledge__r", metadata={},
+            ),
+            SearchResult(
+                id="highly_cited", content="b", distance=0.15,
+                collection="knowledge__r",
+                metadata={"bib_citation_count": 5000, "bib_year": "2024"},
+            ),
+        ]
+        out = apply_ranking_boosts(results, hybrid=False)
+        # Quality boost is additive (weight 0.1) — not large enough alone
+        # to overturn a bigger distance gap, but the boosted result's score
+        # must exceed what hybrid scoring alone would have given it.
+        boosted = next(r for r in out if r.id == "highly_cited")
+        assert boosted.hybrid_score > 0.0
+        # bib metadata is knowledge__-eligible; the unenriched row (no
+        # bib_citation_count) is untouched by the quality step.
+        unenriched = next(r for r in out if r.id == "unenriched")
+        assert unenriched.hybrid_score == pytest.approx(1.0)  # sole survivor at its own distance's v_norm
+
+    def test_ignores_catalog_and_tuning_when_omitted(self):
+        """No tuning/catalog supplied — falls back to TuningConfig defaults
+        (0.7/0.3/30), matching apply_hybrid_scoring's own module defaults.
+
+        A single-item window is trivially "the maximum" on both sides of
+        min_max_normalize; since vector distance is inverted (smaller =
+        better) but frecency is not, a lone result nets
+        ``0.7 * (1.0 - 1.0) + 0.3 * 1.0 == 0.3`` — pins the module-default
+        weights actually reached this call, not a stand-in for
+        hand-computed scoring.py internals.
+        """
+        results = [
+            SearchResult(id="a", content="x", distance=0.1, collection="code__r",
+                         metadata={"frecency_score": 1.0}),
+        ]
+        out = apply_ranking_boosts(results, hybrid=True)
+        assert out[0].hybrid_score == pytest.approx(0.3)

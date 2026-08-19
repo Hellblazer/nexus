@@ -9,7 +9,7 @@ from typing import Any
 
 import structlog
 
-from nexus.config import get_telemetry_config, load_config
+from nexus.config import TuningConfig, get_telemetry_config, load_config
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 from nexus.types import SearchResult
 
@@ -19,6 +19,7 @@ __all__ = [
     "search_cross_corpus",
     "_overfetch_multiplier",
     "SearchDiagnostics",
+    "apply_ranking_boosts",
 ]
 
 
@@ -516,8 +517,14 @@ def search_cross_corpus(
             distance = r["distance"]
             if min_raw_distance is None or distance < min_raw_distance:
                 min_raw_distance = distance
-            # RDR-055 E2 quality_boost runs after hybrid scoring in the
-            # CLI/MCP paths. Thresholds apply to raw distance here.
+            # RDR-055 E2 quality_boost runs after hybrid scoring, via
+            # apply_ranking_boosts(), in every caller that applies it: the
+            # CLI (search_cmd.py) and the MCP search()/query() non-catalog
+            # paths (mcp/core.py). The catalog-routed combined-query paths
+            # (search_metadata_scoped, search_graph_hop, search_topic_scoped,
+            # query()'s catalog-param branch) never call it — see
+            # apply_ranking_boosts' docstring. Thresholds apply to raw
+            # distance here, before any of that.
             if threshold is not None and distance > threshold:
                 dropped += 1
                 if min_dropped_distance is None or distance < min_dropped_distance:
@@ -777,6 +784,72 @@ def search_cross_corpus(
     _attach_display_paths(all_results, catalog)
 
     return all_results
+
+
+def apply_ranking_boosts(
+    results: list[SearchResult],
+    *,
+    hybrid: bool = False,
+    tuning: TuningConfig | None = None,
+    catalog: Any | None = None,
+) -> list[SearchResult]:
+    """Apply the CLI's post-retrieval ranking boosts — hybrid scoring
+    (RDR-frecency) then bibliographic quality boost (RDR-055 E2) — and
+    return *results* re-sorted by ``hybrid_score`` descending.
+
+    Single implementation, two callers: ``nx search`` (``search_cmd.py``)
+    and the MCP ``search``/``query`` tools (``mcp/core.py``) both call this
+    function on the raw list returned by :func:`search_cross_corpus`, so a
+    result set scores and ranks identically regardless of which surface
+    retrieved it. Before this function existed, ``apply_hybrid_scoring``
+    and ``apply_quality_boost`` were called only from ``search_cmd.py`` —
+    the MCP paths sorted on raw vector ``distance`` and never saw
+    ``frecency_score`` or bibliographic-quality weighting at all.
+
+    Order matters and mirrors the CLI exactly: hybrid scoring runs first
+    (it computes and sorts by ``hybrid_score``); quality boost runs second
+    and adjusts ``hybrid_score`` additively without re-sorting — a
+    borderline result can end up slightly out of strict score order after
+    the boost, same as the CLI has always produced.
+
+    *tuning* supplies the per-repo ``.nexus.yml`` ``[tuning]`` weights
+    (``vector_weight`` / ``frecency_weight`` / ``file_size_threshold``);
+    pass ``get_tuning_config()``'s result, or omit for
+    :class:`~nexus.config.TuningConfig`'s built-in defaults. *catalog*
+    resolves ``documents.chunk_count`` for the code__ file-size penalty
+    (nexus-dxly) — omitted or failing lookups degrade to the
+    metadata/no-penalty fallback exactly as ``apply_hybrid_scoring``
+    already does on its own.
+
+    Does NOT apply, by design, to result rows that never carry the
+    metadata these boosts read:
+
+    - Catalog-routed combined-query results (the MCP ``search_metadata_scoped``,
+      ``search_graph_hop``, ``search_topic_scoped`` tools, and ``query()``'s
+      catalog-param path via ``author``/``content_type``/``follow_links``/
+      ``subtree``) come from the engine's SQL combined-query functions and
+      carry only ``(id, content, distance, collection, chash)`` — no
+      ``frecency_score`` or ``bib_citation_count``. Callers on that path do
+      not call this function; there is nothing for it to boost.
+    - ``structured=True`` outputs report each result's raw vector
+      ``distance`` unchanged (downstream plan-runner consumers depend on
+      that field being the real cosine distance) — this function only
+      changes result ORDER, never the reported distance value.
+    """
+    if not results:
+        return results
+    from nexus.scoring import apply_hybrid_scoring, apply_quality_boost  # noqa: PLC0415 — deferred to avoid a module-load-time scoring<->search_engine cycle
+
+    _tuning = tuning or TuningConfig()
+    results = apply_hybrid_scoring(
+        results,
+        hybrid=hybrid,
+        vector_weight=_tuning.vector_weight,
+        frecency_weight=_tuning.frecency_weight,
+        file_size_threshold=_tuning.file_size_threshold,
+        catalog=catalog,
+    )
+    return apply_quality_boost(results)
 
 
 def _fetch_embeddings_for_results(
