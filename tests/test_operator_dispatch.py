@@ -249,6 +249,15 @@ class TestOptInToolAccess:
         argv = captured[0]
         assert "--allowedTools" not in argv, "default dispatch must be tool-free"
         assert "--mcp-config" not in argv, "default dispatch must not inject MCP servers"
+        # RDR-196 Gap 4 (nexus-0d, 2026-08-19): without --strict-mcp-config
+        # the tool-free child still LOADS the user's entire MCP server set
+        # (.mcp.json / user settings) -- measured ~92K context tokens and
+        # 2x the dollars per operator call vs ~45K with a strict empty
+        # config -- for a subprocess that has no tools to call them with.
+        assert "--strict-mcp-config" in argv, (
+            "tool-free dispatch must pass --strict-mcp-config so the child "
+            "loads ZERO MCP servers (no --mcp-config + strict = none)"
+        )
 
     @pytest.mark.asyncio
     async def test_allowed_tools_emits_flag(self) -> None:
@@ -297,6 +306,10 @@ class TestOptInToolAccess:
 
         argv = list(captured[0])
         assert "--mcp-config" in argv
+        # Opt-in servers are the ONLY servers: strict keeps the user's
+        # ambient .mcp.json / settings servers out of the child even when
+        # a caller grants specific ones (RDR-196 Gap 4).
+        assert "--strict-mcp-config" in argv
         cfg = json.loads(argv[argv.index("--mcp-config") + 1])
         assert cfg == {"mcpServers": {"nexus": {"command": "nx-mcp", "args": []}}}
 

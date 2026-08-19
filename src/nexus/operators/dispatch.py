@@ -689,6 +689,14 @@ async def claude_dispatch(
         "--include-partial-messages",
         "--json-schema", schema_json,
         "--no-session-persistence",
+        # RDR-196 Gap 4 (measured by session nexus-0d, 2026-08-19): without
+        # this flag the child loads the user's ENTIRE ambient MCP server set
+        # (.mcp.json / settings) even on the tool-free default path that has
+        # no tools to call them with -- ~92K context tokens and ~2x the
+        # dollars per operator call vs ~45K with a strict empty config.
+        # With --strict-mcp-config and no --mcp-config the child loads zero
+        # servers; with an opt-in --mcp-config below it loads ONLY those.
+        "--strict-mcp-config",
     ]
     if mcp_servers:
         argv += ["--mcp-config", json.dumps({"mcpServers": mcp_servers})]
