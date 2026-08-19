@@ -361,4 +361,89 @@ class VoyageEmbedderBatchSplitTest {
         assertThat(requestBodies).hasSize(1);
         assertThat(e.voyageRequestCount()).isEqualTo(1);
     }
+
+    // ── Scenario 11: sub-request budget is PER-PLANNED-BATCH, not shared across the
+    //    whole top-level call — a first planned batch consuming its own budget must not
+    //    starve a second, independent planned batch (gate remediation, 2026-08-19; T2
+    //    substantive-critique-rdr195-phase2-da9c61781-2026-08-19 finding 1) ────────────
+
+    @Test
+    void subRequestBudgetIsPerPlannedBatchNotSharedAcrossTheWholeCall() throws Exception {
+        // Two texts, each individually WELL under voyage-code-3's 120,000-token budget
+        // but together over it, so planBatches produces exactly two planned batches,
+        // each of which fits in ONE POST (no halving needed for either). With the cap
+        // forced to 1 via the test seam: if the sub-request budget were shared across
+        // the whole top-level call (the pre-fix bug), the first planned batch's single
+        // successful POST would consume the ONLY permitted attempt, and the second
+        // planned batch would be refused with VoyageTooManyTokensException BEFORE ever
+        // reaching upstream -- even though its own request would have succeeded. With
+        // the budget correctly scoped per planned batch, both batches get their own
+        // attempt=1<=cap(1) and both succeed.
+        String t0 = bigText(400_000, 'm'); // ~100,000 est. tokens
+        String t1 = bigText(400_000, 'n'); // ~100,000 est. tokens -- together ~200,000 > 120,000
+        List<String> texts = List.of(t0, t1);
+
+        VoyageEmbedder e = embedder("voyage-code-3");
+        e.setMaxSubRequestsPerBatchForTest(1);
+
+        List<float[]> result = e.embed(texts); // must NOT throw
+
+        assertThat(result).hasSize(2);
+        assertThat(result.get(0)).isEqualTo(vectorFor(t0));
+        assertThat(result.get(1)).isEqualTo(vectorFor(t1));
+        // Two planned batches, each its own single successful POST -- the non-vacuity
+        // assertion that BOTH planned batches actually reached upstream despite the
+        // cap being exhausted (at value 1) by the FIRST one, if the budget were shared.
+        assertThat(requestBodies).as("both planned batches must reach upstream independently").hasSize(2);
+        assertThat(e.voyageRequestCount()).isEqualTo(2);
+    }
+
+    // ── Scenario 12: per-sub-request instrumentation fires on EVERY POST, incl. the
+    //    fast (unsplit) path (gate remediation, 2026-08-19; substantive-critique finding
+    //    3: the pre-remediation event was guarded so the dominant unsplit case emitted NO
+    //    log line at any level, and never paired usage.total_tokens with request bytes) ──
+
+    @Test
+    void perSubRequestEventFiresOnEveryPostIncludingTheFastPath() throws Exception {
+        var root = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            VoyageEmbedder e = embedder("voyage-code-3");
+            // Fast path: one small input, fits in a single planned batch, no halving.
+            e.embed(List.of("The quick brown fox jumps over the lazy dog."));
+
+            var messages = logs.list.stream()
+                    .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                    .toList();
+
+            // event=voyage_subbatch_planned must fire even for the single-batch fast path
+            // (planned=1) -- previously guarded out entirely for this exact case.
+            assertThat(messages)
+                    .as("planned-count event must fire on the fast path (planned=1)")
+                    .anyMatch(m -> m.startsWith("event=voyage_subbatch_planned")
+                            && m.contains("planned=1"));
+
+            // event=voyage_subrequest_sent must fire exactly once, pairing request bytes
+            // with the response's actual usage.total_tokens -- the pairing the critic
+            // found impossible via logs alone for this exact (dominant) case.
+            long sentCount = messages.stream()
+                    .filter(m -> m.startsWith("event=voyage_subrequest_sent")).count();
+            assertThat(sentCount).as("exactly one real POST on the fast path").isEqualTo(1);
+            assertThat(messages)
+                    .anyMatch(m -> m.startsWith("event=voyage_subrequest_sent")
+                            && m.contains("model=voyage-code-3")
+                            && m.contains("texts=1")
+                            && m.contains("attempt=1")
+                            && m.contains("splitDepth=0")
+                            // usageTokens must be a real, non-sentinel value (the fake
+                            // server's default handler always sets usage.total_tokens).
+                            && !m.contains("usageTokens=-1"));
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
 }

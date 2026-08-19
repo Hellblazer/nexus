@@ -77,10 +77,15 @@ import java.util.concurrent.atomic.AtomicInteger;
  * batch, degrades to exactly one request when the whole input already fits). A batch that
  * still trips Voyage's {@code TOO_MANY_TOKENS_IN_BATCH} 400 (the estimator is provisional
  * by design — see the RDR's Decision Rationale) is caught and adaptively halved by
- * {@link #collectWithHalving}, bounded by {@link #maxSubRequestsPerBatch} so no single
- * input can turn one logical embed into unbounded upstream spend. {@code buildJson} itself
- * is untouched: each sub-batch is serialized by the exact same byte-contract method,
- * whether or not splitting ever engages.
+ * {@link #collectWithHalving}, bounded by {@link #maxSubRequestsPerBatch} PER PLANNED
+ * BATCH (see that constant's javadoc for the exact scope and worst-case total) so no
+ * single input can turn one logical embed into unbounded upstream spend. {@code
+ * buildJson} itself is untouched: each sub-batch is serialized by the exact same
+ * byte-contract method, whether or not splitting ever engages. A batch that cannot be
+ * split further (a lone oversize text, or budget exhaustion) escapes as {@link
+ * VoyageTooManyTokensException}, which {@code VectorHandler} maps to HTTP 422 with the
+ * structured detail intact (gate remediation, 2026-08-19) — never the opaque 500 that
+ * predates this RDR.
  *
  * <p>Stateless: each {@link #embed} call is independent.  Thread-safe.
  */
@@ -144,20 +149,42 @@ public final class VoyageEmbedder implements Embedder {
     private static final long PROVISIONAL_BYTES_PER_TOKEN = 4L;
 
     /**
-     * Hard ceiling on adaptive-halving sub-requests per top-level {@link #embed}/
-     * {@link #embedWithUsage}/{@link #embedDouble} call (RDR-195 gate remediation,
-     * 2026-08-19). Derivation: halving terminates in at most {@code ceil(log2(n))} levels
-     * for any single planned sub-batch, and — per the RDR's "single pathological item"
+     * Hard ceiling on adaptive-halving sub-requests <strong>per PLANNED sub-batch</strong>
+     * (RDR-195 gate remediation, 2026-08-19; re-scoped 2026-08-19 per the substantive-critic's
+     * finding 1, T2 {@code substantive-critique-rdr195-phase2-da9c61781-2026-08-19}).
+     *
+     * <p><b>Scope, stated precisely because getting this wrong is exactly the bug being
+     * fixed here.</b> {@link #executeWithHalving} mints a FRESH budget counter for EVERY
+     * entry in {@link #planBatches}'s output — this constant bounds the halving tree of
+     * ONE planned batch, not the whole top-level {@link #embed}/{@link #embedWithUsage}/
+     * {@link #embedDouble} call. A single planned batch's halving tree reaches size 1 in
+     * at most {@code ceil(log2(n))} levels, and — per the RDR's "single pathological item"
      * analysis — a batch with one over-budget chunk among many costs about
-     * {@code 2 * log2(n)} total sub-requests (one failure plus one success per level) even
-     * across the WHOLE original input. {@code n} is bounded by {@link #MAX_BATCH_TEXTS}
-     * (1,000), so {@code 2 * log2(1000) ≈ 20}; 64 gives more than 3x that margin — wide
-     * enough that it can only fire on adversarial input (e.g. a pathologically tiny
-     * per-model budget or many simultaneously-oversize chunks), never on ordinary
-     * calibration drift in {@link #PROVISIONAL_BYTES_PER_TOKEN}. On exhaustion the embed
-     * fails with {@link VoyageTooManyTokensException} carrying the attempted sub-request
-     * count and the offending sub-batch's size — the same loud, no-silent-partial-result
-     * path as the single-unsplittable-text rethrow.
+     * {@code 2 * log2(n)} sub-requests total (one failure plus one success per level),
+     * where {@code n} is that ONE planned batch's own size, itself bounded by {@link
+     * #MAX_BATCH_TEXTS} (1,000): {@code 2 * log2(1000) ≈ 20}. 64 gives more than 3x margin
+     * over that PER-PLANNED-BATCH figure.
+     *
+     * <p><b>Worst-case TOTAL across a top-level call is therefore {@code k * 64}</b>, where
+     * {@code k} is the number of planned batches {@link #planBatches} produced for that
+     * call — never a single shared 64 across the whole call (the pre-fix defect: a shared
+     * counter meant a call's LATER planned batches could be starved by an EARLIER one's
+     * halving, and — the critic's quantified concern — a systematically-miscalibrated
+     * {@link #PROVISIONAL_BYTES_PER_TOKEN} applied uniformly across all {@code k} batches
+     * could approach the 64 ceiling on realistic, non-adversarial input, not just
+     * adversarial input as this javadoc previously claimed). {@code k} is bounded above by
+     * {@link #MAX_BATCH_TEXTS} (a planned batch can degenerate to one text each), but in
+     * practice ranges from {@code ceil(1000/300)} (~4, the Python client's own page cap) up
+     * to low tens for a pathologically small per-model budget against many small chunks —
+     * and a planned batch that is itself a single text can only ever consume ONE attempt
+     * (it cannot halve below size 1), so the realistic total is far below {@code k * 64}
+     * except when MULTIPLE planned batches are simultaneously miscalibrated. This
+     * per-planned-batch scoping is what makes the cap fire only on genuinely adversarial
+     * or badly-miscalibrated input, never on one early batch's ordinary halving starving a
+     * later, independent batch. On exhaustion the embed fails with {@link
+     * VoyageTooManyTokensException} carrying the attempted sub-request count (for THIS
+     * planned batch) and the offending sub-batch's size — the same loud,
+     * no-silent-partial-result path as the single-unsplittable-text rethrow.
      */
     static final int MAX_SUB_REQUESTS_PER_BATCH = 64;
 
@@ -303,16 +330,20 @@ public final class VoyageEmbedder implements Embedder {
      * Top-level RDR-195 entry point shared by {@link #embed}, {@link #embedWithUsage}, and
      * {@link #embedDouble}: asserts {@link #MAX_BATCH_TEXTS} (via {@link #planBatches}),
      * plans sub-batches under the per-model token budget, and executes each with adaptive
-     * halving on a fresh per-call sub-request budget (an {@link AtomicInteger} local to
-     * this invocation, never shared across concurrent calls on the same instance — the
-     * class's thread-safety guarantee depends on that).
+     * halving on a fresh sub-request budget PER PLANNED BATCH (a new {@link AtomicInteger}
+     * minted for every entry in {@code planned} — see {@link #MAX_SUB_REQUESTS_PER_BATCH}'s
+     * javadoc for why this scope is load-bearing, not incidental: sharing one counter
+     * across every planned batch of a call was the gate-remediation defect the
+     * substantive-critic found). Each planned batch's own counter is itself local to that
+     * batch's call, never shared across concurrent calls on the same instance — the
+     * class's thread-safety guarantee depends on that.
      */
     private List<SubBatchResponse> executeWithHalving(List<String> texts) {
         List<List<String>> planned = planBatches(texts);
         List<SubBatchResponse> out = new ArrayList<>();
-        AtomicInteger subRequestBudget = new AtomicInteger(0);
         for (List<String> batch : planned) {
-            collectWithHalving(batch, subRequestBudget, out);
+            AtomicInteger subRequestBudget = new AtomicInteger(0);
+            collectWithHalving(batch, subRequestBudget, out, 0);
         }
         return out;
     }
@@ -348,12 +379,18 @@ public final class VoyageEmbedder implements Embedder {
                 groupTokens = candidateTokens;
                 end++;
             }
-            if (end - start < n) {
-                log.debug("event=voyage_subbatch_planned start={} size={} estTokens={} totalBatch={} model={}",
-                        start, end - start, groupTokens, n, model);
-            }
             batches.add(texts.subList(start, end));
             start = end;
+        }
+        // RDR-195 gate remediation (nexus-kmtlp.11 fix 3): fires unconditionally, INCLUDING
+        // the single-planned-batch fast path (planned=1) — the substantive-critic found
+        // this event previously guarded by `end - start < n`, so the dominant unsplit case
+        // left NO log line, at any level, confirming a Voyage POST was even planned.
+        for (int i = 0; i < batches.size(); i++) {
+            List<String> b = batches.get(i);
+            long estTokens = b.stream().mapToLong(VoyageEmbedder::estimateTokens).sum();
+            log.info("event=voyage_subbatch_planned index={} size={} estTokens={} totalBatch={} planned={} model={}",
+                    i, b.size(), estTokens, n, batches.size(), model);
         }
         return batches;
     }
@@ -382,12 +419,17 @@ public final class VoyageEmbedder implements Embedder {
      * left-half-then-right-half so results append to {@code out} in input order. A
      * single-text batch that still trips the ceiling is DEFENSIVE — genuinely un-splittable
      * — and is rethrown with the upstream detail intact rather than silently dropped.
+     *
+     * @param depth halving depth for this call — 0 for a batch taken straight from {@link
+     *              #planBatches}, incremented on every recursive halve. Instrumentation
+     *              only (RDR-195 gate remediation fix 3): distinguishes a planned request
+     *              from an adaptively-split one in {@code event=voyage_subrequest_sent}.
      */
     private void collectWithHalving(List<String> batch, AtomicInteger subRequestBudget,
-                                     List<SubBatchResponse> out) {
+                                     List<SubBatchResponse> out, int depth) {
         String body;
         try {
-            body = sendSubBatch(batch, subRequestBudget);
+            body = sendSubBatch(batch, subRequestBudget, depth);
         } catch (VoyageTooManyTokensException e) {
             if (batch.size() <= 1) {
                 throw e; // un-splittable — fail loud, never silently drop the text
@@ -395,8 +437,8 @@ public final class VoyageEmbedder implements Embedder {
             int mid = batch.size() / 2;
             log.warn("event=voyage_adaptive_split original_size={} left_size={} right_size={} model={}",
                     batch.size(), mid, batch.size() - mid, model);
-            collectWithHalving(new ArrayList<>(batch.subList(0, mid)), subRequestBudget, out);
-            collectWithHalving(new ArrayList<>(batch.subList(mid, batch.size())), subRequestBudget, out);
+            collectWithHalving(new ArrayList<>(batch.subList(0, mid)), subRequestBudget, out, depth + 1);
+            collectWithHalving(new ArrayList<>(batch.subList(mid, batch.size())), subRequestBudget, out, depth + 1);
             return;
         }
         out.add(new SubBatchResponse(batch, body));
@@ -405,12 +447,21 @@ public final class VoyageEmbedder implements Embedder {
     /**
      * Checks {@link #maxSubRequestsPerBatch} BEFORE issuing the call, so exhaustion never
      * makes a further upstream request — then serializes and sends {@code batch} via the
-     * UNMODIFIED {@link #buildJson}/{@link #callApi}.
+     * UNMODIFIED {@link #buildJson}/{@link #callApi}. On success, emits the RDR-195 gate
+     * remediation fix-3 per-sub-request instrumentation event ({@code
+     * event=voyage_subrequest_sent}) — fires for EVERY real upstream POST, including the
+     * common single-planned-batch fast path, pairing the request's estimated tokens and
+     * byte size with the response's actual {@code usage.total_tokens} so the MVV (bead
+     * nexus-kmtlp.13) can measure requests-per-page and recalibrate {@link
+     * #PROVISIONAL_BYTES_PER_TOKEN} — the gap the critic found (finding 3): the
+     * pre-remediation instrumentation could not pair those two numbers for the dominant,
+     * non-split case at all.
      *
-     * @throws VoyageTooManyTokensException if the sub-request budget for this top-level
-     *         call is exhausted, carrying the attempted count and the offending batch size
+     * @throws VoyageTooManyTokensException if the sub-request budget for this PLANNED
+     *         BATCH (see {@link #MAX_SUB_REQUESTS_PER_BATCH}'s javadoc for the exact scope)
+     *         is exhausted, carrying the attempted count and the offending batch size
      */
-    private String sendSubBatch(List<String> batch, AtomicInteger subRequestBudget) {
+    private String sendSubBatch(List<String> batch, AtomicInteger subRequestBudget, int depth) {
         int attemptNum = subRequestBudget.incrementAndGet();
         if (attemptNum > maxSubRequestsPerBatch) {
             throw new VoyageTooManyTokensException(
@@ -418,10 +469,41 @@ public final class VoyageEmbedder implements Embedder {
                     + maxSubRequestsPerBatch + ") before this batch converged; offending"
                     + " sub-batch size=" + batch.size() + ", sub-requests already attempted="
                     + (attemptNum - 1) + ". Refusing further upstream calls rather than risking"
-                    + " unbounded spend — no partial result was returned.");
+                    + " unbounded spend — no partial result was returned.",
+                    "TOO_MANY_TOKENS_IN_BATCH", model, batch.size(), attemptNum - 1);
         }
         String json = buildJson(batch);
-        return callApi(json);
+        String body = callApi(json, batch.size(), attemptNum);
+        long estTokens = batch.stream().mapToLong(VoyageEmbedder::estimateTokens).sum();
+        log.info("event=voyage_subrequest_sent model={} texts={} requestBytes={} estTokens={}"
+                + " usageTokens={} attempt={} splitDepth={}",
+                model, batch.size(), json.getBytes(StandardCharsets.UTF_8).length, estTokens,
+                peekUsageTokens(body), attemptNum, depth);
+        return body;
+    }
+
+    /**
+     * Best-effort peek at {@code usage.total_tokens} from a raw Voyage response body, for
+     * the {@code event=voyage_subrequest_sent} instrumentation event only (RDR-195 gate
+     * remediation fix 3). Never throws — a parse miss returns {@code -1} (a value no real
+     * token count can take), distinguishable in logs from a genuine {@code 0}. Deliberately
+     * independent of {@link #parseResponseWithUsage}: that method's contract is to FAIL
+     * LOUD on a malformed body (it is on the correctness path); this one must never let a
+     * logging concern perturb the actual embed result.
+     */
+    private long peekUsageTokens(String body) {
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> root = mapper.readValue(body, Map.class);
+            Object usage = root.get("usage");
+            if (usage instanceof Map<?, ?> u) {
+                Object total = u.get("total_tokens");
+                if (total instanceof Number n) return n.longValue();
+            }
+        } catch (Exception e) {
+            // instrumentation only — never let a log field derail the request
+        }
+        return -1L;
     }
 
     /** Test-only: number of {@code callApi()} HTTP POSTs sent since construction or the
@@ -508,7 +590,20 @@ public final class VoyageEmbedder implements Embedder {
     // stance now also applies across adaptive-split sub-requests — a rejected oversize
     // attempt's tokenization is billed by Voyage but never appears in the summed
     // usage.total_tokens returned to the caller. Same safe direction, not a new divergence.
-    private String callApi(String json) {
+    /**
+     * @param batchSize  the sub-batch's text count — used ONLY to populate {@link
+     *                   VoyageTooManyTokensException}'s structured fields if this call
+     *                   trips the token ceiling; never used for retry/split logic here
+     *                   (RDR-195 Technical Design: this method never learns whether IT is
+     *                   the halvable case or the un-splittable escape — {@link
+     *                   #collectWithHalving} decides that from {@code batch.size()}).
+     * @param attemptNum this sub-batch's 1-based attempt number within its PLANNED
+     *                   BATCH's own sub-request budget (see {@link
+     *                   #MAX_SUB_REQUESTS_PER_BATCH}'s javadoc for scope) — populated into
+     *                   the same exception, and also carried by the caller's
+     *                   {@code event=voyage_subrequest_sent} log line.
+     */
+    private String callApi(String json, int batchSize, int attemptNum) {
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
                 HttpRequest req = HttpRequest.newBuilder()
@@ -547,7 +642,8 @@ public final class VoyageEmbedder implements Embedder {
                     throw new VoyageTooManyTokensException(
                             "Voyage AI rejected the batch as exceeding the per-request token"
                             + " ceiling (HTTP 400, error_code=TOO_MANY_TOKENS_IN_BATCH): "
-                            + resp.body());
+                            + resp.body(),
+                            "TOO_MANY_TOKENS_IN_BATCH", model, batchSize, attemptNum);
                 }
                 throw new RuntimeException(
                         "Voyage AI request failed: HTTP " + status + " body=" + resp.body());

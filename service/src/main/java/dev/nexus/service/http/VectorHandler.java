@@ -197,6 +197,24 @@ public final class VectorHandler implements HttpHandler {
             // credentials) → 422, distinguishable from a malformed request (400).
             log.warn("event=vector_model_unavailable op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 422, json(Map.of("error", e.getMessage())));
+        } catch (dev.nexus.service.vectors.VoyageTooManyTokensException e) {
+            // RDR-195 gate remediation (nexus-kmtlp.11 fix 2, 2026-08-19): a precisely
+            // typed, actionable oversize-batch condition must not launder into the
+            // generic 500 arm below — that laundering is exactly the opaque-500 symptom
+            // this exception exists to replace, one layer up (substantive-critic finding
+            // 2, T2 substantive-critique-rdr195-phase2-da9c61781-2026-08-19). 422, not
+            // 500 (the opaque outcome being fixed) and not one of the client's
+            // _GATEWAY_RETRY_CODES {502,503,504} — resending the identical oversize body
+            // is guaranteed to fail again and re-bills Voyage tokenization.
+            log.warn("event=vector_too_many_tokens_in_batch op={} model={} batch_size={} "
+                    + "sub_requests={} error={}",
+                    op, e.model(), e.batchSize(), e.subRequests(), e.getMessage());
+            HttpUtil.send(exchange, 422, json(Map.of(
+                    "error", e.errorCode(),
+                    "detail", e.getMessage(),
+                    "sub_requests", e.subRequests(),
+                    "batch_size", e.batchSize(),
+                    "model", e.model())));
         } catch (IllegalArgumentException e) {
             log.debug("event=vector_bad_request op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
