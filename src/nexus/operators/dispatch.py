@@ -15,6 +15,7 @@ import contextvars
 import json
 import os
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 
@@ -81,7 +82,39 @@ class OperatorError(Exception):
 
 
 class OperatorTimeoutError(OperatorError):
-    """Raised when claude -p exceeds the timeout."""
+    """Raised when claude -p exceeds the timeout.
+
+    nexus-h33x8.6 critic (T2 substantive-critique-h33x8.6-a3-a1-2026-08-19,
+    a4 precondition): carries the RECONSTRUCTED partial content as
+    structured attributes, not merely baked into the message string --
+    a4 (hard budget + partial results) needs to consume the partial
+    programmatically, without re-parsing the message text or re-reading
+    the timeout log file back off disk. All three default to empty/None
+    so existing bare ``OperatorTimeoutError("message")`` construction
+    (test doubles, callers that synthesize a timeout without going
+    through the real dispatch path) keeps working unchanged.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        partial_text: str = "",
+        event_count: int = 0,
+        log_path: Path | None = None,
+    ) -> None:
+        super().__init__(message)
+        #: Assistant/structured-output text reconstructed from whatever
+        #: stream-json NDJSON events arrived before the kill (see
+        #: ``_parse_stream_json_output``). Empty when nothing parsed.
+        self.partial_text = partial_text
+        #: Number of NDJSON lines that parsed as JSON before the kill.
+        self.event_count = event_count
+        #: Path to the persisted timeout log, or ``None`` when the log
+        #: write itself failed (``_persist_timeout_log``'s own best-effort
+        #: fallback) or this exception was constructed outside the real
+        #: timeout path.
+        self.log_path = log_path
 
 
 class OperatorOutputError(OperatorError):
@@ -752,12 +785,19 @@ async def claude_dispatch(
             _final_result, partial_text, event_count = _parse_stream_json_output(
                 partial_stdout.decode(errors="replace")
             )
-            log_path = _persist_timeout_log(timeout, partial_text, partial_stderr, event_count)
+            log_path_str = _persist_timeout_log(timeout, partial_text, partial_stderr, event_count)
             raise OperatorTimeoutError(
                 f"claude -p timed out after {timeout}s; partial output "
                 f"({len(partial_text)} chars reconstructed from {event_count} "
                 f"stream-json events, {len(partial_stdout)}B raw stdout, "
-                f"{len(partial_stderr)}B stderr) logged to {log_path}"
+                f"{len(partial_stderr)}B stderr) logged to {log_path_str}",
+                partial_text=partial_text,
+                event_count=event_count,
+                # _persist_timeout_log's own best-effort write can fail (its
+                # sentinel string, not an exception -- the timeout signal
+                # must surface regardless); a4 gets None rather than a path
+                # that doesn't exist on disk.
+                log_path=Path(log_path_str) if log_path_str != "(log write failed)" else None,
             )
 
         stdout = b"".join(stdout_chunks)

@@ -1419,8 +1419,20 @@ class TestTimeoutPartialCapture:
             patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
             patch("nexus.operators.dispatch._persist_timeout_log", side_effect=fake_persist),
         ):
-            with pytest.raises(OperatorTimeoutError):
+            with pytest.raises(OperatorTimeoutError) as exc_info:
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=0.05)
+
+        # nexus-h33x8.6 critic (a4 precondition): the reconstructed partial
+        # must be a STRUCTURED attribute on the exception, not only baked
+        # into the message string or persisted to the log file -- a4 (hard
+        # budget + partial results) needs to consume it directly.
+        from pathlib import Path
+
+        err = exc_info.value
+        assert err.partial_text != "", "OperatorTimeoutError.partial_text is empty"
+        assert '"ok"' in err.partial_text
+        assert err.event_count == len(pre_result_lines)
+        assert err.log_path == Path("/fake/log/path.log")
 
         assert captured_log_calls, "_persist_timeout_log was never called"
         _timeout, partial_text, _stderr, event_count = captured_log_calls[0]

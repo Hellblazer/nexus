@@ -144,3 +144,90 @@ class TestDocumentDiscoveryPlanMatchReroute:
             f"{plan_class!r}, not single_query -- the fast-path reroute "
             f"in nx_answer would NOT fire"
         )
+
+
+# Synthesis-shaped questions genuinely need composition (search + rank/
+# compare/generate) -- the answer has to be REDUCED FROM multiple sources,
+# not just found. Each covers one of the synthesis phrasings the bead's
+# narrowed guidance (DO step 3) still routes to nx_answer's composed path,
+# as distinct from the document-DISCOVERY shape a1 targets.
+_SYNTHESIS_PHRASINGS = [
+    "compare the approaches to caching across these papers",
+    "what are the tradeoffs of eventual consistency in the corpus",
+    "synthesize how the retry strategy evolved across the RDRs",
+    "what themes emerge across the papers on distributed consensus",
+    "reconcile the conflicting recommendations in these documents",
+    "summarize the evolution of the plan-match algorithm across the RDRs",
+    # Adversarial: deliberately mix a coverage-shaped NOUN (corpus/
+    # collection) with a synthesis-shaped VERB (compare/summarize/favour)
+    # -- the exact stress case the discriminator must resolve on verb
+    # shape, not noun co-occurrence (Sam's directive, 2026-08-19).
+    "compare what the corpus says about caching and consistency",
+    "summarize the corpus's position on eventual consistency",
+    "why does the collection favour optimistic concurrency",
+]
+
+
+class TestDocumentDiscoverySeedPlansDoNotCatchSynthesisQuestions:
+    """Negative guard (nexus-h33x8.6 critic, T2 substantive-critique-
+    h33x8.6-a3-a1-2026-08-19): a synthesis-shaped question ("compare X
+    across these papers", "what are the tradeoffs of Y") must NOT
+    false-reroute onto the new single-query seeds. A synthesis question
+    genuinely needs composition (search + rank/compare/generate) --
+    rerouting it onto a bare ``query()`` would silently DROP the
+    requested synthesis and hand back raw chunks instead, which is worse
+    than the pre-a1 status quo (no fast path at all) because it looks
+    like an answer rather than failing loud.
+
+    Same offline/deterministic setup as the positive tests above (real
+    cosine match, bundled ONNX MiniLM, the full real 17-plan builtin
+    pool) -- this is the critic's own probe (6 synthesis phrasings, 0/6
+    reroutes) made permanent.
+
+    FALSIFIABILITY, stated so a future edit can tell whether it broke
+    this guard on purpose or by accident: this test is NOT vacuous
+    today (these 6 phrasings score below the 0.40 gate against both new
+    seeds, or land on a differently-classified plan). It WOULD go RED
+    if either ``document-discovery.yml`` or ``corpus-coverage-check.yml``
+    had its ``description`` broadened toward generic synthesis language
+    -- e.g. dropping the "not a synthesized answer" framing in the YAML
+    comment header, or adding phrase-bag entries like "compare X",
+    "synthesize", "across these", "tradeoffs of" alongside the existing
+    discovery phrasings. That is the intended tripwire: a seed
+    description drifting toward synthesis vocabulary is exactly the
+    failure mode this guard exists to catch before it reaches
+    production.
+    """
+
+    @pytest.mark.parametrize("question", _SYNTHESIS_PHRASINGS)
+    def test_synthesis_phrasing_does_not_reroute_to_document_discovery(
+        self, question: str, seeded_library, real_plan_cache,
+    ) -> None:
+        from nexus.mcp.core import _nx_answer_classify_plan
+        from nexus.plans.matcher import plan_match
+
+        matches = plan_match(
+            intent=question,
+            library=seeded_library,
+            cache=real_plan_cache,
+            dimensions={"verb": "research"},
+            min_confidence=0.40,
+            n=5,
+        )
+
+        for m in matches:
+            row = seeded_library.get_plan(m.plan_id)
+            if row is None or row["name"] not in _TARGET_PLAN_NAMES:
+                continue
+            # The seed matched above the gate. That alone is not
+            # necessarily a foul -- only a foul if it would actually fire
+            # the single_query fast-path reroute in nx_answer, silently
+            # dropping the requested synthesis.
+            plan_class = _nx_answer_classify_plan(m)
+            assert plan_class != "single_query", (
+                f"synthesis-shaped question {question!r} matched seed "
+                f"{row['name']!r} at confidence {m.confidence} AND "
+                f"classified as single_query -- this would silently "
+                f"reroute to a bare query() call, dropping the requested "
+                f"synthesis"
+            )
