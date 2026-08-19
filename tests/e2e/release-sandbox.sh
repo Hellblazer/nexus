@@ -172,6 +172,60 @@ for c in data.get("checks", []):
 ' "${_DOCTOR_CORPUS_INTEGRITY_LABELS[@]}"
 }
 
+# nexus-jy4hd: extractor-identity verdicts for the MinerU shakedown step.
+# (1) `nx doctor --check-mineru` prints check lines but its rc is not a
+# reliable failure signal for this one check — parse the output for the
+# MinerU line and require it to be a pass; no MinerU line at all is a FAIL
+# (a probe that produced nothing is never a pass). (2) after step 3b
+# indexes with an EXPLICIT --extractor mineru, the indexed chunk's
+# Extractor field must literally be mineru — belt-and-braces against any
+# future in-extractor fallback quietly substituting a different engine.
+_mineru_doctor_verdict() {
+    # stdin: `nx doctor --check-mineru` output → "OK" or "FAIL|<cause>"
+    python3 -c '
+import sys
+out = sys.stdin.read()
+lines = [l for l in out.splitlines()
+         if "MinerU import" in l or "do_parse" in l]
+if not lines:
+    print("FAIL|doctor output carries no MinerU line at all — the probe ran nothing")
+    raise SystemExit(0)
+bad = [l.strip() for l in lines if "✗" in l]
+if bad:
+    print("FAIL|" + "; ".join(bad)[:300])
+else:
+    print("OK")
+'
+}
+
+# Isolate the chunk ids ADDED by a step: set-difference of two id listings
+# (one per line, any order). Ordering-proof by construction — review
+# Critical on the first cut: `nx store list | head -1` rode the engine's
+# ORDER BY chash ASC, so with steps 3a and 3b sharing a collection the
+# "first" chunk could be the OTHER extractor's document (false-FAIL a
+# healthy MinerU run, or false-PASS without inspecting 3b's chunk at all).
+_new_chunk_ids() {
+    # $1 = file of before-ids, $2 = file of after-ids -> new ids, one/line
+    comm -13 <(sort -u "$1") <(sort -u "$2")
+}
+
+_extractor_identity_verdict() {
+    # stdin: `nx store get <chunk-id>` output → "OK" or "FAIL|<cause>"
+    python3 -c '
+import sys
+out = sys.stdin.read()
+for line in out.splitlines():
+    if line.startswith("Extractor:"):
+        method = line.split(":", 1)[1].strip()
+        if method == "mineru":
+            print("OK")
+        else:
+            print(f"FAIL|indexed chunk carries extraction_method={method!r}, not mineru — the step exercised a DIFFERENT extractor than the one it claims to gate")
+        raise SystemExit(0)
+print("FAIL|no Extractor field on the indexed chunk — extraction_method missing, identity unproven")
+'
+}
+
 # ── --self-test: pure-function checks against synthetic fixtures ───────────
 # Exercises the two detectors above directly -- no wheel build, no sandbox
 # HOME, no engine, no PG, no network. Mirrors tests/e2e/local-index-
@@ -247,6 +301,45 @@ _self_test() {
         || _st_bad "unparseable --json output -> expected a flagged line, got empty"
 
     echo
+    echo "== self-test: _mineru_doctor_verdict (nexus-jy4hd) =="
+    out=$(printf '✓ MinerU import\n✓ MinerU do_parse reachable\n' | _mineru_doctor_verdict)
+    [[ "$out" == "OK" ]] && _st_ok "passing doctor output -> OK" \
+        || _st_bad "passing doctor output -> expected OK, got: $out"
+    out=$(printf '✗ MinerU import ModuleNotFoundError: mineru\n' | _mineru_doctor_verdict)
+    [[ "$out" == FAIL\|* ]] && _st_ok "RED: broken MinerU import -> FAIL naming the cause ($out)" \
+        || _st_bad "broken import -> expected FAIL, got: $out"
+    out=$(printf 'unrelated doctor chatter\n' | _mineru_doctor_verdict)
+    [[ "$out" == FAIL\|*"no MinerU line"* ]] && _st_ok "RED: probe produced no MinerU line -> FAIL, never a silent pass" \
+        || _st_bad "empty probe -> expected FAIL, got: $out"
+
+    echo "== self-test: _new_chunk_ids (nexus-jy4hd review Critical) =="
+    tdir_ids="$(mktemp -d)"
+    # BEFORE holds 3a's docling chunks; AFTER adds 3b's mineru chunks. The
+    # docling ids sort LEXICOGRAPHICALLY FIRST (the exact trap: a
+    # chash-ordered head -1 would pick 0a..., a step-3a chunk).
+    printf '0a%.0s' 1 > /dev/null  # noop guard for shellcheck
+    printf '%s\n' "$(printf '0a%.0s' $(seq 32))" "$(printf '0b%.0s' $(seq 32))" > "$tdir_ids/before"
+    printf '%s\n' "$(printf '0a%.0s' $(seq 32))" "$(printf '0b%.0s' $(seq 32))" "$(printf 'ff%.0s' $(seq 32))" > "$tdir_ids/after"
+    new_id="$(_new_chunk_ids "$tdir_ids/before" "$tdir_ids/after")"
+    [[ "$new_id" == "$(printf 'ff%.0s' $(seq 32))" ]] \
+        && _st_ok "set diff isolates ONLY the step-added chunk (ordering-proof: the lexicographically-first id belongs to the other step and is excluded)" \
+        || _st_bad "set diff -> expected the ff... id only, got: $new_id"
+    new_id="$(_new_chunk_ids "$tdir_ids/after" "$tdir_ids/after")"
+    [[ -z "$new_id" ]] && _st_ok "RED: no new chunks -> empty diff -> the step FAILs with 'added no new chunk ids' (never picks an old chunk)" \
+        || _st_bad "identical sets -> expected empty, got: $new_id"
+    rm -rf "$tdir_ids"
+
+    echo "== self-test: _extractor_identity_verdict (nexus-jy4hd) =="
+    out=$(printf 'ID: abc\nExtractor:  mineru\n\ncontent' | _extractor_identity_verdict)
+    [[ "$out" == "OK" ]] && _st_ok "mineru-extracted chunk -> OK" \
+        || _st_bad "mineru chunk -> expected OK, got: $out"
+    out=$(printf 'ID: abc\nExtractor:  docling\n' | _extractor_identity_verdict)
+    [[ "$out" == FAIL\|*"docling"* ]] && _st_ok "RED: silent substitution (docling) -> FAIL naming the extractor" \
+        || _st_bad "docling chunk -> expected FAIL naming docling, got: $out"
+    out=$(printf 'ID: abc\nTitle: x\n' | _extractor_identity_verdict)
+    [[ "$out" == FAIL\|*"no Extractor field"* ]] && _st_ok "RED: missing extraction_method -> FAIL, identity unproven" \
+        || _st_bad "missing field -> expected FAIL, got: $out"
+
     echo "== self-test: bash -n on this script itself =="
     if bash -n "${BASH_SOURCE[0]}"; then
         _st_ok "bash -n clean"
@@ -828,8 +921,35 @@ case "$MODE" in
         # fail even when MinerU itself was broken. Now propagated: a
         # non-zero exit here is collected into SHAKEDOWN_FAILED and turns
         # the final verdict red.
+        # nexus-jy4hd: MinerU used to be asserted by exit code ALONE on an
+        # extractor=auto route — a MinerU outage degraded the step to
+        # Docling/PyMuPDF and the gate stayed green while the release
+        # shipped on the belief MinerU was exercised. Three fixes:
+        # (1) doctor --check-mineru first, verdict parsed (not rc-trusted);
+        # (2) --extractor mineru EXPLICIT, so a route-away is impossible
+        #     and a MinerU failure reddens the step;
+        # (3) post-hoc identity assert on the indexed chunk's Extractor
+        #     field, against any future in-extractor fallback.
+        MINERU_DOCTOR_VERDICT="$(nx doctor --check-mineru 2>&1 | _mineru_doctor_verdict)"
+        if [ "$MINERU_DOCTOR_VERDICT" != "OK" ]; then
+            echo "  [FAIL] nx doctor --check-mineru: ${MINERU_DOCTOR_VERDICT#FAIL|}" >&2
+            SHAKEDOWN_FAILED+=("3b/11 doctor --check-mineru")
+        fi
         read -r MDOCS_BEFORE MCHUNKS_BEFORE < <(_catalog_counts)
+        # Identity-scoping (review Critical): snapshot the collection's id
+        # set BEFORE 3b so the assert below inspects only chunks THIS step
+        # added — step 3a shares the collection and the list is
+        # chash-ordered, so any positional pick is the wrong document
+        # roughly half the time. Step-local mktemp dir: $SCRATCH belongs to
+        # the SIBLING gate script and was unbound here (wave-3.5 review,
+        # BOTH reviewers: under set -u the || true swallowed the unbound-var
+        # error, the snapshot files never existed, and the identity assert
+        # failed unconditionally on every run).
+        MINERU_IDS_DIR="$(mktemp -d /tmp/release-sandbox-mineru-ids-XXXXXX)"
+        nx store list --collection knowledge__shakedown 2>/dev/null \
+            | grep -oE '\b[0-9a-f]{64}\b' > "$MINERU_IDS_DIR/before" || true
         if ! nx index pdf "$REPO_ROOT/tests/fixtures/bft-to-smr.pdf" \
+                --extractor mineru \
                 --collection knowledge__shakedown 2>&1 | tail -5 | sed 's/^/  /'; then
             echo "  [FAIL] nx index pdf (bft-to-smr.pdf, MinerU path) exited non-zero" >&2
             SHAKEDOWN_FAILED+=("3b/11 nx index pdf (MinerU path)")
@@ -837,6 +957,28 @@ case "$MODE" in
             # gap-15: same reasoning as 3a — one PDF -> floor 1 doc, floor 3
             # chunks (bft-to-smr.pdf is a real multi-page formula fixture).
             _index_floor_check "3b/11 nx index pdf (MinerU path)" 1 3 "$MDOCS_BEFORE" "$MCHUNKS_BEFORE"
+            # (3) identity: a chunk ADDED BY THIS STEP must say mineru.
+            # Chunk ids are full 64-hex (RDR-180); the set diff against the
+            # pre-step snapshot is what scopes the pick to bft-to-smr.pdf.
+            nx store list --collection knowledge__shakedown 2>/dev/null \
+                | grep -oE '\b[0-9a-f]{64}\b' > "$MINERU_IDS_DIR/after" || true
+            # Pipe-free first-line pick (pipefail-lint clean): the command
+            # substitution drains comm to EOF; parameter expansion takes
+            # the first id.
+            NEW_MINERU_IDS="$(_new_chunk_ids "$MINERU_IDS_DIR/before" "$MINERU_IDS_DIR/after" || true)"
+            MCHUNK_ID="${NEW_MINERU_IDS%%$'\n'*}"
+            if [ -n "$MCHUNK_ID" ]; then
+                IDENT_VERDICT="$(nx store get "$MCHUNK_ID" --collection knowledge__shakedown 2>/dev/null | _extractor_identity_verdict)"
+            else
+                IDENT_VERDICT="FAIL|step 3b added no new chunk ids to knowledge__shakedown — nothing to verify extractor identity against"
+            fi
+            if [ "$IDENT_VERDICT" != "OK" ]; then
+                echo "  [FAIL] extractor identity: ${IDENT_VERDICT#FAIL|}" >&2
+                SHAKEDOWN_FAILED+=("3b/11 extractor identity (mineru)")
+            else
+                echo "  [ok] indexed chunk extraction_method=mineru (identity proven, nexus-jy4hd)"
+            fi
+            rm -rf "$MINERU_IDS_DIR"
         fi
 
         echo

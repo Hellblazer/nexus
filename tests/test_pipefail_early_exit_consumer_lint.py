@@ -970,8 +970,8 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # dist-info sniffing. The former third entry (the `--version`
         # banner sniff) was FIXED rather than exempted -- it needed no
         # live infra, being a plain capture-then-parameter-expansion.
-        "tests/e2e/fresh-install-mvv.sh:305",
-        "tests/e2e/fresh-install-mvv.sh:318",
+        "tests/e2e/fresh-install-mvv.sh:512",
+        "tests/e2e/fresh-install-mvv.sh:538",
         # --- tests/e2e/local-index-memory-gate.sh (1 entry): owned by a
         # concurrent agent in the authoring session (nexus-wbeyi itself)
         # -- reported to that hand-off, not fixed here. This is a
@@ -1157,9 +1157,9 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         # or a dedicated gate elsewhere, never from these truncated
         # echoes. Retargeted (gap-8/gap-15, T2 [22511]) after this pass's
         # edits shifted the file; same 3 sites, same rationale.
-        "tests/e2e/release-sandbox.sh:761",
-        "tests/e2e/release-sandbox.sh:765",
-        "tests/e2e/release-sandbox.sh:813",
+        "tests/e2e/release-sandbox.sh:1082",
+        "tests/e2e/release-sandbox.sh:1086",
+        "tests/e2e/release-sandbox.sh:1134",
     }
 )
 _PIPEFAIL_OR_TRUE_SITES_CEILING = 9
