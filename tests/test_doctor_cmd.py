@@ -145,6 +145,96 @@ def test_doctor_does_not_mention_serve(runner, mock_reg, absent):
     assert absent not in result.output
 
 
+# ── Supplementary checks (default-sweep promotion of the cheap/read-only ────
+# ── opt-in --check-* subset) ─────────────────────────────────────────────────
+
+
+class TestSupplementaryChecks:
+    """The default `nx doctor` sweep additionally runs the promoted subset
+    of --check-* diagnostics (resources / plan-library / taxonomy /
+    aspect-queue / t1) and names the rest as opt-in-only. Non-gating: a
+    supplementary check's failure (e.g. an unreachable engine in this
+    unit-test environment, which has none) is printed but never flips the
+    sweep's own exit code -- see doctor.py's classification-table comment
+    for why a uniform pass/fail mapping across five differently-shaped
+    checks would be unsound.
+    """
+
+    def test_section_header_present(self, runner, mock_reg):
+        result = _invoke(runner, mock_reg)
+        assert result.exit_code == 0
+        assert "Supplementary checks" in result.output
+
+    @pytest.mark.parametrize("marker", [
+        "--- resources ---",
+        "--- plan-library ---",
+        "--- taxonomy ---",
+        "--- aspect-queue ---",
+        "--- t1 ---",
+    ])
+    def test_each_promoted_check_runs(self, runner, mock_reg, marker):
+        result = _invoke(runner, mock_reg)
+        assert result.exit_code == 0
+        assert marker in result.output
+
+    def test_remaining_opt_in_checks_named(self, runner, mock_reg):
+        result = _invoke(runner, mock_reg)
+        assert "Remaining opt-in-only checks" in result.output
+        for flag in (
+            "--check-schema", "--check-search", "--check-quotas",
+            "--check-mcp-logs", "--check-tier-discipline",
+            "--check-storage-boundary", "--check-post-store-hooks",
+            "--check-mineru", "--check-wal-retention",
+        ):
+            assert flag in result.output
+
+    def test_promoted_checks_not_opt_in_named(self, runner, mock_reg):
+        """The five promoted flags must NOT appear in the opt-in-only
+        summary line -- they already ran above it."""
+        result = _invoke(runner, mock_reg)
+        tail = result.output.rsplit("Remaining opt-in-only checks", 1)[-1]
+        for absent in (
+            "--check-resources", "--check-plan-library",
+            "--check-taxonomy", "--check-aspect-queue", "--check-t1",
+        ):
+            assert absent not in tail
+
+    def test_unreachable_engine_does_not_flip_exit_code(self, runner, mock_reg):
+        """No engine is configured in this unit-test environment, so every
+        HTTP-backed supplementary check (plan-library / taxonomy /
+        aspect-queue) reports 'unreachable'. That must stay informational
+        -- the overall sweep still exits 0 for an otherwise-healthy
+        install (non-gating design)."""
+        result = _invoke(runner, mock_reg)
+        assert result.exit_code == 0
+        assert "unreachable" in result.output or "UNKNOWN" in result.output
+
+    def test_json_mode_omits_supplementary_section(self, runner, mock_reg):
+        """--json is machine-parseable stdout only -- no human prose mixed
+        in (nexus-0vycz). The supplementary section must not run there."""
+        result = _invoke(runner, mock_reg, extra_args=["--json"])
+        assert "Supplementary checks" not in result.output
+
+    def test_one_check_raising_does_not_abort_the_rest(self, runner, mock_reg):
+        """A check that raises something other than click.exceptions.Exit
+        must not prevent the remaining supplementary checks (or the
+        opt-in-only summary line) from running."""
+        result = _invoke(
+            runner, mock_reg,
+            extra_patches=[
+                patch(
+                    "nexus.commands.doctor._run_check_resources",
+                    side_effect=RuntimeError("boom"),
+                ),
+            ],
+        )
+        assert result.exit_code == 0
+        assert "resources check raised unexpectedly" in result.output
+        # The rest of the sweep still ran.
+        assert "--- t1 ---" in result.output
+        assert "Remaining opt-in-only checks" in result.output
+
+
 # ── Missing credentials ─────────────────────────────────────────────────────
 
 def test_doctor_missing_credentials_informational(runner, mock_reg):

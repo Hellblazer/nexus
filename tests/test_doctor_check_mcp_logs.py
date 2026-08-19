@@ -20,9 +20,13 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.commands.doctor import (
+    _parse_nexus_log_line,
     _resolve_claude_cache_dir,
+    _resolve_nexus_log_dir,
     _run_check_mcp_logs,
     _scan_mcp_log_jsonl,
+    _scan_nexus_log_errors,
+    _summarize_nexus_log_errors,
 )
 
 
@@ -45,6 +49,30 @@ def _now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%S.000Z",
     )
+
+
+def _mk_nexus_log_line(
+    *,
+    event: str,
+    level: str = "ERROR",
+    ts: str | None = None,
+    extra: str = "",
+) -> str:
+    """Build one line in the exact shape ``configure_logging``'s ``mcp``
+    mode file formatter writes (``nexus.logging_setup``):
+    ``"%(asctime)s %(name)s %(levelname)s %(message)s"``, where
+    ``message`` is structlog's ``KeyValueRenderer`` output. Matches a
+    real captured line, e.g.::
+
+        2026-07-05 22:05:45,503 nexus.mcp.core ERROR event='mcp_query_failed' timestamp='2026-07-06T05:05:45.501783Z' level='error' ...
+    """
+    if ts is None:
+        ts = _now_iso()
+    asctime = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+    msg = f"event='{event}' timestamp='{ts}' level='{level.lower()}'"
+    if extra:
+        msg += f" {extra}"
+    return f"{asctime} nexus.mcp.core {level} {msg}"
 
 
 def _epoch(dt: _dt.datetime) -> float:
@@ -185,6 +213,193 @@ class TestScanMcpLogJsonl:
         sd, tf = _scan_mcp_log_jsonl(tmp_path / "nonexistent.jsonl", 0.0)
         assert sd == []
         assert tf == []
+
+
+# ── _resolve_nexus_log_dir / _parse_nexus_log_line / _scan_nexus_log_errors ──
+# ── (defect fix: --check-mcp-logs previously never read this log at all) ────
+
+
+class TestResolveNexusLogDir:
+
+    def test_honours_nexus_config_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        assert _resolve_nexus_log_dir() == tmp_path / "logs"
+
+
+class TestParseNexusLogLine:
+
+    def test_error_line_parsed(self):
+        line = _mk_nexus_log_line(event="mcp_memory_put_failed", level="ERROR")
+        hit = _parse_nexus_log_line(line)
+        assert hit is not None
+        assert hit["event"] == "mcp_memory_put_failed"
+        assert hit["level"] == "ERROR"
+        assert hit["timestamp"]
+
+    def test_critical_line_parsed(self):
+        line = _mk_nexus_log_line(event="something_bad", level="CRITICAL")
+        hit = _parse_nexus_log_line(line)
+        assert hit is not None
+        assert hit["level"] == "CRITICAL"
+
+    def test_info_line_ignored(self):
+        line = _mk_nexus_log_line(event="routine_event", level="INFO")
+        assert _parse_nexus_log_line(line) is None
+
+    def test_warning_line_ignored(self):
+        # Deliberate: this check surfaces ERROR/CRITICAL only, not WARNING.
+        line = _mk_nexus_log_line(event="soft_warning", level="WARNING")
+        assert _parse_nexus_log_line(line) is None
+
+    def test_blank_line_ignored(self):
+        assert _parse_nexus_log_line("") is None
+        assert _parse_nexus_log_line("\n") is None
+
+    def test_unparseable_line_ignored(self):
+        assert _parse_nexus_log_line("not a structured log line") is None
+
+    def test_missing_event_field_yields_placeholder(self):
+        line = "2026-08-18 10:00:00,000 nexus.mcp.core ERROR level='error' no_event_here=1"
+        hit = _parse_nexus_log_line(line)
+        assert hit is not None
+        assert hit["event"] == "(unparsed)"
+
+
+class TestScanNexusLogErrors:
+
+    def test_missing_dir_returns_empty(self, tmp_path):
+        assert _scan_nexus_log_errors(tmp_path / "nope", 0.0) == []
+
+    def test_finds_error_events_in_mcp_log(self, tmp_path):
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        lines = [
+            _mk_nexus_log_line(event="mcp_memory_put_failed") for _ in range(5)
+        ] + [
+            _mk_nexus_log_line(event="mcp_query_failed") for _ in range(4)
+        ] + [
+            _mk_nexus_log_line(event="routine_startup", level="INFO"),
+        ]
+        (log_dir / "mcp.log").write_text("\n".join(lines) + "\n")
+
+        cutoff = _epoch(_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=24))
+        hits = _scan_nexus_log_errors(log_dir, cutoff)
+
+        assert len(hits) == 9  # INFO line excluded
+        by_event = _summarize_nexus_log_errors(hits)
+        assert by_event["mcp_memory_put_failed"]["count"] == 5
+        assert by_event["mcp_query_failed"]["count"] == 4
+
+    def test_old_rotated_backup_skipped_by_mtime(self, tmp_path):
+        import os as _os
+
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        old_line = _mk_nexus_log_line(event="stale_failure")
+        backup = log_dir / "mcp.log.1"
+        backup.write_text(old_line + "\n")
+        old_epoch = (
+            _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=48)
+        ).timestamp()
+        _os.utime(backup, (old_epoch, old_epoch))
+
+        cutoff = _epoch(_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=24))
+        hits = _scan_nexus_log_errors(log_dir, cutoff)
+        assert hits == []
+
+    def test_record_timestamp_outside_window_skipped(self, tmp_path):
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        old_ts = (
+            _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=48)
+        ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        (log_dir / "mcp.log").write_text(
+            _mk_nexus_log_line(event="old_failure", ts=old_ts) + "\n"
+        )
+        cutoff = _epoch(_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=24))
+        assert _scan_nexus_log_errors(log_dir, cutoff) == []
+
+
+class TestSummarizeNexusLogErrors:
+
+    def test_most_recent_example_kept(self):
+        hits = [
+            {"event": "e", "level": "ERROR", "timestamp": "2026-08-18T10:00:00Z", "message": "first"},
+            {"event": "e", "level": "ERROR", "timestamp": "2026-08-18T12:00:00Z", "message": "second"},
+        ]
+        by_event = _summarize_nexus_log_errors(hits)
+        assert by_event["e"]["count"] == 2
+        assert by_event["e"]["most_recent"]["message"] == "second"
+
+
+# ── _run_check_mcp_logs — nexus-own-log section is read regardless of ───────
+# ── whether Claude Code's client-side cache exists on this platform ─────────
+
+
+class TestRunCheckMcpLogsNexusSection:
+
+    def test_reports_errors_from_nexus_own_log(
+        self, tmp_path, capsys, monkeypatch,
+    ):
+        nexus_config_dir = tmp_path / "nexus_config"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(nexus_config_dir))
+        log_dir = nexus_config_dir / "logs"
+        log_dir.mkdir(parents=True)
+        lines = [
+            _mk_nexus_log_line(event="mcp_memory_put_failed") for _ in range(5)
+        ] + [
+            _mk_nexus_log_line(event="mcp_query_failed") for _ in range(4)
+        ]
+        (log_dir / "mcp.log").write_text("\n".join(lines) + "\n")
+
+        with patch(
+            "nexus.commands.doctor._resolve_claude_cache_dir",
+            return_value=tmp_path / "no_claude_cache_here",
+        ):
+            _run_check_mcp_logs(json_out=False)
+
+        out = capsys.readouterr().out
+        assert "nexus MCP server log" in out
+        assert "mcp_memory_put_failed" in out
+        assert "x5" in out
+        assert "mcp_query_failed" in out
+        assert "x4" in out
+        # The preserved Claude-cache section still runs too.
+        assert "not present" in out
+
+    def test_json_output_includes_nexus_log_keys(
+        self, tmp_path, capsys, monkeypatch,
+    ):
+        nexus_config_dir = tmp_path / "nexus_config"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(nexus_config_dir))
+        log_dir = nexus_config_dir / "logs"
+        log_dir.mkdir(parents=True)
+        (log_dir / "mcp.log").write_text(
+            _mk_nexus_log_line(event="collection_search_failed") + "\n"
+        )
+
+        with patch(
+            "nexus.commands.doctor._resolve_claude_cache_dir",
+            return_value=tmp_path / "no_claude_cache_here",
+        ):
+            _run_check_mcp_logs(json_out=True)
+
+        payload = _loads_json_out(capsys.readouterr().out)
+        assert payload["nexus_log_error_count"] == 1
+        assert payload["nexus_log_by_event"]["collection_search_failed"]["count"] == 1
+        # Existing top-level keys are untouched (additive-only change).
+        assert payload["platform_supported"] is False
+        assert payload["silent_deaths"] == []
+
+    def test_no_nexus_errors_reports_clean(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "nexus_config"))
+        with patch(
+            "nexus.commands.doctor._resolve_claude_cache_dir",
+            return_value=tmp_path / "no_claude_cache_here",
+        ):
+            _run_check_mcp_logs(json_out=False)
+        out = capsys.readouterr().out
+        assert "No ERROR/CRITICAL events" in out
 
 
 # ── _run_check_mcp_logs ─────────────────────────────────────────────────────
