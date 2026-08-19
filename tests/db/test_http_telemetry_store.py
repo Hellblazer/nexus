@@ -132,12 +132,19 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
 
         elif pp == "/v1/telemetry/search/trim":
             days = int(body.get("days", 30))
+            dry_run = bool(body.get("dry_run", False))
             cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
             with _STORE_LOCK:
-                before = len(_search_telemetry)
-                _search_telemetry[:] = [r for r in _search_telemetry if r["ts"] >= cutoff]
-                deleted = before - len(_search_telemetry)
-            self._send(200, {"deleted": deleted})
+                if dry_run:
+                    # Mirrors TelemetryRepository.trimSearchTelemetry: the
+                    # SAME predicate as the delete branch, just counted
+                    # instead of applied.
+                    deleted = sum(1 for r in _search_telemetry if r["ts"] < cutoff)
+                else:
+                    before = len(_search_telemetry)
+                    _search_telemetry[:] = [r for r in _search_telemetry if r["ts"] >= cutoff]
+                    deleted = before - len(_search_telemetry)
+            self._send(200, {"deleted": deleted, "dry_run": dry_run})
 
         elif pp == "/v1/telemetry/rename_collection":
             old = body.get("old", "")
@@ -215,14 +222,18 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
 
         elif pp == "/v1/telemetry/hook_failures/trim":
             days = int(body.get("days", 30))
+            dry_run = bool(body.get("dry_run", False))
             cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
             with _STORE_LOCK:
-                before = len(_hook_failures)
-                _hook_failures[:] = [
-                    r for r in _hook_failures if r["occurred_at"] >= cutoff
-                ]
-                deleted = before - len(_hook_failures)
-            self._send(200, {"deleted": deleted})
+                if dry_run:
+                    deleted = sum(1 for r in _hook_failures if r["occurred_at"] < cutoff)
+                else:
+                    before = len(_hook_failures)
+                    _hook_failures[:] = [
+                        r for r in _hook_failures if r["occurred_at"] >= cutoff
+                    ]
+                    deleted = before - len(_hook_failures)
+            self._send(200, {"deleted": deleted, "dry_run": dry_run})
 
         elif pp == "/v1/telemetry/frecency/upsert":
             chunk_id = body.get("chunk_id", "")
@@ -692,6 +703,36 @@ class TestTrimSearchTelemetry:
         deleted = client.trim_search_telemetry(days=365 * 3)
         assert deleted >= 1
 
+    def test_dry_run_previews_then_matches_the_real_trim(self, client):
+        """Non-vacuity: seed rows straddling the cutoff, preview, run the real
+        trim, and prove the numbers match AND the dry run left the table
+        untouched (the nexus-3rr3x class this design explicitly avoids)."""
+        rows = [
+            ("2020-01-01T00:00:00Z", "dr-old-1", "code__nexus", 1, 1, None, None),
+            ("2020-01-02T00:00:00Z", "dr-old-2", "code__nexus", 1, 1, None, None),
+        ]
+        client.log_search_batch(rows)
+
+        preview = client.trim_search_telemetry(days=365 * 3, dry_run=True)
+        assert preview == 2
+
+        # Dry run must not have deleted anything: a second dry run still
+        # reports the same population.
+        assert client.trim_search_telemetry(days=365 * 3, dry_run=True) == preview
+
+        deleted = client.trim_search_telemetry(days=365 * 3, dry_run=False)
+        assert deleted == preview, "real trim must delete exactly the previewed count"
+
+        assert client.trim_search_telemetry(days=365 * 3, dry_run=True) == 0
+
+    def test_dry_run_defaults_to_false_backward_compatible(self, client):
+        """The default call shape (no dry_run kwarg) is every pre-existing
+        caller — it must keep actually deleting."""
+        rows = [("2020-01-01T00:00:00Z", "compat-hash", "code__nexus", 1, 1, None, None)]
+        client.log_search_batch(rows)
+        deleted = client.trim_search_telemetry(days=365 * 3)
+        assert deleted == 1
+
 
 class TestQueryTierWrites:
     """nexus-59wjj: nx tier-status read parity — GET /v1/telemetry/tier_writes/query."""
@@ -1046,6 +1087,29 @@ class TestTrimHookFailures:
         )
         deleted = client.trim_hook_failures(days=365 * 3)
         assert deleted == 1
+
+    def test_dry_run_previews_then_matches_the_real_trim(self, client):
+        """Same non-vacuity contract as search_telemetry's dry run — required
+        so a doctor-level --dry-run cannot preview one trimmed table while
+        silently mutating the other."""
+        client.record_hook_failure(
+            doc_id="dr-d-old", collection="code__nexus", hook_name="h_old",
+            error="boom", chain="single", occurred_at="2020-01-01T00:00:00+00:00",
+        )
+        client.record_hook_failure(
+            doc_id="dr-d-new", collection="code__nexus", hook_name="h_new",
+            error="boom", chain="single",
+            occurred_at=datetime.now(UTC).isoformat(),
+        )
+
+        preview = client.trim_hook_failures(days=365 * 3, dry_run=True)
+        assert preview == 1
+        assert client.trim_hook_failures(days=365 * 3, dry_run=True) == preview
+
+        deleted = client.trim_hook_failures(days=365 * 3, dry_run=False)
+        assert deleted == preview
+
+        assert client.trim_hook_failures(days=365 * 3, dry_run=True) == 0
 
 
 class TestRenameCollection:

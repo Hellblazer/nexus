@@ -132,9 +132,37 @@ class TestTrimTelemetryRoutes:
             http_store.return_value.trim_hook_failures.return_value = 3
             doctor_mod._run_trim_telemetry(days=30)
 
-        http_store.return_value.trim_search_telemetry.assert_called_once_with(days=30)
-        http_store.return_value.trim_hook_failures.assert_called_once_with(days=30)
+        http_store.return_value.trim_search_telemetry.assert_called_once_with(
+            days=30, dry_run=False)
+        http_store.return_value.trim_hook_failures.assert_called_once_with(
+            days=30, dry_run=False)
         sqlite_connect.assert_not_called(), "must not open the frozen SQLite"
+
+    def test_dry_run_previews_both_tables_without_deleting(
+        self, service_mode: None,
+    ) -> None:
+        """``dry_run=True`` must reach BOTH stores — a partial preview
+        (search_telemetry previewed, hook_failures for-real deleted, or vice
+        versa) would be a worse footgun than the missing feature."""
+        from nexus.commands import doctor as doctor_mod
+
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as http_store:
+            http_store.return_value.trim_search_telemetry.return_value = 2
+            http_store.return_value.trim_hook_failures.return_value = 1
+            runner = CliRunner()
+            with runner.isolation() as (out, _err, _):
+                doctor_mod._run_trim_telemetry(days=30, dry_run=True)
+                printed = out.getvalue().decode()
+
+        http_store.return_value.trim_search_telemetry.assert_called_once_with(
+            days=30, dry_run=True)
+        http_store.return_value.trim_hook_failures.assert_called_once_with(
+            days=30, dry_run=True)
+        assert "Would trim 2 search_telemetry" in printed, printed
+        assert "Would trim 1 hook_failures" in printed, printed
+        assert "Trimmed" not in printed, (
+            "dry-run output must never read like a completed deletion"
+        )
 
     def test_missing_local_file_does_not_report_nothing_to_trim(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, service_mode: None,

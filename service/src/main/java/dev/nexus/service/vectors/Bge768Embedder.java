@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * RDR-160 (bead nexus-1chpa) — LOCAL bge-768 ONNX embedder for the Java service.
@@ -72,6 +73,57 @@ public final class Bge768Embedder implements Embedder {
     private static final int MAX_SEQ_LEN = 512;
 
     /**
+     * bge-base-en-v1.5 is a BERT-base architecture: 12 transformer layers, 12
+     * attention heads, 768 hidden dim. Confirmed against the nexus-33hpq/nexus-zu4ma
+     * measurements below (not an assumed constant): a single layer's attention-score
+     * tensor is {@code [batch, heads, seq, seq]} float32, and
+     * {@code batch=64 * heads=12 * seq=512 * seq=512 * 4 bytes = 805,306,368 bytes
+     * ≈ 0.81 GB} exactly matches the measured 0.81 GB/tensor at batch=64/seq=512
+     * from nexus-33hpq's investigation, and scales linearly to the measured 3.77 GB
+     * at batch=300/seq=512.
+     */
+    private static final int ATTENTION_HEADS = 12;
+
+    /**
+     * Sub-batch memory budget (nexus-zu4ma), expressed as bytes for ONE layer's
+     * attention-score tensor at the group's own shape:
+     * {@code groupBatchSize * ATTENTION_HEADS * maxLen^2 * BYTES_PER_FLOAT32}.
+     *
+     * <p>Bounding by "padded token area" ({@code groupBatchSize * maxLen^2}) rather
+     * than by a flat row-count constant means one long chunk in a group raises that
+     * group's {@code maxLen} and therefore shrinks how many rows fit alongside it —
+     * a single 512-token chunk can never inflate every OTHER row's padding cost the
+     * way a flat 300-row cap did (nexus-33hpq: 3.77 GB attention tensor, ~77.4 GB
+     * observed peak RSS, engine wedged).
+     *
+     * <p>Sized at the nexus-33hpq VERIFIED-SAFE operating point — batch=16 at the
+     * full 512-token cap (every row simultaneously at MAX_SEQ_LEN, the worst case
+     * for a given batch size) — because that exact shape was measured end-to-end at
+     * 3.03 GB peak RSS with {@code flush_concurrency=3} genuinely active (release-
+     * sandbox shakedown, 11/11 passing, zero storage_service_unhealthy events), i.e.
+     * roughly 1 GB actual peak per single {@code embed()} call at this shape. This
+     * is therefore not a re-derived guess: it reuses the one point on the memory
+     * curve this codebase has already proven safe under real concurrent load,
+     * generalized from "batch=16 rows" to "16*512^2 units of padded token area" so
+     * any batch/length combination reaching the same area gets the same ceiling —
+     * e.g. a 128-row batch of short (~64-token) chunks is allowed the same area as
+     * 16 rows at the 512-token cap, since 128*64^2 ≈ 16*256^2 &lt; 16*512^2.
+     */
+    private static final long MAX_ATTENTION_TENSOR_BYTES =
+            attentionTensorBytes(16, MAX_SEQ_LEN);
+
+    private static long attentionTensorBytes(long batchSize, long seqLen) {
+        return batchSize * ATTENTION_HEADS * seqLen * seqLen * Float.BYTES;
+    }
+
+    /** Equivalent padded-token-area ceiling ({@code batchSize * maxLen^2}) — heads
+     * and bytes-per-float are constants that cancel out of the budget comparison,
+     * so the sub-batch planner works in this unit directly rather than re-deriving
+     * bytes on every candidate check. */
+    private static final long MAX_PADDED_TOKEN_AREA =
+            MAX_ATTENTION_TENSOR_BYTES / (ATTENTION_HEADS * (long) Float.BYTES);
+
+    /**
      * Sanity floor for "this is the standard fp32 export, not a truncated download
      * or the ~140MB quantized/fused substitute". Mirrors the CLI's
      * {@code _MIN_MODEL_BYTES} (service_bge_model.py). The fp32 model is ~416MB.
@@ -83,6 +135,16 @@ public final class Bge768Embedder implements Embedder {
     private final HuggingFaceTokenizer tokenizer;
     /** Some bge ONNX exports declare {@code token_type_ids}, some don't — feed it only if present. */
     private final boolean             wantsTokenTypeIds;
+
+    /**
+     * Counts {@code session.run()} invocations — the non-vacuity instrument for the
+     * sub-batch planner (nexus-zu4ma). Package-private read/reset so
+     * {@link Bge768BatchCompositionTest}, in this same package, can prove an
+     * oversize batch produced more than one ONNX call without any mocking
+     * framework (mirrors this class's existing {@code clsPoolNormalize}
+     * package-private test-access convention).
+     */
+    private final AtomicInteger onnxInvocationCount = new AtomicInteger(0);
 
     /** Construct with the canonical bge artifact paths. */
     public Bge768Embedder() {
@@ -141,7 +203,7 @@ public final class Bge768Embedder implements Embedder {
                     .optTokenizerPath(Path.of(tokenizerPath))
                     .optMaxLength(MAX_SEQ_LEN)
                     .optTruncation(true)
-                    .optPadding(false)   // we pad in embedBatch() so the batch tensor is rectangular
+                    .optPadding(false)   // we pad per-sub-batch in runOnnxSubBatch() so each tensor is rectangular
                     .build();
 
             this.session = sess;
@@ -167,7 +229,7 @@ public final class Bge768Embedder implements Embedder {
     public List<float[]> embed(List<String> texts) {
         if (texts == null || texts.isEmpty()) return List.of();
         try {
-            return embedBatch(texts);
+            return embedSubBatched(texts);
         } catch (Exception e) {
             throw new RuntimeException("Bge768Embedder.embed failed: " + e.getMessage(), e);
         }
@@ -180,25 +242,75 @@ public final class Bge768Embedder implements Embedder {
         return new EmbedResult(embed(texts), 0L);
     }
 
-    private List<float[]> embedBatch(List<String> texts) throws Exception {
-        int batchSize = texts.size();
-
-        Encoding[] encodings = new Encoding[batchSize];
-        int maxLen = 0;
-        for (int i = 0; i < batchSize; i++) {
+    /**
+     * Tokenizes the whole input once (cheap relative to an ONNX forward pass), then
+     * greedily partitions it into sub-batches bounded by {@link #MAX_PADDED_TOKEN_AREA}
+     * — never re-ordering, so results concatenate directly in input order. Each
+     * sub-batch is a separate {@link #runOnnxSubBatch} call, so an oversize request
+     * degrades in throughput (more ONNX invocations) rather than in memory (one
+     * unbounded rectangular tensor).
+     *
+     * <p>Sequential (not sorted-by-length) partitioning: extending the current group
+     * with the next text in order is enough to bound padded-token area — a long text
+     * simply forces its group to close sooner — without the added complexity and
+     * result-reordering bookkeeping a sort-then-bucket scheme would need to restore
+     * input order afterward.
+     *
+     * <p>Degrades to the pre-existing single-shot behavior when the whole input
+     * already fits under budget: the loop below produces exactly one group and one
+     * ONNX call, identical to what the old unconditional {@code embedBatch} did.
+     */
+    private List<float[]> embedSubBatched(List<String> texts) throws Exception {
+        int n = texts.size();
+        Encoding[] encodings = new Encoding[n];
+        int[] lens = new int[n];
+        for (int i = 0; i < n; i++) {
             encodings[i] = tokenizer.encode(texts.get(i));
-            maxLen = Math.max(maxLen, (int) encodings[i].getIds().length);
+            // Guard a single empty text against a zero-width group (maxLen >= 1 below).
+            lens[i] = Math.min((int) encodings[i].getIds().length, MAX_SEQ_LEN);
         }
-        maxLen = Math.min(maxLen, MAX_SEQ_LEN);
-        // Guard against an all-empty batch producing a zero-width tensor.
+
+        List<float[]> results = new ArrayList<>(n);
+        int start = 0;
+        while (start < n) {
+            int end = start + 1;
+            int groupMaxLen = Math.max(lens[start], 1);
+            while (end < n) {
+                int candidateMaxLen = Math.max(groupMaxLen, Math.max(lens[end], 1));
+                long candidateArea = (long) (end - start + 1) * candidateMaxLen * candidateMaxLen;
+                if (candidateArea > MAX_PADDED_TOKEN_AREA) break;
+                groupMaxLen = candidateMaxLen;
+                end++;
+            }
+            if (end - start < n) {
+                // Only log when sub-batching actually engaged — the common case (whole
+                // request under budget) stays silent at the old single-call volume.
+                log.debug("event=bge768_subbatch start={} size={} maxLen={} totalBatch={}",
+                        start, end - start, groupMaxLen, n);
+            }
+            results.addAll(runOnnxSubBatch(encodings, start, end, groupMaxLen));
+            start = end;
+        }
+        return results;
+    }
+
+    /**
+     * Runs ONE {@code session.run()} over {@code encodings[start, end)}, padded to
+     * the caller-supplied {@code maxLen}. This is the sole ONNX invocation point —
+     * {@link #onnxInvocationCount} is incremented here so the sub-batch planner's
+     * non-vacuity test can prove an oversize request actually produced multiple
+     * ONNX calls (nexus-zu4ma).
+     */
+    private List<float[]> runOnnxSubBatch(Encoding[] encodings, int start, int end, int maxLen) throws Exception {
+        int batchSize = end - start;
         maxLen = Math.max(maxLen, 1);
 
         long[] inputIdsFlat      = new long[batchSize * maxLen];
         long[] attentionMaskFlat = new long[batchSize * maxLen];
 
         for (int i = 0; i < batchSize; i++) {
-            long[] ids  = encodings[i].getIds();
-            long[] mask = encodings[i].getAttentionMask();
+            long[] ids  = encodings[start + i].getIds();
+            long[] mask = encodings[start + i].getAttentionMask();
             int seqLen  = Math.min(ids.length, maxLen);
             int offset  = i * maxLen;
             for (int j = 0; j < seqLen; j++) {
@@ -227,6 +339,7 @@ public final class Bge768Embedder implements Embedder {
                 inputs.put("token_type_ids", tokenTypeIdsTensor);
             }
 
+            onnxInvocationCount.incrementAndGet();
             try (OrtSession.Result result = session.run(inputs)) {
                 // Output 0 = last_hidden_state shape [batch, seq, 768]
                 float[][][] hiddenState = (float[][][]) result.get(0).getValue();
@@ -242,6 +355,19 @@ public final class Bge768Embedder implements Embedder {
             if (attentionMaskTensor != null) attentionMaskTensor.close();
             if (tokenTypeIdsTensor != null)  tokenTypeIdsTensor.close();
         }
+    }
+
+    /** Test-only: number of {@code session.run()} calls since construction or the
+     * last {@link #resetOnnxInvocationCount()}. Package-private (see
+     * {@link #onnxInvocationCount}'s javadoc). */
+    int onnxInvocationCount() {
+        return onnxInvocationCount.get();
+    }
+
+    /** Test-only: zero the invocation counter. Package-private (see
+     * {@link #onnxInvocationCount}'s javadoc). */
+    void resetOnnxInvocationCount() {
+        onnxInvocationCount.set(0);
     }
 
     /**

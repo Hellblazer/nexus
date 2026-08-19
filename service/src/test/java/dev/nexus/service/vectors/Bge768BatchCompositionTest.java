@@ -92,12 +92,20 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@link Assumptions} check with a loud message naming the remedy — never a silent pass. CI's
  * {@code prime-bge-onnx} action (see {@code .github/workflows/service-ci.yml}) provisions the
  * model unconditionally, so on CI this gate always executes; it can only skip in a local
- * checkout that has not run {@code nx init --service}. There is currently no Java-side
- * max-skip / non-vacuity meta-assert enforcing that this specific class actually ran (as
- * opposed to skipped) — the same gap already exists, unaddressed, for {@code Bge768ParityTest}
- * itself; this test does not introduce a new gap, it inherits the pre-existing one, and that
- * gap is out of W1's scope (a Java-side skip-budget mechanism analogous to the Python
- * suite's {@code NX_SCENARIO_SKIP_BUDGET} does not currently exist for this test module).
+ * checkout that has not run {@code nx init --service}. The Java-side max-skip / non-vacuity
+ * meta-assert this javadoc used to note as absent is now {@code scripts/assert_bge_gates_ran.py}
+ * (nexus-zbwgb), which fails the CI job outright if this class or {@link Bge768ParityTest}
+ * ever reports zero testcases or any {@code <skipped>} entry.
+ *
+ * <h2>W2/W3 landed (nexus-zu4ma)</h2>
+ * <p>{@link Bge768Embedder} now sub-batches internally ({@code embedSubBatched}), bounded by
+ * a memory budget (padded-token-area, {@code Bge768Embedder#MAX_PADDED_TOKEN_AREA}) rather
+ * than a request-count constant. {@link #oversizeBatch_internalSubBatching_multipleInvocations_outputsMatchSingles()}
+ * below is the non-vacuity test the class javadoc originally called for: it drives
+ * {@link Bge768Embedder#embed} with a batch sized to force the INTERNAL planner to split (not
+ * a manually pre-grouped call as the three tests above do), and proves the split actually
+ * happened via the package-private {@code onnxInvocationCount()} instrument rather than
+ * inferring it from timing or output shape.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Bge768BatchCompositionTest {
@@ -253,6 +261,54 @@ class Bge768BatchCompositionTest {
             assertThat(cos)
                     .as("text[%d] all-in-one vs 3-row-sub-batched cosine must clear the batch-composition " +
                         "equivalence gate (tolerance derivation: class javadoc)", i)
+                    .isGreaterThan(COSINE_TOLERANCE);
+        }
+    }
+
+    /**
+     * THE non-vacuity gate for the sub-batch planner (nexus-zu4ma). A 20-row batch where every
+     * row is a near-512-token text has padded-token-area {@code 20 * 512^2 = 5,242,880}, which
+     * exceeds {@code Bge768Embedder#MAX_PADDED_TOKEN_AREA} ({@code 16 * 512^2 = 4,194,304}) — so
+     * the embedder's OWN internal planner (not this test) MUST split it into more than one
+     * {@code session.run()} call. This is proven directly via the package-private invocation
+     * counter, not inferred from wall-clock time or from the shape of the result.
+     *
+     * <p>Also re-asserts the output-parity property {@link #allInOne_vs_singles_cosineWithinTolerance()}
+     * establishes for a manually-grouped call, but here for the embedder's OWN internally-chosen
+     * grouping — the actual production code path this bead hardens.
+     *
+     * <p><b>RED/GREEN non-vacuity, demonstrated 2026-08-19 (recorded on nexus-zu4ma, not
+     * committed here):</b> temporarily hard-coding {@code MAX_PADDED_TOKEN_AREA} to
+     * {@code Long.MAX_VALUE} (i.e. disabling sub-batching — the planner always produces exactly
+     * one group) turned this test RED on the invocation-count assertion
+     * ({@code expected: greater than 1, but was: 1}); the cosine assertions stayed green
+     * (single-group output is unchanged, as expected). Reverted before commit — this class'
+     * own git history / working tree never carried the disabled state.
+     */
+    @Test
+    void oversizeBatch_internalSubBatching_multipleInvocations_outputsMatchSingles() {
+        List<String> big = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            big.add(longText("padding memory budget sub batch planner invocation counter shape " + i, 480));
+        }
+
+        embedder.resetOnnxInvocationCount();
+        List<float[]> batched = embedder.embed(big);
+        assertThat(batched).hasSize(big.size());
+
+        int invocations = embedder.onnxInvocationCount();
+        assertThat(invocations)
+                .as("a 20-row near-512-token batch must be split into more than one ONNX " +
+                    "invocation by the embedder's own sub-batch planner (padded-token-area " +
+                    "20*512^2 exceeds the 16*512^2 budget)")
+                .isGreaterThan(1);
+
+        for (int i = 0; i < big.size(); i++) {
+            float[] single = embedder.embedOne(big.get(i));
+            double cos = cosine(batched.get(i), single);
+            assertThat(cos)
+                    .as("text[%d] internally-sub-batched vs single-item cosine must clear the " +
+                        "batch-composition equivalence gate (tolerance derivation: class javadoc)", i)
                     .isGreaterThan(COSINE_TOLERANCE);
         }
     }
