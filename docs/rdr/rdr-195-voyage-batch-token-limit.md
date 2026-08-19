@@ -2,13 +2,12 @@
 title: "Token-Aware Voyage Batch Splitting: Make the 120K-Tokens-Per-Request Ceiling a Planned Bound Instead of an Opaque 500"
 id: RDR-195
 type: Bug Fix
-status: accepted
+status: draft
 priority: high
 author: Gerasimos Pollatos
 reviewed-by: self
 created: 2026-08-19
-accepted_date: 2026-08-19
-related_issues: []
+related_issues: ["#1465"]
 ---
 
 # RDR-195: Token-Aware Voyage Batch Splitting
@@ -86,9 +85,11 @@ Discovered 2026-08-19 while indexing a large PHP repository in `mode: local` wit
 embeddings.
 
 Reproduced on **`engine-service-v0.1.80`** (the `nexus-service-mac-arm64` signed native binary,
-installed per RDR-161), which is *also* this branch's `REQUIRED_ENGINE_VERSION` floor
-(`src/nexus/engine_version.py:351` — `(0, 1, 80)`). This is therefore a live defect on the
-currently-pinned engine identity, not an artifact of a stale local build.
+installed per RDR-161), which was this branch's `REQUIRED_ENGINE_VERSION` floor at reproduction
+time. The floor has since moved to `(0, 1, 82)` (the v0.1.81/v0.1.82 cuts of 2026-08-19, which
+shipped with conexus 7.11.0); neither cut touched `VoyageEmbedder` or the client paging loop, so
+the defect is live on the currently-pinned engine identity as well — not an artifact of a stale
+local build.
 
 Impact is a hard stop, not a degradation: affected files are not indexed, and the operator sees a
 500 with no indication that batch size is the cause or that a smaller batch would succeed. Because
@@ -340,6 +341,23 @@ to derive that:
 - **Billing** inherits the existing documented stance (`:203-206`): `usage.total_tokens` comes from
   the final successful response, so the reported total under-counts tokenization Voyage billed for
   rejected attempts. Same safe direction as today, not a new divergence.
+- **Request-rate interaction (429), distinct from the retry-budget point above** (maintainer
+  addition, 2026-08-19): sub-batching multiplies the request *rate* — one logical embed that was
+  one oversized POST becomes N smaller POSTs in quick succession, and a bulk index run multiplies
+  that again across pages. This is a live incident class: a 2026-08-15 bulk index run tripped
+  Voyage rate limits (conexus-ddh0) with today's one-POST-per-page behavior, so the planner makes
+  that pressure strictly worse in exchange for making each request valid. The design's answer is
+  the existing per-sub-request 3-attempt 429/5xx retry with backoff in `callApi` (each sub-request
+  arrives with the same independent budget it has today), plus the sub-request cap above bounding
+  worst-case fan-out per logical batch. If bulk-run 429 pressure recurs post-implementation, the
+  remedy is pacing at the *caller* (the staged bulk-load pipeline below, or inter-sub-request
+  delay), not loosening the planner — the planner's job is validity, not throughput shaping.
+- **Staged bulk-load reconciliation** (maintainer addition, 2026-08-19): the planned `/v1/staging`
+  bulk load-then-promote pipeline (bead nexus-b50zw) is complementary, not overlapping — the
+  engine-side planner covers every Voyage call including staged `embed_fill` (`StagingHandler` is
+  already in the caller list), while the client byte budget below applies only to the direct
+  `upsert_chunks` paging path and deliberately does not extend to a staged path, whose batch
+  shaping is owned by the staging pipeline's own design.
 
 - **Test seam**: add the injectable constructor mirroring `VoyageReranker.java:90-100`
   (`url`, `retryBaseMs`, `Optional<ProxySelector>`; production keeps the 3-arg form). Today
@@ -363,6 +381,11 @@ to derive that:
   its own memory-derived cap, so neither should change behavior.
 - Preserve the `embeddings` passthrough slicing in lockstep with ids (`:1576-1577`) under the now
   variable stride, and keep the existing per-page structured logging.
+- **Passthrough pages are exempt from the byte budget** (maintainer addition, 2026-08-19): a page
+  that carries caller-supplied `embeddings` never reaches Voyage, so gating it by a
+  Voyage-token-derived byte budget would shrink pages for no upstream benefit. The budget applies
+  only when the page will cause a server-side embed. Alignment of the passthrough slices under
+  variable stride (the bullet above) is unaffected.
 
 ### Existing Infrastructure Audit
 
@@ -827,6 +850,17 @@ operational signal (adaptive-split rate) called out rather than N/A'd away.
 
 Gate findings are appended here to keep the design sections clean. Each gate round gets a dated
 subsection.
+
+### Maintainer adoption — 2026-08-19
+
+Adopted in-repo from PR #1466 (author retains authorship; contributed gate rounds below preserved
+as the contributor's record). Amendments on adoption, per the review posted on the PR: status
+flipped to `draft` pending an in-house gate run (the contributed gate attestation is
+self-reported from a fork that cannot write the project store — a process constraint, not a
+content criticism); reproduction floor re-verified against the moved `(0, 1, 82)` floor (v7.11.0;
+neither the v0.1.81 nor v0.1.82 cut touched `VoyageEmbedder`); request-rate (429) interaction
+paragraph added (conexus-ddh0 incident class); staged bulk-load (nexus-b50zw) reconciliation
+added; `embeddings`-passthrough pages exempted from the client byte budget.
 
 ### Gate round 1 — 2026-08-19 — BLOCKED, then remediated
 
