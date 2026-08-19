@@ -267,10 +267,14 @@ class TestViewEraChangesetLive:
         # taxonomy-011-8 content-boundary re-grant fix) — appended AFTER
         # -1/-2 in file order, so blocks[1] is still changeset-2's body
         # unchanged; only the expected total block count moved 2 -> 3.
+        # d9b917fb2 (2026-08-19) appended a FOURTH changeset,
+        # grants-nexus-diag-4 (audit-table SELECT grants for the forensics
+        # path) — again after all prior ones, so blocks[1] is still
+        # changeset-2's body; count moved 3 -> 4.
         blocks = re.findall(
             r"<sql\s[^>]*>(.*?)</sql>", xml, re.DOTALL,
         )
-        assert len(blocks) == 3, "expected exactly the three grants-nexus-diag changesets"
+        assert len(blocks) == 4, "expected exactly the four grants-nexus-diag changesets"
         return blocks[1]
 
     def test_revoke_changeset_survives_superuser_owned_view(self, diag_cluster):
