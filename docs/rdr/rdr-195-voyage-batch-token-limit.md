@@ -2,7 +2,8 @@
 title: "Token-Aware Voyage Batch Splitting: Make the 120K-Tokens-Per-Request Ceiling a Planned Bound Instead of an Opaque 500"
 id: RDR-195
 type: Bug Fix
-status: draft
+status: accepted
+accepted_date: 2026-08-19
 priority: high
 author: Gerasimos Pollatos
 reviewed-by: self
