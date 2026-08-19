@@ -28,9 +28,12 @@ assigned to every agent, fixed topology — is the expensive corner: 153× cost 
 25% quality spread across the plan space, with 96% of Pareto-optimal plans using *mixed*
 model assignments.
 
-`nx_answer` already has the paper's §5.4 piece and is the paper's baseline on everything
-else. The plan library (RDR-078/080/084/100) is a semantically indexed, auto-grown cache of
-optimization decisions — the exact artifact the paper says existing semantic caches lack.
+`nx_answer` already has the *sub-plan half* of the paper's §5.4 piece and is the paper's
+baseline on everything else. The plan library (RDR-078/080/084/100) is a semantically indexed,
+auto-grown cache of retrieval plans — sub-plan topologies keyed by intent, which is the artifact
+the paper says existing semantic caches lack. It does **not** yet cache model or engine
+assignments, because nexus makes none (Gaps 2–5); once Phases 1–3 record those decisions, the
+same library is where they would live.
 But every operator runs on one model via `claude -p`, no step carries a cost/latency/quality
 estimate, the run record stores `cost_usd = 0.0` unconditionally, `budget_usd` is "reserved
 for future enforcement", and `plan_match` ranks candidates on match confidence alone. The
@@ -118,9 +121,11 @@ Adjacent nexus work this RDR must not duplicate:
 - **RDR-100 (closed)** — plan-cache improvements (diversity, floor, dispatcher, hierarchy): the
   §5.4 piece. RDR-196 adds a cost dimension to what RDR-100 matches on; it does not change
   matching.
-- **RDR-177 (draft)** — tenant-scoped telemetry/usage metering on the engine. Gap 1's per-step
-  rows are a client-side record of one pipeline's steps; if RDR-177 lands first, Gap 1 should
-  write through its surface rather than add a parallel table.
+- **RDR-177 (draft)** — tenant-scoped telemetry/usage metering on the engine. Its design is
+  tenant-level aggregate snapshots; RDR-196's `nx_answer_steps` is a per-run, per-step event
+  log — a different grain, not a competing table. The relationship is one-directional:
+  RDR-177's per-tenant nx_answer cost aggregates, if built, roll up from `nx_answer_steps`
+  (this RDR's table is the event source, RDR-177 is a consumer). No conditional sequencing.
 - **RDR-190 (draft)** — plan-IR `loop`/`collect` primitives; topology vocabulary that Phase 3's
   escalate loop would reuse rather than invent.
 - **nexus-h33x8.6** — the nx_answer latency/capability measurement that motivates Phase 1.
@@ -274,8 +279,12 @@ semantics (RDR-100 owns that), any change to operator semantics.
   (band width is a named constant, not a knob exposed to users).
 - Budget: estimate = median cost of the matched plan's history; pre-flight refusal carries the
   estimate and the cap in the error text; mid-run stop returns the partial result with an
-  explicit `budget_exhausted_at_step` marker in structured output (fail loud, no silent
-  truncation).
+  explicit `budget_exhausted_at_step` marker **in both output shapes** — a top-level field in
+  `structured=True` output and a leading `[budget exhausted after step N of M — partial answer]`
+  line in the default text output (`nx_answer`'s default is `structured=False`, so a
+  structured-only marker would be a silent-truncation shape for most callers). The same
+  two-shape rule applies to the "no cost history — ran unestimated" warning. Fail loud, no
+  silent truncation, on every path a caller can take.
 
 ```text
 // Illustrative — verify field names against the stream-json fixture
@@ -357,6 +366,13 @@ inline planner and `generate`/`verify` are where quality concentrates.
   **Mitigation**: parse defensively, record `None` and a warning when absent; the non-vacuity test asserts the fixture carries them.
 - **Risk**: budget enforcement refuses plans whose first run has no history.
   **Mitigation**: no-history plans run with a warning, not a refusal; refusal only on an actual estimate.
+- **Risk**: the current default `budget_usd=0.25` predates any measurement; 196-R2 measured a
+  single default-model dispatch at $0.34–$1.84 on this box, so turning the cap into a hard
+  pre-flight refusal at today's default would refuse most multi-step plans outright.
+  **Mitigation**: Phase 3 Step 0 re-derives the default from Phase 1 history (a named
+  percentile of observed per-plan cost, post-Phase-0/2) before enforcement is enabled; the
+  old literal is never enforced as-is. Enforcement ships off by default until the derived
+  value exists.
 - **Risk**: scope creep toward the planner/refiner.
   **Mitigation**: out-of-scope list above; phase-review-gate at each boundary.
 
@@ -370,7 +386,7 @@ inline planner and `generate`/`verify` are where quality concentrates.
 
 ### Prerequisites
 
-- [ ] All Critical Assumptions verified (two spikes: envelope fields, `--model` composition; one source search: quality proxy)
+- [x] All Critical Assumptions verified (196-research-1..4: envelope fields + `--model` composition + strict-MCP by spike; quality proxy by source search — absent, Phase 2 builds it)
 - [ ] RDR-177 status checked: write through its surface if it has landed
 
 ### Minimum Viable Validation
@@ -383,6 +399,10 @@ test against the engine substrate, not a mock.
 ### Phase 0: Strict Empty MCP Config for the Tool-Free Default
 
 #### Step 1: `--strict-mcp-config` + empty `--mcp-config` in `claude_dispatch`'s base argv; test asserts the opt-in `mcp_servers` path still passes its own config
+
+**Status: landing under nexus-h33x8.6 in the sibling session's release batch (2026-08-19, Sam's
+call; commit SHA recorded here when pushed).** RDR-196 does not re-implement it; Phase 1's
+telemetry records the post-fix baseline.
 #### Step 2: replace `_PER_PAPER_COST_USD` literal with a measured per-dispatch figure (or derive from Phase 1 history once available)
 
 ### Phase 1: Measure
@@ -390,6 +410,13 @@ test against the engine substrate, not a mock.
 #### Step 1: Usage capture in `claude_dispatch` (+ fixture-backed test of the result envelope)
 #### Step 2: `StepRecord` collection in `plans/runner.py` incl. SQL fast-path and bundled steps
 #### Step 3: Engine changeset `nx_answer_steps` + `steps` on the record endpoint; client write-through; `cost_usd` = Σ steps
+
+Engine half: Liquibase changeset under `telemetry-*`, tenant-keyed + RLS like `nx_answer_runs`,
+FK to the run row. Client half: sends `steps` only when the engine advertises the capability
+(version probe), so a client ahead of its engine degrades to the run-row-only record with a
+logged warning, never a 400. Ships as a PAIRED release per AGENTS.md § Engine-service release:
+engine tag cut first, `REQUIRED_ENGINE_VERSION` bumped in the same client release, deploy at
+client-tag push; `scripts/check_engine_release_floor.py` is the mechanical gate.
 #### Step 4: Read surface (`structured` output + a `nx` read) and the MVV test
 
 ### Phase 2: Per-Operator Model Routing
@@ -400,6 +427,7 @@ test against the engine substrate, not a mock.
 
 ### Phase 3: Cost-Ranked Choice + Budget
 
+#### Step 0: derive the default `budget_usd` from Phase 1 history (named percentile of observed per-plan cost); enforcement stays off until the derived value exists
 #### Step 1: candidate set with history from `plan_match`; min-cost-within-band selection
 #### Step 2: `budget_usd` pre-flight estimate + mid-run step-boundary stop with explicit marker
 
