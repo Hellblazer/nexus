@@ -1,0 +1,56 @@
+# nexus-h33x8.6 a1 — single-query fast path.
+#
+# _nx_answer_classify_plan (src/nexus/mcp/core.py) reroutes a matched
+# plan straight to query() (mean 2.1s, no claude -p) ONLY when the plan
+# has exactly one step whose tool is `query`. Prior to this template,
+# every plan in the builtin library ended in an operator, so that
+# documented fast path was structurally unreachable — an nx_answer call
+# for a document-discovery question paid the full ~80s claude -p
+# synthesis floor for a question that never needed synthesis at all.
+#
+# This template covers the DISCOVERY shape: "which documents/papers/RDRs
+# exist on X" — the caller wants the documents, not a synthesized answer
+# over their content. See corpus-coverage-check.yml for the adjacent
+# "does the corpus have anything on X" phrasing.
+#
+# Description text follows the abstract-themes.yml precedent (RDR-098):
+# lead with a dense bag of short natural question-form phrasings, since
+# the RDR-079 T1 cache embeds this text with the bundled MiniLM and a
+# small model's cosine score tracks lexical/phrasal overlap closely — a
+# long explanatory paragraph dilutes the vector away from the question
+# shapes this plan actually needs to catch. Document-level guidance
+# ("use research-default for synthesis instead") belongs in a comment,
+# not the embedded description, for the same reason.
+#
+# Not a synthesized cross-document answer: returns the matching
+# documents themselves (title, snippet, source metadata). For a
+# synthesized answer that reads across multiple documents' content, use
+# research-default / analyze-default instead.
+
+name: document-discovery
+description: >-
+  Which documents discuss this? Which papers discuss this? Which RDRs
+  mention this? Find documents about a topic. Find papers about a
+  topic. List documents covering a topic. What documents exist on this
+  subject. Document discovery: find the documents, papers, or RDRs that
+  touch a given topic.
+dimensions:
+  verb: research
+  scope: global
+  strategy: document-discovery
+required_bindings:
+  - question
+optional_bindings:
+  - corpus
+  - limit
+default_bindings:
+  corpus: knowledge
+  limit: 10
+tags: builtin-template,nexus-h33x8,single-step,fast-path
+plan_json:
+  steps:
+    - tool: query
+      args:
+        question: $question
+        corpus: $corpus
+        limit: $limit

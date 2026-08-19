@@ -1,0 +1,41 @@
+# nexus-h33x8.6 a1 — single-query fast path.
+#
+# Sibling of document-discovery.yml: same single-`query`-step shape (see
+# that file's header for the fast-path rationale), covering the adjacent
+# "does the corpus contain anything on X" coverage-check phrasing rather
+# than the "find me the specific documents" discovery phrasing. Kept as
+# a separate template rather than folded into document-discovery so the
+# matcher has two distinct description vectors to rank against — the two
+# phrasings embed close but not identically, and either one reaching the
+# top match is sufficient to hit the single_query classification.
+#
+# Description text follows the abstract-themes.yml precedent (RDR-098):
+# a dense bag of short natural question-form phrasings — see
+# document-discovery.yml's header for the full rationale.
+
+name: corpus-coverage-check
+description: >-
+  What does the corpus have on this? What does the knowledge base have
+  on this? Does the corpus cover this topic? Is there anything in the
+  corpus about this? What do we have on this? Coverage check: does the
+  collection contain anything about a given topic.
+dimensions:
+  verb: research
+  scope: global
+  strategy: corpus-coverage-check
+required_bindings:
+  - question
+optional_bindings:
+  - corpus
+  - limit
+default_bindings:
+  corpus: knowledge
+  limit: 10
+tags: builtin-template,nexus-h33x8,single-step,fast-path
+plan_json:
+  steps:
+    - tool: query
+      args:
+        question: $question
+        corpus: $corpus
+        limit: $limit

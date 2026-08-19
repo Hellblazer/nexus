@@ -26,7 +26,7 @@ format (RDR-169 G3), not a dependency. Pinned by
 | Store | Purpose |
 |---|---|
 | `HttpMemoryStore` | Persistent notes + full-text search (`nx memory`). |
-| `HttpPlanLibrary` | Plan templates with TTL auto-expiry. 15 builtin templates seeded at `nx catalog setup`. |
+| `HttpPlanLibrary` | Plan templates with TTL auto-expiry. 17 builtin templates seeded at `nx catalog setup`. |
 | `HttpTaxonomyStore` | HDBSCAN topic discovery, assignments, taxonomy meta, topic links (RDR-070). Pure-compute half lives in `taxonomy_compute.py`. |
 | `HttpTelemetryStore` | Relevance log + search/hook telemetry + tier writes. |
 | `HttpChashIndex` | Content-hash chunk index (RDR-086; table retired by RDR-187 — shim until the 410 flip). |

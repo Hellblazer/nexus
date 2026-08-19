@@ -282,9 +282,19 @@ def _capped(raw: bytes) -> str:
 
 
 def _persist_timeout_log(
-    timeout: float, stdout: bytes, stderr: bytes,
+    timeout: float, partial_text: str, stderr: bytes, event_count: int,
 ) -> str:
     """Persist partial subprocess output to a timestamped log file.
+
+    nexus-h33x8.6 a3: *partial_text* is the assistant/structured-output
+    text RECONSTRUCTED by :func:`_parse_stream_json_output` from whatever
+    ``--output-format stream-json`` NDJSON events arrived before the kill
+    -- not a raw byte dump of the wire format (that would mostly be
+    ``stream_event``/``system`` JSON envelope, not the content a debugging
+    session actually wants). *event_count* is the number of NDJSON lines
+    that parsed, surfaced so a reader can tell "the process barely
+    started" (event_count near 0) from "it was deep into generation"
+    without decoding the prompt/log by hand.
 
     Returns the file path as a string for inclusion in the timeout
     exception message. Failures to write the log are swallowed so
@@ -301,13 +311,149 @@ def _persist_timeout_log(
         path = logs_dir / f"operator-timeout-{ts}.log"
         path.write_bytes(
             f"[operator-timeout {timeout}s] {ts}Z\n".encode()
-            + b"--- stdout ---\n" + stdout + b"\n"
+            + f"--- stdout ({event_count} stream-json events; reconstructed text) ---\n".encode()
+            + partial_text.encode(errors="replace") + b"\n"
             + b"--- stderr ---\n" + stderr + b"\n"
         )
         return str(path)
     except Exception as exc:  # noqa: BLE001 - best-effort timeout-log write; logged via log.warning
         _log.warning("operator_timeout_log_failed", error=str(exc))
         return "(log write failed)"
+
+
+def _parse_stream_json_output(raw: str) -> tuple[dict[str, Any] | None, str, int]:
+    """Parse ``claude -p --output-format stream-json`` NDJSON output.
+
+    nexus-h33x8.6 a3. Returns ``(final_result, partial_text, event_count)``:
+
+      * ``final_result`` -- the parsed top-level ``{"type": "result", ...}``
+        event. This is the SAME wrapper shape ``--output-format json``
+        returns as its single stdout object (``is_error`` /
+        ``structured_output`` / ``result`` / ...), verified against a
+        captured fixture pair (tests/fixtures/claude_dispatch_json_mode_
+        sample.json vs claude_dispatch_stream_json_sample.ndjson): the
+        NDJSON stream is a strict superset -- intermediate events plus
+        the identical terminal object. ``None`` when no such line
+        appears (subprocess killed before finishing, or *raw* is a
+        legacy bare-JSON blob from a caller/test that never spoke
+        stream-json — the caller falls back to whole-blob ``json.loads``
+        in that case).
+      * ``partial_text`` -- content reconstructed from
+        ``content_block_delta`` stream events (``text_delta`` for plain
+        text, ``input_json_delta``/``partial_json`` for the
+        StructuredOutput tool call every ``json_schema``-constrained
+        dispatch actually takes -- which is every real caller, since
+        ``claude_dispatch`` always passes ``json_schema``) plus, as a
+        fallback, complete ``assistant`` message text blocks. This is
+        what de-vacuates the nexus-1at5 timeout drain: with
+        ``--output-format json`` the subprocess buffers its entire
+        response and writes nothing until it finishes, so a killed
+        subprocess had written zero bytes BY CONSTRUCTION (all 68 prior
+        operator-timeout logs are 74-75 bytes, zero on both streams).
+        stream-json puts each event on the wire as it happens.
+      * ``event_count`` -- number of NDJSON lines that parsed as a JSON
+        object (informational; surfaced in the timeout log and
+        exception message). A line truncated mid-write by SIGKILL is
+        silently skipped, not counted and not fatal to the rest of the
+        parse -- reconstructing partial output must be resilient to a
+        cut stream by definition.
+    """
+    final_result: dict[str, Any] | None = None
+    partial_text_parts: list[str] = []
+    event_count = 0
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        event_count += 1
+        obj_type = obj.get("type")
+        if obj_type == "result":
+            final_result = obj
+        elif obj_type == "stream_event":
+            event = obj.get("event")
+            if isinstance(event, dict) and event.get("type") == "content_block_delta":
+                delta = event.get("delta")
+                if isinstance(delta, dict):
+                    text = delta.get("text")
+                    if text is None:
+                        # StructuredOutput tool calls (every json_schema
+                        # dispatch) stream their input as input_json_delta
+                        # chunks, not text_delta -- this is the dominant
+                        # partial-content shape in practice.
+                        text = delta.get("partial_json")
+                    if isinstance(text, str):
+                        partial_text_parts.append(text)
+        elif obj_type == "assistant":
+            message = obj.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text")
+                        if isinstance(text, str):
+                            partial_text_parts.append(text)
+    return final_result, "".join(partial_text_parts), event_count
+
+
+async def _feed_stdin(proc: "asyncio.subprocess.Process", prompt: str) -> None:
+    """Write *prompt* to stdin and close it.
+
+    Mirrors ``asyncio.subprocess.Process._feed_stdin``'s tolerance of the
+    child closing its end early (e.g. an immediate arg-parse/auth
+    failure) -- BrokenPipeError/ConnectionResetError on drain are
+    expected there too, not fatal.
+    """
+    proc.stdin.write(prompt.encode())
+    try:
+        await proc.stdin.drain()
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    proc.stdin.close()
+
+
+async def _drain_stream(pipe: "asyncio.StreamReader", sink: list[bytes]) -> None:
+    """Read *pipe* in bounded chunks, appending each chunk to *sink* as it
+    arrives, until EOF.
+
+    nexus-h33x8.6 a3. Two deliberate departures from the obvious approach:
+
+    1. NOT ``asyncio.subprocess.Process.communicate()``. Verified
+       empirically: ``communicate()``'s internal unbounded
+       ``StreamReader.read(-1)`` loop (CPython ``asyncio/streams.py``)
+       accumulates into a list LOCAL to that nested coroutine, popping
+       bytes out of the stream's own buffer as it goes. When the
+       enclosing ``asyncio.wait_for(..., timeout=...)`` times out and
+       cancels ``communicate()``, everything already read is discarded
+       with the cancelled frame -- and it is no longer sitting in the
+       stream's buffer either, since it was already popped out. So the
+       pre-a3 ``_drain_pipe``-after-kill path always found nothing,
+       independent of ``--output-format``: switching only the output
+       format left the drain at 0 bytes in a controlled repro (identical
+       prompt, SIGKILL after timeout: manual accumulator captured
+       ~65KB, ``communicate()`` + post-kill ``_drain_pipe`` captured 0).
+       Accumulating into *sink*, a list owned by the CALLER's frame
+       (``claude_dispatch``), means a cancellation here still leaves
+       whatever was appended intact.
+    2. NOT ``readline()``. asyncio's ``StreamReader`` enforces a
+       line-length limit (default 64 KiB) and raises
+       ``LimitOverrunError`` if a single NDJSON line -- e.g. the
+       terminal ``result`` event carrying a large ``structured_output``
+       -- exceeds it, a risk the old single unbounded ``read(-1)``
+       never had. ``read(n)`` has no per-record limit; NDJSON line
+       splitting happens once, after the read loop, in
+       ``_parse_stream_json_output``.
+    """
+    while True:
+        chunk = await pipe.read(65536)
+        if not chunk:
+            return
+        sink.append(chunk)
 
 
 def _close_dispatch_session(session_id: str | None, session_token: str | None) -> None:
@@ -492,7 +638,18 @@ async def claude_dispatch(
     # contract for extract/filter/rank/etc.
     argv: list[str] = [
         "claude", "-p",
-        "--output-format", "json",
+        # nexus-h33x8.6 a3: stream-json (NOT plain json) so the subprocess
+        # writes each event to stdout as it happens, rather than buffering
+        # the whole response and writing nothing until the turn completes.
+        # --verbose is REQUIRED by the claude CLI for stream-json (it
+        # refuses to start otherwise: "requires --verbose").
+        # --include-partial-messages adds content_block_delta events
+        # (text_delta / input_json_delta) so a killed-mid-turn subprocess
+        # leaves reconstructable partial content, not just envelope noise
+        # -- see _parse_stream_json_output.
+        "--output-format", "stream-json",
+        "--verbose",
+        "--include-partial-messages",
         "--json-schema", schema_json,
         "--no-session-persistence",
     ]
@@ -518,11 +675,25 @@ async def claude_dispatch(
             env=env,
         )
 
+        # nexus-h33x8.6 a3: NOT proc.communicate(). See _drain_stream's
+        # docstring for why -- communicate()'s internal read(-1) loop
+        # discards already-read bytes when asyncio.wait_for cancels it on
+        # timeout, which made the nexus-1at5 partial-output drain below
+        # structurally empty regardless of output format. stdout_chunks /
+        # stderr_chunks are owned by THIS frame, so a cancellation here
+        # leaves whatever was appended intact.
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(prompt.encode()),
+            await asyncio.wait_for(
+                asyncio.gather(
+                    _feed_stdin(proc, prompt),
+                    _drain_stream(proc.stdout, stdout_chunks),
+                    _drain_stream(proc.stderr, stderr_chunks),
+                ),
                 timeout=timeout,
             )
+            await proc.wait()
         except asyncio.TimeoutError:
             # Search review I-6: reach the whole process group so any claude
             # children (nested planners, tool subprocesses) get reaped too.
@@ -543,23 +714,37 @@ async def claude_dispatch(
                 await proc.wait()
             except Exception:  # noqa: BLE001 - best-effort cancel cleanup before drain-and-raise; non-fatal
                 pass
-            # nexus-1at5: drain whatever bytes already landed in the pipe
-            # buffers BEFORE raising. ``communicate()`` was cancelled mid-
-            # await so its return value is gone, but the kernel-side pipe
-            # still holds whatever the subprocess wrote. After kill+wait
-            # the writer is dead, so the read drains cleanly without
-            # blocking. Persist to a per-call log file so the operator can
-            # see what claude was producing when the timeout fired -
-            # otherwise a 5-minute timeout discards 5 minutes of analytical
-            # output and the next debugging session starts from zero.
-            partial_stdout = await _drain_pipe(proc.stdout)
-            partial_stderr = await _drain_pipe(proc.stderr)
-            log_path = _persist_timeout_log(timeout, partial_stdout, partial_stderr)
+            # nexus-1at5 / nexus-h33x8.6 a3: stdout_chunks/stderr_chunks
+            # already hold every chunk _drain_stream consumed before
+            # cancellation (unlike the old communicate()-based drain,
+            # cancellation does not discard them). One more read mops up
+            # a final chunk that may have still been sitting in the
+            # StreamReader's internal buffer (arrived but not yet
+            # delivered to _drain_stream) when the writer died -- after
+            # kill+wait the writer is dead, so this drains cleanly
+            # without blocking.
+            stdout_chunks.append(await _drain_pipe(proc.stdout))
+            stderr_chunks.append(await _drain_pipe(proc.stderr))
+            partial_stdout = b"".join(stdout_chunks)
+            partial_stderr = b"".join(stderr_chunks)
+            # Reconstruct readable partial content from the NDJSON so far,
+            # rather than persisting the raw wire bytes (mostly envelope/
+            # system JSON, not what a debugging session wants) -- otherwise
+            # a 5-minute timeout discards 5 minutes of analytical output
+            # and the next debugging session starts from zero.
+            _final_result, partial_text, event_count = _parse_stream_json_output(
+                partial_stdout.decode(errors="replace")
+            )
+            log_path = _persist_timeout_log(timeout, partial_text, partial_stderr, event_count)
             raise OperatorTimeoutError(
-                f"claude -p timed out after {timeout}s; "
-                f"partial output ({len(partial_stdout)}B stdout, "
+                f"claude -p timed out after {timeout}s; partial output "
+                f"({len(partial_text)} chars reconstructed from {event_count} "
+                f"stream-json events, {len(partial_stdout)}B raw stdout, "
                 f"{len(partial_stderr)}B stderr) logged to {log_path}"
             )
+
+        stdout = b"".join(stdout_chunks)
+        stderr = b"".join(stderr_chunks)
 
         if proc.returncode != 0:
             # GH #1414: `claude -p --output-format json` reports its errors on
@@ -635,12 +820,23 @@ async def claude_dispatch(
         if not raw:
             raise OperatorOutputError("claude -p produced empty stdout")
 
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise OperatorOutputError(
-                f"claude -p output is not valid JSON: {exc} — got: {raw[:200]}"
-            ) from exc
+        # nexus-h33x8.6 a3: stdout is now NDJSON (stream-json). The
+        # terminal "result" event is byte-identical in shape to what
+        # --output-format json used to return as the whole payload, so
+        # extract that line first. Fall back to parsing the whole blob as
+        # a single JSON object when no such line is found -- covers a
+        # subprocess/test double that emits a bare JSON blob rather than
+        # real stream-json (the format this repo's own test doubles use).
+        final_result, _partial_text, _event_count = _parse_stream_json_output(raw)
+        if final_result is not None:
+            parsed = final_result
+        else:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise OperatorOutputError(
+                    f"claude -p output is not valid JSON: {exc} — got: {raw[:200]}"
+                ) from exc
 
         # `claude -p --output-format json` returns a wrapper:
         # {"type":"result", "is_error":bool, "result":str, "structured_output":dict, ...}

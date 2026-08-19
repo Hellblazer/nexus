@@ -544,9 +544,11 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
 #: Minimum global-tier (``project=''``) builtin plan rows expected after
 #: seeding (``nx plan reseed``, formerly ``nx catalog setup``). RDR-078
 #: shipped 9; RDR-092 Phase 0a brought that to 12; the live count at
-#: nexus-vl8lk is 15 (``conexus/plans/builtin/*.yml``). The check only
-#: fails below 9 so a partial install on an older plugin is still
-#: tolerated — same conservative floor the pre-N/A-stub check used.
+#: nexus-vl8lk was 15; nexus-h33x8.6 a1 added 2 single-query-step
+#: fast-path templates, bringing it to 17 (``conexus/plans/builtin/
+#: *.yml``). The check only fails below 9 so a partial install on an
+#: older plugin is still tolerated — same conservative floor the
+#: pre-N/A-stub check used.
 _MIN_GLOBAL_BUILTIN_COUNT: int = 9
 
 
@@ -586,7 +588,7 @@ def _run_check_plan_library() -> None:
     columns mean exactly what they meant before).
 
     Paging: bounded at ``MAX_QUERY_RESULTS`` (the project's paging
-    ceiling) per call — the plan library is small (15 builtins + grown
+    ceiling) per call — the plan library is small (17 builtins + grown
     plans) but a future large deployment could exceed the cap; that case
     is reported as a NOTE, never silently undercounted.
     """
