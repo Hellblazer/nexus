@@ -2233,6 +2233,114 @@ class TestUpsertChunksPaging:
         assert len(calls) == 1
         assert len(calls[0]["ids"]) == 200
 
+    # ── RDR-195 Phase 1: byte-aware paging accumulator (nexus-kmtlp.3/.4) ──
+
+    def test_byte_budget_pages_before_count_cap(self, monkeypatch):
+        """Scenario 1: chunks whose cumulative bytes exceed the budget
+        before the count cap → pages break on BYTES.
+
+        18,000-byte docs, 180,000-byte budget → exactly 10 fit per page
+        (10 * 18_000 == 180_000 exactly; the 11th would exceed it,
+        180_000 + 18_000 > 180_000). n=25, cap=300 (code path) never binds
+        — pages must come out [10, 10, 5], not [25] or anything count-shaped.
+        """
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        calls = self._capture(monkeypatch)
+        n = 25
+        ids = [f"{i:032x}" for i in range(n)]
+        docs = ["x" * 18_000 for _ in range(n)]
+        HttpVectorClient().upsert_chunks("code__o__onnx-x__v1", ids, docs)
+        assert [len(c["ids"]) for c in calls] == [10, 10, 5]
+        assert [i for c in calls for i in c["ids"]] == ids
+
+    def test_single_oversize_chunk_ships_alone(self, monkeypatch):
+        """Scenario 2: one chunk larger than the budget still ships, in a
+        page of its own — never dropped, never blocked from shipping."""
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        calls = self._capture(monkeypatch)
+        ids = [f"{i:032x}" for i in range(3)]
+        # docs[1] alone (300,000 B) exceeds the 180,000 B budget on its own.
+        docs = ["x" * 1_000, "x" * 300_000, "x" * 1_000]
+        HttpVectorClient().upsert_chunks("code__o__onnx-x__v1", ids, docs)
+        assert [len(c["ids"]) for c in calls] == [1, 1, 1]
+        assert calls[1]["ids"] == [ids[1]]
+        assert calls[1]["documents"] == [docs[1]]
+
+    def test_cce_and_onnx_local_paging_byte_for_byte_unchanged(self, monkeypatch):
+        """Scenario 3: a docs__/knowledge__/rdr__ collection, and
+        onnx-local mode → paging BYTE-FOR-BYTE UNCHANGED from today, with
+        concrete page-boundary assertions against the existing 64/16 caps
+        — able to fail: huge (50,000 B) docs would trip the 180,000 B
+        budget almost immediately if it were mistakenly applied here."""
+        from nexus.db.http_vector_client import HttpVectorClient
+        import nexus.db.http_vector_client as hvc
+
+        huge_doc = "x" * 50_000  # far over the 180,000 B budget alone
+
+        # CCE prefix, unknown/voyage serving mode → cap=64, budget N/A.
+        calls = self._capture(monkeypatch)
+        n = 150
+        ids = [f"{i:032x}" for i in range(n)]
+        HttpVectorClient().upsert_chunks("docs__o__onnx-x__v1", ids, [huge_doc] * n)
+        assert [len(c["ids"]) for c in calls] == [64, 64, 22]
+
+        # onnx-local serving → cap=16 for EVERY prefix, budget N/A.
+        monkeypatch.setattr(hvc, "_serving_embedding_mode", lambda: "onnx-local")
+        calls2 = self._capture(monkeypatch)
+        n2 = 20
+        ids2 = [f"{i:032x}" for i in range(n2)]
+        HttpVectorClient().upsert_chunks("code__o__onnx-x__v1", ids2, [huge_doc] * n2)
+        assert [len(c["ids"]) for c in calls2] == [16, 4]
+
+    def test_passthrough_embeddings_aligned_under_variable_stride(self, monkeypatch):
+        """Scenario 4: ``embeddings`` passthrough stays aligned with ids
+        under the now-generic accumulator-produced page boundaries
+        (300, 300, 50 — a count-cap remainder, not a byte boundary) rather
+        than the old ``range(start, min(start+cap, n))`` arithmetic. Docs
+        are deliberately large enough to byte-page if the exemption were
+        broken — see the sibling non-vacuity test below."""
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        calls = self._capture(monkeypatch)
+        n = 650
+        ids = [f"{i:032x}" for i in range(n)]
+        docs = ["x" * 18_000 for _ in range(n)]
+        embs = [[float(i)] for i in range(n)]
+        HttpVectorClient().upsert_chunks(
+            "code__o__onnx-x__v1", ids, docs, embeddings=embs,
+        )
+        assert [len(c["ids"]) for c in calls] == [300, 300, 50]
+        assert calls[0]["embeddings"][0] == [0.0]
+        assert calls[1]["embeddings"][0] == [300.0]
+        assert calls[2]["embeddings"][-1] == [649.0]
+        assert [i for c in calls for i in c["ids"]] == ids
+
+    def test_passthrough_batch_larger_than_byte_budget_pages_by_count_alone(self, monkeypatch):
+        """Scenario 5 (non-vacuity for the exemption — RDR-195 gate finding,
+        2026-08-19): the SAME docs as ``test_byte_budget_pages_before_count_cap``
+        (25 * 18,000 B = 450,000 B, well over the 180,000 B budget) but WITH
+        ``embeddings`` supplied. A passthrough page never reaches Voyage, so
+        the byte budget must not apply — this must page by COUNT ALONE (one
+        page, 25 <= cap=300). If the exemption were removed (budget applied
+        unconditionally to passthrough pages too) this would instead split
+        into [10, 10, 5], exactly like the byte-paging test above without
+        ``embeddings`` — THAT is the observable difference the exemption
+        exists to make; without this test the exemption is decorative."""
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        calls = self._capture(monkeypatch)
+        n = 25
+        ids = [f"{i:032x}" for i in range(n)]
+        docs = ["x" * 18_000 for _ in range(n)]
+        embs = [[float(i)] for i in range(n)]
+        HttpVectorClient().upsert_chunks(
+            "code__o__onnx-x__v1", ids, docs, embeddings=embs,
+        )
+        assert len(calls) == 1
+        assert len(calls[0]["ids"]) == 25
+
 
 # ── nexus-wrwb7: mint_token resolution seam (RDR-005 2a self-minting) ───────
 
