@@ -1870,7 +1870,7 @@ class TestPostTypedErrorDetail:
         body = _json.dumps({
             "error": "TOO_MANY_TOKENS_IN_BATCH",
             "detail": "Your batch has 280871 tokens after truncation. Max allowed tokens per batch is 120000.",
-            "sub_requests": 64, "batch_size": 1, "model": "voyage-code-3",
+            "sub_requests": 64, "batch_size": 1, "model": "voyage-test-model",
         }).encode()
         monkeypatch.setattr(hv, "_request", lambda *a, **k: (_ for _ in ()).throw(self._http_error(422, body)))
         with pytest.raises(VectorServiceError) as exc:
@@ -1881,7 +1881,7 @@ class TestPostTypedErrorDetail:
         assert "280871 tokens after truncation" in text
         assert "sub_requests=64" in text
         assert "batch_size=1" in text
-        assert "model=voyage-code-3" in text
+        assert "model=voyage-test-model" in text
 
     def test_plain_error_body_message_unchanged(self, monkeypatch):
         import nexus.db.http_vector_client as hv
