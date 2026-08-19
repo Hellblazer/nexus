@@ -53,23 +53,131 @@ jobs:
         # is read automatically.
         run: uvx ruff@0.15.18 check src/
 
+  release-ledger-gate:
+    # nexus-55r6o: pre-tag wire-contract-ledger check.
+    #
+    # release.yml's "Verify cloud engine meets required floor" step runs
+    # check_client_lag_ledger via --paired-deploy-auto with no
+    # --ack-client-lag -- there is no human present at tag-push time to name
+    # a bead. An unacknowledged docs/wire-contract-pending.md ## Unshipped
+    # entry fails that step CLOSED on the tagged commit's FROZEN tree, and
+    # the workflow_dispatch retry path cannot fix it: it checks out the SAME
+    # immutable tag (actions/checkout `ref: inputs.tag`), so a ledger fix
+    # landed after the tag exists is invisible to a retry -- it re-reads the
+    # identical unacknowledged entry and fails identically (see release.yml's
+    # "REMEDY, CORRECTED (nexus-55r6o...)" comment on that step). The two
+    # real remedies are (a) cut a fresh tag whose tree carries the ledger
+    # fix, or (b) THIS job: run the identical ledger-only check earlier, on
+    # the release PR, while the tree is still mutable.
+    #
+    # `--ledger-only` (scripts/check_engine_release_floor.py, added for this
+    # bead) runs the SAME check_client_lag_ledger the publish step runs,
+    # isolated from the network probe (check_floor) and the git-only
+    # ancestry check (check_source_ancestry) that surround it there -- it is
+    # purely a read of docs/wire-contract-pending.md against the checked-out
+    # tree. No network calls, no cloud state, so PR-time and tag-push-time
+    # agree on what "clean" means for the one part of the gate that is
+    # tree-static (cloud state at PR time is not publish-time state, which is
+    # exactly why the floor/cloud probe stays at publish time, untouched).
+    #
+    # JOB-LEVEL SKIP (CI Cost Discipline: "skipped == success for branch
+    # protection"): fires on ANY pull_request targeting main, matching the
+    # existing release-boundary precedent at the `test` matrix's
+    # python-version expression below (`github.event_name == 'pull_request'
+    # && github.base_ref == 'main'`) -- deliberately NOT narrowed to
+    # `release/*`-named head branches. A hand-named branch releasing to main
+    # (the normal case is `release/*` per AGENTS.md release Step 7, but
+    # nothing enforces that naming) already gets the full pytest matrix via
+    # that same precedent; narrowing THIS gate to `release/*` would silently
+    # skip exactly the check it exists to run pre-tag on such a branch, while
+    # costing nothing to keep broad -- every main-targeting PR already pays
+    # for the wider pytest matrix, so there is no cost argument for scoping
+    # this cheap job any tighter. Every other PR (develop-bound feature work)
+    # skips at the JOB level with zero checkout cost -- a native `if:`
+    # boolean expression over GitHub's own event context, not a paths-filter
+    # action output, so there is no "malformed output" failure mode requiring
+    # a separate non-vacuity assert step (contrast the `changes` /
+    # `write-seam-gate` jobs below, which DO need one because dorny/paths-filter
+    # can itself emit an empty or malformed string).
+    #
+    # MERGE-BLOCKING, MECHANICALLY, NOT ADVISORY (substantive-critic Critical
+    # finding, same review round): this job is wired into `pytest-gate`'s
+    # `needs:` below, so its result is evaluated by the ALREADY-REQUIRED
+    # `pytest-gate` check -- a release PR CANNOT merge with this job red. No
+    # separate branch-protection required-context entry for THIS job's own
+    # name, and no GitHub repo-settings click, is needed to make that true.
+    # `REQUIRED_CHECK_CONTEXTS` in scripts/check_release_ci_evidence.py
+    # (currently `("pytest-gate",)`, mirroring main's live required
+    # contexts) deliberately does NOT gain a second entry for this job's
+    # name either -- pytest-gate's own green check-run at the tagged commit
+    # already proves release-ledger-gate succeeded (pytest-gate's fan-in
+    # step below fails closed if it did not), so a second required-context
+    # entry would be redundant evidence of the same fact, not new coverage.
+    #
+    # DELIBERATE FRICTION, STATED EXPLICITLY: the ledger this job reads
+    # (docs/wire-contract-pending.md) is repo-GLOBAL, not per-PR, and this
+    # job's own CI invocation carries no `--ack-client-lag` (no interactive
+    # human at CI time to name a bead). So a single unacknowledged
+    # `## Unshipped` entry blocks EVERY PR targeting main -- not just the
+    # release PR that will eventually tag -- until someone acknowledges it
+    # (lands the client half, moving the entry to `## Shipped`) or a human
+    # deliberately edits the ledger. This is intended, not a bug: it mirrors
+    # the ledger's own philosophy (see docs/wire-contract-pending.md's
+    # header) that an unshipped both-halves commit is a standing release
+    # risk the whole team should feel, not a fact only the release operator
+    # discovers at tag time.
+    name: PR-to-main wire-contract ledger gate (nexus-55r6o)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-3.12-
+
+      - name: Install project
+        run: uv sync
+
+      - name: Wire-contract ledger check (pre-tag, tree-static, no network)
+        run: uv run python scripts/check_engine_release_floor.py --ledger-only
+
   changes:
-    # nexus-n0ful: doc-only fast lane predicate for the pytest job. Separate
-    # from CA-3 / write-seam-gate's dorny usage below on purpose — those want
-    # "always true on a develop push" as a safety net (see the :470-era
-    # comment on the CA-3 job); THIS predicate directly controls whether the
+    # nexus-h18n5: computes docs_only DIRECTLY from git diff in this job's own
+    # shell -- no dorny/paths-filter, no GitHub PR-files API. Incident (PR
+    # #1464, 2026-08-18): dorny's PR-files API returned an EMPTY changed-file
+    # list seconds after PR creation ("Matching files: none"), and predicate-
+    # quantifier 'every' silently folded that emptiness to docs_only=false ->
+    # code=true, running the full matrix on a 3-file docs/rdr diff. The API
+    # call was the failure surface; git diff against a checkout we already
+    # have (fetch-depth:0 below) has no equivalent "API answered nothing"
+    # failure mode -- it either finds the base commit and diffs it, or it
+    # doesn't, and REPORTS WHICH (see the "gate" step below).
+    #
+    # nexus-n0ful (superseded by nexus-h18n5's git-direct computation; kept
+    # for the design record): this predicate directly controls whether the
     # expensive service-jar + pytest-shard matrix runs at all, so it must be
     # ACCURATE, not conservative-toward-always-true. Getting it wrong the
     # "safe" way (always true) would just make the fast lane a no-op for the
     # 92%-of-runs push case (project_ci_cost_structure) — the whole point of
     # this job.
     #
-    # predicate-quantifier: 'every' — the docs_only output is true only when
-    # EVERY changed file matches the filter (a subset check), not when ANY
-    # file matches (dorny's default 'some'). That is the doc-only PREDICATE:
-    # "this diff touches nothing but docs/changelog/license."
+    # predicate-quantifier semantics preserved: docs_only is true only when
+    # EVERY changed file matches the path set below (a subset check, not an
+    # any-match). That is the doc-only PREDICATE: "this diff touches nothing
+    # but docs/changelog/license."
     #
-    # Strict initial path set (design doc, T1 scratch 34d6700b): docs/**,
+    # Strict path set (design doc, T1 scratch 34d6700b), unchanged: docs/**,
     # README.md, CHANGELOG*, conexus/CHANGELOG.md, LICENSE*. Root `*.md` was
     # too broad — AGENTS.md (and the CLAUDE.md symlink to it) are TEST
     # INPUTS (tests/test_engine_release_skill_parity.py and
@@ -79,14 +187,28 @@ jobs:
     # a test input. conexus/** is DELIBERATELY excluded —
     # tests/test_plugin_structure*.py and tests/hooks/** pin files under
     # conexus/, so a conexus/** change is code as far as this predicate is
-    # concerned. A mechanically-derived conexus-only subset tier (option C's
-    # narrower cousin) was scoped as a follow-up, not implemented here — see
-    # the write-back for why.
+    # concerned. CHANGELOG* is ROOT-LEVEL ONLY: a bare `case` arm with no
+    # leading `*/` requires the WHOLE path to start with "CHANGELOG", so
+    # docs/CHANGELOG.md or conexus/CHANGELOG.md do NOT match it — the latter
+    # gets its own exact-match arm for exactly that reason. docs/** is
+    # recursive without needing `**`: shell `case` pattern matching is plain
+    # string matching, not filesystem pathname expansion, so `*` in `docs/*`
+    # DOES cross `/` (unlike glob() filename generation, which stops at `/`).
     #
-    # This predicate is now the SINGLE doc-skip mechanism — the former
-    # workflow-level `paths-ignore` under `on.push` / `on.pull_request` was
-    # removed in this same change (review finding: ~99.5% overlap, and the
-    # workflow-level form hangs required checks on doc-only PRs).
+    # This predicate is the SINGLE doc-skip mechanism — there is no
+    # workflow-level `paths-ignore` under `on.push` / `on.pull_request` (that
+    # form hangs required checks on doc-only PRs).
+    #
+    # OTHER dorny/paths-filter USAGES IN THIS REPO ARE UNCHANGED BY DESIGN.
+    # CA-3/write-seam-gate below, and engine-service-build's `svc` predicate,
+    # KEEP dorny: their own comments document a DIFFERENT risk profile —
+    # "always true on a develop push" as a deliberate safety net, where an
+    # empty/malformed file list resolving toward true just spends extra CI
+    # cost and never skips something that needed to run. THIS job is the one
+    # place an emptiness bug bought a false NEGATIVE (a skip that shouldn't
+    # have happened), which is why it alone gets the git-direct treatment —
+    # do not "unify" the CA-3 / write-seam-gate / svc jobs onto this pattern;
+    # they were never the ones that broke.
     name: doc-only fast lane predicate
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -95,54 +217,112 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
         with:
-          fetch-depth: 0  # dorny needs history to resolve the explicit base below
+          fetch-depth: 0  # full history needed to resolve the base/before commit below
 
-      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
-        id: changes
-        with:
-          predicate-quantifier: 'every'
-          # PUSH events: diff against the previous commit on the SAME branch
-          # (dorny's documented "Long lived branches" pattern —
-          # base: ${{ github.ref }}), NOT the repo default branch — the
-          # opposite of the CA-3/write-seam-gate jobs' deliberately-unset
-          # base. An unset base resolves push diffs against main here
-          # (verified 2026-07-27, nexus-4k91k), which would make docs_only
-          # permanently false on develop (main and develop differ in ci.yml
-          # itself), i.e. this predicate would never fire for its primary
-          # target. github.ref (not github.event.before directly) is
-          # dorny's own recommended input for this — it delegates the
-          # merge-base / first-push edge cases to dorny's resolution logic
-          # instead of hand-rolling them against a raw before-SHA. PR events
-          # need no override — dorny already diffs against the PR base ref
-          # by default; pinning it explicitly documents that intent.
-          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.ref }}
-          filters: |
-            docs_only:
-              - 'docs/**'
-              - 'README.md'
-              - 'CHANGELOG*'
-              - 'conexus/CHANGELOG.md'
-              - 'LICENSE*'
-
-      - name: Derive the code-changed predicate (fail loud, never default-skip)
+      - name: Compute the doc-only predicate directly from git (no dorny, no PR-files API)
         id: gate
-        # NON-VACUITY: a missing/malformed docs_only output must FAIL this
-        # job, not silently fall through to "code=true" (which would just
-        # waste CI cost, tolerable) or "code=false" (which would SKIP THE
-        # TEST MATRIX on an unproven predicate — never acceptable). The
-        # fan-in job (pytest-gate) additionally requires this job to have
-        # SUCCEEDED before it will accept a doc-only skip.
+        # NON-VACUITY (the actual PR #1464 bug): an EMPTY changed-file list
+        # against two RESOLVED, REACHABLE commits is a malformed predicate
+        # input — FAIL THIS JOB (exit 1), never resolve it to docs_only true
+        # or false. A genuinely empty diff can't reach CI (pushes and PRs
+        # always carry at least one commit), so hitting this arm means the
+        # diff computation itself is broken, not that nothing changed.
+        #
+        # Separately: the BASE/BEFORE commit can be legitimately unusable
+        # (a brand-new branch's first push, a force-push that rewrote the
+        # previous tip out of this checkout's history) — that is NOT the
+        # same failure as an empty diff against good SHAs. Per the fail-
+        # loud-but-conservative-toward-true philosophy this job has always
+        # used, an unusable base/before SHA resolves to code=true (run the
+        # full matrix) through an explicit, loudly-logged named branch below
+        # — never a silent fallthrough, and never the emptiness bug's exit 1.
         run: |
           set -euo pipefail
-          docs_only="${{ steps.changes.outputs.docs_only }}"
-          case "$docs_only" in
-            true)  echo "code=false" >> "$GITHUB_OUTPUT" ;;
-            false) echo "code=true" >> "$GITHUB_OUTPUT" ;;
-            *)
-              echo "::error::paths-filter produced no usable docs_only output ('$docs_only') — cannot prove the doc-only predicate"
-              exit 1
-              ;;
-          esac
+
+          ZERO_SHA="0000000000000000000000000000000000000000"
+          EVENT_NAME="${{ github.event_name }}"
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # Three-dot diff: merge-base(BASE, HEAD)..HEAD, matching PR
+            # review semantics (what this PR actually adds relative to
+            # where it branched from), not a raw two-commit comparison.
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "$ZERO_SHA" ]; then
+              echo "::warning::pull_request event but base.sha is empty or all-zeros ('$BASE_SHA') -- cannot compute a merge-base diff, falling back to code=true (conservative, named branch, not a silent default)"
+              echo "code=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+              echo "::warning::PR base sha $BASE_SHA is not reachable in this checkout despite fetch-depth:0 -- falling back to code=true (conservative, named branch, not a silent default)"
+              echo "code=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            CHANGED_FILES="$(git diff --name-only "${BASE_SHA}...HEAD")"
+          else
+            # PUSH events: diff against the previous position of THIS SAME
+            # branch (github.event.before), preserving the same-branch
+            # semantics dorny's `base: github.ref` "long-lived branches"
+            # pattern deliberately chose over an unset base — an unset base
+            # resolves push diffs against main (verified 2026-07-27,
+            # nexus-4k91k), which would make docs_only permanently false on
+            # develop (main and develop differ in ci.yml itself), i.e. this
+            # predicate would never fire for its primary target.
+            BEFORE_SHA="${{ github.event.before }}"
+            if [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "$ZERO_SHA" ]; then
+              echo "::warning::push event but before-sha is empty or all-zeros ('$BEFORE_SHA') -- first push of a new branch (or an otherwise unusable before-SHA), cannot compute a same-branch diff, falling back to code=true (conservative, named branch, not a silent default)"
+              echo "code=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+              echo "::warning::push before-sha $BEFORE_SHA is not reachable in this checkout -- likely a force-push that rewrote the previous tip out of history, falling back to code=true (conservative, named branch, not a silent default)"
+              echo "code=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            CHANGED_FILES="$(git diff --name-only "${BEFORE_SHA}" HEAD)"
+          fi
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "::error::computed changed-file list is EMPTY against two resolved, reachable commits -- a non-vacuous CI run always has at least one changed file, so this is a malformed predicate input (the PR #1464 failure class); never resolving to docs_only true or false. (One benign shape can trip this: a fully-rebased PR with a zero-net diff against its own base -- if you believe that is what happened here, re-run after rebasing off a base that actually differs.)"
+            exit 1
+          fi
+
+          echo "changed files:"
+          echo "$CHANGED_FILES"
+
+          # predicate-quantifier 'every': docs_only is true only when EVERY
+          # changed file matches the doc-path set below.
+          #
+          # ANCHORING (code-review-expert Critical, nexus-h18n5): `case`
+          # pattern matching is plain string matching, not filesystem
+          # pathname expansion -- `CHANGELOG*` and `LICENSE*` are UNANCHORED
+          # against '/', so without the `*/*` guard below a pushed file like
+          # `CHANGELOG.d/malicious_code.py` or `LICENSE-vendor/code.py`
+          # would match the root-level arm and silently read as docs-only,
+          # skipping the pytest matrix on an actual code change -- the
+          # inverse-and-worse direction of the PR #1464 bug this job exists
+          # to fix. The `*/*` arm below fires for ANY remaining path with a
+          # directory component (once the two legitimately-nested arms,
+          # `docs/*` and the exact `conexus/CHANGELOG.md`, have already had
+          # first crack) and marks it code -- so `CHANGELOG*`/`LICENSE*`
+          # below it only ever see slash-free, true root-level filenames.
+          docs_only=true
+          while IFS= read -r f; do
+            case "$f" in
+              docs/*) ;;
+              conexus/CHANGELOG.md) ;;
+              */*) docs_only=false ;;
+              README.md) ;;
+              CHANGELOG*) ;;
+              LICENSE*) ;;
+              *) docs_only=false ;;
+            esac
+          done <<< "$CHANGED_FILES"
+
+          if [ "$docs_only" = "true" ]; then
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
 
   service-jar:
     # nexus-eqxxh: provision the shaded service JAR for the pytest matrix.
@@ -527,9 +707,22 @@ jobs:
         # -n/xdist in-process parallelism, so the no-parallel-tests
         # invariant still holds.
         run: |
+          set -euo pipefail
           uv run pytest tests/ -q --durations=25 \
             --splits 4 --group ${{ matrix.shard }} \
-            --durations-path=.test_durations.json
+            --durations-path=.test_durations.json | tee shard-output.txt
+
+      # nexus-lemv5: per-shard executed-count floor — the same backstop the
+      # lint leg carries (check_lint_leg_non_vacuity.py, nexus-wixar), aimed
+      # at the shard matrix pytest-gate trusts blindly via needs.test. The
+      # marker-scoped conftest guards (scenario / mandatory-pin) cannot see
+      # a mass-skip of the GENERAL corpus; pytest exits 0 on all-skipped.
+      # Floor 1500/shard against ~3290/shard actual (13150 default-selected
+      # / 4, measured 2026-08-18): generous headroom for corpus shrinkage
+      # and split imbalance, structurally impossible for a near-zero shard
+      # to pass.
+      - name: Executed-count floor (nexus-lemv5 — a shard that skipped its corpus must not report green)
+        run: uv run python scripts/check_lint_leg_non_vacuity.py shard-output.txt --floor 1500 --label "test shard ${{ matrix.shard }}"
 
   test-lint:
     # test-suite-compression P0 (nexus-test-cleanup, 2026-08-05): the `lint`
@@ -768,9 +961,22 @@ jobs:
     # the doc-only predicate (job-level skip, never a workflow-level
     # `paths:` filter — those hang required checks on PRs that legitimately
     # skip).
+    #
+    # release-ledger-gate WIRING (nexus-55r6o, substantive-critic Critical
+    # finding): release-ledger-gate is orthogonal to the doc-only `code`
+    # predicate above -- it gates on "is this PR targeting main", not on
+    # whether the diff touches docs. Its own condition
+    # (`github.event_name == 'pull_request' && github.base_ref == 'main'`)
+    # is RE-DERIVED below rather than trusted from `needs.release-ledger-
+    # gate.result` alone, because `skipped` is ambiguous between "correctly
+    # skipped, wrong PR shape" and "silently never ran" -- a sibling job's
+    # result alone cannot distinguish those. Deliberately duplicating the
+    # condition string here matches the EXISTING precedent at the `test`
+    # matrix's python-version expression above, which duplicates this exact
+    # condition for the exact same reason.
     name: pytest-gate
     if: always()
-    needs: [changes, test, test-lint, test-mode-census]
+    needs: [changes, test, test-lint, test-mode-census, release-ledger-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -782,11 +988,15 @@ jobs:
           test_result="${{ needs.test.result }}"
           test_lint_result="${{ needs.test-lint.result }}"
           test_mode_census_result="${{ needs.test-mode-census.result }}"
+          release_ledger_result="${{ needs.release-ledger-gate.result }}"
+          event_name="${{ github.event_name }}"
+          base_ref="${{ github.base_ref }}"
 
           echo "changes job result: $changes_result (code=$code)"
           echo "test matrix result: $test_result"
           echo "test-lint result: $test_lint_result"
           echo "test-mode-census result: $test_mode_census_result"
+          echo "release-ledger-gate result: $release_ledger_result (event=$event_name base_ref=$base_ref)"
 
           if [ "$changes_result" != "success" ]; then
             echo "::error::the doc-only predicate job (changes) did not succeed ($changes_result) — cannot prove whether the pytest matrix was needed, failing loud instead of guessing"
@@ -836,6 +1046,27 @@ jobs:
               exit 1
               ;;
           esac
+
+          # release-ledger-gate (nexus-55r6o): on a PR targeting main it
+          # MUST have succeeded -- skipped/failed/cancelled all block. On
+          # every other trigger shape (develop-bound PR, push) its own
+          # job-level `if:` legitimately skips it, so skipped/success are
+          # both clean here, same "skipped == success for branch
+          # protection" idiom as the code==false branch above.
+          if [ "$event_name" = "pull_request" ] && [ "$base_ref" = "main" ]; then
+            if [ "$release_ledger_result" != "success" ]; then
+              echo "::error::PR targets main but release-ledger-gate reported '$release_ledger_result' instead of success — the pre-tag wire-contract-ledger check (nexus-55r6o) must pass before a PR to main can merge"
+              exit 1
+            fi
+          else
+            case "$release_ledger_result" in
+              success|skipped) ;;
+              *)
+                echo "::error::release-ledger-gate reported '$release_ledger_result' instead of skipped/success"
+                exit 1
+                ;;
+            esac
+          fi
 
           echo "pytest-gate: PASS"
 

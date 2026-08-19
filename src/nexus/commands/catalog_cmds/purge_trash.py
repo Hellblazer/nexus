@@ -244,6 +244,15 @@ def purge_trash_cmd(older_than_days: int, dry_run: bool, confirm: bool, json_out
     finally:
         writer.close()
 
+    if will_act:
+        # nexus-sybbh: local breadcrumb of a REAL purge execution — the
+        # independent evidence `nx doctor`'s gc_audit-non-empty check
+        # cross-references against the engine's (currently empty) audit
+        # table. Best-effort; never affects the purge result above.
+        from nexus.gc_purge_marker import record_purge_marker  # noqa: PLC0415 — deferred to avoid a module-load-time import for a rarely-hit branch
+
+        record_purge_marker(result, older_than_days=older_than_days)
+
     if json_out:
         payload = dict(result)
         payload["population"] = _POPULATION_NOTE

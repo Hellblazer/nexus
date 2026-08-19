@@ -202,7 +202,20 @@ _RETIRED_SCRIPT_ALLOWLIST: dict[str, str] = {
 #: (relative-path, verb-as-captured) -> reason. General-purpose single-verb
 #: exemption for a file that is NOT otherwise a wholesale historical
 #: tombstone. Empty today — see module docstring for why it stays wired.
-_FILE_VERB_ALLOWLIST: dict[tuple[str, str], str] = {}
+_FILE_VERB_ALLOWLIST: dict[tuple[str, str], str] = {
+    # nexus-x8fuq: upgrade-shakeout's demoted-verb detector
+    # (_check_no_demoted_verb) exists to FAIL when doctor output names a
+    # retired verb, and its self-test plants exactly that string as the RED
+    # fixture. These are detector test-fixtures quoting the dead verb on
+    # purpose — the opposite of rot: deleting them would blind the detector
+    # test to the very class this sweep protects against.
+    ("tests/e2e/upgrade-shakeout.sh", "guided-upgrade"): (
+        "planted RED fixture for the demoted-verb detector's self-test"
+    ),
+    ("tests/e2e/upgrade-shakeout.sh", "guided-upgrade to"): (
+        "planted RED fixture text for _check_no_demoted_verb's self-test"
+    ),
+}
 
 
 @dataclass(frozen=True)

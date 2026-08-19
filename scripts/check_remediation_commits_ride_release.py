@@ -109,8 +109,50 @@ Exit codes: ``0`` all required commits ride the release (or zero requirements
 found among the parsed beads and ``--require-at-least`` is unset /
 satisfied), ``1`` a required commit is not an ancestor of the release ref
 (named in the message), ``2`` unverifiable (``bd export`` failed, ZERO beads
-were parsed at all, git could not be consulted, or ``--require-at-least``
-was not met -- "could not check" is never "must be fine").
+were parsed at all, git could not be consulted, ``--require-at-least`` was
+not met, ``--bd-export-json`` names a file that does not exist, or
+``--verify-snapshot`` rejected the snapshot -- "could not check" is never
+"must be fine").
+
+## Snapshot verification (``--verify-snapshot``, nexus-fehi3)
+
+``bd export`` needs live ``bd``/Dolt access this repo's CI runner does not
+have (see the Non-vacuity section above for why wiring this gate against
+the stale tracked ``.beads/issues.jsonl`` was rejected -- nexus-fix9t).
+Instead, the release skill's pre-tag human step runs::
+
+    uv run python scripts/check_remediation_commits_ride_release.py \\
+        --write-snapshot .release-gates/remediation-snapshot.json
+
+which invokes a live ``bd export`` and commits the result onto the release
+branch alongside the version-bump commit (Step 7). ``release.yml`` then
+replays the real gate against that exact committed file at tag-publish
+time::
+
+    python3 scripts/check_remediation_commits_ride_release.py \\
+        --release-ref vX.Y.Z \\
+        --bd-export-json .release-gates/remediation-snapshot.json \\
+        --verify-snapshot
+
+``--verify-snapshot`` adds two checks on top of the ordinary
+``--bd-export-json`` load, both fail-closed (exit 2, never a silent pass):
+
+1. **Committed on the release ref.** ``git cat-file -e <release-ref>:<path>``
+   must resolve -- a snapshot present on disk but never ``git add``ed/
+   committed (or committed on a different ref) is not proof of anything
+   about *this* release.
+2. **Not stale.** The newest ``updated_at`` timestamp across every parsed
+   bead must be no older than the commit date of ``--release-base-ref``
+   (default ``<release-ref>^``, i.e. the commit immediately preceding this
+   release -- for the standard ``gh pr merge --merge`` shape this is
+   exactly main's tip before the release PR landed, since Step 7 always
+   pre-merges ``origin/main`` into the release branch before committing).
+   A snapshot whose most recent bead activity predates that point was
+   evidently captured before -- not at -- this release's cut.
+
+A missing ``--bd-export-json`` file is always an explicit UNVERIFIABLE
+message and exit 2 (never a raw traceback), independent of
+``--verify-snapshot``.
 """
 from __future__ import annotations
 
@@ -121,6 +163,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 
 _CLOSED_STATUS = "closed"
 
@@ -259,6 +302,145 @@ def load_beads_from_export_json(path: pathlib.Path) -> list[dict]:
     return beads
 
 
+def write_snapshot(path: pathlib.Path, repo_root: pathlib.Path) -> int:
+    """Run a live ``bd export`` and write it to ``path`` as bd-export-shaped
+    JSONL -- the human pre-tag half of the snapshot flow (nexus-fehi3). The
+    caller (release skill Step 0b) then ``git add``s + commits ``path`` onto
+    the release branch alongside the version-bump commit, so
+    ``--verify-snapshot`` can later confirm it is genuinely on that ref.
+
+    Returns ``0`` on success, ``2`` (same UNVERIFIABLE doctrine as the rest
+    of this module) if ``bd export`` itself could not be run -- no partial
+    file is left behind in that case.
+    """
+    beads = run_bd_export(repo_root)
+    if beads is _EXPORT_UNAVAILABLE:
+        print(
+            "remediation-commit snapshot: `bd export` could not be run or returned "
+            "unparseable output -- no snapshot written. Confirm `bd` is installed and "
+            ".beads/ is initialized in this repo.",
+            file=sys.stderr,
+        )
+        return 2
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for bead in beads:
+            f.write(json.dumps(bead) + "\n")
+    print(f"remediation-commit snapshot: wrote {len(beads)} bead(s) to {path}")
+    return 0
+
+
+def is_path_committed_at_ref(path: pathlib.Path, ref: str, repo_root: pathlib.Path) -> bool:
+    """``True`` iff ``path`` (any path, absolute or relative) is tracked by
+    git AT ``ref`` -- i.e. committed on that exact ref, not merely present
+    on disk. A path outside ``repo_root`` cannot be "on this ref" by
+    definition and is ``False`` without invoking git at all.
+    """
+    try:
+        rel = path.resolve().relative_to(repo_root.resolve())
+    except ValueError:
+        return False
+    try:
+        out = subprocess.run(
+            ["git", "cat-file", "-e", f"{ref}:{rel.as_posix()}"],
+            cwd=repo_root, capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.returncode == 0
+
+
+def resolve_commit_date(ref: str, repo_root: pathlib.Path) -> object:
+    """The commit date of ``ref`` as a timezone-aware :class:`datetime`, or
+    :data:`_UNVERIFIABLE` if git could not resolve it."""
+    try:
+        out = subprocess.run(
+            ["git", "log", "-1", "--format=%cI", ref],
+            cwd=repo_root, capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _UNVERIFIABLE
+    if out.returncode != 0 or not out.stdout.strip():
+        return _UNVERIFIABLE
+    try:
+        return datetime.fromisoformat(out.stdout.strip())
+    except ValueError:
+        return _UNVERIFIABLE
+
+
+def newest_bead_updated_at(beads: list[dict]) -> datetime | None:
+    """The most recent ``updated_at`` timestamp among ``beads``, or ``None``
+    if none carry a parseable one. Missing or malformed values are skipped,
+    not errors -- the caller decides whether "no timestamps at all" is
+    itself a failure (it is, for ``--verify-snapshot``: see
+    :func:`verify_snapshot_is_fresh`)."""
+    timestamps: list[datetime] = []
+    for bead in beads:
+        raw = bead.get("updated_at")
+        if not raw:
+            continue
+        try:
+            timestamps.append(datetime.fromisoformat(str(raw).replace("Z", "+00:00")))
+        except ValueError:
+            continue
+    return max(timestamps) if timestamps else None
+
+
+def verify_snapshot_is_fresh(
+    beads: list[dict],
+    snapshot_path: pathlib.Path,
+    release_ref: str,
+    release_base_ref: str,
+    repo_root: pathlib.Path,
+) -> int | None:
+    """The two ``--verify-snapshot`` checks (module docstring). Returns an
+    exit code (always ``2``, UNVERIFIABLE) if either check fails, or
+    ``None`` if both pass and the caller should proceed to the ordinary
+    ancestor-check gate."""
+    if not is_path_committed_at_ref(snapshot_path, release_ref, repo_root):
+        print(
+            f"REMEDIATION-COMMIT GATE UNVERIFIABLE: snapshot {snapshot_path} is not "
+            f"committed on {release_ref} -- a snapshot present on disk but never "
+            "`git add`ed/committed (or committed on a different ref) proves nothing "
+            "about this release. Run the release skill's pre-tag `--write-snapshot` "
+            "step and commit its output before tagging.",
+            file=sys.stderr,
+        )
+        return 2
+
+    newest = newest_bead_updated_at(beads)
+    if newest is None:
+        print(
+            "REMEDIATION-COMMIT GATE UNVERIFIABLE: the snapshot carries no parseable "
+            "`updated_at` timestamp on any bead -- cannot establish freshness. Treat as "
+            "a failed gate, not a pass.",
+            file=sys.stderr,
+        )
+        return 2
+
+    base_date = resolve_commit_date(release_base_ref, repo_root)
+    if base_date is _UNVERIFIABLE:
+        print(
+            f"REMEDIATION-COMMIT GATE UNVERIFIABLE: could not resolve --release-base-ref "
+            f"{release_base_ref!r} against git -- cannot establish the staleness floor.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if newest < base_date:
+        print(
+            f"REMEDIATION-COMMIT GATE UNVERIFIABLE: snapshot is STALE -- newest bead "
+            f"updated_at ({newest.isoformat()}) is older than {release_base_ref}'s commit "
+            f"date ({base_date.isoformat()}). The snapshot was evidently captured before, "
+            "not at, this release's cut -- re-run the release skill's pre-tag "
+            "`--write-snapshot` step and re-commit.",
+            file=sys.stderr,
+        )
+        return 2
+
+    return None
+
+
 def run_bd_export(repo_root: pathlib.Path) -> object:
     """Read-only ``bd export`` against ``repo_root``'s beads DB.
 
@@ -395,10 +577,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--release-ref",
-        required=True,
+        default=None,
         metavar="REF",
         help="Branch or tag being cut/verified (e.g. develop, v7.7.0). Every open "
-        "remediation bead's required commit(s) must be an ancestor of this ref.",
+        "remediation bead's required commit(s) must be an ancestor of this ref. Required "
+        "unless --write-snapshot is given (that mode does not run the gate).",
     )
     parser.add_argument(
         "--repo-root",
@@ -426,11 +609,55 @@ def main(argv: list[str] | None = None) -> int:
         "found across all scanned beads. 0 (default) allows a legitimate zero-finding "
         "green -- most releases have no open remediation bead with a commit dependency.",
     )
+    parser.add_argument(
+        "--write-snapshot",
+        default=None,
+        type=pathlib.Path,
+        metavar="PATH",
+        help="SNAPSHOT-WRITE MODE (nexus-fehi3): run a live `bd export` and write it to "
+        "PATH, then exit -- does not run the gate and does not require --release-ref. "
+        "The human pre-tag half of the CI-replay flow (release skill Step 0b); commit "
+        "PATH onto the release branch afterward.",
+    )
+    parser.add_argument(
+        "--verify-snapshot",
+        action="store_true",
+        help="SNAPSHOT-VERIFY MODE (nexus-fehi3): requires --bd-export-json. Additionally "
+        "asserts the snapshot file is committed on --release-ref (not merely present on "
+        "disk) and is not stale (see --release-base-ref). Fails closed (exit 2) on either "
+        "check failing. This is what release.yml's CI replay passes.",
+    )
+    parser.add_argument(
+        "--release-base-ref",
+        default=None,
+        metavar="REF",
+        help="Only meaningful with --verify-snapshot: the staleness floor -- the snapshot's "
+        "newest bead updated_at must be no older than this ref's commit date. Default "
+        "`<release-ref>^`, the commit immediately preceding this release (main's tip "
+        "before the release PR landed, for the standard merge shape).",
+    )
     args = parser.parse_args(argv)
 
     repo_root = args.repo_root or pathlib.Path(__file__).resolve().parent.parent
 
+    if args.write_snapshot is not None:
+        return write_snapshot(args.write_snapshot, repo_root)
+
+    if args.release_ref is None:
+        parser.error("--release-ref is required (unless --write-snapshot is given)")
+    if args.verify_snapshot and args.bd_export_json is None:
+        parser.error("--verify-snapshot requires --bd-export-json")
+
     if args.bd_export_json is not None:
+        if not args.bd_export_json.exists():
+            print(
+                f"REMEDIATION-COMMIT GATE UNVERIFIABLE: --bd-export-json "
+                f"{args.bd_export_json} does not exist. A missing snapshot means the "
+                "pre-tag human step (or the offline caller) did not produce it -- this is "
+                "never a pass.",
+                file=sys.stderr,
+            )
+            return 2
         beads = load_beads_from_export_json(args.bd_export_json)
     else:
         beads = run_bd_export(repo_root)
@@ -444,6 +671,12 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+
+    if args.verify_snapshot:
+        release_base_ref = args.release_base_ref or f"{args.release_ref}^"
+        rc = verify_snapshot_is_fresh(beads, args.bd_export_json, args.release_ref, release_base_ref, repo_root)
+        if rc is not None:
+            return rc
 
     return run_gate(beads, args.release_ref, repo_root, require_at_least=args.require_at_least)
 

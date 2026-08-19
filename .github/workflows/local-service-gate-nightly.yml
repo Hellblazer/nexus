@@ -220,7 +220,7 @@ jobs:
 
       - name: Non-vacuity — every ungated file actually ran (nexus-5opzu)
         # A gate that skip-passes when its dependency is absent must carry a
-        # non-vacuity assert (CLAUDE.md § Testing). Each of the four files
+        # non-vacuity assert (AGENTS.md § Critical conventions). Each of the four files
         # must contribute >= 1 non-skipped testcase; a jar/PG-prereq skip
         # sweep reads as a broken gate, not a pass.
         run: |
@@ -267,13 +267,15 @@ jobs:
         # the few extra minutes the tests take (CI-cost discipline: no new
         # runner, piggyback the existing nightly schedule).
         #
-        # test_mineru_path_preserves_formulas is DESELECTED here: MinerU's
-        # first invocation downloads ~2-3GB of model weights with no HF
-        # cache in this job, and its coverage strategy (shakedown with the
-        # indexing steps' `|| true` removed, vs. joining this weekly/nightly
-        # -m slow run) is nexus-6xkdu's decision, not this bead's. Do not
-        # fold it in here without also adding the HF cache step ci.yml
-        # already carries for it.
+        # test_mineru_path_preserves_formulas is DESELECTED here — DECIDED
+        # state, not pending (nexus-jy4hd, 2026-08-18): MinerU's first
+        # invocation downloads ~2-3GB of model weights with no HF cache in
+        # this job, and MinerU-end-to-end coverage is owned by the release
+        # shakedown's step 3b, which now indexes with an EXPLICIT
+        # --extractor mineru, doctor-precheck parsed, and a post-hoc
+        # extraction_method identity assert — a route-away or substitution
+        # reddens every release. Do not fold the pytest twin in here
+        # without also adding the HF cache step ci.yml already carries.
         #
         # FIRST-NIGHTLY-RUN VERIFICATION (manual, once, after this merges): confirm this step exits 0; the non-vacuity step below prints exactly 6 (floor=6); slow-s6dei.xml contains no test_mineru_path_preserves_formulas testcase; and -rs prints no unexpected skip lines beyond legitimately-conditional ones.
         run: |

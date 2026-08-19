@@ -30,6 +30,12 @@ If it exits non-zero, STOP — do not proceed with the PyPI release. The gate fa
 
 Re-run (without `--paired-deploy`) until it exits 0 — including the post-tag verify for a paired release.
 
+`release.yml`'s own copy of this gate runs `--paired-deploy-auto` (nexus-gc9ir) instead of bare — it derives the candidate tag from `REQUIRED_ENGINE_VERSION` itself and only engages the paired-acceptance path when the cloud is actually below floor, so the workflow no longer red's during a paired release's expected parallel-deploy window. This pre-tag human invocation still uses the explicit `--paired-deploy <tag>` form above — name the tag deliberately here, where you already know it.
+
+**The core tradeoff:** paired acceptance (either flag) proves the engine TAG is legitimate — it does not prove the deploy has actually landed. That's an accepted, bounded gap: the daily `engine-floor-verify` scheduled job (`.github/workflows/scheduled-failure-watch.yml`) re-probes the real endpoint bare and surfaces a still-stale cloud within ≤24h via the tracked "Scheduled workflows are failing silently" GH issue. See `check_engine_release_floor.py`'s module docstring for the full statement.
+
+**Known CI-side failure mode, no bypass by design:** the workflow's `--paired-deploy-auto` invocation has no `--ack-client-lag` flag (no human present at tag-push to name a bead), so an unacknowledged `docs/wire-contract-pending.md` `## Unshipped` entry fails that step CLOSED during a paired release, before the tag/cloud checks even run — correctly, do not ask for a CI-side bypass. **Re-running the SAME tag via `workflow_dispatch` does NOT fix this** (nexus-55r6o) — the checkout pins the tag's immutable tree, and the ledger check reads the ledger off that same frozen tree, so a same-tag retry re-reads the identical unacknowledged entry and fails identically. Real remedy: (a) cut a FRESH client tag whose tree carries the ledger fix (a new release, not a retry of the failed one), or (b) implemented (nexus-55r6o): ci.yml's `release-ledger-gate` job runs the identical ledger-only check (`check_engine_release_floor.py --ledger-only`) on EVERY PR targeting main, before any tag exists — not narrowed to `release/*`-named branches, so a hand-named branch promoting to main is covered too. **This is mechanically MERGE-BLOCKING, not advisory:** the job is wired into `pytest-gate`'s `needs:`, and `pytest-gate` is main's actual required branch-protection check — a release PR with an unacknowledged entry fails CI on Step 7 and cannot merge, no separate GitHub repo-settings change needed. Because the ledger this job reads is repo-GLOBAL and the CI invocation carries no `--ack-client-lag` path, this is deliberately broad friction: a single unacknowledged `## Unshipped` entry blocks EVERY PR to main, not just the eventual release PR, until it is acknowledged (client half shipped) or a human edits the ledger — intended, matching the ledger's own philosophy of surfacing an unshipped both-halves commit as a standing risk, not a tag-time surprise.
+
 Supplementary context (useful when deciding whether recent `service/` work is cloud-relevant, but the script above is the actual gate):
 
 ```bash
@@ -63,6 +69,14 @@ requires-commit: <sha>
 ```
 
 one sha per line (7-40 hex chars). This is the structured form the gate scans for first. It also nets two free-text phrasings ("requires commit `<sha>`", "must include `<sha>`") for beads written before this convention existed, but the marker is the reliable form — prefer it. Closed beads are never scanned.
+
+**Pre-tag snapshot for the CI replay (nexus-fehi3, MANDATORY, do BEFORE Step 7's commit).** This repo's `bd` backend is Dolt with no credentials on the CI runner, so `release.yml` cannot run `bd export` live — it replays this gate against a cut-time snapshot instead. Write it now:
+
+```bash
+uv run python scripts/check_remediation_commits_ride_release.py --write-snapshot .release-gates/remediation-snapshot.json
+```
+
+Stage `.release-gates/remediation-snapshot.json` into Step 7's release-branch commit (alongside the seven version-bump manifests). `release.yml` reruns the gate against that exact committed file at tag-publish time via `--verify-snapshot`, which fails the release closed if the file is missing (the pre-tag step didn't run), present but not committed on the tagged ref, or stale (its newest bead `updated_at` predates the commit immediately preceding this release). A stale/missing snapshot from a prior release does NOT carry forward — write a fresh one every release.
 
 ### 1. Run unit + integration suite
 
@@ -272,14 +286,17 @@ git merge origin/main   # resolve: changelogs = union (fold main's released
 # (they were never bumped on develop) — Step 3 bumps from whatever is present,
 # so bump by pattern, not by exact-previous-version string match.
 
-# Stage ALL SEVEN bump targets from Step 3, plus uv.lock and both changelogs.
-# mcpb/pyproject.toml + mcpb/manifest.json are the easy-to-miss pair here and
-# their omission fails CI's mcpb-manifest-version parity check.
+# Stage ALL SEVEN bump targets from Step 3, plus uv.lock and both changelogs,
+# plus Step 0b's pre-tag snapshot. mcpb/pyproject.toml + mcpb/manifest.json
+# are the easy-to-miss pair here and their omission fails CI's mcpb-manifest-
+# version parity check; omitting .release-gates/remediation-snapshot.json
+# fails release.yml's --verify-snapshot step outright (missing snapshot).
 git add pyproject.toml uv.lock CHANGELOG.md conexus/CHANGELOG.md \
         mcpb/pyproject.toml mcpb/manifest.json \
         .claude-plugin/marketplace.json \
         conexus/.claude-plugin/plugin.json \
-        sn/.claude-plugin/plugin.json
+        sn/.claude-plugin/plugin.json \
+        .release-gates/remediation-snapshot.json
 git commit -m "chore(release): conexus X.Y.Z"
 
 git push -u origin release/vX.Y.Z

@@ -99,6 +99,263 @@ _index_floor_check() {
     fi
 }
 
+# nexus-whqun: the T1 leak sniff used to count two directories that are
+# BOTH confirmed dead by the current T1 design: `$HOME/.config/nexus/
+# sessions/` (the legacy SESSIONS_DIR resolver -- T1Database._reconnect's
+# own docstring in src/nexus/db/t1.py says it and the multi-writer record
+# files it read "are gone") and `$TMPDIR/nx_t1_*` (the retired chroma-T1
+# tmpdir convention -- `rg "nx_t1_" src/` returns zero hits anywhere in
+# this tree). Nothing in this codebase writes to either location any more,
+# so both deltas were structurally always 0 -- a WARN that could never
+# fire, twice over, not once as originally filed.
+#
+# What T1 ACTUALLY leaves on disk today (src/nexus/db/t1.py): per-session
+# lease files (`t1_session_lease.<session_id>`, published by a live MCP
+# session and removed on clean teardown) and one persisted CLI-dedicated-
+# session cache file (`t1_cli_dedicated_session`). Both are written via an
+# atomic temp-file + os.replace() pattern -- `<name>.<pid>.<uuid>.tmp`,
+# renamed into place instantly (`publish_t1_session_lease` /
+# `_cli_dedicated_session_id`). A `.tmp` file surviving past the write
+# that created it means a process died mid-publish (crash, SIGKILL)
+# BEFORE the rename -- genuine litter, the same failure class the
+# original sniff was trying (and structurally failing) to catch.
+_t1_stray_tmp_count() {
+    local config_dir="$1"
+    { ls -1 "$config_dir"/t1_session_lease.*.tmp \
+          "$config_dir"/t1_cli_dedicated_session.*.tmp 2>/dev/null || true; } \
+        | wc -l | tr -d ' '
+}
+
+# nexus-9nchs part B: `nx doctor`'s own process exit code encodes ONLY
+# `fatal and not ok` (nexus.health.HealthResult docstring: `ok=False,
+# warn=True` is "soft warning ... never fatal, never marks the run
+# failed" -- RDR-129 B4, a deliberate PRODUCT design choice this script
+# does not change). The corpus-integrity instruments this shakedown step
+# needs to watch are ALL warn=True by that same design, so bare `nx
+# doctor`'s rc is structurally blind to a regression in any of them.
+# This is release-sandbox's OWN, additional gate layered over the SAME
+# `nx doctor --json` payload (nexus.health.format_health_for_json),
+# independent of doctor's own exit-code semantics.
+#
+# The three named checks are the currently-live corpus-integrity
+# instruments in nexus.health (verified against the tree at fix time --
+# the bead's originally-cited "dangling manifests" check was retired
+# outright at RDR-191 Phase 6/nexus-o8dil.33; "manifest pre-backfill
+# rows" is its still-live sibling, explicitly NOT retired per RDR-191
+# Decision item 4's carve-out, and the closest surviving analogue).
+_DOCTOR_CORPUS_INTEGRITY_LABELS=(
+    "Chunk chash conformance"
+    "stale index-run fences"
+    "manifest pre-backfill rows (collection IS NULL)"
+)
+
+# Reads `nx doctor --json` output on stdin. Prints one "LABEL: detail"
+# line per named check whose status came back anything other than "ok";
+# prints nothing when all named checks are clean. Unparseable input
+# (doctor crashed/changed shape before emitting valid JSON) is flagged
+# explicitly rather than silently read as "all clean" -- the same
+# fail-loud-never-fail-open discipline health.py itself uses.
+_doctor_corpus_integrity_regressions() {
+    python3 -c '
+import json, sys
+named = set(sys.argv[1:])
+try:
+    data = json.load(sys.stdin)
+except ValueError as exc:
+    print(f"<unparseable nx doctor --json output: {exc}>")
+    raise SystemExit(0)
+for c in data.get("checks", []):
+    if c.get("name") in named and c.get("status") != "ok":
+        name = c.get("name")
+        detail = c.get("detail", "")
+        print(f"{name}: {detail}")
+' "${_DOCTOR_CORPUS_INTEGRITY_LABELS[@]}"
+}
+
+# nexus-jy4hd: extractor-identity verdicts for the MinerU shakedown step.
+# (1) `nx doctor --check-mineru` prints check lines but its rc is not a
+# reliable failure signal for this one check — parse the output for the
+# MinerU line and require it to be a pass; no MinerU line at all is a FAIL
+# (a probe that produced nothing is never a pass). (2) after step 3b
+# indexes with an EXPLICIT --extractor mineru, the indexed chunk's
+# Extractor field must literally be mineru — belt-and-braces against any
+# future in-extractor fallback quietly substituting a different engine.
+_mineru_doctor_verdict() {
+    # stdin: `nx doctor --check-mineru` output → "OK" or "FAIL|<cause>"
+    python3 -c '
+import sys
+out = sys.stdin.read()
+lines = [l for l in out.splitlines()
+         if "MinerU import" in l or "do_parse" in l]
+if not lines:
+    print("FAIL|doctor output carries no MinerU line at all — the probe ran nothing")
+    raise SystemExit(0)
+bad = [l.strip() for l in lines if "✗" in l]
+if bad:
+    print("FAIL|" + "; ".join(bad)[:300])
+else:
+    print("OK")
+'
+}
+
+# Isolate the chunk ids ADDED by a step: set-difference of two id listings
+# (one per line, any order). Ordering-proof by construction — review
+# Critical on the first cut: `nx store list | head -1` rode the engine's
+# ORDER BY chash ASC, so with steps 3a and 3b sharing a collection the
+# "first" chunk could be the OTHER extractor's document (false-FAIL a
+# healthy MinerU run, or false-PASS without inspecting 3b's chunk at all).
+_new_chunk_ids() {
+    # $1 = file of before-ids, $2 = file of after-ids -> new ids, one/line
+    comm -13 <(sort -u "$1") <(sort -u "$2")
+}
+
+_extractor_identity_verdict() {
+    # stdin: `nx store get <chunk-id>` output → "OK" or "FAIL|<cause>"
+    python3 -c '
+import sys
+out = sys.stdin.read()
+for line in out.splitlines():
+    if line.startswith("Extractor:"):
+        method = line.split(":", 1)[1].strip()
+        if method == "mineru":
+            print("OK")
+        else:
+            print(f"FAIL|indexed chunk carries extraction_method={method!r}, not mineru — the step exercised a DIFFERENT extractor than the one it claims to gate")
+        raise SystemExit(0)
+print("FAIL|no Extractor field on the indexed chunk — extraction_method missing, identity unproven")
+'
+}
+
+# ── --self-test: pure-function checks against synthetic fixtures ───────────
+# Exercises the two detectors above directly -- no wheel build, no sandbox
+# HOME, no engine, no PG, no network. Mirrors tests/e2e/local-index-
+# memory-gate.sh's --self-test precedent: a full sandbox run is
+# impractical to drive per-edit, so the changed assertions get a pure-
+# function seam a plain shell can exercise anywhere, any time.
+_SELF_TEST_FAILED=0
+_st_ok()  { printf '  [PASS] %s\n' "$*"; }
+_st_bad() { printf '  [FAIL] %s\n' "$*" >&2; _SELF_TEST_FAILED=1; }
+
+_self_test() {
+    echo "== self-test: _t1_stray_tmp_count (nexus-whqun) =="
+    local tdir n
+    tdir="$(mktemp -d)"
+
+    n=$(_t1_stray_tmp_count "$tdir")
+    [[ "$n" == "0" ]] && _st_ok "clean dir -> 0" \
+        || _st_bad "clean dir -> expected 0, got $n"
+
+    # RED: plant the exact litter class the detector claims to catch.
+    : > "$tdir/t1_session_lease.abc123.999.deadbeef.tmp"
+    : > "$tdir/t1_cli_dedicated_session.999.deadbeef.tmp"
+    : > "$tdir/t1_session_lease.abc123"   # real, non-.tmp lease -- must NOT count
+    n=$(_t1_stray_tmp_count "$tdir")
+    [[ "$n" == "2" ]] && _st_ok "2 stray .tmp files -> detected 2 (RED)" \
+        || _st_bad "2 stray .tmp files -> expected 2, got $n (detector did not fire)"
+
+    # GREEN: repair (remove the litter) -- must clear back to 0.
+    rm -f "$tdir"/*.tmp
+    n=$(_t1_stray_tmp_count "$tdir")
+    [[ "$n" == "0" ]] && _st_ok "litter removed -> 0 (GREEN)" \
+        || _st_bad "litter removed -> expected 0, got $n"
+
+    rm -rf "$tdir"
+
+    echo
+    echo "== self-test: _doctor_corpus_integrity_regressions (nexus-9nchs) =="
+    local clean_json warn_json out
+    clean_json='{"checks":[
+        {"name":"Chunk chash conformance","ok":true,"status":"ok","detail":""},
+        {"name":"stale index-run fences","ok":true,"status":"ok","detail":""},
+        {"name":"manifest pre-backfill rows (collection IS NULL)","ok":true,"status":"ok","detail":""}
+    ]}'
+    out=$(printf '%s' "$clean_json" | _doctor_corpus_integrity_regressions)
+    [[ -z "$out" ]] && _st_ok "all three ok -> no regressions reported" \
+        || _st_bad "all three ok -> expected empty, got: $out"
+
+    # RED: plant the exact regression the step claims to catch -- one
+    # named instrument flips to warn=true/status=warn (the real shape
+    # health.py emits, e.g. CHASH_CONFORMANCE_LABEL's ok=False, warn=True
+    # branch on poisoned chash rows) while doctor's own rc would stay 0.
+    warn_json='{"checks":[
+        {"name":"Chunk chash conformance","ok":false,"status":"warn","detail":"3 chunk row(s) have a non-conformant chash length"},
+        {"name":"stale index-run fences","ok":true,"status":"ok","detail":""},
+        {"name":"manifest pre-backfill rows (collection IS NULL)","ok":true,"status":"ok","detail":""}
+    ]}'
+    out=$(printf '%s' "$warn_json" | _doctor_corpus_integrity_regressions)
+    if [[ "$out" == *"Chunk chash conformance"*"non-conformant chash length"* ]]; then
+        _st_ok "chash-conformance regression (warn=true, doctor rc still 0) -> flagged (RED)"
+    else
+        _st_bad "chash-conformance regression -> expected it named in output, got: $out"
+    fi
+
+    # GREEN: repair -- back to the clean payload.
+    out=$(printf '%s' "$clean_json" | _doctor_corpus_integrity_regressions)
+    [[ -z "$out" ]] && _st_ok "repaired -> no regressions reported (GREEN)" \
+        || _st_bad "repaired -> expected empty, got: $out"
+
+    # Unparseable --json output (doctor crashed before emitting JSON) must
+    # be flagged too, not silently read as "all clean".
+    out=$(printf 'not json' | _doctor_corpus_integrity_regressions)
+    [[ -n "$out" ]] && _st_ok "unparseable --json output -> flagged, not silently clean" \
+        || _st_bad "unparseable --json output -> expected a flagged line, got empty"
+
+    echo
+    echo "== self-test: _mineru_doctor_verdict (nexus-jy4hd) =="
+    out=$(printf '✓ MinerU import\n✓ MinerU do_parse reachable\n' | _mineru_doctor_verdict)
+    [[ "$out" == "OK" ]] && _st_ok "passing doctor output -> OK" \
+        || _st_bad "passing doctor output -> expected OK, got: $out"
+    out=$(printf '✗ MinerU import ModuleNotFoundError: mineru\n' | _mineru_doctor_verdict)
+    [[ "$out" == FAIL\|* ]] && _st_ok "RED: broken MinerU import -> FAIL naming the cause ($out)" \
+        || _st_bad "broken import -> expected FAIL, got: $out"
+    out=$(printf 'unrelated doctor chatter\n' | _mineru_doctor_verdict)
+    [[ "$out" == FAIL\|*"no MinerU line"* ]] && _st_ok "RED: probe produced no MinerU line -> FAIL, never a silent pass" \
+        || _st_bad "empty probe -> expected FAIL, got: $out"
+
+    echo "== self-test: _new_chunk_ids (nexus-jy4hd review Critical) =="
+    tdir_ids="$(mktemp -d)"
+    # BEFORE holds 3a's docling chunks; AFTER adds 3b's mineru chunks. The
+    # docling ids sort LEXICOGRAPHICALLY FIRST (the exact trap: a
+    # chash-ordered head -1 would pick 0a..., a step-3a chunk).
+    printf '0a%.0s' 1 > /dev/null  # noop guard for shellcheck
+    printf '%s\n' "$(printf '0a%.0s' $(seq 32))" "$(printf '0b%.0s' $(seq 32))" > "$tdir_ids/before"
+    printf '%s\n' "$(printf '0a%.0s' $(seq 32))" "$(printf '0b%.0s' $(seq 32))" "$(printf 'ff%.0s' $(seq 32))" > "$tdir_ids/after"
+    new_id="$(_new_chunk_ids "$tdir_ids/before" "$tdir_ids/after")"
+    [[ "$new_id" == "$(printf 'ff%.0s' $(seq 32))" ]] \
+        && _st_ok "set diff isolates ONLY the step-added chunk (ordering-proof: the lexicographically-first id belongs to the other step and is excluded)" \
+        || _st_bad "set diff -> expected the ff... id only, got: $new_id"
+    new_id="$(_new_chunk_ids "$tdir_ids/after" "$tdir_ids/after")"
+    [[ -z "$new_id" ]] && _st_ok "RED: no new chunks -> empty diff -> the step FAILs with 'added no new chunk ids' (never picks an old chunk)" \
+        || _st_bad "identical sets -> expected empty, got: $new_id"
+    rm -rf "$tdir_ids"
+
+    echo "== self-test: _extractor_identity_verdict (nexus-jy4hd) =="
+    out=$(printf 'ID: abc\nExtractor:  mineru\n\ncontent' | _extractor_identity_verdict)
+    [[ "$out" == "OK" ]] && _st_ok "mineru-extracted chunk -> OK" \
+        || _st_bad "mineru chunk -> expected OK, got: $out"
+    out=$(printf 'ID: abc\nExtractor:  docling\n' | _extractor_identity_verdict)
+    [[ "$out" == FAIL\|*"docling"* ]] && _st_ok "RED: silent substitution (docling) -> FAIL naming the extractor" \
+        || _st_bad "docling chunk -> expected FAIL naming docling, got: $out"
+    out=$(printf 'ID: abc\nTitle: x\n' | _extractor_identity_verdict)
+    [[ "$out" == FAIL\|*"no Extractor field"* ]] && _st_ok "RED: missing extraction_method -> FAIL, identity unproven" \
+        || _st_bad "missing field -> expected FAIL, got: $out"
+
+    echo "== self-test: bash -n on this script itself =="
+    if bash -n "${BASH_SOURCE[0]}"; then
+        _st_ok "bash -n clean"
+    else
+        _st_bad "bash -n reported a syntax error"
+    fi
+
+    echo
+    if (( _SELF_TEST_FAILED )); then
+        echo "SELF-TEST FAILED" >&2
+        return 1
+    fi
+    echo "SELF-TEST PASSED"
+    return 0
+}
+
 _svc_teardown() {
     echo "  ── teardown (nx daemon service stop --with-pg) ──"
     nx daemon service stop --with-pg 2>&1 | tail -3 | sed 's/^/    /' || true
@@ -248,6 +505,10 @@ _print_help() {
         "             Requires a local PG with pgvector (host or NEXUS_PG_BUNDLE) and the" \
         "             bge-768 ONNX (auto-fetched by init; ~416 MB on a cold cache)." \
         "  reset      Remove ~/nexus-sandbox. Does NOT reinstall." \
+        "  self-test  Pure-function checks on the T1-litter / doctor-corpus-" \
+        "             integrity detectors (nexus-whqun / nexus-9nchs) against" \
+        "             synthetic fixtures. No wheel build, no sandbox HOME, no" \
+        "             engine, no PG, no network. Safe to run anywhere, any time." \
         "  help       Print this message." \
         "" \
         "Common options (post-mode):" \
@@ -292,6 +553,14 @@ done
 if [[ "$MODE" == "help" || "$MODE" == "--help" || "$MODE" == "-h" ]]; then
     _print_help
     exit 0
+fi
+
+# nexus-whqun / nexus-9nchs: pure-function self-test, dispatched before the
+# machine-global lock below — it touches neither $SANDBOX nor the lock dir,
+# requires no `nx` install, no engine, no PG. Safe to run anywhere, any time.
+if [[ "$MODE" == "self-test" ]]; then
+    _self_test
+    exit $?
 fi
 
 # RDR-184 P0.2 (nexus-ccs9v.2): serialize on the machine-global fixed
@@ -487,18 +756,21 @@ case "$MODE" in
         # SMOKE_FAILED pattern in the smoke arm above.
         SHAKEDOWN_FAILED=()
         # gap-8 (T2 [22511]): steps that are deliberately NOT part of the
-        # pass/fail verdict (a pre-step whose real gate runs right after it,
-        # a T1-turd-risk sniff) still need to be VISIBLE, never silently
-        # dropped. Collected here and printed unconditionally in the final
-        # summary, regardless of overall pass/fail.
+        # pass/fail verdict (a pre-step whose real gate runs right after it —
+        # e.g. the 11/11 backfill-collections pre-step below) still need to
+        # be VISIBLE, never silently dropped. Collected here and printed
+        # unconditionally in the final summary, regardless of overall
+        # pass/fail. (The T1 sniff formerly lived here too — nexus-whqun
+        # promoted it to a real SHAKEDOWN_FAILED gate; see its own comment.)
         SHAKEDOWN_SOFT=()
 
         echo
         echo "── T1 sniff: BEFORE ──"
-        T1_DIR_PARENT="${TMPDIR%/}"; [[ -z "$T1_DIR_PARENT" ]] && T1_DIR_PARENT=/tmp
-        BEFORE_SESSIONS=$( { ls "$HOME/.config/nexus/sessions/" 2>/dev/null || true; } | wc -l | tr -d ' ')
-        BEFORE_TMPDIRS=$( { ls -d "$T1_DIR_PARENT"/nx_t1_* 2>/dev/null || true; } | wc -l | tr -d ' ')
-        echo "  session files: $BEFORE_SESSIONS  | tmpdirs: $BEFORE_TMPDIRS"
+        # nexus-whqun: see _t1_stray_tmp_count's comment near the top of
+        # this file — the prior BEFORE_SESSIONS/BEFORE_TMPDIRS measurement
+        # globbed two directories nothing in this tree writes to any more.
+        BEFORE_TMP_LITTER=$(_t1_stray_tmp_count "$HOME/.config/nexus")
+        echo "  stray T1 .tmp litter: $BEFORE_TMP_LITTER"
 
         echo
         echo "── nx --version + upgrade ──"
@@ -649,8 +921,35 @@ case "$MODE" in
         # fail even when MinerU itself was broken. Now propagated: a
         # non-zero exit here is collected into SHAKEDOWN_FAILED and turns
         # the final verdict red.
+        # nexus-jy4hd: MinerU used to be asserted by exit code ALONE on an
+        # extractor=auto route — a MinerU outage degraded the step to
+        # Docling/PyMuPDF and the gate stayed green while the release
+        # shipped on the belief MinerU was exercised. Three fixes:
+        # (1) doctor --check-mineru first, verdict parsed (not rc-trusted);
+        # (2) --extractor mineru EXPLICIT, so a route-away is impossible
+        #     and a MinerU failure reddens the step;
+        # (3) post-hoc identity assert on the indexed chunk's Extractor
+        #     field, against any future in-extractor fallback.
+        MINERU_DOCTOR_VERDICT="$(nx doctor --check-mineru 2>&1 | _mineru_doctor_verdict)"
+        if [ "$MINERU_DOCTOR_VERDICT" != "OK" ]; then
+            echo "  [FAIL] nx doctor --check-mineru: ${MINERU_DOCTOR_VERDICT#FAIL|}" >&2
+            SHAKEDOWN_FAILED+=("3b/11 doctor --check-mineru")
+        fi
         read -r MDOCS_BEFORE MCHUNKS_BEFORE < <(_catalog_counts)
+        # Identity-scoping (review Critical): snapshot the collection's id
+        # set BEFORE 3b so the assert below inspects only chunks THIS step
+        # added — step 3a shares the collection and the list is
+        # chash-ordered, so any positional pick is the wrong document
+        # roughly half the time. Step-local mktemp dir: $SCRATCH belongs to
+        # the SIBLING gate script and was unbound here (wave-3.5 review,
+        # BOTH reviewers: under set -u the || true swallowed the unbound-var
+        # error, the snapshot files never existed, and the identity assert
+        # failed unconditionally on every run).
+        MINERU_IDS_DIR="$(mktemp -d /tmp/release-sandbox-mineru-ids-XXXXXX)"
+        nx store list --collection knowledge__shakedown 2>/dev/null \
+            | grep -oE '\b[0-9a-f]{64}\b' > "$MINERU_IDS_DIR/before" || true
         if ! nx index pdf "$REPO_ROOT/tests/fixtures/bft-to-smr.pdf" \
+                --extractor mineru \
                 --collection knowledge__shakedown 2>&1 | tail -5 | sed 's/^/  /'; then
             echo "  [FAIL] nx index pdf (bft-to-smr.pdf, MinerU path) exited non-zero" >&2
             SHAKEDOWN_FAILED+=("3b/11 nx index pdf (MinerU path)")
@@ -658,6 +957,28 @@ case "$MODE" in
             # gap-15: same reasoning as 3a — one PDF -> floor 1 doc, floor 3
             # chunks (bft-to-smr.pdf is a real multi-page formula fixture).
             _index_floor_check "3b/11 nx index pdf (MinerU path)" 1 3 "$MDOCS_BEFORE" "$MCHUNKS_BEFORE"
+            # (3) identity: a chunk ADDED BY THIS STEP must say mineru.
+            # Chunk ids are full 64-hex (RDR-180); the set diff against the
+            # pre-step snapshot is what scopes the pick to bft-to-smr.pdf.
+            nx store list --collection knowledge__shakedown 2>/dev/null \
+                | grep -oE '\b[0-9a-f]{64}\b' > "$MINERU_IDS_DIR/after" || true
+            # Pipe-free first-line pick (pipefail-lint clean): the command
+            # substitution drains comm to EOF; parameter expansion takes
+            # the first id.
+            NEW_MINERU_IDS="$(_new_chunk_ids "$MINERU_IDS_DIR/before" "$MINERU_IDS_DIR/after" || true)"
+            MCHUNK_ID="${NEW_MINERU_IDS%%$'\n'*}"
+            if [ -n "$MCHUNK_ID" ]; then
+                IDENT_VERDICT="$(nx store get "$MCHUNK_ID" --collection knowledge__shakedown 2>/dev/null | _extractor_identity_verdict)"
+            else
+                IDENT_VERDICT="FAIL|step 3b added no new chunk ids to knowledge__shakedown — nothing to verify extractor identity against"
+            fi
+            if [ "$IDENT_VERDICT" != "OK" ]; then
+                echo "  [FAIL] extractor identity: ${IDENT_VERDICT#FAIL|}" >&2
+                SHAKEDOWN_FAILED+=("3b/11 extractor identity (mineru)")
+            else
+                echo "  [ok] indexed chunk extraction_method=mineru (identity proven, nexus-jy4hd)"
+            fi
+            rm -rf "$MINERU_IDS_DIR"
         fi
 
         echo
@@ -816,12 +1137,11 @@ case "$MODE" in
         echo "── 10/11 nx doctor (all checks, post-activity) ──"
         # (--check-tmpdirs retired at RDR-155 P4b with the chroma T1 tmpdirs.)
         # BARE `nx doctor` runs run_health_checks() — the corpus-integrity
-        # instruments (chash conformance, stale index-run fences, dangling
-        # manifests) live ONLY there, not behind any --check-* flag. The
+        # instruments live ONLY there, not behind any --check-* flag. The
         # strandedness audit (T2 [21590], 2026-08-07) found this step had
-        # never invoked it, so the release gate was blind to all three and
-        # `|| true` meant even the flag-scoped checks could not redden the
-        # run. Fail-capable now, per the 6xkdu de-theatre precedent.
+        # never invoked it, so the release gate was blind and `|| true`
+        # meant even the flag-scoped checks could not redden the run.
+        # Fail-capable now, per the 6xkdu de-theatre precedent.
         #
         # nexus-u88vu: this used to call `_fail`, which is undefined anywhere
         # in this script — the first honest doctor red died with rc=127
@@ -841,6 +1161,33 @@ case "$MODE" in
                 SHAKEDOWN_FAILED+=("10/11 nx doctor $check")
             fi
         done
+
+        # nexus-9nchs part B: bare `nx doctor`'s own rc (checked above) is
+        # structurally blind to chash conformance / stale index-run fences /
+        # manifest pre-backfill rows — all three are warn=True by RDR-129 B4
+        # design (see _DOCTOR_CORPUS_INTEGRITY_LABELS's comment near the top
+        # of this file), so a regression in any of them could not previously
+        # redden this step no matter what happened. Read `nx doctor --json`
+        # directly and assert on the named checks' own status field instead
+        # of doctor's rc.
+        echo "  corpus-integrity instruments (chash conformance, stale index-run"
+        echo "  fences, manifest pre-backfill rows) — warn=true by design, so"
+        echo "  they never flip bare doctor's exit code; asserting on --json directly:"
+        DOCTOR_JSON_OUT=$(nx doctor --json 2>/dev/null || true)
+        if [[ -z "$DOCTOR_JSON_OUT" ]]; then
+            echo "  [FAIL] nx doctor --json produced no output" >&2
+            SHAKEDOWN_FAILED+=("10/11 nx doctor --json (no output)")
+        else
+            CORPUS_REGRESSIONS=$(printf '%s' "$DOCTOR_JSON_OUT" | _doctor_corpus_integrity_regressions)
+            if [[ -n "$CORPUS_REGRESSIONS" ]]; then
+                echo "$CORPUS_REGRESSIONS" | sed 's/^/    [FAIL] /' >&2
+                while IFS= read -r _regression_line; do
+                    SHAKEDOWN_FAILED+=("10/11 nx doctor corpus-integrity: $_regression_line")
+                done <<< "$CORPUS_REGRESSIONS"
+            else
+                echo "    [ok] chash conformance / stale index-run fences / manifest pre-backfill rows all clean"
+            fi
+        fi
 
         echo
         echo "── 11/11 nx catalog doctor (collections-drift release gate, nexus-o6aa.14) ──"
@@ -890,24 +1237,22 @@ case "$MODE" in
 
         echo
         echo "── T1 sniff: AFTER ──"
-        AFTER_SESSIONS=$( { ls "$HOME/.config/nexus/sessions/" 2>/dev/null || true; } | wc -l | tr -d ' ')
-        AFTER_TMPDIRS=$( { ls -d "$T1_DIR_PARENT"/nx_t1_* 2>/dev/null || true; } | wc -l | tr -d ' ')
-        echo "  session files: $AFTER_SESSIONS (was $BEFORE_SESSIONS)"
-        echo "  tmpdirs:       $AFTER_TMPDIRS (was $BEFORE_TMPDIRS)"
-        DELTA_S=$((AFTER_SESSIONS - BEFORE_SESSIONS))
-        DELTA_T=$((AFTER_TMPDIRS - BEFORE_TMPDIRS))
-        echo "  delta:         sessions+$DELTA_S  tmpdirs+$DELTA_T"
-        # gap-8 (T2 [22511]): explicitly ADVISORY (never gates the
-        # pass/fail verdict — T1 turd accumulation is a slow-leak signal,
-        # not a single-run correctness failure) AND now a verdict INPUT via
-        # SHAKEDOWN_SOFT, so a trip is visible in the final summary instead
-        # of a WARN line that could scroll by unnoticed.
-        if (( DELTA_S > 2 || DELTA_T > 2 )); then
-            echo "  [ADVISORY, non-blocking] T1 turd risk: net delta exceeds expected steady-state"
-            echo "         Investigate $HOME/.config/nexus/sessions/ and $T1_DIR_PARENT/nx_t1_*"
-            SHAKEDOWN_SOFT+=("T1 sniff: turd risk (sessions+$DELTA_S tmpdirs+$DELTA_T exceeds expected steady-state)")
+        AFTER_TMP_LITTER=$(_t1_stray_tmp_count "$HOME/.config/nexus")
+        echo "  stray T1 .tmp litter: $AFTER_TMP_LITTER (was $BEFORE_TMP_LITTER)"
+        DELTA_LITTER=$((AFTER_TMP_LITTER - BEFORE_TMP_LITTER))
+        echo "  delta: +$DELTA_LITTER"
+        # nexus-whqun: a REAL gate now (SHAKEDOWN_FAILED, not the SOFT/
+        # ADVISORY list) — any net-new litter is a genuine crash-mid-
+        # publish signal (see _t1_stray_tmp_count's comment near the top
+        # of this file), not a benign steady-state count the way the two
+        # dead directories the old measurement globbed were.
+        if (( DELTA_LITTER > 0 )); then
+            echo "  [FAIL] T1 stray .tmp litter increased by $DELTA_LITTER during this run" >&2
+            echo "         Investigate $HOME/.config/nexus/t1_session_lease.*.tmp and"
+            echo "         $HOME/.config/nexus/t1_cli_dedicated_session.*.tmp"
+            SHAKEDOWN_FAILED+=("T1 sniff: stray .tmp litter (+$DELTA_LITTER)")
         else
-            echo "  [ok] T1 lifecycle within expected bounds"
+            echo "  [ok] no new T1 .tmp litter"
         fi
 
         echo
@@ -923,7 +1268,17 @@ case "$MODE" in
             printf '  %s\n' "${SHAKEDOWN_FAILED[@]}" >&2
             exit 1
         fi
-        echo "SHAKEDOWN PASSED: all release-gate steps green."
+        # nexus-9nchs part C: name what this banner actually proved. Every
+        # numbered step but 9/11 (`nx catalog stats` — deliberately
+        # informational readback, no pass/fail contract of its own by
+        # design) is fail-capable and feeds SHAKEDOWN_FAILED above; the
+        # backfill-collections pre-step at 11/11 is deliberately soft
+        # (its real gate, collections-drift, runs immediately after it and
+        # IS fail-capable). Anything soft is already printed in the
+        # SOFT/ADVISORY block above, not silently folded into "green".
+        echo "SHAKEDOWN PASSED: every fail-capable release-gate step is green" \
+             "(9/11 catalog stats is informational-only by design; see" \
+             "SOFT/ADVISORY above for any other non-blocking findings)."
         ;;
 
     service)

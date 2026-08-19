@@ -1791,6 +1791,83 @@ def test_on_phase_none_is_safe(tmp_path):
         run(repo, _reg())  # on_phase omitted → None default
 
 
+def test_on_flush_threads_through_to_chunk_batcher(tmp_path, monkeypatch):
+    """nexus-rhwg5 / GH #1432 ask 3 residue: _run_index must thread its
+    own ``on_flush`` argument straight into ``ChunkBatcher``'s
+    constructor unchanged — a fake batcher stands in so this test proves
+    ONLY the wiring, not ChunkBatcher's own firing behaviour (that is
+    tests/test_chunk_batcher.py::TestOnFlushHook's job)."""
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    captured: dict = {}
+
+    class _FakeBatcher:
+        def __init__(self, *, flush, on_flush=None, **_kw):
+            captured["on_flush"] = on_flush
+
+        def add(self, *_a, **_kw):
+            return False  # legacy per-file fallback — nothing else under test here
+
+        def drain(self, on_progress=None) -> int:
+            return 0
+
+        @property
+        def pending_summary(self) -> dict:
+            return {"chunks": 0, "collections": 0, "in_flight": 0}
+
+        @property
+        def failed_files(self) -> dict:
+            return {}
+
+        @property
+        def stats(self) -> dict:
+            return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
+
+    run, repo = _cb_repo(tmp_path)
+    db = MagicMock(spec=HttpVectorClient)
+    monkeypatch.setattr("nexus.chunk_batcher.ChunkBatcher", _FakeBatcher)
+    sentinel = lambda *_a: None  # noqa: E731 — identity marker, not real logic
+    with _cb_patches(db):
+        run(repo, _reg(), on_flush=sentinel)
+    assert captured["on_flush"] is sentinel
+
+
+def test_on_flush_defaults_to_none_when_omitted(tmp_path, monkeypatch):
+    """Backward compat: every pre-nexus-rhwg5 caller omits on_flush."""
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    captured: dict = {}
+
+    class _FakeBatcher:
+        def __init__(self, *, flush, on_flush=None, **_kw):
+            captured["on_flush"] = on_flush
+
+        def add(self, *_a, **_kw):
+            return False
+
+        def drain(self, on_progress=None) -> int:
+            return 0
+
+        @property
+        def pending_summary(self) -> dict:
+            return {"chunks": 0, "collections": 0, "in_flight": 0}
+
+        @property
+        def failed_files(self) -> dict:
+            return {}
+
+        @property
+        def stats(self) -> dict:
+            return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
+
+    run, repo = _cb_repo(tmp_path)
+    db = MagicMock(spec=HttpVectorClient)
+    monkeypatch.setattr("nexus.chunk_batcher.ChunkBatcher", _FakeBatcher)
+    with _cb_patches(db):
+        run(repo, _reg())
+    assert captured["on_flush"] is None
+
+
 def test_on_phase_includes_stamp_phase_every_run(tmp_path):
     """Pipeline-version stamp phase fires on every successful run (nexus-7yfm).
 

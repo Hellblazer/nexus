@@ -4721,10 +4721,19 @@ public final class CatalogRepository {
                 // (nexus-o8dil.48): formerly checked once and reused across
                 // THREE per-dim DELETEs; now feeds the single unified DELETE.
                 boolean stagingActive = stagingHasRowsForTenant(ctx, tenant);
-                int swept = sweepChunks(ctx, tenant, collection, dropped, stagingActive);
+                List<String> sweptChashes = sweepChunks(ctx, tenant, collection, dropped, stagingActive);
+                int swept = sweptChashes.size();
                 if (swept > 0) {
                     log.info("event=write_manifest_many_swept tenant={} doc_id={} collection={} dropped={} swept={}",
                               tenant, docId, collection, dropped.size(), swept);
+                    // nexus-sybbh: audit the reap IN THE SAME TRANSACTION as the sweep
+                    // DELETE above (same ctx, not yet committed) — this is the exact
+                    // codepath the 233 lost store_put chunks (nexus-3n7pr) went through
+                    // with zero forensic trace. actor="engine" distinguishes this
+                    // server-driven producer from the CLIENT-attributed rows
+                    // recordGcAudit writes for `nx t3 gc`.
+                    insertGcAuditRow(ctx, tenant, "sweep_superseded_chunks", collection, "engine", false,
+                        sweptChashes, Map.of("doc_id", docId, "dropped", dropped.size()));
                 }
                 Map<String, Object> out = new LinkedHashMap<>();
                 out.put("doc_id", docId);
@@ -4904,9 +4913,33 @@ public final class CatalogRepository {
             .and(stagingActive ? stagingGuardCondition(ctx, tenant, CHUNKS.CHASH) : DSL.noCondition());
     }
 
-    private static int sweepChunks(DSLContext ctx, String tenant, String collection, List<String> dropped,
-                                    boolean stagingActive) {
-        return sweepChunksQuery(ctx, tenant, collection, dropped, stagingActive).execute();
+    /**
+     * @return the hex chashes ACTUALLY deleted (not merely candidates in {@code dropped} —
+     *         the guard conditions in {@link #sweepChunksQuery} may exclude some). RETURNING
+     *         rather than a bare {@code .execute()} count so {@link #runSweepTransaction} can
+     *         audit precisely what was reaped (nexus-sybbh), not just how many.
+     *
+     *         <p>Returns via the RAW generated {@link org.jooq.impl.TableImpl} field
+     *         ({@code CHUNKS.CHASH}, {@code byte[]}) and hex-encodes in Java, NOT via the
+     *         ad-hoc {@link ChashHex#hex} converted field ({@code CHUNKS_CHASH_HEX}) —
+     *         found empirically (CatalogGcAuditProducersTest) that {@code
+     *         .returning(CHUNKS_CHASH_HEX).fetch(CHUNKS_CHASH_HEX)} silently returns
+     *         BASE64 of the hex string's UTF-8 bytes instead of the hex string itself:
+     *         jOOQ's RETURNING-clause result mapping does not reliably re-apply an
+     *         ad-hoc {@code DSL.field(name, convertedType)}'s converter the same way a
+     *         plain WHERE/SELECT usage of that field does. The properly generated field
+     *         carries no such ambiguity.
+     */
+    private static List<String> sweepChunks(DSLContext ctx, String tenant, String collection, List<String> dropped,
+                                              boolean stagingActive) {
+        List<byte[]> raw = sweepChunksQuery(ctx, tenant, collection, dropped, stagingActive)
+            .returning(CHUNKS.CHASH)
+            .fetch(CHUNKS.CHASH);
+        List<String> hex = new ArrayList<>(raw.size());
+        for (byte[] b : raw) {
+            hex.add(java.util.HexFormat.of().formatHex(b));
+        }
+        return hex;
     }
 
     /**
@@ -5105,6 +5138,15 @@ public final class CatalogRepository {
      * {@code chunk_count} in the SAME transaction (nexus-b6enc F5 — a purge
      * that leaves the count standing manufactures a ghost: a document
      * claiming chunks with no manifest rows behind it).
+     *
+     * <p>OUT OF {@code gc_audit}'s SCOPE (nexus-sybbh reap-path enumeration): this
+     * deletes {@code catalog_document_chunks} MANIFEST (link) rows only — it never
+     * touches {@code nexus.chunks} (the chunk CONTENT table {@code gc_audit} exists
+     * to attribute reaps of). A chunk this unlinks becomes orphaned and is reaped
+     * (and audited) later by whichever of {@link #sweepChunks} / {@code
+     * nexus.purge_trash} / {@code nexus.gc_quarantine_orphans} next sees it —
+     * auditing the unlink here as well would double-count the same eventual chunk
+     * loss under two different {@code gc_audit} rows.
      */
     public int purgeManifest(String tenant, String docId) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -5961,6 +6003,15 @@ public final class CatalogRepository {
      *
      * <p>Out of scope (stays client-side, RDR-164 CA-4/CA-5): the {@code pipeline.db}
      * streaming buffer and the entire local-mode (sqlite/Chroma) cascade.
+     *
+     * <p>OUT OF {@code gc_audit}'s SCOPE too (nexus-sybbh reap-path enumeration),
+     * deliberately: {@code gc_audit} exists to attribute background reaps the caller
+     * does NOT directly observe (the ~233 lost {@code store_put} chunks it was built
+     * for went through the manifest-write sweep with zero forensic trace). This method
+     * is the opposite shape — a synchronous, explicit, caller-named destructive action
+     * whose FULL per-table row counts are already returned to the caller (see {@code
+     * counts} above) and logged, not a background sweep the caller has to reconstruct
+     * after the fact. Auditing it too would not add attribution the caller lacks.
      */
     public Map<String, Integer> deleteCollection(String tenant, String name) {
         Map<String, Integer> counts = deleteCollectionTxn(tenant, name);
@@ -8276,35 +8327,69 @@ public final class CatalogRepository {
                 if (o != null) chashes.add(o.toString());
             }
         }
-        int fullCount = chashes.size();
-        boolean truncated = fullCount > GC_AUDIT_MAX_CHASHES;
-        List<String> stored = truncated ? chashes.subList(0, GC_AUDIT_MAX_CHASHES) : chashes;
 
         Map<String, Object> details = new LinkedHashMap<>();
         if (audit.get("details") instanceof Map<?, ?> d) {
             for (var e : d.entrySet()) details.put(String.valueOf(e.getKey()), e.getValue());
-        }
-        if (truncated) {
-            details.put("chashes_truncated", true);
-            details.put("chashes_stored", GC_AUDIT_MAX_CHASHES);
         }
 
         boolean dryRun = Boolean.TRUE.equals(audit.get("dry_run"))
             || "true".equalsIgnoreCase(String.valueOf(audit.get("dry_run")));
 
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.insertInto(GC_AUDIT)
-               .set(GC_AUDIT.TENANT_ID,   tenant)
-               .set(GC_AUDIT.OPERATION,   operation)
-               .set(GC_AUDIT.COLLECTION,  s(audit, "collection", ""))
-               .set(GC_AUDIT.ACTOR,       s(audit, "actor", ""))
-               .set(GC_AUDIT.DRY_RUN,     dryRun)
-               .set(GC_AUDIT.CHASH_COUNT, fullCount)
-               .set(gcAuditChashes(),     jsonbVal(jsonOrNull(stored)))
-               .set(gcAuditDetails(),     jsonbVal(details.isEmpty() ? null : jsonOrNull(details)))
-               .returningResult(GC_AUDIT.ID)
-               .fetchOne()
-               .value1());
+            insertGcAuditRow(ctx, tenant, operation, s(audit, "collection", ""), s(audit, "actor", ""),
+                dryRun, chashes, details));
+    }
+
+    /**
+     * Shared INSERT for a {@code gc_audit} row, taking an ALREADY-OPEN {@link DSLContext}
+     * so an engine-side reaper can write its audit row in the SAME transaction as the
+     * delete it is documenting (nexus-sybbh) — an audit that can be lost separately from
+     * the delete it records is not an audit. {@link #recordGcAudit} (the CLIENT-facing
+     * {@code POST /gc_audit/record} path) opens its own transaction via {@link
+     * TenantScope#withTenant} and calls this with that transaction's {@code ctx}. Of the
+     * engine-side producers, only {@link #runSweepTransaction}'s sweep path actually calls
+     * this method — it wires an already-open {@code ctx} straight through. {@link
+     * #purgeTrash}'s {@code nexus.purge_trash} routine, {@code nexus.gc_quarantine_orphans},
+     * and {@code nexus.gc_expire_quarantine} never cross the JVM boundary before writing
+     * their own {@code gc_audit} row: each is audited SQL-side, INSERTing directly as the
+     * last statement of the same plpgsql function body that ran its delete/move, mirroring
+     * this method's contract (same truncation constant, same {@code actor='engine'}) —
+     * see {@code catalog-033-gc-audit-producers.xml}'s changesets and header for the full
+     * per-function trace.
+     *
+     * <p>{@code chashesHex} is TRUNCATED at {@link #GC_AUDIT_MAX_CHASHES} entries, same
+     * contract as {@link #recordGcAudit}'s javadoc: {@code chash_count} always carries the
+     * FULL count, {@code details.chashes_truncated} records a partial list explicitly.
+     *
+     * @return the new audit row's id
+     */
+    private long insertGcAuditRow(DSLContext ctx, String tenant, String operation, String collection,
+                                   String actor, boolean dryRun, List<String> chashesHex,
+                                   Map<String, Object> extraDetails) {
+        int fullCount = chashesHex.size();
+        boolean truncated = fullCount > GC_AUDIT_MAX_CHASHES;
+        List<String> stored = truncated ? chashesHex.subList(0, GC_AUDIT_MAX_CHASHES) : chashesHex;
+
+        Map<String, Object> details = new LinkedHashMap<>();
+        if (extraDetails != null) details.putAll(extraDetails);
+        if (truncated) {
+            details.put("chashes_truncated", true);
+            details.put("chashes_stored", GC_AUDIT_MAX_CHASHES);
+        }
+
+        return ctx.insertInto(GC_AUDIT)
+                   .set(GC_AUDIT.TENANT_ID,   tenant)
+                   .set(GC_AUDIT.OPERATION,   operation)
+                   .set(GC_AUDIT.COLLECTION,  collection == null ? "" : collection)
+                   .set(GC_AUDIT.ACTOR,       actor == null ? "" : actor)
+                   .set(GC_AUDIT.DRY_RUN,     dryRun)
+                   .set(GC_AUDIT.CHASH_COUNT, fullCount)
+                   .set(gcAuditChashes(),     jsonbVal(jsonOrNull(stored)))
+                   .set(gcAuditDetails(),     jsonbVal(details.isEmpty() ? null : jsonOrNull(details)))
+                   .returningResult(GC_AUDIT.ID)
+                   .fetchOne()
+                   .value1();
     }
 
     /**

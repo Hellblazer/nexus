@@ -348,7 +348,22 @@ from __future__ import annotations
 #: v0.1.71 gates on this tree: engine suite 1974/0/0 (1 skipped),
 #: run.sh --shakeout CANDIDATE SHAKEOUT PASSED, and
 #: run.sh --acquire ACQUIRE GATE PASSED against the published bytes.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 80)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 82)
+
+#: nexus-5uoxu: the first engine version whose telemetry trim honors the
+#: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
+#: with the revert-of-cba38ea41). Below this, an engine silently DROPS the
+#: unknown field and the "preview" DELETES — so the client refuses
+#: ``--trim-telemetry --dry-run`` against any serving engine older than
+#: this, independent of REQUIRED_ENGINE_VERSION (which tracks the release
+#: pairing, not this feature's floor — and at re-land time REQUIRED was
+#: (0,1,80), the exact engine that deletes on preview, so it CANNOT serve
+#: as this floor; substantive-critic 2026-08-19 prescription checked and
+#: declined on that ground). Set to the next tag after v0.1.80, the newest
+#: tag cut WITHOUT the overload; engine-service-v0.1.81 is cut from the
+#: SAME tree this constant lands in (same session, Sam-authorized), so the
+#: value is a real tag, not a standing guess — any later tag is >= it.
+TRIM_DRY_RUN_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 81)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

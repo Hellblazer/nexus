@@ -1,10 +1,18 @@
 [build-system]
-requires = ["hatchling"]
+# nexus-d7xuj: bounded so the build backend cannot float across a major on a
+# release runner we do not control (the l2ku5 class; the 7.6.0 publish died
+# when an unbounded hatchling emitted a Metadata-Version the pinned uploader
+# predated). HONEST LIMIT: 1.32 was a MINOR that changed metadata version, so
+# <2 does not prevent a recurrence of that exact incident — and the MVV's
+# twine check runs a CURRENT twine, which by its own SCOPE HONESTY comment
+# cannot see uploader-version skew. The residual protection for minor drift
+# is Dependabot keeping the uploader pin current (weekly cadence).
+requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "7.10.0"
+version = "7.11.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"

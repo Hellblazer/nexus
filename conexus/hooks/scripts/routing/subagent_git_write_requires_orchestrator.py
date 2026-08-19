@@ -118,15 +118,21 @@ def _matched_write_subcommands(command: str) -> set[str]:
     segments = re.split(r"(?:&&|\|\||;|\s\|\s|\bthen\b|\bdo\b)", command)
     for segment in segments:
         try:
-            tokens = shlex.split(segment, posix=True)
+            candidates = [shlex.split(segment, posix=True)]
         except ValueError:
-            continue
-        sub = _git_subcommand(tokens)
-        if sub not in _WRITE_SUBCOMMANDS:
-            continue
-        if sub in _READ_ONLY_FORMS and _read_only_form(tokens, sub):
-            continue
-        matched.add(sub)
+            # nexus-2e874: never silently skip a segment shlex rejects for
+            # unbalanced quoting — that direction fully bypassed the guard
+            # (a stray quote in any argument made a subagent `git stash`
+            # invisible). Degrade to rough token variants; a match in any
+            # variant counts.
+            candidates = _lib.degraded_token_variants(segment)
+        for tokens in candidates:
+            sub = _git_subcommand(tokens)
+            if sub not in _WRITE_SUBCOMMANDS:
+                continue
+            if sub in _READ_ONLY_FORMS and _read_only_form(tokens, sub):
+                continue
+            matched.add(sub)
     return matched
 
 

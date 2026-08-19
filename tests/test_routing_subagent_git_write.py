@@ -288,3 +288,27 @@ def test_destructive_verb_hidden_in_a_compound_command_is_caught(shared_repo):
         "pytest -q && git checkout -- src/nexus/upgrade_finish.py", cwd=str(shared_repo),
     )))
     assert out["permissionDecision"] == "deny", out
+
+
+def test_unbalanced_quote_commit_is_still_denied(shared_repo):
+    """nexus-2e874: a stray quote in any argument used to make shlex reject
+    the segment and the guard silently skipped it -- a subagent `git commit`
+    (or stash) became invisible. The degraded whitespace fallback keeps the
+    `git <subcommand>` anchor visible."""
+    out = _decision(_run(_bash('git commit -m "unterminated', cwd=str(shared_repo))))
+    assert out["permissionDecision"] == "deny", out
+
+
+def test_unbalanced_quote_nongit_segment_stays_allowed(shared_repo):
+    """The degraded parse stays anchored: a non-git command whose
+    unterminated quoted string merely MENTIONS `git commit` never matches
+    (the segment's first token is not `git`)."""
+    out = _decision(_run(_bash('echo "later run git commit -m x', cwd=str(shared_repo))))
+    assert out["permissionDecision"] == "allow", out
+
+
+def test_quote_inside_the_subcommand_is_still_denied(shared_repo):
+    """Review Important-1 (nexus-2e874): quote INSIDE the verb -- the
+    quote-removed degraded variant must still anchor `git commit`."""
+    out = _decision(_run(_bash('git com"mit -m msg', cwd=str(shared_repo))))
+    assert out["permissionDecision"] == "deny", out

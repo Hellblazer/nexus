@@ -1,4 +1,10 @@
-name: Guided-upgrade MVV (weekly + on migration-path changes)
+# nexus-x7ujy / nexus-idtjs: the name must tell the truth about the trigger
+# block. This workflow is DISPATCH-ONLY BY DESIGN (see the x7xjj block below:
+# its subject, nx guided-upgrade, was deleted at RDR-155 P4b; the successor
+# gate is stranded-redirect-rehearsal.yml). The old name advertised "weekly +
+# on migration-path changes" — a cadence the on: block has not had since
+# 2026-07-27.
+name: Guided-upgrade MVV (retired journey — dispatch-only parts donor)
 
 # nexus-myk4e (RDR-002 ez5.14/15 deferral; escalated as the release-N+1 hard
 # gate): the one-command `nx guided-upgrade` MVV

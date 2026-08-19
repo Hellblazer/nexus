@@ -575,8 +575,16 @@ def _print_tree(node: dict, indent: int = 0) -> None:
 @taxonomy.command("show")
 @click.argument("topic_id", type=int)
 @click.option("--limit", "-n", default=20, help="Max docs to show", show_default=True)
-def show_cmd(topic_id: int, limit: int) -> None:
+@click.option(
+    "--assignments", is_flag=True,
+    help="Show per-assignment quality (chunk, confidence, provenance) instead of a plain doc list.",
+)
+def show_cmd(topic_id: int, limit: int, assignments: bool) -> None:
     """Show documents assigned to a topic."""
+    if assignments:
+        _show_assignment_quality(topic_id, limit)
+        return
+
     from nexus.taxonomy import get_topic_docs  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     with _T2Database(_default_db_path()) as db:
@@ -588,6 +596,48 @@ def show_cmd(topic_id: int, limit: int) -> None:
     click.echo("-" * 60)
     for doc in docs:
         click.echo(f"  {doc['doc_id']}")
+
+
+def _show_assignment_quality(topic_id: int, limit: int) -> None:
+    """``nx taxonomy show <id> --assignments``: per-assignment quality rows
+    (nexus-92uh0 — wiring ``HttpTaxonomyStore.get_assignment_details``,
+    the nexus-onjvy quality-column route that had zero callers).
+
+    ``get_assignment_details`` is not itself topic-scoped (it answers by
+    doc_id, not topic_id — see its docstring), so the doc_id list comes
+    from ``get_topic_doc_ids(topic_id, ...)`` first and the returned rows
+    are filtered defensively to this topic in case a doc_id was
+    reassigned between the two calls.
+    """
+    with _T2Database(_default_db_path()) as db:
+        doc_ids = db.taxonomy.get_topic_doc_ids(topic_id, limit=limit)
+        if not doc_ids:
+            click.echo(f"No documents in topic {topic_id}.")
+            return
+        rows = [
+            r for r in db.taxonomy.get_assignment_details(doc_ids)
+            if r.get("topic_id") == topic_id
+        ]
+
+    if not rows:
+        click.echo(f"No assignment details for topic {topic_id}.")
+        return
+
+    click.echo(f"Topic {topic_id}: {len(rows)} assignments")
+    click.echo("-" * 100)
+    click.echo(
+        f"  {'CHUNK':<40} {'CONFIDENCE':<11} {'SOURCE':<20} {'ASSIGNED_BY':<14} ASSIGNED_AT"
+    )
+    for row in rows:
+        similarity = row.get("similarity")
+        confidence = f"{similarity:.4f}" if isinstance(similarity, (int, float)) else "-"
+        chunk = str(row.get("doc_id", ""))
+        source = str(row.get("source_collection") or "-")
+        assigned_by = str(row.get("assigned_by") or "-")
+        assigned_at = str(row.get("assigned_at") or "-")
+        click.echo(
+            f"  {chunk:<40} {confidence:<11} {source:<20} {assigned_by:<14} {assigned_at}"
+        )
 
 
 @taxonomy.command("discover")
@@ -1009,7 +1059,7 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
     RDR-151 Phase 3 (nexus-uzay8): the T3 fetch + MiniLM reembed + KMeans
     clustering happens locally (compute phase), then the pure-T2 persist
     (DELETE parent assignments + INSERT children) is routed through the
-    daemon via t2_index_write.  Chroma centroid operations happen locally
+    daemon via t2_index_write.  Centroid vector operations happen locally
     before and after the routed persist using the returned child IDs.
     """
     from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load
@@ -1032,6 +1082,7 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
 
         collection_name = topic["collection"]
         t3 = make_t3()
+        parent_doc_count = len(doc_ids)
 
         # nexus-9pqoj: the store's split_topic does the full fetch -> compute
         # -> persist -> centroid round-trip via the service, which is the
@@ -1045,6 +1096,17 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
         child_count = db.taxonomy.split_topic(topic_id, k, t3)  # boundary-allow: service single-writer persist
         click.echo(f"Split '{topic_label}' into {child_count} sub-topics.")
         if child_count:
+            # nexus-i6eg8: report the redistribution so an operator can see
+            # the split was conservation-safe at a glance, rather than
+            # having to trust a bare child-topic count the way the
+            # 2026-07-27 incident (1,330 -> 60, reported as success) did.
+            children = db.taxonomy.get_topics(parent_id=topic_id)
+            child_counts = [int(c.get("doc_count") or 0) for c in children]
+            retained = parent_doc_count - sum(child_counts)
+            redistribution = "/".join(str(c) for c in child_counts) or "0"
+            note = f" ({retained} retained on parent)" if retained else ""
+            click.echo(f"Redistribution: {parent_doc_count} -> {redistribution}{note}")
+
             coll_scope = collection_name or collection
             scope = f" -c {coll_scope}" if coll_scope else ""
             click.echo(
@@ -1776,6 +1838,34 @@ def _review_auto(
     )
 
 
+def _topic_has_auto_label(topic: dict[str, Any]) -> bool:
+    """True when *topic*'s label is still its unreviewed auto-label.
+
+    ``update_topic_label`` deliberately leaves ``review_status='pending'``
+    after a successful LLM relabel (GH #241 Item 3 — label and review are
+    separate axes; only ``nx taxonomy review`` advances ``review_status``).
+    With no dedicated "has been labeled" column, the only client-side
+    signal for "still needs an LLM label" is comparing the live ``label``
+    against the c-TF-IDF auto-label ``compute_discovered_topics`` assigns
+    at discovery time (``" ".join(top_terms[:3])`` — see
+    ``taxonomy_compute.compute_discovered_topics``). A topic whose label no
+    longer matches that pattern has already been given a real label and
+    must not be re-selected by ``get_unreviewed_topics`` for another LLM
+    pass (nexus taxonomy-label-pipeline fix).
+
+    Fails open toward "needs labeling" (returns True) when ``terms`` is
+    missing/unparseable — the safe direction is an unnecessary relabel,
+    never a silently-skipped one.
+    """
+    try:
+        terms = json.loads(topic["terms"]) if topic.get("terms") else []
+    except (json.JSONDecodeError, TypeError):
+        return True
+    if not terms:
+        return True
+    return topic.get("label", "") == " ".join(terms[:3])
+
+
 def relabel_topics(
     taxonomy: "HttpTaxonomyStore",
     *,
@@ -1793,6 +1883,11 @@ def relabel_topics(
     subsequent ThreadPoolExecutor workers each call ``asyncio.run()`` to
     drive the async dispatcher in isolation.
 
+    Per-topic persist failures (e.g. a concurrent-update 409 from
+    ``update_topic_label``) are caught and counted, never allowed to abort
+    the run — one bad write must not lose every not-yet-processed batch's
+    labels (mirrors ``_review_auto``'s apply-loop resilience).
+
     Args:
         project_root: Repo root for glossary resolution. Defaults to
             ``Path.cwd()`` when unset.
@@ -1803,6 +1898,11 @@ def relabel_topics(
 
     if only_pending:
         topics = taxonomy.get_unreviewed_topics(collection=collection, limit=5000)
+        # Selection fix: get_unreviewed_topics selects on review_status
+        # alone, which stays 'pending' after a successful relabel — without
+        # this filter, an already-relabeled-but-not-yet-reviewed topic is
+        # re-fed to the LLM on every subsequent `label` run.
+        topics = [t for t in topics if _topic_has_auto_label(t)]
     else:
         # GitHub #243: include split children on the relabel_all path.
         # ``get_topics()`` returns only roots, which hid split sub-topics.
@@ -1849,6 +1949,13 @@ def relabel_topics(
     # inside the batch functions — captured by the file, off the terminal),
     # and the single rollup below replaces one WARNING per failed batch.
     dispatch_failures: list[str] = []
+    # taxonomy-label-pipeline fix: per-topic T2 persist failures (e.g. a
+    # concurrent-update 409 from update_topic_label). Distinct from
+    # dispatch_failures above — these are t2_index_write failures, not
+    # claude -p harness failures. Unwrapped, ANY single one used to abort
+    # the whole run (propagating out of the as_completed loop and skipping
+    # every not-yet-dequeued batch's results entirely).
+    persist_failures: list[str] = []
 
     def _label_batch(batch: list) -> list[tuple[int, str | None]]:
         items = [(w[2], w[3]) for w in batch]  # (terms, doc_ids)
@@ -1880,7 +1987,18 @@ def relabel_topics(
             futures = {pool.submit(_label_batch, b): b for b in batches}
             for future in as_completed(futures):
                 batches_done += 1
-                for tid, label in future.result():
+                try:
+                    batch_results = future.result()
+                except Exception as exc:  # noqa: BLE001 - one bad batch must not abort the whole run
+                    _log.warning(
+                        "taxonomy_label_batch_failed",
+                        batch=batches_done,
+                        error=str(exc),
+                    )
+                    persist_failures.append(f"batch {batches_done}: {exc}")
+                    _progress(f"    batch {batches_done}/{len(batches)} FAILED ({count} renamed)")
+                    continue
+                for tid, label in batch_results:
                     if label:
                         # GitHub #241 Item 3: use update_topic_label rather than
                         # rename_topic so review_status stays 'pending'. The
@@ -1890,7 +2008,16 @@ def relabel_topics(
                         # RDR-151 Phase 3 (nexus-uzay8): route via daemon.
                         _tid = tid  # capture for lambda
                         _lbl = label
-                        t2_index_write(lambda db, _t=_tid, _l=_lbl: db.taxonomy.update_topic_label(_t, _l))
+                        try:
+                            t2_index_write(lambda db, _t=_tid, _l=_lbl: db.taxonomy.update_topic_label(_t, _l))
+                        except Exception as exc:  # noqa: BLE001 - per-item apply resilience: one bad 409/write must not abort the remaining batches
+                            _log.warning(
+                                "taxonomy_label_persist_failed",
+                                topic_id=_tid,
+                                error=str(exc),
+                            )
+                            persist_failures.append(f"topic {_tid}: {exc}")
+                            continue
                         count += 1
                 _progress(f"    batch {batches_done}/{len(batches)} done ({count} renamed)")
 
@@ -1901,6 +2028,16 @@ def relabel_topics(
             "model labels); affected topics keep their existing labels. "
             f"Per-failure details: {run_log_path}. First: "
             f"{dispatch_failures[0][:200]}",
+            err=True,
+        )
+
+    if persist_failures:
+        click.echo(
+            f"WARNING: {len(persist_failures)} label persists failed writing "
+            "to T2 (e.g. a concurrent-update 409); affected topics keep "
+            "their prior label and remain pending for the next run. "
+            f"Per-failure details: {run_log_path}. First: "
+            f"{persist_failures[0][:200]}",
             err=True,
         )
 
@@ -1929,6 +2066,10 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
             target = db.taxonomy.get_unreviewed_topics(
                 collection=collection, limit=5000,
             )
+            # Same selection fix as relabel_topics: exclude topics that
+            # already carry a real (non-auto) label so the precheck count
+            # matches what actually gets dispatched.
+            target = [t for t in target if _topic_has_auto_label(t)]
 
         if not target:
             click.echo("No topics to label.")

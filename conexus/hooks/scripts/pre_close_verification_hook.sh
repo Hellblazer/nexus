@@ -145,20 +145,32 @@ inline_override = False
 env_assign_re = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 for seg in segments:
     try:
-        tokens = shlex.split(seg, posix=True)
+        variants = [shlex.split(seg, posix=True)]
     except ValueError:
-        continue
-    i = 0
-    while i < len(tokens) and env_assign_re.match(tokens[i]):
-        if tokens[i] == 'NX_REVIEW_GATE_OVERRIDE=1':
-            inline_override = True
-        i += 1
-    rest = tokens[i:]
-    if len(rest) >= 2 and rest[0] == 'bd':
-        if rest[1] == 'create':
-            has_create = True
-        elif rest[1] in ('close', 'done'):
-            has_close_or_done = True
+        # nexus-2e874: never silently skip a segment shlex rejects for
+        # unbalanced quoting -- that direction made the verb never match,
+        # so the whole hook fast-no-op'd and a stray quote in a --reason
+        # value fully bypassed the close gate. Degrade to TWO rough
+        # variants (quote-as-space keeps boundary-glued quotes splitting;
+        # quote-removed keeps a quote INSIDE the verb from fracturing it,
+        # e.g. b\"d close) -- a match in either counts. Same posture as
+        # the BEAD_IDS_JSON raw-scan fallback below.
+        variants = [
+            seg.replace('\"', ' ').replace(\"'\", ' ').split(),
+            seg.replace('\"', '').replace(\"'\", '').split(),
+        ]
+    for tokens in variants:
+        i = 0
+        while i < len(tokens) and env_assign_re.match(tokens[i]):
+            if tokens[i] == 'NX_REVIEW_GATE_OVERRIDE=1':
+                inline_override = True
+            i += 1
+        rest = tokens[i:]
+        if len(rest) >= 2 and rest[0] == 'bd':
+            if rest[1] == 'create':
+                has_create = True
+            elif rest[1] in ('close', 'done'):
+                has_close_or_done = True
 print(json.dumps({
     'has_create': has_create,
     'has_close_or_done': has_close_or_done,

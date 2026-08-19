@@ -1201,3 +1201,58 @@ class TestSessionIdExport:
         assert result.returncode == 0
         log_contents = log_file.read_text() if log_file.exists() else ""
         assert "NX_SESSION_ID=pre-existing-ambient-value" in log_contents, log_contents
+
+
+class TestMalformedQuotingNeverBypasses:
+    """nexus-2e874: an unbalanced quote in any argument (e.g. a --reason
+    value) used to make shlex reject the segment inside the BD_VERBS
+    matcher, which silently SKIPPED it -- has_close_or_done stayed False
+    and the whole hook fast-no-op'd with a bare allow, fully bypassing the
+    close gate. The matcher now degrades to a quote-blanked whitespace
+    split, so the leading `bd close` anchor still matches."""
+
+    def test_unbalanced_quote_in_reason_still_triggers_the_gate(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command='bd close nexus-abc12 --reason="unterminated'),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny"
+        assert "nexus-abc12" in _get_reason(parsed)
+
+    def test_unbalanced_quoted_mention_does_not_false_match(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """The degraded split stays anchored: `bd close` inside an
+        unterminated quoted string mid-segment never matches (the segment's
+        first token is not `bd`)."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command='git commit -m "notes about bd close nexus-abc12'),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+
+
+    def test_quote_inside_the_verb_still_triggers_the_gate(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """Review Important-1 (nexus-2e874): a quote INSIDE the verb
+        fractures the quote-as-space variant ('b', 'd', ...) -- the
+        quote-removed variant must still anchor `bd close`."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command='b"d close nexus-abc12'),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        assert _get_decision(json.loads(result.stdout)) == "deny"

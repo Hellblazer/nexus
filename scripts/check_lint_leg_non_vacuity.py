@@ -87,14 +87,18 @@ def count_executed(pytest_output: str) -> tuple[int, int, int]:
     return passed, failed_plus_errored, passed + failed_plus_errored
 
 
-def check(pytest_output: str, floor: int = LINT_EXECUTED_FLOOR) -> str | None:
+def check(
+    pytest_output: str, floor: int = LINT_EXECUTED_FLOOR, *, label: str = "lint leg",
+) -> str | None:
     """Return an error message if *pytest_output* shows fewer than *floor*
-    executed tests, else ``None``."""
+    executed tests, else ``None``. ``label`` names the leg in the message
+    (nexus-lemv5 reuses this for the shard matrix — a triage line saying
+    "lint leg" about a shard misdirects)."""
     passed, failed, executed = count_executed(pytest_output)
     if executed < floor:
         return (
-            f"lint leg executed only {executed} test(s) (passed={passed} "
-            f"failed={failed}, floor={floor}) -- the lint-marked corpus is "
+            f"{label} executed only {executed} test(s) (passed={passed} "
+            f"failed={failed}, floor={floor}) -- the selected corpus is "
             "not running for real. This is the nexus-wixar vacuous-CI-gate "
             "class: a mass-skip that still exits 0."
         )
@@ -107,6 +111,11 @@ def main(argv: list[str] | None = None) -> int:
         "output_file",
         nargs="?",
         help="path to captured `pytest -m lint -q` output; reads stdin if omitted",
+    )
+    parser.add_argument(
+        "--label",
+        default="lint leg",
+        help="leg name used in output/messages (e.g. 'test shard') — nexus-lemv5",
     )
     parser.add_argument(
         "--floor",
@@ -123,9 +132,9 @@ def main(argv: list[str] | None = None) -> int:
         text = sys.stdin.read()
 
     passed, failed, executed = count_executed(text)
-    print(f"lint leg: passed={passed} failed={failed} executed={executed} floor={args.floor}")
+    print(f"{args.label}: passed={passed} failed={failed} executed={executed} floor={args.floor}")
 
-    reason = check(text, args.floor)
+    reason = check(text, args.floor, label=args.label)
     if reason is not None:
         print(f"::error::{reason}")
         return 1

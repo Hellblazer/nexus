@@ -621,6 +621,17 @@ def index_repo_cmd(
             is_tty=sys.stdout.isatty(),
             echo=lambda msg, nl: click.echo(msg, nl=nl, err=True),
         )
+        # nexus-rhwg5 review remediation (code-review-expert, IMPORTANT):
+        # on_flush_progress below is invoked from ChunkBatcher's flush-pool
+        # WORKER THREADS (production FLUSH_CONCURRENCY=3), unlike on_phase
+        # and on_start/on_file's own tqdm/postfix writes, which only ever
+        # run on run_file_loop's callback thread under ITS OWN cb_lock
+        # (indexer_utils.py:1130: "the CLI progress renderer is not
+        # re-entrant"). Two flushes settling on different pool threads at
+        # the same moment would otherwise interleave two `click.echo`
+        # calls into one corrupted --monitor line. Same idiom as
+        # run_file_loop's cb_lock, scoped to this one renderer.
+        _flush_progress_lock = threading.Lock()
 
         def on_start(count: int) -> None:
             nonlocal bar, total
@@ -704,6 +715,38 @@ def index_repo_cmd(
             phase_heartbeat.disarm()
             click.echo(f"  [post] {msg}", err=True)
             phase_heartbeat.arm(msg)
+
+        # nexus-rhwg5 / GH #1432 ask 3 residue: mid-loop chunk-batch
+        # flushes (dispatched from inside ChunkBatcher.add(), i.e. every
+        # flush except the small end-of-run drain _drain_batcher_with_
+        # markers already covers) had NO progress output at all — on a
+        # real run ~94% of flush work (50 of 53 flushes) was silent
+        # between the last file line and "Done.". Gated on --monitor
+        # ONLY (assessment 7.5: "per-flush mid-loop lines to --monitor,
+        # not default") — unlike on_file's lines, this does NOT
+        # auto-enable on a non-TTY, so the default transcript (including
+        # every existing non-interactive/CI run) is byte-for-byte
+        # unchanged. No denominator exists mid-loop (total flush count is
+        # unknown until the run ends) — honest indeterminate-but-moving
+        # rendering, never a fabricated N/M (constraint 1: this shape
+        # does not match ``^\s*\[[0-9]+/[0-9]+\]`` since the flush number
+        # is a bare ``#N``, not a fraction). Failures surface HERE, at
+        # occurrence, not only in the end-of-run summary.
+        def on_flush_progress(
+            flush_num: int, chunks: int, collection: str, elapsed: float,
+            error: str | None,
+        ) -> None:
+            line = (
+                f"  [post] flush #{flush_num} complete "
+                f"({elapsed:.1f}s, {chunks:,} chunks, {collection})"
+            )
+            if error:
+                line += f" — FAILED: {error}"
+            # Locked: see _flush_progress_lock's construction-site comment
+            # above — concurrent flush completions on ChunkBatcher's pool
+            # threads must never interleave into one corrupted line.
+            with _flush_progress_lock:
+                click.echo(line, err=True)
 
         # Review remediation (Reviewer A/I-2): emit the retry-time summary
         # regardless of whether index_repository succeeded. A run that
@@ -804,6 +847,7 @@ def index_repo_cmd(
                                      force_stale=force_stale, since_head=since_head,
                                      on_locked=on_locked, on_start=on_start, on_file=on_file,
                                      on_phase=on_phase,
+                                     on_flush=on_flush_progress if monitor else None,
                                      on_stage_timers=on_stage_timers) or {}
         finally:
             eta_ticker.stop()

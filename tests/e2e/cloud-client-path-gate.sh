@@ -69,6 +69,23 @@ VIOLATIONS=0
 _leg_fail() { echo "  LEG FAILED: $*" >&2; VIOLATIONS=$((VIOLATIONS + 1)); }
 _fail() { echo "CLOUD CLIENT-PATH GATE FAILED: $*" >&2; exit 1; }
 
+# nexus-i1oh4: observed-vs-expected leg floor. The verdict used to be a
+# function of VIOLATIONS alone — a leg that was skipped, guarded out, or
+# removed by an edit contributed nothing, so absent work read as clean work
+# (the gate could print PASSED having run nothing; unacceptable for the ONLY
+# assert that the engine's pinned contracts survive the public edge,
+# nexus-bwulw). Each leg group increments LEGS_RAN on ENTRY, on the SHELL
+# side — a heredoc that dies mid-leg still counts as a leg that failed to
+# complete, never a leg that quietly did not run.
+#
+# EXPECTED_LEGS=3 (dated 2026-08-18): [A] /version, [B] /health
+# authenticated, [C+D] client probe heredoc (one shell-side entry for the
+# combined python leg). Editing the battery means updating this constant in
+# the same diff.
+LEGS_RAN=0
+EXPECTED_LEGS=3
+_leg_enter() { LEGS_RAN=$((LEGS_RAN + 1)); echo "[$1] $2"; }
+
 SERVICE_URL="$(uv run python - <<'PY'
 from nexus.config import get_credential
 print((get_credential("service_url") or "").strip())
@@ -82,7 +99,7 @@ esac
 echo "Gating client path against: $SERVICE_URL"
 
 # ── Leg A: /version contract through the edge ────────────────────────────
-echo "[A] /version contract"
+_leg_enter A "/version contract"
 VERSION_BODY="$(curl -sS -m 20 "$SERVICE_URL/version")" || _leg_fail "A: /version unreachable"
 uv run python - "$VERSION_BODY" <<'PY' || _leg_fail "A: /version contract violated (see above)"
 import json, sys
@@ -120,7 +137,7 @@ PY
 
 # ── Leg B: /health edge contract, AUTHENTICATED (guided_upgrade's managed-
 #    target probe shape per conexus relay [21082], decision (b)) ──────────
-echo "[B] /health edge contract (authenticated bearer)"
+_leg_enter B "/health edge contract (authenticated bearer)"
 SERVICE_TOKEN="$(uv run python - <<'PY'
 from nexus.config import get_credential
 print((get_credential("service_token") or "").strip())
@@ -146,7 +163,7 @@ else
 fi
 
 # ── Legs C+D: real client code through the live config ───────────────────
-echo "[C] client embedding_mode probe + [D] client read path"
+_leg_enter C+D "client embedding_mode probe + client read path"
 uv run python - <<'PY' || _leg_fail "C/D: client-path probe failed (see above)"
 import sys
 from nexus.db import make_t3
@@ -177,7 +194,13 @@ except Exception as exc:
 sys.exit(1 if bad else 0)
 PY
 
+if [ "$LEGS_RAN" -ne "$EXPECTED_LEGS" ]; then
+    # Distinct from a violation: "the gate did not run its full battery" is
+    # a different fact from "the edge is broken", and the relay must be able
+    # to tell them apart (nexus-i1oh4).
+    _fail "battery shortfall: only $LEGS_RAN of $EXPECTED_LEGS leg(s) ran — this run proves nothing about the legs that never executed"
+fi
 if [ "$VIOLATIONS" -gt 0 ]; then
     _fail "$VIOLATIONS leg(s) violated — the public edge does not deliver the engine's pinned client contract"
 fi
-echo "CLOUD CLIENT-PATH GATE PASSED"
+echo "CLOUD CLIENT-PATH GATE PASSED — legs=$LEGS_RAN/$EXPECTED_LEGS violations=0"

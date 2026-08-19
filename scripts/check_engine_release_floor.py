@@ -85,11 +85,67 @@ acknowledge), and an unreachable cloud is still exit 2 regardless of pairing
 -- unverifiable is never a pass, paired or not. The default (no flag) path is
 byte-for-byte unchanged.
 
+**Auto-paired mode** (``--paired-deploy-auto``, nexus-gc9ir, 2026-08-18): the
+UNATTENDED counterpart of ``--paired-deploy`` for ``release.yml``'s own copy
+of this gate. v7.10.0 tag push showed the gap: the workflow ran this script
+bare, with no way to name ``--paired-deploy <tag>`` (there is no human at the
+keyboard to type it), so a routine paired-release's EXPECTED pre-deploy
+cloud-behind state red'd the publish and forced a deploy-first-then-
+``gh run rerun`` dance that defeats the whole point of the parallel window.
+``--paired-deploy-auto`` DERIVES the candidate tag from
+``REQUIRED_ENGINE_VERSION`` (``engine-service-v{major}.{minor}.{patch}`` --
+the same string :func:`_pinned_engine_tag` computes) and, ONLY when the cloud
+actually reports below that floor, runs the IDENTICAL verification battery
+:func:`check_paired_preconditions` already applies to the explicit flag --
+one shared function, two entry points, so a miss in auto mode fails for the
+exact same named reason an explicit ``--paired-deploy`` miss would. Auto mode
+is NOT a weaker check: when the cloud already meets the floor it takes the
+untouched bare-invocation path (pin-currency, then the ordinary "current"
+message) -- the paired machinery (ledger, git/gh tag verification) never
+runs, because the workflow probes the cloud FIRST to decide, rather than
+demanding an explicit human-named tag up front the way ``--paired-deploy``
+does. An unreachable cloud stays exit 2 regardless -- same fail-closed
+doctrine as everywhere else in this module. On acceptance the printed
+acknowledgment states the pairing was AUTO-derived (not human-named) in
+addition to the usual deployed/floor versions and the POST-TAG VERIFY
+obligation.
+
+**The core tradeoff, stated plainly (review round, 2026-08-18):** BOTH paired
+modes accept on TAG legitimacy (published, exactly pinned, newest, fresh),
+never on proof that the deploy has actually landed. Passing this gate no
+longer means "the deployed cloud engine meets the floor" for a paired
+release -- it means "a genuinely fresh, correctly-cut engine tag exists, and
+the deploy is presumed armed for the choreography's parallel window". A
+CI-side check has no way to observe the deploy relay's actual completion
+(it runs on a different system, on Hal's side of the AGENTS.md bus), so this
+is an accepted, bounded gap, not an oversight: the pre-existing DAILY
+``engine-floor-verify`` job (``.github/workflows/scheduled-failure-watch.yml``,
+09:23 UTC, BARE gate against the real public endpoint, protocol-audit
+[22511] Gap 2) is the backstop that would catch a still-stale cloud -- a
+deploy that never fired, or silently failed -- within at most 24h of the
+paired tag, surfaced as the SAME "Scheduled workflows are failing silently"
+tracked GH issue every other rotted scheduled gate reports through (see that
+workflow's header comment). This gate accepting a paired tag is therefore a
+DELIBERATE, backstopped bet, not a claim that the deploy is verified live;
+see ``test_auto_paired_below_floor_accepts_without_deploy_liveness_signal_by_design``
+in the test file for the behavior pin.
+
+Relatedly: paired acceptance (both modes) requires a GENUINE, parseable
+below-floor ``release_version`` reading -- never merely "the probe raised
+some ``ManagedServiceError``". ``probe_managed_service`` raises
+:class:`ManagedServiceIncompatible` for five distinct reasons (non-200,
+non-JSON body, missing/unparseable ``release_version``, AND the one that
+matters here, a parseable version below the floor) and only the last one
+populates the exception's structured ``deployed_version`` field. An endpoint
+that is simply broken or misconfigured is NOT "deploy pending" and must
+never be folded into paired acceptance -- see :func:`_classify_probe_failure`.
+
 Usage::
 
     uv run python scripts/check_engine_release_floor.py
     uv run python scripts/check_engine_release_floor.py --url https://staging.example.com
     uv run python scripts/check_engine_release_floor.py --paired-deploy engine-service-v0.1.63
+    uv run python scripts/check_engine_release_floor.py --paired-deploy-auto
 
 Exit codes: ``0`` current, ``1`` stale / incompatible, ``2`` unreachable
 (network/DNS/TLS/timeout -- "could not verify" is never treated as "must be
@@ -652,19 +708,73 @@ def check_paired_preconditions(
     return 0
 
 
-def _print_paired_ack(deployed: str, floor: str) -> None:
+def _classify_probe_failure(exc: ManagedServiceError) -> tuple[bool, str]:
+    """Distinguish a GENUINE below-floor cloud report from any other probe
+    failure inside a caught :class:`ManagedServiceError` (nexus-gc9ir review
+    round, SIGNIFICANT finding 3).
+
+    :func:`~nexus.db.managed_endpoint.probe_managed_service` raises
+    ``ManagedServiceIncompatible`` for FIVE distinct reasons (see its
+    docstring): a non-200 status, a non-JSON body, a missing/unparseable
+    ``release_version``, AND the one that matters here -- a
+    ``release_version`` that parsed fine but sits numerically below
+    ``REQUIRED_ENGINE_VERSION``. Only that LAST raise site populates the
+    exception's structured ``deployed_version`` field (nexus-b6qlf Fix 2);
+    every other raise site leaves it ``None``. Folding all five into
+    "accept as paired, deploy is just pending" -- the bug both paired call
+    sites carried before this fix -- would let a genuinely broken or
+    misconfigured endpoint sail through paired mode (explicit OR auto) as
+    if it were merely a pre-deploy cloud, which is exactly the
+    "unverifiable is never a pass" doctrine this module exists to enforce.
+
+    Returns ``(True, deployed_version)`` for a genuine below-floor report;
+    ``(False, "")`` for anything else. The caller MUST treat the ``False``
+    case as UNVERIFIABLE (exit 2), never an acceptance -- paired or not.
+    """
+    deployed = getattr(exc, "deployed_version", None)
+    return (deployed is not None, deployed or "")
+
+
+def _probe_unverifiable_message(base: str, floor: str, detail: str) -> str:
+    """Shared stderr text for a probe result paired mode refuses to accept
+    as "deploy pending" -- an endpoint error or a malformed/unparseable
+    response, as distinct from a genuine parseable below-floor version
+    (see :func:`_classify_probe_failure`).
+    """
+    return (
+        f"ENGINE FLOOR CHECK UNVERIFIABLE (required v{floor}): managed "
+        f"service at {base} {detail}. Paired mode only ever accepts a "
+        "GENUINE, parseable below-floor version report as 'deploy pending' "
+        "-- an endpoint error or a malformed/unparseable response is never "
+        "folded into that acceptance, paired or not. Treat as a failed "
+        "gate, not a pass."
+    )
+
+
+def _print_paired_ack(deployed: str, floor: str, auto: bool = False) -> None:
     """Explicit acknowledgment for an accepted paired-mode cloud-behind result.
 
     Names both versions (never a bare "OK") and states the POST-TAG VERIFY
     obligation up front -- a paired acceptance is a deferred check, not a
     closed one, and the caller must re-run without ``--paired-deploy`` once
     the deploy lands to confirm the pairing actually converged.
+
+    ``auto=True`` (nexus-gc9ir): the pairing was DERIVED from
+    ``REQUIRED_ENGINE_VERSION`` by ``--paired-deploy-auto``, not named by a
+    human via ``--paired-deploy`` -- the acknowledgment says so explicitly so
+    a reader of CI logs can tell the two modes apart.
     """
+    origin = (
+        "AUTO-derived from REQUIRED_ENGINE_VERSION (--paired-deploy-auto, "
+        "nexus-gc9ir) -- no explicit --paired-deploy given."
+        if auto
+        else "named via --paired-deploy."
+    )
     print(
         f"PAIRED MODE: cloud reports release_version {deployed!r}, behind floor "
         f"v{floor}. Expected pre-deploy under the paired-release choreography -- "
         "the deploy fires at client-tag push (AGENTS.md § Cutting a "
-        "release, step 0), not before this tag exists.\n"
+        f"release, step 0), not before this tag exists. Pairing {origin}\n"
         "POST-TAG VERIFY REQUIRED: re-run this script WITHOUT --paired-deploy "
         "once the deploy lands, to confirm the cloud engine actually converged "
         "-- escalate loudly (never silently re-accept) if it is still behind at "
@@ -672,10 +782,150 @@ def _print_paired_ack(deployed: str, floor: str) -> None:
     )
 
 
+def _run_paired_precondition_battery(
+    tag: str,
+    newest: object,
+    paired_tag_max_age_hours: float,
+    ack_client_lag: list[str] | None,
+) -> int:
+    """The local, no-network battery an ARMED pairing must clear -- shared by
+    BOTH explicit ``--paired-deploy`` and auto-derived ``--paired-deploy-auto``
+    (nexus-gc9ir review round: this sequence was duplicated between
+    :func:`check_floor`'s explicit branch and the auto-mode tail, which is
+    exactly the drift-prone-release-machinery class this bead exists to
+    close -- one function, two call sites, so a future change to the
+    battery cannot land in only one mode by accident).
+
+    Order: the both-halves wire-contract ledger (nexus-1vogq) FIRST -- local,
+    no network, actionable without ever looking at ``tag``'s git/gh state --
+    THEN :func:`check_paired_preconditions` (nexus-k1c08).
+
+    Returns 0 when both pass; the first failing check's own named-reason
+    exit code otherwise.
+    """
+    ledger_rc = check_client_lag_ledger(ack_client_lag)
+    if ledger_rc != 0:
+        return ledger_rc
+    return check_paired_preconditions(tag, newest, max_age_hours=paired_tag_max_age_hours)
+
+
+def _paired_below_floor_path(
+    deployed_version: str,
+    newest: object,
+    paired_tag_max_age_hours: float,
+    ack_client_lag: list[str] | None,
+) -> int:
+    """Shared tail of auto-paired mode once the cloud is confirmed below floor.
+
+    Runs :func:`_run_paired_precondition_battery` -- the IDENTICAL local
+    battery :func:`check_floor` runs for an explicit ``--paired-deploy`` --
+    on the tag AUTO-derived from ``REQUIRED_ENGINE_VERSION``. On success,
+    prints the paired acknowledgment with ``auto=True`` and returns 0; any
+    precondition miss returns its own named-reason code unchanged.
+    """
+    tag = _pinned_engine_tag()
+    paired_rc = _run_paired_precondition_battery(
+        tag, newest, paired_tag_max_age_hours, ack_client_lag
+    )
+    if paired_rc != 0:
+        return paired_rc
+    floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
+    _print_paired_ack(deployed_version, floor, auto=True)
+    return 0
+
+
+def _check_floor_auto_paired(
+    url: str | None,
+    newest: object,
+    paired_tag_max_age_hours: float,
+    ack_client_lag: list[str] | None,
+) -> int:
+    """``--paired-deploy-auto`` (nexus-gc9ir): probe the cloud FIRST to decide
+    which path to take.
+
+    Unlike explicit ``--paired-deploy`` -- which always demands the named
+    tag's preconditions hold before ever looking at the cloud, even if the
+    cloud already caught up -- auto mode's contract is "must not weaken
+    anything": when the cloud already meets the floor this MUST be a byte-
+    for-byte bare-invocation pass (pin-currency, then the ordinary "current"
+    message), with the paired machinery (ledger, git/gh tag verification)
+    never invoked. That decision can only be made after probing, so auto
+    mode probes once, up front, and branches on the result -- rather than
+    reusing :func:`check_floor`'s normal probe-after-local-checks ordering.
+
+    An unreachable cloud stays exit 2 regardless of mode -- unverifiable is
+    never a pass, auto or not.
+    """
+    base = url or resolve_managed_endpoint(require_token=False)[0]
+    floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
+
+    try:
+        caps = probe_managed_service(base_url=base)
+    except ManagedServiceUnreachable as exc:
+        print(
+            f"ENGINE FLOOR CHECK FAILED: managed service at {base} is unreachable "
+            f"({exc}). Cannot verify the cloud engine version -- treat this as a "
+            "failed gate, not a pass.",
+            file=sys.stderr,
+        )
+        return 2
+    except ManagedServiceError as exc:
+        # Only a GENUINE, parseable below-floor version reading is "deploy
+        # pending" for auto mode's purposes -- an endpoint error or
+        # malformed response is UNVERIFIABLE, never folded into paired
+        # acceptance (nexus-gc9ir review round, SIGNIFICANT finding 3; see
+        # _classify_probe_failure).
+        is_below_floor, deployed = _classify_probe_failure(exc)
+        if not is_below_floor:
+            print(
+                _probe_unverifiable_message(
+                    base, floor,
+                    f"probe failed without a genuine below-floor version reading ({exc})",
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        return _paired_below_floor_path(deployed, newest, paired_tag_max_age_hours, ack_client_lag)
+
+    parsed = parse_engine_version(caps.release_version)
+    if parsed is not None and parsed >= REQUIRED_ENGINE_VERSION:
+        # Cloud already meets the floor: EXACTLY the bare-invocation path.
+        pin_rc = check_pin_currency(newest)
+        if pin_rc != 0:
+            return pin_rc
+        print(
+            f"cloud engine is current: {caps.base_url} release_version="
+            f"{caps.release_version} (floor v{floor})"
+        )
+        return 0
+
+    if parsed is None:
+        # Reachable, but the response carries an unparseable release_version
+        # -- never reachable via the REAL probe (which raises before ever
+        # returning such a caps; see probe_managed_service's docstring), but
+        # for defense in depth this must not silently fold into paired
+        # acceptance either -- same "genuine below-floor only" rule as the
+        # exception branch above.
+        print(
+            _probe_unverifiable_message(
+                base, floor,
+                f"reported an unparseable release_version {caps.release_version!r}",
+            ),
+            file=sys.stderr,
+        )
+        return 2
+
+    # Reachable, with a genuine parseable release_version below the floor.
+    return _paired_below_floor_path(
+        caps.release_version, newest, paired_tag_max_age_hours, ack_client_lag
+    )
+
+
 def check_floor(
     url: str | None = None,
     newest: object | None = None,
     paired_deploy: str | None = None,
+    paired_deploy_auto: bool = False,
     paired_tag_max_age_hours: float = _DEFAULT_PAIRED_TAG_MAX_AGE_HOURS,
     ack_client_lag: list[str] | None = None,
 ) -> int:
@@ -696,19 +946,35 @@ def check_floor(
     ``paired_tag_max_age_hours`` bounds how old the paired tag's commit may
     be (see :data:`_DEFAULT_PAIRED_TAG_MAX_AGE_HOURS`); ignored when
     ``paired_deploy`` is ``None``.
+
+    ``paired_deploy_auto`` (nexus-gc9ir): when ``True`` AND ``paired_deploy``
+    is ``None``, delegates entirely to :func:`_check_floor_auto_paired`,
+    which derives the candidate tag from ``REQUIRED_ENGINE_VERSION`` and
+    probes the cloud FIRST to decide whether the bare or the paired path
+    applies -- see the module docstring's auto-paired section. An explicit
+    ``paired_deploy`` always takes priority over ``paired_deploy_auto`` when
+    both are somehow set (the CLI enforces mutual exclusion; this is the
+    library-level tiebreak). ``False`` (the default) leaves every existing
+    code path byte-for-byte unchanged.
     """
     resolved_newest = newest_published_engine() if newest is None else newest
 
+    if paired_deploy_auto and paired_deploy is None:
+        return _check_floor_auto_paired(
+            url=url,
+            newest=resolved_newest,
+            paired_tag_max_age_hours=paired_tag_max_age_hours,
+            ack_client_lag=ack_client_lag,
+        )
+
     if paired_deploy is not None:
-        # nexus-1vogq: the both-halves wire-contract ledger gate runs FIRST --
-        # local, no network, same "cheap local check before anything else"
-        # ordering as pin-currency below. A ledger with unacknowledged
-        # unshipped client halves blocks the deploy outright, named by bead.
-        ledger_rc = check_client_lag_ledger(ack_client_lag)
-        if ledger_rc != 0:
-            return ledger_rc
-        paired_rc = check_paired_preconditions(
-            paired_deploy, resolved_newest, max_age_hours=paired_tag_max_age_hours
+        # _run_paired_precondition_battery: ledger (nexus-1vogq) FIRST -- local,
+        # no network, same "cheap local check before anything else" ordering as
+        # pin-currency below -- THEN check_paired_preconditions (nexus-k1c08).
+        # Shared with auto mode's tail (nexus-gc9ir) so the two entry points
+        # can never drift on what "armed" means.
+        paired_rc = _run_paired_precondition_battery(
+            paired_deploy, resolved_newest, paired_tag_max_age_hours, ack_client_lag
         )
         if paired_rc != 0:
             return paired_rc
@@ -738,19 +1004,28 @@ def check_floor(
         # probe_managed_service already fails closed on a below-floor / missing
         # / unparseable release_version -- its message names the deployed
         # version and the floor already, so surface it verbatim plus the
-        # remedy pointer. In paired mode this is the EXPECTED pre-deploy
-        # state, not a defect -- accept it with the explicit acknowledgment.
+        # remedy pointer. In paired mode a GENUINE below-floor reading is the
+        # EXPECTED pre-deploy state, not a defect -- accept it with the
+        # explicit acknowledgment. An endpoint error or malformed response is
+        # NOT "deploy pending" and must stay UNVERIFIABLE even in paired mode
+        # (nexus-gc9ir review round, SIGNIFICANT finding 3 -- this branch
+        # used to fold every ManagedServiceError into acceptance; see
+        # _classify_probe_failure).
         if paired_deploy is not None:
             # This IS the real production paired-acceptance path (the
             # below-floor probe raises ManagedServiceIncompatible, a
             # ManagedServiceError subclass, here -- not in the dead
             # post-probe comparison below, which only patched tests reach).
-            # str(exc) is a full remedy SENTENCE ("...upgrade the managed
-            # service, or upgrade/downgrade..."); ManagedServiceIncompatible
-            # carries a structured deployed_version field for exactly this
-            # (nexus-b6qlf Fix 2) -- prefer it so the ack names a clean
-            # version instead of embedding that whole sentence via !r.
-            deployed = getattr(exc, "deployed_version", None) or str(exc)
+            is_below_floor, deployed = _classify_probe_failure(exc)
+            if not is_below_floor:
+                print(
+                    _probe_unverifiable_message(
+                        base, floor,
+                        f"probe failed without a genuine below-floor version reading ({exc})",
+                    ),
+                    file=sys.stderr,
+                )
+                return 2
             _print_paired_ack(deployed, floor)
             return 0
         print(
@@ -762,6 +1037,19 @@ def check_floor(
     parsed = parse_engine_version(caps.release_version)
     if parsed is None or parsed < REQUIRED_ENGINE_VERSION:
         if paired_deploy is not None:
+            if parsed is None:
+                # Reachable, but an unparseable release_version -- never
+                # reachable via the REAL probe (see probe_managed_service's
+                # docstring), but for defense in depth this must not
+                # silently fold into paired acceptance either.
+                print(
+                    _probe_unverifiable_message(
+                        base, floor,
+                        f"reported an unparseable release_version {caps.release_version!r}",
+                    ),
+                    file=sys.stderr,
+                )
+                return 2
             _print_paired_ack(caps.release_version, floor)
             return 0
         print(
@@ -803,31 +1091,74 @@ def main(argv: list[str] | None = None) -> int:
         "the deploy-window VERIFY.",
     )
     parser.add_argument(
+        "--paired-deploy-auto",
+        action="store_true",
+        help="Auto-paired mode (nexus-gc9ir). The unattended counterpart of "
+        "--paired-deploy for release.yml's own copy of this gate, where "
+        "there is no human to name a tag. Derives the candidate tag from "
+        "REQUIRED_ENGINE_VERSION and, ONLY when the cloud is confirmed "
+        "below that floor, applies the IDENTICAL --paired-deploy "
+        "verification battery to it. When the cloud already meets the "
+        "floor this is a byte-for-byte bare-invocation pass -- never "
+        "weaker than the default path. Mutually exclusive with "
+        "--paired-deploy.",
+    )
+    parser.add_argument(
         "--paired-tag-max-age-hours",
         type=float,
         default=_DEFAULT_PAIRED_TAG_MAX_AGE_HOURS,
         metavar="HOURS",
-        help="Only with --paired-deploy: override the paired-tag freshness "
-        f"window (default {_DEFAULT_PAIRED_TAG_MAX_AGE_HOURS:g}h). Use only "
-        "when this release genuinely lagged its engine tag -- the default "
-        "exists to stop a reused --paired-deploy from silently accepting a "
-        "stale pairing across multiple releases (nexus-k1c08 fix round).",
+        help="Only with --paired-deploy or --paired-deploy-auto (nexus-gc9ir: "
+        "the auto-derived tag goes through the IDENTICAL freshness check): "
+        "override the paired-tag freshness window (default "
+        f"{_DEFAULT_PAIRED_TAG_MAX_AGE_HOURS:g}h). Use only when this release "
+        "genuinely lagged its engine tag -- the default exists to stop a "
+        "reused pairing from silently accepting a stale tag across multiple "
+        "releases (nexus-k1c08 fix round).",
     )
     parser.add_argument(
         "--ack-client-lag",
         action="append",
         default=None,
         metavar="BEAD-ID",
-        help="Only with --paired-deploy (nexus-1vogq). Explicit acknowledgment "
-        "that a both-halves commit's client half is not yet in a published "
-        "release -- names the OWNING BEAD of a "
-        "docs/wire-contract-pending.md ## Unshipped entry. Repeat for each "
-        "entry. Without this, a non-empty ledger blocks the deploy.",
+        help="With --paired-deploy, --paired-deploy-auto, or --ledger-only "
+        "(nexus-1vogq; auto mode's below-floor path runs the identical "
+        "ledger check, nexus-gc9ir). Explicit acknowledgment that a "
+        "both-halves commit's client half is not yet in a published "
+        "release -- names the OWNING BEAD of a docs/wire-contract-pending.md "
+        "## Unshipped entry. Repeat for each entry. Without this, a "
+        "non-empty ledger blocks -- release.yml's own auto invocation has "
+        "no way to supply this flag (see its step comment for the operator "
+        "remedy).",
+    )
+    parser.add_argument(
+        "--ledger-only",
+        action="store_true",
+        help="Pre-tag mode (nexus-55r6o). Runs ONLY check_client_lag_ledger "
+        "-- the tree-static docs/wire-contract-pending.md read, no network "
+        "probe, no git-ancestry check -- and exits with its result. For "
+        "release-branch PR CI: catches an unacknowledged ## Unshipped "
+        "entry while the tree is still mutable, mirroring the exact check "
+        "that would otherwise fail closed at tag-push time (release.yml's "
+        "--paired-deploy-auto step) with no CI-side remedy once the tag is "
+        "immutable. Mutually exclusive with --url, --paired-deploy, and "
+        "--paired-deploy-auto; combine with --ack-client-lag exactly like "
+        "those modes.",
     )
     args = parser.parse_args(argv)
+    if args.paired_deploy is not None and args.paired_deploy_auto:
+        parser.error("--paired-deploy and --paired-deploy-auto are mutually exclusive")
+    if args.ledger_only:
+        if args.paired_deploy is not None or args.paired_deploy_auto or args.url is not None:
+            parser.error(
+                "--ledger-only is mutually exclusive with --url, "
+                "--paired-deploy, and --paired-deploy-auto"
+            )
+        return check_client_lag_ledger(args.ack_client_lag)
     rc = check_floor(
         url=args.url,
         paired_deploy=args.paired_deploy,
+        paired_deploy_auto=args.paired_deploy_auto,
         paired_tag_max_age_hours=args.paired_tag_max_age_hours,
         ack_client_lag=args.ack_client_lag,
     )

@@ -345,6 +345,43 @@ def test_reindex_not_found(runner, env_creds, mock_db) -> None:
     assert "not found" in result.output.lower() or "error" in result.output.lower()
 
 
+def test_reindex_routes_delete_through_cascade_not_client_delete(
+    runner, env_creds, mock_db, tmp_path,
+) -> None:
+    """nexus-sjb52: ``nx collection reindex`` must delete the collection via
+    ``purge_collection_cascade`` (the same cascade ``nx collection delete``
+    uses), never via the T3 client's own ``delete_collection`` directly.
+
+    ``HttpVectorClient.delete_collection`` is an unconditional
+    ``NotImplementedError`` stub in BOTH local and cloud mode since
+    RDR-155 P4b -- so a direct call died on every invocation. This test
+    existed BEFORE the fix too (as ``mock_db.delete_collection.assert_
+    called_once_with(...)`` in the other reindex tests) and stayed green
+    the whole time: ``mock_db`` is ``MagicMock(spec=HttpVectorClient)``,
+    and spec'ing a mock only constrains which attributes exist -- it does
+    not run the real method body, so the spec'd mock happily "implemented"
+    delete_collection and hid the bug for every release since RDR-155 P4b.
+    A test that invokes the real (unmocked) implementation is the only way
+    this class of gap gets caught -- see the engine-substrate test in
+    tests/test_collection_reindex_e2e.py for that half of the fix.
+    """
+    doc_file = tmp_path / "doc.md"
+    doc_file.write_text("# Doc\ncontent")
+    vr = _setup_reindex_mock(
+        mock_db,
+        [{"source_path": str(doc_file)}],
+        [{"source_path": str(doc_file)}],
+    )
+    with patch("nexus.commands.collection._t3", return_value=mock_db), \
+         patch("nexus.db.collection_purge.purge_collection_cascade") as mock_purge, \
+         patch("nexus.doc_indexer.index_markdown", return_value=1), \
+         patch("nexus.db.t3.verify_collection_deep", return_value=vr):
+        result = runner.invoke(main, ["collection", "reindex", "knowledge__test"])
+    assert result.exit_code == 0, result.output
+    mock_purge.assert_called_once_with(mock_db, "knowledge__test")
+    mock_db.delete_collection.assert_not_called()
+
+
 def _setup_reindex_mock(mock_db, metadatas_check, metadatas_batch, before_count=1, after_count=1):
     from nexus.db.t3 import VerifyResult
     mock_db.collection_info.side_effect = [
@@ -451,6 +488,7 @@ def test_reindex_treats_doc_id_only_chunk_as_reindexable(
         return_value=str(doc_file),
     ), \
          patch("nexus.commands.collection._t3", return_value=mock_db), \
+         patch("nexus.db.collection_purge.purge_collection_cascade") as mock_purge, \
          patch("nexus.doc_indexer.index_markdown", return_value=1), \
          patch("nexus.db.t3.verify_collection_deep", return_value=vr):
         result = runner.invoke(
@@ -458,7 +496,10 @@ def test_reindex_treats_doc_id_only_chunk_as_reindexable(
         )
     # Must NOT hit the all-sourceless refuse branch; reindex proceeds.
     assert "refusing to reindex" not in result.output.lower()
-    mock_db.delete_collection.assert_called_once_with("docs__test")
+    # nexus-sjb52: the delete hop routes through the cascade, not the T3
+    # client's own (unimplemented) delete_collection.
+    mock_purge.assert_called_once_with(mock_db, "docs__test")
+    mock_db.delete_collection.assert_not_called()
 
 
 def test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable(
@@ -505,6 +546,7 @@ def test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable(
     ), \
          patch("nexus.commands.collection._t3", return_value=mock_db), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=fake_cat), \
+         patch("nexus.db.collection_purge.purge_collection_cascade") as mock_purge, \
          patch("nexus.doc_indexer.index_markdown", return_value=1), \
          patch("nexus.db.t3.verify_collection_deep", return_value=vr):
         result = runner.invoke(
@@ -512,7 +554,10 @@ def test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable(
         )
     # Must NOT hit the all-sourceless refuse branch.
     assert "refusing to reindex" not in result.output.lower(), result.output
-    mock_db.delete_collection.assert_called_once_with("docs__test")
+    # nexus-sjb52: the delete hop routes through the cascade, not the T3
+    # client's own (unimplemented) delete_collection.
+    mock_purge.assert_called_once_with(mock_db, "docs__test")
+    mock_db.delete_collection.assert_not_called()
     # Verify the manifest path actually fired.
     fake_cat.docs_for_chashes.assert_called_once()
 
@@ -556,11 +601,15 @@ def test_reindex_force_proceeds(runner, env_creds, mock_db, tmp_path) -> None:
         before_count=2, after_count=1,
     )
     with patch("nexus.commands.collection._t3", return_value=mock_db), \
+         patch("nexus.db.collection_purge.purge_collection_cascade") as mock_purge, \
          patch("nexus.doc_indexer.index_markdown", return_value=1), \
          patch("nexus.db.t3.verify_collection_deep", return_value=vr):
         result = runner.invoke(main, ["collection", "reindex", "knowledge__test", "--force"])
     assert result.exit_code == 0, result.output
-    mock_db.delete_collection.assert_called_once_with("knowledge__test")
+    # nexus-sjb52: the delete hop routes through the cascade, not the T3
+    # client's own (unimplemented) delete_collection.
+    mock_purge.assert_called_once_with(mock_db, "knowledge__test")
+    mock_db.delete_collection.assert_not_called()
 
 
 def test_reindex_rdr_uses_batch(runner, env_creds, mock_db, tmp_path) -> None:
@@ -1126,3 +1175,23 @@ def test_prune_no_recorded_choice_falls_back_to_ef_token(
     result = _invoke(runner, mock_db, ["prune"])
     assert result.exit_code == 0, result.output
     assert "No dimension-mismatched collections found" in result.output
+
+
+def test_reindex_refuses_code_collections_before_deleting(runner, env_creds, mock_db) -> None:
+    """nexus-caifp: this verb has no re-index driver for code__ — with the
+    nexus-sjb52 reroute making the delete actually WORK, reaching the delete
+    would silently destroy the collection (chunks + catalog + taxonomy +
+    registry) and exit 0 with nothing rebuilt. Must refuse BEFORE any
+    delete, pointing at `nx index repo`."""
+    mock_db.collection_info.return_value = {"count": 5, "metadata": {}}
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["a"], "metadatas": [{"source_path": "/repo/x.py"}],
+    }
+    mock_db.get_or_create_collection.return_value = mock_col
+    with patch("nexus.db.collection_purge.purge_collection_cascade") as cascade:
+        result = _invoke(runner, mock_db, ["reindex", "code__myrepo"])
+    assert result.exit_code != 0
+    assert "nx index repo" in result.output
+    cascade.assert_not_called()
+    mock_db.delete_collection.assert_not_called()

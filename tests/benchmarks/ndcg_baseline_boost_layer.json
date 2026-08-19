@@ -1,0 +1,206 @@
+{
+ "mean_ndcg_at_3": 0.9078,
+ "k": 3,
+ "queries": [
+  {
+   "query": "how to securely store authentication tokens",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "bcrypt password hashing implementation",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "JWT token expiration and signing",
+   "ndcg_at_3": 0.9173
+  },
+  {
+   "query": "OAuth2 access token refresh flow",
+   "ndcg_at_3": 0.9828
+  },
+  {
+   "query": "Redis LRU cache eviction policy configuration",
+   "ndcg_at_3": 0.9828
+  },
+  {
+   "query": "cache TTL and cache-aside pattern",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "Python memoization with lru_cache",
+   "ndcg_at_3": 0.9173
+  },
+  {
+   "query": "in-memory caching strategies for read-heavy workloads",
+   "ndcg_at_3": 0.8452
+  },
+  {
+   "query": "inverted index BM25 full text search",
+   "ndcg_at_3": 0.9173
+  },
+  {
+   "query": "vector embeddings cosine similarity approximate nearest neighbor",
+   "ndcg_at_3": 0.9385
+  },
+  {
+   "query": "ChromaDB query with metadata filter",
+   "ndcg_at_3": 0.9173
+  },
+  {
+   "query": "semantic search dense retrieval embeddings",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "database index B-tree hash covering index",
+   "ndcg_at_3": 0.9173
+  },
+  {
+   "query": "PostgreSQL query planner EXPLAIN ANALYZE",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "SQLite WAL mode concurrent readers writers",
+   "ndcg_at_3": 0.9173
+  },
+  {
+   "query": "relational database query optimization",
+   "ndcg_at_3": 0.5874
+  },
+  {
+   "query": "REST API resource naming and HTTP verbs",
+   "ndcg_at_3": 0.9224
+  },
+  {
+   "query": "API rate limiting token bucket algorithm",
+   "ndcg_at_3": 0.9828
+  },
+  {
+   "query": "GraphQL query fragments persisted queries",
+   "ndcg_at_3": 0.9173
+  },
+  {
+   "query": "HTTP API design best practices",
+   "ndcg_at_3": 0.6735
+  },
+  {
+   "query": "test driven development red green refactor",
+   "ndcg_at_3": 0.9173
+  },
+  {
+   "query": "property based testing hypothesis python",
+   "ndcg_at_3": 0.9828
+  },
+  {
+   "query": "integration tests with real database and containers",
+   "ndcg_at_3": 0.9173
+  },
+  {
+   "query": "testing strategies unit integration end-to-end",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "exception handling fail fast vs graceful recovery",
+   "ndcg_at_3": 0.8124
+  },
+  {
+   "query": "circuit breaker pattern cascading failure prevention",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "retry exponential backoff transient errors",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "resilience patterns error handling in distributed systems",
+   "ndcg_at_3": 0.8129
+  },
+  {
+   "query": "asyncio concurrency async await Python",
+   "ndcg_at_3": 0.9828
+  },
+  {
+   "query": "thread safety locks mutual exclusion",
+   "ndcg_at_3": 0.9828
+  },
+  {
+   "query": "producer consumer queue concurrency pattern",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "concurrent programming CPU-bound vs IO-bound tasks",
+   "ndcg_at_3": 0.9558
+  },
+  {
+   "query": "structured logging request correlation context",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "log levels production versus development",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "twelve factor app environment variable configuration",
+   "ndcg_at_3": 0.9173
+  },
+  {
+   "query": "layered configuration defaults files environment CLI",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "YAML TOML configuration file management",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "security best practices for web applications",
+   "ndcg_at_3": 0.5189
+  },
+  {
+   "query": "caching layer design for high throughput systems",
+   "ndcg_at_3": 0.8452
+  },
+  {
+   "query": "search engine indexing and retrieval pipeline",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "database schema design and query performance",
+   "ndcg_at_3": 0.5419
+  },
+  {
+   "query": "microservice API design and communication",
+   "ndcg_at_3": 0.5693
+  },
+  {
+   "query": "software testing methodologies and best practices",
+   "ndcg_at_3": 0.8839
+  },
+  {
+   "query": "fault tolerance and system reliability patterns",
+   "ndcg_at_3": 0.6254
+  },
+  {
+   "query": "Python concurrency models and thread safety",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "observability logging and configuration management",
+   "ndcg_at_3": 0.7872
+  },
+  {
+   "query": "HNSW graph approximate nearest neighbor index",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "Redis INCR EXPIRE sliding window rate limit",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "pragma journal_mode WAL SQLite",
+   "ndcg_at_3": 1.0
+  },
+  {
+   "query": "asyncio.gather producer consumer asyncio.Queue",
+   "ndcg_at_3": 1.0
+  }
+ ]
+}

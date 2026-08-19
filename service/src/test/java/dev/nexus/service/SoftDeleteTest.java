@@ -229,7 +229,13 @@ class SoftDeleteTest {
                     // existed, so both need the same DML grant shape as every
                     // other table in this list.
                     "topic_assignments",
-                    "topics")) {
+                    "topics",
+                    // nexus-sybbh: nexus.purge_trash now INSERTs a gc_audit row IN THE
+                    // SAME TRANSACTION as its chunk/document sweep (catalog-033-1) --
+                    // this role calls purgeTrash below, so it needs the same DML grant
+                    // shape as every other table this trigger/function-invoking role
+                    // touches.
+                    "gc_audit")) {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
             }
@@ -243,6 +249,10 @@ class SoftDeleteTest {
                 "GRANT USAGE ON SEQUENCE nexus.document_highlights_id_seq TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT USAGE ON SEQUENCE nexus.aspect_extraction_queue_id_seq TO " + SVC_ROLE);
+            // nexus-sybbh: gc_audit.id is a BIGSERIAL -- INSERT needs USAGE on its
+            // backing sequence too, same as every other serial-PK table above.
+            su.createStatement().execute(
+                "GRANT USAGE ON SEQUENCE nexus.gc_audit_id_seq TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }

@@ -266,6 +266,16 @@ _compute_verdict() {
         echo "FAILED|the cap NEVER BOUND: largest observed flush/page = ${largest_flush} chunks, configured cap is ${configured_cap} — the corpus is too small to be a memory gate (grow --corpus-scale)"
         return
     fi
+    # nexus-c7fht non-vacuity: the cap binding ONLY on the legacy per-file
+    # paged-upload family must not read as a pass — the combined write
+    # (chunk_flush_complete) is the path this gate exists to measure, and
+    # an all-oversize corpus binds the cap exclusively on the legacy path
+    # (the exact theatre shape c7fht filed). $8 is the combined-family-only
+    # at-cap count (family=combined), never the summed one.
+    if [ "${8:-0}" -eq 0 ] 2>/dev/null; then
+        echo "FAILED|the cap never bound on the COMBINED-WRITE path (zero chunk_flush_complete events with chunks >= ${configured_cap}) — legacy per-file paged-upload bindings do not count; the path under test was not exercised at the cap (nexus-c7fht)"
+        return
+    fi
     if [ "$index_rc" != 0 ]; then
         echo "FAILED|nx index repo exited ${index_rc}"
         return
@@ -297,6 +307,39 @@ _emit_json() {
     # old two-family sum exceed "flushes" in the first place.
     printf '{"peak_gb":%s,"cap":%s,"timeout_s":%s,"flushes":%s,"flushes_at_cap":%s,"legacy_pages_at_cap":%s,"killed":%s,"wall_s":%s,"manifest_write_retries":%s,"refreshable_retries":%s}\n' \
         "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}"
+}
+
+# ── health-payload parser (nexus-9dua3 / nexus-cwc8w) ──────────────────────
+# Extracts .health from a `nx daemon service status --json` payload.
+# cwc8w: the payload is NOT guaranteed to be clean JSON — the gate's own
+# NX_ONNX_LOCAL_UPSERT_CHUNK_CAP override makes nx prepend a structlog
+# warning line to stdout (nexus-f93r1, the product defect) — so this scans
+# for the first parseable JSON OBJECT instead of json.load()ing the whole
+# stream. 9dua3: an unparseable payload is NEVER silently folded into
+# "not healthy yet" (the old `except Exception: print("")` was a silent
+# fallback on a correctness decision — a one-line parse error became 60s
+# of opaque polling ending in a verdict accusing a healthy service): it
+# prints the sentinel PARSE_ERROR so the caller can fail loud immediately.
+# $1 = payload text, $2 = python interpreter (default: python3).
+_health_from_status_json() {
+    printf '%s' "$1" | "${2:-python3}" -c '
+import json, sys
+raw = sys.stdin.read()
+dec = json.JSONDecoder()
+i = raw.find("{")
+while i != -1:
+    try:
+        obj, _ = dec.raw_decode(raw[i:])
+    except ValueError:
+        i = raw.find("{", i + 1)
+        continue
+    if isinstance(obj, dict):
+        print(obj.get("health", ""))
+        break
+    i = raw.find("{", i + 1)
+else:
+    print("PARSE_ERROR")
+'
 }
 
 # ── --self-test: pure-function checks against synthetic fixtures ───────────
@@ -366,6 +409,21 @@ EOF
     _assert_eq "zero retries -> 0, not an error" \
         "$(_count_matches_in_log "$t/fake2.log" manifest_write_transient_error_retry)" "0"
 
+    say "self-test: _health_from_status_json (nexus-9dua3 / nexus-cwc8w)"
+    _assert_eq "clean payload -> health field" \
+        "$(_health_from_status_json '{"health": "ok", "port": 5555}')" "ok"
+    _assert_eq "degraded payload -> its literal health value" \
+        "$(_health_from_status_json '{"health": "db-down"}')" "db-down"
+    _assert_eq "cwc8w: structlog warning line BEFORE the JSON still parses" \
+        "$(_health_from_status_json '2026-08-10T18:00:00Z [warning] onnx_local_upsert_chunk_cap_override cap=16
+{"health": "ok"}')" "ok"
+    _assert_eq "9dua3: no JSON object anywhere -> loud PARSE_ERROR sentinel, never a silent empty" \
+        "$(_health_from_status_json 'is the service running?')" "PARSE_ERROR"
+    _assert_eq "empty payload -> PARSE_ERROR" \
+        "$(_health_from_status_json '')" "PARSE_ERROR"
+    _assert_eq "JSON object present but no health key -> empty (parsed, field absent)" \
+        "$(_health_from_status_json '{"port": 5555}')" ""
+
     say "self-test: _service_pids / _service_rss_kb_total against a marker that matches nothing"
     # Real pgrep call (safe: the marker is a random, self-test-only token
     # nothing on the box can match), not a stub — proves the zero-samples
@@ -406,6 +464,9 @@ EOF
 
     v="$(_compute_verdict 0 0 3145728 20971520 16 15 0 0)"
     case "$v" in FAILED\|*cap*never*bound*|FAILED\|*NEVER\ BOUND*) ok "cap never bound (97dp4 non-vacuity) -> FAILED ($v)";; *) bad "cap-never-bound case -> $v"; failures=$((failures+1));; esac
+
+    v="$(_compute_verdict 0 0 3176038 20971520 16 16 0 0)"
+    case "$v" in FAILED\|*COMBINED-WRITE*) ok "c7fht falsification: legacy-only cap binding (combined count 0) -> FAILED ($v)";; *) bad "legacy-only-binding case must FAIL naming the combined-write path -> $v"; failures=$((failures+1));; esac
 
     v="$(_compute_verdict 0 1 3145728 20971520 16 20 0 1)"
     case "$v" in FAILED\|*exited\ 1*) ok "nonzero index exit -> FAILED ($v)";; *) bad "nonzero-exit case -> $v"; failures=$((failures+1));; esac
@@ -659,16 +720,18 @@ for _ in $(seq 1 30); do
     STATUS_RC=$?
     { printf -- '--- attempt %s (rc=%s) ---\n' "$attempt" "$STATUS_RC"; printf '%s\n' "$STATUS_JSON"; } >> "$STATUS_LOG"
     if [ "$STATUS_RC" = 0 ]; then
-        HEALTH="$(printf '%s' "$STATUS_JSON" | "$VENV/bin/python" -c '
-import json, sys
-try:
-    print(json.load(sys.stdin).get("health", ""))
-except Exception:
-    print("")
-')"
+        HEALTH="$(_health_from_status_json "$STATUS_JSON" "$VENV/bin/python")"
         if [ "$HEALTH" = "ok" ]; then
             healthy=1
             break
+        fi
+        if [ "$HEALTH" = "PARSE_ERROR" ]; then
+            # nexus-9dua3: rc=0 means a live lease answered, so an
+            # unparseable payload is a STRUCTURAL defect (no JSON object
+            # anywhere in stdout), never a transient — retrying 30x cannot
+            # fix it. Fail loud NOW, naming the real cause.
+            printf 'unparseable status payload (attempt %s):\n%s\n' "$attempt" "$STATUS_JSON" >&2
+            _die "nx daemon service status --json returned rc=0 but its stdout contains no parseable JSON object — see $STATUS_LOG (nexus-9dua3/nexus-cwc8w)"
         fi
     fi
     sleep 2

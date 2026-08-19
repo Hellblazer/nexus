@@ -2,6 +2,7 @@
 """nx doctor — health check for all required services."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -166,6 +167,174 @@ _MCP_TOOL_FAILURE_SIGNATURES: tuple[str, ...] = (
 )
 
 
+# ── nexus's OWN structured log (defect fix: the prior version of this
+# ── check read ONLY Claude Code's client-side cache below and never
+# ── looked here, where the MCP server's own tool-level failures land) ──────
+
+
+def _resolve_nexus_log_dir() -> Path:
+    """Return nexus's own structured-log directory, honouring
+    ``NEXUS_CONFIG_DIR`` the same way the rest of the codebase does.
+
+    ``configure_logging(mode="mcp", ...)`` (``nexus.logging_setup``)
+    routes the running MCP server's own structlog events through a
+    ``RotatingFileHandler`` at ``<config_dir>/logs/mcp.log`` (+ up to 5
+    rotated backups). That is where tool-level failures such as
+    ``mcp_memory_put_failed`` / ``mcp_query_failed`` /
+    ``collection_search_failed`` actually land — evidence the prior
+    version of ``--check-mcp-logs`` never read, because it only walked
+    Claude Code's own client-side transport-death cache (see below).
+    Delegates to :func:`nexus.config.nexus_config_dir`, the project's
+    single source of truth for the ``NEXUS_CONFIG_DIR`` override,
+    rather than hardcoding ``$HOME``.
+    """
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    return nexus_config_dir() / "logs"
+
+
+#: Matches one line written by the ``mcp`` logging mode's file formatter
+#: (``nexus.logging_setup.configure_logging``:
+#: ``"%(asctime)s %(name)s %(levelname)s %(message)s"``), where
+#: ``message`` is structlog's ``KeyValueRenderer`` output
+#: (``key_order=["event", "timestamp", "level"]``). Example:
+#: ``2026-08-18 10:23:45,123 nexus.mcp.core ERROR event='mcp_query_failed' ...``
+_NEXUS_LOG_LINE_RE = re.compile(
+    r"^(?P<date>\S+) (?P<time>\S+) (?P<name>\S+) (?P<level>[A-Z]+) (?P<message>.*)$"
+)
+_NEXUS_LOG_EVENT_FIELD_RE = re.compile(r"event='([^']*)'")
+_NEXUS_LOG_TIMESTAMP_FIELD_RE = re.compile(r"timestamp='([^']*)'")
+
+#: Levels this check surfaces. WARNING is deliberately excluded — the task
+#: is ERROR-level signal; a WARNING-inclusive sweep would drown the summary
+#: in the same routine-warning noise ``_resolve_level`` already tunes the
+#: file handler's default threshold for.
+_NEXUS_LOG_ERROR_LEVELS: frozenset[str] = frozenset({"ERROR", "CRITICAL"})
+
+
+def _iso_ts_to_epoch(ts_raw: str) -> float | None:
+    """Best-effort ISO-8601 -> epoch-seconds. ``None`` on anything unparseable."""
+    import datetime as _dt  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    if not ts_raw:
+        return None
+    try:
+        return _dt.datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp()
+    except (ValueError, AttributeError):
+        return None
+
+
+def _parse_nexus_log_line(line: str) -> dict[str, str] | None:
+    """Parse one line of nexus's own structured log. Returns a hit dict
+    (``event``, ``level``, ``timestamp``, ``message``) for ERROR/CRITICAL
+    lines this process's own formatter produced; ``None`` for everything
+    else (other levels, blank lines, lines this formatter didn't write).
+    """
+    line = line.rstrip("\n")
+    if not line:
+        return None
+    m = _NEXUS_LOG_LINE_RE.match(line)
+    if not m or m.group("level") not in _NEXUS_LOG_ERROR_LEVELS:
+        return None
+    message = m.group("message")
+    event_m = _NEXUS_LOG_EVENT_FIELD_RE.search(message)
+    ts_m = _NEXUS_LOG_TIMESTAMP_FIELD_RE.search(message)
+    return {
+        "event": event_m.group(1) if event_m else "(unparsed)",
+        "level": m.group("level"),
+        "timestamp": ts_m.group(1) if ts_m else "",
+        "message": message[:300],
+    }
+
+
+def _scan_nexus_log_errors(
+    log_dir: Path,
+    cutoff_epoch: float,
+    *,
+    stem: str = "mcp",
+) -> list[dict[str, str]]:
+    """Return ERROR/CRITICAL hits from nexus's own structured log within
+    the lookback window.
+
+    Walks ``<log_dir>/<stem>.log`` plus its ``RotatingFileHandler``
+    backups (``<stem>.log.1`` .. ``<stem>.log.5``). A backup whose mtime
+    predates *cutoff_epoch* is skipped outright — rotation stamps mtime
+    at rotation time, so an old backup cannot contain in-window lines;
+    the actively-written current file is always opened, with per-line
+    timestamp filtering (the embedded structlog ``timestamp=`` field,
+    always UTC) doing the rest. Best-effort throughout: a missing
+    directory, an unreadable file, or a line this process's own
+    formatter didn't produce is skipped rather than raised.
+    """
+    hits: list[dict[str, str]] = []
+    if not log_dir.exists():
+        return hits
+    for path in sorted(log_dir.glob(f"{stem}.log*")):
+        try:
+            if path.stat().st_mtime < cutoff_epoch:
+                continue
+        except OSError:
+            continue
+        try:
+            with path.open("r", errors="replace") as f:
+                for line in f:
+                    hit = _parse_nexus_log_line(line)
+                    if hit is None:
+                        continue
+                    ts_epoch = _iso_ts_to_epoch(hit["timestamp"])
+                    if ts_epoch is not None and ts_epoch < cutoff_epoch:
+                        continue
+                    hit["log_file"] = path.name
+                    hits.append(hit)
+        except OSError:
+            continue
+    return hits
+
+
+def _summarize_nexus_log_errors(
+    hits: list[dict[str, str]],
+) -> dict[str, dict[str, Any]]:
+    """Group ERROR/CRITICAL hits by event name: count + most-recent example.
+
+    "Most recent" compares the embedded ISO-8601 ``timestamp`` strings
+    lexicographically, which is time-ordered for same-precision UTC
+    ISO-8601 -- true of every hit :func:`_parse_nexus_log_line` produces.
+    """
+    by_event: dict[str, dict[str, Any]] = {}
+    for hit in hits:
+        bucket = by_event.setdefault(hit["event"], {"count": 0, "most_recent": None})
+        bucket["count"] += 1
+        current = bucket["most_recent"]
+        if current is None or hit["timestamp"] >= current.get("timestamp", ""):
+            bucket["most_recent"] = hit
+    return by_event
+
+
+def _format_nexus_log_section(
+    log_dir: Path,
+    hours: int,
+    hits: list[dict[str, str]],
+    by_event: dict[str, dict[str, Any]],
+) -> str:
+    """Human-readable rendering of the nexus-own-log section."""
+    lines = [f"nexus MCP server log ({log_dir}):"]
+    if not hits:
+        lines.append(f"  No ERROR/CRITICAL events in the last {hours}h.")
+        return "\n".join(lines)
+    lines.append(
+        f"  [WARNING] {len(hits)} ERROR/CRITICAL event(s) across "
+        f"{len(by_event)} distinct event name(s) in the last {hours}h:"
+    )
+    for name, info in sorted(by_event.items(), key=lambda kv: -kv[1]["count"]):
+        recent = info["most_recent"] or {}
+        ts = recent.get("timestamp") or "?"
+        msg = recent.get("message", "")
+        lines.append(
+            f"    {name:<40} x{info['count']:<3} (most recent {ts}: {msg[:120]})"
+        )
+    return "\n".join(lines)
+
+
 def _scan_mcp_log_jsonl(
     path: Path,
     cutoff_epoch: float,
@@ -227,16 +396,24 @@ def _scan_mcp_log_jsonl(
 
 
 def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
-    """Surface nx-mcp silent-death evidence from Claude Code's MCP cache.
+    """Surface nx-mcp failure evidence from TWO independent sources.
 
-    Per RDR-094 §Day 2 Operations §Diagnosing nx-mcp silent death
-    (nexus-3f95 + nexus-50u5).
+    **Primary (defect fix, all platforms): nexus's own structured log**
+    (``<config_dir>/logs/mcp.log`` -- see :func:`_resolve_nexus_log_dir`).
+    This is where the MCP server's own tool-level failures land --
+    ``mcp_memory_put_failed``, ``mcp_query_failed``,
+    ``collection_search_failed``, etc. The check summarizes ERROR/
+    CRITICAL events by name within the lookback window.
 
-    Walks Claude Code's per-server log cache at
-    ``~/Library/Caches/claude-cli-nodejs/<cwd-slug>/mcp-logs-*`` for
-    files modified within the last *hours* window and greps for the
-    silent-death signatures Claude Code emits when nx-mcp's stdio
-    transport breaks before structlog can flush:
+    **Secondary (preserved, RDR-094 §Day 2 Operations §Diagnosing nx-mcp
+    silent death, nexus-3f95 + nexus-50u5): Claude Code's own per-server
+    MCP cache** at
+    ``~/Library/Caches/claude-cli-nodejs/<cwd-slug>/mcp-logs-*``. This is
+    a DIFFERENT log, written by the Claude Code CLI client itself, and
+    carries signal the server-side log structurally cannot: when
+    nx-mcp's stdio transport dies before structlog can flush its last
+    event, nothing lands in ``mcp.log`` -- only Claude Code's own
+    client-side connection log sees the drop. Signatures scanned:
 
       * "STDIO connection dropped after Ns uptime"
       * "stdio transport error"
@@ -246,15 +423,23 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
     rather than crashes.
 
     On non-macOS platforms (no ``~/Library/Caches/claude-cli-nodejs``)
-    the check exits cleanly with "not present on this platform" --
-    the cache is a Claude Code CLI implementation detail, not part
-    of the MCP protocol.
+    the Claude-cache half exits cleanly with "not present on this
+    platform" -- the cache is a Claude Code CLI implementation detail,
+    not part of the MCP protocol. The nexus-own-log half runs
+    regardless of platform.
     """
     import json as _json  # noqa: PLC0415 — deferred to keep CLI startup fast
     import time  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    cache_dir = _resolve_claude_cache_dir()
     cutoff_epoch = time.time() - hours * 3600.0
+
+    # ── Primary: nexus's own structured log ────────────────────────────────
+    nexus_log_dir = _resolve_nexus_log_dir()
+    nexus_hits = _scan_nexus_log_errors(nexus_log_dir, cutoff_epoch)
+    nexus_by_event = _summarize_nexus_log_errors(nexus_hits)
+
+    # ── Secondary: Claude Code's client-side cache (preserved as-is) ───────
+    cache_dir = _resolve_claude_cache_dir()
 
     payload: dict[str, Any] = {
         "cache_dir": str(cache_dir),
@@ -264,12 +449,18 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
         "tool_failures": [],
         "log_dirs_scanned": 0,
         "log_files_scanned": 0,
+        # Additive keys (nexus's own log; independent of platform_supported).
+        "nexus_log_dir": str(nexus_log_dir),
+        "nexus_log_error_count": len(nexus_hits),
+        "nexus_log_by_event": nexus_by_event,
     }
 
     if not cache_dir.exists():
         if json_out:
             click.echo(_json.dumps(payload, indent=2))
         else:
+            click.echo(_format_nexus_log_section(nexus_log_dir, hours, nexus_hits, nexus_by_event))
+            click.echo("")
             click.echo(
                 f"MCP log surface not present at {cache_dir} "
                 f"(macOS-only path; nothing to check on this platform)."
@@ -303,6 +494,8 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
         click.echo(_json.dumps(payload, indent=2))
         return
 
+    click.echo(_format_nexus_log_section(nexus_log_dir, hours, nexus_hits, nexus_by_event))
+    click.echo("")
     click.echo(
         f"Scanned {payload['log_files_scanned']} JSONL files across "
         f"{payload['log_dirs_scanned']} mcp-logs-* dirs under "
@@ -474,11 +667,23 @@ def _run_check_plan_library() -> None:
         raise click.exceptions.Exit(1)
 
 
-def _run_trim_telemetry(days: int) -> None:
-    """Delete aged audit-log rows older than *days* (RDR-087 P2.4; nexus-7365x).
+def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
+    """Delete (or, with ``dry_run=True``, PREVIEW) aged audit-log rows older
+    than *days* (RDR-087 P2.4; nexus-7365x).
 
     Trims both ``search_telemetry`` (RDR-087) and ``hook_failures`` (RDR-164 P0
     audit-table TTL parity) — the two age-reaped, no-cascade audit tables.
+
+    ``dry_run=True`` reports what WOULD be removed without deleting anything
+    (the search_telemetry trim-preview gap this closes: until now there was
+    no way to learn the row count before ``--trim-telemetry`` deleted it —
+    see T2 ``nexus/shakedown-2026-08-11-s11-telemetry``). Both tables are
+    previewed together under one ``--dry-run`` — trimming ``search_telemetry``
+    for real while only previewing ``hook_failures`` (or vice versa) would be
+    a worse footgun than the missing feature, so
+    :meth:`HttpTelemetryStore.trim_hook_failures` grew the identical
+    ``dry_run`` contract alongside :meth:`trim_search_telemetry` rather than
+    leaving it a partial, single-table preview.
     """
     # nexus-ingey: this used to construct Telemetry(db_path) unconditionally.
     # On a migrated box that is the FROZEN SQLite — the verb trimmed a file
@@ -492,10 +697,56 @@ def _run_trim_telemetry(days: int) -> None:
 
     from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
+    if dry_run:
+        # nexus-5uoxu belt-and-braces: the dry-run branch is ENGINE-side.
+        # An engine below the version that introduced the 3-arg overload
+        # ignores the unknown ``dry_run`` JSON field and takes the DELETE
+        # branch — a preview flag that deletes (the exact reason 2c1f929c
+        # was reverted out of 7.6.1, which pinned engine v0.1.71). The
+        # paired-release choreography prevents that pairing for THIS
+        # product's installs; this probe protects every other pairing
+        # (older cloud engine, lagging deploy, hand-configured endpoint):
+        # refuse the preview outright when the SERVING engine cannot honor
+        # it. Fail-closed: an unprobeable version is a refusal too — a
+        # preview must never be a gamble.
+        from nexus.engine_version import (  # noqa: PLC0415 — deferred local import
+            TRIM_DRY_RUN_MIN_ENGINE_VERSION,
+            parse_engine_version,
+        )
+
+        serving: tuple[int, int, int] | None = None
+        try:
+            # Evidence-gated resolver (review Important, nexus-7dsgp class):
+            # the bare resolve_service_endpoint(wait_budget_s=0) can read
+            # falsely unresolvable in the 5-10s supervisor-respawn gap and
+            # spuriously refuse a preview the store call would have served.
+            from nexus.db.service_endpoint import resolve_service_endpoint_with_evidence_gate  # noqa: PLC0415 — deferred local import
+
+            base_url, _token = resolve_service_endpoint_with_evidence_gate()
+            resp = httpx.get(f"{base_url.rstrip('/')}/version", timeout=10)
+            resp.raise_for_status()
+            body = resp.json()
+            if isinstance(body, dict):
+                serving = parse_engine_version(body.get("release_version"))
+        except Exception:  # noqa: BLE001 — fail-closed below; the refusal message carries the remedy
+            serving = None
+        if serving is None or serving < TRIM_DRY_RUN_MIN_ENGINE_VERSION:
+            floor = ".".join(str(x) for x in TRIM_DRY_RUN_MIN_ENGINE_VERSION)
+            got = ".".join(str(x) for x in serving) if serving else "unprobeable"
+            click.echo(
+                f"Error: --dry-run requires engine-service v{floor}+ (serving: "
+                f"{got}). On an older engine the preview flag is silently "
+                "dropped and the trim DELETES what it claims to preview — "
+                "refusing. Upgrade the engine (nx upgrade / redeploy), or run "
+                "without --dry-run only if you intend a real trim.",
+                err=True,
+            )
+            raise click.exceptions.Exit(2)
+
     try:
         store = HttpTelemetryStore()
-        deleted_search = store.trim_search_telemetry(days=days)
-        deleted_hooks = store.trim_hook_failures(days=days)
+        deleted_search = store.trim_search_telemetry(days=days, dry_run=dry_run)
+        deleted_hooks = store.trim_hook_failures(days=days, dry_run=dry_run)
     except (httpx.HTTPError, RuntimeError) as exc:
         # Same class as _report_aspect_queue_service above (review
         # 2026-07-25): store CONSTRUCTION resolves the endpoint and raises
@@ -507,18 +758,20 @@ def _run_trim_telemetry(days: int) -> None:
         # Reporting nothing trimmed would be the false-clean this whole
         # commit exists to remove — say UNKNOWN and exit non-zero so a
         # scripted caller cannot mistake a failed trim for a completed one.
+        verb = "preview" if dry_run else "trim"
         click.echo(
-            f"Error: telemetry trim unavailable ({exc}). Nothing was "
+            f"Error: telemetry {verb} unavailable ({exc}). Nothing was "
             "trimmed and the live retention state is UNKNOWN.",
             err=True,
         )
         raise click.exceptions.Exit(2)
+    verb = "Would trim" if dry_run else "Trimmed"
     for table, deleted in (
         ("search_telemetry", deleted_search),
         ("hook_failures", deleted_hooks),
     ):
         noun = "row" if deleted == 1 else "rows"
-        click.echo(f"Trimmed {deleted} {table} {noun} older than {days} days.")
+        click.echo(f"{verb} {deleted} {table} {noun} older than {days} days.")
 
 
 # ── --check-aspect-queue (nexus-1pfq) ────────────────────────────────────────
@@ -913,6 +1166,178 @@ def _run_check_mineru() -> None:
         click.echo("  (no mineru-api server configured; subprocess mode in use)")
 
 
+# ── Supplementary checks: the cheap/read-only subset of the opt-in ─────────
+# ── --check-* diagnostics, promoted into the default `nx doctor` sweep ─────
+#
+# ``nx doctor`` (no mode flag) runs ``nexus.health.run_health_checks()``
+# only -- none of the fourteen ``--check-*`` diagnostics below participate,
+# so a real backlog (this week: 303 aspect-queue claim failures) is
+# invisible unless an operator happens to run the exact opt-in flag for it.
+# health.py cannot be edited to close this gap (RDR-wide gate on this
+# module), so the qualifying subset runs HERE, inline, right after the
+# default sweep's own output.
+#
+# Inclusion criteria (ALL must hold):
+#   * read-only -- no mutation, no destructive side effect
+#   * no network beyond the already-configured engine (no third-party
+#     service, no arbitrary-repo scan)
+#   * sub-second-ish in the common case
+#   * a FAILURE state means something concrete on an otherwise-healthy
+#     install -- not "always exits 0", not "no pass/fail state at all"
+#
+#   flag                      | included? | why
+#   --------------------------+-----------+----------------------------------
+#   --check-schema             | NO        | ALREADY asked by the default
+#                                          | sweep itself -- health.py's
+#                                          | ``_check_t2_schema_applied``
+#                                          | shares the identical
+#                                          | ``probe_t2_schema_fingerprint``
+#                                          | call (see ``_run_check_schema``'s
+#                                          | own docstring). Promoting it
+#                                          | would duplicate, not add, signal.
+#   --check-search              | NO        | cost scales with the number of
+#                                          | registered collections and name
+#                                          | canaries (multiple resolve +
+#                                          | search_cross_corpus calls each);
+#                                          | not bounded sub-second.
+#   --check-resources           | YES       | local POSIX semaphore probe +
+#                                          | one ``ps`` call, zero network,
+#                                          | sub-second; Errno 28 exhaustion
+#                                          | is a real, otherwise-invisible
+#                                          | failure with no default-sweep
+#                                          | equivalent.
+#   --check-quotas              | NO        | mostly a static limits dump;
+#                                          | its one live signal (T3
+#                                          | reachability) already duplicates
+#                                          | the default sweep's own T3
+#                                          | checks, and the verbose report
+#                                          | is meant for on-demand reading.
+#   --check-taxonomy            | YES       | one HTTP call to the
+#                                          | already-configured engine
+#                                          | (``HttpTaxonomyStore
+#                                          | .get_link_drift``); a real
+#                                          | invariant-drift signal with no
+#                                          | default-sweep equivalent.
+#   --check-plan-library        | YES       | one HTTP call, bounded page
+#                                          | size; the global-tier builtin
+#                                          | floor is a real, otherwise-
+#                                          | invisible failure.
+#   --check-mcp-logs            | NO        | cost scales with log volume /
+#                                          | window (up to ~60MB across
+#                                          | rotated files); a deliberately-
+#                                          | scoped troubleshooting tool, not
+#                                          | a routine signal.
+#   --check-tier-discipline     | NO        | never fails by design (its own
+#                                          | docstring: "does NOT exit
+#                                          | non-zero... visibility, not
+#                                          | enforcement") and is scoped to
+#                                          | the invoking Claude session, not
+#                                          | install health.
+#   --check-storage-boundary    | NO        | O(repo) AST scan of the whole
+#                                          | checkout (the project's own
+#                                          | "out of hot loop" lint bucket);
+#                                          | assumes a git-repo cwd and exits
+#                                          | 2 outright otherwise -- not
+#                                          | applicable to a generic
+#                                          | installed ``nx``.
+#   --check-post-store-hooks    | NO        | purely descriptive listing, no
+#                                          | pass/fail state at all.
+#   --check-mineru               | NO        | imports the heavy mineru[all]
+#                                          | dependency tree -- far from
+#                                          | sub-second.
+#   --check-aspect-queue         | YES       | THE MOTIVATING CASE: one/two
+#                                          | HTTP calls, real backlog signal
+#                                          | nothing in the default sweep
+#                                          | watches.
+#   --check-t1                   | YES       | local lease-file read, zero
+#                                          | network; complements (does not
+#                                          | duplicate) the default sweep's
+#                                          | orphan-lease SWEEP -- that one
+#                                          | reaps expired leases across ALL
+#                                          | sessions, this one reports
+#                                          | freshness for THIS session.
+#   --check-wal-retention         | NO        | explicitly "Always exit 0:
+#                                          | this is informational" by its
+#                                          | own docstring -- no failure
+#                                          | state to surface.
+#
+# Non-gating by design: a supplementary check's failure is printed, never
+# folded into the default sweep's exit code. Two of the five (schema-
+# adjacent reasoning aside) checks distinguish "service unreachable /
+# unknown" from "definite failure" with DIFFERENT exit codes that mean
+# different things per-check (``--check-resources``'s Exit(2) is a real
+# resource-exhaustion failure; ``--check-plan-library``'s Exit(2) is an
+# explicit "not reporting pass or fail") -- there is no single correct
+# mapping from "supplementary check raised" to "the sweep should now fail".
+# Promoting these into the exit-code gate is a deliberate, separately-
+# reviewed decision, not a side effect of adding visibility.
+#: Names of the promoted checks, in run order. The actual callables are
+#: resolved lazily inside :func:`_run_supplementary_checks` (module-
+#: level binding is not possible here: ``_run_check_resources`` /
+#: ``_run_check_taxonomy`` / ``_run_check_t1`` are defined further down
+#: this file, after ``doctor_cmd``).
+_SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
+    "resources", "plan-library", "taxonomy", "aspect-queue", "t1",
+)
+
+#: The remaining opt-in-only flags -- named in the summary line at the end
+#: of the supplementary section so the operator knows what a default
+#: `nx doctor` run does NOT cover. Kept as a literal tuple (not derived
+#: from ``_SUPPLEMENTARY_CHECKS``) so the classification table above stays
+#: the one place a reviewer needs to update when a flag's disposition
+#: changes.
+_OPT_IN_ONLY_CHECKS: tuple[str, ...] = (
+    "--check-schema", "--check-search", "--check-quotas",
+    "--check-mcp-logs", "--check-tier-discipline",
+    "--check-storage-boundary", "--check-post-store-hooks",
+    "--check-mineru", "--check-wal-retention",
+)
+
+
+def _run_supplementary_checks() -> None:
+    """Run the cheap/read-only opt-in checks promoted into the default
+    sweep (see the classification table above). Purely additive output --
+    never affects the caller's exit code (see the non-gating note above).
+
+    Each check is isolated: a check's ``click.exceptions.Exit`` or any
+    other exception is caught and reported inline rather than aborting
+    the remaining checks or the doctor process.
+    """
+    # Resolved at call time (see _SUPPLEMENTARY_CHECK_NAMES's docstring) --
+    # every check function below is a module-level name defined by the
+    # time this function is ever invoked (doctor_cmd only calls it at CLI
+    # dispatch time, long after module import completes).
+    runners: dict[str, Any] = {
+        "resources": _run_check_resources,
+        "plan-library": _run_check_plan_library,
+        "taxonomy": _run_check_taxonomy,
+        "aspect-queue": _run_check_aspect_queue,
+        "t1": _run_check_t1,
+    }
+    click.echo(
+        "\nSupplementary checks (cheap/read-only subset of the opt-in "
+        "--check-* diagnostics):"
+    )
+    for name in _SUPPLEMENTARY_CHECK_NAMES:
+        runner = runners[name]
+        click.echo(f"\n--- {name} ---")
+        try:
+            runner()
+        except click.exceptions.Exit:
+            # The check already printed its own failure/status detail;
+            # nothing further to say here (see non-gating note above).
+            pass
+        except Exception as exc:  # noqa: BLE001 — isolate one check's crash from the rest of the sweep
+            click.echo(f"  [!] {name} check raised unexpectedly: {exc}", err=True)
+            _log.warning(
+                "doctor_supplementary_check_failed", check=name, error=str(exc)
+            )
+    click.echo(
+        "\nRemaining opt-in-only checks (not run above; invoke explicitly): "
+        + ", ".join(_OPT_IN_ONLY_CHECKS)
+    )
+
+
 @click.command("doctor")
 @click.option(
     "--clean-checkpoints",
@@ -942,7 +1367,8 @@ def _run_check_mineru() -> None:
     "--dry-run",
     is_flag=True,
     default=False,
-    help="Report affected entries without writing changes (use with --fix-paths).",
+    help="Report affected entries without writing changes "
+         "(use with --fix-paths or --trim-telemetry).",
 )
 @click.option(
     "--check-schema",
@@ -1081,7 +1507,8 @@ def _run_check_mineru() -> None:
     is_flag=True,
     default=False,
     help="Delete search_telemetry rows older than --days (default 30) to "
-         "cap T2 disk use. RDR-087 Phase 2.4.",
+         "cap T2 disk use. RDR-087 Phase 2.4. Combine with --dry-run to "
+         "preview the count without deleting.",
 )
 @click.option(
     "--check-post-store-hooks",
@@ -1234,7 +1661,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if trim_telemetry:
-        _run_trim_telemetry(days=days)
+        _run_trim_telemetry(days=days, dry_run=dry_run)
         return
 
     if check_post_store_hooks:
@@ -1418,6 +1845,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         click.echo(format_health_for_json(results, local_mode=is_local))
     else:
         click.echo(output)
+        _run_supplementary_checks()
 
     # RDR-185 P4.2 (nexus-n7u38.29): the nexus-0rwwv bridge notice is RETIRED
     # here. A pending Chroma→pgvector cutover is reported by the ladder's own

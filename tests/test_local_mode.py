@@ -370,6 +370,15 @@ class TestLocalEmbeddingFunction:
         assert ef.model_name == "all-MiniLM-L6-v2"
         assert ef.dimensions == 384
 
+    def test_unknown_model_name_raises_naming_the_model(self) -> None:
+        """nexus-r4fdv: an unrecognised model name used to silently default
+        to 384 dimensions — the least-used dim in this deployment, so the
+        fallback was the value least likely to be right, and a wrong width
+        is silently-wrong data, not a degraded result (no-silent-fallbacks
+        directive). Must raise, naming the model and the known set."""
+        with pytest.raises(ValueError, match="totally-made-up-model"):
+            LocalEmbeddingFunction(model_name="totally-made-up-model")
+
 
 # ── db/t3.py: T3Database local_mode ──────────────────────────────────────────
 

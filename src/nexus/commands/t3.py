@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""``nx t3`` command group — T3 (ChromaDB) maintenance.
+"""``nx t3`` command group — T3 vector-store maintenance.
 
 ``nx t3 prune-stale`` (RDR-090 P1.4 / nexus-u7r0) sweeps each T3
 collection's source_path values, removes chunks whose on-disk source
@@ -151,7 +151,7 @@ def _make_t3_for_backfill():
 
 @click.group()
 def t3() -> None:
-    """T3 (ChromaDB) maintenance commands."""
+    """T3 vector-store maintenance commands."""
 
 
 @t3.command("prune-stale")
@@ -1047,7 +1047,7 @@ def reidentify_cmd(
         ThreadPoolExecutor (--max-workers, default 4). Each collection
         has an independent ID namespace so concurrent execution is
         correctness-preserving; the practical ceiling is the operator's
-        ChromaDB Cloud rate limits, not local CPU.
+        service-side rate limits, not local CPU.
       - Per-collection completion order is non-deterministic under
         max_workers > 1. Pass --max-workers 1 for serial dispatch and
         operator-readable output.

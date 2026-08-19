@@ -102,6 +102,7 @@ class ChunkBatcher:
         on_file_failed: Callable[[str, str, object], None] | None = None,
         on_batch_complete: "Callable[[str, list[str], list[str], list[dict], list[tuple[str, object]]], None] | None" = None,
         on_batch_begin: "Callable[[str, list[tuple[str, object]]], None] | None" = None,
+        on_flush: "Callable[[int, int, str, float, str | None], None] | None" = None,
         max_chunks: "int | Callable[[str], int]" = DEFAULT_MAX_CHUNKS,
         max_bytes: int | None = None,
         flush_concurrency: int = 1,
@@ -125,6 +126,22 @@ class ChunkBatcher:
         #: per-file ``catalog_doc_id`` / ``content_hash`` pair from either.
         #: Best-effort: a failure here must never block the actual upload.
         self._on_batch_begin = on_batch_begin or (lambda _c, _fc: None)
+        #: nexus-rhwg5 / GH #1432 ask 3 residue: fired once per SETTLED
+        #: flush (never a bisect attempt -- same contract as the
+        #: ``chunk_flush_complete`` structlog event below) with
+        #: ``(flush_num, chunks, collection, elapsed, error)``. Unlike
+        #: ``drain()``'s ``on_progress`` (a per-call parameter -- drain()
+        #: is called once), this is a CONSTRUCTOR callback: ``add()`` is
+        #: called once per file and dispatches flushes internally, so
+        #: there is no per-call site to hand a callback to. Suppressed
+        #: while ``drain()`` is running (``self._draining``) so an
+        #: in-flight flush dispatched earlier by ``add()`` is reported by
+        #: exactly one voice -- drain's own ``on_progress`` already
+        #: counts "awaited" futures, so both firing would be the same
+        #: two-liveness-voices class nexus-1iw8k fixed for the ETA
+        #: ticker / phase heartbeat.
+        self._on_flush = on_flush
+        self._draining = False
         self._max_chunks = max_chunks
         self._max_bytes = max_bytes
         self._lock = threading.Lock()
@@ -328,41 +345,51 @@ class ChunkBatcher:
                 (coll, pend) for coll, pend in self._pending.items() if pend.ids
             ]
             self._pending = {}
-        if self._flush_pool is None:
-            done = 0
+            # nexus-rhwg5: suppress on_flush for the duration of drain() —
+            # see the constructor docstring for the mutual-exclusion
+            # rationale. Set under the lock alongside the pending swap so
+            # there is no window where a concurrently-dispatched flush
+            # observes the old value.
+            self._draining = True
+        try:
+            if self._flush_pool is None:
+                done = 0
+                for coll, batch in to_flush:
+                    self._dispatch_flush(coll, batch)
+                    done += 1
+                    if on_progress is not None:
+                        on_progress(done, len(to_flush))
+                return done
             for coll, batch in to_flush:
                 self._dispatch_flush(coll, batch)
+            # Wait for every in-flight flush (including ones dispatched by
+            # earlier add() overflows) so callers see all callbacks fired.
+            with self._lock:
+                futures, self._futures = self._futures, []
+            from concurrent.futures import as_completed  # noqa: PLC0415 — only with concurrency enabled
+
+            # Futures already settled by now finished during the file loop —
+            # surface any retained exception, but don't count them as drain
+            # work (they'd inflate done/total with instant "progress" for
+            # long-finished flushes — nexus-uizok critique HIGH-2).
+            outstanding = []
+            for f in futures:
+                if f.done():
+                    f.result()
+                else:
+                    outstanding.append(f)
+            done = 0
+            for f in as_completed(outstanding):
+                f.result()
                 done += 1
                 if on_progress is not None:
-                    on_progress(done, len(to_flush))
+                    on_progress(done, len(outstanding))
+            self._flush_pool.shutdown(wait=True)
+            self._flush_pool = None  # post-drain adds fall back to sync
             return done
-        for coll, batch in to_flush:
-            self._dispatch_flush(coll, batch)
-        # Wait for every in-flight flush (including ones dispatched by
-        # earlier add() overflows) so callers see all callbacks fired.
-        with self._lock:
-            futures, self._futures = self._futures, []
-        from concurrent.futures import as_completed  # noqa: PLC0415 — only with concurrency enabled
-
-        # Futures already settled by now finished during the file loop —
-        # surface any retained exception, but don't count them as drain
-        # work (they'd inflate done/total with instant "progress" for
-        # long-finished flushes — nexus-uizok critique HIGH-2).
-        outstanding = []
-        for f in futures:
-            if f.done():
-                f.result()
-            else:
-                outstanding.append(f)
-        done = 0
-        for f in as_completed(outstanding):
-            f.result()
-            done += 1
-            if on_progress is not None:
-                on_progress(done, len(outstanding))
-        self._flush_pool.shutdown(wait=True)
-        self._flush_pool = None  # post-drain adds fall back to sync
-        return done
+        finally:
+            with self._lock:
+                self._draining = False
 
     # ── internals ────────────────────────────────────────────────────────
 
@@ -505,6 +532,8 @@ class ChunkBatcher:
         settled: list[_Settled] = []
         with self._lock:
             self._flush_count += 1
+            _flush_num = self._flush_count
+            _draining = self._draining
             for path, count in pend.file_counts.items():
                 state = self._files[path]
                 state.outstanding -= count
@@ -537,6 +566,26 @@ class ChunkBatcher:
             settle_s=round(settle_elapsed, 3),
             file_hook_s=round(file_hook_elapsed, 3),
         )
+
+        # nexus-rhwg5: mirrors the log event above exactly (same settled-
+        # flush contract, never the bisect parent) but fires only for
+        # mid-loop (non-drain) flushes -- see the constructor docstring.
+        if self._on_flush is not None and not _draining:
+            _total_elapsed = (
+                begin_hook_elapsed + upload_elapsed + flush_hook_elapsed
+                + settle_elapsed + file_hook_elapsed
+            )
+            try:
+                self._on_flush(
+                    _flush_num, len(pend.ids), collection, _total_elapsed, error,
+                )
+            except Exception:  # noqa: BLE001 — progress reporting is advisory; must never fail the flush
+                _log.warning(
+                    "chunk_flush_on_flush_callback_failed",
+                    collection=collection,
+                    chunks=len(pend.ids),
+                    exc_info=True,
+                )
 
     @staticmethod
     def _split(pend: _Pending) -> "list[_Pending]":

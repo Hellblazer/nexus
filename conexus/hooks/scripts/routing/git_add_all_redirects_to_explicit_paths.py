@@ -379,6 +379,11 @@ def _override_active(command: str) -> bool:
         try:
             tokens = shlex.split(segment, posix=True)
         except ValueError:
+            # Deliberate asymmetry with _push_tokens' degraded fallback
+            # (nexus-2e874): an override is an ESCAPE HATCH, so the
+            # guard-keeping degradation here is to NOT recognize it —
+            # the gate still denies and names the override remedy; the
+            # ambient-env form works regardless of command quoting.
             continue
         for tok in tokens:
             if not _ENV_ASSIGN_RE.match(tok):
@@ -393,23 +398,28 @@ def _push_tokens(command: str) -> list[list[str]]:
     out: list[list[str]] = []
     for segment in re.split(r"(?:&&|\|\||;|\s\|\s|\bthen\b|\bdo\b)", command):
         try:
-            tokens = shlex.split(segment, posix=True)
+            candidates = [shlex.split(segment, posix=True)]
         except ValueError:
-            continue
-        # nexus-cr4lp F2: skip leading NAME=VALUE env-assignment tokens
-        # before requiring "git" -- `NX_REVIEW_GATE_OVERRIDE=1 git push ...`
-        # must still be recognised as a push segment, not silently dropped.
-        i = 0
-        while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
-            i += 1
-        tokens = tokens[i:]
-        if len(tokens) >= 2 and tokens[0] == "git":
-            # Skip global flags (`git -C path push`) to find the subcommand.
-            j = 1
-            while j < len(tokens) and tokens[j].startswith("-"):
-                j += 2 if tokens[j] in {"-C", "-c"} else 1
-            if j < len(tokens) and tokens[j] == "push":
-                out.append(tokens[j:])
+            # nexus-2e874: never skip — degrade to rough token variants.
+            candidates = _lib.degraded_token_variants(segment)
+        for tokens in candidates:
+            # nexus-cr4lp F2: skip leading NAME=VALUE env-assignment tokens
+            # before requiring "git" -- `NX_REVIEW_GATE_OVERRIDE=1 git push
+            # ...` must still be recognised as a push segment, not silently
+            # dropped.
+            i = 0
+            while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+                i += 1
+            tokens = tokens[i:]
+            if len(tokens) >= 2 and tokens[0] == "git":
+                # Skip global flags (`git -C path push`) to find the
+                # subcommand.
+                j = 1
+                while j < len(tokens) and tokens[j].startswith("-"):
+                    j += 2 if tokens[j] in {"-C", "-c"} else 1
+                if j < len(tokens) and tokens[j] == "push":
+                    out.append(tokens[j:])
+                    break  # one entry per segment, first matching variant
     return out
 
 

@@ -96,6 +96,31 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --sha "$(git rev-parse HEAD)"
 
+      - name: Verify remediation-commit snapshot rides this release (nexus-fehi3)
+        # CI replay of the release skill's Step 0b human pre-tag gate
+        # (scripts/check_remediation_commits_ride_release.py). This repo's
+        # `bd` backend is Dolt with no credentials on this runner, so CI
+        # cannot run `bd export` live -- and the only git-tracked bead
+        # artifact, .beads/issues.jsonl, is a stale pre-Dolt fossil that
+        # would manufacture a permanently-green, blind check if wired in
+        # directly (nexus-fix9t bead description has the full verification).
+        # Instead the human pre-tag step (release skill Step 0b) runs
+        # `--write-snapshot .release-gates/remediation-snapshot.json` and
+        # commits the result onto the release branch alongside the
+        # version-bump commit; --verify-snapshot here replays the real
+        # ancestor-check against that committed file and additionally
+        # fails closed if the file is MISSING (the pre-tag step never ran),
+        # present but not committed on this exact tag, or stale (its
+        # newest bead updated_at predates the commit immediately preceding
+        # this release). Stdlib-only script, same as the evidence step
+        # above -- runs before setup-uv/build so a red exits fast and cheap
+        # (CI Cost Discipline).
+        run: |
+          python3 scripts/check_remediation_commits_ride_release.py \
+            --release-ref "$RELEASE_TAG" \
+            --bd-export-json .release-gates/remediation-snapshot.json \
+            --verify-snapshot
+
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           python-version: "3.12"
@@ -158,7 +183,23 @@ jobs:
           # Match the section for this version (between its heading and the next ## heading)
           pattern = rf'## \[{re.escape(tag)}\][^\n]*\n(.*?)(?=\n## \[|\Z)'
           m = re.search(pattern, text, re.DOTALL)
-          print(m.group(1).strip() if m else f"Release {tag}")
+          # nexus-5crgr: this used to fall back to a stub body ("Release
+          # X.Y.Z") and publish anyway — the one version surface with no
+          # parity enforcement. A missing section now fails the release,
+          # matching the adjacent version checks' exit 1 discipline; the
+          # pytest parity half lives in tests/test_plugin_structure.py.
+          if m is None:
+              print(f"::error::CHANGELOG.md has no '## [{tag}]' section — "
+                    "refusing to publish with a stub release body (nexus-5crgr)",
+                    file=sys.stderr)
+              sys.exit(1)
+          body = m.group(1).strip()
+          if not body:
+              print(f"::error::CHANGELOG.md's '## [{tag}]' section is EMPTY — "
+                    "refusing to publish with a blank release body (nexus-5crgr)",
+                    file=sys.stderr)
+              sys.exit(1)
+          print(body)
           EOF
           echo "Release notes:"
           cat /tmp/release_notes.md
@@ -176,7 +217,73 @@ jobs:
         # needed) -- a transient network blip could block a release
         # momentarily; accepted tradeoff vs. the alternative of silent
         # engine drift.
-        run: uv run python scripts/check_engine_release_floor.py
+        #
+        # --paired-deploy-auto (nexus-gc9ir): under the paired-release
+        # choreography the engine deploy fires AT client-tag push, in
+        # PARALLEL with this publish job -- so a below-floor cloud at this
+        # exact moment is the EXPECTED pre-deploy state for a paired
+        # release, not drift. v7.10.0 (2026-08-18) ran this step bare, with
+        # no human present to type --paired-deploy <tag>, and a routine
+        # paired release red'd the publish outright. --paired-deploy-auto
+        # derives the candidate tag from REQUIRED_ENGINE_VERSION and only
+        # engages the paired-acceptance path when the cloud is confirmed
+        # below that floor -- a cloud that already meets the floor takes
+        # the untouched bare-invocation path, so this is never weaker than
+        # the previous unconditional invocation for a non-paired release.
+        #
+        # GITHUB_TOKEN: the paired-acceptance path (engaged only when the
+        # cloud is below floor) shells out to `gh release view` to verify
+        # the derived tag is a published release -- without this, `gh`
+        # refuses to run unauthenticated in Actions and the paired check
+        # fails closed (UNVERIFIABLE) exactly when it is needed most.
+        #
+        # THE CORE TRADEOFF (review round, 2026-08-18): paired acceptance
+        # here proves the engine TAG is legitimate (published, exactly
+        # pinned, newest, fresh) -- it does NOT prove the deploy relay has
+        # actually landed; this job has no way to observe that (it runs on
+        # a different system, on Hal's side of the AGENTS.md bus). That is
+        # an accepted, bounded gap: the DAILY `engine-floor-verify` job
+        # (.github/workflows/scheduled-failure-watch.yml, 09:23 UTC, bare
+        # gate against the real public endpoint) is the backstop -- a
+        # deploy that never fired, or silently failed, surfaces within at
+        # most 24h via the same "Scheduled workflows are failing silently"
+        # tracked GH issue every other rotted scheduled gate reports
+        # through. See check_engine_release_floor.py's module docstring
+        # for the full statement and its behavior-pinning test.
+        #
+        # KNOWN FAILURE MODE, NO CI-SIDE BYPASS BY DESIGN: this invocation
+        # has no --ack-client-lag flag (there is no human here to name a
+        # bead), so an unacknowledged docs/wire-contract-pending.md
+        # ## Unshipped entry fails this step CLOSED during a paired
+        # release, with the ledger blocking BEFORE the tag/cloud checks
+        # even run. That is correct -- do not add a bypass here.
+        #
+        # REMEDY, CORRECTED (nexus-55r6o, substantive-critic Critical
+        # finding): re-running this SAME tag via `workflow_dispatch` does
+        # NOT pick up a ledger fix -- the checkout step above pins
+        # `ref: ${{ inputs.tag }}`, an IMMUTABLE tag, and
+        # check_client_lag_ledger reads the ledger off that frozen tree, so
+        # a same-tag retry re-reads the identical unacknowledged entry and
+        # fails identically. The two REAL remedies: (a) cut a FRESH client
+        # tag whose tree carries the ledger fix -- this is a new release,
+        # not a retry of the failed one -- or (b) implemented (nexus-55r6o):
+        # ci.yml's `release-ledger-gate` job runs the identical ledger-only
+        # check (check_engine_release_floor.py --ledger-only) on EVERY PR
+        # targeting main, before any tag exists -- not narrowed to
+        # `release/*`-named branches, so a hand-named branch promoting to
+        # main is covered too. That job is wired into `pytest-gate`'s
+        # `needs:` (ci.yml), and `pytest-gate` is main's actual required
+        # branch-protection check -- so this is mechanically MERGE-BLOCKING
+        # on the release PR, not advisory, with no separate GitHub
+        # repo-settings change needed. By the time this step runs at Step 8
+        # on a frozen tag, a genuinely unacknowledged entry has already
+        # failed the release PR at Step 7 and could not have merged, while
+        # the tree was still mutable. This step's own unbypassable behavior
+        # remains the correct backstop for whatever still reaches it (e.g.
+        # a ledger entry added between PR merge and tag push).
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: uv run python scripts/check_engine_release_floor.py --paired-deploy-auto
 
       - name: Build wheel and sdist
         run: uv build --sdist --wheel

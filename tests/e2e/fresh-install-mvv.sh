@@ -65,11 +65,200 @@
 #                       (release-battery layer, default)
 #   --published        install the LATEST published conexus from PyPI
 #   --published X.Y.Z  install that EXACT published version from PyPI
+#   --self-test        run the pure-function unit checks (nexus-1ktd5 items
+#                       A/B/C) against synthetic fixtures only — no wheel
+#                       build, no venv, no engine, no network. Safe anywhere.
 # Exit 0 == FRESH-INSTALL MVV PASSED (the literal sentinel on the last line).
 set -euo pipefail
 
+# ── pure helper functions (exercised directly by --self-test) ──────────────
+# House precedent: tests/e2e/local-index-memory-gate.sh extracts pure
+# functions + a --self-test arm for exactly this reason (nexus-1ktd5
+# MANDATORY ACCEPTANCE CRITERION) — a full sandboxed run of THIS script
+# costs minutes (wheel build, engine download, PG bundle) and --published
+# additionally hits the real network/PyPI, so RED/GREEN demonstrations of
+# an assertion's logic run here against synthetic fixtures instead of a
+# live end-to-end run.
+
+# Extract `version = "X.Y.Z"` from a pyproject.toml-shaped file. Echoes the
+# bare version string, or empty if no `version =` line is found (missing
+# file included — read failure is not an error here, just "unknown").
+_pyproject_version() {
+    local file="$1"
+    [ -r "$file" ] || return 0
+    grep -m1 -E '^version[[:space:]]*=' "$file" 2>/dev/null \
+        | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/'
+}
+
+# nexus-1ktd5 item A: decide whether an installed conexus version matches
+# what was EXPECTED (an explicit --published X.Y.Z, or this checkout's own
+# pyproject.toml version when no version was given — the shakedown-layer
+# contract: confirm PyPI actually served what was just tagged, not a stale
+# index cache entry or an unrelated version). Pure — echoes "PASS|<msg>" or
+# "FAIL|<msg>", touches neither filesystem nor network.
+_version_check_verdict() {
+    local expected="$1" installed="$2" source="$3"
+    if [ -z "$expected" ]; then
+        echo "FAIL|could not determine an expected version (source: $source) — cannot verify what PyPI actually served"
+        return
+    fi
+    if [ -z "$installed" ]; then
+        echo "FAIL|could not determine the installed version — cannot verify it against expected $expected (source: $source)"
+        return
+    fi
+    if [ "$expected" != "$installed" ]; then
+        echo "FAIL|PyPI served $installed but expected $expected (source: $source) — index mismatch, stale cache, or resolver bug; the run must not pass silently on a different artifact than intended"
+        return
+    fi
+    echo "PASS|confirmed installed version $installed matches expected $expected (source: $source)"
+}
+
+# nexus-1ktd5 item B: does *log* carry the discriminating evidence that the
+# MARKDOWN doc's own search leg matched -- not just any "fresh-mvv"
+# substring, which the store-put doc's output ALSO satisfies (title
+# "fresh-mvv-sentinel"). "fresh-mvv-markdown-note" is the markdown file's
+# stem, embedded in its source_path (formatters.py format_plain's
+# source_path:line:content rendering for file-backed results) and absent
+# from the store-put doc's title/content -- a disjoint, leg-specific
+# literal. Extracted so --self-test exercises the SAME logic the runtime
+# leg calls, not a parallel copy of it.
+_search_log_confirms_markdown_leg() {
+    grep -q "fresh-mvv-markdown-note" "$1"
+}
+
+# nexus-1ktd5 item C: real non-vacuity check for a journey leg's log file.
+# `test -s` alone (the prior check) proves only that SOME bytes were
+# written — a log holding nothing but an uncaught traceback (e.g. a
+# background-thread exception that never propagates a nonzero exit)
+# satisfies `-s` and adds no evidence beyond what each leg's own content
+# assertion already checks elsewhere in this script. This adds the one
+# thing `-s` cannot: no unhandled Python traceback anywhere in the leg's
+# own log. Echoes "OK" or "FAIL|<reason>".
+_leg_log_is_substantive() {
+    local f="$1"
+    if [ ! -s "$f" ]; then
+        echo "FAIL|empty — a journey leg silently skipped"
+        return
+    fi
+    if grep -q "Traceback (most recent call last)" "$f" 2>/dev/null; then
+        echo "FAIL|contains an uncaught Python traceback — the leg's own log is non-empty but that is not evidence it worked (nexus-1ktd5 item C)"
+        return
+    fi
+    echo "OK"
+}
+
+_self_test() {
+    local failures=0 t
+    t="$(mktemp -d /tmp/fresh-install-mvv-selftest-XXXXXX)"
+    trap 'rm -rf "$t"' RETURN
+
+    _assert_eq() {
+        if [ "$2" = "$3" ]; then
+            echo "  PASS $1"
+        else
+            echo "  FAIL $1 -- expected [$3] got [$2]"
+            failures=$((failures + 1))
+        fi
+    }
+    _assert_prefix() {
+        case "$2" in
+            "$3"*) echo "  PASS $1" ;;
+            *) echo "  FAIL $1 -- expected prefix [$3] got [$2]"; failures=$((failures + 1)) ;;
+        esac
+    }
+
+    echo "== self-test: _pyproject_version =="
+    printf '[project]\nname = "conexus"\nversion = "7.10.0"\ndescription = "x"\n' > "$t/pyproject.toml"
+    _assert_eq "reads a normal version line" "$(_pyproject_version "$t/pyproject.toml")" "7.10.0"
+    printf '[project]\nname = "conexus"\n' > "$t/no-version.toml"
+    _assert_eq "no version line -> empty" "$(_pyproject_version "$t/no-version.toml")" ""
+    _assert_eq "missing file -> empty, not an error" "$(_pyproject_version "$t/does-not-exist.toml")" ""
+
+    echo "== self-test: _version_check_verdict (item A -- RED/GREEN) =="
+    # RED: the exact break item A describes -- PyPI served a DIFFERENT
+    # version than expected. Must FAIL and name both versions.
+    _assert_prefix "RED: served != expected -> FAIL naming both versions" \
+        "$(_version_check_verdict "7.10.0" "7.9.0" "explicit --published arg")" "FAIL|PyPI served 7.9.0 but expected 7.10.0"
+    # GREEN: repaired -- served == expected.
+    _assert_prefix "GREEN: served == expected -> PASS" \
+        "$(_version_check_verdict "7.10.0" "7.10.0" "explicit --published arg")" "PASS|"
+    _assert_prefix "no expected version resolvable -> FAIL, not a silent pass" \
+        "$(_version_check_verdict "" "7.10.0" "this checkout's pyproject.toml")" "FAIL|could not determine an expected version"
+
+    echo "== self-test: item B -- markdown-search literal must not cross-satisfy the store-put doc (RED/GREEN) =="
+    # Synthetic fixtures standing in for the two 'nx search' output shapes:
+    # the store-put doc's own output (title-style, no source_path -- see
+    # formatters.py format_plain) and the indexed-markdown doc's output
+    # (source_path-style, filename embedded in the path column).
+    printf '[0.1234] fresh-mvv-sentinel\n  fresh-mvv-sentinel: portable pgvector never ships the builder ISA\n' > "$t/store-doc-search-output.log"
+    printf '/tmp/xxx/fresh-mvv-markdown-note.md:1:The era-32 wire re-id recomputes during re-embed, and fresh boxes register markdown in the service catalog.\n' > "$t/markdown-doc-search-output.log"
+    # RED: the OLD weak literal "fresh-mvv" is satisfied by BOTH fixtures --
+    # a search leg using it cannot prove it searched the markdown doc's OWN
+    # indexing path, since the store-put doc's output also contains it.
+    # (Exercised directly, not via the shared function -- this documents
+    # the bug the fix replaced; the GREEN checks below exercise the REAL
+    # runtime function.)
+    if grep -q "fresh-mvv" "$t/store-doc-search-output.log" && grep -q "fresh-mvv" "$t/markdown-doc-search-output.log"; then
+        echo "  PASS RED: old literal 'fresh-mvv' cross-satisfies both fixtures (the bug)"
+    else
+        echo "  FAIL RED: expected the old literal to cross-satisfy both fixtures"
+        failures=$((failures + 1))
+    fi
+    # GREEN: the REAL runtime function (_search_log_confirms_markdown_leg,
+    # the same one the 7/9 leg calls) matches ONLY the markdown doc's own
+    # output, never the store-put doc's.
+    if _search_log_confirms_markdown_leg "$t/markdown-doc-search-output.log"; then
+        echo "  PASS GREEN: runtime function matches the markdown doc's own output"
+    else
+        echo "  FAIL GREEN: runtime function did not match the markdown doc's own output"
+        failures=$((failures + 1))
+    fi
+    if _search_log_confirms_markdown_leg "$t/store-doc-search-output.log"; then
+        echo "  FAIL GREEN: runtime function spuriously matches the store-put doc's output too -- not disjoint"
+        failures=$((failures + 1))
+    else
+        echo "  PASS GREEN: runtime function does NOT match the store-put doc's output (disjoint)"
+    fi
+
+    echo "== self-test: _leg_log_is_substantive (item C -- RED/GREEN) =="
+    printf '' > "$t/empty.log"
+    _assert_prefix "empty log -> FAIL" "$(_leg_log_is_substantive "$t/empty.log")" "FAIL|empty"
+    printf 'Traceback (most recent call last):\n  File "x.py", line 1, in <module>\nRuntimeError: boom\n' > "$t/traceback-only.log"
+    # RED: the OLD check (`test -s`) treats this as fine (non-empty) even
+    # though the leg crashed -- this is the exact "-s only" vacuity item C
+    # describes. Demonstrate that directly.
+    if [ -s "$t/traceback-only.log" ]; then
+        echo "  PASS RED: old '-s only' check would treat a traceback-only log as fine (the bug)"
+    else
+        echo "  FAIL RED: expected the traceback fixture to be non-empty"
+        failures=$((failures + 1))
+    fi
+    _assert_prefix "GREEN: new check FAILs a traceback-only log naming the real cause" \
+        "$(_leg_log_is_substantive "$t/traceback-only.log")" "FAIL|contains an uncaught Python traceback"
+    printf 'Stored: %s\n' "$(printf 'a%.0s' $(seq 1 64))" > "$t/real-content.log"
+    _assert_eq "GREEN: a real, traceback-free log -> OK" "$(_leg_log_is_substantive "$t/real-content.log")" "OK"
+
+    echo "== self-test: bash -n on this script itself =="
+    if bash -n "${BASH_SOURCE[0]}"; then
+        echo "  PASS bash -n clean"
+    else
+        echo "  FAIL bash -n reported a syntax error"
+        failures=$((failures + 1))
+    fi
+
+    echo
+    if [ "$failures" -eq 0 ]; then
+        echo "SELF-TEST PASSED -- nexus-1ktd5 items A/B/C verified against synthetic fixtures (no wheel build, no venv, no engine, no network)"
+        return 0
+    else
+        echo "SELF-TEST FAILED -- $failures check(s)"
+        return 1
+    fi
+}
+
 PUBLISHED_MODE=0
 PUBLISHED_VERSION=""
+SELF_TEST=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --published)
@@ -80,11 +269,18 @@ while [ $# -gt 0 ]; do
                 shift
             fi
             ;;
+        --self-test)
+            SELF_TEST=1
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 [--published [VERSION]]"
+            echo "Usage: $0 [--published [VERSION]] [--self-test]"
             echo "  (no args)          install the LOCAL wheel built from this checkout (default)"
             echo "  --published        install the latest PUBLISHED conexus from PyPI"
             echo "  --published X.Y.Z  install that exact PUBLISHED version from PyPI"
+            echo "  --self-test        run the pure-function unit checks (nexus-1ktd5 items"
+            echo "                     A/B/C) against synthetic fixtures only -- no wheel"
+            echo "                     build, no venv, no engine, no network. Safe anywhere."
             exit 0
             ;;
         *)
@@ -93,6 +289,11 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
+
+if [ "$SELF_TEST" = 1 ]; then
+    _self_test
+    exit $?
+fi
 
 if [ "$PUBLISHED_MODE" = 1 ]; then
     if [ -n "$PUBLISHED_VERSION" ]; then
@@ -257,8 +458,14 @@ else
     sed 's/^/    /' "$LOGS/twine-check.log"
 
     echo "── 2/9 Virgin venv + install ──"
-    uv venv --python 3.12 -q "$VENV"
-    uv pip install -q --python "$VENV/bin/python" "$WHEEL"
+    # nexus-1ktd5 item E (wave-2 review fast-follow): the local-wheel
+    # install layer used to run with the AMBIENT env while --published ran
+    # under _uv_sandboxed's env -i — an operator's UV_INDEX_URL /
+    # PIP_INDEX_URL / UV_* overrides could steer THIS layer's dependency
+    # resolution at a mirror (the nexus-l2ku5 resolver-drift class) while
+    # the sandboxed layer resolved the real index. Same helper both layers.
+    _uv_sandboxed venv --python 3.12 -q "$VENV"
+    _uv_sandboxed pip install -q --python "$VENV/bin/python" "$WHEEL"
     BIN_DIR="$VENV/bin"
     PROBE_PYTHON="$VENV/bin/python"
     _nx --version
@@ -312,16 +519,31 @@ if [ "$MCP_MAJOR" -ge 2 ]; then
     _fail "mcp resolved to $MCP_VERSION (>=2) in the fresh install — the mcp>=1.0,<2 pin regressed (nexus-l2ku5: mcp 2.0.0 removed mcp.server.fastmcp, killing both MCP servers at import)"
 fi
 
-# Published mode with an explicit version: confirm PyPI actually resolved
-# the requested version rather than serving a stale index cache entry.
-if [ "$PUBLISHED_MODE" = 1 ] && [ -n "$PUBLISHED_VERSION" ]; then
+# nexus-1ktd5 item A: verify PyPI served the version EXPECTED, always -- not
+# only when --published named an explicit version. Before this fix, an
+# omitted version (the documented post-tag SHAKEDOWN form, T2
+# nexus/shakedown-playbook §2 S1) asserted NOTHING about which version PyPI
+# actually resolved. With no explicit version this now compares against
+# THIS CHECKOUT's own pyproject.toml version -- the shakedown contract:
+# confirm PyPI served exactly what was just tagged from this tree, not a
+# stale index cache entry or an unrelated version.
+if [ "$PUBLISHED_MODE" = 1 ]; then
+    if [ -n "$PUBLISHED_VERSION" ]; then
+        EXPECTED_VERSION="$PUBLISHED_VERSION"
+        EXPECTED_VERSION_SOURCE="explicit --published arg"
+    else
+        EXPECTED_VERSION="$(_pyproject_version "$REPO_ROOT/pyproject.toml")"
+        EXPECTED_VERSION_SOURCE="this checkout's pyproject.toml (no explicit --published version given)"
+    fi
     CONEXUS_DIST_INFO="$(find "$SITE_PACKAGES" -maxdepth 1 -name 'conexus-*.dist-info' 2>/dev/null | head -1)"
     [ -n "$CONEXUS_DIST_INFO" ] \
         || _fail "conexus dist-info not found under $SITE_PACKAGES after a published install"
     INSTALLED_VERSION="$(basename "$CONEXUS_DIST_INFO" | sed -E 's/^conexus-([0-9]+(\.[0-9]+)*).*/\1/')"
-    [ "$INSTALLED_VERSION" = "$PUBLISHED_VERSION" ] \
-        || _fail "requested conexus==$PUBLISHED_VERSION but the installed dist-info reports $INSTALLED_VERSION — PyPI index mismatch or resolver bug"
-    echo "  confirmed installed version: $INSTALLED_VERSION"
+    VERSION_VERDICT="$(_version_check_verdict "$EXPECTED_VERSION" "$INSTALLED_VERSION" "$EXPECTED_VERSION_SOURCE")"
+    case "$VERSION_VERDICT" in
+        PASS\|*) echo "  ${VERSION_VERDICT#PASS|}" ;;
+        FAIL\|*) _fail "${VERSION_VERDICT#FAIL|}" ;;
+    esac
 fi
 
 echo "── 4/9 nx init (local mode, virgin HOME, scrubbed env) ──"
@@ -399,8 +621,8 @@ _nx search "portable pgvector builder ISA" >"$LOGS/search1.log" 2>&1 || true
 grep -q "fresh-mvv-sentinel" "$LOGS/search1.log" \
     || _fail "search did not return the stored sentinel"
 _nx search "era-32 wire re-id re-embed" >"$LOGS/search2.log" 2>&1 || true
-grep -q "fresh-mvv" "$LOGS/search2.log" \
-    || _fail "search did not return the indexed markdown"
+_search_log_confirms_markdown_leg "$LOGS/search2.log" \
+    || _fail "search did not return the indexed markdown (fresh-mvv-markdown-note)"
 
 echo "── 8/9 doctor: zero ✗, zero ⚠, warnings allowlisted ──"
 _nx doctor >"$LOGS/doctor.log" 2>&1 || _fail "doctor exited non-zero"
@@ -488,6 +710,13 @@ fi
 
 echo "── 9/9 non-vacuity ──"
 # The gate must never skip-pass: prove the substantive legs actually ran.
+# nexus-1ktd5 item C: `test -s` alone only proves non-emptiness -- every
+# log below already carries a real content assertion earlier in this
+# script, so a bare `-s` check here was pure duplication that additionally
+# let a log holding nothing but an uncaught traceback (a leg that exits 0
+# despite a background-thread exception) read as fine. This calls
+# _leg_log_is_substantive instead, which adds the one thing `-s` cannot: no
+# unhandled Python traceback anywhere in the leg's own log.
 LEGS_TO_CHECK="mcp-entrypoints.log init.log store.log store-reput.log search-reput.log index.log doctor.log"
 if [ "$PUBLISHED_MODE" = 1 ]; then
     LEGS_TO_CHECK="install.log $LEGS_TO_CHECK"
@@ -495,7 +724,11 @@ else
     LEGS_TO_CHECK="build.log $LEGS_TO_CHECK"
 fi
 for f in $LEGS_TO_CHECK; do
-    [ -s "$LOGS/$f" ] || _fail "leg log $f is empty — a journey leg silently skipped"
+    LEG_VERDICT="$(_leg_log_is_substantive "$LOGS/$f")"
+    case "$LEG_VERDICT" in
+        OK) : ;;
+        FAIL\|*) _fail "leg log $f: ${LEG_VERDICT#FAIL|}" ;;
+    esac
 done
 
 GATE_OK=1

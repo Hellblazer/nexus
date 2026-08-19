@@ -341,3 +341,46 @@ def test_master_default_branch_is_also_protected(tmp_path):
     _git("push", "-q", "-u", "origin", "master", cwd=work)
     out = _decision(_run(_bash("git push", str(work))))
     assert out["permissionDecision"] == "deny", out
+
+
+# ---------------------------------------------------------------------------
+# nexus-2e874: malformed quoting must degrade safely, never silently bypass.
+# ---------------------------------------------------------------------------
+
+
+def test_wildcard_add_with_unbalanced_quote_is_still_denied():
+    """nexus-2e874: an unbalanced quote in the same segment used to make
+    shlex reject it and the whole segment was silently SKIPPED -- a full
+    bypass of rule 1. The degraded whitespace fallback keeps the
+    `git add -A` anchor visible."""
+    d = _decision(_run(_bash('git add -A "oops')))
+    assert d["permissionDecision"] == "deny"
+
+
+def test_push_to_main_with_unbalanced_quote_is_still_blocked(repo_on):
+    """nexus-2e874 live specimen: `git push origin main --receive-pack="x`
+    was ALLOWed with zero context (rule 2 fully bypassed)."""
+    work = repo_on("feature/x")
+    out = _decision(_run(_bash(
+        'git push origin main --receive-pack="unterminated', str(work),
+    )))
+    assert out["permissionDecision"] == "deny", out
+
+
+def test_unbalanced_quote_on_a_feature_push_is_still_allowed(repo_on):
+    """The degraded parse must not over-deny: a malformed-quote push whose
+    destination is NOT protected stays allowed."""
+    work = repo_on("feature/x")
+    out = _decision(_run(_bash(
+        'git push origin feature/x --receive-pack="unterminated', str(work),
+    )))
+    assert out["permissionDecision"] == "allow", out
+
+
+def test_quote_inside_the_verb_is_still_blocked(repo_on):
+    """Review Important-1 (nexus-2e874): a quote INSIDE the verb fractures
+    the quote-as-space variant ('gi', 't', ...) -- the quote-removed
+    variant must catch it."""
+    work = repo_on("feature/x")
+    out = _decision(_run(_bash('gi"t push origin main', str(work))))
+    assert out["permissionDecision"] == "deny", out

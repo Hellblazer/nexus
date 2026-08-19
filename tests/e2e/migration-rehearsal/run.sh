@@ -120,7 +120,7 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # suite when it drifts. Following the old wording blocked the 7.6.0 release
 # battery (2026-08-10). A prose comment that contradicts a mechanical test
 # loses to the test.
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.80}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.82}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
@@ -147,8 +147,39 @@ COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.80}"
 # v0.1.71 while these two correctly STAYED at 7.5.0 / v0.1.69 — 7.5.0 being
 # the previous release and v0.1.69 what it pinned. The guard below does not
 # catch this case either; only a human/agent check does.
-PREV_RELEASE="${NEXUS_PREV_RELEASE:-7.9.0}"
-PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.79}"
+# DERIVED, NOT HAND-TYPED (2026-08-19). Both values are facts already in this
+# repo's history, so they are computed from it rather than re-typed at every
+# floor bump: PREV_RELEASE is the newest published `v*` tag that is NOT the
+# current working tree's own version, and PREV_ENGINE_TAG is whatever
+# engine_version.py pinned AT that tag. The skipped-tag trap the block above
+# describes cannot occur by construction — an engine tag no release ever
+# pinned never appears in any release tag's engine_version.py, so it can
+# never be selected here. The "two releases behind" drift the guard below
+# cannot see is likewise structurally impossible: the derivation always picks
+# the immediately-preceding release. Override either via the NEXUS_* env vars
+# (unchanged contract); a derivation that comes up empty fails loud rather
+# than falling back to a stale literal.
+_derive_prev_release() {
+  local self_version prev
+  self_version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$(pwd)/pyproject.toml" | head -1)"
+  # Anchored to canonical vX.Y.Z: an off-shape tag (rc/beta/typo) must never
+  # be selectable as "the previous release" (substantive-critic, 2026-08-19).
+  prev="$(git tag -l 'v[0-9]*' \
+          | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' \
+          | grep -vx "$self_version" | sort -V | tail -1)"
+  [ -n "$prev" ] || { echo "FATAL: cannot derive PREV_RELEASE — no published v* tag older than $self_version" >&2; exit 2; }
+  printf '%s' "$prev"
+}
+_derive_prev_engine_tag() {
+  local rel tuple
+  rel="$1"
+  tuple="$(git show "v$rel:src/nexus/engine_version.py" 2>/dev/null \
+           | sed -n 's/^REQUIRED_ENGINE_VERSION[^(]*(\([0-9]*\), *\([0-9]*\), *\([0-9]*\)).*/\1.\2.\3/p' | head -1)"
+  [ -n "$tuple" ] || { echo "FATAL: cannot derive PREV_ENGINE_TAG — v$rel has no readable REQUIRED_ENGINE_VERSION" >&2; exit 2; }
+  printf 'engine-service-v%s' "$tuple"
+}
+PREV_RELEASE="${NEXUS_PREV_RELEASE:-$(_derive_prev_release)}"
+PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-$(_derive_prev_engine_tag "$PREV_RELEASE")}"
 # nexus-86mx2 (2026-08-14) PUBLISHED-TARGET mode for --package-upgrade: when
 # set, the UPGRADE TARGET is the real PUBLISHED PyPI wheel for that version
 # instead of the working-tree build — the published-BYTES upgrade journey,

@@ -1132,6 +1132,87 @@ def test_on_phase_heartbeat_fires_for_silent_long_phase(runner, repo_dir, mock_r
     assert "\r" not in result.output  # CliRunner's stdout is never a TTY
 
 
+# ── mid-loop chunk-flush progress (nexus-rhwg5 / GH #1432 ask 3 residue) ────
+
+
+def test_monitor_wires_on_flush_and_renders_progress_line(runner, repo_dir, mock_reg):
+    """--monitor must thread a real on_flush callback through to
+    index_repository, and calling it must render the exact shape the
+    bead specifies -- never a fabricated N/M denominator."""
+    import re
+
+    def fake_index(path, reg, **kwargs):
+        on_start = kwargs.get("on_start")
+        on_flush = kwargs["on_flush"]
+        on_start(1)
+        assert on_flush is not None
+        on_flush(1, 42, "code__myrepo", 0.37, None)
+        on_flush(2, 7, "docs__myrepo", 1.2, None)
+        return {}
+
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir), "--monitor"], mock_reg, index_side_effect=fake_index,
+    )
+    assert result.exit_code == 0, result.output
+    assert "  [post] flush #1 complete (0.4s, 42 chunks, code__myrepo)" in result.output
+    assert "  [post] flush #2 complete (1.2s, 7 chunks, docs__myrepo)" in result.output
+    # constraint 1: never a bracketed fraction -- "#N" is a bare ordinal,
+    # not "[N/M]".
+    assert not re.search(r"^\s*\[[0-9]+/[0-9]+\]", result.output, re.MULTILINE)
+    assert "\r" not in result.output  # CliRunner's stdout is never a TTY
+    assert result.output.rstrip().splitlines()[-1] == "Done."
+
+
+def test_default_no_monitor_on_flush_is_none(runner, repo_dir, mock_reg):
+    """Default (non---monitor) path: on_flush must be None, not a
+    real-but-silent callback -- this is the assertion that pins the
+    level assignment (assessment 7.5) rather than assuming it."""
+    result, mock_idx = _invoke_repo(runner, [str(repo_dir)], mock_reg)
+    assert result.exit_code == 0, result.output
+    _, kw = mock_idx.call_args
+    assert kw.get("on_flush") is None
+
+
+def test_monitor_flush_progress_emits_nothing_without_monitor_flag(runner, repo_dir, mock_reg):
+    """Same fake_index shape as the --monitor test above, invoked WITHOUT
+    --monitor: on_flush must be None so the fake harness itself proves
+    nothing CAN be emitted on the default path (not just "wasn't
+    called")."""
+    def fake_index(path, reg, **kwargs):
+        on_start = kwargs.get("on_start")
+        on_start(1)
+        assert kwargs["on_flush"] is None
+        return {}
+
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg, index_side_effect=fake_index,
+    )
+    assert result.exit_code == 0, result.output
+    assert "flush #" not in result.output
+
+
+def test_monitor_flush_failure_surfaces_before_done(runner, repo_dir, mock_reg):
+    """Failures surface AT OCCURRENCE (mid-run), not only in the
+    end-of-run summary -- the literal ask-3 gap. Non-vacuity: the FAILED
+    marker's position must be strictly before 'Done.', not merely
+    present somewhere in the output."""
+    def fake_index(path, reg, **kwargs):
+        on_start = kwargs.get("on_start")
+        on_flush = kwargs["on_flush"]
+        on_start(1)
+        on_flush(1, 3, "code__myrepo", 0.1, "gateway 503")
+        return {}
+
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir), "--monitor"], mock_reg, index_side_effect=fake_index,
+    )
+    assert result.exit_code == 0, result.output
+    assert "FAILED: gateway 503" in result.output
+    failed_pos = result.output.index("FAILED: gateway 503")
+    done_pos = result.output.index("Done.")
+    assert failed_pos < done_pos, "failure must surface before Done., not only in a final summary"
+
+
 # ── --debug-timing (nexus-7niu) ─────────────────────────────────────────────
 
 

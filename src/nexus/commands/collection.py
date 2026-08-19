@@ -42,7 +42,7 @@ def _doc_id_to_file_path(doc_id: str) -> str:
 
 @click.group()
 def collection() -> None:
-    """Manage ChromaDB collections (list, info, verify, delete)."""
+    """Manage T3 vector collections (list, info, verify, delete)."""
 
 
 @collection.command("list")
@@ -409,11 +409,11 @@ def rename_collection_data_plane(
     ),
 )
 def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
-    """Rename a collection in-place via ChromaDB's native modify(name=).
+    """Rename a collection in-place via the engine's native rename.
 
-    O(1) metadata update — no embedding re-upload, no Voyage cost,
-    no ChromaDB egress. Cascades the new name through T2 taxonomy,
-    chash_index, and catalog (JSONL + SQLite).
+    O(1) metadata update — no embedding re-upload, no Voyage cost.
+    Cascades the new name through T2 taxonomy, chash_index, and the
+    catalog.
 
     Cross-prefix renames (e.g. ``code__`` ↔ ``docs__``) change the
     embedding-model space and are rejected unless ``--force-prefix-change``
@@ -592,9 +592,67 @@ def reindex_cmd(name: str, force: bool) -> None:
             f"Use --force to proceed and accept that loss."
         )
 
-    # 3. Delete collection
+    # 2b. code__ collections have NO re-index driver in this verb — the
+    # branch below only echoes a suggestion to run `nx index repo`. While
+    # the delete hop was dead (NotImplementedError, nexus-sjb52) that was
+    # unreachable; with a WORKING delete it would silently destroy the
+    # collection (chunks + catalog + taxonomy + registry) and exit 0 with
+    # "0 sources processed" (nexus-caifp). Refuse BEFORE deleting anything.
+    if name.startswith("code__"):
+        raise click.ClickException(
+            f"Refusing to reindex code collection '{name}': this verb has "
+            "no re-index driver for code — it would delete the collection "
+            "and rebuild nothing. Use `nx index repo <path>` instead, "
+            "which re-indexes in place."
+        )
+
+    # 3. Delete collection — via the canonical cascade, exactly like
+    # `nx collection delete` (nexus-sjb52: the old direct
+    # db.delete_collection(name) call raised NotImplementedError on every
+    # invocation, in BOTH modes, since RDR-155 P4b made HttpVectorClient the
+    # only T3 client — the verb printed "Deleting..." and died. The cascade
+    # also purges the derived state a bare T3 delete would orphan, which the
+    # re-index below then rebuilds).
+    from nexus.db.collection_purge import purge_collection_cascade  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
     click.echo(f"Deleting collection '{name}' ({before_count} chunks)...")
-    db.delete_collection(name)
+    purge_collection_cascade(db, name)
+
+    # 3b. Re-register the catalog_collections registry row the cascade just
+    # deleted (nexus-ync6s): no re-index path calls register_collection, so
+    # without this every reindex left the collection in `nx catalog doctor
+    # --collections-drift`'s t3_not_in_projection bucket. Same call shape as
+    # indexer.py's phase-4 registration; best-effort with a loud warning —
+    # a failed projection write must not abort the re-index that follows.
+    try:
+        from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid import cycle
+            is_conformant_collection_name,
+            parse_conformant_collection_name,
+        )
+
+        _w = make_catalog_writer()
+        try:
+            if is_conformant_collection_name(name):
+                segments = parse_conformant_collection_name(name)
+                _w.register_collection(
+                    name,
+                    content_type=segments["content_type"],
+                    owner_id=segments["owner_id"],
+                    embedding_model=segments["embedding_model"],
+                    model_version=segments["model_version"],
+                )
+            else:
+                _w.register_collection(name)
+        finally:
+            _w.close()
+    except Exception as reg_exc:  # noqa: BLE001 — projection write is best-effort; the re-index below must proceed
+        click.echo(
+            f"WARNING: could not re-register catalog_collections row for "
+            f"'{name}' ({reg_exc}) — `nx catalog doctor --collections-drift` "
+            "will flag it until re-registered",
+            err=True,
+        )
 
     # 5. Re-index based on collection type
     # Derive corpus from collection name so chunk metadata gets correct provenance.
@@ -604,13 +662,9 @@ def reindex_cmd(name: str, force: bool) -> None:
     indexed = 0
     missing: list[str] = []
 
-    if name.startswith("code__"):
-        click.echo(
-            f"Re-indexing code collection — use 'nx index repo <path>' for full re-index"
-        )
-        click.echo(f"Source paths: {len(source_paths)} files")
-
-    elif name.startswith("rdr__"):
+    # (code__ collections are refused before the delete above, nexus-caifp —
+    # this dispatch starts at the prose families.)
+    if name.startswith("rdr__"):
         rdr_files = [Path(sp) for sp in source_paths if Path(sp).exists()]
         missing = [sp for sp in source_paths if not Path(sp).exists()]
         if rdr_files:
@@ -994,7 +1048,7 @@ def _backfill_chunk_text_hash(
 def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
     """Add chunk_text_hash to chunks missing it (no re-embedding).
 
-    Reads each chunk's stored text from ChromaDB and computes
+    Reads each chunk's stored text from T3 and computes
     sha256(text.encode()).hexdigest(). Updates metadata in-place —
     embeddings and documents are untouched.
 
@@ -1433,7 +1487,7 @@ def audit_cmd(name: str, fmt: str, live: bool, live_n: int) -> None:
     """Deep-dive audit for a single collection (RDR-087 Phase 4.2).
 
     Five sections: distance histogram (30d telemetry, ``--live`` to
-    probe ChromaDB when telemetry is cold), top-5 cross-projections,
+    probe T3 when telemetry is cold), top-5 cross-projections,
     orphan chunks (>30d, no incoming links), top-10 cross-collection
     hub topic assignments, chash_index coverage.
     """

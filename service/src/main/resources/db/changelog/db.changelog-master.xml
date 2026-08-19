@@ -760,6 +760,30 @@
          all of which exist well before this point in the chain. -->
     <include file="db/changelog/vectors-007-hybrid-search-functions.xml"/>
 
+    <!-- nexus-0uuit (P1, conexus-ddh0 cloud 5xx incident): topics.doc_count
+         recompute trigger lock-order fix — deterministic ORDER BY FOR
+         UPDATE lock acquisition + batched-aggregate recompute, closing the
+         40P01 deadlock in assign_from_chashes_<dim>'s manifest write path.
+         Placed after vectors-007-hybrid-search-functions.xml (current
+         tail) and before the grants-nexus-svc.xml runAlways block,
+         matching the established late-append convention (see taxonomy-012's
+         / catalog-032's own <include> comments for the identical
+         reasoning). Depends only on taxonomy-003-doc-count-trigger.xml
+         (the trigger definitions this supersedes via CREATE OR REPLACE),
+         already included well before this point. -->
+    <include file="db/changelog/taxonomy-013-doc-count-lock-order.xml"/>
+
+    <!-- nexus-sybbh (P1): gc_audit producer wiring — purge_trash,
+         gc_quarantine_orphans, gc_expire_quarantine each now record a
+         gc_audit row in the same transaction as their delete. Placed after
+         taxonomy-013-doc-count-lock-order.xml (current tail) and before
+         the grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention. Depends on catalog-018-gc-audit.xml (the
+         gc_audit table) and the live bodies of the three functions this
+         supersedes via CREATE OR REPLACE (catalog-029, vectors-005),
+         already included well before this point. -->
+    <include file="db/changelog/catalog-033-gc-audit-producers.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

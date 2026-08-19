@@ -423,7 +423,7 @@ def disable_cmd(plan_id: int, reason: str) -> None:
     and rollback. Re-enable with ``nx plan enable <id>``.
 
     \b
-    Both matcher lanes (T1 cosine via list_active_plans, T2 FTS5 via
+    Both matcher lanes (T1 cosine via list_active_plans, T2 full-text via
     search_plans) skip rows with disabled_at set.
     """
     lib = _open_plan_library()

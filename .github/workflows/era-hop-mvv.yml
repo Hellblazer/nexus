@@ -1,4 +1,10 @@
-name: Era-spanning upgrade hop (weekly + on ladder-path changes)
+# nexus-4viey: the name below must tell the truth about the trigger block.
+# This workflow is DISPATCH-ONLY BY DESIGN (see the x7xjj/8nlj4 blocks
+# further down): its substrate-etl journey retired with RDR-155 P4b, and the
+# weekly-cadence successor is stranded-redirect-rehearsal.yml. The old name
+# ("weekly + on ladder-path changes") advertised a cadence the on: block has
+# not had since 2026-07-27 — a title asserting coverage that does not exist.
+name: Era-spanning upgrade hop (dispatch-only parts donor; successor gate is stranded-redirect-rehearsal)
 
 # RDR-185 P4.3 (nexus-n7u38.30), wired to CI per the P4.R2 critique's HIGH.
 #

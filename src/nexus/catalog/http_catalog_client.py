@@ -1500,6 +1500,35 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             "dry_run": dry_run,
         }) or {}
 
+    def gc_audit_list(
+        self,
+        *,
+        collection: str | None = None,
+        operation: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """GET /v1/catalog/gc_audit/list — the destructive-T3-op audit trail,
+        newest first (nexus-jqvzk).
+
+        Read-only counterpart to :meth:`purge_trash`'s writer surface, used
+        by ``nx doctor``'s gc_audit-non-empty check (nexus-sybbh) to see
+        whether a purge/reap actually left a breadcrumb. Each entry carries
+        ``{id, operation, collection, actor, dry_run, chash_count, chashes,
+        details, created_at}`` verbatim from the engine — this client does
+        not interpret or reshape it.
+
+        A pre-nexus-jqvzk engine has no matching route and answers 404 —
+        propagated like :meth:`purge_trash`, never swallowed, so callers can
+        tell "engine too old" apart from "engine answered zero rows".
+        """
+        result = self._get(
+            "/gc_audit/list",
+            collection=collection, operation=operation,
+            limit=limit, offset=offset,
+        )
+        return (result or {}).get("entries", [])
+
     def find(
         self, query: str, *, content_type: str | None = None
     ) -> list[CatalogEntry]:

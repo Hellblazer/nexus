@@ -1369,6 +1369,7 @@ nx taxonomy discover -c docs__nexus --force     # re-discover (preserves operato
 nx taxonomy list                                # topic tree
 nx taxonomy list -c docs__nexus                 # topic tree for one collection
 nx taxonomy show 5                              # docs assigned to topic 5
+nx taxonomy show 5 --assignments                # per-assignment quality: chunk/confidence/provenance
 nx taxonomy review                              # interactive: accept/rename/merge/delete/skip
 nx taxonomy review --auto                       # unattended: batched claude_dispatch verdicts
 nx taxonomy review --auto --dry-run             # preview verdicts, apply nothing
@@ -1391,6 +1392,22 @@ nx taxonomy validate-refs docs/**/*.md                        # stale-reference 
 nx taxonomy backfill-source-collection                        # dry-run: backfill legacy source_collection rows
 nx taxonomy backfill-source-collection --apply                # commit the backfill (irreversible)
 ```
+
+### `nx taxonomy show --assignments`
+
+`nx taxonomy show TOPIC_ID --assignments [-n/--limit N]` (nexus-92uh0) shows
+per-assignment quality instead of a plain doc-id list: chunk (doc_id),
+confidence (`similarity`, blank when the assign path recorded none),
+`source_collection`, `assigned_by`, and `assigned_at` (UTC ISO-8601). This is
+the read path for `topic_assignments.similarity` / `source_collection` /
+`assigned_at` — written by every assign path (discover, `assign`,
+`assign_single`, projection) but previously visible nowhere; without it an
+operator could see a doc was assigned to a topic but not how confident the
+assignment was, when it was made, or which collection it came from
+(nexus-onjvy). `--limit` bounds how many of the topic's doc_ids are looked up
+(same default as the plain `show`, 20); rows are additionally filtered to the
+requested topic id defensively, in case a doc_id was reassigned between the
+doc-id lookup and the detail fetch.
 
 ### `nx taxonomy assign`
 
@@ -2173,6 +2190,23 @@ Health check for all dependencies.
 nx doctor
 ```
 
+**Supplementary checks (new in 7.11.0).** After the default sweep prints its
+own result, `nx doctor` additionally runs the cheap, read-only subset of the
+`--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
+`aspect-queue`, and `t1`. Before 7.11.0 all fourteen `--check-*` modes were
+opt-in only, so a real backlog was invisible unless an operator happened to
+run its exact flag (the motivating case: an aspect-queue throwing hundreds of
+claim failures while nothing in the default run watched it). These are
+visibility-only and never change the sweep's exit code: their failure
+semantics are not uniform, so gating on them would be an unreviewed policy
+change. Each runs isolated, so one crashing cannot hide the rest, and the
+section ends by naming the flags a default run still does NOT cover
+(`--check-schema`, `--check-search`, `--check-quotas`, `--check-mcp-logs`,
+`--check-tier-discipline`, `--check-storage-boundary`,
+`--check-post-store-hooks`, `--check-mineru`, `--check-wal-retention`) so the
+blind spots stay explicit. The section is printed on the human-readable path
+only; `--json` output shape is unchanged.
+
 Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and (local-service mode only) the service cross-encoder reranker model.
 
 Data-token self-minting (nexus-wrwb7, RDR-005 2a): a `mint_token` presence + reachability check that always runs (not behind a `--check-*` flag). Unconfigured (the default — most installs) reports a loud-but-passing skip line, since self-minting is optional and the static `service_token` path runs unchanged. When `mint_token` IS configured it routes through `DataTokenManager`'s own process-wide, TTL-cached singleton (never a throwaway manager — nexus-ssqk9 fixed a residue-discipline bug where the check used to mint a FRESH token on every single `nx doctor` invocation) and reports which of three things happened on success, plus the granted TTL: MINTED a fresh token, REUSED one already live in-process, or REUSED one borrowed from the cross-process lease file (nexus-9c7t9, below). A real `nx doctor` invocation is its own fresh subprocess with an empty in-process cache, so its own two outcomes are "minted a fresh" (no lease existed yet, or it had gone stale) or "reused the cached (lease file)" (a prior `nx` invocation's mint is still fresh); "reused the cached (in-process)" is observable only inside a long-lived process such as the MCP server. Degrades to a soft warning (never fatal, never a silent "ok") on an unresolvable endpoint or a rejected mint. If the credential is bound to a tenant other than `"default"` (see `mint_tenant` above), configure `mint_tenant` too — the doctor check mints against `mint_tenant` (or `"default"`) exactly like every other call site; an unconfigured `mint_tenant` against a mint-locked credential bound to a different tenant surfaces as the same 403 the `mint_tenant` table entry above documents. IMPORTANT caveat baked into the success line's wording: pre-cutover on the managed cloud path the edge still strips client `Authorization` and injects its own credential (RDR-005 2a staged cutover), so a successful round trip through the edge does not yet prove this credential's own authority — treat it as reachability, not proof, until the cutover.
@@ -2207,7 +2241,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--check-resources` | Probe POSIX semaphore headroom and report orphan multiprocessing-tracker pressure. Exits 2 with `Errno 28` when the namespace is exhausted (MinerU workers / orphan chroma children / trackers re-parented to init after ungraceful MCP shutdowns) |
 | `--check-taxonomy` | Verify the `topic_links` ≡ projection-assignment invariant (GH #252). Exits 1 on drift |
 | `--check-tier-discipline` | Audit tier-write activity for the current session: prints the tier-write summary and warns when a substantive session has no write-back (Phase 1B nexus-a52i) |
-| `--check-mcp-logs` | Scan Claude Code's per-server MCP cache for nx-mcp silent-death signatures (`STDIO connection dropped`, `stdio transport error`). macOS only; skips cleanly elsewhere (RDR-094 Phase H, nexus-50u5) |
+| `--check-mcp-logs` | Summarize ERROR/CRITICAL events in nexus's OWN structured MCP log (`<NEXUS_CONFIG_DIR>/logs/mcp.log` plus rotations), counted by event name with the most-recent example per event. Until 7.11.0 this scanned ONLY Claude Code's per-server cache, so nexus's own error signatures had no automated consumer at all; that cache scan survives as a clearly-labeled secondary section, since it carries a distinct signal the nexus-side log cannot (client-side stdio transport death: `STDIO connection dropped`, `stdio transport error`, macOS only, skips cleanly elsewhere — RDR-094 Phase H, nexus-50u5) |
 | `--mcp-log-hours N` | Lookback window in hours for `--check-mcp-logs` (default: 24) |
 | `--check-storage-boundary` | RDR-120 P0.A AST-scan for direct `sqlite3.connect` / `voyageai.Client` calls and `T2Database`/`T3Database` constructions outside the named allowlists in `storage_boundary_lint.py`. The per-line `# epsilon-allow:` escape token is retired (RDR-186 P4): surviving sites are enumerated per file with exact counts; a new site is a hard violation |
 | `--fail-on-violation` | With `--check-storage-boundary`, exit 1 if any violation is found (otherwise the lint is informational) |
@@ -2262,9 +2296,12 @@ every current install; structurally dead, not merely legacy-flavored.
 ```
 nx doctor --trim-telemetry              # Delete aged search_telemetry + hook_failures rows (default 30 days)
 nx doctor --trim-telemetry --days 7     # Aggressive retention (minimum 1 day)
+nx doctor --trim-telemetry --dry-run    # Preview the row count WITHOUT deleting
 ```
 
 `--trim-telemetry` trims both age-reaped, no-cascade audit tables: `search_telemetry` (RDR-087, one row per (query, collection) pair on every `nx search` / MCP search call when `telemetry.search_enabled` is true) and `hook_failures` (RDR-164 P0 audit-table TTL parity). Both trims go through the engine (`POST /v1/telemetry/{search,hook_failures}/trim` via `HttpTelemetryStore`) in every mode — there is no longer a local-SQLite arm (nexus-i711w Stage 2 sub-stage A collapsed the seam; nexus-ingey). Run periodically from cron or a CI job; the default 30-day window keeps an analytical signal long enough to detect slow-burn silent-threshold-drop patterns.
+
+Combine with the global `--dry-run` flag to preview the count before deleting anything — the engine computes the preview from the exact same `WHERE` predicate the real delete uses (never a separate count query), so the previewed number is guaranteed to match what a follow-up non-dry-run call removes. `--dry-run` applies to BOTH tables together; there is no way to preview one while trimming the other in the same invocation.
 
 ```
 nx doctor --check-quotas            # Vector-store limits + embedder caps + reranker + retry headroom

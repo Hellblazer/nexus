@@ -230,6 +230,17 @@ jobs:
             service/target/surefire-reports/TEST-dev.nexus.service.vectors.CrossEncoderRerankerInferenceTest.xml \
             service/target/surefire-reports/TEST-dev.nexus.service.RerankStageIntegrationTest.xml
 
+      # nexus-zbwgb: Bge768ParityTest (RDR-160 go/no-go) and
+      # Bge768BatchCompositionTest (nexus-zu4ma sub-batch equivalence gate)
+      # both Assumptions-skip when the standard fp32 bge ONNX is absent — the
+      # identical invisible-skip risk the rerank assert above closes. Same
+      # mirror.
+      - name: Assert bge-768 model-dependent gates actually ran (not skipped)
+        run: |
+          python3 scripts/assert_bge_gates_ran.py \
+            service/target/surefire-reports/TEST-dev.nexus.service.Bge768ParityTest.xml \
+            service/target/surefire-reports/TEST-dev.nexus.service.vectors.Bge768BatchCompositionTest.xml
+
   # 2026-07-06 CI-cost pass: the native-image-build-and-smoke job that lived
   # here was removed — every service/** push was building the native image
   # TWICE (this job's full -O2 build + pgvector smoke, PLUS ci.yml's

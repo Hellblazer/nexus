@@ -199,6 +199,84 @@ class TestConfirmGate:
         assert writer.calls == [{"older_than_days": 30, "dry_run": True}]
 
 
+# ── CLI: gc_purge_marker wiring (nexus-sybbh, client half) ─────────────────
+
+
+class TestGcPurgeMarkerWiring:
+    """The CLI-to-marker integration point: does ``purge_trash_cmd`` actually
+    call ``record_purge_marker`` on a REAL execution, and stay silent on a
+    dry-run or unconfirmed one? ``tests/test_health_service_checks.py``
+    covers the marker module and the doctor check in isolation; neither
+    exercises this call site, so it is covered separately here.
+    """
+
+    def _spy(self, monkeypatch):
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            "nexus.gc_purge_marker.record_purge_marker",
+            lambda result, *, older_than_days: calls.append(
+                {"result": result, "older_than_days": older_than_days},
+            ),
+        )
+        return calls
+
+    def test_no_dry_run_with_confirm_records_a_marker(self, monkeypatch):
+        writer = _FakeWriter(result={
+            "dry_run": False, "documents_purged": 3, "chunks_384_stranded": 0,
+            "chunks_768_stranded": 12, "chunks_1024_stranded": 0,
+        })
+        _patch_writer(monkeypatch, writer)
+        calls = self._spy(monkeypatch)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["catalog", "purge-trash", "--no-dry-run", "--confirm",
+                   "--older-than-days", "45"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert len(calls) == 1
+        assert calls[0]["older_than_days"] == 45
+        assert calls[0]["result"]["documents_purged"] == 3
+
+    def test_default_dry_run_does_not_record_a_marker(self, monkeypatch):
+        writer = _FakeWriter()
+        _patch_writer(monkeypatch, writer)
+        calls = self._spy(monkeypatch)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "purge-trash"])
+
+        assert result.exit_code == 0, result.output
+        assert calls == []
+
+    def test_no_dry_run_without_confirm_does_not_record_a_marker(self, monkeypatch):
+        """``--no-dry-run`` alone is report-only (TestConfirmGate above) —
+        no real purge happened, so no marker."""
+        writer = _FakeWriter()
+        _patch_writer(monkeypatch, writer)
+        calls = self._spy(monkeypatch)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "purge-trash", "--no-dry-run"])
+
+        assert result.exit_code == 0, result.output
+        assert calls == []
+
+    def test_confirm_without_no_dry_run_does_not_record_a_marker(self, monkeypatch):
+        """``--confirm`` alone (default ``--dry-run``) must never mutate —
+        and must never record a marker either."""
+        writer = _FakeWriter()
+        _patch_writer(monkeypatch, writer)
+        calls = self._spy(monkeypatch)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "purge-trash", "--confirm"])
+
+        assert result.exit_code == 0, result.output
+        assert calls == []
+
+
 # ── CLI: partial-purge detection (nexus-ff85q) ───────────────────────────
 
 

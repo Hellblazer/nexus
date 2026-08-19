@@ -46,6 +46,7 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _commit(repo: Path, filename: str, content: str, message: str) -> str:
+    (repo / filename).parent.mkdir(parents=True, exist_ok=True)
     (repo / filename).write_text(content, encoding="utf-8")
     _git(repo, "add", filename)
     _git(repo, "commit", "-q", "-m", message)
@@ -120,6 +121,15 @@ def _write_export(tmp_path: Path, beads: list[dict]) -> Path:
         for bead in beads:
             f.write(json.dumps(bead) + "\n")
     return path
+
+
+def _commit_snapshot(repo: _Repo, beads: list[dict]) -> str:
+    """Commit a bd-export-shaped snapshot onto ``repo`` at
+    ``.release-gates/remediation-snapshot.json`` -- mirrors the human
+    pre-tag step (release skill Step 0b) committing the snapshot alongside
+    the version-bump commit. Returns the new commit's sha."""
+    content = "".join(json.dumps(b) + "\n" for b in beads)
+    return _commit(repo.path, ".release-gates/remediation-snapshot.json", content, "chore(release): snapshot")
 
 
 # ── Marker / free-text extraction ────────────────────────────────────────
@@ -432,3 +442,196 @@ def test_bd_export_unavailable_is_unverifiable_not_a_pass(
     err = capsys.readouterr().err
     assert "UNVERIFIABLE" in err
     assert "bd export" in err
+
+
+# ── Snapshot write mode (--write-snapshot, nexus-fehi3) ──────────────────
+#
+# The human pre-tag step (release skill Step 0b) runs `bd export` and
+# commits the result onto the release branch, since this repo's `bd`
+# backend is Dolt and CI has no bd/Dolt credentials (nexus-fix9t's
+# rejection of wiring the gate against the stale tracked
+# .beads/issues.jsonl). --write-snapshot is that step, mechanized.
+
+
+def test_write_snapshot_writes_bd_export_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    beads = [_bead("nexus-aaa"), _bead("nexus-bbb")]
+    monkeypatch.setattr(gate, "run_bd_export", lambda repo_root: beads)
+    out_path = tmp_path / "snapshot.json"
+    rc = gate.write_snapshot(out_path, tmp_path)
+    assert rc == 0
+    lines = out_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["id"] == "nexus-aaa"
+    assert json.loads(lines[1])["id"] == "nexus-bbb"
+
+
+def test_write_snapshot_creates_parent_directories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gate, "run_bd_export", lambda repo_root: [_bead("nexus-aaa")])
+    out_path = tmp_path / ".release-gates" / "remediation-snapshot.json"
+    rc = gate.write_snapshot(out_path, tmp_path)
+    assert rc == 0
+    assert out_path.exists()
+
+
+def test_write_snapshot_propagates_bd_export_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(gate, "run_bd_export", lambda repo_root: gate._EXPORT_UNAVAILABLE)
+    out_path = tmp_path / "snapshot.json"
+    rc = gate.write_snapshot(out_path, tmp_path)
+    assert rc == 2
+    assert not out_path.exists()
+    assert "bd export" in capsys.readouterr().err.lower()
+
+
+def test_main_write_snapshot_flag_short_circuits_without_release_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--write-snapshot is a distinct mode from the gate run -- it must not
+    require --release-ref, which the gate-run mode does."""
+    monkeypatch.setattr(gate, "run_bd_export", lambda repo_root: [_bead("nexus-aaa")])
+    out_path = tmp_path / "snapshot.json"
+    rc = gate.main(["--write-snapshot", str(out_path), "--repo-root", str(tmp_path)])
+    assert rc == 0
+    assert out_path.exists()
+
+
+# ── Snapshot verification (--verify-snapshot, nexus-fehi3) ───────────────
+#
+# The CI replay half: release.yml passes --bd-export-json against the
+# committed snapshot plus --verify-snapshot, which must fail closed on a
+# missing file, a file present on disk but not committed on the release
+# ref, or a stale snapshot (newest bead updated_at older than the commit
+# immediately preceding this release -- default --release-base-ref is
+# `<release-ref>^`, which for a `gh pr merge --merge` shape is exactly
+# main's tip before this release's PR landed).
+
+
+def test_verify_snapshot_missing_file_is_unverifiable(repo: _Repo, capsys: pytest.CaptureFixture[str]) -> None:
+    missing = repo.path / ".release-gates" / "remediation-snapshot.json"
+    rc = gate.main(
+        ["--release-ref", "main", "--repo-root", str(repo.path), "--bd-export-json", str(missing), "--verify-snapshot"]
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "UNVERIFIABLE" in err
+    assert "does not exist" in err.lower()
+
+
+def test_bd_export_json_missing_file_without_verify_flag_is_also_unverifiable(
+    repo: _Repo, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Even outside --verify-snapshot mode, a missing --bd-export-json path
+    must be a clear UNVERIFIABLE message, not a raw traceback."""
+    missing = repo.path / "nope.json"
+    rc = gate.main(["--release-ref", "main", "--repo-root", str(repo.path), "--bd-export-json", str(missing)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "UNVERIFIABLE" in err
+    assert "does not exist" in err.lower()
+
+
+def test_verify_snapshot_without_bd_export_json_is_a_usage_error(repo: _Repo) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        gate.main(["--release-ref", "main", "--repo-root", str(repo.path), "--verify-snapshot"])
+    assert exc_info.value.code == 2
+
+
+def test_verify_snapshot_uncommitted_file_is_unverifiable(repo: _Repo, capsys: pytest.CaptureFixture[str]) -> None:
+    """Written to disk but never `git add`+committed -- not on the release
+    ref, so it must not be trusted even though the loader can read it."""
+    uncommitted = repo.path / ".release-gates" / "remediation-snapshot.json"
+    uncommitted.parent.mkdir(parents=True, exist_ok=True)
+    uncommitted.write_text(json.dumps(_bead("nexus-x", description=f"requires-commit: {repo.sha_a}")) + "\n", encoding="utf-8")
+    rc = gate.main(
+        [
+            "--release-ref", "main", "--repo-root", str(repo.path),
+            "--bd-export-json", str(uncommitted), "--verify-snapshot",
+        ]
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "UNVERIFIABLE" in err
+    assert "not committed" in err.lower()
+
+
+def test_verify_snapshot_stale_is_rejected(repo: _Repo, capsys: pytest.CaptureFixture[str]) -> None:
+    """RED/GREEN pin (nexus-fehi3): a snapshot whose newest bead updated_at
+    predates the commit immediately before this release must fail closed,
+    not silently pass -- the exact scenario a stale honor-system snapshot
+    would otherwise produce undetected."""
+    beads = [_bead("nexus-old")]
+    beads[0]["updated_at"] = "2001-01-01T00:00:00Z"
+    _commit_snapshot(repo, beads)
+    rc = gate.main(
+        [
+            "--release-ref", "main", "--repo-root", str(repo.path),
+            "--bd-export-json", str(repo.path / ".release-gates" / "remediation-snapshot.json"),
+            "--verify-snapshot",
+        ]
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "UNVERIFIABLE" in err
+    assert "stale" in err.lower()
+
+
+def test_verify_snapshot_fresh_snapshot_passes(repo: _Repo) -> None:
+    beads = [_bead("nexus-fresh", description=f"requires-commit: {repo.sha_a}")]
+    beads[0]["updated_at"] = "2099-01-01T00:00:00Z"
+    _commit_snapshot(repo, beads)
+    rc = gate.main(
+        [
+            "--release-ref", "main", "--repo-root", str(repo.path),
+            "--bd-export-json", str(repo.path / ".release-gates" / "remediation-snapshot.json"),
+            "--verify-snapshot",
+        ]
+    )
+    assert rc == 0
+
+
+def test_verify_snapshot_explicit_base_ref_override(repo: _Repo) -> None:
+    """--release-base-ref lets a caller name a different staleness floor
+    than the default `<release-ref>^`."""
+    beads = [_bead("nexus-mid")]
+    beads[0]["updated_at"] = "2050-01-01T00:00:00Z"
+    _commit_snapshot(repo, beads)
+    rc = gate.main(
+        [
+            "--release-ref", "main", "--repo-root", str(repo.path),
+            "--bd-export-json", str(repo.path / ".release-gates" / "remediation-snapshot.json"),
+            "--verify-snapshot", "--release-base-ref", repo.sha_a,
+        ]
+    )
+    assert rc == 0
+
+
+def test_verify_snapshot_no_timestamps_at_all_is_unverifiable(repo: _Repo, capsys: pytest.CaptureFixture[str]) -> None:
+    beads = [_bead("nexus-no-ts")]  # no updated_at field
+    _commit_snapshot(repo, beads)
+    rc = gate.main(
+        [
+            "--release-ref", "main", "--repo-root", str(repo.path),
+            "--bd-export-json", str(repo.path / ".release-gates" / "remediation-snapshot.json"),
+            "--verify-snapshot",
+        ]
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "UNVERIFIABLE" in err
+
+
+def test_newest_bead_updated_at_ignores_missing_and_malformed_timestamps() -> None:
+    beads = [
+        {"id": "a"},
+        {"id": "b", "updated_at": "not-a-date"},
+        {"id": "c", "updated_at": "2026-08-01T00:00:00Z"},
+        {"id": "d", "updated_at": "2020-01-01T00:00:00Z"},
+    ]
+    newest = gate.newest_bead_updated_at(beads)
+    assert newest is not None
+    assert newest.year == 2026
+
+
+def test_newest_bead_updated_at_empty_list_is_none() -> None:
+    assert gate.newest_bead_updated_at([]) is None

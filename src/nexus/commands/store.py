@@ -448,7 +448,7 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
 
     Note (RDR-108 D1 / RDR-180): T3 chunk natural IDs are content-derived
     (the full sha256(text) hexdigest). Two documents with different titles but
-    identical content share one Chroma row; deleting one --title
+    identical content share one T3 row; deleting one --title
     removes the shared row, which also removes the other title's
     content. If you need both titles to remain, store them under
     distinct content.

@@ -60,6 +60,10 @@ For the full module map, post-store hook contracts, T2 schema, and design herita
 - **No ORM.** Raw SQL. (Existing T2 SQLite code: raw `sqlite3`, WAL on open — maintenance only, see the NO-SQLITE hot rule.)
 - **Composition over inheritance.** Protocols, not deep hierarchies. Constructor injection — no global singletons, no service locators.
 - **TDD.** Test file before implementation. Deterministic: seeded randomness, fixed clocks, `port=0` for dynamic allocation.
+- **Gates fail loud on absent dependencies.** A gate that skip-passes when
+  its dependency is absent must carry a max-skip / non-vacuity assert; a
+  sweep that found nothing to check is a failure, not a pass (the
+  nexus-moht0 vacuous-gate doctrine).
 - **Integration over mocks.** Hit real substrates — mocks hide boundary bugs. For existing SQLite-backed stores that means a real tmp-path SQLite (maintenance only); NEW persistence targets PG via the engine (see the NO-SQLITE hot rule), so its tests hit PG, not a new SQLite fixture.
 - **Structured logging only.** `structlog.get_logger(__name__)`. Never `print()` in library code; CLI commands use `click.echo()`.
 - **`uv` as package manager.** `pyproject.toml` for deps. Don't bump `llama-index-core` or `tree-sitter-language-pack` without exercising the chunking pipeline — they have known breaking incompatibilities.
@@ -105,6 +109,31 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 - **Worktree-dispatched agents run `scripts/agent-worktree-preflight.sh [required-sha]` as their FIRST action and stop on any `PREFLIGHT_FAIL` line.** The harness cuts `isolation:worktree` worktrees from the DEFAULT branch's tip, not the session's current branch, so a fresh worktree can be silently stale relative to `develop` by construction (nexus-5kwkf); the script also refuses outright if the agent turns out to be in the shared primary checkout, not a worktree at all. `required-sha` is optional — when omitted it defaults to local `develop` if that branch exists, else `origin/develop`, else refuses (`PREFLIGHT_FAIL_BAD_SHA`); local is checked first because this project's own batched-push workflow routinely runs local `develop` ahead of `origin/develop`. It recovers a stale-but-clean worktree via `git merge --ff-only`; a dirty or diverged worktree is refused untouched. The conexus SubagentStart hook injects this instruction for `isolation:worktree` dispatches once the plugin ships it (`conexus/PENDING_RELEASE.md`); until then this bullet is the delivery path.
 - **Daemon-lifecycle fixes land in the shared primitive, never one tier's copy.** Discovery / single-writer / self-heal / version-skew for T1/T2/T3 all live in `src/nexus/daemon/service_registry.py` + the conformance suite `tests/daemon/test_rdr149_lifecycle_conformance.py` (RDR-149). Editing a single tier's lifecycle without touching both is the recurring bug class. Mechanically enforced by `tests/daemon/test_lifecycle_gate.py`. See [`src/nexus/daemon/AGENTS.md`](src/nexus/daemon/AGENTS.md).
 
+## CI Cost Discipline
+
+Project policy, cited by name from the workflows (nexus-jndz0 landed it here
+so those citations resolve inside the repo; origin: the 2026-07-06 billing
+incident — 24 CI runs + 4 engine tags in one day, macOS at ~10x rates, the
+same tree tested four times en route to PyPI. Reference implementation:
+PRs #1375/#1376):
+
+- **Never test the same tree twice.** A tree that passed a PR's required
+  checks does not re-run CI on the merge-push or at tag time. Tag/release
+  workflows publish — they do not re-test.
+- **Expensive jobs run only when their inputs changed.** Per-job path
+  filters on native builds, from-source compiles, platform matrices.
+  Required checks stay satisfied via job-level skip (skipped == success for
+  branch protection) or always-run-report-skip WITH a non-vacuity assert.
+- **Never rebuild deterministic artifacts.** Version-pinned compiles (PG
+  bundles, models, toolchains) are cached or prebuilt, keyed on exact
+  inputs; rebuild only on key miss.
+- **macOS/premium runners only where the artifact requires the platform**
+  (release/tag artifact builds), never in routine push/PR CI.
+- **Every workflow has a concurrency group; superseded runs cancel.**
+- **Full matrix breadth only at merge boundaries.** PRs run the full
+  matrix; interior branch pushes run the minimal representative.
+- **Tag cadence is a cost decision.** Batch related work into one cut.
+
 ## Workflows
 
 ### Adding a CLI command
@@ -148,6 +177,8 @@ uv run python scripts/check_engine_release_floor.py
 ```
 
 If it exits non-zero, STOP — do not proceed with the PyPI release; cut a fresh `engine-service` tag via the `engine-release` skill (see "Engine-service release" above), bump `REQUIRED_ENGINE_VERSION` to that tag's version (this alone also moves `PINNED_SERVICE_TAG`), gate the release battery against that engine, and pair the deploy with THIS release (deploy relay fires at client-tag push, parallel with the PyPI publish — paired-release choreography, Hal directive 2026-08-02). For a paired release, cloud-behind pre-tag is the EXPECTED state, not drift: re-run the gate with `--paired-deploy engine-service-vX.Y.Z` naming the exact tag this release pairs with (nexus-k1c08). The flag accepts a below-floor cloud solely where the named tag independently verifies as (a) a published, non-draft GH release with assets, (b) exactly equal to `REQUIRED_ENGINE_VERSION`, and (c) the newest published `engine-service-v*` tag — any miss stays red with a named reason, never a silent pass. Post-tag, re-run the gate WITHOUT the flag as the deploy-window VERIFY; escalate loudly if it is still behind. `git log <pinned-engine-tag>..HEAD -- service/` remains useful supplementary context for judging whether recent `service/` work is cloud-relevant, but the script above — not the eyeball — is the actual gate. Shipping the PyPI release on a stale, un-cloud-validated engine is exactly the gap this gate closes.
+
+`release.yml`'s own copy of this step (unattended, no human to type `--paired-deploy <tag>`) runs `--paired-deploy-auto` instead of bare (nexus-gc9ir, after v7.10.0's publish red'd on the exact expected pre-deploy paired-release state) — it derives the candidate tag from `REQUIRED_ENGINE_VERSION` itself and only engages paired acceptance when the cloud is confirmed below floor. The pre-tag human invocation above stays the explicit `--paired-deploy` form.
 
 **Remediation-commit gate (step 0b — BLOCKING, run alongside step 0).** nexus-fix9t: nexus-3n7pr's remediation was sequenced "after the client release ships" — 7.7.0 shipped, but the commit its plan depended on (5f59ede70, nexus-gvmbo / nexus-b91tv) was NOT an ancestor of v7.7.0, so the installed `nx` at 7.7.0 carried the pre-fix DESTRUCTIVE `manifest_backfill` module the plan assumed was already safe (found retroactively via `git merge-base --is-ancestor`; nothing checked this at release time). Run:
 

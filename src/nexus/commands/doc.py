@@ -438,7 +438,7 @@ def check_extensions_cmd(
     """Flag doc chunks that don't project into a primary source.
 
     For each ``chash:`` citation in the input docs, resolve the chash
-    through the T2 ``chash_index`` to the ChromaDB-scoped ``doc_id``
+    through the T2 ``chash_index`` to the T3-scoped ``doc_id``
     (RDR-086 Phase 4.2 caller-side fix), then delegate to
     ``CatalogTaxonomy.chunk_grounded_in`` with the resolved doc_id.
     The taxonomy signature and semantics are unchanged — the fix is

@@ -130,7 +130,8 @@ def get_cmd(entry_id: int | None, project: str | None, title: str | None) -> Non
 @click.argument("query")
 @click.option("--project", "-p", default=None, help="Scope search to a project")
 def search_cmd(query: str, project: str | None) -> None:
-    """FTS5 keyword search across T2 memory entries."""
+    """Full-text keyword search across T2 memory entries (engine-side
+    PostgreSQL full-text search)."""
     with t2_handle() as db:
         try:
             results = db.memory.search(query=query, project=project)
@@ -279,7 +280,7 @@ def expire_cmd() -> None:
 @click.option("--tags", default="", help="Comma-separated tags (overrides T2 tags when provided)")
 @click.option("--remove", is_flag=True, default=False, help="Delete the entry from T2 after promoting.")
 def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None:
-    """Promote a T2 memory entry to T3 ChromaDB permanent storage."""
+    """Promote a T2 memory entry to T3 permanent vector storage."""
     from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import: heavy T3-resolution dep deferred to command invocation
 
     with t2_handle() as db:

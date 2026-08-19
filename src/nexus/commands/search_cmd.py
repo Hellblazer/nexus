@@ -18,9 +18,9 @@ from nexus.formatters import (
     format_plain_with_context,
     format_vimgrep,
 )
-from nexus.scoring import RG_FLOOR_SCORE, apply_hybrid_scoring, round_robin_interleave
+from nexus.scoring import RG_FLOOR_SCORE, round_robin_interleave
 from nexus.db.http_vector_client import VectorServiceError
-from nexus.search_engine import SearchDiagnostics, search_cross_corpus
+from nexus.search_engine import SearchDiagnostics, apply_ranking_boosts, search_cross_corpus
 from nexus.types import SearchResult
 
 
@@ -28,7 +28,8 @@ from nexus.filters import parse_where as _parse_where_core
 
 
 def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
-    """Parse ``KEY{op}VALUE`` strings into a ChromaDB where dict.
+    """Parse ``KEY{op}VALUE`` strings into a metadata-filter where dict
+    (Chroma-heritage operator shape, served by the engine).
 
     Wraps shared ``parse_where`` with Click-specific error handling.
     """
@@ -462,18 +463,12 @@ def search_cmd(
         _scoring_cat = make_catalog_reader()
     except Exception:  # noqa: BLE001 — scoring catalog optional; degrade to None on any failure
         _scoring_cat = None
-    results = apply_hybrid_scoring(
-        results,
-        hybrid=hybrid,
-        vector_weight=tuning.vector_weight,
-        frecency_weight=tuning.frecency_weight,
-        file_size_threshold=tuning.file_size_threshold,
-        catalog=_scoring_cat,
+    # nexus: hybrid scoring + RDR-055 E2 quality boost — shared with the MCP
+    # search()/query() paths via apply_ranking_boosts (search_engine.py) so
+    # both surfaces rank identically for identical inputs.
+    results = apply_ranking_boosts(
+        results, hybrid=hybrid, tuning=tuning, catalog=_scoring_cat,
     )
-
-    # RDR-055 E2: quality boost from bibliographic metadata (no-op when unenriched)
-    from nexus.scoring import apply_quality_boost  # noqa: PLC0415 — deferred import; scoring only needed in this branch
-    results = apply_quality_boost(results)
 
     # RDR-188 (nexus-9o6y2.8): consume SERVER rerank scores. The engine's
     # fused stage scored the fan-out rows; scores are query-relevance values,

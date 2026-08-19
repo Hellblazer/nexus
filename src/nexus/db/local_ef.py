@@ -19,7 +19,17 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-# Model metadata: name → dimensions
+# Model metadata: name → dimensions.
+#
+# DELIBERATELY SEPARATE from ``nexus.db.reconcile._MODEL_DIMS`` (nexus-r4fdv
+# acceptance item 3): the two maps live in different key spaces with
+# different authorities. THIS map is keyed by the raw local model name (the
+# HF id the ONNX loader takes) and covers only the two locally-servable
+# models; reconcile's is keyed by the RDR-109 collection-name TOKEN, covers
+# Voyage too, and mirrors the Java authority ``PgVectorRepository.MODEL_DIMS``.
+# ``exporter._MODEL_DIMENSIONS`` derives its local half FROM this map via
+# ``_MODEL_TOKENS`` rather than duplicating it. Unifying them would force a
+# name<->token translation layer into every consumer for no defect closed.
 _MODEL_DIMS: dict[str, int] = {
     "all-MiniLM-L6-v2": 384,
     "BAAI/bge-base-en-v1.5": 768,
@@ -166,7 +176,19 @@ class LocalEmbeddingFunction:
         else:
             self._model_name = _select_model_name()
 
-        self._dimensions = _MODEL_DIMS.get(self._model_name, 384)
+        if self._model_name not in _MODEL_DIMS:
+            # nexus-r4fdv: no silent fallback on a data-correctness value.
+            # This used to default to 384 — embeddings written at a wrong
+            # width land in the wrong typed column or fail a width CHECK far
+            # from the cause, and 384 is the least-used dim here (local is
+            # 768, cloud 1024), so the default was the value least likely to
+            # be right. Only reachable via an explicit model_name argument:
+            # _select_model_name() can only return keys of _MODEL_DIMS.
+            raise ValueError(
+                f"unknown local embedding model {self._model_name!r}: no "
+                f"registered dimension (known: {sorted(_MODEL_DIMS)})"
+            )
+        self._dimensions = _MODEL_DIMS[self._model_name]
         self._ef: Any = None  # lazy init
         # Storage review S-2: guard lazy init so two concurrent callers
         # don't both download/load the fastembed model and discard one.

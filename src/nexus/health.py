@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -4284,10 +4284,22 @@ def _check_chash_conformance_report() -> list[HealthResult]:
 
         cat = make_catalog_reader()
         if cat is None:
+            # Benign by design (nexus-5h4ou re-examination): reader-returns-
+            # None is the "no catalog configured" state — a configuration
+            # fact, not a probe failure. There is genuinely nothing for this
+            # check to examine, so a plain skip is honest, unlike the arms
+            # below where something SHOULD have been examinable.
             return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
-    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        _log.debug("doctor_chash_conformance_report_check_failed", error=str(exc))
-        return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
+    except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`, but must not lie either
+        # nexus-5h4ou: the factory RAISING is "could not check" — a box with
+        # a catalog whose reader failed to construct. That is
+        # distinguishable-from-clean territory (nexus-kmo9h), never a bare
+        # ok=True skip.
+        _log.warning("doctor_chash_conformance_report_check_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"SKIPPED (catalog reader unavailable: {exc}) — not a clean-store signal",
+        )]
 
     import httpx  # noqa: PLC0415 — deferred to avoid a heavy/optional import at module load
 
@@ -4346,9 +4358,30 @@ def _check_chash_conformance_report() -> list[HealthResult]:
         rows.extend(result.get("tables") or [])
 
     if dims_checked == 0:
-        # NON-VACUITY (nexus-kmo9h): zero dims actually checked is not a
-        # clean bill of health.
-        return [HealthResult(label=label, ok=True, detail="skipped (no dim reachable)")]
+        # NON-VACUITY (nexus-kmo9h / nexus-5h4ou): zero dims actually
+        # checked is not a clean bill of health — this arm used to return
+        # ok=True directly under this very comment. RDR-191's shard-drop
+        # window makes "no dim reachable" a real state, and it must render
+        # distinguishable from genuinely-clean.
+        #
+        # SCOPE (nexus-5h4ou acceptance item 4, decided at review): warn,
+        # NOT fatal — deliberately matching every OTHER could-not-check arm
+        # of this same check (engine-predates-route 404, transport failure,
+        # factory-raise above). Doctor's process exit code is therefore
+        # unchanged (warns never mark the run failed, RDR-129 B4);
+        # "distinguishable from clean" is served by the CLI warn glyph and
+        # the --json ok=false/status field, which scripted consumers read.
+        # Making only these two arms fatal while the 404 arm stays warn
+        # would be an arbitrary split inside one check's uniform
+        # degradation contract. Pinned by
+        # test_could_not_check_arms_warn_but_do_not_fail_the_run.
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                "SKIPPED (0 dims checked — no dim reachable); this check "
+                "examined NOTHING and must not read as clean (nexus-5h4ou)"
+            ),
+        )]
 
     total_non_conformant = 0
     offenders: list[str] = []
@@ -4450,6 +4483,260 @@ def _check_chash_conformance_report() -> list[HealthResult]:
             f"clean — 0 width-non-conformant chash rows across {len(rows)} "
             f"table(s), {dims_checked} dim(s) checked (tenant-scoped)"
         ),
+    )]
+
+
+_GC_AUDIT_NON_EMPTY_LABEL = "gc_audit non-empty after purge"
+
+#: Clock-drift tolerance when comparing a gc_audit ``purge_trash`` row's
+#: ``created_at`` against the local purge marker's ``ts`` (crit-fix
+#: critique 2026-08-19, nexus-0uuit/sybbh pile): the client and engine are
+#: separate hosts, so a small allowance avoids a false warn on an
+#: otherwise-correct same-purge audit row purely from clock skew. Generous
+#: on purpose — this is a forensic freshness check, not a precise ordering
+#: guarantee.
+_GC_AUDIT_CLOCK_SKEW = timedelta(minutes=5)
+
+
+#: Result-dict keys (per marker's ``result`` field, verbatim from
+#: ``CatalogRepository#purgeTrash``'s response) that indicate the purge
+#: actually reaped something. ``documents_purged`` and the three
+#: ``chunks_<dim>_stranded`` counts are the only fields in that response
+#: that reflect real deletions; ``dry_run``/``documents_eligible`` do not
+#: (critique 2026-08-19 round 2, nexus-sybbh: ``nexus.purge_trash``'s own
+#: audit INSERT is gated on ``v_chunk_count > 0 OR v_count > 0``, catalog-
+#: 033-1 — a genuinely no-op real purge writes NO gc_audit row by design,
+#: so this check must not expect one either).
+_EFFECT_RESULT_KEY_RE = re.compile(r"^(documents_purged|chunks_\d+_stranded)$")
+
+
+def _marker_has_effect(marker: dict) -> bool:
+    """True if *marker*'s stored ``result`` shows a nonzero purge effect.
+
+    Fail-open toward cross-checking, not toward silence: a missing or
+    malformed ``result`` (unexpected shape, older marker format) is
+    treated as "has effect" so the check still cross-references it,
+    rather than risking a silent skip over a real writer-side defect
+    (no-silent-fallback-for-correctness).
+    """
+    result = marker.get("result")
+    if not isinstance(result, dict):
+        return True
+    for key, value in result.items():
+        if _EFFECT_RESULT_KEY_RE.match(key) and isinstance(value, (int, float)) and value > 0:
+            return True
+    return False
+
+
+def _parse_gc_audit_timestamp(value: str | None) -> datetime | None:
+    """Best-effort ISO-8601 parse for a gc_audit ``created_at`` / purge
+    marker ``ts`` string.
+
+    Returns ``None`` on any parse failure or missing value — callers MUST
+    treat that as "cannot verify recency", never as "recent enough"
+    (RDR-129 B4: honest degradation, not a false clean).
+    """
+    if not value or value == "?":
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
+
+
+def _check_gc_audit_non_empty_after_purge() -> list[HealthResult]:
+    """After any local reap/purge activity, ``nexus.gc_audit`` must carry a
+    row (nexus-sybbh: found completely empty on the live store — 0 rows, all
+    tenants, all time — despite real purges having run, so RDR-192-class
+    chunk losses become unattributable after the fact).
+
+    Client-side half of nexus-sybbh: the engine-side writer bug (why nothing
+    lands in gc_audit) is a separate, concurrently-owned fix. This check
+    never assumes that fix has shipped — it degrades honestly regardless
+    (RDR-129 B4 house style, same shape as :func:`_check_chash_conformance_
+    report`, its closest sibling in this module):
+
+    - No local evidence a purge ran recently -> named skip (``ok=True``,
+      "nothing to cross-check"). This is NOT the same claim as "gc_audit is
+      populated correctly" (nexus-kmo9h) — it is honestly silent about
+      gc_audit because there is nothing to compare it against.
+    - Catalog reader unavailable, or the engine predates the
+      ``/gc_audit/list`` route (404), or any other read failure -> warn
+      (``ok=False, warn=True``), never a silent/false clean pass.
+    - Local evidence exists but EVERY marker in the window shows zero
+      effect (:func:`_marker_has_effect`) -> named skip (``ok=True``):
+      ``nexus.purge_trash``'s own audit INSERT only fires on a nonzero
+      effect (catalog-033-1), so a genuinely no-op real purge writes no
+      gc_audit row by design — expecting one there is a false alarm, not
+      a defect (critique 2026-08-19 round 2).
+    - Local evidence of a purge WITH nonzero effect exists AND gc_audit has
+      no ``purge_trash`` row at or after the NEWEST such marker -> warn:
+      the defect this check exists to catch. Cross-referencing is by
+      ``operation="purge_trash"`` (server-side exact-match filter,
+      ``CatalogRepository#listGcAudit``) PLUS a ``created_at`` >= the
+      newest effectful marker's ``ts`` (within :data:`_GC_AUDIT_CLOCK_SKEW`)
+      — an unfiltered/untimed check would false-clean forever the moment
+      ANY gc_audit row exists, from ANY of the 4 producers, at ANY point in
+      the past (critique 2026-08-19); anchoring on the OLDEST marker
+      instead of the newest would let a stale row from an earlier, working
+      audit paper over a writer regression later in the same window
+      (critique 2026-08-19 round 2 — both are now fixed).
+    - Local evidence of a purge with nonzero effect exists AND a matching,
+      sufficiently-recent ``purge_trash`` row exists -> clean.
+
+    The independent "did a purge run" signal is
+    :mod:`nexus.gc_purge_marker`'s local breadcrumb file, written by
+    ``nx catalog purge-trash`` on every REAL (``--no-dry-run --confirm``)
+    execution — see that module's docstring for why gc_audit itself cannot
+    be used as its own "did something happen" signal.
+    """
+    from nexus.gc_purge_marker import read_recent_purge_markers  # noqa: PLC0415 — deferred; rarely-hit branch
+
+    label = _GC_AUDIT_NON_EMPTY_LABEL
+    markers = read_recent_purge_markers(within_days=7)
+    if not markers:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(
+                "skipped (no local `nx catalog purge-trash` execution "
+                "recorded in the last 7 days — nothing to cross-check)"
+            ),
+        )]
+
+    # critique 2026-08-19 round 2: a marker records every REAL purge
+    # invocation regardless of effect, but the engine's own audit INSERT
+    # is gated on nonzero effect (catalog-033-1) — cross-checking a
+    # zero-effect marker against gc_audit is a guaranteed false alarm on
+    # every healthy no-op purge, not a defect. Only markers with real
+    # effect are eligible for the cross-check below.
+    effective_markers = [m for m in markers if _marker_has_effect(m)]
+    if not effective_markers:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(
+                f"skipped ({len(markers)} local `nx catalog purge-trash` "
+                "execution(s) in the last 7 days, all zero-effect no-ops "
+                "per their own recorded result — nothing to cross-check)"
+            ),
+        )]
+
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail="SKIPPED (no catalog reader configured) — not a clean-store signal",
+            )]
+    except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`, but must not lie either
+        _log.warning("doctor_gc_audit_check_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"SKIPPED (catalog reader unavailable: {exc}) — not a clean-store signal",
+        )]
+
+    import httpx  # noqa: PLC0415 — deferred to avoid a heavy/optional import at module load
+
+    # Anchor on the NEWEST effectful marker, not the oldest (critique
+    # 2026-08-19 round 2): with multiple purges inside the 7-day lookback,
+    # anchoring on the oldest let a stale gc_audit row covering only the
+    # earliest purge satisfy the check even if the writer regressed after
+    # that and every later purge went unaudited.
+    anchor_ts = max(m.get("ts", "?") for m in effective_markers)
+    anchor_dt = _parse_gc_audit_timestamp(anchor_ts)
+    try:
+        # operation="purge_trash" — CatalogRepository#listGcAudit applies
+        # this as an exact-match WHERE clause server-side, so limit=1
+        # returns the newest purge_trash row specifically, not the newest
+        # row of ANY operation (critique 2026-08-19: the latter false-
+        # cleans forever once the routine sweep_superseded_chunks producer
+        # fires, now wired for all 4 gc_audit producers).
+        entries = cat.gc_audit_list(limit=1, operation="purge_trash")
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code if exc.response is not None else 0
+        if status == 404:
+            _log.warning("doctor_gc_audit_engine_floor", status=status)
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=(
+                    "SKIPPED (engine predates the gc_audit/list route — "
+                    "404'd; re-run after the next engine tag lands). This "
+                    "is NOT a clean signal: local evidence shows "
+                    f"{len(effective_markers)} purge-trash execution(s) with "
+                    f"real effect since {anchor_ts}, unauditable until the "
+                    "engine is upgraded."
+                ),
+            )]
+        _log.warning("doctor_gc_audit_check_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"SKIPPED (gc_audit/list failed: {exc})",
+        )]
+    except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`, but must not lie either
+        _log.warning("doctor_gc_audit_check_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"SKIPPED (gc_audit/list failed: {exc})",
+        )]
+
+    if entries:
+        audit_dt = _parse_gc_audit_timestamp(entries[0].get("created_at"))
+        recent_enough = (
+            audit_dt is not None
+            and anchor_dt is not None
+            and audit_dt >= anchor_dt - _GC_AUDIT_CLOCK_SKEW
+        )
+        if recent_enough:
+            return [HealthResult(
+                label=label, ok=True,
+                detail=(
+                    f"{len(effective_markers)} local purge-trash execution(s) "
+                    f"with real effect since {anchor_ts}; gc_audit carries a "
+                    f"purge_trash row at {entries[0].get('created_at')} — audited"
+                ),
+            )]
+        # A purge_trash row exists, but either its created_at could not be
+        # verified against the marker (missing/unparseable — degrade
+        # honestly, never assume clean) or it predates the newest effectful
+        # local evidence (a stale row from an earlier purge, not this one).
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"{len(effective_markers)} local `nx catalog purge-trash` "
+                f"execution(s) with real effect since {anchor_ts}, but the "
+                f"newest nexus.gc_audit purge_trash row "
+                f"({entries[0].get('created_at')!r}) does not cover it — "
+                "the reap/purge is NOT confirmed audited (nexus-sybbh; "
+                "RDR-192-class chunk losses become unattributable after "
+                "the fact). If the deployed engine already carries the "
+                "gc_audit writer fix, this should clear on the next purge; "
+                "otherwise the writer-side bug is still live."
+            ),
+            fix_suggestions=[
+                "nx catalog purge-trash --no-dry-run --confirm   (re-run once the engine writer fix is deployed)",
+                "nx doctor                                       (re-run; clears once gc_audit carries a row)",
+            ],
+        )]
+
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(
+            f"{len(effective_markers)} local `nx catalog purge-trash` "
+            f"execution(s) with real effect since {anchor_ts}, but "
+            "nexus.gc_audit is EMPTY — the reap/purge is NOT being audited "
+            "(nexus-sybbh; RDR-192-class chunk losses become unattributable "
+            "after the fact). If the deployed engine already carries the "
+            "gc_audit writer fix, this should clear on the next purge; "
+            "otherwise the writer-side bug is still live."
+        ),
+        fix_suggestions=[
+            "nx catalog purge-trash --no-dry-run --confirm   (re-run once the engine writer fix is deployed)",
+            "nx doctor                                       (re-run; clears once gc_audit carries a row)",
+        ],
     )]
 
 
@@ -5213,6 +5500,10 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     # fed into the install-binary/convergence gates — see the check's own
     # docstring for the scoping rationale).
     results.extend(_check_chash_conformance_report())
+    # nexus-sybbh: independent local evidence a purge-trash ran recently,
+    # cross-referenced against the engine's gc_audit table — degrades to a
+    # named skip when there is no local evidence, never a false clean pass.
+    results.extend(_check_gc_audit_non_empty_after_purge())
     # nexus-5xn3k.6 (bead-text amendment): a document's fence never
     # cleared — a different failure class from the missing-chunk aggregates
     # above (surfaced ALONGSIDE, not folded in).

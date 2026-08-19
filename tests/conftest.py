@@ -1303,10 +1303,17 @@ def _isolate_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     orphan ``int-cce-*`` curator owners accumulated from
     ``test_cce_query_retrieves_cce_indexed_markdown`` alone.
 
-    The fixture works because catalog write paths guard on
-    ``Catalog.is_initialized(cat_path)`` — the tmp path is never initialised,
-    so hooks return early. See ``tests/test_catalog_isolation.py`` for the
-    regression tests that lock this behaviour in (nexus-dqr3 / nexus-b34f).
+    HISTORY, corrected 2026-08-18 (wave-3 critique): this docstring used to
+    claim the mechanism was catalog write paths guarding on
+    ``Catalog.is_initialized(cat_path)`` and cite
+    ``tests/test_catalog_isolation.py`` — BOTH are gone (the guard left the
+    service-mode write path at nexus-f1itv; the local catalog and its
+    isolation file were deleted at nexus-i711w). In the service era this
+    env var is residual local-path hygiene only; the isolation that
+    actually protects the operator's catalog is the three-fixture stack
+    (``_isolate_config_dir`` + ``_isolate_service_endpoint_env`` +
+    ``_pin_t2_substrate``'s per-test tenant), regression-locked by
+    ``tests/test_service_catalog_isolation.py`` (nexus-1vt0b).
     """
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "test-catalog"))
 

@@ -328,6 +328,138 @@ def test_search_no_threshold_kwarg_passes_none():
     assert captured[0].get("threshold_override") is None
 
 
+# ── MCP path applies hybrid scoring + quality boost ───────────
+#
+# Pre-fix, apply_hybrid_scoring/apply_quality_boost had exactly one call
+# site (search_cmd.py, CLI-only); the MCP search()/query() paths ranked by
+# raw vector distance and never read frecency_score or bib_citation_count.
+# These tests pin the fix: both tools now call the shared
+# search_engine.apply_ranking_boosts() and rank accordingly.
+
+_HYBRID_DEFAULT_ON_CFG = {"search": {"hybrid_default": True, "query_sanitizer": False}}
+
+# Three code__ chunks where raw-distance order and hybrid-score order
+# diverge: the mid-distance chunk's huge frecency_score should outrank the
+# closer-but-unfrecent chunk once frecency is blended in.
+_DIVERGENT_RESULTS = [
+    SearchResult(id="low_dist_no_boost", content="a", distance=0.10,
+                 collection="code__test", metadata={"frecency_score": 0.0}),
+    SearchResult(id="mid_dist_high_frecency", content="b", distance=0.30,
+                 collection="code__test", metadata={"frecency_score": 100.0}),
+    SearchResult(id="high_dist_no_boost", content="c", distance=0.90,
+                 collection="code__test", metadata={"frecency_score": 0.0}),
+]
+
+
+def test_search_ranks_by_hybrid_score_not_raw_distance():
+    """MCP ``search()`` must rank via hybrid_score (frecency-boosted), not
+    raw distance. Raw-distance order would be low/mid/high; hybrid scoring
+    (vector_weight=0.7/frecency_weight=0.3) promotes the high-frecency
+    mid-distance chunk to the top."""
+    _mock_t3([{"name": "code__test", "count": 3}])
+
+    def fake(*_a, **_kw):
+        return [SearchResult(id=r.id, content=r.content, distance=r.distance,
+                              collection=r.collection, metadata=dict(r.metadata))
+                for r in _DIVERGENT_RESULTS]
+
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = search(query="hybrid ranking pin", corpus="code__test",
+                      cluster_by="", structured=True)
+    assert out["ids"] == [
+        "mid_dist_high_frecency", "low_dist_no_boost", "high_dist_no_boost",
+    ]
+
+
+def test_query_ranks_documents_by_hybrid_score_not_raw_distance():
+    """MCP ``query()``'s document-level grouping must pick the "best chunk"
+    per document, and order documents, by hybrid_score — same divergent
+    fixture as the ``search()`` pin above, one doc per chunk (distinct
+    doc_key via distinct titles)."""
+    _mock_t3([{"name": "code__test", "count": 3}])
+
+    def fake(*_a, **_kw):
+        results = []
+        for r in _DIVERGENT_RESULTS:
+            meta = dict(r.metadata)
+            meta["title"] = r.id
+            results.append(SearchResult(id=r.id, content=r.content, distance=r.distance,
+                                         collection=r.collection, metadata=meta))
+        return results
+
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="hybrid ranking pin", corpus="code__test", structured=True)
+    assert out["ids"][0] == "mid_dist_high_frecency"
+
+
+def test_search_and_cli_helper_rank_identically():
+    """Parity: the same corpus+query, scored by the same shared
+    search_engine.apply_ranking_boosts() the CLI (search_cmd.py) calls,
+    ranks identically through the MCP search() path."""
+    from nexus.config import get_tuning_config
+    from nexus.search_engine import apply_ranking_boosts
+
+    _mock_t3([{"name": "code__test", "count": 3}])
+
+    def fake(*_a, **_kw):
+        return [SearchResult(id=r.id, content=r.content, distance=r.distance,
+                              collection=r.collection, metadata=dict(r.metadata))
+                for r in _DIVERGENT_RESULTS]
+
+    # "CLI helper" side: apply the exact function search_cmd.py calls,
+    # with the same hybrid flag + tuning the MCP path resolves.
+    cli_side = apply_ranking_boosts(
+        [SearchResult(id=r.id, content=r.content, distance=r.distance,
+                      collection=r.collection, metadata=dict(r.metadata))
+         for r in _DIVERGENT_RESULTS],
+        hybrid=True, tuning=get_tuning_config(), catalog=None,
+    )
+    cli_order = [r.id for r in cli_side]
+
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        mcp_out = search(query="parity pin", corpus="code__test",
+                          cluster_by="", structured=True)
+
+    assert mcp_out["ids"] == cli_order
+
+
+def test_cluster_by_semantic_discards_the_boosted_order():
+    """critique 2026-08-19 (both reviewers): ``cluster_by="semantic"``
+    computes the hybrid/bib boost (real cost: catalog lookup, tuning
+    resolution, scoring) but its reordering is fully discarded to keep
+    same-cluster results contiguous for the text renderer — pins the
+    truthful behavior the corrected docstring now describes: the boost is
+    genuinely inert for this mode. Same divergent fixture as
+    ``test_search_ranks_by_hybrid_score_not_raw_distance`` above, which
+    pins the OPPOSITE outcome (boosted order wins) for ``cluster_by=""``
+    — the two tests together pin that the divergence is real, not
+    incidental fixture noise."""
+    _mock_t3([{"name": "code__test", "count": 3}])
+
+    def fake(*_a, **_kw):
+        return [SearchResult(id=r.id, content=r.content, distance=r.distance,
+                              collection=r.collection, metadata=dict(r.metadata))
+                for r in _DIVERGENT_RESULTS]
+
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = search(query="cluster order pin", corpus="code__test",
+                      cluster_by="semantic", structured=True)
+
+    # NOT the hybrid-boosted order (mid/low/high) — the pre-boost order
+    # search_cross_corpus produced, which is this fixture's own declaration
+    # order (low/mid/high).
+    assert out["ids"] == [
+        "low_dist_no_boost", "mid_dist_high_frecency", "high_dist_no_boost",
+    ]
+    # structured=True never surfaces hybrid_score, in ANY cluster_by mode —
+    # so even the inert boost computation leaves no trace in the output.
+    assert "hybrid_score" not in out
+
+
 # ── Store ────────────────────────────────────────────────────────────────────
 
 def test_store_put(t3):
@@ -1198,11 +1330,35 @@ async def test_mcp_server_round_trip():
     try:
         host, port, token = resolve_service_config()
     except RuntimeError:
-        pytest.skip(
-            "no service endpoint resolvable in the isolated test env "
-            "(export NX_SERVICE_PORT/NX_SERVICE_TOKEN or run via "
-            "tests/e2e/local-service-gate.sh)"
-        )
+        # nexus-4doqz: inside local-service-gate.sh this used to skip with
+        # a message prescribing... running the gate. The gate's
+        # NX_SERVICE_* exports are (correctly) scrubbed by the autouse
+        # _isolate_service_endpoint_env fixture, so resolution failed even
+        # when the gate had provisioned a real service. The gate now ALSO
+        # exports NX_GATE_SERVICE_* — names the scrub does not strip,
+        # carrying the gate's own provisioned endpoint, never ambient
+        # operator credentials. Under the gate (marker set) an unresolvable
+        # endpoint is a FAILURE, never a skip: the gate's own passed-count
+        # is evidence, and a test that silently declines inside its named
+        # enabler is the success-shaped-emptiness class (nexus-moht0).
+        if os.environ.get("NX_GATE_SERVICE_EXPECTED") == "1":
+            host = os.environ.get("NX_GATE_SERVICE_HOST", "")
+            port_s = os.environ.get("NX_GATE_SERVICE_PORT", "")
+            token = os.environ.get("NX_GATE_SERVICE_TOKEN", "")
+            if not (host and port_s and token):
+                pytest.fail(
+                    "local-service-gate.sh set NX_GATE_SERVICE_EXPECTED=1 "
+                    "but the NX_GATE_SERVICE_{HOST,PORT,TOKEN} triplet is "
+                    "incomplete — the gate promised an endpoint it did not "
+                    "deliver (nexus-4doqz: never skip inside the enabler)"
+                )
+            port = int(port_s)
+        else:
+            pytest.skip(
+                "no service endpoint resolvable in the isolated test env "
+                "(export NX_SERVICE_PORT/NX_SERVICE_TOKEN or run via "
+                "tests/e2e/local-service-gate.sh)"
+            )
 
     # nexus-f4wcg: StdioServerParameters(env=None) does NOT inherit os.environ
     # — the MCP SDK strips the child env to a 6-var safe set (HOME, PATH, ...).
@@ -1220,11 +1376,30 @@ async def test_mcp_server_round_trip():
          if k.startswith(("NX_", "NEXUS_", "CHROMA_", "VOYAGE_"))}
     )
     env.pop("NX_SERVICE_URL", None)
+    # The autouse _isolate_t1_sessions fixture minted NX_T1_SESSION /
+    # NX_T1_SESSION_ID against the TEST SUBSTRATE engine; forwarding them
+    # makes the child's T1 routing take USE_INHERITED and present a token
+    # the pinned endpoint below never issued (401 on /v1/t1/put, no lease
+    # to self-heal from in the isolated config dir). Strip them so the
+    # spawned server MINTS its own session against the endpoint it is
+    # actually pointed at. Latent since the fixture landed; first surfaced
+    # when c847182ce made this test actually RUN under the gate.
+    for t1_var in ("NX_T1_SESSION", "NX_T1_SESSION_ID", "NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED"):
+        env.pop(t1_var, None)
+    # With the inherited token gone the child takes the MINT branch, which
+    # needs a resolvable session id (NX_SESSION_ID — resolve_active_session_id's
+    # env tier; CLAUDE_CODE_SESSION_ID is not forwarded and the isolated config
+    # dir has no session file). A fresh uuid makes the child mint its own
+    # session against the endpoint pinned below — the same MINT code path a
+    # real MCP spawn executes at session start (production usually resolves
+    # the id via CLAUDE_CODE_SESSION_ID instead; the mint itself is identical).
+    from uuid import uuid4
     env.update({
         "NX_STORAGE_BACKEND": "service",
         "NX_SERVICE_HOST": host,
         "NX_SERVICE_PORT": str(port),
         "NX_SERVICE_TOKEN": token,
+        "NX_SESSION_ID": str(uuid4()),
     })
     server_params = StdioServerParameters(command=str(nx_mcp), args=[], env=env)
     async with stdio_client(server_params) as (read_stream, write_stream):

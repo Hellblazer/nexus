@@ -210,6 +210,8 @@ touch "$TEST_HOME/.zshrc"
 
 # ─── Run scenarios ────────────────────────────────────────────────────────────
 
+SCENARIOS_RUN=0
+
 run_scenario() {
     local file="$1"
     local num
@@ -217,6 +219,7 @@ run_scenario() {
     if [[ -n "$ONLY_SCENARIO" && "$num" != "$ONLY_SCENARIO" ]]; then
         return 0
     fi
+    SCENARIOS_RUN=$((SCENARIOS_RUN + 1))
     echo ""
     echo "══════════════════════════════════════════════"
     # shellcheck source=/dev/null
@@ -226,6 +229,23 @@ run_scenario() {
 for scenario_file in "$SCRIPT_DIR"/scenarios/[0-9]*.sh; do
     run_scenario "$scenario_file"
 done
+
+# nexus-poplq: executed-work floor. A typo'd/renamed/deleted --scenario used
+# to match nothing, source nothing, and exit 0 on "Results: 0 passed,
+# 0 failed" — a run that executed nothing was indistinguishable from a run
+# that passed everything (success-shaped emptiness).
+if [[ $SCENARIOS_RUN -eq 0 ]]; then
+    echo ""
+    echo "ERROR: no scenario matched${ONLY_SCENARIO:+ --scenario '$ONLY_SCENARIO'} — nothing ran, so this run proves nothing." >&2
+    echo "Available scenarios:" >&2
+    ls "$SCRIPT_DIR"/scenarios/[0-9]*.sh 2>/dev/null | sed 's/^/  /' >&2
+    exit 1
+fi
+if [[ $((PASS + FAIL + SKIP)) -eq 0 ]]; then
+    echo ""
+    echo "ERROR: $SCENARIOS_RUN scenario(s) ran but made ZERO assertions — a green verdict over no checks is not a pass (nexus-poplq)." >&2
+    exit 1
+fi
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
 

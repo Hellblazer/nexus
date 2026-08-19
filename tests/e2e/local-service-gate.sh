@@ -673,6 +673,8 @@ fi   # else: host-PG / dev mode — fall through to auto-discovery
 # and cost nightlies 2026-08-01/02 (skipped 21 -> 28, budget 25).
 # Mechanically enforced by tests/test_shell_continuation_lint.py.
 NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SERVICE_PORT" NX_SERVICE_TOKEN="$SERVICE_TOKEN" \
+  NX_GATE_SERVICE_EXPECTED=1 \
+  NX_GATE_SERVICE_HOST=127.0.0.1 NX_GATE_SERVICE_PORT="$SERVICE_PORT" NX_GATE_SERVICE_TOKEN="$SERVICE_TOKEN" \
   NEXUS_CONFIG_DIR="$SCRATCH" \
   uv run pytest -m "integration and not lived_in and not cloud_mode" -q -rs --color=no "$@" 2>&1 | tee "$SCRATCH/pytest.out"
 STATUS=${PIPESTATUS[0]}

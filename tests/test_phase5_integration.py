@@ -639,8 +639,8 @@ class TestDoctorTrimTelemetry:
         """Default 30d retention reaches the store as days=30; count rendered."""
         result, spy = self._spy_and_trim(runner, trim_days=None)
         assert result.exit_code == 0, result.output
-        spy.trim_search_telemetry.assert_called_once_with(days=30)
-        spy.trim_hook_failures.assert_called_once_with(days=30)
+        spy.trim_search_telemetry.assert_called_once_with(days=30, dry_run=False)
+        spy.trim_hook_failures.assert_called_once_with(days=30, dry_run=False)
         assert "Trimmed 1 search_telemetry" in result.output
 
     def test_aggressive_retention_days_7(
@@ -649,8 +649,41 @@ class TestDoctorTrimTelemetry:
         """``--days 7`` is passed through to both engine-side trims."""
         result, spy = self._spy_and_trim(runner, trim_days=7)
         assert result.exit_code == 0, result.output
-        spy.trim_search_telemetry.assert_called_once_with(days=7)
-        spy.trim_hook_failures.assert_called_once_with(days=7)
+        spy.trim_search_telemetry.assert_called_once_with(days=7, dry_run=False)
+        spy.trim_hook_failures.assert_called_once_with(days=7, dry_run=False)
+
+    def test_dry_run_previews_the_count_and_says_would_trim(
+        self, runner: CliRunner,
+    ) -> None:
+        """``--trim-telemetry --dry-run`` reports the preview count without
+        deleting — the search_telemetry trim-preview gap this closes."""
+        from unittest.mock import MagicMock
+
+        spy = MagicMock()
+        spy.trim_search_telemetry.return_value = 4
+        spy.trim_hook_failures.return_value = 2
+        # nexus-5uoxu: stub the dry-run engine-version gate as satisfied —
+        # this test is about the preview plumbing, not the belt (the gate
+        # has its own suite in test_false_clean_diagnostics_service_mode).
+        probe_resp = MagicMock()
+        probe_resp.json.return_value = {"release_version": "0.1.81"}
+        probe_resp.raise_for_status.return_value = None
+        with patch(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            return_value=spy,
+        ), patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1", "tk"),
+        ), patch("httpx.get", return_value=probe_resp):
+            result = runner.invoke(
+                main, ["doctor", "--trim-telemetry", "--dry-run"],
+            )
+        assert result.exit_code == 0, result.output
+        spy.trim_search_telemetry.assert_called_once_with(days=30, dry_run=True)
+        spy.trim_hook_failures.assert_called_once_with(days=30, dry_run=True)
+        assert "Would trim 4 search_telemetry" in result.output
+        assert "Would trim 2 hook_failures" in result.output
+        assert "Trimmed" not in result.output
 
     def test_empty_table_is_safe(
         self, runner: CliRunner, tmp_path: Path,

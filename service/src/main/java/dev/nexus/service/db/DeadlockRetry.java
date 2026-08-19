@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 
 import java.sql.SQLException;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 /**
@@ -41,6 +42,26 @@ public final class DeadlockRetry {
     /** PostgreSQL SQLSTATE for {@code deadlock_detected}. */
     static final String SQLSTATE_DEADLOCK = "40P01";
 
+    /**
+     * Test-visible observability counter (nexus-0uuit/sybbh crit-fix critique
+     * 2026-08-19, substantive-critic): total number of retry attempts this
+     * belt has actually issued, process-wide. A concurrency regression test
+     * can use this to distinguish "the thing under test closed its own
+     * deadlock source" from "the belt silently absorbed a deadlock that
+     * escaped it" — {@code escaped == 0} alone cannot tell those apart, since
+     * this belt is deliberately designed to make the latter look like the
+     * former to the CALLER. Global/JVM-wide by design (this is a shared
+     * belt), so a caller measuring one code path's retry behavior must
+     * snapshot the count immediately before and after that path runs, not
+     * assume the JVM has no other concurrent DeadlockRetry traffic.
+     */
+    private static final AtomicLong RETRY_ATTEMPTS = new AtomicLong();
+
+    /** @return total retry attempts issued by {@link #run} so far, process-wide. */
+    public static long retryAttemptCount() {
+        return RETRY_ATTEMPTS.get();
+    }
+
     private DeadlockRetry() {
     }
 
@@ -68,6 +89,7 @@ public final class DeadlockRetry {
                 return writeTxn.get();
             } catch (RuntimeException ex) {
                 if (isDeadlock(ex) && ++attempt < MAX_ATTEMPTS) {
+                    RETRY_ATTEMPTS.incrementAndGet();
                     log.warn("event=deadlock_retry context={} attempt={} maxAttempts={}",
                             context, attempt, MAX_ATTEMPTS);
                     backoff(attempt);

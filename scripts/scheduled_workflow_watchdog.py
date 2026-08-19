@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -58,7 +59,7 @@ DEFAULT_STALE_AFTER_DAYS = 16
 class Finding:
     workflow: str
     path: str
-    kind: str  # "failing" | "never-ran" | "stale" | "nothing-to-watch"
+    kind: str  # "failing" | "never-ran" | "stale" | "nothing-to-watch" | "name-claims-cadence"
     detail: str
 
     def as_markdown(self) -> str:
@@ -86,6 +87,68 @@ def scheduled_paths(workflow_dir: Path) -> dict[str, Path]:
         if isinstance(triggers, dict) and "schedule" in triggers:
             out[f".github/workflows/{path.name}"] = path
     return out
+
+
+#: nexus-idtjs: cadence claims a workflow NAME can make, each mapped to the
+#: trigger key(s) that would honor it. Deliberately keyword-based and
+#: approximate — a false positive costs one rename; a false negative costs a
+#: journey nobody runs for months (era-hop-mvv sat titled "weekly" with a
+#: dispatch-only trigger block for 12 days, nexus-4viey).
+_CADENCE_CLAIM_RES: tuple[tuple["re.Pattern[str]", tuple[str, ...]], ...] = (
+    (re.compile(r"\bweekly\b", re.IGNORECASE), ("schedule",)),
+    (re.compile(r"\bnightly\b", re.IGNORECASE), ("schedule",)),
+    (re.compile(r"\bdaily\b", re.IGNORECASE), ("schedule",)),
+    (re.compile(r"\bhourly\b", re.IGNORECASE), ("schedule",)),
+    (re.compile(r"\bon every pull request\b", re.IGNORECASE), ("pull_request",)),
+    (re.compile(r"\bon every push\b", re.IGNORECASE), ("push",)),
+    (re.compile(r"\bon [-\w /]+ changes\b", re.IGNORECASE), ("push", "pull_request")),
+)
+
+
+def _trigger_keys(triggers: object) -> set[str]:
+    """The `on:` block's trigger names, tolerant of the three YAML shapes
+    (`on: push`, `on: [push, pull_request]`, `on: {push: ..., schedule: ...}`)."""
+    if isinstance(triggers, dict):
+        return {str(k) for k in triggers}
+    if isinstance(triggers, str):
+        return {triggers}
+    if isinstance(triggers, list):
+        return {str(t) for t in triggers}
+    return set()
+
+
+def name_claim_findings(workflow_dir: Path) -> list[Finding]:
+    """nexus-idtjs: the fourth finding kind — a NAME that promises a cadence
+    the `on:` block does not provide. This is scanned over EVERY workflow,
+    not just the scheduled ones, because the population `scheduled_paths`
+    selects is by construction the population that cannot exhibit the bug:
+    the workflows whose names lie are exactly the ones a schedule-keyed
+    filter cannot see."""
+    findings: list[Finding] = []
+    for path in sorted(workflow_dir.glob("*.y*ml")):
+        try:
+            doc = yaml.safe_load(path.read_text())
+        except yaml.YAMLError as exc:  # a broken workflow is a finding, not a skip
+            raise SystemExit(f"{path}: unparseable workflow: {exc}") from exc
+        if not isinstance(doc, dict):
+            continue
+        name = str(doc.get("name", ""))
+        keys = _trigger_keys(doc.get("on", doc.get(True)))
+        for rx, satisfying in _CADENCE_CLAIM_RES:
+            m = rx.search(name)
+            if m and not (keys & set(satisfying)):
+                findings.append(Finding(
+                    workflow=path.name,
+                    path=f".github/workflows/{path.name}",
+                    kind="name-claims-cadence",
+                    detail=(
+                        f"name claims `{m.group(0)}` but the `on:` block has "
+                        f"{sorted(keys) if keys else 'no triggers at all'} — the title "
+                        "asserts coverage the triggers do not provide; rename it to "
+                        "the truth or restore the trigger (nexus-idtjs)"
+                    ),
+                ))
+    return findings
 
 
 def classify(
@@ -234,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
     names = {p: p.rsplit("/", 1)[-1] for p in paths}
     latest = fetch_latest_runs(args.repo, token, list(paths)) if paths else {}
     findings = classify(names, latest, datetime.now(timezone.utc), args.stale_after_days)
+    # nexus-idtjs: scanned over ALL workflows, not just the scheduled subset.
+    findings += name_claim_findings(Path(args.workflow_dir))
 
     print(render(findings))
     # Reported on stderr so the workflow can log it without polluting the body.
