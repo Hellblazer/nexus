@@ -662,10 +662,19 @@ class TestDoctorTrimTelemetry:
         spy = MagicMock()
         spy.trim_search_telemetry.return_value = 4
         spy.trim_hook_failures.return_value = 2
+        # nexus-5uoxu: stub the dry-run engine-version gate as satisfied —
+        # this test is about the preview plumbing, not the belt (the gate
+        # has its own suite in test_false_clean_diagnostics_service_mode).
+        probe_resp = MagicMock()
+        probe_resp.json.return_value = {"release_version": "0.1.81"}
+        probe_resp.raise_for_status.return_value = None
         with patch(
             "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
             return_value=spy,
-        ):
+        ), patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+            return_value=("http://127.0.0.1:1", "tk"),
+        ), patch("httpx.get", return_value=probe_resp):
             result = runner.invoke(
                 main, ["doctor", "--trim-telemetry", "--dry-run"],
             )

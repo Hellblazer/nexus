@@ -504,6 +504,52 @@ def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
 
     from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
+    if dry_run:
+        # nexus-5uoxu belt-and-braces: the dry-run branch is ENGINE-side.
+        # An engine below the version that introduced the 3-arg overload
+        # ignores the unknown ``dry_run`` JSON field and takes the DELETE
+        # branch — a preview flag that deletes (the exact reason 2c1f929c
+        # was reverted out of 7.6.1, which pinned engine v0.1.71). The
+        # paired-release choreography prevents that pairing for THIS
+        # product's installs; this probe protects every other pairing
+        # (older cloud engine, lagging deploy, hand-configured endpoint):
+        # refuse the preview outright when the SERVING engine cannot honor
+        # it. Fail-closed: an unprobeable version is a refusal too — a
+        # preview must never be a gamble.
+        from nexus.engine_version import (  # noqa: PLC0415 — deferred local import
+            TRIM_DRY_RUN_MIN_ENGINE_VERSION,
+            parse_engine_version,
+        )
+
+        serving: tuple[int, int, int] | None = None
+        try:
+            # Evidence-gated resolver (review Important, nexus-7dsgp class):
+            # the bare resolve_service_endpoint(wait_budget_s=0) can read
+            # falsely unresolvable in the 5-10s supervisor-respawn gap and
+            # spuriously refuse a preview the store call would have served.
+            from nexus.db.service_endpoint import resolve_service_endpoint_with_evidence_gate  # noqa: PLC0415 — deferred local import
+
+            base_url, _token = resolve_service_endpoint_with_evidence_gate()
+            resp = httpx.get(f"{base_url.rstrip('/')}/version", timeout=10)
+            resp.raise_for_status()
+            body = resp.json()
+            if isinstance(body, dict):
+                serving = parse_engine_version(body.get("release_version"))
+        except Exception:  # noqa: BLE001 — fail-closed below; the refusal message carries the remedy
+            serving = None
+        if serving is None or serving < TRIM_DRY_RUN_MIN_ENGINE_VERSION:
+            floor = ".".join(str(x) for x in TRIM_DRY_RUN_MIN_ENGINE_VERSION)
+            got = ".".join(str(x) for x in serving) if serving else "unprobeable"
+            click.echo(
+                f"Error: --dry-run requires engine-service v{floor}+ (serving: "
+                f"{got}). On an older engine the preview flag is silently "
+                "dropped and the trim DELETES what it claims to preview — "
+                "refusing. Upgrade the engine (nx upgrade / redeploy), or run "
+                "without --dry-run only if you intend a real trim.",
+                err=True,
+            )
+            raise click.exceptions.Exit(2)
+
     try:
         store = HttpTelemetryStore()
         deleted_search = store.trim_search_telemetry(days=days, dry_run=dry_run)

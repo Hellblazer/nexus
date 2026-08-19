@@ -114,6 +114,93 @@ class TestAspectsGcRefusesInsteadOfFalseClean:
 # ── nx doctor --trim (nexus-ingey b) ────────────────────────────────────────
 
 
+from contextlib import contextmanager
+
+
+@contextmanager
+def _engine_version_probe(release_version: str | None):
+    """Stub the nexus-5uoxu dry-run engine-version probe: a resolvable
+    endpoint whose /version reports *release_version* (None -> the GET
+    raises, the unprobeable arm)."""
+    from unittest.mock import MagicMock
+
+    resp = MagicMock()
+    resp.json.return_value = {"release_version": release_version}
+    resp.raise_for_status.return_value = None
+    with patch(
+        "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+        return_value=("http://127.0.0.1:1", "tk"),
+    ), patch(
+        "httpx.get",
+        side_effect=(RuntimeError("probe down") if release_version is None else None),
+        return_value=resp,
+    ):
+        yield
+
+
+class TestTrimDryRunEngineGate:
+    """nexus-5uoxu belt-and-braces: an engine below the dryRun floor
+    silently drops the field and DELETES what the flag claims to preview —
+    the client must refuse, fail-closed, before any store call."""
+
+    def _run(self, dry_run: bool, version: str | None):
+        from nexus.commands import doctor as doctor_mod
+
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as http_store, \
+             _engine_version_probe(version):
+            http_store.return_value.trim_search_telemetry.return_value = 0
+            http_store.return_value.trim_hook_failures.return_value = 0
+            runner = CliRunner()
+            with runner.isolation():
+                doctor_mod._run_trim_telemetry(days=30, dry_run=dry_run)
+            return http_store
+
+    def test_below_floor_engine_refuses_the_preview(self, service_mode: None) -> None:
+        import click
+
+        with pytest.raises(click.exceptions.Exit):
+            self._run(dry_run=True, version="0.1.80")
+
+    def test_unprobeable_engine_refuses_fail_closed(self, service_mode: None) -> None:
+        import click
+
+        with pytest.raises(click.exceptions.Exit):
+            self._run(dry_run=True, version=None)
+
+    def test_at_floor_engine_previews(self, service_mode: None) -> None:
+        store = self._run(dry_run=True, version="0.1.81")
+        store.return_value.trim_search_telemetry.assert_called_once_with(
+            days=30, dry_run=True)
+
+    def test_refusal_never_reaches_a_store(self, service_mode: None) -> None:
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as http_store, \
+             _engine_version_probe("0.1.71"):
+            runner = CliRunner()
+            with runner.isolation():
+                with pytest.raises(click.exceptions.Exit):
+                    doctor_mod._run_trim_telemetry(days=30, dry_run=True)
+        http_store.return_value.trim_search_telemetry.assert_not_called()
+        http_store.return_value.trim_hook_failures.assert_not_called()
+
+    def test_real_trim_never_probes_or_refuses(self, service_mode: None) -> None:
+        """dry_run=False is the pre-existing contract — no probe, no gate."""
+        from nexus.commands import doctor as doctor_mod
+
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as http_store, \
+             patch("httpx.get", side_effect=AssertionError("real trim must not probe /version")):
+            http_store.return_value.trim_search_telemetry.return_value = 1
+            http_store.return_value.trim_hook_failures.return_value = 1
+            runner = CliRunner()
+            with runner.isolation():
+                doctor_mod._run_trim_telemetry(days=30, dry_run=False)
+        http_store.return_value.trim_search_telemetry.assert_called_once_with(
+            days=30, dry_run=False)
+
+
 class TestTrimTelemetryRoutes:
     def test_trim_routes_to_the_service_and_never_opens_sqlite(
         self, service_mode: None,
@@ -146,7 +233,8 @@ class TestTrimTelemetryRoutes:
         versa) would be a worse footgun than the missing feature."""
         from nexus.commands import doctor as doctor_mod
 
-        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as http_store:
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as http_store, \
+             _engine_version_probe("0.1.81"):
             http_store.return_value.trim_search_telemetry.return_value = 2
             http_store.return_value.trim_hook_failures.return_value = 1
             runner = CliRunner()
