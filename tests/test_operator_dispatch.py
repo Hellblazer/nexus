@@ -1008,7 +1008,12 @@ class TestErrorHandling:
 
         with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorTimeoutError):
-                await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=0.05)
+                # Outer bound: on a real regression (wait() back outside the
+                # guard) the dispatch hangs for the mock's 999s sleep; fail
+                # fast instead of stalling a worker (no pytest-timeout here).
+                await asyncio.wait_for(
+                    claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=0.05), timeout=2
+                )
 
         proc.kill.assert_called_once()
 
