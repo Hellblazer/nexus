@@ -266,6 +266,58 @@ def test_kill_control_declared_commit_passes() -> None:
     assert result.ok
 
 
+def test_every_ledger_bullet_parses() -> None:
+    """Every `- \\`sha\\`` bullet under ## Unshipped / ## Shipped must match
+    its section's regex — a malformed line is silently DROPPED by
+    parse_ledger (no error), which can reopen the exact declared-vs-gate
+    contradiction the Shipped-counts-as-declared fix closed (found live:
+    the nexus-o8dil.33 line used `-- engine tag` phrasing in ## Shipped and
+    vanished from ledger.shipped with zero signal)."""
+    section = None
+    bad: list[str] = []
+    for line in wctp.DEFAULT_LEDGER_PATH.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## Unshipped"):
+            section = wctp._UNSHIPPED_RE
+        elif line.startswith("## Shipped"):
+            section = wctp._SHIPPED_RE
+        elif line.startswith("## "):
+            section = None
+        elif section is not None and line.startswith("- `") and not section.match(line):
+            bad.append(line)
+    assert not bad, (
+        "ledger bullet(s) do not match their section's regex and would be "
+        f"silently dropped by parse_ledger: {bad}"
+    )
+
+
+def test_shipped_entry_counts_as_declared() -> None:
+    """A flagged commit declared under ## Shipped is NOT undeclared
+    (nexus-55r6o follow-up): the release-PR window moves an entry
+    Unshipped -> Shipped before the tag exists — the exact remedy the
+    release-ledger-gate prescribes — while the commit is still inside the
+    scanned range. Counting only Unshipped made the PR gate and this lint
+    contradictory for every release PR."""
+    synthetic = wctp.FlaggedCommit(
+        sha="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        subject="synthetic both-halves commit, declared Shipped pre-tag",
+        engine_paths=("service/src/main/java/dev/nexus/service/http/FakeHandler.java",),
+        client_paths=("src/nexus/catalog/http_catalog_client.py",),
+    )
+    ledger = wctp.Ledger(
+        shipped={
+            "deadbeef": wctp.LedgerEntry(
+                sha="deadbeef",
+                bead="nexus-fake",
+                note="release-PR-window fixture",
+                shipped_in="v9.9.9",
+            )
+        }
+    )
+    result = wctp.evaluate([synthetic], ledger, newest_tag=None)
+    assert result is not wctp.GIT_UNAVAILABLE
+    assert result.ok
+
+
 def test_stale_ledger_entry_detected() -> None:
     """An Unshipped entry whose commit is already an ancestor of the newest
     published tag must be flagged stale -- reuses a real, permanently-shipped

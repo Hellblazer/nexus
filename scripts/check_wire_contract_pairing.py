@@ -374,10 +374,26 @@ def parse_ledger(path: pathlib.Path) -> Ledger:
     return ledger
 
 
-def _sha_declared(sha: str, unshipped: dict[str, LedgerEntry]) -> bool:
-    """A flagged full 40-char sha is declared if any ledger key is a prefix
-    of it (ledger entries may use abbreviated shas)."""
-    return any(sha.startswith(key) for key in unshipped)
+def _sha_declared(sha: str, ledger: Ledger) -> bool:
+    """A flagged full 40-char sha is declared if any ledger key -- Unshipped
+    OR Shipped -- is a prefix of it (ledger entries may use abbreviated shas).
+
+    Shipped counts as declared (nexus-55r6o follow-up, v7.11.0 release PR):
+    a release PR that carries a both-halves commit's client half moves its
+    entry Unshipped -> Shipped BEFORE the tag exists -- the exact remedy
+    ci.yml's release-ledger-gate comment prescribes, since that gate blocks
+    on any Unshipped entry with no --ack-client-lag possible in CI. Until
+    the tag publishes, the commit stays inside the scanned
+    ``<newest published tag>..HEAD`` range, so counting only Unshipped here
+    made the two checks contradictory for every release-PR window. Counting
+    a Shipped declaration is sound because both halves live in ONE commit:
+    any flagged commit is reachable from HEAD, so its client half is in the
+    tree by construction -- there is no state where a Shipped claim can hide
+    a missing client half. The STALE check below still forces Unshipped
+    entries over to Shipped once the tag publishes."""
+    return any(
+        sha.startswith(key) for key in (*ledger.unshipped, *ledger.shipped)
+    )
 
 
 @dataclass(frozen=True)
@@ -403,7 +419,7 @@ def evaluate(
     treats "could not verify" as "must be clean".
     """
     undeclared = tuple(
-        c for c in flagged if not _sha_declared(c.sha, ledger.unshipped)
+        c for c in flagged if not _sha_declared(c.sha, ledger)
     )
     stale: list[LedgerEntry] = []
     if newest_tag not in (None, GIT_UNAVAILABLE):
