@@ -214,6 +214,26 @@ def should_skip_for_reason(command: str) -> bool:
     return len(reason) >= ESCAPE_REASON_MIN_LENGTH
 
 
+def degraded_token_variants(segment: str) -> list[list[str]]:
+    """Rough tokenizations of a segment ``shlex`` rejected for unbalanced
+    quoting (nexus-2e874). The old ``except ValueError: continue`` silently
+    DROPPED the whole segment, so a single stray quote anywhere in a gated
+    command fully bypassed the guard (``git push origin main
+    --receive-pack="x`` was ALLOWed with zero warning).
+
+    Two variants, because neither alone keeps every anchor visible
+    (review Important-1): quote-chars-as-whitespace keeps a quote glued to
+    a token BOUNDARY splitting (``--receive-pack="x`` -> ``--receive-pack=``,
+    ``x``), while quote-chars-removed keeps a quote INSIDE a verb from
+    fracturing it (``gi"t push`` -> ``git``, ``push``). Callers must treat a
+    match in EITHER variant as a match — the safe, over-inclusive
+    direction; only quoting fidelity inside VALUES is lost.
+    """
+    blanked = segment.replace('"', " ").replace("'", " ").split()
+    stripped = segment.replace('"', "").replace("'", "").split()
+    return [blanked] if blanked == stripped else [blanked, stripped]
+
+
 # ---------------------------------------------------------------------------
 # Telemetry
 # ---------------------------------------------------------------------------
