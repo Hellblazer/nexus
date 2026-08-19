@@ -60,3 +60,9 @@ entry-point skills. Files:
 - `conexus/skills/research/SKILL.md`
 - `conexus/skills/review/SKILL.md`
 - `conexus/skills/using-nx-skills/SKILL.md`
+
+Sequential-thinking guidance made unconditional (Sam directive 2026-08-19: "use it at every
+decision point"; every prior mention was scoped to "non-trivial"/"complex"/"obstacles", which
+measured to zero top-level calls in a full session). Files beyond the list above:
+- `conexus/agents/test-validator.md`
+- `conexus/agents/deep-analyst.md`

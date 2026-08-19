@@ -260,8 +260,11 @@ cat <<'SEQTHINK'
 ## Sequential Thinking
 
 Tool: mcp__plugin_conexus_sequential-thinking__sequentialthinking
-Use for: debugging hypotheses, design choices, plan evaluation, risk assessment.
-Params: needsMoreThoughts=true (continue), isRevision=true+revisesThought=N (correct), branchFromThought=N+branchId="alt" (explore).
+Call it BEFORE every decision (what to read, which fix, how to read a result, what to
+report) — not only "complex" ones; the qualifier is how it goes unused. The thought is
+the visible record of your reasoning.
+Params: needsMoreThoughts=true (continue), isRevision=true+revisesThought=N (correct),
+branchFromThought=N+branchId="alt" (explore).
 SEQTHINK
 
 if [[ $SKIP_OPERATORS -eq 0 ]]; then

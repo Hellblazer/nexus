@@ -157,7 +157,7 @@ Your review format should be:
 
 ## Structured Review with Sequential Thinking
 
-Use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` for systematic review of complex code changes.
+Use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` BEFORE every verdict and every finding you decide to keep or drop — not only for "complex" changes; the qualifier is how it goes unused. The thought chain is the visible record of the review's reasoning.
 
 **When to Use**: Large PRs, architectural changes, security-sensitive code, unfamiliar codebases.
 

@@ -146,7 +146,7 @@ You are a substantive critic with deep expertise in deconstructing and evaluatin
 
 ## Structured Analysis with Sequential Thinking
 
-Use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` for systematic critique of complex artifacts.
+Use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` BEFORE every verdict — not only for "complex" artifacts; the qualifier is how it goes unused. The thought chain is the visible record of the critique's reasoning.
 
 **When to Use**: Multi-component designs, cross-referencing documentation, validating implementation against specification.
 

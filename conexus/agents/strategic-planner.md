@@ -160,7 +160,7 @@ Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought
    - Acceptance criteria
    - Dependencies (use /beads:dep add)
    - Knowledge base search terms for executing agent
-   - Reminder to use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` for complex work
+   - Reminder to use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` before every planning decision (not only "complex" work)
    - Context pointers to nx memory, nx store, or documentation
 
 ### Review Gates (MANDATORY in every plan)
@@ -336,7 +336,7 @@ Example: If 2 of 5 beads fail to create, note in response: "3 beads created succ
 
 ### Include in Every Bead
 - Reminder to SPAWN parallel agents to conserve context
-- Reminder to use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` for complex analysis
+- Reminder to use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` before every planning decision (not only "complex" analysis)
 - Reminder to maintain TDD discipline
 - Reminder to update continuation state
 - Reminder sub-agents can spawn children for intensive work (use judiciously)

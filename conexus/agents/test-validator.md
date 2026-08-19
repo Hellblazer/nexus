@@ -219,7 +219,7 @@ can be zero in normal operation, that is a finding, not a footnote.
 
 ## Systematic Analysis with Sequential Thinking
 
-Use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` for systematic test failure analysis and coverage assessment.
+Use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` BEFORE every assessment — every failure you classify, every coverage verdict; not only the hard ones.
 
 **When to Use**: Multiple test failures, flaky tests, coverage gap analysis, test suite health assessment.
 
