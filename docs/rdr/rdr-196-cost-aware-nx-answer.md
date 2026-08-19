@@ -77,7 +77,20 @@ fastest is never preferred because nothing records which that is. `nx_answer(bud
 documents itself as "reserved for future enforcement" (`core.py:6283`): a plan that will cost
 $0.60 runs to completion against a $0.25 cap.
 
-#### Gap 4: The one engine-assignment axis nexus has is chosen by heuristic
+#### Gap 4: The tool-free operator dispatch loads the user's entire MCP server set — ~2× context and cost per call, for tools it cannot use
+
+`claude_dispatch`'s default argv passes `--mcp-config` only when a caller opts into tools and
+never passes `--strict-mcp-config` (`dispatch.py:643-694`), so every operator subprocess
+inherits every MCP server configured for the user and loads all their tool schemas into
+context. Measured (196-research-3): the identical trivial dispatch costs **$1.84 / 92,052
+context tokens** with the servers loaded vs **$0.91 / 45,396** with a strict empty MCP
+config, on the default model. In `-p` mode without `--allowedTools` those tools cannot be
+called, so the overhead buys nothing. Every nx_answer step, `nx enrich aspects` extraction,
+`nx_tidy` and the inline planner pays it; `commands/enrich.py::_PER_PAPER_COST_USD = 0.01`
+is ~100× under on a default-model box. This is a Phase 0: one argv change, measurable on the
+Phase 1 telemetry, no routing required.
+
+#### Gap 5: The one engine-assignment axis nexus has is chosen by heuristic
 
 `operator_filter` / `operator_groupby` / `operator_aggregate` choose a SQL fast path over
 `document_aspects` or a `claude -p` dispatch via `source="auto"` keyword cues
@@ -129,19 +142,45 @@ Adjacent nexus work this RDR must not duplicate:
 
 - Paper read in full (sections 1–6; 76 chunks, catalog 1.14.51). Build order stated by the
   authors: (1) unified cost model over fixed topology, (2) generation, (3) refiner, (4) cache.
-- Code reads cited in the gaps above; `claude -p` result-envelope fields (`total_cost_usd`,
-  `duration_ms`, `usage.input_tokens/output_tokens`, `model`) are what the subprocess emits
-  and what Gap 1 would capture — **Assumed** until verified against the installed CLI's
-  stream-json `result` event (fixture: `tests/fixtures/claude_dispatch_stream_json_sample.ndjson`
-  landed this week by the h33x8.6 a3 work and is the place to check).
+- Code reads cited in the gaps above.
+- Four research records in T2 (`nexus_rdr/196-research-1..4`), summarized:
+  - **196-R1 (verified, spike)** — the stream-json `result` event carries `total_cost_usd`,
+    `duration_ms`, `duration_api_ms`, `num_turns`, `usage.{input,output,cache_creation,cache_read}`
+    and `modelUsage.{<model>: {…, costUSD, canonicalModel}}` (per-model, so bundled multi-turn
+    dispatches are attributable); assistant events carry `message.model` + per-turn usage.
+    `dispatch.py` keeps none of it.
+  - **196-R2 (verified, spike)** — `--model haiku|sonnet` composes with `--json-schema` +
+    `stream-json` + `--no-session-persistence`; structured output validates; `modelUsage`
+    reports the canonical id. Cost of one trivial operator-shaped dispatch, same box, same day:
+
+    | dispatch shape | cost | context tokens |
+    | --- | --- | --- |
+    | default model, user's MCP servers loaded (today's `claude_dispatch`) | $1.84 | 92,052 |
+    | default model, `--strict-mcp-config` empty | $0.91 | 45,396 |
+    | sonnet, strict empty MCP | $0.34 | 56,669 |
+    | haiku, strict empty MCP | $0.07 | 36,170 |
+
+    ~13× spread between tiers at identical output; harness context dominates the tokens
+    regardless of operator input.
+  - **196-R3 (verified, spike)** — Gap 4 above: no `--strict-mcp-config` in the tool-free
+    default.
+  - **196-R4 (documented, source search)** — no operator-level quality proxy exists; RDR-090's
+    `scripts/bench/` harness scores *retrieval* (NDCG@3, 5 queries in `bench/queries/spike_5q.yaml`),
+    which RDR-179 P2 plans to operationalize. Phase 2 therefore defines its own proxy:
+    tier-agreement against the strong model on a fixed operator-input set (exact membership for
+    filter/groupby, rank correlation for rank, field-level F1 for extract), with a named threshold
+    before any tier flips to default; LLM-as-judge alone is not the proxy for this decision. The
+    RDR-090/179 bench remains the retrieval-quality check Phase 3 must not regress.
 
 #### Dependency Source Verification
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| `claude -p` stream-json result envelope | No (fixture available) | Whether `total_cost_usd`/`usage`/`model` are present per run, and per-turn for bundled steps — to verify before Phase 1 |
-| `claude -p --model` | No | Accepts model aliases (`sonnet`, `haiku`, `opus`) and full ids; confirm it composes with `--json-schema` and `--output-format stream-json` |
+| `claude -p` stream-json result envelope | Yes (fixture + live spike, 196-R1) | `total_cost_usd`, `usage.*`, `modelUsage` per model, `duration_ms` present per run; per-turn usage on assistant events |
+| `claude -p --model` | Yes (live spike, 196-R2) | `haiku`/`sonnet` aliases compose with `--json-schema` + stream-json; canonical id reported in `modelUsage` |
+| `claude -p --strict-mcp-config` | Yes (live spike, 196-R3) | Empty strict config halves context/cost for the tool-free default |
 | engine `nx_answer_runs` DDL | Yes | Columns as listed in Gap 1; per-step table does not exist |
+| RDR-090 bench harness | Yes (196-R4) | Retrieval-only proxy (NDCG@3, 5 queries); no operator-output proxy exists |
 
 ### Key Discoveries
 
@@ -157,14 +196,16 @@ Adjacent nexus work this RDR must not duplicate:
 
 ### Critical Assumptions
 
-- [ ] The `claude -p` result envelope exposes cost/usage/model per dispatch (and per bundled
-      turn) — **Status**: Unverified — **Method**: Spike against the installed CLI + fixture.
-- [ ] `--model` composes with `--json-schema` + `stream-json` for every operator prompt shape —
-      **Status**: Unverified — **Method**: Spike.
-- [ ] A fixed, cheap-to-run quality proxy exists for at least the extract/filter/rank operators
-      (RDR-090 set, or a small hand-labelled set under `tests/fixtures`) so Phase 2 can say
-      "equal quality" with a number — **Status**: Unverified — **Method**: Source Search
-      (RDR-090 / RDR-179 artifacts) then Spike.
+- [x] The `claude -p` result envelope exposes cost/usage/model per dispatch (and per bundled
+      turn) — **Status**: Verified (196-R1) — **Method**: Spike (fixture + live CLI).
+- [x] `--model` composes with `--json-schema` + `stream-json` — **Status**: Verified (196-R2)
+      for `haiku`/`sonnet` on the operator-shaped trivial prompt — **Method**: Spike. Per-operator
+      prompt shapes are exercised by Phase 2's own runs, not assumed.
+- [x] A quality proxy for Phase 2 — **Status**: Verified-as-ABSENT (196-R4): no operator-level
+      proxy exists; Phase 2 defines tier-agreement-vs-strong on a fixed input set (see Research
+      Findings) — **Method**: Source Search. The proxy's construction is Phase 2 Step 2, in scope.
+- [x] A strict empty MCP config is accepted by the CLI and removes the inherited tool-schema
+      context — **Status**: Verified (196-R3) — **Method**: Spike.
 - [ ] Per-step rows at nx_answer's real volume are negligible store load (h33x8.6: single-digit
       lifetime runs; even at 100/day × 6 steps this is trivial) — **Status**: Verified by
       arithmetic — **Method**: Docs Only (acceptable: not load-bearing at this volume).
@@ -175,7 +216,14 @@ Adjacent nexus work this RDR must not duplicate:
 
 Adopt NOMA's build order, each phase gated by the measurement the previous one produces:
 
-1. **Phase 1 — measure (Gap 1, Gap 4).** Capture per-step `{plan_id, run_id, step_index,
+0. **Phase 0 — stop paying for tools the operator cannot call (Gap 4).** Pass
+   `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` in the tool-free default argv (the
+   opt-in `mcp_servers` path is unchanged). Measured on the default model: ~2× fewer context
+   tokens and ~2× lower cost per dispatch before any routing. Lands with Phase 1 so the
+   telemetry records the post-fix baseline; correct `_PER_PAPER_COST_USD` from the measured
+   per-dispatch cost rather than the 0.01 literal.
+
+1. **Phase 1 — measure (Gap 1, Gap 5).** Capture per-step `{plan_id, run_id, step_index,
    operator, source (sql|llm|bundle), model, input_tokens, output_tokens, cost_usd,
    elapsed_ms, ok}` from the dispatch result envelope and the operator fast-path branch; write
    them alongside the run row; stop writing `cost_usd=0.0` (sum of steps). Surface via
@@ -331,6 +379,11 @@ One `nx_answer` call end-to-end on a multi-step plan produces a run row whose `c
 the sum of its step rows, each step row carrying the model and token counts the subprocess
 reported, and `nx_answer(..., structured=True)` returns the per-step breakdown. Asserted by a
 test against the engine substrate, not a mock.
+
+### Phase 0: Strict Empty MCP Config for the Tool-Free Default
+
+#### Step 1: `--strict-mcp-config` + empty `--mcp-config` in `claude_dispatch`'s base argv; test asserts the opt-in `mcp_servers` path still passes its own config
+#### Step 2: replace `_PER_PAPER_COST_USD` literal with a measured per-dispatch figure (or derive from Phase 1 history once available)
 
 ### Phase 1: Measure
 
