@@ -183,7 +183,23 @@ jobs:
           # Match the section for this version (between its heading and the next ## heading)
           pattern = rf'## \[{re.escape(tag)}\][^\n]*\n(.*?)(?=\n## \[|\Z)'
           m = re.search(pattern, text, re.DOTALL)
-          print(m.group(1).strip() if m else f"Release {tag}")
+          # nexus-5crgr: this used to fall back to a stub body ("Release
+          # X.Y.Z") and publish anyway — the one version surface with no
+          # parity enforcement. A missing section now fails the release,
+          # matching the adjacent version checks' exit 1 discipline; the
+          # pytest parity half lives in tests/test_plugin_structure.py.
+          if m is None:
+              print(f"::error::CHANGELOG.md has no '## [{tag}]' section — "
+                    "refusing to publish with a stub release body (nexus-5crgr)",
+                    file=sys.stderr)
+              sys.exit(1)
+          body = m.group(1).strip()
+          if not body:
+              print(f"::error::CHANGELOG.md's '## [{tag}]' section is EMPTY — "
+                    "refusing to publish with a blank release body (nexus-5crgr)",
+                    file=sys.stderr)
+              sys.exit(1)
+          print(body)
           EOF
           echo "Release notes:"
           cat /tmp/release_notes.md

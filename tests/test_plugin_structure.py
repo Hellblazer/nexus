@@ -1069,3 +1069,25 @@ class TestRdr080StubAgents:
             f"conexus/agents/{agent_name}.md must reference an MCP tool "
             "(mcp__plugin_conexus_nexus__*) as its redirect target (RDR-080)."
         )
+
+
+def test_changelog_has_a_section_for_pyprojects_version() -> None:
+    """nexus-5crgr: six of the seven version surfaces had parity tests; the
+    CHANGELOG had none, and release.yml silently fell back to a stub
+    release body when the section was missing (that fallback is now a hard
+    failure — this is the pre-tag half, which catches the omission on the
+    release branch before the PR merges, where the fix is cheapest)."""
+    version = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]["version"]
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text()
+    m = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=\n## \[|\Z)",
+                  changelog, re.DOTALL | re.MULTILINE)
+    assert m, (
+        f"CHANGELOG.md has no '## [{version}]' section for pyproject.toml's "
+        "current version — the release would have published a stub body "
+        "pre-nexus-5crgr, and now fails at the tag instead; add the section "
+        "in the same commit that bumps the version"
+    )
+    assert m.group(1).strip(), (
+        f"CHANGELOG.md's '## [{version}]' section is empty — a heading with "
+        "no content is the same stub-body problem one level down"
+    )
