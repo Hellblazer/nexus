@@ -1198,11 +1198,35 @@ async def test_mcp_server_round_trip():
     try:
         host, port, token = resolve_service_config()
     except RuntimeError:
-        pytest.skip(
-            "no service endpoint resolvable in the isolated test env "
-            "(export NX_SERVICE_PORT/NX_SERVICE_TOKEN or run via "
-            "tests/e2e/local-service-gate.sh)"
-        )
+        # nexus-4doqz: inside local-service-gate.sh this used to skip with
+        # a message prescribing... running the gate. The gate's
+        # NX_SERVICE_* exports are (correctly) scrubbed by the autouse
+        # _isolate_service_endpoint_env fixture, so resolution failed even
+        # when the gate had provisioned a real service. The gate now ALSO
+        # exports NX_GATE_SERVICE_* — names the scrub does not strip,
+        # carrying the gate's own provisioned endpoint, never ambient
+        # operator credentials. Under the gate (marker set) an unresolvable
+        # endpoint is a FAILURE, never a skip: the gate's own passed-count
+        # is evidence, and a test that silently declines inside its named
+        # enabler is the success-shaped-emptiness class (nexus-moht0).
+        if os.environ.get("NX_GATE_SERVICE_EXPECTED") == "1":
+            host = os.environ.get("NX_GATE_SERVICE_HOST", "")
+            port_s = os.environ.get("NX_GATE_SERVICE_PORT", "")
+            token = os.environ.get("NX_GATE_SERVICE_TOKEN", "")
+            if not (host and port_s and token):
+                pytest.fail(
+                    "local-service-gate.sh set NX_GATE_SERVICE_EXPECTED=1 "
+                    "but the NX_GATE_SERVICE_{HOST,PORT,TOKEN} triplet is "
+                    "incomplete — the gate promised an endpoint it did not "
+                    "deliver (nexus-4doqz: never skip inside the enabler)"
+                )
+            port = int(port_s)
+        else:
+            pytest.skip(
+                "no service endpoint resolvable in the isolated test env "
+                "(export NX_SERVICE_PORT/NX_SERVICE_TOKEN or run via "
+                "tests/e2e/local-service-gate.sh)"
+            )
 
     # nexus-f4wcg: StdioServerParameters(env=None) does NOT inherit os.environ
     # — the MCP SDK strips the child env to a 6-var safe set (HOME, PATH, ...).
