@@ -456,6 +456,13 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # to come through a path this entry cannot distinguish -- accepted, and
     # narrower than ``logs/``.
     "logs/index-",
+    # Per-repo index lock taken by that same background `nx index repo`
+    # run (src/nexus/indexer.py:351, ``locks/<path_hash>.lock``; the
+    # aspect worker daemon uses the same directory, aspect_worker.py:658).
+    # Observed 2026-08-20 as ``ADDED locks/571b8edd.lock`` -- the hash of
+    # this checkout's index run -- during a sibling's pytest run that
+    # coincided with an orchestrator commit.
+    "locks/",
 )
 
 
