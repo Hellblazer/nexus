@@ -10,7 +10,9 @@ Contract pins:
   * ``_run_session_end_synchronously`` calls
     ``nexus.hooks.session_end_flush`` (storage-only path; chroma
     teardown is owned by nx-mcp's lifespan + signal handler + atexit
-    chain, unconditional as of 4.13.0) and swallows exceptions.
+    chain, unconditional as of 4.13.0) and swallows exceptions, then
+    calls the nexus-h33x8.3 capability-census writer (also
+    failure-isolated).
   * Platform-without-fork fallback runs synchronously.
 """
 from __future__ import annotations
@@ -18,6 +20,29 @@ from __future__ import annotations
 import importlib
 import sys
 from unittest.mock import patch
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test in this file now exercises a real (unmocked) call to
+    ``nexus._session_end_census.write_session_capability_census`` via
+    ``_run_session_end_synchronously`` unless the census writer itself is
+    mocked. Left unisolated, that call would resolve THIS pytest
+    process's own ambient session id (``CLAUDE_CODE_SESSION_ID`` is
+    genuinely set when the suite runs inside a live Claude Code Bash
+    tool call) and attempt real work against the developer's actual
+    ``~/.config/nexus/`` -- exactly the ambient-state contamination the
+    project's dev-session hygiene rules exist to prevent. Force
+    resolution to ``None`` for every test here so the writer's own
+    documented no-op-on-no-session path is what actually runs, unless a
+    test explicitly overrides.
+    """
+    monkeypatch.delenv("NX_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    import nexus.session
+    monkeypatch.setattr(nexus.session, "read_claude_session_id", lambda: None)
 
 
 def test_module_does_not_import_nexus_submodules_at_top_level() -> None:
@@ -94,6 +119,101 @@ def test_run_session_end_synchronously_swallows_exceptions() -> None:
 
     with patch("nexus.hooks.session_end_flush", side_effect=boom):
         launcher._run_session_end_synchronously()  # must not raise
+
+
+# ── nexus-h33x8.3: capability-census append in the grandchild ────────────────
+
+
+def test_run_session_end_synchronously_calls_capability_census() -> None:
+    """Tier B delivery point: the census writer runs in the SAME
+    grandchild path as the storage flush -- nexus-h33x8.3's chosen home,
+    since that path is already the fully-detached, stdio-to-/dev/null
+    location (see the module docstring's VISIBILITY note)."""
+    import nexus._session_end_launcher as launcher
+
+    calls: list[str] = []
+    with (
+        patch("nexus.hooks.session_end_flush", side_effect=lambda: calls.append("flush")),
+        patch(
+            "nexus._session_end_census.write_session_capability_census",
+            side_effect=lambda: calls.append("census"),
+        ),
+    ):
+        launcher._run_session_end_synchronously()
+
+    assert calls == ["flush", "census"]
+
+
+def test_capability_census_failure_does_not_break_flush_or_propagate() -> None:
+    """Bead requirement: 'a census failure must NEVER break session-end
+    cleanup (wrap, log via structlog, continue)'."""
+    import nexus._session_end_launcher as launcher
+
+    calls: list[str] = []
+    with (
+        patch("nexus.hooks.session_end_flush", side_effect=lambda: calls.append("flush")),
+        patch(
+            "nexus._session_end_census.write_session_capability_census",
+            side_effect=RuntimeError("census boom"),
+        ),
+    ):
+        launcher._run_session_end_synchronously()  # must not raise
+
+    assert calls == ["flush"]
+
+
+def test_capability_census_failure_is_logged_via_structlog() -> None:
+    """A census failure must be diagnosable from the logs, not just
+    silently dropped (mirrors ``_print_service_tier_summary``'s own
+    debug-log-on-failure discipline)."""
+    import logging
+
+    import structlog
+    from structlog.testing import capture_logs
+
+    import nexus._session_end_launcher as launcher
+
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG))
+    try:
+        with (
+            patch("nexus.hooks.session_end_flush", return_value="stub"),
+            patch(
+                "nexus._session_end_census.write_session_capability_census",
+                side_effect=RuntimeError("census boom"),
+            ),
+            capture_logs() as cap,
+        ):
+            launcher._write_capability_census()
+    finally:
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING))
+
+    events = [entry["event"] for entry in cap]
+    assert "session_end_capability_census_failed" in events
+
+
+def test_capability_census_not_called_in_daemonize_parent_path() -> None:
+    """The first-fork parent must return without running EITHER the
+    storage flush or the capability census -- both live only in the
+    grandchild (extends the existing cleanup-not-in-parent contract to
+    name the census explicitly, per the bead's 'assert WHERE emission
+    happens' instruction)."""
+    import nexus._session_end_launcher as launcher
+
+    census_calls: list[None] = []
+
+    def fake_fork():
+        return 12345  # simulate parent side of first fork
+
+    with (
+        patch("os.fork", side_effect=fake_fork),
+        patch.object(
+            launcher, "_run_session_end_synchronously",
+            side_effect=lambda: census_calls.append(None),
+        ),
+    ):
+        launcher._daemonize_and_run()
+
+    assert census_calls == []
 
 
 def test_main_falls_through_to_sync_when_fork_unavailable() -> None:
