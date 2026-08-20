@@ -5838,6 +5838,29 @@ def _maybe_unwrap_output_envelope(text: str, *, max_depth: int = 3) -> str:
     return current
 
 
+def _step_record_to_wire(step: Any) -> dict[str, Any]:
+    """One :class:`~nexus.plans.runner.StepRecord` -> the wire shape
+    ``POST /v1/telemetry/nx_answer_runs/record``'s optional ``steps[]``
+    element expects (RDR-196 .p1c/.p1d; field names mirror
+    ``TelemetryHandler.parseNxAnswerSteps`` verbatim). ``run_id`` is
+    deliberately dropped — the engine assigns it server-side from the
+    parent row inserted in the SAME transaction (``StepRecord``'s own
+    docstring, runner.py).
+    """
+    return {
+        "step_index":    step.step_index,
+        "operator":      step.operator,
+        "source":        step.source,
+        "model":         step.model,
+        "input_tokens":  step.input_tokens,
+        "output_tokens": step.output_tokens,
+        "cost_usd":      step.cost_usd,
+        "elapsed_ms":    step.elapsed_ms,
+        "ok":            step.ok,
+        "bundled_steps": list(step.bundled_steps),
+    }
+
+
 def _nx_answer_record_run(
     telemetry: Any,
     *,
@@ -5846,24 +5869,43 @@ def _nx_answer_record_run(
     matched_confidence: float | None,
     step_count: int,
     final_text: str,
-    cost_usd: float,
+    step_records: list[Any] | None,
     duration_ms: int,
     trace: bool,
 ) -> None:
-    """Persist one ``nx_answer_runs`` row via the telemetry store. Redacts when
-    ``trace=False``.
+    """Persist one ``nx_answer_runs`` row (+ its ``step_records``, when any)
+    via the telemetry store. Redacts when ``trace=False``.
 
-    nexus-pyzk7: routes through ``telemetry.record_nx_answer_run`` (SQLite raw OR
-    the service's POST /v1/telemetry/nx_answer_runs/record), so it persists in
-    BOTH backends instead of reaching for a raw ``.conn`` the service lacks.
+    nexus-pyzk7: routes through ``telemetry.record_nx_answer_run`` (the
+    service's POST /v1/telemetry/nx_answer_runs/record), not a raw
+    ``.conn`` the service lacks.
+
+    ``cost_usd`` (RDR-196 .p1d, nexus-nyry9.10 — replaces 9 former
+    hardcoded-zero-cost literals, one per call site): the SUM of every step's
+    ``cost_usd`` that is not ``None``, or ``None`` when no step reports a
+    known cost — an empty *step_records* trivially falls into the latter
+    (sum of nothing is "unknown", never a fabricated zero). This is
+    deliberately a BLANKET rule, not case-by-case: a call site with
+    genuinely zero steps (e.g. the single-step fast path, which bypasses
+    ``plan_run`` and therefore never produces a ``StepRecord`` at all,
+    even though it IS a real, free T3-only call) still gets ``None`` here
+    rather than an invented ``0.0`` — see this bead's dev-notes writeback
+    for the documented trade-off (a real but unmeasured cost reads
+    identically to "we don't know", which is honest, if not maximally
+    informative; a follow-up teaching the fast path to emit its own
+    ``sql``-source StepRecord is future work, not fabricated here).
     """
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
+    steps = step_records or []
+    _known_costs = [s.cost_usd for s in steps if s.cost_usd is not None]
+    cost_usd = sum(_known_costs) if _known_costs else None
+    wire_steps = [_step_record_to_wire(s) for s in steps] or None
     try:
         telemetry.record_nx_answer_run(
             question=q, plan_id=plan_id, matched_confidence=matched_confidence,
             step_count=step_count, final_text=text, cost_usd=cost_usd,
-            duration_ms=duration_ms,
+            duration_ms=duration_ms, steps=wire_steps,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller (warned once via _warn_telemetry_drop)
         # Best-effort, but warn once so a service-mode drop is visible (the call
@@ -6645,12 +6687,24 @@ async def nx_answer(
             chunk_count=len(partial_chunks),
             has_partial_operator_text=bool(partial_operator_text),
         )
+        # nexus-nyry9.10 (RDR-196 .p1d): ``result`` here is EITHER a real
+        # ``PlanResult`` (Step 4's post-plan_run check — real
+        # ``step_records``) OR the pre-Step-2 ``SimpleNamespace`` stand-in,
+        # which carries no ``step_records`` attribute at all. Defensive
+        # isinstance check (not a bare ``getattr(..., [])`` — a MagicMock
+        # test double's unconfigured ``.step_records`` is itself a
+        # (truthy, non-list) MagicMock, same landmine
+        # ``_budget_exhausted_response``'s own ``_budget_step`` guard
+        # above already documents for this exact function).
+        _step_records = getattr(result, "step_records", None)
+        if not isinstance(_step_records, list):
+            _step_records = []
         try:
             with _t2_ctx() as db:
                 _nx_answer_record_run(
                     db.telemetry, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence, step_count=len(result.steps),
-                    final_text=budget_final_text[:2000], cost_usd=0.0,
+                    final_text=budget_final_text[:2000], step_records=_step_records,
                     duration_ms=int((time.monotonic() - start) * 1000), trace=trace,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -6733,7 +6787,7 @@ async def nx_answer(
                         db.telemetry, question=question, plan_id=None,
                         matched_confidence=matches[0].confidence if matches else None,
                         step_count=0, final_text=f"Planner error: {exc}",
-                        cost_usd=0.0, duration_ms=elapsed_ms, trace=trace,
+                        step_records=[], duration_ms=elapsed_ms, trace=trace,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -6869,7 +6923,7 @@ async def nx_answer(
                         _nx_answer_record_run(
                             db.telemetry, question=question, plan_id=best.plan_id,
                             matched_confidence=best.confidence, step_count=0,
-                            final_text=f"Error: {exc}", cost_usd=0.0,
+                            final_text=f"Error: {exc}", step_records=[],
                             duration_ms=elapsed_ms, trace=trace,
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
@@ -6961,7 +7015,7 @@ async def nx_answer(
                     _nx_answer_record_run(
                         db.telemetry, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
-                        final_text=str(result_text)[:2000], cost_usd=0.0,
+                        final_text=str(result_text)[:2000], step_records=[],
                         duration_ms=elapsed_ms, trace=trace,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -6987,7 +7041,7 @@ async def nx_answer(
                     _nx_answer_record_run(
                         db.telemetry, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
-                        final_text=f"Error: {exc}", cost_usd=0.0,
+                        final_text=f"Error: {exc}", step_records=[],
                         duration_ms=elapsed_ms, trace=trace,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -7055,7 +7109,7 @@ async def nx_answer(
                 _nx_answer_record_run(
                     db.telemetry, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence, step_count=0,
-                    final_text=f"Error: {exc}", cost_usd=0.0,
+                    final_text=f"Error: {exc}", step_records=[],
                     duration_ms=elapsed_ms, trace=trace,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
@@ -7092,7 +7146,7 @@ async def nx_answer(
                 _nx_answer_record_run(
                     db.telemetry, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence, step_count=0,
-                    final_text=f"Error: {exc}", cost_usd=0.0,
+                    final_text=f"Error: {exc}", step_records=[],
                     duration_ms=elapsed_ms, trace=trace,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -7118,6 +7172,18 @@ async def nx_answer(
     _budget_response = _budget_exhausted_response(result)
     if _budget_response is not None:
         return _budget_response
+
+    # nexus-nyry9.10 (RDR-196 .p1d): computed once here for both Step 5's
+    # empty-retrieval-guard record and Step 6's success record below.
+    # Defensive isinstance check, not a bare ``getattr(result,
+    # "step_records", [])`` — several existing tests patch ``plan_run``
+    # with a bare ``MagicMock()`` carrying only ``.steps`` (never
+    # ``.step_records``), and a MagicMock's unconfigured attribute access
+    # auto-creates a truthy, non-list MagicMock rather than raising, which
+    # would defeat a plain ``getattr`` default.
+    _result_step_records = getattr(result, "step_records", None)
+    if not isinstance(_result_step_records, list):
+        _result_step_records = []
 
     # ── Step 5: extract final answer ─────────────────────────────────────
     elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -7215,7 +7281,7 @@ async def nx_answer(
                     db.telemetry, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence,
                     step_count=len(result.steps),
-                    final_text=no_match[:2000], cost_usd=0.0,
+                    final_text=no_match[:2000], step_records=_result_step_records,
                     duration_ms=elapsed_ms, trace=trace,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -7319,7 +7385,7 @@ async def nx_answer(
             _nx_answer_record_run(
                 db.telemetry, question=question, plan_id=best.plan_id,
                 matched_confidence=best.confidence, step_count=len(result.steps),
-                final_text=final_text[:2000], cost_usd=0.0,
+                final_text=final_text[:2000], step_records=_result_step_records,
                 duration_ms=elapsed_ms, trace=trace,
             )
     except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller

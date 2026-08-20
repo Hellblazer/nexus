@@ -339,6 +339,66 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             return {}
         return {k: int(v) for k, v in markers.items() if isinstance(v, (int, float))}
 
+    #: RDR-196 .p1d (nexus-nyry9.10) capability-probe cache. Class-level
+    #: default; the first probe on THIS instance shadows it with an
+    #: instance attribute — "cache per store instance" per the bead's own
+    #: design note. Note this buys less than it sounds: ``T2Database.__init__``
+    #: constructs a FRESH ``HttpTelemetryStore()`` on every ``t2_ctx()`` call
+    #: (see ``mcp_infra.t2_ctx``'s own docstring — "fresh per call"), so in
+    #: production this cache rarely outlives a single ``_nx_answer_record_run``
+    #: call and every nx_answer invocation re-probes. That is a known,
+    #: accepted cost (one extra GET on an already multi-second-plus
+    #: operation), not a bug — see the class docstring for the full account.
+    _nx_answer_steps_supported_cache: bool | None = None
+
+    def _supports_nx_answer_steps(self) -> bool:
+        """Capability probe (RDR-196 .p1d): does the engine THIS store talks
+        to accept ``steps[]`` on ``POST /v1/telemetry/nx_answer_runs/record``?
+
+        Reads ``GET /version``'s ``nx_answer_steps_supported`` field (added
+        at ``.p1c`` / nexus-nyry9.9, unconditionally ``true`` whenever
+        present — see ``TelemetryHandler``/``VersionHandler`` on the engine
+        side). Cached per store INSTANCE, matching
+        :func:`nexus.db.http_vector_client.get_http_vector_client`'s
+        "the deployed engine does not change under a running client"
+        reasoning for the ``INCOMPATIBLE`` probe class — simpler than that
+        module's retry-window machinery because this probe is advisory
+        (a `False` degrades to run-row-only telemetry, never a hard
+        failure), not gating.
+
+        NEVER raises. An absent field, a non-2xx response, or any
+        transport failure (including hitting an engine that predates the
+        ``/version`` route entirely, unlikely but not assumed) all read as
+        unsupported — degrade to a run-row-only write.
+
+        CORRECTION (code-review, T2 review-nexus-nyry9.10 [23091]): this
+        probe does NOT exist to prevent a 400. ``TelemetryHandler``'s
+        Jackson ``MAPPER`` has ``FAIL_ON_UNKNOWN_PROPERTIES=false`` and
+        parses the request body into a generic ``Map`` — an engine that
+        predates ``.p1c`` would silently IGNORE an unrecognized ``steps``
+        key and still answer 200, probe or no probe. The probe's actual
+        value is OBSERVABILITY: without it, a client talking to an old
+        engine would believe its per-step telemetry landed (the run row
+        writes fine either way) when it was actually dropped on the
+        floor, unlogged. Checking first lets :meth:`record_nx_answer_run`
+        log ``nx_answer_steps_unsupported_by_engine`` the moment it knows
+        the data will be lost, instead of never finding out. Logged once
+        per store instance so a genuinely-broken probe is still visible
+        (nexus-bwulw class: the public edge has stubbed ``/version``
+        before).
+        """
+        if self._nx_answer_steps_supported_cache is not None:
+            return self._nx_answer_steps_supported_cache
+        try:
+            resp = self._get("/version")
+        except Exception as exc:  # noqa: BLE001 — capability probe must never raise; caller degrades to run-row-only
+            _log.warning("nx_answer_steps_probe_failed", error=str(exc))
+            self._nx_answer_steps_supported_cache = False
+            return False
+        supported = bool(resp.get("nx_answer_steps_supported")) if isinstance(resp, dict) else False
+        self._nx_answer_steps_supported_cache = supported
+        return supported
+
     def record_nx_answer_run(
         self,
         *,
@@ -347,11 +407,43 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         matched_confidence: float | None,
         step_count: int,
         final_text: str,
-        cost_usd: float,
+        cost_usd: float | None,
         duration_ms: int,
+        steps: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Record an nx_answer run. Calls ``POST /v1/telemetry/nx_answer_runs/record``."""
-        self._post("/v1/telemetry/nx_answer_runs/record", {
+        """Record an nx_answer run. Calls ``POST /v1/telemetry/nx_answer_runs/record``.
+
+        ``cost_usd`` is ``float | None`` (RDR-196 .p1d, nexus-nyry9.10):
+        ``None`` means the caller could not determine a real cost (no step
+        carried a known figure), never a fabricated ``0.0``; ``0.0`` means a
+        measured free run (for example all-SQL steps). The parent
+        ``nx_answer_runs.cost_usd`` column is nullable since changeset
+        ``telemetry-007-3`` (nexus-lme1s, rides the same engine cut as the
+        ``steps[]`` write), so the JSON ``null`` this method emits is stored
+        as NULL server-side. Against an engine that predates 007-3 the
+        column still carries ``NOT NULL DEFAULT 0.0`` and a ``null`` lands
+        as ``0.0`` -- the same engine that also lacks the ``steps[]`` route,
+        which the capability probe below reports.
+
+        ``steps``: per-step telemetry rows (RDR-196 .p1b/.p1c/.p1d),
+        included on the wire ONLY when :meth:`_supports_nx_answer_steps`
+        reports the engine accepts them — an older engine never sees this
+        key at all, matching the ``.p1c`` degradation contract ("absent/
+        empty writes only the parent"). A `None`/empty *steps* never adds
+        the key either way — nothing to gate, nothing lost, no warning.
+        When *steps* IS non-empty but the probe reports unsupported, the
+        run row still writes either way (this method always degrades,
+        never refuses — see :meth:`_supports_nx_answer_steps`'s docstring
+        for why the "never a 400" framing is about client-side visibility,
+        not crash prevention: an old engine's lenient JSON parser would
+        silently ignore an unrecognized ``steps`` key on its own and still
+        answer 200). Gating on the probe instead of sending unconditionally
+        is what lets a ``structlog`` warning fire the moment real per-step
+        telemetry is about to be silently dropped, rather than the client
+        wrongly believing it landed (RDR-196 .p1d DO: "probe says
+        unsupported -> run-row-only payload + logged warning").
+        """
+        payload: dict[str, Any] = {
             "question":           question,
             "plan_id":            plan_id,
             "matched_confidence": matched_confidence,
@@ -359,13 +451,24 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "final_text":         final_text,
             "cost_usd":           cost_usd,
             "duration_ms":        duration_ms,
-        })
+        }
+        if steps:
+            if self._supports_nx_answer_steps():
+                payload["steps"] = steps
+            else:
+                _log.warning(
+                    "nx_answer_steps_unsupported_by_engine",
+                    step_count=len(steps),
+                    consequence="run row recorded without per-step telemetry",
+                )
+        self._post("/v1/telemetry/nx_answer_runs/record", payload)
 
     def query_nx_answer_runs(
         self,
         *,
         since: str | None = None,
         limit: int = 20,
+        include_steps: bool = False,
     ) -> dict[str, Any]:
         """Read nx_answer_runs rows plus exact aggregates (nexus-eho3u).
 
@@ -380,10 +483,36 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
         Calls ``GET /v1/telemetry/nx_answer_runs/query``.
 
+        Args:
+            since: only rows with ``created_at >= since``; ``None``/empty
+                means no time bound.
+            limit: max rows in the returned page; does not affect the
+                aggregates.
+            include_steps: RDR-196 .p1c-b (nexus-lme1s) — when ``True``,
+                sends ``?include_steps=true`` and each row in the returned
+                page gains a ``steps`` list (one dict per
+                ``nx_answer_steps`` child row, ordered by ``step_index``,
+                using the same field names the write side
+                (``record_nx_answer_run``'s ``steps`` payload) accepts:
+                ``step_index, operator, source, model, input_tokens,
+                output_tokens, cost_usd, elapsed_ms, ok, bundled_steps``).
+                Rows already pass through server JSON verbatim below, so no
+                extra reconstruction is needed here — the ``steps`` key
+                simply arrives already-present on each row dict when the
+                server includes it. Requires an engine build that carries
+                the .p1c-b read route (probe via ``GET /version``'s
+                ``nx_answer_steps_supported`` field, same capability flag
+                :class:`HttpTelemetryStore`'s write-side probe already
+                uses, if a caller needs to know ahead of the call whether
+                steps will actually come back) — an older engine simply
+                ignores the unknown query param and returns rows with no
+                ``steps`` key, not an error.
+
         Returns a dict with:
             rows: last *limit* runs, newest first — each
                 ``{id, question, plan_id, matched_confidence, step_count,
-                final_text, cost_usd, duration_ms, created_at}``.
+                final_text, cost_usd, duration_ms, created_at}`` plus, when
+                ``include_steps=True`` and the engine supports it, ``steps``.
             total: exact row count over the WHOLE *since*-filtered set, not
                 the page — a caller asking for the last 5 runs must not see
                 a total of 5.
@@ -418,6 +547,8 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         params: dict[str, Any] = {"limit": limit}
         if since:
             params["since"] = since
+        if include_steps:
+            params["include_steps"] = "true"
         resp = self._get("/v1/telemetry/nx_answer_runs/query", params=params)
         if not isinstance(resp, dict):  # defensive: a stripped proxy response
             return {

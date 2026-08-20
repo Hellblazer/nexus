@@ -547,12 +547,14 @@ class TestRunRecording:
 
     def test_record_run_trace_true(self, tmp_path):
         from nexus.db.t2 import T2Database
+        from nexus.plans.runner import StepRecord
 
         with T2Database(tmp_path / "mem.db") as db:
             seen = self._record_and_capture(
                 db, question="test question", plan_id=1,
                 matched_confidence=0.55, step_count=3,
-                final_text="the answer", cost_usd=0.04,
+                final_text="the answer",
+                step_records=[StepRecord(step_index=0, operator="op", source="llm", cost_usd=0.04)],
                 duration_ms=1500, trace=True,
             )
             assert seen["question"] == "test question"
@@ -560,12 +562,14 @@ class TestRunRecording:
 
     def test_record_run_trace_false_redacts(self, tmp_path):
         from nexus.db.t2 import T2Database
+        from nexus.plans.runner import StepRecord
 
         with T2Database(tmp_path / "mem.db") as db:
             seen = self._record_and_capture(
                 db, question="private question", plan_id=2,
                 matched_confidence=None, step_count=2,
-                final_text="sensitive answer", cost_usd=0.02,
+                final_text="sensitive answer",
+                step_records=[StepRecord(step_index=0, operator="op", source="llm", cost_usd=0.02)],
                 duration_ms=800, trace=False,
             )
             # Redaction happens caller-side, BEFORE the store boundary —
@@ -594,12 +598,39 @@ class TestRunRecording:
             seen = self._record_and_capture(
                 db, question="integration-probe",
                 plan_id=7, matched_confidence=0.8, step_count=2,
-                final_text="ok", cost_usd=0.0, duration_ms=42,
+                final_text="ok", step_records=[], duration_ms=42,
                 trace=True,
             )
             assert seen["question"] == "integration-probe"
             assert seen["plan_id"] == 7
             assert seen["step_count"] == 2
+
+    def test_step_write_failure_does_not_fail_the_answer(self):
+        """RDR-196 .p1d DO 5: a telemetry write failure — including one
+        raised from INSIDE the ``steps`` write-through — must not
+        propagate out of ``_nx_answer_record_run``. Pre-existing
+        ``_warn_telemetry_drop`` contract (nexus-pyzk7), pinned here
+        specifically for the new ``step_records`` path so a bug in
+        ``_step_record_to_wire`` (e.g. a StepRecord field typo) cannot
+        turn a best-effort telemetry write into a caller-visible crash."""
+        from nexus.mcp import core as _core
+        from nexus.plans.runner import StepRecord
+
+        telemetry = MagicMock()
+        telemetry.record_nx_answer_run = MagicMock(
+            side_effect=RuntimeError("simulated wire failure mid steps[] write")
+        )
+
+        with patch.object(_core, "_warn_telemetry_drop") as warn:
+            # Must not raise.
+            _core._nx_answer_record_run(
+                telemetry, question="q", plan_id=1, matched_confidence=0.8,
+                step_count=1, final_text="answer",
+                step_records=[StepRecord(step_index=0, operator="op", source="llm", cost_usd=0.01)],
+                duration_ms=100, trace=True,
+            )
+        warn.assert_called_once()
+        assert warn.call_args.args[0] == "nx_answer_runs"
 
 
 # ── Plan-run use_count / success_count / failure_count telemetry ──────────────
@@ -2023,23 +2054,60 @@ class TestNxAnswerTimeoutHandling:
         assert "planner" in result.lower() or "search" in result.lower() or "error" in result.lower()
 
 
-class TestNxAnswerCostStub:
-    """cost_usd is hardcoded 0.0 — pin the stub contract explicitly."""
+class TestNxAnswerCostAccounting:
+    """RDR-196 .p1d (nexus-nyry9.10): ``cost_usd`` is no longer a hardcoded
+    0.0 stub — it is the SUM of the run's ``StepRecord.cost_usd`` values
+    that are not ``None``, or ``None`` (never a fabricated 0.0) when no
+    step reports a known cost. Supersedes the old ``TestNxAnswerCostStub``
+    class, which pinned the P5-stub-0.0 contract this bead removes."""
 
-    def test_cost_usd_recorded_as_zero(self, tmp_path):
-        """_nx_answer_record_run stores cost_usd=0.0 (P5 stub — not real cost)."""
+    def test_cost_usd_sums_known_step_costs(self, tmp_path):
+        from nexus.db.t2 import T2Database
+        from nexus.plans.runner import StepRecord
+
+        steps = [
+            StepRecord(step_index=0, operator="query", source="sql", cost_usd=None),
+            StepRecord(step_index=1, operator="operator_generate", source="llm", cost_usd=0.02),
+            StepRecord(step_index=2, operator="operator_summarize", source="llm", cost_usd=0.015),
+        ]
+        with T2Database(tmp_path / "mem.db") as db:
+            seen = TestRunRecording._record_and_capture(
+                db, question="q", plan_id=1, matched_confidence=0.8,
+                step_count=3, final_text="answer", step_records=steps,
+                duration_ms=500, trace=True,
+            )
+            assert seen["cost_usd"] == pytest.approx(0.035)
+
+    def test_cost_usd_none_when_no_step_reports_a_known_cost(self, tmp_path):
+        """An isolated/bundle-fallback 'llm' StepRecord with cost_usd=None
+        (the dispatch layer genuinely could not observe it, per StepRecord's
+        own docstring) must never coerce to a fabricated 0.0."""
+        from nexus.db.t2 import T2Database
+        from nexus.plans.runner import StepRecord
+
+        steps = [StepRecord(step_index=0, operator="claude_dispatch", source="llm", cost_usd=None)]
+        with T2Database(tmp_path / "mem.db") as db:
+            seen = TestRunRecording._record_and_capture(
+                db, question="q", plan_id=1, matched_confidence=0.8,
+                step_count=1, final_text="answer", step_records=steps,
+                duration_ms=500, trace=True,
+            )
+            assert seen["cost_usd"] is None
+
+    def test_cost_usd_none_when_no_steps_at_all(self, tmp_path):
+        """The call sites that never produce a StepRecord at all (planner
+        failure before any dispatch, a binding refusal before plan_run,
+        the single-step fast path which bypasses the runner) get None —
+        sum-of-nothing is honestly 'unknown', not zero."""
         from nexus.db.t2 import T2Database
 
         with T2Database(tmp_path / "mem.db") as db:
             seen = TestRunRecording._record_and_capture(
                 db, question="q", plan_id=1, matched_confidence=0.8,
-                step_count=2, final_text="answer", cost_usd=0.0,
+                step_count=0, final_text="answer", step_records=[],
                 duration_ms=500, trace=True,
             )
-            # SC-TODO P5: cost_usd is a stub (always 0.0). When real cost
-            # tracking ships, this test documents the before state and must
-            # be updated.
-            assert seen["cost_usd"] == 0.0
+            assert seen["cost_usd"] is None
 
     def test_budget_usd_parameter_accepted_without_error(self, tmp_path):
         """budget_usd is a no-op parameter — accepted but not enforced (P5 stub)."""

@@ -14,7 +14,7 @@ def test_nx_answer_record_run_routes_through_store_with_redaction():
     tel = MagicMock()
     core._nx_answer_record_run(
         tel, question="secret q", plan_id=3, matched_confidence=0.9,
-        step_count=2, final_text="secret a", cost_usd=0.1, duration_ms=5,
+        step_count=2, final_text="secret a", step_records=[], duration_ms=5,
         trace=False,  # redact
     )
     tel.record_nx_answer_run.assert_called_once()
@@ -27,7 +27,7 @@ def test_nx_answer_record_run_trace_true_keeps_text():
     tel = MagicMock()
     core._nx_answer_record_run(
         tel, question="q", plan_id=None, matched_confidence=None,
-        step_count=1, final_text="a", cost_usd=0.0, duration_ms=1, trace=True,
+        step_count=1, final_text="a", step_records=[], duration_ms=1, trace=True,
     )
     kw = tel.record_nx_answer_run.call_args.kwargs
     assert kw["question"] == "q" and kw["final_text"] == "a"
@@ -58,7 +58,7 @@ def test_record_run_store_failure_warns_once_and_does_not_raise():
     # Must not raise.
     core._nx_answer_record_run(
         tel, question="q", plan_id=None, matched_confidence=None,
-        step_count=1, final_text="a", cost_usd=0.0, duration_ms=1, trace=True,
+        step_count=1, final_text="a", step_records=[], duration_ms=1, trace=True,
     )
     assert "nx_answer_runs" in core._telemetry_drop_warned
 
