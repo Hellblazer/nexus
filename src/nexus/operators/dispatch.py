@@ -733,6 +733,8 @@ async def claude_dispatch(
     allowed_tools: list[str] | None = None,
     mcp_servers: dict[str, Any] | None = None,
     usage_sink: list[DispatchUsage] | None = None,
+    model: str | None = None,
+    operator: str | None = None,
 ) -> dict[str, Any]:
     """Dispatch a single operator call to claude -p, fully async.
 
@@ -795,6 +797,25 @@ async def claude_dispatch(
             ``None`` (default) is a complete no-op: this preserves
             ``claude_dispatch``'s existing return contract (a bare dict)
             for all current call sites, none of which unpack a tuple.
+        model: Opt-in ``--model`` override (RDR-196 .p2b, nexus-nyry9.15).
+            ``None`` (default) appends NO ``--model`` flag -- argv is
+            byte-identical to every pre-.p2b call site. When set, the
+            value is passed to the CLI verbatim (a tier alias such as
+            ``"haiku"``/``"sonnet"`` -- see
+            ``nexus.operators.model_tiers.resolve_model_for_tier`` --
+            or a pinned model id); ``claude_dispatch`` itself never
+            consults the tier table, so resolving a tier to a model
+            string is entirely the caller's decision. Whatever the CLI
+            actually resolves the alias to is recorded separately, in
+            ``DispatchUsage.model`` (sourced from the stream-json
+            envelope's own ``canonicalModel``, not this argument), so a
+            future alias re-point stays observable in telemetry.
+        operator: Opt-in diagnostic label (RDR-196 .p2b) identifying which
+            operator/caller this dispatch is for (e.g. ``"operator_rank"``).
+            Purely cosmetic -- carried into the dispatch-harness-failure
+            error message (only when *model* is also set) so a rejected
+            ``--model`` value names both what was rejected and who asked
+            for it. Never affects argv or control flow.
 
     Returns:
         Parsed JSON dict from stdout.
@@ -805,6 +826,17 @@ async def claude_dispatch(
         OperatorOutputError: stdout was not valid JSON.
     """
     schema_json = json.dumps(json_schema)
+    # RDR-196 .p2b review fix (nexus-nyry9.15, code-review-expert [23032]
+    # Important #2): normalize model="" / whitespace-only to None ONCE
+    # here, so the argv-append (`if model:`) and the error-clause gate
+    # (`if model is not None:`) below can never disagree about whether a
+    # model was "set" -- a lingering empty string previously would skip
+    # --model in argv but still append a `[model='' ...]` clause to a
+    # harness-failure error, falsely implying an override reached the
+    # CLI when none did.
+    if model is not None and not model.strip():
+        _log.warning("claude_dispatch_empty_model_normalized", operator=operator)
+        model = None
     # Search review I-6: start in a new process group so we can reach
     # any child processes ``claude -p`` spawns (nested claude calls, tool
     # subprocesses). Same killpg idiom as T1 chroma + MinerU cleanup
@@ -886,6 +918,15 @@ async def claude_dispatch(
         # servers; with an opt-in --mcp-config below it loads ONLY those.
         "--strict-mcp-config",
     ]
+    # RDR-196 .p2b (nexus-nyry9.15): ability only -- appended ONLY when the
+    # caller passes an explicit model. Tier resolution to this string (if
+    # any) happens in the CALLER, e.g. via
+    # ``nexus.operators.model_tiers.resolve_model_for_tier`` -- claude_dispatch
+    # never imports or consults the tier table itself. ``model=None`` (the
+    # default, and every one of the 18 pre-.p2b call sites) leaves argv
+    # byte-identical to before this bead.
+    if model:
+        argv += ["--model", model]
     if mcp_servers:
         argv += ["--mcp-config", json.dumps({"mcpServers": mcp_servers})]
     if allowed_tools:
@@ -1070,6 +1111,14 @@ async def claude_dispatch(
                 returncode=proc.returncode,
                 stdout=_capped_text(stdout_text),
                 stderr=_capped(stderr),
+                # RDR-196 .p2b review fix (nexus-nyry9.15, code-review-expert
+                # [23032] Important #1): the DURABLE record must carry the
+                # same model/operator label the transient exception text
+                # gets a few lines below -- the exception is visible for
+                # exactly one turn; this structlog emit is what a later
+                # investigation actually greps.
+                model=model,
+                operator=operator,
             )
             # nexus-ri56e: (a) origin unambiguity — a populated message now
             # reads like an ordinary application error, but this is the
@@ -1087,9 +1136,18 @@ async def claude_dispatch(
                 else "no log file attached (plain CLI mode) — this message is "
                      "the only record"
             )
+            # RDR-196 .p2b DO 4: a rejected --model must name both the
+            # model and the operator that asked for it -- only when
+            # *model* was actually set, so the default (model=None)
+            # error text is untouched.
+            model_operator_clause = (
+                f" [model={model!r} operator={operator!r}]"
+                if model is not None else ""
+            )
             raise OperatorError(
                 f"claude -p exited {proc.returncode} (dispatch-harness "
                 f"failure, not a model answer): {detail} [{where}]"
+                f"{model_operator_clause}"
             )
 
         raw = stdout.decode(errors="replace").strip()

@@ -577,6 +577,307 @@ class TestSubprocessContract:
         assert result == payload
 
 
+class TestModelAndOperatorKwargs:
+    """RDR-196 .p2b (nexus-nyry9.15): ``model``/``operator`` are ability-only
+    keyword-only additions to ``claude_dispatch``. The load-bearing
+    assertion is the DEFAULT-argv-unchanged test below -- everything else
+    is new, additive behavior gated behind an explicit opt-in."""
+
+    @pytest.mark.asyncio
+    async def test_model_none_default_produces_no_model_flag_in_argv(self) -> None:
+        """The protected assertion: model=None (every one of the 18
+        pre-.p2b call sites) must leave argv byte-identical -- no
+        --model flag anywhere in it."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert "--model" not in captured[0], (
+            f"--model must not appear in argv when model is not passed: {captured[0]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_model_set_appends_model_flag_to_argv(self) -> None:
+        """An explicit model= reaches argv as an adjacent --model <value>
+        pair."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA, model="haiku")
+
+        argv = captured[0]
+        assert "--model" in argv, f"--model missing from argv: {argv}"
+        idx = argv.index("--model")
+        assert argv[idx + 1] == "haiku", (
+            f"expected 'haiku' immediately after --model, got {argv[idx + 1]!r} in {argv}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_default_path_never_consults_the_tier_table(self) -> None:
+        """DO 3: the tier table/resolver is not consulted on the default
+        path. Structural, not intent-based: claude_dispatch has zero
+        IMPORT of nexus.operators.model_tiers, so a default dispatch can
+        be run with that module never imported and still succeed --
+        proving the default path cannot possibly have consulted it.
+        (Prose *mentions* of the module name in comments/docstrings are
+        fine and expected -- only an actual import statement would let
+        claude_dispatch reach the table, so that's what this checks.)"""
+        import re
+
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        # The real assertion: dispatch.py's own source has no IMPORT
+        # STATEMENT reaching model_tiers -- grep for the import form,
+        # not for the bare substring (which would also flag legitimate
+        # doc-comment mentions of the module by name).
+        import inspect
+
+        import nexus.operators.dispatch as dispatch_mod
+
+        source = inspect.getsource(dispatch_mod)
+        import_pattern = re.compile(
+            r"^\s*(import\s+nexus\.operators\.model_tiers"
+            r"|from\s+nexus\.operators(\.model_tiers)?\s+import\s+"
+            r"(model_tiers|\w+.*model_tiers))",
+            re.MULTILINE,
+        )
+        assert not import_pattern.search(source), (
+            "claude_dispatch must not IMPORT nexus.operators.model_tiers "
+            "-- tier resolution is entirely the caller's responsibility "
+            "in this bead"
+        )
+
+    @pytest.mark.asyncio
+    async def test_bogus_model_error_names_both_model_and_operator(self) -> None:
+        """DO 4: a --model rejected by the CLI (non-zero exit) must
+        produce an OperatorError naming BOTH the rejected model id and
+        the operator that requested it."""
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(
+            stdout=b"",
+            stderr=b"Error: model 'bogus-model-xyz' not found",
+            returncode=1,
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc_info:
+                await claude_dispatch(
+                    "prompt", _SIMPLE_SCHEMA,
+                    model="bogus-model-xyz", operator="operator_rank",
+                )
+
+        message = str(exc_info.value)
+        assert "bogus-model-xyz" in message, (
+            f"error must name the rejected model: {message}"
+        )
+        assert "operator_rank" in message, (
+            f"error must name the requesting operator: {message}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_default_error_text_unchanged_when_model_not_set(self) -> None:
+        """A non-zero-exit failure with model=None (the default) must not
+        gain a stray '[model=None operator=None]' clause -- the default
+        error text is untouched by this bead."""
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(
+            stdout=b"", stderr=b"some unrelated failure", returncode=1,
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc_info:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert "model=" not in str(exc_info.value)
+        assert "operator=" not in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_alias_model_reaches_argv_but_usage_sink_records_canonical(self) -> None:
+        """RDR-196 R3 (relay decision): the tier resolves to a CLI ALIAS
+        ("haiku"), which is what reaches argv -- but DispatchUsage.model
+        (already wired by .p1a from the envelope's canonicalModel) must
+        record whichever concrete model the alias actually resolved to,
+        never the alias string itself. This is what makes an alias
+        re-point observable in telemetry instead of silently confounding
+        every measurement keyed on the tier table."""
+        from nexus.operators.dispatch import claude_dispatch, DispatchUsage
+        from nexus.operators.model_tiers import resolve_model_for_tier
+
+        alias = resolve_model_for_tier("cheap")
+        assert alias == "haiku"
+
+        canonical_id = "claude-haiku-4-5-20260101"
+        ndjson = (
+            json.dumps({
+                "type": "result",
+                "is_error": False,
+                "result": "ok",
+                "structured_output": {"result": "ok"},
+                "total_cost_usd": 0.02,
+                "duration_ms": 500,
+                "duration_api_ms": 400,
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+                "modelUsage": {
+                    alias: {
+                        "canonicalModel": canonical_id,
+                        "inputTokens": 10,
+                        "outputTokens": 5,
+                        "costUSD": 0.02,
+                    },
+                },
+            }) + "\n"
+        )
+        proc = _make_proc(stdout=ndjson.encode(), returncode=0, stderr=b"")
+        sink: list[DispatchUsage] = []
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch(
+                "prompt", _SIMPLE_SCHEMA, model=alias, usage_sink=sink,
+            )
+
+        argv = captured[0]
+        idx = argv.index("--model")
+        assert argv[idx + 1] == alias, "argv must carry the alias, not the canonical id"
+
+        assert len(sink) == 1
+        assert sink[0].model == canonical_id, (
+            f"DispatchUsage.model must record the canonical id "
+            f"({canonical_id!r}), not the alias ({alias!r}); got {sink[0].model!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_durable_log_emit_carries_model_and_operator(self) -> None:
+        """Review fix (nexus-nyry9.15, code-review-expert [23032]
+        Important #1): the DURABLE structlog ``operator_dispatch_failed``
+        emit -- not just the transient exception text -- must carry
+        ``model=``/``operator=``, since the function's own comments say
+        this emit is the only thing a later investigation can grep."""
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(
+            stdout=b"", stderr=b"Error: model 'bogus-model-xyz' not found",
+            returncode=1,
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with pytest.raises(OperatorError):
+                    await claude_dispatch(
+                        "prompt", _SIMPLE_SCHEMA,
+                        model="bogus-model-xyz", operator="operator_rank",
+                    )
+
+        assert mock_log.warning.called, "expected the WARNING-level emit (outside rolled-up scope)"
+        _, kwargs = mock_log.warning.call_args
+        assert kwargs.get("model") == "bogus-model-xyz", (
+            f"durable log record must carry model=; got kwargs={kwargs}"
+        )
+        assert kwargs.get("operator") == "operator_rank", (
+            f"durable log record must carry operator=; got kwargs={kwargs}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_durable_log_emit_carries_none_when_model_not_set(self) -> None:
+        """The default path (model=None) still passes model=/operator=
+        to the emit -- as None -- rather than omitting the keys, so the
+        log record shape is uniform across both cases."""
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(stdout=b"", stderr=b"some unrelated failure", returncode=1)
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with pytest.raises(OperatorError):
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        _, kwargs = mock_log.warning.call_args
+        # Deliberately "key present with value None", not "key absent" --
+        # `.get() is None` would pass either way, so check membership too.
+        assert "model" in kwargs and kwargs["model"] is None
+        assert "operator" in kwargs and kwargs["operator"] is None
+
+    @pytest.mark.asyncio
+    async def test_empty_string_model_normalized_to_none_with_warning(self) -> None:
+        """Review fix (nexus-nyry9.15, code-review-expert [23032]
+        Important #2): model="" (and whitespace-only) is normalized to
+        None ONCE at function entry -- picked over rejecting with
+        ValueError -- so the argv-append (`if model:`) and the error-
+        clause gate (`if model is not None:`) can never disagree about
+        whether a model was "set". A structlog warning names the
+        operator so a caller that accidentally passes "" is diagnosable."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                await claude_dispatch(
+                    "prompt", _SIMPLE_SCHEMA, model="   ", operator="operator_extract",
+                )
+
+        assert "--model" not in captured[0], (
+            f"an empty/whitespace model must never reach argv: {captured[0]}"
+        )
+        assert mock_log.warning.called
+        _, kwargs = mock_log.warning.call_args
+        assert kwargs.get("operator") == "operator_extract"
+
+    @pytest.mark.asyncio
+    async def test_empty_string_model_error_clause_matches_argv_absence(self) -> None:
+        """The inconsistency the review flagged directly: model="" must
+        produce NEITHER a --model flag in argv NOR a
+        '[model=... operator=...]' clause on a harness-failure error --
+        the two must agree, in both directions, not just the argv half."""
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(stdout=b"", stderr=b"some unrelated failure", returncode=1)
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc_info:
+                await claude_dispatch(
+                    "prompt", _SIMPLE_SCHEMA, model="", operator="operator_rank",
+                )
+
+        message = str(exc_info.value)
+        assert "model=" not in message, (
+            f"empty-string model must not produce a model= clause: {message}"
+        )
+        assert "operator=" not in message, (
+            f"empty-string model must not produce an operator= clause either: {message}"
+        )
+
+
 # ── nexus-5daww: _build_dispatch_env must not forward a live T1 session ─────
 #
 # operators.dispatch.claude_dispatch's `ephemeral=True` mode (the default,
@@ -2939,3 +3240,266 @@ class TestClaudeDispatchLiveUsage:
         assert usage.model is not None and usage.model != "", (
             "live dispatch must record a canonical model id"
         )
+
+
+@pytest.mark.integration
+class TestClaudeDispatchPerOperatorSchemaCheapTier:
+    """RDR-196 .p2b DO 5 (nexus-nyry9.15): every operator's own real
+    json_schema, dispatched at the cheap tier, must still produce
+    schema-conforming structured output. Per the RDR's failure mode, a
+    schema-conformance error on the cheap tier surfaces as an operator
+    failure -- exercising all 10 real per-operator schemas here (not one
+    blanket schema) is what keeps .p2c's quality-proxy measurement from
+    confounding a genuine tier-quality regression with a plumbing bug
+    this test would have caught first.
+
+    Schemas and prompt shapes are copied verbatim from the 10
+    ``@mcp.tool``-registered operators in ``src/nexus/mcp/core.py``
+    (``operator_extract`` .. ``operator_aggregate``) -- read-only source,
+    not re-derived or simplified, so a schema drift in core.py is a
+    genuine signal here rather than noise from two independently
+    maintained copies.
+
+    Skipped by default; requires ``claude`` on PATH with valid
+    credentials.
+
+    Run with:
+      uv run pytest -m integration tests/test_operator_dispatch.py -k PerOperatorSchema
+    """
+
+    @staticmethod
+    def _claude_auth_available() -> bool:
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["claude", "auth", "status", "--json"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return False
+            data = json.loads(result.stdout)
+            return bool(data.get("loggedIn") or data.get("isLoggedIn"))
+        except Exception:
+            return False
+
+    # (operator_name, prompt, schema) -- schema/prompt copied verbatim
+    # from src/nexus/mcp/core.py as of RDR-196 .p2b.
+    _CHECK_EVIDENCE_ITEM_SCHEMA = {
+        "type": "object",
+        "required": ["item_id", "quote", "role"],
+        "properties": {
+            "item_id": {"type": "string"},
+            "quote": {"type": "string"},
+            "role": {
+                "type": "string",
+                "enum": ["supports", "contradicts", "neutral"],
+            },
+        },
+    }
+
+    _CASES = [
+        (
+            "operator_extract",
+            "Extract the following fields from each item: name\n\n"
+            'Items:\n[{"name": "Alice", "age": 30}]',
+            {
+                "type": "object",
+                "required": ["extractions"],
+                "properties": {
+                    "extractions": {"type": "array", "items": {"type": "object"}},
+                },
+            },
+        ),
+        (
+            "operator_rank",
+            "Rank the following items by size.\n"
+            "Return them in ranked order, best first.\n\n"
+            'Items:\n["small", "medium", "large"]',
+            {
+                "type": "object",
+                "required": ["ranked"],
+                "properties": {
+                    "ranked": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        ),
+        (
+            "operator_compare",
+            "Compare the following items.\n\n"
+            'Items:\n["apple", "orange"]',
+            {
+                "type": "object",
+                "required": ["comparison"],
+                "properties": {"comparison": {"type": "string"}},
+            },
+        ),
+        (
+            "operator_summarize",
+            "Summarize the following content concisely.\n\n"
+            "Nexus is a semantic search and knowledge management CLI.",
+            {
+                "type": "object",
+                "required": ["summary"],
+                "properties": {
+                    "summary": {"type": "string"},
+                    "citations": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        ),
+        (
+            "operator_generate",
+            "Generate a one-sentence description.\n\n"
+            "Context:\nA CLI tool for semantic search.",
+            {
+                "type": "object",
+                "required": ["output"],
+                "properties": {
+                    "output": {"type": "string"},
+                    "citations": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        ),
+        (
+            "operator_filter",
+            "Filter the following items by this criterion: is a fruit\n"
+            "Return only the items that satisfy the criterion in the "
+            "'items' array. Populate 'rationale' with one entry per "
+            "input item, keyed by the item's id, giving the reason each "
+            "item was kept or rejected. The output 'items' array must "
+            "be a subset of the input; never add synthetic items.\n\n"
+            'Items:\n[{"id": "1", "name": "apple"}, {"id": "2", "name": "car"}]',
+            {
+                "type": "object",
+                "required": ["items", "rationale"],
+                "properties": {
+                    "items": {"type": "array", "items": {"type": "object"}},
+                    "rationale": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["id", "reason"],
+                            "properties": {
+                                "id": {"type": "string"},
+                                "reason": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+        ),
+        (
+            "operator_check",
+            "Check whether the following items are consistent with this "
+            "claim or question: all items are fruit\n"
+            "Set ok=true when every item supports the claim, false when "
+            "at least one item contradicts it. Populate 'evidence' with "
+            "a record per item containing a short grounding 'quote' and "
+            "a 'role' of 'supports', 'contradicts', or 'neutral'.\n\n"
+            'Items:\n[{"id": "1", "name": "apple"}, {"id": "2", "name": "car"}]',
+            {
+                "type": "object",
+                "required": ["ok", "evidence"],
+                "properties": {
+                    "ok": {"type": "boolean"},
+                    "evidence": {
+                        "type": "array",
+                        "items": _CHECK_EVIDENCE_ITEM_SCHEMA,
+                    },
+                },
+            },
+        ),
+        (
+            "operator_verify",
+            "Verify whether the following claim is grounded in the "
+            "evidence provided.\n\n"
+            "Claim: the sky is blue\n\n"
+            "Evidence:\nOn a clear day, the sky appears blue due to "
+            "Rayleigh scattering.\n\n"
+            "Set verified=true only when the claim is directly "
+            "supported by the evidence. Provide a concise 'reason'. "
+            "Populate 'citations' with locators.",
+            {
+                "type": "object",
+                "required": ["verified", "reason", "citations"],
+                "properties": {
+                    "verified": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                    "citations": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        ),
+        (
+            "operator_groupby",
+            "Partition the following items by this key: category\n"
+            "Output a list of groups. Each group has a string "
+            "`key_value` and an `items` array carrying each item's "
+            "full content INLINE.\n\n"
+            'Items:\n[{"id": "1", "name": "apple", "category": "fruit"}, '
+            '{"id": "2", "name": "car", "category": "vehicle"}]',
+            {
+                "type": "object",
+                "required": ["groups"],
+                "properties": {
+                    "groups": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["key_value", "items"],
+                            "properties": {
+                                "key_value": {"type": "string"},
+                                "items": {"type": "array", "items": {"type": "object"}},
+                            },
+                        },
+                    },
+                },
+            },
+        ),
+        (
+            "operator_aggregate",
+            "Reduce each group of items into a per-group summary using "
+            "this reducer instruction: count the items\n\n"
+            "Output one aggregate per input group, preserving the "
+            "group's `key_value` verbatim.\n\n"
+            'Groups:\n[{"key_value": "fruit", "items": [{"id": "1", "name": "apple"}]}]',
+            {
+                "type": "object",
+                "required": ["aggregates"],
+                "properties": {
+                    "aggregates": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["key_value", "summary"],
+                            "properties": {
+                                "key_value": {"type": "string"},
+                                "summary": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+        ),
+    ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "operator_name, prompt, schema", _CASES, ids=[c[0] for c in _CASES],
+    )
+    async def test_cheap_tier_produces_schema_conforming_output(
+        self, operator_name: str, prompt: str, schema: dict,
+    ) -> None:
+        if not self._claude_auth_available():
+            pytest.skip("claude CLI not on PATH or not authenticated -- live dispatch skipped")
+
+        import jsonschema
+
+        from nexus.operators.dispatch import claude_dispatch
+        from nexus.operators.model_tiers import resolve_model_for_tier
+
+        result = await claude_dispatch(
+            prompt, schema, timeout=60.0,
+            model=resolve_model_for_tier("cheap"), operator=operator_name,
+        )
+
+        jsonschema.validate(result, schema)
