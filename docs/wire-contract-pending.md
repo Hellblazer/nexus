@@ -41,6 +41,8 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
+- `f2d979113` -- bead nexus-tk070.p6a -- engine tag `TBD (RDR-194 P7 paired cut, not yet tagged)` -- RDR-194 D5: nexus.memory/nexus.plans ttl_days CHECK constraints (memory-003-ttl-days.xml, plans-003-ttl-days.xml) + MemoryHandler.requirePositiveOrNullTtl boundary-400 (engine half); MCP core.py ttl coercion deletion (client half). Ack condition: the client release whose REQUIRED_ENGINE_VERSION bumps to the RDR-194 P7 paired engine tag carrying these CHECKs. Bounded blast radius in the interim: an engine predating this commit still carries the retired coercePermanentTtl, so a client already carrying core.py's change talking to an un-paired old engine gets the pre-existing silent-coerce-to-NULL behavior, unchanged from before this bead.
+
 ## Shipped
 
 - `f1c669b4792b43dc15d48dce344c48fa695bf287` -- bead nexus-zu4ma -- shipped in `v7.11.0` -- Bge768 padded-token-area sub-batching (engine half: engine-service-v0.1.81, deployed + cloud-gated 2026-08-19); client half (http_telemetry_store.py) rides v7.11.0, whose REQUIRED_ENGINE_VERSION=(0,1,82) floor carries the (0,1,81) bump (nexus-5uoxu conditions 2+4)
