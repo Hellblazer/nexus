@@ -445,6 +445,17 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # during a test run (this session's own orchestrator committing
     # pathspec-limited diffs) touches this file independent of pytest.
     "index.log",
+    # The SAME post-commit hook's background `nx index repo ...` dispatch
+    # writes its per-run log via ``open_run_log(f"index-{basename}-{hash8}")``
+    # (src/nexus/commands/index.py:514) under the REAL ``logs/`` dir --
+    # observed 2026-08-20 as ``logs/index-nexus-571b8edd.log`` tripping this
+    # guard three times in one session, each coinciding with an orchestrator
+    # commit. Unit tests that reach open_run_log are redirected by
+    # NEXUS_CONFIG_DIR (nexus-pfuns fixed the one hardcoded Path.home() in
+    # index.py), so a leak of this name class from a TEST would still have
+    # to come through a path this entry cannot distinguish -- accepted, and
+    # narrower than ``logs/``.
+    "logs/index-",
 )
 
 
