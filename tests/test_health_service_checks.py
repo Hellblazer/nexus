@@ -937,7 +937,9 @@ _ALL_TENANT_TABLES = [
     "nexus.hook_failures",
     "nexus.ladder_completions",
     "nexus.memory",
-    "nexus.migration_jobs",
+    # ("nexus.migration_jobs" removed — nexus-tk070.p5b, reworked
+    # 2026-08-20: dead table dropped (migration-002-tenant-pk.xml),
+    # mirrors health._RLS_TENANT_TABLES)
     "nexus.nx_answer_runs",
     "nexus.pdf_chunks",
     "nexus.pdf_pages",
@@ -1430,6 +1432,7 @@ class TestRlsTableCompleteness:
         dropped = {
             "nexus.chash_index",  # rdr187-001-drop-chash-index.xml (RDR-187)
             "nexus.chash_alias",  # legacy-001-drop-chash-alias.xml (nexus-lgdel.l1)
+            "nexus.migration_jobs",  # migration-002-tenant-pk.xml, reworked (nexus-tk070.p5b)
         }
         return frozenset(found - dropped)
 

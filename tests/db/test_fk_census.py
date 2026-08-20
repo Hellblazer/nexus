@@ -21,9 +21,13 @@ engine substrate's freshly Liquibase-applied schema and asserts:
     - ``nexus.catalog_links.from_tumbler`` (and ``to_tumbler``) carry NO
       FK today (nexus-ysrwi: 277 dangling rows measured 2026-07-25,
       RDR-194 Problem Statement item 5 / Q2).
-    - ``nexus.migration_jobs`` has PK=(job_id) only — no tenant_id in the
-      PK and no tenant-scoped UNIQUE constraint (RLS-only protection;
-      RDR-194 Problem Statement item 3).
+    - ``nexus.migration_jobs`` no longer exists (reworked nexus-tk070.p5b,
+      2026-08-20, Sam disposition: the table was dead — zero producers/
+      consumers — so ``migration-002-tenant-pk.xml`` DROPs it outright
+      rather than closing the tenant-keying gap this ground truth used to
+      pin: PK=(job_id) only, no tenant_id in the PK, no tenant-scoped
+      UNIQUE constraint, RLS-only protection; RDR-194 Problem Statement
+      item 3).
 
 Uses the same ``psql -tAc`` substrate-query helper already established by
 ``tests/db/test_schema_type_hygiene_preflight.py`` (verbatim copy, per
@@ -245,33 +249,26 @@ def test_ground_truth_catalog_links_tumbler_columns_are_fk_enforced(census_state
     )
 
 
-def test_ground_truth_migration_jobs_has_no_tenant_scoped_uniqueness(census_state):
-    """migration_jobs PK=(job_id) with no tenant-scoped UNIQUE — RLS-only
-    protection (Problem Statement item 3, the sharpest tenant-in-PK
-    example)."""
-    pk_sql = """
-    SELECT array_agg(a.attname ORDER BY k.ord)::text
-    FROM pg_constraint con
-    JOIN pg_class c ON c.oid = con.conrelid
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
-    JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
-    WHERE con.contype = 'p' AND n.nspname = 'nexus' AND c.relname = 'migration_jobs';
-    """
-    pk_rows = _psql_csv(census_state, pk_sql)
-    assert pk_rows[0] == "{job_id}", f"expected migration_jobs PK=(job_id) only, got {pk_rows[0]!r}"
+def test_ground_truth_migration_jobs_table_dropped(census_state):
+    """nexus.migration_jobs no longer exists on a freshly-migrated schema.
 
-    unique_sql = """
-    SELECT count(*)
-    FROM pg_constraint con
-    JOIN pg_class c ON c.oid = con.conrelid
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
-    JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
-    WHERE con.contype = 'u' AND n.nspname = 'nexus' AND c.relname = 'migration_jobs'
-      AND a.attname = 'tenant_id';
+    SUPERSEDES test_ground_truth_migration_jobs_has_no_tenant_scoped_uniqueness
+    (which pinned the tenant-keying gap this table used to have: PK=(job_id)
+    with no tenant-scoped UNIQUE, RLS-only protection). Reworked
+    nexus-tk070.p5b (2026-08-20, Sam disposition): the table is DEAD —
+    MigrationHandler.java / MigrationJobRepository.java were deleted at
+    7bcf29c67 (2026-07-24), zero producers/consumers — so
+    migration-002-tenant-pk.xml DROPs it outright rather than widening its
+    PK. The tenant-keying gap this test used to document no longer applies
+    to a table that does not exist; this ground truth now pins the
+    retirement itself, so a future changelog that accidentally re-creates
+    the table (or a rollback left mid-applied) is caught here.
     """
-    unique_rows = _psql_csv(census_state, unique_sql)
-    assert unique_rows[0] == "0", (
-        f"expected migration_jobs to carry NO tenant-scoped UNIQUE, found {unique_rows[0]}"
+    exists_sql = """
+    SELECT to_regclass('nexus.migration_jobs') IS NULL;
+    """
+    rows = _psql_csv(census_state, exists_sql)
+    assert rows[0] == "t", (
+        f"expected nexus.migration_jobs to be ABSENT on a freshly-migrated schema "
+        f"(migration-002-tenant-pk.xml drops it), got to_regclass IS NULL = {rows[0]!r}"
     )

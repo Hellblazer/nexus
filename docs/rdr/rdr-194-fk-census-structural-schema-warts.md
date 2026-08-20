@@ -804,6 +804,22 @@ INDEX that `pg_constraint` cannot see:
   every finished job is unprotected. Nothing FK-references `migration_jobs`,
   so the clean fix is the composite PK `(tenant_id, job_id)`. The partial
   index stays.
+
+  > **CORRECTION (2026-08-20, P5b implementation, stacked-review round, T2
+  > `substantive-critique-tk070-p5b-2026-08-20`):** the tenant-keying remedy
+  > above is SUPERSEDED. `nexus.migration_jobs` has ZERO live producers or
+  > consumers — `MigrationHandler.java` and `MigrationJobRepository.java`
+  > were deleted at commit `7bcf29c67` (2026-07-24), before this Decision
+  > was even researched, and this research missed it. Sam's disposition
+  > (2026-08-20, relayed via the orchestrator): DROP the table outright
+  > rather than widen the PK of a table nothing writes to or reads from.
+  > `migration-002-tenant-pk.xml` was reworked from a PK-widening changeset
+  > to a `DROP TABLE` changeset (same file, same changeset id
+  > `migration-002-1`, `EXPECT_NEW_CHANGESETS=1` unchanged). The "clean fix
+  > is the composite PK" sentence above is the ORIGINAL, now-superseded
+  > analysis — correct as far as it went, wrong about whether the table was
+  > worth fixing at all. See the § P5b phasing bullet below for the matching
+  > correction to what actually shipped.
 - **`topics` is the "surrogate PK that other FKs reference" case.** Its
   `id` is the target of four FK columns, and all four are tenant-blind:
   `topics.parent_id` (`taxonomy-001-baseline.xml:60`),
@@ -1460,6 +1476,18 @@ DDL beyond `COMMENT ON COLUMN` for `hook_failures.doc_id`,
 - **P5b `migration_jobs`.** `migration-002-tenant-pk.xml`: PK ->
   `(tenant_id, job_id)`, partial index retained, ANALYZE.
   `EXPECT_NEW_CHANGESETS=1`.
+
+  > **CORRECTION (2026-08-20, P5b implementation, stacked-review round, T2
+  > `substantive-critique-tk070-p5b-2026-08-20`):** this bullet describes
+  > what P5b was PLANNED to ship, not what shipped. `nexus.migration_jobs`
+  > was found dead during implementation (zero producers/consumers,
+  > `MigrationHandler.java`/`MigrationJobRepository.java` deleted at
+  > `7bcf29c67`, 2026-07-24) and Sam's disposition (2026-08-20) was to DROP
+  > the table instead. `migration-002-tenant-pk.xml` was reworked to a
+  > single `DROP TABLE nexus.migration_jobs` changeset (pre-drop row-count
+  > NOTICE, shape-agnostic, rollback recreates the baseline shape empty) —
+  > same file, same changeset id, `EXPECT_NEW_CHANGESETS=1` unchanged. See
+  > the § D4 CORRECTION above for the full disposition.
 
 **P6. TTL (D5), two commits.** No longer blocked: the Q5 residual
 (`plans.ttl`'s write and expiry path) is traced in D5.

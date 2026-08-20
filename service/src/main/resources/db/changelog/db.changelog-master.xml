@@ -815,6 +815,21 @@
          reasoning). -->
     <include file="db/changelog/taxonomy-014-topics-tenant-unique.xml"/>
 
+    <!-- nexus-tk070.p5b (RDR-194 P5b, D4) — REWORKED 2026-08-20: DROPS
+         nexus.migration_jobs outright rather than widening its PK.
+         MigrationHandler.java / MigrationJobRepository.java were deleted at
+         7bcf29c67 (2026-07-24) — the table has zero producers/consumers.
+         Sam disposition 2026-08-20 supersedes the tenant-keying remedy D4
+         originally recorded for this table (see the RDR's own CORRECTION
+         blockquotes at its D4 section and P5b phasing bullet). Pre-drop
+         row-count RAISE NOTICE, shape-agnostic (tolerates the table already
+         being absent), rollback recreates the baseline shape empty — see
+         the file's own header for the full disposition. Still placed after
+         taxonomy-014-topics-tenant-unique.xml (current tail) and before the
+         grants-nexus-svc.xml runAlways block — the rework only replaced
+         this file's content, not its position (D0.1). -->
+    <include file="db/changelog/migration-002-tenant-pk.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

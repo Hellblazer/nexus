@@ -6346,11 +6346,13 @@ public final class CatalogRepository {
      * would be advisory at merge, which for this defect class is no gate at all (nexus-20890).
      *
      * <p>Tables deliberately NOT here, each documented with a reason in that gate's
-     * {@code _DOCUMENTED_EXCLUSIONS}: {@code pdf_pipeline} (transient work queue),
+     * {@code _DOCUMENTED_EXCLUSIONS}: {@code pdf_pipeline} (transient work queue) and
      * {@code chash_remap} (permanent RF-186 ledger whose collection is inside its PK —
-     * nexus-4nll0), and {@code migration_jobs} (JSONB collection SETS, which a scalar UPDATE
-     * cannot rewrite — nexus-rvr1n). An exclusion that is not written down is
-     * indistinguishable from an omission, so the gate fails on an undocumented one.
+     * nexus-4nll0). An exclusion that is not written down is indistinguishable from an
+     * omission, so the gate fails on an undocumented one. ({@code migration_jobs} — JSONB
+     * collection SETS a scalar UPDATE cannot rewrite, nexus-rvr1n — was a THIRD entry here
+     * until the table itself was DROPPED, nexus-tk070.p5b, 2026-08-20: dead code, zero
+     * producers/consumers.)
      *
      * <p>RDR-191 (nexus-o8dil.48): {@code chunks_384/768/1024} and {@code
      * taxonomy_centroids_384/768/1024} collapse to ONE entry each ({@code chunks},
