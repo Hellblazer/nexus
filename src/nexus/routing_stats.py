@@ -89,7 +89,9 @@ class RuleStats:
                 self.extra[outcome] = self.extra.get(outcome, 0) + 1
 
 
-def _iter_records(path: pathlib.Path) -> Iterable[dict[str, Any]]:
+def _read_one_log_file(path: pathlib.Path) -> list[dict[str, Any]]:
+    """Parse one JSONL file's records. Missing/unreadable/malformed lines
+    degrade to an empty result or a dropped line -- never raises."""
     if not path.exists():
         return []
     try:
@@ -108,6 +110,38 @@ def _iter_records(path: pathlib.Path) -> Iterable[dict[str, Any]]:
         if isinstance(record, dict):
             out.append(record)
     return out
+
+
+def _iter_records(path: pathlib.Path) -> Iterable[dict[str, Any]]:
+    """Read the routing log, OLDEST-FIRST: the rotated ``.1`` generation
+    (if present) then the live file.
+
+    ``log_routing_event`` (``conexus/hooks/scripts/routing/_lib.py``,
+    Sam-directed fix pass 2026-08-20) rotates the live file to
+    ``<name>.1`` via atomic rename once it exceeds its byte cap -- so
+    recent history can live split across two files immediately after a
+    rotation. A reader that only looked at the live file would silently
+    HALVE its longitudinal window at every rotation, exactly the gap
+    this function closes for every caller (``aggregate``/
+    ``aggregate_detailed``/``escape_events`` all funnel through here --
+    fixing the read primitive fixes every reader at once, no
+    per-function duplication). An absent ``.1`` (nothing has rotated
+    yet) is the common case and is not an error -- see
+    :func:`_read_one_log_file`.
+
+    NON-ATOMIC ACROSS THE TWO FILES (code-review Suggestion, fix pass
+    2026-08-20): reading ``.1`` then ``path`` is two separate,
+    unsynchronized reads -- if a rotation happens to land exactly
+    between them (the live file is renamed to ``.1`` and a fresh live
+    file started right in that gap), this call can see neither the
+    just-renamed content NOR anything from the brand-new live file for
+    that one read, an undercount, never a duplicate (rotation never
+    copies a record into two places at once). The window is narrow and
+    the effect self-heals on the NEXT read once the rotation has
+    settled -- not worth a lock for a read-only reporting path.
+    """
+    rotated = path.with_name(path.name + ".1")
+    return _read_one_log_file(rotated) + _read_one_log_file(path)
 
 
 def _is_selftest_record(rule: str, outcome: str, record: dict[str, Any]) -> bool:

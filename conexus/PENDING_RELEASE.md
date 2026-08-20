@@ -47,3 +47,15 @@ mechanize, it matters enough to ship.
   render caps tightened (`_HARD_CAP` 15->8, `_SNIPPET_LIMIT` 5->3,
   `_TITLE_LIMIT` 8->5, snippet `max_chars` 120->70). The fetch/budget/
   freshness machinery is unchanged — only render density shrank.
+- `conexus/hooks/scripts/routing/_lib.py` — nexus-h33x8.3 fix-pass
+  (Sam-directed, 2026-08-20): `log_routing_event` now rotates
+  `routing_log.jsonl` to `routing_log.jsonl.1` via atomic rename
+  (`os.replace`, clobbering any prior `.1`) once it exceeds a 1 MiB byte
+  cap, BEFORE appending — never a read-modify-write trim, which would
+  race the many concurrent routing-hook processes that append to this
+  file. Rotation failure (including the expected concurrent-rotation
+  `FileNotFoundError` race) never blocks the append. All other behavior
+  unchanged, including the pre-existing `Path.home()` hardcoding this
+  fix-pass deliberately left alone.
+- `sn/hooks/scripts/routing/_lib.py` — same change, kept byte-identical
+  to the `conexus/` copy per `test_lib_copies_are_byte_identical`.

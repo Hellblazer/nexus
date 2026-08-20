@@ -358,3 +358,340 @@ class TestWriteSessionCapabilityCensus:
             if line.strip()
         ]
         assert any(r.get("blindspot") is True for r in lines)
+
+
+class TestLogRotation:
+    """Size-gated rotation-by-atomic-rename (Sam-directed fix pass,
+    2026-08-20): capability_census.jsonl grows without bound otherwise.
+    Rotation, never trim-in-place -- see ``_rotate_log_if_oversized``'s own
+    docstring for why a read-modify-write is a foot-cannon for a
+    multi-writer append log (concurrent SessionEnd appenders can interleave
+    a rewrite with another process's line-atomic append, clobbering it; a
+    crash mid-rewrite loses the file outright)."""
+
+    def test_undersize_log_is_left_untouched(self, tmp_path: pathlib.Path) -> None:
+        from nexus._session_end_census import _rotate_log_if_oversized
+
+        log_path = tmp_path / "capability_census.jsonl"
+        log_path.write_text('{"session_id": "small"}\n')
+
+        _rotate_log_if_oversized(log_path)
+
+        assert log_path.read_text() == '{"session_id": "small"}\n'
+        assert not log_path.with_name(log_path.name + ".1").exists()
+
+    def test_oversize_log_rotates_via_atomic_rename(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import nexus._session_end_census as mod
+
+        monkeypatch.setattr(mod, "_LOG_ROTATION_MAX_BYTES", 10)
+        log_path = tmp_path / "capability_census.jsonl"
+        log_path.write_text("x" * 100)
+
+        mod._rotate_log_if_oversized(log_path)
+
+        assert not log_path.exists(), "the live path must be empty/gone after rotation"
+        rotated = tmp_path / "capability_census.jsonl.1"
+        assert rotated.exists()
+        assert rotated.read_text() == "x" * 100
+
+    def test_rotation_clobbers_prior_generation_not_accumulate(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Exactly one older generation is retained -- ``.1`` is clobbered,
+        never pushed to ``.2``, bounding total on-disk size at ~2x the cap."""
+        import nexus._session_end_census as mod
+
+        monkeypatch.setattr(mod, "_LOG_ROTATION_MAX_BYTES", 10)
+        log_path = tmp_path / "capability_census.jsonl"
+        (tmp_path / "capability_census.jsonl.1").write_text("STALE-OLD-GENERATION")
+        log_path.write_text("FRESH" * 5)
+
+        mod._rotate_log_if_oversized(log_path)
+
+        rotated = tmp_path / "capability_census.jsonl.1"
+        assert rotated.read_text() == "FRESH" * 5
+        assert not (tmp_path / "capability_census.jsonl.2").exists()
+
+    def test_concurrent_rotation_race_file_not_found_is_tolerated(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A second process's rename hitting FileNotFoundError (it already
+        rotated the file away between our stat and our rename) is expected
+        and must be silently swallowed, never raised."""
+        import nexus._session_end_census as mod
+
+        monkeypatch.setattr(mod, "_LOG_ROTATION_MAX_BYTES", 10)
+        log_path = tmp_path / "capability_census.jsonl"
+        log_path.write_text("x" * 100)
+
+        def _simulated_concurrent_rotation(_src: object, _dst: object) -> None:
+            raise FileNotFoundError("simulated: another process rotated first")
+
+        monkeypatch.setattr(mod.os, "replace", _simulated_concurrent_rotation)
+
+        mod._rotate_log_if_oversized(log_path)  # must not raise
+
+    def test_write_session_capability_census_rotates_before_append(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Integration: an oversize log rotates, and the new record lands
+        in the fresh (post-rotation) file, not the rotated-away one."""
+        cfg_dir = tmp_path / "cfgdir"
+        cfg_dir.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        monkeypatch.setenv("NX_CENSUS_PROJECT_DIR", str(project_dir))
+
+        import nexus._session_end_census as mod
+
+        monkeypatch.setattr(mod, "_LOG_ROTATION_MAX_BYTES", 10)
+        log_path = cfg_dir / "capability_census.jsonl"
+        log_path.write_text("x" * 100)
+
+        sid = "sess-after-rotate"
+        _write_transcript(project_dir / f"{sid}.jsonl", [_tool_use_record("Bash")])
+
+        record = mod.write_session_capability_census(sid)
+
+        assert record is not None
+        rotated = cfg_dir / "capability_census.jsonl.1"
+        assert rotated.read_text() == "x" * 100
+
+        lines = [
+            json.loads(line) for line in log_path.read_text().splitlines() if line.strip()
+        ]
+        assert len(lines) == 1
+        assert lines[0]["session_id"] == sid
+
+    def test_rotation_failure_never_breaks_the_append(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A non-ENOENT rotation failure (e.g. a permission error on the
+        rename) must still let the append proceed -- rotation is best
+        effort, the durable record is not."""
+        cfg_dir = tmp_path / "cfgdir"
+        cfg_dir.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        monkeypatch.setenv("NX_CENSUS_PROJECT_DIR", str(project_dir))
+
+        import nexus._session_end_census as mod
+
+        monkeypatch.setattr(mod, "_LOG_ROTATION_MAX_BYTES", 10)
+        log_path = cfg_dir / "capability_census.jsonl"
+        # Trailing newline: real log content is always line-terminated
+        # (every write ends in "\n") -- keeps the pre-existing oversize
+        # content and the new append parseable as separate JSONL lines
+        # even though rotation is simulated to fail.
+        log_path.write_text("x" * 100 + "\n")
+
+        def _boom(_src: object, _dst: object) -> None:
+            raise PermissionError("simulated rotation failure")
+
+        monkeypatch.setattr(mod.os, "replace", _boom)
+
+        sid = "sess-rotate-fails"
+        _write_transcript(project_dir / f"{sid}.jsonl", [_tool_use_record("Bash")])
+
+        record = mod.write_session_capability_census(sid)  # must not raise
+
+        assert record is not None
+        assert log_path.exists()
+        # The pre-existing "x" * 100 filler line is deliberately not
+        # valid JSON (synthetic oversize content); only the newly
+        # appended LAST line is asserted on.
+        last_line = log_path.read_text().splitlines()[-1]
+        assert json.loads(last_line)["session_id"] == sid
+
+
+class TestRotationTOCTOUSerialization:
+    """code-review Critical (nexus-g3jw6, fix pass, 2026-08-20): the
+    TOCTOU double-rotation clobber.
+
+    P1 stats the log oversize, rotates it into ``.1``, reopens and
+    appends (recreating a small live file). P2 stat'd BEFORE P1's
+    rotation (a stale, oversize observation) but calls ``os.replace``
+    LATE, after P1 has already rotated and reappended -- the live path
+    exists again, so P2's rename SUCCEEDS, clobbering P1's real ``.1``
+    (irreplaceable history) with the small, near-empty file P1 just
+    wrote.
+
+    FIX: serialize rotators via a non-blocking advisory lock on a
+    sidecar ``<name>.rotate.lock``, held across {re-stat, os.replace}.
+    A rotator re-checks size UNDER THE LOCK before renaming -- a stale
+    pre-lock observation is corrected by the time the rename actually
+    happens. Losing the lock race (someone else is rotating right now)
+    means skip entirely, not block and retry -- appends never wait on
+    this. This eliminates the stale-observation rename BY CONSTRUCTION:
+    the decision to rename is now made with fresh data, atomically with
+    respect to every other rotator.
+    """
+
+    def test_stale_oversize_observation_does_not_clobber_a_fresher_rotation(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Deterministic simulation of the interleaving: fakes ONLY the
+        FIRST ``Path.stat()`` call against the log path (P2's cheap,
+        pre-lock decision) as stale-oversize; every subsequent stat call
+        --including the fix's re-check UNDER THE LOCK -- sees the TRUE,
+        current, small size, exactly as a real re-stat after acquiring
+        the lock would. Must fail against the pre-fix code (a single,
+        unguarded stat+replace has no re-check to correct the stale
+        observation)."""
+        import nexus._session_end_census as mod
+
+        monkeypatch.setattr(mod, "_LOG_ROTATION_MAX_BYTES", 10)
+        log_path = tmp_path / "capability_census.jsonl"
+        rotated = tmp_path / "capability_census.jsonl.1"
+
+        log_path.write_text("OLD" * 50)  # 150 bytes, genuinely oversize
+
+        # P1: a real, correct rotation -- establishes the valuable
+        # history in .1.
+        mod._rotate_log_if_oversized(log_path)
+        assert not log_path.exists()
+        assert rotated.read_text() == "OLD" * 50
+
+        # P1 reopens + appends -- exactly what write_session_capability_census
+        # does right after rotation. The live file is small again (2
+        # bytes, well under the 10-byte test cap).
+        log_path.write_text("x\n")
+        fresh_live_content = log_path.read_text()
+        assert log_path.stat().st_size < mod._LOG_ROTATION_MAX_BYTES
+
+        # P2: simulate its stale pre-lock observation. The FIRST stat()
+        # call against log_path returns a fake oversize result (999
+        # bytes -- what P2 "saw" before P1 acted); every OTHER stat call
+        # (on log_path or any other path) delegates to the real stat(),
+        # so the fix's re-check-under-the-lock sees ground truth.
+        real_stat = pathlib.Path.stat
+        call_count = {"n": 0}
+
+        class _StaleStatResult:
+            st_size = 999
+
+        def _stat_first_call_on_log_path_is_stale(self, *args, **kwargs):
+            if self == log_path:
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    return _StaleStatResult()
+            return real_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "stat", _stat_first_call_on_log_path_is_stale)
+
+        mod._rotate_log_if_oversized(log_path)  # P2's rotation attempt
+
+        # THE ASSERTION: P1's real, irreplaceable .1 history must
+        # survive untouched. Pre-fix this fails -- P2's single unguarded
+        # stat+replace clobbers .1 with the small live content.
+        assert rotated.read_text() == "OLD" * 50, (
+            "P2 clobbered P1's real rotated history with a stale "
+            "oversize observation (the TOCTOU double-rotation bug, "
+            "nexus-g3jw6)"
+        )
+        assert log_path.exists()
+        assert log_path.read_text() == fresh_live_content
+        assert call_count["n"] >= 2, (
+            "the fix must re-stat AT LEAST once more under the lock -- "
+            "a single stat() call cannot correct a stale observation"
+        )
+
+    def test_rotation_skips_entirely_when_lock_is_already_held(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Non-blocking acquire: a rotator that loses the lock race must
+        skip immediately (no wait, no retry, no raise) -- someone else
+        is already handling rotation."""
+        import os as _os
+
+        import nexus._session_end_census as mod
+        from nexus._locking import lock_file, unlock_file
+
+        monkeypatch.setattr(mod, "_LOG_ROTATION_MAX_BYTES", 10)
+        log_path = tmp_path / "capability_census.jsonl"
+        log_path.write_text("x" * 100)  # genuinely oversize
+
+        lock_path = tmp_path / "capability_census.jsonl.rotate.lock"
+        fd = _os.open(str(lock_path), _os.O_RDWR | _os.O_CREAT, 0o644)
+        held = _os.fdopen(fd, "r+")
+        lock_file(held, blocking=True)  # simulate another process mid-rotation
+        try:
+            mod._rotate_log_if_oversized(log_path)  # must not raise, must not block
+
+            assert log_path.read_text() == "x" * 100, "the contended rotator must not touch the live file"
+            assert not (tmp_path / "capability_census.jsonl.1").exists()
+        finally:
+            unlock_file(held)
+            held.close()
+
+    def test_normal_rotation_still_works_under_the_lock(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression pin: the lock must not itself prevent an ordinary,
+        uncontended rotation from happening."""
+        import nexus._session_end_census as mod
+
+        monkeypatch.setattr(mod, "_LOG_ROTATION_MAX_BYTES", 10)
+        log_path = tmp_path / "capability_census.jsonl"
+        log_path.write_text("x" * 100)
+
+        mod._rotate_log_if_oversized(log_path)
+
+        assert not log_path.exists()
+        assert (tmp_path / "capability_census.jsonl.1").read_text() == "x" * 100
+
+
+class TestRotationFailureLogging:
+    """code-review Important #4 (fix pass, 2026-08-20): the rotation-
+    failure guard in write_session_capability_census was a bare
+    ``except Exception: pass``, contradicting its own docstring's
+    no-swallow claim for this module. A rotation failure must be
+    diagnosable from the logs, matching
+    ``_session_end_launcher._write_capability_census``'s own
+    debug-level structlog discipline for its analogous failure case."""
+
+    def test_rotation_failure_is_logged_via_structlog(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import logging
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        cfg_dir = tmp_path / "cfgdir"
+        cfg_dir.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        monkeypatch.setenv("NX_CENSUS_PROJECT_DIR", str(project_dir))
+
+        import nexus._session_end_census as mod
+
+        monkeypatch.setattr(mod, "_LOG_ROTATION_MAX_BYTES", 10)
+        log_path = cfg_dir / "capability_census.jsonl"
+        log_path.write_text("x" * 100 + "\n")
+
+        def _boom(*_a: object, **_kw: object) -> None:
+            raise RuntimeError("simulated rotation failure")
+
+        monkeypatch.setattr(mod, "_rotate_log_if_oversized", _boom)
+
+        sid = "sess-rotate-logs-failure"
+        _write_transcript(project_dir / f"{sid}.jsonl", [_tool_use_record("Bash")])
+
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG))
+        try:
+            with capture_logs() as cap:
+                record = mod.write_session_capability_census(sid)  # must not raise
+        finally:
+            structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING))
+
+        assert record is not None
+        events = [entry["event"] for entry in cap]
+        assert any("rotat" in e.lower() for e in events), (
+            f"expected a structlog event naming the rotation failure; got {events!r}"
+        )

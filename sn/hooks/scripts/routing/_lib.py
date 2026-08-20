@@ -44,6 +44,7 @@ import os
 import pathlib
 import re
 import sys
+import time
 from typing import Any, Callable
 
 ESCAPE_TOKEN = "# routing-allow:"
@@ -244,6 +245,169 @@ def _log_path() -> pathlib.Path:
     return pathlib.Path(override) if override else _DEFAULT_LOG_PATH
 
 
+#: Byte cap that triggers rotation (~1 MiB) -- same design and constant
+#: as ``nexus._session_end_census``'s capability-census log; see that
+#: module's docstring for the full "rotation, not trim-in-place" rationale
+#: (a read-modify-write races the many concurrent routing-hook processes
+#: that append to this exact file, one per gated tool call, across
+#: however many Claude Code sessions are live at once -- worse than the
+#: once-per-SessionEnd census log this pattern was first written for). A
+#: byte ``stat()`` is O(1); a line count would require reading the whole
+#: file on every single hook invocation.
+_ROUTING_LOG_ROTATION_MAX_BYTES = 1_048_576
+
+if sys.platform == "win32":
+    import msvcrt as _msvcrt
+else:
+    import fcntl as _fcntl
+
+
+def _lock_file(file_obj: Any, *, blocking: bool) -> None:
+    """Exclusive lock on an already-open regular file. Cross-platform:
+    ``fcntl.flock`` on POSIX, ``msvcrt.locking`` on Windows. Deliberately
+    self-contained (duplicates ``nexus._locking.lock_file``'s logic
+    rather than importing it) -- this script has no dependency on the
+    ``nexus`` package being installed/importable at all, by design (no
+    other routing script under ``conexus/hooks/scripts/`` imports it
+    either). Raises ``BlockingIOError`` if ``blocking=False`` and the
+    lock is contended.
+    """
+    fd = file_obj.fileno()
+    if sys.platform == "win32":
+        if blocking:
+            while True:
+                try:
+                    _msvcrt.locking(fd, _msvcrt.LK_LOCK, 1)
+                    return
+                except OSError:
+                    time.sleep(0.5)
+        else:
+            try:
+                _msvcrt.locking(fd, _msvcrt.LK_NBLCK, 1)
+            except OSError as e:
+                raise BlockingIOError(str(e)) from e
+    else:
+        flag = _fcntl.LOCK_EX if blocking else _fcntl.LOCK_EX | _fcntl.LOCK_NB
+        _fcntl.flock(fd, flag)
+
+
+def _unlock_file(file_obj: Any) -> None:
+    """Release a lock acquired by :func:`_lock_file`."""
+    fd = file_obj.fileno()
+    if sys.platform == "win32":
+        try:
+            _msvcrt.locking(fd, _msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    else:
+        _fcntl.flock(fd, _fcntl.LOCK_UN)
+
+
+def _rotate_log_if_oversized(log_path: pathlib.Path) -> None:
+    """Rotate ``log_path`` to ``<name>.1`` via atomic rename if it has
+    grown past :data:`_ROUTING_LOG_ROTATION_MAX_BYTES`.
+
+    ROTATION, NOT TRIM-IN-PLACE: rewriting the file in place to keep only
+    the newest N lines is a foot-cannon here specifically -- MANY routing
+    hook processes append to this file concurrently (one per gated
+    Bash/Agent/git command), so a read-modify-write can clobber another
+    process's line-atomic append mid-flight, and a crash partway through
+    the rewrite loses the file outright. ``os.replace`` is atomic on
+    POSIX: at every instant the path either names the pre-rotation file
+    or nothing, never a half-written intermediate. Do NOT "simplify"
+    this back into a rewrite.
+
+    Exactly one older generation is retained -- any existing ``.1`` is
+    CLOBBERED, never pushed to ``.2``, bounding total on-disk size at
+    roughly 2x the cap ONCE rotation has run at least once. The FIRST
+    rotation is an exception to that bound: a pre-existing file already
+    over the cap when this code first ships (this project's own real
+    ``routing_log.jsonl``, observed at ~5MB against a 1 MiB cap) lands in
+    ``.1`` WHOLE, not truncated to the cap -- and persists at that size
+    until the NEXT rotation clobbers it. Steady-state is bounded; the
+    one-time first-rotation transient is not.
+
+    TOCTOU DOUBLE-ROTATION CLOBBER (code-review Critical, nexus-g3jw6,
+    fix pass 2026-08-20) -- why this function takes a lock at all: two
+    concurrent rotators, P1 and P2, can BOTH observe the file oversize
+    (P2's observation stale by the time it acts). P1 rotates the real
+    history into ``.1`` and reappends a small live file. If P2 then
+    blindly replays its stale decision, its rename SUCCEEDS AGAIN (the
+    live path exists again) and CLOBBERS P1's real ``.1`` with P1's
+    small reappended content -- silent, irreversible history loss, not
+    the benign "someone else already rotated it" FileNotFoundError case
+    below. FIX: a non-blocking advisory lock on a sidecar
+    ``<name>.rotate.lock`` serializes the {re-stat, os.replace} critical
+    section across rotators. Appends stay completely lock-free
+    (unchanged, single ``fh.write()`` in ``log_routing_event``) -- only
+    the RARE rotation path pays any lock cost, and only once oversize
+    was observed at all. Losing the lock race (``BlockingIOError``)
+    means someone else is rotating right now -- skip entirely, do not
+    block or retry. Winning the lock means re-stat under it: if the file
+    is no longer oversize, skip -- the earlier, unlocked stat() that
+    triggered this call may be stale, but the DECISION to actually
+    rename is always made with fresh data. This eliminates the
+    stale-observation rename by construction, not merely narrows its
+    window -- a bare re-stat immediately before ``os.replace`` WITHOUT
+    the lock would still let two rotators interleave their re-stat and
+    replace calls.
+
+    A concurrent rotation race that manifests as ``FileNotFoundError``
+    on the rename itself (another process's rotation completed between
+    OUR re-stat-under-the-lock and OUR own replace -- possible only if
+    that other process is not participating in this same lock) is still
+    tolerated silently: the file is rotated either way. Any OTHER
+    failure propagates to the caller, which is responsible for keeping
+    rotation failure from blocking the append (see ``log_routing_event``).
+    """
+    try:
+        size = log_path.stat().st_size
+    except FileNotFoundError:
+        return  # nothing to rotate
+
+    if size < _ROUTING_LOG_ROTATION_MAX_BYTES:
+        return  # cheap, lock-free common case: not even apparently oversize
+
+    # Apparently oversize (per a possibly-stale stat()) -- escalate to the
+    # serialized, re-checked critical section.
+    lock_path = log_path.with_name(log_path.name + ".rotate.lock")
+    try:
+        lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError:
+        return  # can't even open the lockfile -- best-effort, skip rotation
+    lock_file_obj = os.fdopen(lock_fd, "r+")
+    try:
+        try:
+            _lock_file(lock_file_obj, blocking=False)
+        except BlockingIOError:
+            # Someone else is inside the rotation critical section right
+            # now -- skip entirely rather than wait or race them.
+            return
+
+        # RE-CHECK under the lock: the stat() above may be stale.
+        try:
+            size = log_path.stat().st_size
+        except FileNotFoundError:
+            return  # nothing left to rotate
+        if size < _ROUTING_LOG_ROTATION_MAX_BYTES:
+            return  # a fresher rotator already handled it
+
+        rotated = log_path.with_name(log_path.name + ".1")
+        try:
+            os.replace(log_path, rotated)
+        except FileNotFoundError:
+            # Another (non-participating) process removed/rotated the
+            # file between our re-stat and our rename -- rotated either
+            # way.
+            pass
+    finally:
+        try:
+            _unlock_file(lock_file_obj)
+        except OSError:
+            pass
+        lock_file_obj.close()
+
+
 def log_routing_event(
     rule: str,
     outcome: str,
@@ -256,6 +420,13 @@ def log_routing_event(
     try:
         path = _log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _rotate_log_if_oversized(path)
+        except Exception:
+            # Rotation is best-effort; the append below must still happen
+            # even if rotation itself hit an unexpected error (e.g. a
+            # permission error on the rename).
+            pass
         record = {
             "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
             "rule": rule,

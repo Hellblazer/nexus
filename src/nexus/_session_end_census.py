@@ -35,11 +35,40 @@ once, in the grandchild, off the hook-timeout critical path entirely.
 Reuses nexus-h33x8.1's shipped transcript-parsing machinery
 (:mod:`nexus.census`) rather than re-implementing it -- see
 ``census_corpus``/``census_session_dispatches``.
+
+FUTURE-READER WARNING (code-review Significant, fix pass 2026-08-20): as
+of this writing NOTHING reads ``capability_census.jsonl`` -- confirmed by
+grep across ``src/``/``tests/``/``conexus/``, not assumed (nexus-h33x8.3
+fix-pass-3 dev notes). That "no reader yet" state is exactly where a time
+bomb hides: whoever eventually writes the first reader (a
+``nx census capability --from-log`` variant, a longitudinal-trend command,
+whatever it turns out to be) MUST merge the rotated ``.1`` generation
+(oldest-first) with the live file, or it will silently see only the
+post-rotation slice and half its history will look like it never
+happened. Do not discover this the hard way -- :func:`nexus.routing_stats
+._iter_records` already solved the identical problem for
+``routing_log.jsonl`` (same rotation scheme, same two-file merge, oldest-
+first); copy that pattern, don't reinvent it.
+
+ROTATION, NOT TRIM-IN-PLACE (Sam-directed fix pass, 2026-08-20): the log
+grows without bound otherwise. Rewriting the file in place to keep only
+the newest N lines is a foot-cannon for a MULTI-WRITER append log like
+this one -- a concurrent SessionEnd appender from another Claude Code
+session can interleave a read-modify-write with its own line-atomic
+append (clobbering that append), and a crash partway through the
+rewrite loses the file outright. Rotation by atomic rename
+(``os.replace``/``Path.replace``, atomic on POSIX) never reads the
+file's content at all: at every instant the path either names the
+pre-rotation file or nothing, never a half-written intermediate. See
+:func:`_rotate_log_if_oversized` for the mechanics -- do NOT
+"simplify" this back into a rewrite; that is the exact class of bug
+this design avoids.
 """
 from __future__ import annotations
 
 import datetime
 import json
+import os
 import pathlib
 from typing import Any
 
@@ -51,6 +80,121 @@ from typing import Any
 #: ``NEXUS_CONFIG_DIR`` (the bead's explicit requirement) -- the two
 #: diverge whenever ``NEXUS_CONFIG_DIR`` is set (sandboxes, tests).
 _LOG_FILENAME = "capability_census.jsonl"
+
+#: Byte cap that triggers rotation (~1 MiB). A capability-census record
+#: runs a few hundred bytes; years of one-record-per-SessionEnd headroom
+#: fit comfortably under this before the FIRST rotation ever fires. A
+#: byte ``stat()`` is O(1) -- checking this on every write is deliberately
+#: cheap, unlike a line count (O(n), would require reading the whole file).
+_LOG_ROTATION_MAX_BYTES = 1_048_576
+
+
+def _rotate_log_if_oversized(log_path: pathlib.Path) -> None:
+    """Rotate ``log_path`` to ``<name>.1`` via atomic rename if it has
+    grown past :data:`_LOG_ROTATION_MAX_BYTES`. Never a read-modify-write
+    -- see the module docstring's ROTATION, NOT TRIM-IN-PLACE section for
+    why.
+
+    Exactly one older generation is retained: any existing ``.1`` is
+    CLOBBERED by ``os.replace`` (POSIX rename semantics), never pushed to
+    ``.2`` -- bounding total on-disk size at roughly 2x the cap ONCE
+    rotation has run at least once. The FIRST rotation is an exception to
+    that bound: a pre-existing file already over the cap when this code
+    first ships (e.g. this project's own real ``routing_log.jsonl``,
+    observed at ~5MB against a 1 MiB cap) lands in ``.1`` WHOLE, not
+    truncated to the cap -- and persists at that size until the NEXT
+    rotation clobbers it. Steady-state is bounded; the one-time
+    first-rotation transient is not.
+
+    TOCTOU DOUBLE-ROTATION CLOBBER (code-review Critical, nexus-g3jw6,
+    fix pass 2026-08-20) -- why this function takes a lock at all: two
+    concurrent rotators, P1 and P2, can BOTH observe the file oversize
+    (P2's observation stale by the time it acts). P1 rotates the real
+    history into ``.1`` and reappends a small live file. If P2 then
+    blindly replays its stale decision, its rename SUCCEEDS AGAIN (the
+    live path exists again) and CLOBBERS P1's real ``.1`` with P1's
+    small reappended content -- silent, irreversible history loss, not
+    the benign "someone else already rotated it" FileNotFoundError case
+    below. FIX: a non-blocking advisory lock on a sidecar
+    ``<name>.rotate.lock`` serializes the {re-stat, os.replace}
+    critical section across rotators. Appends stay completely lock-free
+    (unchanged, single ``fh.write()`` in the caller) -- only the RARE
+    rotation path pays any lock cost, and only once oversize was
+    observed at all. Losing the lock race (``BlockingIOError``) means
+    someone else is rotating right now -- skip entirely, do not block
+    or retry. Winning the lock means re-stat under it: if the file is no
+    longer oversize (someone else already rotated, e.g. P1 finished
+    first), skip -- the earlier, unlocked stat() that triggered this
+    call may be stale, but the DECISION to actually rename is always
+    made with fresh data. This eliminates the stale-observation rename
+    by construction, not merely narrows its window -- a bare re-stat
+    immediately before ``os.replace`` WITHOUT the lock would still let
+    two rotators interleave their re-stat and replace calls.
+
+    A concurrent rotation race that manifests as ``FileNotFoundError``
+    on the rename itself (another process's rotation completed between
+    OUR re-stat-under-the-lock and OUR own replace -- possible only if
+    that other process is not participating in this same lock, e.g. a
+    pre-upgrade version of this code) is still tolerated silently: the
+    file is rotated either way, which is what this function promises.
+    Any OTHER failure (permission error, disk error, lock file
+    unopenable, ...) is the caller's responsibility to isolate; this
+    function does not swallow those itself, so a genuinely unexpected
+    failure stays diagnosable rather than silently absorbed at two
+    different layers.
+    """
+    try:
+        size = log_path.stat().st_size
+    except FileNotFoundError:
+        return  # nothing to rotate
+
+    if size < _LOG_ROTATION_MAX_BYTES:
+        return  # cheap, lock-free common case: not even apparently oversize
+
+    # Apparently oversize (per a possibly-stale stat()) -- escalate to the
+    # serialized, re-checked critical section. Everything from here down
+    # runs at most once per rotation event across all processes that
+    # honor this lock.
+    from nexus._locking import lock_file, unlock_file  # noqa: PLC0415 — deferred; only needed on the rare rotation path
+
+    lock_path = log_path.with_name(log_path.name + ".rotate.lock")
+    try:
+        lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError:
+        return  # can't even open the lockfile -- best-effort, skip rotation
+    lock_file_obj = os.fdopen(lock_fd, "r+")
+    try:
+        try:
+            lock_file(lock_file_obj, blocking=False)
+        except BlockingIOError:
+            # Someone else is inside the rotation critical section right
+            # now -- skip entirely rather than wait or race them.
+            return
+
+        # RE-CHECK under the lock: the stat() above may be stale (another
+        # rotator may have already rotated -- and even reappended -- since
+        # then). Only rotate if STILL oversize right now.
+        try:
+            size = log_path.stat().st_size
+        except FileNotFoundError:
+            return  # nothing left to rotate
+        if size < _LOG_ROTATION_MAX_BYTES:
+            return  # a fresher rotator already handled it
+
+        rotated = log_path.with_name(log_path.name + ".1")
+        try:
+            os.replace(log_path, rotated)
+        except FileNotFoundError:
+            # Another (non-participating) process removed/rotated the
+            # file between our re-stat and our rename -- rotated either
+            # way.
+            pass
+    finally:
+        try:
+            unlock_file(lock_file_obj)
+        except OSError:
+            pass
+        lock_file_obj.close()
 
 
 def capability_census_log_path() -> pathlib.Path:
@@ -200,6 +344,30 @@ def write_session_capability_census(session_id: str | None = None) -> dict[str, 
 
     log_path = capability_census_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _rotate_log_if_oversized(log_path)
+    except Exception as exc:  # noqa: BLE001 — rotation is best-effort; the durable record below is not
+        # A rotation failure (anything beyond the FileNotFoundError race
+        # _rotate_log_if_oversized already tolerates internally -- e.g. a
+        # permission error on the rename, or on opening the rotate lock
+        # file) must never prevent the append. code-review Important #4
+        # (fix pass, 2026-08-20): a bare swallow here contradicted
+        # _rotate_log_if_oversized's own "stays diagnosable" promise --
+        # log it at debug level (matches
+        # ``_session_end_launcher._write_capability_census``'s identical
+        # discipline for its analogous failure case) so an environment
+        # whose rotation silently fails forever is still debuggable from
+        # the logs, not just from a growing file someone eventually
+        # notices.
+        try:
+            import structlog  # noqa: PLC0415 — deferred; only needed on this rare failure path
+
+            structlog.get_logger(__name__).debug(
+                "capability_census_rotation_failed",
+                error=str(exc),
+            )
+        except Exception:  # noqa: BLE001 — even the debug log is best-effort
+            pass
     with log_path.open("a", encoding="utf-8") as fh:
         # code-review Important #2 (fix pass, 2026-08-20): ONE fh.write()
         # call with the complete line (payload + newline), matching the
