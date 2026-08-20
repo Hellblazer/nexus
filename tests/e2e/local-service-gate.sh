@@ -357,10 +357,13 @@ print(jar_freshness_skip_reason() or "")
       -e "s/^build_ref=.*/build_ref=${GATE_BUILD_REF}/" \
       "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp" \
     && mv "$RELEASE_PROPS.tmp" "$RELEASE_PROPS"
-  if ! (cd service && ./mvnw -q package -DskipTests); then
+  # nexus-c00dw: mvnw-leased.sh takes the single-builder lease around this
+  # ./mvnw call itself (cds into service/ internally) — never call the bare
+  # ./mvnw here, or this gate can collide with a concurrent build.
+  if ! "$REPO_ROOT/scripts/mvnw-leased.sh" -q package -DskipTests; then
     _restore_props
     echo "[gate] ERROR: service jar rebuild failed — fix the Maven build and re-run:" >&2
-    echo "         cd service && ./mvnw package -DskipTests" >&2
+    echo "         scripts/mvnw-leased.sh package -DskipTests" >&2
     exit 2
   fi
   _restore_props
@@ -377,7 +380,7 @@ elif [ -f "$JAR" ]; then
   START_ENV+=("NEXUS_SERVICE_JAR=$JAR")
 else
   echo "[gate] ERROR: no launch artifact — build the dev jar first:" >&2
-  echo "         cd service && ./mvnw -q package -DskipTests" >&2
+  echo "         scripts/mvnw-leased.sh -q package -DskipTests" >&2
   echo "       or export NEXUS_SERVICE_BIN=<native binary>" >&2
   exit 2
 fi

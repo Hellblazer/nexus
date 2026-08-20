@@ -66,7 +66,9 @@ JAR="service/target/nexus-service-1.0-SNAPSHOT.jar"
 # ── Build the service JAR (fresh — nexus-todyv: stale shaded jar reuse) ────────
 if [[ "$BUILD" == "1" ]]; then
     echo "▸ Building service JAR (mvn package -DskipTests)…"
-    ( cd service && mvn -q -DskipTests package )
+    # nexus-c00dw: route through the single-builder lease — a bare `mvn`
+    # here can collide with a concurrent build of the same service/target.
+    "$REPO_ROOT/scripts/mvnw-leased.sh" -q -DskipTests package
     echo "  built: $JAR"
 elif [[ "$RUN_PYTHON" == "1" && ! -f "$JAR" ]]; then
     # Only the Python suites need a pre-built JAR (their fixtures spawn it as a
@@ -113,7 +115,9 @@ if [[ "$RUN_JAVA" == "1" ]]; then
     # NOTE: deliberately NOT `-q` — quiet mode suppresses the surefire
     # "Tests run: N" summary the inconclusive-detection below greps for, which
     # would make every Java run read as INCONCLUSIVE even when green.
-    java_out="$( cd service && mvn test -Dtest="$JAVA_TESTS" 2>&1 )" || rc=$?
+    # nexus-c00dw: leased, same as the build above — a lease refusal (rc 75)
+    # surfaces here as a nonzero rc, same as any other build failure.
+    java_out="$("$REPO_ROOT/scripts/mvnw-leased.sh" test -Dtest="$JAVA_TESTS" 2>&1)" || rc=$?
     # Show the surefire per-class lines + the final reactor summary, not the
     # full noisy build log.
     grep -E 'Tests run:|BUILD' <<<"$java_out" | tail -20

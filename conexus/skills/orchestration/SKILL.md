@@ -147,6 +147,7 @@ is still silent scope reduction. Applies to every dispatch below.
 - **Design gate first**: when a plan marks an item DESIGN DECISION FIRST, the orchestrator locks the design-of-record in T1 before any code dispatch; deviations from a plan's recommendation need the human's nod, named fallbacks do not.
 - **Review at every seam**: each arc gets the stacked dual review independently; cross-arc integration points get named in reviewer briefs.
 - **Commit order**: arcs commit pathspec-limited in dependency order (lib contract before doc text referencing it), one arc per commit.
+- **service/ builds**: one builder at a time. Never dispatch a bare `./mvnw`/`mvn` invocation while another agent might also be building `service/` — both write `service/target` and a collision corrupts jOOQ codegen mid-build (nexus-c00dw). Any ad hoc Maven call goes through `scripts/mvnw-leased.sh <args>` (it takes the `scripts/lib/build-lease.sh` lease, cds into `service/`, and passes args through); `scripts/build-gate-jar.sh` takes the same lease internally for the stamped-jar path. A refusal (rc 75) names the live holder — wait for it, don't bypass it. Coverage (every in-repo caller, not just these two) is enforced by `scripts/lib/bare_mvnw_lint_test.sh`.
 
 ## Quick Routing
 

@@ -39,12 +39,23 @@
 # The working tree is left CLEAN: release.properties is restored on exit,
 # including on failure or interrupt.
 #
+# SINGLE-BUILDER LEASE (nexus-c00dw): acquires the service build lease
+# before touching anything, so this script and a concurrent ./mvnw
+# invocation (an orchestrator + a developer agent, historically — see the
+# incident this bead records) can never write service/target at the same
+# time. Refuses loudly (rc 75) naming the live holder rather than
+# corrupting a concurrent build. See scripts/lib/build-lease.sh.
+#
 #   usage: scripts/build-gate-jar.sh [extra mvn args...]
 
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 props="$repo_root/service/src/main/resources/META-INF/nexus/release.properties"
+
+# shellcheck source=./lib/build-lease.sh disable=SC1091
+source "$repo_root/scripts/lib/build-lease.sh"
+build_lease_acquire service build-gate-jar.sh "$@"
 
 test -f "$props" || { echo "release.properties missing at $props" >&2; exit 1; }
 
@@ -69,7 +80,7 @@ cp "$props" "$backup"
 # tracked-file modification that would follow the developer into their next
 # commit, and it would make a subsequent `mvn package` silently produce a
 # release-looking JAR.
-trap 'cp "$backup" "$props"; rm -f "$backup"' EXIT
+trap 'build_lease_release service; cp "$backup" "$props"; rm -f "$backup"' EXIT
 
 tmp="$(mktemp)"
 grep -Ev '^release_version=|^build_ref=' "$props" > "$tmp"

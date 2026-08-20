@@ -30,7 +30,7 @@ Confirm the full Java suite + native build passed on the exact `service/` tree:
 # fast path: if service/ at HEAD is byte-identical to a green service-ci commit, that CI covers it
 git diff --stat <green-service-ci-sha> HEAD -- service/    # empty = covered
 # else run locally (needs Docker for Testcontainers pgvector + the bge ONNX model):
-cd service && ./mvnw -q test
+scripts/mvnw-leased.sh -q test
 ```
 
 The Java CI (`service-ci.yml`) is **advisory** — it does not block auto-merge — so verify it actually passed on this tree rather than assuming.
@@ -168,7 +168,7 @@ finding, not a harness formality: its maiden runs caught two production bugs
 the unit suites missed (nexus-h8rf6).
 
 Notes:
-- The host JVM suite (`cd service && ./mvnw -q test`, Step 2) validates the Java
+- The host JVM suite (`scripts/mvnw-leased.sh -q test`, Step 2) validates the Java
   on the JVM; `--shakeout` adds the native-image build + serve + drive.
 - **Do NOT use `release-sandbox.sh`** — it swaps the uv tool venv and can break
   the live install. The container rehearsal is the safe, isolated one.
