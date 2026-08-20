@@ -1689,6 +1689,146 @@ class TelemetryRepositoryTest {
             .isEqualTo(0);
     }
 
+    // ── nx_answer_runs.cost_usd nullable + include_steps read route
+    //    (RDR-196 .p1c-b, nexus-lme1s) ──────────────────────────────────────
+
+    @Test @Order(53)
+    void recordNxAnswerRun_nullCostUsd_readsBackNullNotZero() {
+        String tenant = "nar-null-cost-" + System.nanoTime();
+        // A run with a genuinely unknown cost (null) alongside one with a
+        // real known cost — proves both the write-null round trip AND that
+        // avg_cost_usd (SQL AVG) ignores the null rather than averaging it
+        // in as a zero (which would silently understate every reported
+        // average the moment any caller sends a null).
+        repo.recordNxAnswerRun(tenant, "no usage observed", null, null, 0, "",
+            null, 1_000, PAST_TS);
+        repo.recordNxAnswerRun(tenant, "known cost", 1L, 0.9, 1, "answer",
+            0.02, 1_000, PAST_TS);
+
+        var out = repo.queryNxAnswerRuns(tenant, "", 100);
+        assertThat(out.get("total")).isEqualTo(2);
+        assertThat((Double) out.get("avg_cost_usd"))
+            .as("AVG must ignore the null row, not treat it as 0.0 "
+                + "(0.02 averaged over 1 non-null row, not 2)")
+            .isCloseTo(0.02, org.assertj.core.data.Offset.offset(1e-9));
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) out.get("rows");
+        var nullRow = rows.stream()
+            .filter(r -> "no usage observed".equals(r.get("question")))
+            .findFirst().orElseThrow();
+        assertThat(nullRow.get("cost_usd"))
+            .as("a null cost_usd must read back as null, never a fabricated 0.0")
+            .isNull();
+        var knownRow = rows.stream()
+            .filter(r -> "known cost".equals(r.get("question")))
+            .findFirst().orElseThrow();
+        assertThat(((Number) knownRow.get("cost_usd")).doubleValue()).isEqualTo(0.02);
+    }
+
+    @Test @Order(54)
+    void queryNxAnswerRuns_includeStepsTrue_returnsStepsOrderedByStepIndex() {
+        String tenant = "nar-incl-steps-" + System.nanoTime();
+        String withSteps = "run-with-steps-" + System.nanoTime();
+        String withoutSteps = "run-without-steps-" + System.nanoTime();
+        // Insertion order deliberately reversed vs step_index — proves the
+        // read path orders by step_index, not insertion/write order.
+        List<TelemetryRepository.StepInput> steps = List.of(
+            new TelemetryRepository.StepInput(1, "claude_dispatch", "bundle", "claude-fable-5",
+                150, 40, 0.0021, 4200, true, List.of(1, 2)),
+            new TelemetryRepository.StepInput(0, "operator_filter", "sql", null,
+                0, 0, 0.0, 12, true, List.of()));
+        // Each StepInput inserts as its own PK-addressed row regardless of
+        // list position, so writing index-1-then-index-0 exercises the
+        // claim that the READ path (ORDER BY step_index) — not write
+        // order — determines what comes back below.
+        repo.recordNxAnswerRun(tenant, withSteps, null, null, 2, "final",
+            0.0021, 4212, PAST_TS, steps);
+        repo.recordNxAnswerRun(tenant, withoutSteps, null, null, 0, "no steps",
+            0.0, 5, PAST_TS, List.of());
+
+        var out = repo.queryNxAnswerRuns(tenant, "", 100, true);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) out.get("rows");
+        assertThat(rows).hasSize(2);
+
+        var rowWithSteps = rows.stream()
+            .filter(r -> withSteps.equals(r.get("question")))
+            .findFirst().orElseThrow();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> gotSteps = (List<Map<String, Object>>) rowWithSteps.get("steps");
+        assertThat(gotSteps).as("both step rows must be present").hasSize(2);
+        assertThat(gotSteps.get(0).get("step_index")).isEqualTo(0);
+        assertThat(gotSteps.get(0).get("operator")).isEqualTo("operator_filter");
+        assertThat(gotSteps.get(0).get("source")).isEqualTo("sql");
+        assertThat(gotSteps.get(1).get("step_index")).isEqualTo(1);
+        assertThat(gotSteps.get(1).get("source")).isEqualTo("bundle");
+        assertThat(gotSteps.get(1).get("model")).isEqualTo("claude-fable-5");
+        assertThat(((Number) gotSteps.get(1).get("input_tokens")).intValue()).isEqualTo(150);
+        assertThat(((java.math.BigDecimal) gotSteps.get(1).get("cost_usd")).doubleValue())
+            .isEqualTo(0.0021);
+        Integer[] bundledSteps = (Integer[]) gotSteps.get(1).get("bundled_steps");
+        assertThat(bundledSteps).containsExactly(1, 2);
+
+        var rowWithoutSteps = rows.stream()
+            .filter(r -> withoutSteps.equals(r.get("question")))
+            .findFirst().orElseThrow();
+        assertThat(rowWithoutSteps.get("steps"))
+            .as("a run written with zero steps must still get 'steps': [] under "
+                + "include_steps=true, never an absent key or null")
+            .isEqualTo(List.of());
+    }
+
+    @Test @Order(55)
+    void queryNxAnswerRuns_includeStepsFalse_omitsStepsKeyEntirely() {
+        String tenant = "nar-no-incl-steps-" + System.nanoTime();
+        List<TelemetryRepository.StepInput> steps = List.of(
+            new TelemetryRepository.StepInput(0, "op", "llm", null,
+                null, null, null, 1, true, List.of()));
+        repo.recordNxAnswerRun(tenant, "q", null, null, 1, "a", 0.0, 1, PAST_TS, steps);
+
+        // Both the default 3-arg overload AND explicit includeSteps=false must
+        // be byte-for-byte the pre-existing shape — no 'steps' key at all.
+        var defaultOut = repo.queryNxAnswerRuns(tenant, "", 100);
+        var explicitFalseOut = repo.queryNxAnswerRuns(tenant, "", 100, false);
+        for (var out : List.of(defaultOut, explicitFalseOut)) {
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> rows = (List<Map<String, Object>>) out.get("rows");
+            assertThat(rows).hasSize(1);
+            assertThat(rows.get(0)).doesNotContainKey("steps");
+        }
+    }
+
+    @Test @Order(56)
+    void queryNxAnswerRuns_includeStepsTrue_isTenantScoped() {
+        String tenantA = "nar-incl-iso-a-" + System.nanoTime();
+        String tenantB = "nar-incl-iso-b-" + System.nanoTime();
+        List<TelemetryRepository.StepInput> steps = List.of(
+            new TelemetryRepository.StepInput(0, "op", "llm", null,
+                null, null, null, 3, true, List.of()));
+        repo.recordNxAnswerRun(tenantA, "tenant-a-run", null, null, 1, "a",
+            0.0, 3, PAST_TS, steps);
+
+        var mineOut = repo.queryNxAnswerRuns(tenantA, "", 100, true);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> mineRows = (List<Map<String, Object>>) mineOut.get("rows");
+        assertThat(mineRows).hasSize(1);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> mineSteps = (List<Map<String, Object>>) mineRows.get(0).get("steps");
+        assertThat(mineSteps).as("the owning tenant must see its own step").hasSize(1);
+
+        // FORCE RLS on both nx_answer_runs AND nx_answer_steps, exercised
+        // through the SAME NOSUPERUSER svcDs-backed repo this whole test
+        // class uses (tenantScope = new TenantScope(svcDs) in setup) — a
+        // different tenant must see zero rows (and therefore zero steps).
+        var theirsOut = repo.queryNxAnswerRuns(tenantB, "", 100, true);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> theirsRows = (List<Map<String, Object>>) theirsOut.get("rows");
+        assertThat(theirsRows)
+            .as("a different tenant must see zero rows for tenant A's run (FORCE RLS)")
+            .isEmpty();
+    }
+
     private long fetchNxAnswerRunId(String tenant, String question) {
         try (Connection conn = pg.createConnection("")) {
             conn.createStatement().execute("SET nexus.tenant = '" + tenant + "'");

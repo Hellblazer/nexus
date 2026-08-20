@@ -850,7 +850,7 @@ public final class TelemetryRepository {
 
     /**
      * One parsed {@code nx_answer_steps} child row, as handed to
-     * {@link #recordNxAnswerRun(String, String, Long, Double, int, String, double, long, String, List)}
+     * {@link #recordNxAnswerRun(String, String, Long, Double, int, String, Double, long, String, List)}
      * by {@code TelemetryHandler.parseSteps} (RDR-196 .p1c, nexus-nyry9.9).
      * Field-for-field mirror of the Python-side {@code StepRecord}
      * (src/nexus/plans/runner.py:242) — see telemetry-007-nx-answer-steps.xml's
@@ -872,6 +872,15 @@ public final class TelemetryRepository {
      * Delegates to the steps-carrying overload with an empty list — every
      * existing caller (ETL-adjacent live-write sites, every pre-nexus-nyry9.9
      * test) keeps its exact prior behavior unchanged.
+     *
+     * <p>{@code costUsd} is {@code Double} (boxed), not {@code double}
+     * (RDR-196 .p1c-b, nexus-lme1s): {@code nx_answer_runs.cost_usd} lost
+     * its {@code NOT NULL DEFAULT 0.0} at telemetry-007-3 specifically so a
+     * caller's "no usage observed" can be written as SQL {@code NULL}
+     * instead of being forced to a stored {@code 0.0} indistinguishable
+     * from a genuine free call (RDR-196 risk 1). A primitive parameter
+     * cannot represent that distinction at all, so this is a signature
+     * change, not just a schema change.
      */
     public void recordNxAnswerRun(String tenant,
                                   String question,
@@ -879,7 +888,7 @@ public final class TelemetryRepository {
                                   Double matchedConfidence,
                                   int stepCount,
                                   String finalText,
-                                  double costUsd,
+                                  Double costUsd,
                                   long durationMs,
                                   String createdAtIso) {
         recordNxAnswerRun(tenant, question, planId, matchedConfidence, stepCount, finalText,
@@ -925,7 +934,7 @@ public final class TelemetryRepository {
                                   Double matchedConfidence,
                                   int stepCount,
                                   String finalText,
-                                  double costUsd,
+                                  Double costUsd,
                                   long durationMs,
                                   String createdAtIso,
                                   List<StepInput> steps) {
@@ -977,6 +986,11 @@ public final class TelemetryRepository {
      * Uses {@link #parseTsStrict} — throws on null/blank/malformed {@code createdAtIso}.
      * Does NOT delegate to {@code recordNxAnswerRun} because that method uses the
      * lenient {@link #parseTs} which would silently stamp migration-time on blank input.
+     *
+     * <p>{@code costUsd} is {@code Double} (boxed), not {@code double}
+     * (RDR-196 .p1c-b, nexus-lme1s, same reasoning as {@link #recordNxAnswerRun}):
+     * fidelity preservation means a source row's null cost_usd must import
+     * as SQL {@code NULL}, not get coerced to {@code 0.0} en route.
      */
     public void importNxAnswerRunRow(String tenant,
                                      String question,
@@ -984,7 +998,7 @@ public final class TelemetryRepository {
                                      Double matchedConfidence,
                                      int stepCount,
                                      String finalText,
-                                     double costUsd,
+                                     Double costUsd,
                                      long durationMs,
                                      String createdAtIso) {
         OffsetDateTime createdAt = parseTsStrict(createdAtIso);  // STRICT: throws on blank/malformed
@@ -1053,6 +1067,22 @@ public final class TelemetryRepository {
      *                 aggregates
      */
     public Map<String, Object> queryNxAnswerRuns(String tenant, String sinceIso, int limit) {
+        return queryNxAnswerRuns(tenant, sinceIso, limit, false);
+    }
+
+    /**
+     * {@code includeSteps} overload (RDR-196 .p1c-b, nexus-lme1s): when
+     * {@code true}, each row in the returned page gains a {@code steps}
+     * entry — the page's {@code nx_answer_steps} children, ordered by
+     * {@code step_index}, fetched in ONE query over all page run ids
+     * (grouped in Java, not per-row — no N+1) and RLS-scoped through the
+     * SAME {@code tenantScope.withTenant} connection as the parent query,
+     * so a tenant can never see another tenant's steps. {@code false}
+     * (the 3-arg overload above) is byte-for-byte the pre-existing
+     * behavior — no {@code steps} key at all, not even an empty one.
+     */
+    public Map<String, Object> queryNxAnswerRuns(String tenant, String sinceIso, int limit,
+                                                  boolean includeSteps) {
         return tenantScope.withTenant(tenant, ctx -> {
             var cond = noCondition();
             if (sinceIso != null && !sinceIso.isBlank()) {
@@ -1101,7 +1131,7 @@ public final class TelemetryRepository {
             buckets.put("2min_to_5min", bucketVal(agg, "b_2min_5min"));
             buckets.put("over_5min",   bucketVal(agg, "b_over_5min"));
 
-            List<Map<String, Object>> rows = ctx.select(
+            var runRecords = ctx.select(
                     NX_ANSWER_RUNS.ID,
                     NX_ANSWER_RUNS.QUESTION,
                     NX_ANSWER_RUNS.PLAN_ID,
@@ -1115,8 +1145,15 @@ public final class TelemetryRepository {
                 .where(cond)
                 .orderBy(NX_ANSWER_RUNS.CREATED_AT.desc(), NX_ANSWER_RUNS.ID.desc())
                 .limit(limit)
-                .fetch()
-                .map(r -> {
+                .fetch();
+
+            // ONE query over the page's run ids, grouped in Java — no N+1
+            // (RDR-196 .p1c-b, nexus-lme1s).
+            Map<Long, List<Map<String, Object>>> stepsByRunId = includeSteps
+                ? fetchNxAnswerStepsGrouped(ctx, runRecords.getValues(NX_ANSWER_RUNS.ID))
+                : Map.of();
+
+            List<Map<String, Object>> rows = runRecords.map(r -> {
                     Map<String, Object> m = new java.util.LinkedHashMap<>();
                     m.put("id",                 r.value1());
                     m.put("question",           r.value2());
@@ -1127,6 +1164,9 @@ public final class TelemetryRepository {
                     m.put("cost_usd",           r.value7());
                     m.put("duration_ms",        r.value8());
                     m.put("created_at",         utcIso(r.value9()));
+                    if (includeSteps) {
+                        m.put("steps", stepsByRunId.getOrDefault(r.value1(), List.of()));
+                    }
                     return m;
                 });
 
@@ -1146,6 +1186,67 @@ public final class TelemetryRepository {
     private static long bucketVal(org.jooq.Record agg, String key) {
         Object v = agg != null ? agg.get(key) : null;
         return v != null ? ((Number) v).longValue() : 0L;
+    }
+
+    /**
+     * Fetch every {@code nx_answer_steps} row for the given {@code run_id}s in
+     * ONE query, grouped by {@code run_id} and ordered by {@code step_index}
+     * within each group (RDR-196 .p1c-b, nexus-lme1s — the read half of
+     * {@code nx_answer_steps}, written at .p1c but never read back). Field
+     * names in each returned map are the SAME ones {@code
+     * TelemetryHandler.parseNxAnswerSteps} accepts on the write side —
+     * {@code step_index, operator, source, model, input_tokens,
+     * output_tokens, cost_usd, elapsed_ms, ok, bundled_steps} — deliberately
+     * omitting {@code run_id}/{@code tenant_id}, both already implied by
+     * which run's {@code steps} array a caller finds this map inside.
+     * {@code cost_usd} is the raw (possibly-null) {@code BigDecimal} from
+     * the NUMERIC column; {@code bundled_steps} the raw {@code Integer[]} —
+     * both serialize correctly via Jackson without a manual conversion.
+     *
+     * <p>Empty/null {@code runIds} short-circuits to an empty map rather
+     * than issuing a query with an empty {@code IN ()} — jOOQ's own
+     * {@code Field.in(Collection)} degrades to a false condition for that
+     * case, but skipping the round trip entirely is both cheaper and more
+     * explicit about the empty-page case.
+     */
+    private static Map<Long, List<Map<String, Object>>> fetchNxAnswerStepsGrouped(
+            DSLContext ctx, List<Long> runIds) {
+        if (runIds == null || runIds.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, List<Map<String, Object>>> out = new java.util.LinkedHashMap<>();
+        ctx.select(
+                NX_ANSWER_STEPS.RUN_ID,
+                NX_ANSWER_STEPS.STEP_INDEX,
+                NX_ANSWER_STEPS.OPERATOR,
+                NX_ANSWER_STEPS.SOURCE,
+                NX_ANSWER_STEPS.MODEL,
+                NX_ANSWER_STEPS.INPUT_TOKENS,
+                NX_ANSWER_STEPS.OUTPUT_TOKENS,
+                NX_ANSWER_STEPS.COST_USD,
+                NX_ANSWER_STEPS.ELAPSED_MS,
+                NX_ANSWER_STEPS.OK,
+                NX_ANSWER_STEPS.BUNDLED_STEPS)
+            .from(NX_ANSWER_STEPS)
+            .where(NX_ANSWER_STEPS.RUN_ID.in(runIds))
+            .orderBy(NX_ANSWER_STEPS.RUN_ID.asc(), NX_ANSWER_STEPS.STEP_INDEX.asc())
+            .fetch()
+            .forEach(r -> {
+                Map<String, Object> step = new java.util.LinkedHashMap<>();
+                step.put("step_index",    r.get(NX_ANSWER_STEPS.STEP_INDEX));
+                step.put("operator",      r.get(NX_ANSWER_STEPS.OPERATOR));
+                step.put("source",        r.get(NX_ANSWER_STEPS.SOURCE));
+                step.put("model",         r.get(NX_ANSWER_STEPS.MODEL));
+                step.put("input_tokens",  r.get(NX_ANSWER_STEPS.INPUT_TOKENS));
+                step.put("output_tokens", r.get(NX_ANSWER_STEPS.OUTPUT_TOKENS));
+                step.put("cost_usd",      r.get(NX_ANSWER_STEPS.COST_USD));
+                step.put("elapsed_ms",    r.get(NX_ANSWER_STEPS.ELAPSED_MS));
+                step.put("ok",            r.get(NX_ANSWER_STEPS.OK));
+                step.put("bundled_steps", r.get(NX_ANSWER_STEPS.BUNDLED_STEPS));
+                out.computeIfAbsent(r.get(NX_ANSWER_STEPS.RUN_ID), k -> new java.util.ArrayList<>())
+                   .add(step);
+            });
+        return out;
     }
 
     // ── hook_failures ──────────────────────────────────────────────────────────
@@ -1384,9 +1485,13 @@ public final class TelemetryRepository {
                     NX_ANSWER_RUNS.MATCHED_CONFIDENCE, NX_ANSWER_RUNS.STEP_COUNT, NX_ANSWER_RUNS.FINAL_TEXT,
                     NX_ANSWER_RUNS.COST_USD, NX_ANSWER_RUNS.DURATION_MS, NX_ANSWER_RUNS.CREATED_AT);
             for (var r : batch) {
+                // cost_usd: optD (nullable, no default) — not optDd (RDR-196 .p1c-b,
+                // nexus-lme1s). Fidelity-preserving import must not coerce a source
+                // row's absent/null cost_usd to a stored 0.0 (indistinguishable from
+                // a genuine known-zero, same reasoning as importNxAnswerRunRow above).
                 insert = insert.values(tenant, reqS(r, "question"), optL(r, "plan_id"),
                         optD(r, "matched_confidence"), optI(r, "step_count", 0), str(optS(r, "final_text")),
-                        optDd(r, "cost_usd", 0.0), optLd(r, "duration_ms", 0L),
+                        optD(r, "cost_usd"), optLd(r, "duration_ms", 0L),
                         parseTsStrict(reqS(r, "created_at")));
             }
             insert.onConflictDoNothing().execute();

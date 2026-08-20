@@ -184,6 +184,26 @@ class TelemetrySchemaLiquibaseTest {
         }
     }
 
+    // ── nx_answer_runs.cost_usd nullable (RDR-196 .p1c-b, nexus-lme1s) ───────
+
+    @Test
+    void nxAnswerRuns_costUsdIsNullableNoDefault() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT is_nullable, column_default FROM information_schema.columns "
+                + "WHERE table_schema = 'nexus' AND table_name = 'nx_answer_runs' "
+                + "AND column_name = 'cost_usd'");
+            assertThat(rs.next()).as("nx_answer_runs.cost_usd column must exist").isTrue();
+            assertThat(rs.getString("is_nullable"))
+                .as("telemetry-007-3 must DROP NOT NULL on nx_answer_runs.cost_usd "
+                    + "(RDR-196 risk 1: a client null must not be forced to 0.0)")
+                .isEqualTo("YES");
+            assertThat(rs.getString("column_default"))
+                .as("telemetry-007-3 must DROP DEFAULT on nx_answer_runs.cost_usd")
+                .isNull();
+        }
+    }
+
     // ── Test 2: RLS on every telemetry table ─────────────────────────────────
 
     @Test

@@ -99,6 +99,46 @@
     ttl-null.xml (the current tail, nexus-tk070.p6b) and before the
     grants-nexus-svc.xml runAlways block — the established late-append
     convention (D0.1) every new changeset since RDR-156 follows.
+
+    ── telemetry-007-3 (RDR-196 .p1c-b, nexus-lme1s) ─────────────────────
+
+    nx_answer_runs.cost_usd DROP NOT NULL + DROP DEFAULT: appended to this
+    SAME file rather than a new tail file — telemetry-007 has not shipped
+    in any engine-service tag yet (verified via a git tag containment
+    check against its landing commit before this changeset was authored),
+    so appending is the D0.1-compliant move, not a checksum-breaking edit
+    of a shipped changeset.
+
+    Risk 1 (RDR-196, "zeros are not free"): the client (nexus-nyry9.10,
+    src/nexus/mcp/core.py) now sends a JSON `cost_usd: null` on the parent
+    run row when NO usage was observed at all (as opposed to a genuine
+    known-zero, e.g. a pure-T3 fast-path call) — see that bead's dev notes
+    for the full "ENGINE LIMITATION FOUND" writeup: prior to this
+    changeset, `NOT NULL DEFAULT 0.0` forced that null into a stored 0.0,
+    indistinguishable from "this call was free." NUMERIC/DOUBLE PRECISION
+    stays DOUBLE PRECISION here — the type-hygiene divergence from the
+    child `nx_answer_steps.cost_usd` (NUMERIC) is unchanged and was already
+    decided + documented at telemetry-007-1 above; this changeset only
+    lifts the NOT NULL/DEFAULT constraint, it does not retype the column.
+
+    Readers updated in lockstep (same commit as this changeset, not a
+    follow-up): `TelemetryRepository.queryNxAnswerRuns`'s
+    `avg(NX_ANSWER_RUNS.COST_USD)` aggregate already ignores NULLs per
+    standard SQL AVG semantics (asserted by a new repository test, not
+    just assumed); the row mapper emits the raw (possibly-null) value,
+    which Jackson serializes as JSON `null`, never a fabricated `0`; the
+    live-write path (`recordNxAnswerRun`) and the fidelity-preserving ETL
+    import path (`importNxAnswerRunRow`) both now accept a `Double`
+    (boxed, nullable) `costUsd` parameter instead of a primitive `double`
+    that could never carry "absent" as anything but 0.0.
+
+    Rollback: COALESCEs any existing NULLs to 0.0 before restoring
+    `NOT NULL DEFAULT 0.0` — a rollback must never fail on data this
+    changeset itself could have legitimately written (the "legacy-cleanup
+    migrations never wedge a user upgrade" doctrine, applied here to a
+    forward-then-back cycle rather than a legacy cleanup, because the
+    failure shape is identical: a NOT NULL restore over live NULLs must
+    not abort).
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -144,6 +184,20 @@ CREATE POLICY tenant_isolation ON nexus.nx_answer_steps
             DROP POLICY IF EXISTS tenant_isolation ON nexus.nx_answer_steps;
             ALTER TABLE nexus.nx_answer_steps NO FORCE ROW LEVEL SECURITY;
             ALTER TABLE nexus.nx_answer_steps DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset telemetry-007-3: nx_answer_runs.cost_usd nullable ─────── -->
+    <changeSet id="telemetry-007-3" author="nexus-lme1s">
+        <comment>nx_answer_runs.cost_usd: DROP NOT NULL + DROP DEFAULT — a client "no usage observed" null must not land as a stored 0.0 (RDR-196 risk 1)</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.nx_answer_runs ALTER COLUMN cost_usd DROP NOT NULL;
+ALTER TABLE nexus.nx_answer_runs ALTER COLUMN cost_usd DROP DEFAULT;
+        </sql>
+        <rollback>
+UPDATE nexus.nx_answer_runs SET cost_usd = 0.0 WHERE cost_usd IS NULL;
+ALTER TABLE nexus.nx_answer_runs ALTER COLUMN cost_usd SET DEFAULT 0.0;
+ALTER TABLE nexus.nx_answer_runs ALTER COLUMN cost_usd SET NOT NULL;
         </rollback>
     </changeSet>
 

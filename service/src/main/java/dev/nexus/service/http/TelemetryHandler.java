@@ -73,6 +73,20 @@ public final class TelemetryHandler implements HttpHandler {
     /** RDR-178 wave-2 (nexus-s3dd4.3): max candidate keys per /ids/probe request. */
     private static final int MAX_PROBE_KEYS = 300;
 
+    /**
+     * RDR-196 .p1c-b review fix (nexus-lme1s): max {@code limit} for
+     * {@code GET /nx_answer_runs/query}, matching the project's
+     * {@code MAX_QUERY_RESULTS} paging convention (src/nexus/db/limits.py).
+     * Without this, {@code ?include_steps=true} lets a caller request an
+     * unbounded page of runs, each pulling an unbounded number of steps —
+     * N runs x M steps with no ceiling on either N or M. Clamped
+     * server-side (never a 400) so an over-large request degrades to the
+     * capped page rather than failing; a client that actually wanted more
+     * than {@value} rows was always going to need pagination (``since``)
+     * regardless of this cap.
+     */
+    private static final int MAX_QUERY_RUNS_LIMIT = 300;
+
     private final TelemetryRepository repo;
 
     public TelemetryHandler(TelemetryRepository repo) {
@@ -332,15 +346,17 @@ public final class TelemetryHandler implements HttpHandler {
         Double conf      = optDoubleNull(body, "matched_confidence");
         int stepCount    = optInt(body, "step_count", 0);
         String finalText = optStr(body, "final_text");
+        // RDR-196 .p1c-b (nexus-lme1s): cost_usd stays nullable end to end — a client
+        // "no usage observed" null must land as SQL NULL, never a fabricated 0.0
+        // indistinguishable from a genuine free call (RDR-196 risk 1). No coercion here.
         Double cost      = optDoubleNull(body, "cost_usd");
         Long durationMs  = optLongNull(body, "duration_ms");
-        double costUsd   = cost != null ? cost : 0.0;
         long durationMsV = durationMs != null ? durationMs : 0L;
         String createdAt = optStr(body, "created_at");
         // RDR-196 .p1c (nexus-nyry9.9): OPTIONAL steps[] — absent/empty writes only
         // the parent, exactly as before this bead (the .p1d degradation contract).
         List<TelemetryRepository.StepInput> steps = parseNxAnswerSteps(body.get("steps"));
-        repo.recordNxAnswerRun(tenant, question, planId, conf, stepCount, finalText, costUsd,
+        repo.recordNxAnswerRun(tenant, question, planId, conf, stepCount, finalText, cost,
             durationMsV, createdAt, steps);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
     }
@@ -416,13 +432,25 @@ public final class TelemetryHandler implements HttpHandler {
      * page (default 20). Aggregates (total, hit/fallback split, latency
      * buckets, averages) are computed over the WHOLE filtered set, not the
      * page — see {@link TelemetryRepository#queryNxAnswerRuns}.
+     *
+     * <p>{@code ?include_steps=true} (RDR-196 .p1c-b, nexus-lme1s) — OPTIONAL,
+     * defaults to {@code false} so the wire shape is unchanged when absent
+     * (matches the write side's {@code steps[]} degradation contract). When
+     * true, each row in the response gains a {@code steps} array using the
+     * SAME field names {@code parseNxAnswerSteps} accepts on the write side,
+     * RLS-scoped through the same tenant-stamped connection as the parent
+     * query — a tenant can never see another tenant's steps.
      */
     private void handleNxAnswerRunsQuery(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "GET");
         var params = queryParams(ex);
         String since = params.getOrDefault("since", "");
-        int limit = parseIntParam(params, "limit", 20);
-        HttpUtil.send(ex, 200, json(repo.queryNxAnswerRuns(tenant, since, limit)));
+        // Clamped to MAX_QUERY_RUNS_LIMIT (never rejected with a 400) — see
+        // that constant's javadoc: unbounded here compounds with
+        // include_steps into an unbounded N runs x M steps page.
+        int limit = Math.min(parseIntParam(params, "limit", 20), MAX_QUERY_RUNS_LIMIT);
+        boolean includeSteps = "true".equalsIgnoreCase(params.get("include_steps"));
+        HttpUtil.send(ex, 200, json(repo.queryNxAnswerRuns(tenant, since, limit, includeSteps)));
     }
 
     // ── hook_failures ──────────────────────────────────────────────────────────
@@ -588,6 +616,9 @@ public final class TelemetryHandler implements HttpHandler {
                 // optLongNull / optDoubleNull accept either a number or a numeric string.
                 Long planId = optLongNull(body, "plan_id");
                 Double conf = optDoubleNull(body, "matched_confidence");
+                // cost_usd: fidelity-preserving import must not coerce an absent/null
+                // source value to 0.0 (RDR-196 .p1c-b, nexus-lme1s, risk 1) — pass the
+                // nullable Double straight through.
                 Double cost = optDoubleNull(body, "cost_usd");
                 Long durationMs = optLongNull(body, "duration_ms");
                 repo.importNxAnswerRunRow(tenant,
@@ -595,7 +626,7 @@ public final class TelemetryHandler implements HttpHandler {
                     planId, conf,
                     optInt(body, "step_count", 0),
                     optStr(body, "final_text"),
-                    cost != null ? cost : 0.0,
+                    cost,
                     durationMs != null ? durationMs : 0L,
                     requireString(body, "created_at"));
             }
