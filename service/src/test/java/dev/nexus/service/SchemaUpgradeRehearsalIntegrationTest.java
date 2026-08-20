@@ -379,6 +379,8 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   taxonomy-014-5 nexus-tk070.p5a
                 //   memory-003-1 nexus-tk070.p6a
                 //   plans-003-1 nexus-tk070.p6a
+                //   telemetry-006-1 nexus-tk070.p6b
+                //   telemetry-006-2 nexus-tk070.p6b
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -597,6 +599,42 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     seedPlanRow(su, "t1", "p6a-proj", "p6a zero query", 0);
                     seedPlanRow(su, "t1", "p6a-proj", "p6a permanent query", null);
 
+                    // telemetry-006-1/telemetry-006-2 (nexus-tk070.p6b, RDR-194 § D5):
+                    // frecency.ttl_days 0 -> NULL counted UPDATE (not a DELETE --
+                    // these rows are RECOVERED by converting the sentinel, not
+                    // discarded), the same NO FORCE/FORCE toggle-wrap shape as
+                    // memory-003-1/plans-003-1/legacy-001-1/legacy-001-2. Both
+                    // nexus.frecency and staging.frecency are baseline-shaped
+                    // tables at OLD_TAG: nexus.frecency predates OLD_TAG
+                    // (telemetry-001-baseline.xml, already exercised above by
+                    // legacy-001-1's own seed rows "e"x32/"d"x64); staging.frecency
+                    // does NOT exist at OLD_TAG (staging-001-landing-tables.xml is
+                    // itself part of THIS hop, created before telemetry-006-2 runs)
+                    // -- see telemetry-006-2's own coverage note below for why it
+                    // needs no fresh seed. CONVERSION arm: a ttl_days=0 row. KEEP
+                    // arm: a POSITIVE ttl_days row that must survive UNCHANGED
+                    // (not converted -- proves the UPDATE's WHERE ttl_days = 0
+                    // predicate is selective, not a blanket rewrite). Unlike
+                    // memory-003-1/plans-003-1 (whose KEEP arm is a NULL row), a
+                    // NULL KEEP arm CANNOT be seeded here: at OLD_TAG, nexus.
+                    // frecency.ttl_days is STILL `NOT NULL DEFAULT 0`
+                    // (telemetry-006-1 is the changeset that first permits NULL),
+                    // so nothing in this old-leg seed phase can write NULL into
+                    // it -- the permanent-sentinel arm is proven instead by
+                    // TelemetryRepositoryTest's upsertFrecency_ttlDaysNull_
+                    // isPermanentAndAccepted (a fresh HEAD-schema test), the same
+                    // "arm proven separately, outside this fixture" split
+                    // taxonomy-010-1's own coverage note above already uses for
+                    // its un-seedable positive-resolution arm. Fresh chunk_id
+                    // values ("6"x64/"7"x64), distinct from legacy-001-1's own
+                    // "e"x32 (legacy-width, deleted by legacy-001-1 earlier in
+                    // this same hop) and "d"x64 (canonical, survives with its
+                    // DEFAULT ttl_days=0 -- also converted to NULL by
+                    // telemetry-006-1, effect-asserted below alongside the
+                    // dedicated fixture).
+                    seedFrecencyTtlRow(su, "t1", "6".repeat(64), 0);
+                    seedFrecencyTtlRow(su, "t1", "7".repeat(64), 45);
+
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("superuser ground truth after seeding").isEqualTo(5);
                     assertThat(count(su,
@@ -627,8 +665,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "non-BYPASSRLS owner — catalog-032-1's own toggle-wrap target")
                         .isEqualTo(0);
                     assertThat(count(admin, "SELECT count(*) FROM nexus.frecency"))
-                        .as("FORCE RLS must hide both seeded frecency rows from the "
-                            + "non-BYPASSRLS owner — legacy-001-1's own toggle-wrap target")
+                        .as("FORCE RLS must hide all four seeded frecency rows from the "
+                            + "non-BYPASSRLS owner — legacy-001-1's own toggle-wrap target "
+                            + "(2 rows) plus telemetry-006-1's own toggle-wrap target (2 more)")
                         .isEqualTo(0);
                     assertThat(count(admin, "SELECT count(*) FROM nexus.relevance_log"))
                         .as("FORCE RLS must hide both seeded relevance_log rows from the "
@@ -1368,6 +1407,76 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("FORCE ROW LEVEL SECURITY restored on nexus.plans after "
                             + "plans-003-1's own toggle-wrap")
                         .isEqualTo(1);
+
+                    // telemetry-006-1 leg (nexus-tk070.p6b, RDR-194 § D5, seed-coverage
+                    // lint follow-up): the ttl_days=0 CONVERSION arm must actually fire
+                    // under FORCE-RLS (converted to NULL, not deleted -- this is an
+                    // UPDATE, not a DELETE, unlike memory-003-1/plans-003-1 above), the
+                    // NULL-ttl_days KEEP arm must survive untouched, and the CHECK must
+                    // exist at HEAD. Also covers legacy-001-1's own "d"x64 KEEP-arm row
+                    // (seeded with the table's DEFAULT ttl_days=0, since seedFrecencyRow
+                    // never set it explicitly) -- it too gets converted here, proving
+                    // the UPDATE reaches every ttl_days=0 row in this hop, not merely
+                    // the dedicated fixture.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.frecency WHERE tenant_id = 't1' "
+                        + "AND chunk_id = '" + "6".repeat(64) + "' AND ttl_days IS NULL"))
+                        .as("telemetry-006-1's counted UPDATE must convert the seeded "
+                            + "ttl_days=0 row to NULL -- the CONVERSION arm (not deleted, "
+                            + "unlike memory-003-1/plans-003-1's DELETE arms)")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.frecency WHERE tenant_id = 't1' "
+                        + "AND chunk_id = '" + "7".repeat(64) + "' AND ttl_days = 45"))
+                        .as("the positive-ttl_days decoy row must survive telemetry-006-1's "
+                            + "UPDATE unchanged -- the KEEP arm, proving the UPDATE's "
+                            + "WHERE ttl_days = 0 predicate is selective")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.frecency WHERE tenant_id = 't1' "
+                        + "AND chunk_id = '" + "d".repeat(64) + "' AND ttl_days IS NULL"))
+                        .as("legacy-001-1's own canonical-width KEEP-arm row (DEFAULT "
+                            + "ttl_days=0) must ALSO be converted to NULL by "
+                            + "telemetry-006-1 -- the UPDATE is unconditional across every "
+                            + "row in this hop, not scoped to the dedicated fixture")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'frecency_ttl_days_positive_chk'"))
+                        .as("frecency_ttl_days_positive_chk must exist at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity "
+                        + "AND oid = 'nexus.frecency'::regclass"))
+                        .as("FORCE ROW LEVEL SECURITY restored on nexus.frecency after "
+                            + "telemetry-006-1's own toggle-wrap")
+                        .isEqualTo(1);
+
+                    // telemetry-006-2 leg (nexus-tk070.p6b): staging.frecency has NO
+                    // fresh seed data (see the SEED-COVERAGE contract block's own note
+                    // above) -- staging-001-landing-tables.xml creates the table fresh
+                    // EARLIER in this SAME hop and nothing populates it before
+                    // telemetry-006-2 runs, so its UPDATE structurally operates over
+                    // zero rows in this rehearsal (not merely un-seeded). Effect-
+                    // asserted the same minimal way as fk-004-0-reconcile-precount /
+                    // taxonomy-011-1 above: the changeset EXECUTES (doesNotThrowAny
+                    // Exception already covers this), the table still exists with the
+                    // DROP DEFAULT/DROP NOT NULL shape landed, and -- unlike
+                    // telemetry-006-1 -- carries NO CHECK (staging stays typeless).
+                    assertThat(count(su,
+                        "SELECT count(*) FROM information_schema.columns WHERE "
+                        + "table_schema = 'staging' AND table_name = 'frecency' AND "
+                        + "column_name = 'ttl_days' AND is_nullable = 'YES' AND "
+                        + "column_default IS NULL"))
+                        .as("staging.frecency.ttl_days must be nullable with no default at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid "
+                        + "JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'staging' "
+                        + "AND t.relname = 'frecency' AND c.contype = 'c'"))
+                        .as("staging.frecency must carry NO CHECK constraint -- typeless "
+                            + "landing by design, matching legacy-001-3's identical exemption")
+                        .isEqualTo(0);
                 }
             }
         } finally {
@@ -1764,6 +1873,31 @@ class SchemaUpgradeRehearsalIntegrationTest {
             "INSERT INTO nexus.frecency (tenant_id, chunk_id) VALUES (?, ?)")) {
             ps.setString(1, tenant);
             ps.setString(2, chunkId);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A {@code nexus.frecency} row with an EXPLICIT {@code ttl_days}
+     * (nexus-tk070.p6b, telemetry-006-1). {@code 0} seeds the CONVERSION
+     * arm (rewritten to {@code NULL}); {@code null} seeds the KEEP arm
+     * (already permanent, must survive untouched). Distinct from {@link
+     * #seedFrecencyRow}, which relies on the column's own DEFAULT
+     * {@code ttl_days=0} — that row (legacy-001-1's canonical-width KEEP
+     * fixture) is ALSO converted by telemetry-006-1, effect-asserted
+     * separately alongside this method's own dedicated fixture.
+     */
+    private static void seedFrecencyTtlRow(Connection c, String tenant, String chunkId, Integer ttlDays)
+            throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.frecency (tenant_id, chunk_id, ttl_days) VALUES (?, ?, ?)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, chunkId);
+            if (ttlDays == null) {
+                ps.setNull(3, java.sql.Types.INTEGER);
+            } else {
+                ps.setInt(3, ttlDays);
+            }
             ps.executeUpdate();
         }
     }

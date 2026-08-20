@@ -3213,7 +3213,13 @@ def store_put(
         if not content:
             return "Error: content is required"
         days = parse_ttl(ttl)
-        ttl_days = days if days is not None else 0
+        # nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): pass None
+        # through verbatim rather than coercing to 0 — parse_ttl already
+        # rejects "0d"/"0w" input (ValueError), so `days` is either None
+        # (permanent) or a positive int here; t3.put now rejects an
+        # explicit 0 itself as defense-in-depth, but this MCP path can
+        # never reach it.
+        ttl_days = days
         # nexus-4ftd7: resolve actor attribution HERE (mirrors memory_put's
         # own inline resolution) rather than leaving it to T3Database.put,
         # which — unlike HttpMemoryStore.put's resolve_attribution — has no

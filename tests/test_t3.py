@@ -209,7 +209,11 @@ def _check_store_put_full_metadata(mock_col, doc_id):
     assert meta["category"] == "security"
     assert meta["session_id"] == "sess-001"
     assert meta["source_agent"] == "codebase-deep-analyzer"
-    assert meta["ttl_days"] == 0
+    # nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): omitted ttl_days
+    # now defaults to None (permanent), not 0 — T3Database.put's own
+    # default changed; make_chunk_metadata's own default stays 0 for
+    # non-put() callers, but put() always forwards its own default.
+    assert meta["ttl_days"] is None
     # expires_at removed; expiry derived from indexed_at + ttl_days
     assert "expires_at" not in meta
     assert meta["indexed_at"]  # ISO timestamp
@@ -261,6 +265,47 @@ def test_store_put_permanent_returns_id_metadata_and_ttl(mock_db, put_kwargs, ch
     db, mock_col, _ = mock_db
     doc_id = db.put(**put_kwargs)
     check(mock_col, doc_id)
+
+
+# ── nexus-24rof (RDR-194 D5 ship-blocker, tk070.p6b fix-pass): ttl_days
+#    write-path rejection ──────────────────────────────────────────────────
+
+
+def test_store_put_ttl_days_zero_raises_before_any_write(mock_db):
+    """An explicit ttl_days=0 must be REJECTED loudly, never silently
+    reinterpreted as permanent — and must never reach the collection
+    write (validated first)."""
+    db, mock_col, _ = mock_db
+    with pytest.raises(ValueError) as exc_info:
+        db.put(collection="knowledge__security", content="rejected", ttl_days=0)
+    msg = str(exc_info.value)
+    assert "ttl_days=0" in msg
+    assert "permanent" in msg
+    assert "None" in msg
+    mock_col.upsert.assert_not_called()
+
+
+def test_store_put_ttl_days_negative_raises(mock_db):
+    db, mock_col, _ = mock_db
+    with pytest.raises(ValueError, match="ttl_days=-1"):
+        db.put(collection="knowledge__security", content="rejected", ttl_days=-1)
+    mock_col.upsert.assert_not_called()
+
+
+def test_store_put_ttl_days_omitted_is_permanent(mock_db):
+    """Omitting ttl_days must default to None (permanent) — the new
+    default, not the retired 0."""
+    db, mock_col, _ = mock_db
+    db.put(collection="knowledge__security", content="permanent by omission")
+    meta = mock_col.upsert.call_args.kwargs["metadatas"][0]
+    assert meta["ttl_days"] is None
+
+
+def test_store_put_ttl_days_none_explicit_is_permanent(mock_db):
+    db, mock_col, _ = mock_db
+    db.put(collection="knowledge__security", content="permanent explicit", ttl_days=None)
+    meta = mock_col.upsert.call_args.kwargs["metadatas"][0]
+    assert meta["ttl_days"] is None
 
 
 # ── AC4: expire ─────────────────────────────────────────────────────────────

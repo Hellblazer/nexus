@@ -861,6 +861,25 @@
          grants-nexus-svc.xml runAlways block (D0.1). -->
     <include file="db/changelog/plans-003-ttl-days.xml"/>
 
+    <!-- nexus-tk070.p6b (RDR-194 D5, P6b) — nexus.frecency.ttl_days /
+         staging.frecency.ttl_days: 0=permanent RETIRED, NULL=permanent
+         adopted. Counted UPDATE (not DELETE — these rows are RECOVERED,
+         not discarded) of pre-existing ttl_days=0 rows to NULL (RAISE
+         NOTICE'd, RLS toggle-wrapped), then ADD CHECK on nexus.frecency
+         only (staging stays typeless landing, no CHECK), then ANALYZE both
+         tables (D0.5 — this is the arc's only large-population rewrite).
+         Gated on nexus-tk070.cc6 (0 zero-rows / 0 total rows on both
+         tables, measured 2026-08-20) — a no-op today, ships fully guarded
+         regardless. See the file's own header for the full derivation.
+         Client pairing: ships with HttpVectorClient.expire()'s T3
+         read-path predicate flip and T3Database's docstring updates, same
+         commit — the docs/wire-contract-pending.md ## Unshipped entry is
+         added in the immediately-following commit (same two-commit
+         pattern as memory-003-ttl-days.xml / plans-003-ttl-days.xml).
+         Placed after plans-003-ttl-days.xml (current tail) and before the
+         grants-nexus-svc.xml runAlways block (D0.1). -->
+    <include file="db/changelog/telemetry-006-frecency-ttl-null.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

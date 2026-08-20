@@ -1131,14 +1131,29 @@ public final class TelemetryRepository {
      *   <li>{@code frecency_score} — GREATEST: preserve highest observed score.</li>
      *   <li>{@code miss_count}     — GREATEST: monotonic counter.</li>
      *   <li>{@code last_hit_at}    — GREATEST: keep latest hit timestamp.</li>
-     *   <li>{@code ttl_days}       — GREATEST: take the larger TTL.</li>
+     *   <li>{@code ttl_days}       — GREATEST: take the larger TTL. {@code null}
+     *       (RDR-194 D5: the permanent sentinel, {@code 0} retired —
+     *       {@code telemetry-006-frecency-ttl-null.xml}) is ignored by
+     *       Postgres's {@code GREATEST} unless BOTH sides are {@code null},
+     *       so a permanent row merged against any concrete TTL keeps the
+     *       concrete value — identical merge behavior to the pre-migration
+     *       {@code GREATEST(0, x)}, since {@code 0} always lost to any
+     *       positive competitor there too (verified, not assumed: this is
+     *       why the sentinel flip needed no change to the merge SQL
+     *       itself, only to the parameter's nullability).</li>
      *   <li>{@code embedded_at}    — LEAST: keep the OLDEST embed time (earliest entry wins).</li>
      * </ul>
+     *
+     * @param ttlDays {@code null} for permanent (RDR-194 D5); a caller-
+     *     supplied {@code 0} is rejected before reaching this method by
+     *     {@code TelemetryHandler}'s boundary validation on the live
+     *     single-row path, or by {@code frecency_ttl_days_positive_chk} at
+     *     INSERT time on the ETL import paths (which pass values verbatim).
      */
     public void upsertFrecency(String tenant,
                                String chunkId,
                                String embeddedAtIso,
-                               int ttlDays,
+                               Integer ttlDays,
                                double frecencyScore,
                                int missCount,
                                String lastHitAtIso) {
@@ -1307,6 +1322,14 @@ public final class TelemetryRepository {
         // Conflict key: (tenant_id, chunk_id). tenant is constant for this call.
         // Dedupe last-wins (defensive; the ETL source's PK makes intra-batch
         // duplicates impossible in practice — same rationale as ChashRepository).
+        // nexus-tk070.p6b (RDR-194 D5): ttl_days's ETL-fidelity default is
+        // optInteger(r, "ttl_days") — null when omitted, matching the new
+        // permanent sentinel — not optI(..., 0) (0 is retired and would
+        // hit the CHECK on every row that simply omits the field). An
+        // EXPLICIT ttl_days in the source row (including an explicit 0)
+        // still flows through verbatim and hits the CHECK at INSERT if
+        // invalid — same ETL-verbatim scope decision as memory-003-
+        // ttl-days.xml's parseImportRow precedent.
         var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(rows.size());
         for (var r : rows) unique.put(reqS(r, "chunk_id"), r);
         List<Map<String, Object>> deduped = List.copyOf(unique.values());
@@ -1321,7 +1344,7 @@ public final class TelemetryRepository {
                 OffsetDateTime embeddedAt = optTsLenient(r, "embedded_at");
                 OffsetDateTime lastHitAt  = optTsLenient(r, "last_hit_at");
                 insert = insert.values(tenant, reqS(r, "chunk_id"), embeddedAt,
-                        optI(r, "ttl_days", 0), optDd(r, "frecency_score", 0.0),
+                        optInteger(r, "ttl_days"), optDd(r, "frecency_score", 0.0),
                         optI(r, "miss_count", 0), lastHitAt);
             }
             insert.onConflict(FRECENCY.TENANT_ID, FRECENCY.CHUNK_ID).doUpdate()
@@ -1487,6 +1510,22 @@ public final class TelemetryRepository {
         if (v != null) { try { return Integer.parseInt(v.toString()); } catch (NumberFormatException ignored) { } }
         return def;
     }
+    /**
+     * Nullable {@code Integer} read, mirroring {@link #optL}. nexus-tk070.p6b
+     * (RDR-194 D5): {@code ttl_days}'s ETL default must be {@code null}
+     * (permanent), not {@code 0} (retired, now CHECK-rejected) — an omitted
+     * field means "no opinion, keep it permanent," not "explicitly zero."
+     * An explicit {@code ttl_days} value (including an explicit {@code 0})
+     * still passes through verbatim, ETL-fidelity-preserving, exactly like
+     * {@link #optI}'s siblings — {@code 0} then fails loud at the CHECK,
+     * never silently reinterpreted.
+     */
+    private static Integer optInteger(Map<String, Object> r, String k) {
+        Object v = r.get(k);
+        if (v == null) return null;
+        if (v instanceof Number n) return n.intValue();
+        try { return Integer.parseInt(v.toString()); } catch (NumberFormatException e) { return null; }
+    }
     private static OffsetDateTime optTsLenient(Map<String, Object> r, String k) {
         String s = optS(r, k);
         return (s != null && !s.isBlank()) ? parseTs(s) : OffsetDateTime.now(ZoneOffset.UTC);
@@ -1508,13 +1547,20 @@ public final class TelemetryRepository {
                 .where(FRECENCY.CHUNK_ID.eq(chunkId))
                 .fetchOne();
             if (rec == null) return Optional.<Map<String, Object>>empty();
-            return Optional.<Map<String, Object>>of(Map.of(
-                "chunk_id",       rec.value1(),
-                "embedded_at",    rec.value2() != null ? rec.value2().toString() : "",
-                "ttl_days",       rec.value3(),
-                "frecency_score", rec.value4(),
-                "miss_count",     rec.value5(),
-                "last_hit_at",    rec.value6() != null ? rec.value6().toString() : ""));
+            // nexus-tk070.p6b (RDR-194 D5): ttl_days can now be legitimately
+            // NULL (permanent) — Map.of throws NPE on a null value, a latent
+            // bug this migration would otherwise expose the first time a
+            // permanent frecency row is fetched. A mutable LinkedHashMap
+            // tolerates null; chunk_id/frecency_score/miss_count remain
+            // NOT NULL columns and can never be null here regardless.
+            var result = new java.util.LinkedHashMap<String, Object>();
+            result.put("chunk_id",       rec.value1());
+            result.put("embedded_at",    rec.value2() != null ? rec.value2().toString() : "");
+            result.put("ttl_days",       rec.value3());
+            result.put("frecency_score", rec.value4());
+            result.put("miss_count",     rec.value5());
+            result.put("last_hit_at",    rec.value6() != null ? rec.value6().toString() : "");
+            return Optional.<Map<String, Object>>of(result);
         });
     }
 }

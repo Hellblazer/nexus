@@ -262,7 +262,11 @@ class TestPutBehavior:
     T3Database.put() signature:
         put(collection, content, title='', tags='', category='',
             session_id='', source_agent='', store_type='knowledge',
-            ttl_days=0, catalog_doc_id='') -> str
+            ttl_days=None, catalog_doc_id='') -> str
+
+    nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): ttl_days=None is
+    permanent (was 0); an explicit ttl_days<=0 now raises ValueError on
+    BOTH T3Database.put and HttpVectorClient.put, before any HTTP call.
 
     The HTTP wire call is /v1/vectors/store-put. The request body must carry:
       - doc_id: full sha256(content) hexdigest (RDR-180)
@@ -296,7 +300,6 @@ class TestPutBehavior:
             title="test-title",
             tags="rdr-test",
             category="test",
-            ttl_days=0,
             catalog_doc_id="",
         )
         assert returned == expected_doc_id, (
@@ -568,6 +571,70 @@ class TestPutBehavior:
         # content_type DOES appear — derived from collection prefix, not store_type
         assert "content_type" in meta, "content_type (from prefix) must be in metadata"
 
+    # ── nexus-24rof (RDR-194 D5 ship-blocker, tk070.p6b fix-pass): ttl_days
+    #    write-path rejection, byte-identical to T3Database.put's own ──────
+
+    def test_put_ttl_days_zero_raises_before_any_http_call(self, monkeypatch):
+        """An explicit ttl_days=0 must be REJECTED loudly, never silently
+        reinterpreted as permanent — and must never even reach the HTTP
+        call (validated first, matching T3Database.put's ordering)."""
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
+
+        with pytest.raises(ValueError) as exc_info:
+            client.put(
+                collection="knowledge__nexus__minilm-l6-v2-384__v1",
+                content="rejected content",
+                ttl_days=0,
+            )
+        msg = str(exc_info.value)
+        assert "ttl_days=0" in msg
+        assert "permanent" in msg
+        assert "None" in msg
+        assert not calls, "put() must validate BEFORE making any HTTP call"
+
+    def test_put_ttl_days_negative_raises(self, monkeypatch):
+        client = HttpVectorClient()
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post", self._fake_post_capture([]),
+        )
+        with pytest.raises(ValueError, match="ttl_days=-3"):
+            client.put(
+                collection="knowledge__nexus__minilm-l6-v2-384__v1",
+                content="rejected content",
+                ttl_days=-3,
+            )
+
+    def test_put_ttl_days_omitted_is_permanent(self, monkeypatch):
+        """Omitting ttl_days must default to None (permanent) — the new
+        default, not the retired 0."""
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
+
+        client.put(
+            collection="knowledge__nexus__minilm-l6-v2-384__v1",
+            content="permanent by omission",
+        )
+        meta = calls[0]["body"].get("metadata", {})
+        assert meta.get("ttl_days") is None, (
+            f"omitted ttl_days must land as None (permanent), got {meta.get('ttl_days')!r}"
+        )
+
+    def test_put_ttl_days_none_explicit_is_permanent(self, monkeypatch):
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
+
+        client.put(
+            collection="knowledge__nexus__minilm-l6-v2-384__v1",
+            content="permanent explicit none",
+            ttl_days=None,
+        )
+        meta = calls[0]["body"].get("metadata", {})
+        assert meta.get("ttl_days") is None
+
 
 # ── Behavior: upsert_chunks_with_embeddings collection_name kwarg ─────────────
 
@@ -800,13 +867,24 @@ class TestSourcePathMethodsRetired:
 
 class TestExpire:
     """nexus-h8rf6.5: expire() was missing entirely — `nx store expire`
-    crashed with AttributeError in service mode. Implemented client-side:
-    the server's where-translator supports $eq/$ne/$in/$nin only (no $gt),
-    but T3Database.expire's `{"ttl_days": {"$gt": 0}}` pre-filter exists
-    solely to exclude the permanent ttl_days=0 sentinel, so the supported
-    NULL-inclusive `{"ttl_days": {"$ne": 0}}` is equivalent (TTLs are never
-    negative; rows with absent ttl_days are kept by the server but rejected
-    by is_expired Python-side, which is the authoritative check either way).
+    crashed with AttributeError in service mode. Implemented client-side.
+
+    nexus-tk070.p6b (RDR-194 D5) UPDATE: originally the server's
+    where-translator supported $eq/$ne/$in/$nin only (no $gt), so this
+    method used the NULL-inclusive `{"ttl_days": {"$ne": 0}}` as a
+    numeric-comparison workaround for T3Database.expire's own
+    `{"ttl_days": {"$gt": 0}}` (equivalent then: TTLs are never negative,
+    and rows with absent ttl_days were kept by the server but rejected by
+    is_expired Python-side either way). Range operators landed later
+    (nexus-4l80g) but this method was never retrofitted — until this pass,
+    which retires the divergence: this method now sends the IDENTICAL
+    `{"ttl_days": {"$gt": 0}}` T3Database.expire always used. See
+    HttpVectorClient.expire's own docstring for why `$ne: null` (the
+    literal spelling the D5 sentinel flip might suggest) does NOT work as
+    a substitute — it is vacuous server-side by construction
+    (PgVectorRepository.appendWherePredicate's $ne binds
+    String.valueOf(operand), and String.valueOf(None) is the four-char
+    string "null", not SQL NULL).
     """
 
     _KNOWLEDGE = "knowledge__nexus-1-1__voyage-context-3__v1"
@@ -834,9 +912,18 @@ class TestExpire:
                     "ids": ["expired1", "permanent", "fresh", "no-ttl"],
                     "metadatas": [
                         self._meta(1, "2020-01-01T00:00:00+00:00"),   # expired
+                        # nexus-tk070.p6b: a real server's $gt:0 predicate
+                        # structurally excludes ttl_days=0/null/missing rows
+                        # (jsonb_typeof(...)='number' AND >0) — this fake
+                        # deliberately ignores the `where` it was sent and
+                        # returns them anyway, so this test also proves
+                        # is_expired() is a correct defense-in-depth second
+                        # check, not merely that the server's own filtering
+                        # (exercised for real by the Java integration suite)
+                        # works.
                         self._meta(0, "2020-01-01T00:00:00+00:00"),   # permanent
                         self._meta(36500, "2026-01-01T00:00:00+00:00"),  # not yet
-                        {},                                            # NULL-inclusive $ne row
+                        {},                                            # absent ttl_days
                     ],
                 }
             return {"deleted": len(body["ids"])}
@@ -849,9 +936,9 @@ class TestExpire:
         n = HttpVectorClient().expire()
         assert n == 1
         gets = [b for p, b in posted if p == "/v1/vectors/get"]
-        # only the knowledge__ collection is queried, with the $ne pre-filter
+        # only the knowledge__ collection is queried, with the $gt pre-filter
         assert all(b["collection"] == self._KNOWLEDGE for b in gets)
-        assert gets[0]["where"] == {"ttl_days": {"$ne": 0}}
+        assert gets[0]["where"] == {"ttl_days": {"$gt": 0}}
         deletes = [b for p, b in posted if p == "/v1/vectors/store-delete"]
         assert deletes == [{"collection": self._KNOWLEDGE, "ids": ["expired1"]}]
 
@@ -894,6 +981,51 @@ class TestExpire:
 
         self._patch(monkeypatch, ["code__nexus-1-1__voyage-code-3__v1"], fake_post)
         assert HttpVectorClient().expire() == 0
+
+    def test_expire_predicate_matches_t3database_exactly(self, monkeypatch):
+        """nexus-tk070.p6b (RDR-194 D5): the subtlest part of this phase —
+        BEFORE this pass, HttpVectorClient.expire's `{"ttl_days": {"$ne":
+        0}}` and T3Database.expire's `{"ttl_days": {"$gt": 0}}` were only
+        EQUIVALENT (same fetched row set for every shape this repo's data
+        takes), never IDENTICAL — two different spellings, kept in sync by
+        hand. AFTER this pass they are the literal same dict.
+
+        Mechanism (code-review cosmetic finding, 2026-08-20 fix-pass — the
+        prior wording overclaimed a live import/reflection binding): two
+        INDEPENDENT literal assertions, not a shared constant. The first
+        greps T3Database.expire's OWN source text via inspect.getsource for
+        the exact string; the second checks HttpVectorClient.expire's
+        actually-produced dict. Both directions of drift are still caught
+        (either assertion fails on its own if only one side changes), so
+        the protection is real — it just isn't a single shared source of
+        truth the way "sourced from ... at import time" would imply.
+        """
+        from nexus.db.t3 import T3Database
+
+        t3_ttl_where = inspect.getsource(T3Database.expire)
+        assert '{"ttl_days": {"$gt": 0}}' in t3_ttl_where, (
+            "T3Database.expire's own predicate must still be $gt:0 — if this "
+            "assertion ever fails because T3Database changed, HttpVectorClient "
+            "must change with it, not silently diverge again"
+        )
+
+        def fake_post(path, body, **kw):
+            if path == "/v1/vectors/get":
+                return {"ids": [], "metadatas": []}
+            return {"deleted": 0}
+
+        posted = []
+
+        def capturing_post(path, body, **kw):
+            posted.append((path, body))
+            return fake_post(path, body, **kw)
+
+        self._patch(monkeypatch, [self._KNOWLEDGE], fake_post)
+        monkeypatch.setattr("nexus.db.http_vector_client._post", capturing_post)
+        HttpVectorClient().expire()
+        gets = [b for p, b in posted if p == "/v1/vectors/get"]
+        assert gets[0]["where"] == {"ttl_days": {"$gt": 0}}
+        assert "$ne" not in str(gets[0]["where"]), "the retired $ne:0 predicate must not reappear"
 
     def test_expire_server_error_reraises(self, monkeypatch):
         # A failure must NOT be swallowed as "0 expired" — the CLI would

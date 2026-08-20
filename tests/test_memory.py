@@ -335,7 +335,11 @@ def test_promote_permanent_entry(runner: CliRunner, mem_home: Path, db: T2Databa
     row_id = db.put(project="proj", title="perm.md", content="forever", ttl=None)
     _, mt3 = _promote(runner, db, row_id)
     kw = mt3.put.call_args.kwargs
-    assert kw["ttl_days"] == 0
+    # nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): permanent now
+    # translates to ttl_days=None, not 0 (0 is rejected by the real
+    # T3Database.put/HttpVectorClient.put; this test uses a mock T3, so
+    # only the value passed through is asserted here).
+    assert kw["ttl_days"] is None
     # nexus-v4paa fold: neither real T3 substrate accepts expires_at —
     # promote must not pass it (it was a TypeError, mock-shielded here).
     assert "expires_at" not in kw

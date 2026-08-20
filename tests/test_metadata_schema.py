@@ -262,6 +262,46 @@ def test_is_expired_uses_indexed_at_plus_ttl() -> None:
     assert not is_expired(no_idx, now_iso="2026-04-25T00:00:00+00:00")
 
 
+def test_is_expired_null_ttl_days_never_expires() -> None:
+    """nexus-tk070.p6b (RDR-194 D5): ``None`` is the CANONICAL permanent
+    sentinel going forward (matching the SQL ``nexus.frecency.ttl_days``
+    CHECK-enforced contract), distinct from the legacy ``0`` case the
+    sibling test above already covers. Explicit-key-None and absent-key
+    must behave identically — both are "no opinion, permanent."
+    """
+    from nexus.metadata_schema import is_expired
+
+    explicit_null = {"ttl_days": None, "indexed_at": "2020-01-01T00:00:00+00:00"}
+    assert not is_expired(explicit_null, now_iso="2027-01-01T00:00:00+00:00")
+
+    absent_key = {"indexed_at": "2020-01-01T00:00:00+00:00"}
+    assert not is_expired(absent_key, now_iso="2027-01-01T00:00:00+00:00")
+
+
+def test_is_expired_legacy_ttl_days_zero_treated_as_permanent_with_warning() -> None:
+    """nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): T3Database.put/
+    HttpVectorClient.put now REJECT an explicit ttl_days=0 on write, so a
+    ttl_days=0 reaching is_expired() is always LEGACY data (written before
+    that fix, or by a caller outside those two methods). Reads are not
+    writes: this function still treats a legacy 0 as permanent (no
+    population-wide rewrite path exists for T3 chunk metadata, unlike the
+    SQL nexus.frecency table's CHECK-backed migration) — but now logs a
+    warning each time, making the legacy-compat path observable rather
+    than fully silent.
+    """
+    import structlog
+
+    from nexus.metadata_schema import is_expired
+
+    legacy_zero = {"ttl_days": 0, "indexed_at": "2020-01-01T00:00:00+00:00"}
+    with structlog.testing.capture_logs() as captured:
+        result = is_expired(legacy_zero, now_iso="2027-01-01T00:00:00+00:00")
+    assert result is False, "a legacy ttl_days=0 row must still be treated as permanent"
+    warnings = [c for c in captured if c.get("log_level") == "warning"]
+    assert warnings, f"expected a warning log for legacy ttl_days=0, got: {captured}"
+    assert warnings[0]["event"] == "frecency_legacy_ttl_days_zero_treated_as_permanent"
+
+
 def test_normalize_drops_empty_bib_placeholders() -> None:
     """Bib_* slots with placeholder values (``0`` / ``""``) eat metadata
     budget for no payload when ``--enrich`` is off (nexus-2my fix #2).

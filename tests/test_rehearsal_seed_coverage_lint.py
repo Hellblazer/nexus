@@ -341,6 +341,32 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # exist, FORCE restored on both tables).
         ("memory-003-1", "nexus-tk070.p6a"),
         ("plans-003-1", "nexus-tk070.p6a"),
+        # nexus-tk070.p6b (RDR-194 § D5): telemetry-006-1's counted UPDATE
+        # (0 -> NULL, the ONLY genuine population rewrite in the arc —
+        # memory-003-1/plans-003-1 above are DELETEs) on nexus.frecency, the
+        # same NO FORCE/FORCE toggle-wrap shape as memory-003-1/plans-003-1/
+        # legacy-001-1/legacy-001-2. Seeded as one ttl_days=0 row (CONVERSION
+        # arm) and one positive-ttl_days row (KEEP arm — a NULL KEEP arm
+        # cannot be seeded pre-hop, since nexus.frecency.ttl_days is still
+        # NOT NULL at OLD_TAG; the permanent-sentinel arm is proven instead
+        # by TelemetryRepositoryTest's own fresh-HEAD-schema test); also
+        # effect-asserts that legacy-001-1's own pre-existing canonical-width
+        # KEEP-arm row (DEFAULT ttl_days=0) is likewise converted, proving
+        # the UPDATE reaches every ttl_days=0 row in the hop, not merely the
+        # dedicated fixture.
+        ("telemetry-006-1", "nexus-tk070.p6b"),
+        # telemetry-006-2 (staging.frecency's mirrored UPDATE) needs NO new
+        # seed data: staging.frecency does not exist at OLD_TAG at all
+        # (staging-001-landing-tables.xml creates it fresh, itself INSIDE
+        # this hop, strictly before telemetry-006-2 runs) and nothing else
+        # in the hop populates it before telemetry-006-2 runs, so its
+        # UPDATE structurally operates over zero rows in this rehearsal —
+        # not merely un-seeded, the same "always zero in this hop, no new
+        # seed needed" reasoning as fk-004-1-reconcile / taxonomy-011-1
+        # above. Effect-asserted the minimal way: the changeset EXECUTES,
+        # and the DROP DEFAULT/DROP NOT NULL shape (with no CHECK, staging
+        # stays typeless) lands at HEAD.
+        ("telemetry-006-2", "nexus-tk070.p6b"),
     }
 )
 

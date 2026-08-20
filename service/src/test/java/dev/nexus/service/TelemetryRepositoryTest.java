@@ -822,6 +822,45 @@ class TelemetryRepositoryTest {
         }
     }
 
+    // ── nexus-tk070.p6b (RDR-194 D5): CHECK-layer proof, independent of the
+    //    TelemetryHandler boundary 400 ──────────────────────────────────────
+
+    @Test @Order(47)
+    void upsertFrecency_ttlDaysZero_violatesCheckConstraintDirectlyAtRepositoryLayer() {
+        // Calls TelemetryRepository directly -- bypassing TelemetryHandler's
+        // handler-level ttl_days<=0 rejection entirely -- to prove the DB
+        // CHECK itself rejects ttl_days=0, independent of the HTTP boundary
+        // validation. The two layers are tested SEPARATELY (see
+        // TelemetryHandlerFrecencyTtlBoundaryTest for the boundary proof,
+        // MemoryRepositoryTest's identical-shape test for the precedent):
+        // deleting TelemetryHandler's requirePositiveOrNullTtlDays would not
+        // make THIS test fail, and dropping frecency_ttl_days_positive_chk
+        // would not make the boundary test fail -- each test falsifies only
+        // its own layer.
+        assertThatThrownBy(() ->
+            repo.upsertFrecency(TENANT_A,
+                "0123456789abcdef".repeat(4),
+                "2024-01-01T00:00:00Z", 0, 0.0, 0, "2024-01-01T00:00:00Z"))
+            .as("ttl_days=0 must violate frecency_ttl_days_positive_chk at the "
+                + "DB layer even when no handler-level validation runs")
+            .hasMessageContaining("frecency_ttl_days_positive_chk");
+    }
+
+    @Test @Order(48)
+    void upsertFrecency_ttlDaysNull_isPermanentAndAccepted() {
+        // The positive companion to the CHECK-violation test above: NULL is
+        // the sole permanent sentinel post-migration and must be accepted
+        // without any exception.
+        String chunkId = "fedcba9876543210".repeat(4);
+        repo.upsertFrecency(TENANT_A, chunkId, "2024-01-01T00:00:00Z", null, 0.5, 0,
+            "2024-01-01T00:00:00Z");
+        Optional<Map<String, Object>> result = repo.getFrecency(TENANT_A, chunkId);
+        assertThat(result).as("a NULL-ttl_days row must be readable, not swallowed").isPresent();
+        assertThat(result.get().get("ttl_days"))
+            .as("ttl_days must round-trip as null (permanent), not silently coerced")
+            .isNull();
+    }
+
     // ── renameCollection ───────────────────────────────────────────────────────
 
     @Test @Order(15)

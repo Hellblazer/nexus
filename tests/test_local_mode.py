@@ -628,9 +628,15 @@ class TestLocalCollectionLifecycle:
 
     def test_expire_ttl_entries(self, local_db: T3Database) -> None:
         """``expire()`` deletes entries whose ``indexed_at + ttl_days``
-        is in the past; permanent entries (``ttl_days=0``) are kept.
-        ``expires_at`` was removed from the schema; expiry is derived
-        Python-side via ``metadata_schema.is_expired``."""
+        is in the past; permanent entries (omitted ``ttl_days``, i.e.
+        ``None``) are kept. ``expires_at`` was removed from the schema;
+        expiry is derived Python-side via ``metadata_schema.is_expired``.
+
+        nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): ``put()`` now
+        REJECTS an explicit ``ttl_days=0`` — the permanent case below omits
+        the argument entirely (the new default, ``None``) rather than
+        passing ``0``.
+        """
         from datetime import UTC, datetime, timedelta
         from nexus.metadata_schema import make_chunk_metadata
         import hashlib
@@ -651,12 +657,12 @@ class TestLocalCollectionLifecycle:
                 title="temp",
             )],
         )
-        # Permanent entry — still alive after expire().
+        # Permanent entry — still alive after expire(). ttl_days omitted
+        # (defaults to None); an explicit 0 is now rejected (nexus-24rof).
         local_db.put(
             collection="knowledge__expire_test",
             content="permanent data",
             title="perm",
-            ttl_days=0,
         )
         assert local_db.expire() == 1
         assert len(local_db.search("permanent", collection_names=["knowledge__expire_test"])) == 1

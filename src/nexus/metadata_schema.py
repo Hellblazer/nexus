@@ -31,6 +31,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import structlog
+
+_log = structlog.get_logger(__name__)
+
 __all__ = [
     "ALLOWED_TOP_LEVEL",
     "CONTENT_TYPES",
@@ -95,7 +99,16 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     "bib_semantic_scholar_id",
     # Lifecycle / scoring (5) — ``expires_at`` removed; expiry is
     # derived from ``indexed_at + ttl_days`` Python-side. ``ttl_days=0``
-    # is the "permanent" sentinel.
+    # is the "permanent" sentinel THIS FIELD's OWN write default still
+    # uses (T3Database.put / HttpVectorClient.put / make_chunk_metadata,
+    # unchanged — RDR-194 D5 / nexus-tk070.p6b scopes the None-sentinel
+    # flip to the SQL nexus.frecency table and this field's own READ path
+    # (T3Database.expire / HttpVectorClient.expire), not to this write
+    # default; see those methods' docstrings). is_expired() below already
+    # treats 0/None/absent identically, so 0 here is not a bug, just an
+    # unconverted local convention for this specific unstructured-JSON
+    # field, distinct from the SQL column family's canonical NULL
+    # spelling.
     "indexed_at",
     "ttl_days",
     "frecency_score",
@@ -345,8 +358,16 @@ def make_chunk_metadata(
     bib_venue: str = "",
     bib_citation_count: int = 0,
     bib_semantic_scholar_id: str = "",
-    # Lifecycle
-    ttl_days: int = 0,
+    # Lifecycle. Type widened to accept None (nexus-tk070.p6b fix-pass,
+    # nexus-24rof, RDR-194 D5): T3Database.put/HttpVectorClient.put now
+    # validate and pass None through for "permanent" rather than 0 — see
+    # those methods' own docstrings. The DEFAULT stays 0 deliberately,
+    # unchanged: non-put() callers (code/prose/pdf indexers via
+    # upsert_chunks*) have no --ttl concept at all and rely on this
+    # factory default for ordinary permanent content; widening ONLY the
+    # put() write path's own default (not this shared factory's) keeps
+    # the indexer pipeline's blast radius at zero for this fix.
+    ttl_days: int | None = 0,
     frecency_score: float = 0.0,
     source_agent: str = "nexus-indexer",
     session_id: str = "",
@@ -411,10 +432,39 @@ def is_expired(metadata: dict[str, Any], *, now_iso: str) -> bool:
     """Return ``True`` when *metadata* has elapsed its TTL.
 
     Replaces the previous ``where=expires_at < now`` filter. Computes
-    expiry from ``indexed_at + ttl_days`` Python-side. ``ttl_days == 0``
-    is the permanent sentinel — never expires regardless of indexed_at.
+    expiry from ``indexed_at + ttl_days`` Python-side.
+
+    ``None``/absent ``ttl_days`` is the canonical permanent sentinel
+    (RDR-194 D5, nexus-tk070.p6b — matching ``nexus.memory.ttl_days`` /
+    ``nexus.plans.ttl_days`` / ``nexus.frecency.ttl_days``'s CHECK-enforced
+    contract). ``T3Database.put``/``HttpVectorClient.put`` (fix-pass,
+    nexus-24rof) now REJECT an explicit ``ttl_days=0`` loudly at write
+    time — 0 can no longer be freshly written by either write path. A
+    ``ttl_days == 0`` reaching this function is therefore always LEGACY
+    data (written before that fix, or by a caller outside those two
+    methods — code/prose/pdf indexers route through
+    :func:`make_chunk_metadata` directly and never validate ``ttl_days``,
+    by design, see that factory's own comment). This function still
+    treats a legacy ``0`` as permanent — reads are not writes, and there
+    is no population-wide rewrite path for T3 chunk metadata (unlike the
+    SQL ``nexus.frecency`` table's CHECK-backed migration) — but now logs
+    a warning each time, making the legacy-compat path observable instead
+    of fully silent. ``not ttl`` remains the single guard for both ``None``
+    and ``0``; the warning is a side effect layered in front of it, not a
+    logic change.
     """
-    ttl = metadata.get("ttl_days", 0)
+    ttl = metadata.get("ttl_days")
+    if ttl == 0:
+        _log.warning(
+            "frecency_legacy_ttl_days_zero_treated_as_permanent",
+            hint=(
+                "ttl_days=0 predates the None-sentinel migration (RDR-194 D5, "
+                "nexus-tk070.p6b/nexus-24rof) and is legacy-compat-tolerated as "
+                "permanent on read; T3Database.put/HttpVectorClient.put reject "
+                "0 on write, so this metadata was written before that fix (or "
+                "by a caller outside those two methods)"
+            ),
+        )
     if not ttl or ttl <= 0:
         return False
     indexed_at = metadata.get("indexed_at", "")

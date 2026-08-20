@@ -428,7 +428,10 @@ public final class TelemetryHandler implements HttpHandler {
         String chunkId       = dev.nexus.service.db.Chash.requireCanonical(
             requireString(body, "chunk_id"), "'chunk_id'");
         String embeddedAt    = optStr(body, "embedded_at");
-        int ttlDays          = optInt(body, "ttl_days", 0);
+        // nexus-tk070.p6b (RDR-194 D5): live single-row path — boundary-
+        // validated (400), matching MemoryHandler's /put treatment. Omitted
+        // means permanent (null); an explicit ttl_days<=0 is rejected loud.
+        Integer ttlDays       = requirePositiveOrNullTtlDays(optInt(body, "ttl_days"));
         double frecencyScore = body.get("frecency_score") != null
             ? ((Number) body.get("frecency_score")).doubleValue() : 0.0;
         int missCount        = optInt(body, "miss_count", 0);
@@ -550,7 +553,13 @@ public final class TelemetryHandler implements HttpHandler {
                     dev.nexus.service.db.Chash.requireCanonical(
                         requireString(body, "chunk_id"), "'chunk_id'"),
                     optStr(body, "embedded_at"),
-                    optInt(body, "ttl_days", 0),
+                    // nexus-tk070.p6b (RDR-194 D5): ETL path — carries an
+                    // explicit ttl_days verbatim (including an explicit 0,
+                    // which then hits the CHECK), but an OMITTED field now
+                    // defaults to null (permanent), not 0 (retired). Not
+                    // boundary-validated — see requirePositiveOrNullTtlDays's
+                    // javadoc for the scope decision.
+                    optInt(body, "ttl_days"),
                     frecScore != null ? frecScore : 0.0,
                     optInt(body, "miss_count", 0),
                     optStr(body, "last_hit_at"));
@@ -724,6 +733,64 @@ public final class TelemetryHandler implements HttpHandler {
         }
         throw new IllegalArgumentException(
             "Field '" + key + "' has unexpected type: " + v.getClass().getSimpleName());
+    }
+
+    /**
+     * Nullable {@code Integer} read — {@code null} when the field is absent.
+     * A genuine 2-arg overload of {@link #optInt(Map, String, int)} (code-
+     * review cosmetic finding, 2026-08-20 fix-pass) — matches
+     * {@code PlanHandler}/{@code MemoryHandler}'s own no-default
+     * {@code optInt(Map, String)} exactly, name and all, rather than a
+     * differently-named method the earlier docstring only claimed
+     * "mirrored" them (nexus-tk070.p6b, RDR-194 D5): unlike the 3-arg
+     * overload, an omitted field must NOT collapse onto a numeric default
+     * here — for {@code ttl_days}, {@code 0} is the now-retired sentinel,
+     * so silently defaulting to it would immediately fail the CHECK for
+     * every caller that simply left the field out.
+     */
+    private Integer optInt(Map<String, Object> body, String key) {
+        Object v = body.get(key);
+        if (v == null) return null;
+        if (v instanceof Number n) return n.intValue();
+        if (v instanceof String s) {
+            String t = s.trim();
+            if (t.isEmpty()) return null;
+            try {
+                return Integer.parseInt(t);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                    "Field '" + key + "' is not a valid integer: " + s);
+            }
+        }
+        throw new IllegalArgumentException(
+            "Field '" + key + "' has unexpected type: " + v.getClass().getSimpleName());
+    }
+
+    /**
+     * Boundary rejection for {@code ttl_days} on the live single-row
+     * {@code POST /v1/telemetry/frecency/upsert} path (nexus-tk070.p6b,
+     * RDR-194 D5) — mirrors {@code MemoryHandler.requirePositiveOrNullTtl}
+     * exactly (same message shape, same {@code null}-or-positive contract),
+     * naming the field {@code ttl_days} rather than {@code ttl} since that
+     * is this table's actual wire field name. Deliberately NOT applied to
+     * the ETL import paths ({@code handleImportRow}'s {@code "frecency"}
+     * case, {@code TelemetryRepository.importFrecencyBatch}) — those carry
+     * source values verbatim (their default moved from {@code 0} to
+     * {@code null} instead, a default-value fix, not new rejection logic;
+     * see {@code TelemetryRepository.optInteger}'s javadoc), so an explicit
+     * {@code ttl_days=0} row from an ETL source still reaches the CHECK and
+     * surfaces as a 409 with a remedy (HttpUtil.ttlDaysCheckRemedy already
+     * wildcard-matches {@code frecency_ttl_days_positive_chk}) — same scope
+     * boundary p6a drew for {@code MemoryHandler.parseImportRow}.
+     */
+    private static Integer requirePositiveOrNullTtlDays(Integer ttlDays) {
+        if (ttlDays != null && ttlDays <= 0) {
+            throw new IllegalArgumentException(
+                "ttl_days=" + ttlDays + " is invalid: omit the field or pass null for a "
+                + "permanent entry — ttl_days must be a positive integer number of "
+                + "days (0 does NOT mean permanent; NULL does)");
+        }
+        return ttlDays;
     }
 
     /**
