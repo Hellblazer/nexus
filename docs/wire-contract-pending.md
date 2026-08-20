@@ -43,6 +43,8 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
+- `cc61d4c31` -- bead nexus-nyry9.10 -- engine tag `TBD (RDR-196 .p1f paired cut, not yet tagged)` -- RDR-196 Phase 1: `steps[]` on POST /v1/telemetry/nx_answer_runs/record (engine half e87d2d9c7, nexus-nyry9.9: telemetry-007-1/-2 nx_answer_steps table + RLS, /version `nx_answer_steps_supported`), `include_steps` on the query route + nullable `nx_answer_runs.cost_usd` (engine half 93c3d7bf3, nexus-lme1s: telemetry-007-3), client half cc61d4c31 (steps write-through behind a /version capability probe; run cost_usd = sum of steps or null). Direction safety: new engine + old client = unchanged wire (steps optional, include_steps default off, null cost tolerated); old engine + new client = probe reports unsupported, run row only, never a 400. Ack = the paired client release bumping REQUIRED_ENGINE_VERSION to the .p1f tag; this entry moves to Shipped in that release PR.
+
 
 
 ## Shipped
