@@ -57,13 +57,16 @@ __all__ = [
     "PlanResult",
     "PlanRunBindingError",
     "PlanRunEmbeddingDomainError",
+    "PlanRunOperatorArgMissingError",
     "PlanRunOperatorOutputError",
     "PlanRunOperatorSchemaVersionError",
     "PlanRunOperatorUnavailableError",
     "PlanRunStepRefError",
     "PlanRunToolNotFoundError",
     "ToolDispatcher",
+    "merge_bindings",
     "plan_run",
+    "resolve_step_bindings",
 ]
 
 
@@ -96,6 +99,32 @@ class PlanRunToolNotFoundError(ValueError):
         self.tool = tool
         self.reason = reason
         super().__init__(f"plan_run: unknown tool {tool!r}: {reason}")
+
+
+class PlanRunOperatorArgMissingError(ValueError):
+    """Raised when an operator step has no way to supply its required
+    positional content argument (nexus-nyry9.4 review-fix, T2 [23036]).
+
+    Not present as the operator's own arg key, not present as ``ids``
+    (which ``_hydrate_operator_args`` would hydrate FROM), and not
+    present as an ``inputs`` alias (nexus-yis0) — no hydration or
+    substitution path can ever satisfy the call, so this is a plan-
+    authoring bug, not a runtime condition. The unfixed shape reaches
+    ``fn(**args)`` in ``_default_dispatcher`` and raises a bare
+    ``TypeError`` instead (nx_answer_runs id=4: "operator_summarize()
+    missing 1 required positional argument: 'content'").
+    """
+
+    def __init__(self, *, step_index: int, tool: str, missing_arg: str) -> None:
+        self.step_index = step_index
+        self.tool = tool
+        self.missing_arg = missing_arg
+        super().__init__(
+            f"plan_run: steps[{step_index}] ({tool!r}) has no "
+            f"{missing_arg!r} — not present in args, not hydratable via "
+            "'ids', no 'inputs' alias present. Malformed plan, rejected "
+            "before any step dispatched."
+        )
 
 
 class PlanRunOperatorOutputError(ValueError):
@@ -505,6 +534,54 @@ def _resolve_args(
         )
         for key, val in args.items()
     }
+
+
+def merge_bindings(
+    default_bindings: dict[str, Any] | None,
+    caller_bindings: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The plan-execution binding-precedence formula: caller wins over
+    plan defaults.
+
+    Extracted (nexus-nyry9.5, RDR-196 .r5 review-fix, code-review
+    SIGNIFICANT, T2 review-nexus-nyry9.5) so this precedence lives in
+    exactly ONE place. ``plan_run`` below computes its ``merged``
+    binding dict via this function; ``nexus.mcp.core``'s ``nx_answer``
+    single-query fast path (Step 2, which bypasses ``plan_run``
+    entirely by design) used to hand-replicate
+    ``{**default_bindings, **caller}`` as an independently-maintained
+    second copy with no test cross-checking the two stayed in sync — a
+    future edit to this precedence here would have silently NOT
+    propagated to that copy. It now calls :func:`resolve_step_bindings`
+    below, which calls this.
+    """
+    return {**(default_bindings or {}), **(caller_bindings or {})}
+
+
+def resolve_step_bindings(
+    raw_args: dict[str, Any],
+    *,
+    default_bindings: dict[str, Any] | None,
+    caller_bindings: dict[str, Any] | None,
+    step_outputs: list[dict[str, Any]] | None = None,
+    deferred_step_indices: set[int] | None = None,
+) -> dict[str, Any]:
+    """Merge bindings (:func:`merge_bindings`) then resolve ONE step's
+    raw ``args`` dict against them (:func:`_resolve_args`).
+
+    ``plan_run`` itself doesn't need this exact shape — it merges once
+    via :func:`merge_bindings` and resolves MANY steps against the same
+    merged dict across the run, calling :func:`_resolve_args` directly
+    at each call site. This is what a caller resolving exactly ONE
+    step's args outside of a full ``plan_run`` invocation should call
+    instead — currently ``nexus.mcp.core``'s ``nx_answer`` single-query
+    fast path (nexus-nyry9.5, RDR-196 .r5 review-fix).
+    """
+    merged = merge_bindings(default_bindings, caller_bindings)
+    return _resolve_args(
+        raw_args, bindings=merged, step_outputs=step_outputs or [],
+        deferred_step_indices=deferred_step_indices,
+    )
 
 
 # ── Cross-embedding guard ───────────────────────────────────────────────────
@@ -957,8 +1034,16 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # call succeeds, AND log the drop at warning level so misspelled
     # or unwired kwargs stay observable. ``**kwargs``-accepting tools
     # keep every kwarg.
+    _sig: inspect.Signature | None
     try:
-        sig = inspect.signature(fn)
+        _sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        # Builtins / C-level callables can't always be inspected; leave
+        # args untouched and let the call site surface any TypeError.
+        _sig = None
+
+    if _sig is not None:
+        sig = _sig
         accepts_any_kwarg = any(
             p.kind is inspect.Parameter.VAR_KEYWORD
             for p in sig.parameters.values()
@@ -974,10 +1059,42 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
                     known_sample=sorted(known)[:12],
                 )
             args = {k: v for k, v in args.items() if k in known}
-    except (TypeError, ValueError):
-        # Builtins / C-level callables can't always be inspected; leave
-        # args untouched and let the call site surface any TypeError.
-        pass
+
+        # nexus-nyry9.4 review-fix (critic finding #3, T2 [23036]): a
+        # step whose resolved args have no path to a required parameter
+        # (not hydrated via ``ids``, not present directly, no ``inputs``
+        # alias — see ``_hydrate_operator_args`` above, which already
+        # ran) reaches this call and raises a bare ``TypeError`` today
+        # (nx_answer_runs id=4: "operator_summarize() missing 1 required
+        # positional argument: 'content'"). Fail loud with a named error
+        # instead — a plan-authoring bug, not a runtime condition; a
+        # silent default would mask it (no-silent-fallbacks-for-
+        # correctness). Deliberately placed HERE, after hydration and
+        # AFTER the kwargs-drop pass, and gated on the REAL callable's
+        # own signature — not a blanket pre-dispatch check — so a
+        # caller-injected fake/test dispatcher (which never reaches this
+        # function) is never affected; only a step that will actually be
+        # dispatched against the real MCP tool registry is checked.
+        # ``step_index=-1`` is a placeholder: this function is not given
+        # the step index (the ``ToolDispatcher`` protocol is deliberately
+        # ``(tool, args) -> result``), so the two ``plan_run`` call sites
+        # that invoke a real dispatcher patch in the correct index before
+        # re-raising.
+        _missing_required = [
+            name for name, p in sig.parameters.items()
+            if p.default is inspect.Parameter.empty
+            and p.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+            and name not in args
+        ]
+        if _missing_required:
+            raise PlanRunOperatorArgMissingError(
+                step_index=-1,
+                tool=resolved_tool,
+                missing_arg=_missing_required[0],
+            )
 
     # RDR-079 P4: await async tools directly, call sync tools inline.
     # No thread bridge — the loop continuity matters for the pool's
@@ -1112,17 +1229,82 @@ async def plan_run(
 
     def _extract_tool(step: dict[str, Any]) -> str:
         t = step.get("tool") or step.get("op") or step.get("operation") or ""
+        # nexus-nyry9.4 review-fix (code-review-expert + substantive-critic,
+        # T2 [23035]/[23036]): a truthy non-string tool value (e.g.
+        # ``{"tool": 5}``) previously reached ``t.startswith(...)`` and
+        # raised a bare ``AttributeError`` instead of the intended
+        # ``PlanRunToolNotFoundError`` — exactly the kind of unhandled
+        # crash the validation loop below exists to prevent. Treat a
+        # non-string value the same as "no tool resolved" so the loop's
+        # own checks (which DO name the step index and the offending
+        # value/type) are what the caller sees.
+        if not isinstance(t, str):
+            return ""
         if t.startswith("mcp__"):
             t = t.rsplit("__", 1)[-1]
         return t
 
     caller = bindings or {}
-    merged: dict[str, Any] = {**match.default_bindings, **caller}
+    # nexus-nyry9.5 (RDR-196 .r5 review-fix): this precedence formula is
+    # now expressed in exactly one place — see merge_bindings's own
+    # docstring for why.
+    merged: dict[str, Any] = merge_bindings(match.default_bindings, caller)
     _validate_bindings(match, merged)
 
     plan = json.loads(match.plan_json)
     steps = plan.get("steps", []) or []
 
+    # nexus-nyry9.4 (RDR-196 residual): fail loud at VALIDATION, not
+    # dispatch. Historically an empty/missing tool name reached
+    # ``_default_dispatcher`` and raised ``PlanRunToolNotFoundError``
+    # only after earlier steps in the same plan had already dispatched
+    # (nx_answer_runs ids 177/183/184/369 — the plan-138 "unknown tool
+    # ''" crash class; the offending stored plans no longer exist in
+    # the library, purged by a later reseed, but the runner itself
+    # never validated this and would still fail the same way against
+    # any malformed plan reaching it today). A caller-supplied fake
+    # dispatcher (as in tests) may not replicate the real dispatcher's
+    # own unknown-tool check at all, so this cannot be left to the
+    # dispatcher layer — it must be checked here, once, for every step,
+    # before the first dispatch of the whole plan.
+    for _step_index, _step in enumerate(steps):
+        if not isinstance(_step, dict):
+            raise PlanRunToolNotFoundError(
+                tool="",
+                reason=(
+                    f"plan_json.steps[{_step_index}] is not a mapping "
+                    f"(got {type(_step).__name__}) — malformed plan, "
+                    "rejected before any step dispatched"
+                ),
+            )
+        if not _extract_tool(_step):
+            # nexus-nyry9.4 review-fix: distinguish "missing entirely"
+            # from "present but not a string" so the error names the
+            # offending value/type, not just a generic absence.
+            _raw_tool = (
+                _step.get("tool")
+                if _step.get("tool") is not None
+                else _step.get("op") if _step.get("op") is not None
+                else _step.get("operation")
+            )
+            if _raw_tool is not None and not isinstance(_raw_tool, str):
+                raise PlanRunToolNotFoundError(
+                    tool="",
+                    reason=(
+                        f"plan_json.steps[{_step_index}] has a non-string "
+                        f"'tool'/'op'/'operation' value {_raw_tool!r} "
+                        f"({type(_raw_tool).__name__}) — malformed plan, "
+                        "rejected before any step dispatched"
+                    ),
+                )
+            raise PlanRunToolNotFoundError(
+                tool="",
+                reason=(
+                    f"plan_json.steps[{_step_index}] has no resolvable "
+                    "'tool'/'op'/'operation' name — malformed plan, "
+                    "rejected before any step dispatched"
+                ),
+            )
     dispatch: ToolDispatcher = dispatcher or _default_dispatcher
     step_outputs: list[dict[str, Any]] = []
     #: nexus-h33x8.6 a4: set when ``deadline`` cuts the run short. See
@@ -1254,6 +1436,19 @@ async def plan_run(
                         else:
                             result = raw
                     except Exception as exc:
+                        # nexus-nyry9.4 review-fix: _default_dispatcher
+                        # doesn't know the step index (see its docstring
+                        # note); patch in the real one here, where ``bi``
+                        # is in scope, before this propagates further.
+                        if (
+                            isinstance(exc, PlanRunOperatorArgMissingError)
+                            and exc.step_index < 0
+                        ):
+                            raise PlanRunOperatorArgMissingError(
+                                step_index=bi,
+                                tool=exc.tool,
+                                missing_arg=exc.missing_arg,
+                            ) from exc
                         if not _is_operator_error(exc):
                             raise
                         # nexus-l0yh: graceful degrade — substitute
@@ -1419,6 +1614,19 @@ async def plan_run(
             else:
                 result = raw
         except Exception as exc:
+            # nexus-nyry9.4 review-fix: _default_dispatcher doesn't know
+            # the step index (see its docstring note); patch in the real
+            # one here, where ``index`` is in scope, before this
+            # propagates further.
+            if (
+                isinstance(exc, PlanRunOperatorArgMissingError)
+                and exc.step_index < 0
+            ):
+                raise PlanRunOperatorArgMissingError(
+                    step_index=index,
+                    tool=exc.tool,
+                    missing_arg=exc.missing_arg,
+                ) from exc
             if deadline is not None and isinstance(exc, _dispatch_mod.OperatorTimeoutError):
                 # a4: capture partial content and STOP — unlike the
                 # deadline-less path below, a budget-driven timeout does

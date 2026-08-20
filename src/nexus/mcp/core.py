@@ -5706,21 +5706,35 @@ def _infer_grown_plan_name(
 
 
 def _nx_answer_classify_plan(match: Any) -> str:
-    """Classify a matched plan: ``"single_query"`` | ``"retrieval_only"`` | ``"needs_operators"``.
+    """Classify a matched plan: ``"single_query"`` | ``"needs_operators"``.
 
-    nexus-h33x8.6 a4 fold-in: the operator-detection set used to be
-    ``_OPERATOR_TOOL_MAP``'s bare names only (``extract``, ``rank``,
-    ...), narrower than the authoritative
-    :func:`nexus.plans.bundle.is_operator_tool` — which
-    ``plan_run``/``segment_steps`` actually dispatch against, and which
-    accepts BOTH bare and ``operator_``-prefixed forms ("plan YAMLs use
-    either", per that module's own docstring). A plan step written as
-    ``operator_summarize`` was silently misclassified as
-    ``retrieval_only`` under the old set even though it genuinely needs
-    a claude -p dispatch. Using the same authoritative set here closes
-    that gap.
+    nexus-nyry9.5 (RDR-196 .r5 review-fix, critic CRITICAL, T2
+    review-nexus-nyry9.5): the prior three-way split additionally
+    returned a third, retrieval-only literal for a multi-step plan
+    with no operator tool call, and that bucket was exempt from
+    ``nx_answer``'s ``budget_seconds`` deadline. A census of all 17
+    real shipped builtin plans (``conexus/plans/builtin/*.yml``) found
+    ZERO that classify that way — 2 are ``single_query``, 15 end in an
+    operator — and the bucket's only "proof" of liveness was a
+    hand-built ``plan_json`` fed directly to this function, never
+    routed through a real ``plan_match()``. Per this bead's own
+    no-live-test-from-a-real-match-means-dead rule, the bucket is
+    deleted: everything that is not the single-step ``query()`` fast
+    path now classifies as ``needs_operators`` and is budget-bound like
+    any other ``plan_run`` execution, regardless of whether it actually
+    contains an operator tool call. The name is a mild misnomer for a
+    would-be-retrieval-only plan under this binary split — it now means
+    "goes through Step 4 plan_run", not literally "contains an operator
+    step" — kept as the surviving literal because callers/tests already
+    key on it.
+
+    nexus-h33x8.6 a4 fold-in (history, no longer load-bearing for
+    classification since the two non-single_query cases collapsed):
+    this used to distinguish plans by
+    :func:`nexus.plans.bundle.is_operator_tool` — the authoritative
+    operator-detection set ``plan_run``/``segment_steps`` actually
+    dispatch against, broader than ``_OPERATOR_TOOL_MAP``'s bare names.
     """
-    from nexus.plans.bundle import is_operator_tool  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     try:
         plan = json.loads(match.plan_json)
     except (json.JSONDecodeError, TypeError):
@@ -5728,9 +5742,7 @@ def _nx_answer_classify_plan(match: Any) -> str:
     steps = plan.get("steps") or []
     if len(steps) == 1 and steps[0].get("tool") == "query":
         return "single_query"
-    if any(is_operator_tool(step.get("tool", "")) for step in steps):
-        return "needs_operators"
-    return "retrieval_only"
+    return "needs_operators"
 
 
 def _nx_answer_is_single_query(match: Any) -> bool:
@@ -5738,7 +5750,27 @@ def _nx_answer_is_single_query(match: Any) -> bool:
 
 
 def _nx_answer_needs_operators(match: Any) -> bool:
-    return _nx_answer_classify_plan(match) == "needs_operators"
+    """Does this plan contain a genuine operator (``claude -p``) step?
+
+    nexus-nyry9.5 (RDR-196 .r5 review-fix): DECOUPLED from
+    ``_nx_answer_classify_plan`` — that function's return value now
+    drives ONLY the single_query-fast-path-vs-everything-else split
+    (its own docstring explains why classification stopped being
+    operator-aware: the deadline exemption the distinction used to
+    carry was deleted, and with it the reason to make the classifier
+    itself operator-aware). This predicate is not consulted anywhere in
+    ``nx_answer``'s own control flow — it exists purely so callers
+    (tests) can ask "does this plan actually dispatch claude -p",
+    independent of the fast-path/budget question, the same way it
+    always could before the collapse.
+    """
+    from nexus.plans.bundle import is_operator_tool  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+    try:
+        plan = json.loads(match.plan_json)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    steps = plan.get("steps") or []
+    return any(is_operator_tool(step.get("tool", "")) for step in steps)
 
 
 def _maybe_unwrap_output_envelope(text: str, *, max_depth: int = 3) -> str:
@@ -6353,45 +6385,33 @@ async def nx_answer(
             mode; converges with RDR-196 §Approach's marker convention
             for the later USD-budget work).
 
-            ONE remaining explicit, INTENTIONAL boundary where this
-            budget does NOT apply (substantive-critic SIGNIFICANT #1, T2
-            substantive-critique-nexus-h33x8.6-a4-a2-2026-08-19; the
-            sibling boundary below was FIXED by nexus-nyry9.2 / RDR-196
-            .r2 — see the CORRECTED note):
+            **CORRECTED (nexus-nyry9.2, RDR-196 .r2):** the plan-MISS
+            inline-planner phase (``_nx_answer_plan_miss``, its own
+            claude -p round trip, up to 300s) used to be dispatched
+            BEFORE ``deadline`` was ever consulted and paid its cost in
+            full regardless of budget. It is now checked immediately
+            after Step 1 (the plan-match gate, and on a miss, the
+            inline planner) — a budget already exhausted at that point
+            returns the exhaustion marker with
+            :data:`_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN` (step 0,
+            meaning zero plan steps ran) instead of proceeding to
+            Step 2 or Step 4. This also closes a second, previously
+            undocumented gap: the single-step fast path (Step 2) had no
+            deadline check of its own before this fix.
 
-            1. **CORRECTED (nexus-nyry9.2, RDR-196 .r2):** the plan-MISS
-               inline-planner phase (``_nx_answer_plan_miss``, its own
-               claude -p round trip, up to 300s) used to be dispatched
-               BEFORE ``deadline`` was ever consulted and paid its cost
-               in full regardless of budget. It is now checked
-               immediately after Step 1 (the plan-match gate, and on a
-               miss, the inline planner) — a budget already exhausted at
-               that point returns the exhaustion marker with
-               :data:`_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN` (step 0,
-               meaning zero plan steps ran) instead of proceeding to
-               Step 2 or Step 4. This also closes a second, previously
-               undocumented gap: the single-step fast path (Step 2) had
-               no deadline check of its own before this fix. The
-               retrieval_only exemption immediately below still applies
-               to this new check, unchanged.
-            2. **Retrieval-only matched plans** (no operator steps —
-               see ``_nx_answer_classify_plan``) are exempt from the
-               deadline even after a successful match/grow: they have
-               no operator floor to protect against, and applying a
-               budget meant for synthesis timeouts to a legitimately
-               slower multi-search plan (steps measured 17-47s) would
-               truncate it for no synthesis benefit.
-
-            A question that BOTH misses the plan-match gate AND grows
-            or matches a retrieval-only plan therefore runs completely
-            unbounded by ``budget_seconds`` — pinned as documented,
-            accepted behavior by
-            ``test_budget_seconds_silently_bypassed_by_miss_plus_retrieval_only_combo``
-            in tests/test_nx_answer.py. Retrieval steps finish early
-            (16-29% of run time, mean 8.5s/step per the measured
-            basis) — a 20-30s budget can usually still return real
-            chunks on the paths it DOES cover, even when synthesis
-            alone would have blown past it.
+            **DELETED (nexus-nyry9.5, RDR-196 .r5 review-fix, T2
+            review-nexus-nyry9.5):** a prior version of this docstring
+            named a second, INTENTIONAL boundary — a "retrieval-only"
+            matched plan (no operator steps) was exempt from the
+            deadline entirely. That bucket was never demonstrated to
+            route any real matched plan (a census of all 17 shipped
+            builtin plans found zero; see
+            ``_nx_answer_classify_plan``'s own docstring) and has been
+            deleted along with the exemption. There is no longer any
+            boundary where ``budget_seconds`` fails to apply to plan
+            execution once Step 1 has produced a match — every
+            non-``single_query`` plan is budget-bound at Step 4 like
+            any other.
         trace: When False, redacts question and final_text in the run log.
         dimensions: Dimensional filter for the plan-match gate.  Pass
             ``{"verb": "research"}`` (etc.) so verb skills narrow the
@@ -6452,8 +6472,9 @@ async def nx_answer(
     # nexus-h33x8.6 a4: anchored at call entry (not at plan_run's own
     # start) so "budget_seconds" reads as "answer me within N seconds
     # total", matching caller intuition. Threaded through to plan_run
-    # at Step 4 below (except for retrieval_only-classified plans —
-    # see the plan_class check there).
+    # unconditionally at Step 4 below (nexus-nyry9.5, RDR-196 .r5: the
+    # deadline exemption a prior classify_plan bucket used to carry was
+    # deleted — see that function's own docstring).
     deadline = start + budget_seconds if budget_seconds is not None else None
 
     # RDR-137 followup (nexus-n1908): normalize a malformed comma-list
@@ -6742,16 +6763,13 @@ async def nx_answer(
     # (Step 2) and plan execution (Step 4), neither of which had a
     # deadline check of its own before this fix.
     #
-    # retrieval_only plans keep the SEPARATE, still-intentional boundary
-    # #2 exemption documented on ``budget_seconds`` above and pinned by
-    # ``test_budget_seconds_silently_bypassed_by_miss_plus_retrieval_only_combo``
-    # — no operator floor to protect, deliberately never deadline-bound,
-    # even here.
-    if (
-        deadline is not None
-        and plan_class != "retrieval_only"
-        and time.monotonic() >= deadline
-    ):
+    # nexus-nyry9.5 (RDR-196 .r5 review-fix): a deadline exemption for
+    # a third classify_plan bucket used to apply here — DELETED along
+    # with that bucket (see ``_nx_answer_classify_plan``) since it was
+    # never demonstrated to route a real matched plan. Every
+    # non-single_query plan is now budget-bound at this check like any
+    # other.
+    if deadline is not None and time.monotonic() >= deadline:
         # code-review Important (T2 nyry9.2-code-review-2026-08-20):
         # guard this the same way ``_nx_answer_classify_plan`` guards
         # its own parse of ``match.plan_json`` (:5724-5727) — a
@@ -6777,17 +6795,96 @@ async def nx_answer(
     if plan_class == "single_query":
         _log.info("nx_answer_single_step_guard", plan_id=best.plan_id, confidence=conf_str)
         try:
+            from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred; matches this module's convention
+            from nexus.plans.runner import resolve_step_bindings  # noqa: PLC0415 — deferred; matches this module's convention
+
             plan = json.loads(best.plan_json)
-            step_args = plan["steps"][0].get("args", {})
+            raw_args = plan["steps"][0].get("args", {})
+            # nexus-nyry9.5 (RDR-196 .r5): raw_args holds UNRESOLVED
+            # ``$var`` placeholders for any template-authored plan --
+            # every builtin plan, including the two single-query seeds
+            # (conexus/plans/builtin/document-discovery.yml,
+            # corpus-coverage-check.yml), declares
+            # ``args: {question: $question, corpus: $corpus, limit:
+            # $limit}``. The pre-fix code read this dict with plain
+            # ``.get("question", question)`` -- since the KEY "question"
+            # IS present, the fallback never fired, so the fast path
+            # silently queried for the literal string "$question"
+            # against corpus "$corpus" instead of the caller's real
+            # text.
+            #
+            # nexus-nyry9.5 review-fix (code-review SIGNIFICANT, T2
+            # review-nexus-nyry9.5): a required binding this plan
+            # declares as TYPED (e.g. ``content_type``, ``author`` --
+            # see ``TYPED_FILTER_BINDINGS``) that the caller did not
+            # supply is refused rather than guessed -- explicit handling
+            # here mirrors Step 4's dedicated
+            # ``except PlanBindingUnsatisfiableError`` below (step_count=0,
+            # logged) instead of falling through to the generic
+            # ``except Exception`` further down (which used to record
+            # step_count=1 and no telemetry event for this case, wrongly
+            # implying one step actually ran).
+            try:
+                step_bindings = _autoalias_bindings(
+                    required=best.required_bindings,
+                    run_bindings=dict(_caller_run),
+                    defaults=best.default_bindings or {},
+                    question=question,
+                    plan_id=best.plan_id,
+                    plan_name=best.name or "",
+                )
+            except PlanBindingUnsatisfiableError as exc:
+                elapsed_ms = int((time.monotonic() - start) * 1000)
+                _log.warning(
+                    "nx_answer_plan_binding_unsatisfiable",
+                    plan_id=best.plan_id, plan_name=best.name,
+                    binding=exc.binding, confidence=best.confidence,
+                )
+                try:
+                    with _t2_ctx() as db:
+                        _nx_answer_record_run(
+                            db.telemetry, question=question, plan_id=best.plan_id,
+                            matched_confidence=best.confidence, step_count=0,
+                            final_text=f"Error: {exc}", cost_usd=0.0,
+                            duration_ms=elapsed_ms, trace=trace,
+                        )
+                except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
+                    pass
+                _nx_answer_record_outcome(best.plan_id, success=False)
+                return _result(str(exc), plan_id=best.plan_id, step_count=0)
+
+            # Resolve the same way plan_run (Step 4 below) would: caller
+            # bindings autoaliased from the question, merged over the
+            # plan's own default_bindings with defaults first and caller
+            # winning. Shared with plan_run via ``resolve_step_bindings``
+            # (nexus-nyry9.5 review-fix, code-review SIGNIFICANT) so this
+            # formula lives in exactly one place instead of two
+            # independently-maintained copies.
+            step_args = resolve_step_bindings(
+                raw_args,
+                default_bindings=best.default_bindings or {},
+                caller_bindings=step_bindings,
+            )
             q = step_args.get("question", question)
             corpus = step_args.get("corpus", "knowledge")
+            try:
+                limit = int(step_args.get("limit", 10))
+            except (TypeError, ValueError):
+                limit = 10
+            # nexus-nyry9.5 review-fix (code-review IMPORTANT, T2
+            # review-nexus-nyry9.5): clamp to the same ceiling every
+            # other paging/query-result path in this codebase honours
+            # (AGENTS.md § External service limits) -- a plan-supplied
+            # or caller-influenced ``limit`` must not bypass it just
+            # because this path skips ``plan_run``.
+            limit = max(1, min(limit, MAX_QUERY_RESULTS))
             # RDR-086 review #4: exactly one ``query()`` call — the
             # previous structured path re-ran non-structured for
             # ``result_text`` (doubling the T3 round-trip) even though
             # the structured envelope already contains enough to
             # synthesize a result summary.
             if structured:
-                q_struct = query(question=q, corpus=corpus, structured=True)
+                q_struct = query(question=q, corpus=corpus, limit=limit, structured=True)
                 chunks: list[dict] = []
                 if isinstance(q_struct, dict):
                     ids = q_struct.get("ids", [])
@@ -6831,7 +6928,7 @@ async def nx_answer(
                 else:
                     result_text = "No results."
             else:
-                result_text = query(question=q, corpus=corpus)
+                result_text = query(question=q, corpus=corpus, limit=limit)
                 chunks = []
 
             elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -6944,14 +7041,13 @@ async def nx_answer(
         _nx_answer_record_outcome(best.plan_id, success=False)
         return _result(str(exc), plan_id=best.plan_id, step_count=0)
 
-    # nexus-h33x8.6 a4 fold-in: a retrieval_only-classified plan has no
-    # operator steps — no claude -p floor for the budget to protect
-    # against — so it is exempt from the deadline even when the caller
-    # supplied budget_seconds. Applying it anyway would risk truncating
-    # a legitimately slower multi-search plan (some search steps
-    # measured 17-47s) for zero synthesis-timeout benefit.
-    _deadline_for_run = None if plan_class == "retrieval_only" else deadline
-
+    # nexus-nyry9.5 (RDR-196 .r5 review-fix): the retrieval-only
+    # deadline exemption that used to apply here was DELETED along with
+    # the bucket itself (see ``_nx_answer_classify_plan``) — no real
+    # matched plan was ever shown to land in it, so every plan execution
+    # is now budget-bound the same way, whether or not it actually
+    # contains an operator step.
+    #
     # Only pass ``deadline=`` when it's actually set. Several existing
     # tests (and possibly external callers) patch ``plan_run`` with a
     # fixed ``(match, bindings)`` signature; forwarding an unconditional
@@ -6959,8 +7055,8 @@ async def nx_answer(
     # degrade to "Error during plan execution" — exactly the "changed
     # default behavior" this parameter must not cause.
     _plan_run_kwargs: dict[str, Any] = {}
-    if _deadline_for_run is not None:
-        _plan_run_kwargs["deadline"] = _deadline_for_run
+    if deadline is not None:
+        _plan_run_kwargs["deadline"] = deadline
 
     try:
         result = await _plan_run(best, run_bindings, **_plan_run_kwargs)

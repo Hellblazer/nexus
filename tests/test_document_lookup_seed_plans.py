@@ -26,10 +26,30 @@ do-NOT list.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 _BUILTIN_DIR = Path(__file__).parent.parent / "conexus" / "plans" / "builtin"
+
+
+def _fake_t2_ctx(tmp_path: Path):
+    """Return a factory that yields a real T2Database at tmp_path/t2.db.
+
+    Mirrors ``tests/test_nx_answer.py``'s helper of the same name -- kept
+    local rather than imported so this file's fixtures stay self-
+    contained (matches the file's existing no-cross-test-file-import
+    convention).
+    """
+    from contextlib import contextmanager
+    from nexus.db.t2 import T2Database
+
+    @contextmanager
+    def _ctx():
+        with T2Database(tmp_path / "t2.db") as db:
+            yield db
+
+    return _ctx
 
 # The natural phrasings this seed is meant to catch. Each covers one of
 # the three shapes named in the bead: "which documents ... discuss X",
@@ -231,3 +251,89 @@ class TestDocumentDiscoverySeedPlansDoNotCatchSynthesisQuestions:
                 f"reroute to a bare query() call, dropping the requested "
                 f"synthesis"
             )
+
+
+class TestSingleQueryFastPathLiveThroughNxAnswer:
+    """nexus-nyry9.5 (RDR-196 .r5): close the gap between "plan_match
+    classifies as single_query" (proved above) and "nx_answer's Step 2
+    fast path actually takes zero claude -p dispatches and queries for
+    the REAL question text when driven end-to-end". The two are not the
+    same claim -- Step 2 reads the matched plan's RAW ``args`` dict,
+    which for a template-authored plan (every builtin, including these
+    two seeds) holds unresolved ``$var`` placeholders, not concrete
+    values. A structural observable — dispatch count and the literal
+    ``question=`` kwarg query() received — proves the branch, not
+    wall-clock.
+    """
+
+    @pytest.mark.asyncio
+    async def test_nx_answer_single_query_reroute_skips_plan_run_and_dispatch(
+        self, tmp_path: Path, seeded_library, real_plan_cache,
+    ) -> None:
+        import nexus.mcp_infra as _infra
+        import nexus.operators.dispatch as _dispatch_mod
+        import nexus.plans.runner as _runner
+        from nexus.plans.matcher import plan_match
+
+        question = "which documents discuss vector search"
+        matches = plan_match(
+            intent=question,
+            library=seeded_library,
+            cache=real_plan_cache,
+            dimensions={"verb": "research"},
+            min_confidence=0.40,
+            n=5,
+        )
+        assert matches, f"no match >= 0.40 confidence for {question!r}"
+        top = matches[0]
+        row = seeded_library.get_plan(top.plan_id)
+        assert row is not None and row["name"] in _TARGET_PLAN_NAMES, (
+            f"setup precondition failed: {question!r} did not match a "
+            f"single-query seed (got {row['name'] if row else None!r})"
+        )
+
+        query_calls: list[dict] = []
+
+        def _fake_query(**kwargs):
+            query_calls.append(kwargs)
+            return "canned single-query result"
+
+        def _forbid_plan_run(*args, **kwargs):
+            raise AssertionError(
+                "single_query fast path must not call plan_run -- that "
+                "would defeat the entire point of the reroute"
+            )
+
+        def _forbid_dispatch(*args, **kwargs):
+            raise AssertionError(
+                "single_query fast path must not dispatch claude -p"
+            )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[top]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch("nexus.mcp.core.query", side_effect=_fake_query),
+            patch.object(_runner, "plan_run", side_effect=_forbid_plan_run),
+            patch.object(_dispatch_mod, "claude_dispatch", side_effect=_forbid_dispatch),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer(question)
+
+        assert len(query_calls) == 1, (
+            f"expected exactly one query() call from the fast path, got "
+            f"{len(query_calls)}: {query_calls}"
+        )
+        assert query_calls[0].get("question") == question, (
+            "single_query fast path must resolve the plan's $-prefixed "
+            "arg placeholder to the caller's REAL question text, not "
+            "pass through the literal template token -- got "
+            f"{query_calls[0].get('question')!r}"
+        )
+        assert query_calls[0].get("corpus") == "knowledge", (
+            f"expected the plan's resolved default corpus 'knowledge', "
+            f"got {query_calls[0].get('corpus')!r}"
+        )
+        assert "canned single-query result" in result

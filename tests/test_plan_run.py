@@ -247,6 +247,30 @@ async def test_default_dispatcher_raises_tool_not_found_for_unknown_tool() -> No
 
 
 @pytest.mark.asyncio
+async def test_run_rejects_operator_step_missing_required_arg_at_real_dispatch() -> None:
+    """nexus-nyry9.4 review-fix (critic finding #3, T2 [23036]): a
+    ``summarize`` step with no way to supply ``content`` — no ``ids`` to
+    hydrate from, no ``content`` directly, no ``inputs`` alias
+    (nexus-yis0) — reproduces ``operator_summarize() missing 1 required
+    positional argument: 'content'`` at real dispatch today
+    (nx_answer_runs id=4, mislabeled "likely closed by auto-hydration"
+    in the taxonomy — it is not). Rejected with a named, step-indexed
+    error instead. Deliberately exercises the REAL dispatcher (no
+    ``dispatcher=`` override) — the fix lives in ``_default_dispatcher``,
+    gated on the real callable's own signature, so it must never fire
+    against a caller-injected fake/test dispatcher (every other test in
+    this file uses one and must stay unaffected)."""
+    from nexus.plans.runner import PlanRunOperatorArgMissingError, plan_run
+
+    plan = {"steps": [{"tool": "summarize", "args": {}}]}
+    with pytest.raises(PlanRunOperatorArgMissingError) as exc:
+        await plan_run(_match(plan), {})
+    assert exc.value.step_index == 0
+    assert exc.value.tool == "operator_summarize"
+    assert exc.value.missing_arg == "content"
+
+
+@pytest.mark.asyncio
 async def test_run_resolves_list_of_step_refs_flattens() -> None:
     """``[$step1.ids, $step2.ids]`` resolves element-wise and flattens one
     level — callers combining outputs from multiple prior steps can use
@@ -568,6 +592,58 @@ async def test_run_with_empty_steps_returns_empty_result() -> None:
     )
     assert result.steps == []
     assert result.final is None
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_step_with_empty_tool_name_before_dispatch() -> None:
+    """nexus-nyry9.4 (RDR-196 residual): the plan-138 crash class
+    (nx_answer_runs ids 177/183/184/369, ``unknown tool ''``). An empty
+    tool name is a malformed plan — reject it at VALIDATION before any
+    step dispatches, not at dispatch time after already burning
+    wall-clock on earlier steps in the same plan."""
+    from nexus.plans.runner import PlanRunToolNotFoundError, plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "", "args": {}},
+        ],
+    }
+    disp = _FakeDispatcher([{"text": "search-output"}])
+    with pytest.raises(PlanRunToolNotFoundError, match=r"steps\[1\]"):
+        await plan_run(_match(plan), {}, dispatcher=disp)
+    # Validated up front — step 0 never dispatched either.
+    assert disp.calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_step_with_missing_tool_key_before_dispatch() -> None:
+    """Same malformed-plan class as the empty-string case: no
+    ``tool``/``op``/``operation`` key at all."""
+    from nexus.plans.runner import PlanRunToolNotFoundError, plan_run
+
+    plan = {"steps": [{"args": {"query": "x"}}]}
+    disp = _FakeDispatcher()
+    with pytest.raises(PlanRunToolNotFoundError, match=r"steps\[0\]"):
+        await plan_run(_match(plan), {}, dispatcher=disp)
+    assert disp.calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_step_with_non_string_tool_value_before_dispatch() -> None:
+    """nexus-nyry9.4 review-fix (code-review-expert + substantive-critic,
+    T2 [23035]/[23036]): a truthy non-string ``tool`` value (e.g. an int)
+    previously reached ``t.startswith(...)`` inside ``_extract_tool`` and
+    raised a bare ``AttributeError`` instead of the intended, step-
+    indexed ``PlanRunToolNotFoundError`` — defeating the very validation
+    loop meant to fail loud on exactly this shape."""
+    from nexus.plans.runner import PlanRunToolNotFoundError, plan_run
+
+    plan = {"steps": [{"tool": 5, "args": {}}]}
+    disp = _FakeDispatcher()
+    with pytest.raises(PlanRunToolNotFoundError, match=r"steps\[0\].*non-string.*5"):
+        await plan_run(_match(plan), {}, dispatcher=disp)
+    assert disp.calls == []
 
 
 @pytest.mark.asyncio

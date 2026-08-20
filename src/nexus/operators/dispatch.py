@@ -1161,13 +1161,21 @@ async def claude_dispatch(
         # a single JSON object when no such line is found -- covers a
         # subprocess/test double that emits a bare JSON blob rather than
         # real stream-json (the format this repo's own test doubles use).
-        final_result, _partial_text, _event_count = _parse_stream_json_output(raw)
+        final_result, _partial_text, event_count = _parse_stream_json_output(raw)
         if usage_sink is not None:
             # RDR-196 .p1a (nexus-nyry9.7): capture cost/usage telemetry
             # for a dispatch that reached a parsed result -- the raw JSON
             # fallback below (final_result is None) still parses to an
             # all-None DispatchUsage + warning via _parse_dispatch_usage,
-            # never a silently-omitted record.
+            # never a silently-omitted record. This append is BEFORE the
+            # fallback's own possible raise (see the docstring's "Appended,
+            # then STILL RAISES" list) -- the diagnostic enrichment below
+            # (nexus-nyry9.4 review-fix, taxonomy id=99) only changes the
+            # exception's MESSAGE, never this ordering or the exception
+            # type, so that contract and its test
+            # (TestUsageSinkAppendsBeforeSubsequentRaises::
+            # test_invalid_json_fallback_still_appends_all_none_usage_
+            # then_raises) both stay true unchanged.
             usage_sink.append(_parse_dispatch_usage(final_result))
         if final_result is not None:
             parsed = final_result
@@ -1175,8 +1183,30 @@ async def claude_dispatch(
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError as exc:
+                # nexus-nyry9.4 review-fix (RDR-196 .r4 residual, taxonomy
+                # id=99): the old ``raw[:200]`` preview showed only the
+                # OPENING bytes of the whole blob, which for a real
+                # multi-line NDJSON stream is rarely where the parse
+                # actually failed -- useless when the interesting content
+                # is past byte 200. Locate the specific line ``json.loads``
+                # choked on via the exception's own ``lineno`` and preview
+                # THAT, plus how many lines parsed as objects at all (0
+                # means the child never spoke NDJSON; >0 means a real
+                # stream was seen but never reached a terminal "result"
+                # event) -- "no terminal 'result' event seen" is always
+                # true in this branch (we are here BECAUSE final_result is
+                # None) but stated explicitly rather than left implicit.
+                _raw_lines = raw.splitlines()
+                _offending_line = (
+                    _raw_lines[exc.lineno - 1]
+                    if 0 < exc.lineno <= len(_raw_lines)
+                    else raw
+                )
                 raise OperatorOutputError(
-                    f"claude -p output is not valid JSON: {exc} — got: {raw[:200]}"
+                    f"claude -p output is not valid JSON: {exc} — "
+                    f"{event_count} NDJSON line(s) parsed as objects, "
+                    f"no terminal 'result' event seen — "
+                    f"offending line (first 200 chars): {_offending_line[:200]!r}"
                 ) from exc
 
         # `claude -p --output-format json` returns a wrapper:

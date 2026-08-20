@@ -564,6 +564,45 @@ class TestSubprocessContract:
         )
 
     @pytest.mark.asyncio
+    async def test_stdin_written_even_when_stdout_never_drains(self) -> None:
+        """nexus-h33x8.6 a3 (dca12e1e3): ``_feed_stdin`` and
+        ``_drain_stream`` run CONCURRENTLY via ``asyncio.gather`` -- stdin
+        must be fed regardless of how slow/stuck the read side is, never
+        waiting on stdout/stderr draining first. The old
+        ``proc.communicate()``-based mechanism this replaced is where the
+        historical 'no stdin data received in 3s' class originated
+        (taxonomy class 4, nx_answer_runs id=100). Makes stdout/stderr
+        hang forever and asserts stdin still gets written."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        async def _hang_forever(n: int = -1) -> bytes:
+            await asyncio.Future()
+            return b""  # pragma: no cover — unreachable, Future never resolves
+
+        proc = _make_proc()
+        proc.stdout.read = _hang_forever
+        proc.stderr.read = _hang_forever
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            task = asyncio.create_task(claude_dispatch("prompt", _SIMPLE_SCHEMA))
+            try:
+                for _ in range(200):
+                    if proc.stdin.write.called:
+                        break
+                    await asyncio.sleep(0.005)
+                assert proc.stdin.write.called, (
+                    "stdin.write must fire even though stdout/stderr never "
+                    "drain -- sequential feed-then-drain would leave this "
+                    "unset"
+                )
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    @pytest.mark.asyncio
     async def test_returns_parsed_json(self) -> None:
         """Return value must be the parsed JSON dict from stdout."""
         from nexus.operators.dispatch import claude_dispatch
@@ -1553,6 +1592,52 @@ class TestErrorHandling:
         with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorOutputError):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+    @pytest.mark.asyncio
+    async def test_malformed_json_error_names_event_count_and_offending_line(self) -> None:
+        """nexus-nyry9.4 review-fix (RDR-196 .r4 residual, taxonomy
+        id=99, 2026-05-06): the generic 'not valid JSON' message gave no
+        way to tell 'the child never spoke stream-json at all' apart
+        from 'a real stream got cut mid-line' -- both produced identical
+        text, and the old ``raw[:200]`` preview showed only the START of
+        the WHOLE blob, which for a real multi-line NDJSON stream is
+        rarely where the parse actually failed. Enrich with: how many
+        NDJSON lines parsed as objects, that no terminal 'result' event
+        was seen, and the OFFENDING line's own content (located via the
+        JSONDecodeError's line number), not just the blob's opening
+        bytes.
+
+        Two lines, each individually valid JSON (so both count as
+        parsed events) -- line 1 padded past 200 chars so the old
+        ``raw[:200]`` preview never reaches line 2's content; their
+        CONCATENATION is not one valid JSON value, so whole-blob
+        ``json.loads`` fails with 'Extra data' pointing at line 2.
+        """
+        from nexus.operators.dispatch import claude_dispatch, OperatorOutputError
+
+        padding = "x" * 300
+        line1 = (
+            '{"type":"system","subtype":"init","cwd":"/' + padding + '","session_id":"s1"}'
+        )
+        line2 = '{"type":"weird_unexpected_event","note":"THE-OFFENDING-CONTENT-MARKER"}'
+        proc = _make_proc(stdout=(line1 + "\n" + line2).encode())
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorOutputError) as exc_info:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        msg = str(exc_info.value)
+        assert "not valid JSON" in msg
+        assert "2 NDJSON line(s) parsed as objects" in msg, (
+            f"event count missing from: {msg}"
+        )
+        assert "no terminal 'result' event seen" in msg, (
+            f"result-event status missing from: {msg}"
+        )
+        assert "THE-OFFENDING-CONTENT-MARKER" in msg, (
+            "the offending line's own content must be surfaced -- "
+            f"raw[:200] of the whole (padded) blob never reaches it: {msg}"
+        )
 
     @pytest.mark.asyncio
     async def test_empty_stdout_raises_operator_output_error(self) -> None:

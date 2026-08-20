@@ -290,6 +290,206 @@ class TestSingleStepGuard:
         assert _nx_answer_is_single_query(match) is False
 
 
+# ── Shared step-binding resolution helper (review-fix) ─────────────────────────
+
+
+class TestSharedStepBindingResolutionHelper:
+    """nexus-nyry9.5 review-fix (code-review SIGNIFICANT, T2
+    nyry9.5-code-review-2026-08-20): core.py's single_query fast path
+    and runner.py's plan_run must resolve step bindings through the
+    SAME shared precedence formula (``nexus.plans.runner.merge_bindings``)
+    rather than two independently hand-maintained copies with no test
+    cross-checking they stayed in sync."""
+
+    @pytest.mark.asyncio
+    async def test_single_query_fast_path_calls_shared_merge_bindings(self, tmp_path):
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+
+        match = _make_single_step_query_match()
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch("nexus.mcp.core.query", return_value="ok"),
+            patch.object(_runner, "merge_bindings", wraps=_runner.merge_bindings) as spy,
+        ):
+            from nexus.mcp.core import nx_answer
+            await nx_answer("q")
+
+        assert spy.called, (
+            "single_query fast path must resolve bindings via the "
+            "shared merge_bindings helper, not a hand-replicated copy"
+        )
+
+    @pytest.mark.asyncio
+    async def test_plan_run_calls_shared_merge_bindings(self):
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import plan_run
+
+        match = _make_match(
+            plan_json=json.dumps({
+                "steps": [{"tool": "search", "args": {"query": "$intent"}}],
+            }),
+        )
+
+        async def fake_dispatch(tool, args):
+            return {"text": "ok", "ids": []}
+
+        with patch.object(_runner, "merge_bindings", wraps=_runner.merge_bindings) as spy:
+            await plan_run(match, {"intent": "q"}, dispatcher=fake_dispatch)
+
+        assert spy.called, (
+            "plan_run must resolve bindings via the shared "
+            "merge_bindings helper"
+        )
+
+
+# ── Single-query typed-binding refusal (review-fix) ─────────────────────────────
+
+
+class TestSingleQueryPlanBindingUnsatisfiable:
+    """nexus-nyry9.5 review-fix (code-review IMPORTANT #1, T2
+    nyry9.5-code-review-2026-08-20): a typed required binding
+    (``TYPED_FILTER_BINDINGS`` -- e.g. ``content_type``) the single_query
+    fast path cannot derive from the question text must be handled the
+    same explicit way Step 4 handles it: step_count=0, a logged
+    ``nx_answer_plan_binding_unsatisfiable`` event, NOT the generic
+    ``except Exception`` (which used to record step_count=1 with no
+    telemetry event, wrongly implying one step actually ran)."""
+
+    @pytest.mark.asyncio
+    async def test_typed_binding_unsatisfiable_records_step_count_zero(self, tmp_path):
+        import nexus.mcp_infra as _infra
+        from nexus.plans.match import Match
+
+        match = Match(
+            plan_id=1,
+            name="test-plan-typed-binding",
+            description="test",
+            confidence=0.75,
+            dimensions={},
+            tags="",
+            plan_json=json.dumps({
+                "steps": [{
+                    "tool": "query",
+                    "args": {"question": "$intent", "content_type": "$content_type"},
+                }],
+            }),
+            required_bindings=["content_type"],
+            optional_bindings=[],
+            default_bindings={},
+            parent_dims=None,
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch("nexus.mcp.core._nx_answer_record_run") as record_run_spy,
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q")
+
+        assert "content_type" in result, (
+            f"expected the typed-binding refusal message naming the "
+            f"unsatisfiable binding, got: {result!r}"
+        )
+        assert record_run_spy.called, "the refusal must still be recorded"
+        assert record_run_spy.call_args.kwargs.get("step_count") == 0, (
+            "single_query's typed-binding refusal must record step_count=0 "
+            "(zero steps ran), matching Step 4's dedicated handling -- not "
+            "step_count=1 from the generic except Exception fallthrough"
+        )
+
+
+# ── Single-query limit clamp (review-fix) ───────────────────────────────────────
+
+
+class TestSingleQueryLimitClamp:
+    """nexus-nyry9.5 review-fix (code-review IMPORTANT #2, T2
+    nyry9.5-code-review-2026-08-20): a plan- or caller-influenced
+    ``limit`` reaching the single_query fast path's ``query()`` call
+    must be clamped to ``QUOTAS.MAX_QUERY_RESULTS`` like every other
+    paging/query-result path in this codebase (AGENTS.md § External
+    service limits) -- this path skipping ``plan_run`` must not also
+    mean it skips the ceiling."""
+
+    @pytest.mark.asyncio
+    async def test_plan_limit_over_ceiling_clamped_to_max_query_results(self, tmp_path):
+        import nexus.mcp_infra as _infra
+        from nexus.db.limits import MAX_QUERY_RESULTS
+
+        match = _make_match(
+            plan_json=json.dumps({
+                "steps": [{
+                    "tool": "query",
+                    "args": {"question": "$intent", "corpus": "knowledge", "limit": 1000},
+                }],
+            }),
+        )
+        query_calls: list[dict] = []
+
+        def fake_query(**kwargs):
+            query_calls.append(kwargs)
+            return "ok"
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch("nexus.mcp.core.query", side_effect=fake_query),
+        ):
+            from nexus.mcp.core import nx_answer
+            await nx_answer("q")
+
+        assert query_calls, "query() was never called"
+        assert query_calls[0].get("limit") == MAX_QUERY_RESULTS == 300, (
+            f"a plan limit of 1000 must clamp to MAX_QUERY_RESULTS "
+            f"(300), got {query_calls[0].get('limit')!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_plan_limit_uses_querys_own_default(self, tmp_path):
+        import inspect
+        import nexus.mcp_infra as _infra
+        from nexus.mcp.core import query as _query_tool
+
+        default_limit = inspect.signature(_query_tool).parameters["limit"].default
+        assert default_limit == 10  # sanity: query()'s own documented default
+
+        match = _make_single_step_query_match()  # no "limit" key in args
+        query_calls: list[dict] = []
+
+        def fake_query(**kwargs):
+            query_calls.append(kwargs)
+            return "ok"
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch("nexus.mcp.core.query", side_effect=fake_query),
+        ):
+            from nexus.mcp.core import nx_answer
+            await nx_answer("q")
+
+        assert query_calls, "query() was never called"
+        assert query_calls[0].get("limit") == default_limit == 10, (
+            f"a plan with no 'limit' arg must fall back to query()'s own "
+            f"default (10), got {query_calls[0].get('limit')!r}"
+        )
+
+
 # ── Graceful degradation (SC-9) ───────────────────────────────────────────────
 
 
@@ -2369,15 +2569,25 @@ class TestNxAnswerBudgetSeconds:
         assert before + 30.0 <= deadline <= after + 30.0
 
     @pytest.mark.asyncio
-    async def test_retrieval_only_plan_exempt_from_budget_deadline(self, tmp_path):
-        """nexus-h33x8.6 a4 fold-in: a retrieval_only-classified plan has
-        no operator floor to protect against, so it must NOT receive a
-        deadline even when the caller supplied budget_seconds."""
+    async def test_multi_step_no_operator_plan_now_gets_budget_deadline(self, tmp_path):
+        """nexus-nyry9.5 (RDR-196 .r5 review-fix, critic CRITICAL, T2
+        review-nexus-nyry9.5): PINS THE NEW CONTRACT. A multi-step plan
+        with zero operator steps used to be classified into a deleted
+        third bucket and exempted from the budget deadline entirely --
+        a census of all 17 real shipped builtin plans found ZERO that
+        ever classified that way via a real plan_match(), so the
+        exemption protected no real plan. The bucket and its exemption
+        are deleted; this same plan shape must now receive a real
+        deadline like any other non-single_query plan. Formerly
+        ``test_retrieval_only_plan_exempt_from_budget_deadline``, which
+        asserted the opposite (``deadline is None``) under the deleted
+        contract."""
+        import time
         import nexus.mcp_infra as _infra
         import nexus.plans.runner as _runner
         from nexus.plans.runner import PlanResult
 
-        retrieval_only_match = _make_match(
+        no_operator_match = _make_match(
             confidence=0.75,
             plan_json=json.dumps({
                 "steps": [
@@ -2393,8 +2603,9 @@ class TestNxAnswerBudgetSeconds:
             captured.update(kwargs)
             return run_result
 
+        before = time.monotonic()
         with (
-            patch("nexus.plans.matcher.plan_match", return_value=[retrieval_only_match]),
+            patch("nexus.plans.matcher.plan_match", return_value=[no_operator_match]),
             patch.object(_infra, "get_t1_plan_cache",
                          return_value=MagicMock(is_available=False)),
             patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
@@ -2403,10 +2614,15 @@ class TestNxAnswerBudgetSeconds:
         ):
             from nexus.mcp.core import nx_answer
             await nx_answer("q", budget_seconds=5.0)
+        after = time.monotonic()
 
-        assert captured.get("deadline") is None, (
-            "retrieval_only plans must skip the a4 budget deadline entirely"
+        deadline = captured.get("deadline")
+        assert deadline is not None, (
+            "a multi-step, zero-operator plan must now receive the same "
+            "budget deadline as any other non-single_query plan -- the "
+            "deleted bucket's exemption must not resurface"
         )
+        assert before + 5.0 <= deadline <= after + 5.0
 
     @pytest.mark.asyncio
     async def test_budget_exhausted_returns_marker_text_not_raw_error(self, tmp_path):
@@ -2681,32 +2897,35 @@ class TestNxAnswerBudgetSeconds:
         ) in result
 
     @pytest.mark.asyncio
-    async def test_budget_seconds_silently_bypassed_by_miss_plus_retrieval_only_combo(
+    async def test_budget_seconds_applies_to_miss_plus_grown_plan_combo(
         self, tmp_path,
     ):
-        """PIN TEST (substantive-critic SIGNIFICANT #1, T2 substantive-
-        critique-nexus-h33x8.6-a4-a2-2026-08-19). UPDATED by
-        nexus-nyry9.2 (RDR-196 .r2): the plan-miss inline-planner phase
-        is now charged against budget_seconds in general (see
-        ``test_planner_phase_exhausts_budget_returns_marker_not_plan_run``
-        above) -- but a retrieval_only-classified plan remains exempt
-        from the deadline even after a miss (still deliberate -- no
-        operator floor to protect; boundary #2 on the docstring,
-        unchanged and out of THIS bead's scope). This test's mocked
-        planner returns instantly (no sleep), so it does not itself
-        exercise the now-fixed general case -- its job is narrower: it
-        pins that the retrieval_only exemption ALONE is still enough to
-        make a miss-plus-retrieval_only combo run unbounded by
-        budget_seconds -- no marker, no exception, plain success text --
-        even though the general miss-phase gap it used to compound with
-        is closed. Goes RED if the retrieval_only exemption itself is
-        ever silently dropped.
+        """PIN TEST, UPDATED by nexus-nyry9.5 (RDR-196 .r5 review-fix,
+        critic CRITICAL, T2 review-nexus-nyry9.5) for the NEW contract.
+        Originally ``test_budget_seconds_silently_bypassed_by_miss_plus_
+        retrieval_only_combo`` (substantive-critic SIGNIFICANT #1, T2
+        substantive-critique-nexus-h33x8.6-a4-a2-2026-08-19; UPDATED by
+        nexus-nyry9.2 / RDR-196 .r2), which pinned that a plan-miss
+        combined with a grown plan shaped like the (now-deleted) third
+        classify_plan bucket ran completely unbounded by
+        ``budget_seconds`` -- deliberate at the time, because that
+        bucket carried its own deadline exemption. The bucket and its
+        exemption are deleted (census: zero of 17 real shipped builtin
+        plans ever classified that way via a real plan_match()), so
+        this exact combo must now behave like any other miss-plus-
+        matched-plan run: a real deadline reaches plan_run. This test's
+        mocked planner still returns instantly (no sleep) and the mock
+        plan_run still returns success text with no budget already
+        exhausted at the pre-Step-4 check, so the run still completes
+        with plain success text and no marker -- what changed is
+        whether plan_run's ``deadline`` kwarg is ``None``.
         """
+        import time
         import nexus.mcp_infra as _infra
         import nexus.plans.runner as _runner
         from nexus.plans.runner import PlanResult
 
-        retrieval_only_match = _make_match(
+        grown_match = _make_match(
             plan_id=0, confidence=None,
             plan_json=json.dumps({
                 "steps": [
@@ -2723,8 +2942,9 @@ class TestNxAnswerBudgetSeconds:
             return run_result
 
         async def fake_miss(question, scope="", max_steps=6, **kwargs):
-            return retrieval_only_match
+            return grown_match
 
+        before = time.monotonic()
         with (
             patch("nexus.plans.matcher.plan_match", return_value=[]),  # miss
             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(side_effect=fake_miss)),
@@ -2736,17 +2956,22 @@ class TestNxAnswerBudgetSeconds:
         ):
             from nexus.mcp.core import nx_answer
             result = await nx_answer("q", budget_seconds=1.0)
+        after = time.monotonic()
 
         assert isinstance(result, str)
         assert "[budget exhausted" not in result, (
-            "documents that this combo produces NO marker despite "
-            "budget_seconds being set"
+            "the mocked planner/plan_run still complete well inside the "
+            "1s budget in this test, so no marker is expected -- this "
+            "test is about the deadline KWARG plan_run receives, not "
+            "about the budget actually running out"
         )
-        assert captured.get("deadline") is None, (
-            "documents that plan_run receives deadline=None for this "
-            "combo -- the retrieval_only exemption applies even to a "
-            "miss-path-grown/matched plan"
+        deadline = captured.get("deadline")
+        assert deadline is not None, (
+            "a miss-path-grown plan shaped like the deleted bucket must "
+            "now receive a real deadline like any other plan -- the "
+            "deleted exemption must not resurface for this combo"
         )
+        assert before + 1.0 <= deadline <= after + 1.0
 
     @pytest.mark.asyncio
     async def test_non_budget_run_structured_envelope_field_is_none(self, tmp_path):
@@ -2813,7 +3038,8 @@ class TestNxAnswerClassifyPlanPrefixedOperatorNames:
     (bare AND ``operator_``-prefixed forms both accepted, per that
     module's own docstring: 'plan YAMLs use either'). A plan step written
     as ``operator_summarize`` (rather than bare ``summarize``) was
-    misclassified as retrieval_only even though it genuinely needs a
+    misclassified into the deleted retrieval-only bucket (see
+    nexus-nyry9.5, RDR-196 .r5) even though it genuinely needs a
     claude -p dispatch."""
 
     def test_prefixed_operator_tool_name_classifies_as_needs_operators(self):
@@ -2833,9 +3059,20 @@ class TestNxAnswerClassifyPlanPrefixedOperatorNames:
         from nexus.mcp.core import _nx_answer_classify_plan
         assert _nx_answer_classify_plan(_make_multi_step_match()) == "needs_operators"
 
-    def test_genuine_retrieval_only_plan_still_classifies_as_retrieval_only(self):
-        """Regression: a plan with zero operator steps (bare OR prefixed)
-        must still classify as retrieval_only."""
+    def test_multi_step_plan_with_zero_operator_steps_classifies_as_needs_operators(self):
+        """nexus-nyry9.5 (RDR-196 .r5 review-fix): the third
+        classify_plan bucket a plan like this used to land in (no
+        operator steps, exempt from the budget deadline) was deleted --
+        a census of all 17 shipped builtin plans found zero that ever
+        classified that way via a real plan_match(). A multi-step plan
+        with zero operator steps (bare OR prefixed tool names) now
+        classifies the same as any other non-single_query plan:
+        needs_operators, budget-bound like everything else. (Whether it
+        structurally contains an operator step is a SEPARATE question
+        answered by ``_nx_answer_needs_operators``, which this diff
+        decoupled from ``_nx_answer_classify_plan`` precisely so this
+        distinction stays testable without resurrecting the deleted
+        deadline exemption.)"""
         from nexus.mcp.core import _nx_answer_classify_plan
         match = _make_match(
             plan_json=json.dumps({
@@ -2845,4 +3082,4 @@ class TestNxAnswerClassifyPlanPrefixedOperatorNames:
                 ],
             }),
         )
-        assert _nx_answer_classify_plan(match) == "retrieval_only"
+        assert _nx_answer_classify_plan(match) == "needs_operators"
