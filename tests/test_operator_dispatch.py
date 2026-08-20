@@ -2508,3 +2508,434 @@ class TestRolledUpFailureDemotion:
         with rolled_up_dispatch_failures():
             assert _ROLLED_UP.get() is True
         assert _ROLLED_UP.get() is False
+
+
+# ── DispatchUsage / cost-usage capture (RDR-196 .p1a, nexus-nyry9.7) ────────
+#
+# ``claude -p --output-format stream-json``'s terminal result event carries
+# ``total_cost_usd`` / ``usage.*`` / ``modelUsage`` -- dispatch.py parses it
+# (``_parse_stream_json_output``) and, before this bead, discarded every
+# cost/usage field. Field names below are FIXTURE-VERIFIED against
+# ``tests/fixtures/claude_dispatch_stream_json_sample.ndjson`` line 12 (the
+# terminal ``result`` event), not the RDR-196 Technical Design section's
+# illustrative sketch, which used ``elapsed_ms`` for what the wire payload
+# actually calls ``duration_ms`` -- see the correction block in
+# docs/rdr/rdr-196-cost-aware-nx-answer.md's Technical Design section.
+#
+# ``claude_dispatch``'s existing return contract (a bare dict -- the parsed
+# ``structured_output`` or the raw wrapper) is UNCHANGED: all ~17 non-
+# aspect_extractor.py call sites (mcp/core.py, plans/bundle.py,
+# commands/taxonomy_cmd.py) do ``return await claude_dispatch(...)`` with no
+# tuple-unpacking, so returning a tuple would break every one of them
+# despite the RDR sketch's "existing callers are unaffected" claim. Usage is
+# instead reachable via an opt-in ``usage_sink: list[DispatchUsage] | None``
+# out-param: ``None`` (default) is a complete no-op, byte-identical to the
+# pre-change behaviour for all existing callers; a caller that wants usage
+# passes its own list and reads ``sink[0]`` after the ``await`` returns.
+
+_RESULT_EVENT_LINE = 12  # 1-indexed line in the fixture; the terminal "result" event
+
+
+def _fixture_result_event() -> dict:
+    lines = _load_fixture_lines("claude_dispatch_stream_json_sample.ndjson")
+    obj = json.loads(lines[_RESULT_EVENT_LINE - 1])
+    assert obj.get("type") == "result", "fixture line 12 must be the terminal result event"
+    return obj
+
+
+class TestParseDispatchUsage:
+    """Unit tests for ``_parse_dispatch_usage`` against the real captured
+    fixture's terminal result event."""
+
+    def test_parses_exact_values_from_fixture(self) -> None:
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        usage = _parse_dispatch_usage(_fixture_result_event())
+
+        assert usage.cost_usd == 0.5414490000000001
+        assert usage.input_tokens == 2
+        assert usage.output_tokens == 52
+        assert usage.cache_creation_input_tokens == 25989
+        assert usage.cache_read_input_tokens == 19049
+        assert usage.duration_ms == 3220
+        assert usage.duration_api_ms == 3135
+        assert usage.num_turns == 2
+        assert usage.model == "claude-fable-5"
+        assert set(usage.model_usage.keys()) == {"claude-fable-5"}
+        mu = usage.model_usage["claude-fable-5"]
+        assert mu.canonical_model == "claude-fable-5"
+        assert mu.input_tokens == 2
+        assert mu.output_tokens == 52
+        assert mu.cache_read_input_tokens == 19049
+        assert mu.cache_creation_input_tokens == 25989
+        assert mu.cost_usd == 0.5414490000000001
+
+    def test_no_result_event_yields_all_none_and_warns(self) -> None:
+        """A legacy bare-JSON test double (no stream-json result event at
+        all) must yield an all-``None`` DispatchUsage, never 0.0 -- 0.0
+        reads as "this call was free", not "we don't know"."""
+        from structlog.testing import capture_logs
+
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        with capture_logs() as cap:
+            usage = _parse_dispatch_usage(None)
+
+        assert usage.cost_usd is None
+        assert usage.input_tokens is None
+        assert usage.output_tokens is None
+        assert usage.model is None
+        assert usage.model_usage == {}
+        assert any(e.get("event") == "dispatch_usage_no_result_event" for e in cap)
+
+    def test_absent_fields_record_none_not_zero_and_warn(self) -> None:
+        """Doctored copy of the fixture's result event with total_cost_usd,
+        usage, and modelUsage stripped -- the absent-field path per the
+        RDR's risk register. Every affected field must be None, never 0.0,
+        and a warning must name what was missing."""
+        from structlog.testing import capture_logs
+
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        doctored = dict(_fixture_result_event())
+        del doctored["total_cost_usd"]
+        del doctored["usage"]
+        del doctored["modelUsage"]
+
+        with capture_logs() as cap:
+            usage = _parse_dispatch_usage(doctored)
+
+        assert usage.cost_usd is None
+        assert usage.input_tokens is None
+        assert usage.output_tokens is None
+        assert usage.cache_creation_input_tokens is None
+        assert usage.cache_read_input_tokens is None
+        assert usage.model is None
+        assert usage.model_usage == {}
+        # duration_ms/duration_api_ms/num_turns are untouched by the
+        # doctoring and must still parse normally.
+        assert usage.duration_ms == 3220
+        assert usage.duration_api_ms == 3135
+        assert usage.num_turns == 2
+
+        warnings = [e for e in cap if e.get("event") == "dispatch_usage_fields_missing"]
+        assert warnings, f"expected a dispatch_usage_fields_missing warning: {cap}"
+        missing = warnings[0].get("missing", [])
+        assert "total_cost_usd" in missing
+        assert "usage" in missing
+        assert "modelUsage" in missing
+
+    def test_fixture_result_event_contains_cost_and_usage_fields(self) -> None:
+        """Non-vacuity guard (bead item 3): if a future fixture
+        regeneration drops the cost/usage fields, THIS must fail loudly --
+        otherwise every DispatchUsage test above would keep passing on an
+        empty result event and the whole telemetry arc silently measures
+        nothing. See the handback for a demonstration that this assertion
+        actually fails on a stripped copy."""
+        result = _fixture_result_event()
+        assert "total_cost_usd" in result
+        assert "usage" in result
+        assert "modelUsage" in result
+        assert isinstance(result["usage"], dict) and result["usage"], (
+            "usage must be a populated dict, not empty/absent"
+        )
+        assert isinstance(result["modelUsage"], dict) and result["modelUsage"], (
+            "modelUsage must be a populated dict, not empty/absent"
+        )
+
+    def test_single_model_alias_key_records_canonical_not_key(self) -> None:
+        """review finding (substantive-critic Significant #2): the real
+        fixture's single modelUsage key happens to equal its
+        canonicalModel ("claude-fable-5" both ways), so
+        test_parses_exact_values_from_fixture cannot distinguish reading
+        ``canonicalModel`` from falling back to the dict key -- exactly
+        what 196-R3 ("record the canonical id, never the requested
+        alias") needs distinguished. Doctor the map key to a requested
+        alias distinct from its canonicalModel and assert the id that
+        actually gets recorded is the canonical one."""
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        doctored = dict(_fixture_result_event())
+        doctored["modelUsage"] = {
+            "sonnet": {  # the requested alias -- must NOT be what's recorded
+                "inputTokens": 2,
+                "outputTokens": 52,
+                "cacheReadInputTokens": 19049,
+                "cacheCreationInputTokens": 25989,
+                "costUSD": 0.5414490000000001,
+                "canonicalModel": "claude-sonnet-5-20260101",
+            },
+        }
+
+        usage = _parse_dispatch_usage(doctored)
+
+        assert usage.model == "claude-sonnet-5-20260101", (
+            f"expected the canonical id, not the requested alias 'sonnet': got {usage.model!r}"
+        )
+        assert set(usage.model_usage.keys()) == {"sonnet"}, (
+            "the map is still keyed by the alias -- only the recorded model id must be canonical"
+        )
+        assert usage.model_usage["sonnet"].canonical_model == "claude-sonnet-5-20260101"
+
+    def test_two_models_no_cross_wiring_between_top_level_and_per_model_usage(self) -> None:
+        """review finding (substantive-critic Significant #2): the real
+        fixture is single-turn/single-model, so top-level ``usage.*`` is
+        numerically IDENTICAL to the one ``modelUsage`` entry's numbers --
+        a mis-sourced field (reading from the wrong dict) would still pass
+        every exact-value assertion. Doctor two modelUsage entries, both
+        with a distinct alias/canonical pair, and top-level usage/cost
+        numbers that match NEITHER entry, then assert (a) each entry's
+        canonical_model is read from canonicalModel, not its key, (b) the
+        top-level DispatchUsage fields come from the top-level ``usage``/
+        ``total_cost_usd``, not either modelUsage entry, and (c) the
+        single-value ``model`` convenience field stays None -- genuinely
+        ambiguous with two distinct canonical models, not a silent pick."""
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        doctored = dict(_fixture_result_event())
+        doctored["total_cost_usd"] = 9.0  # distinct from both entries below
+        doctored["usage"] = {
+            "input_tokens": 900,
+            "output_tokens": 901,
+            "cache_creation_input_tokens": 902,
+            "cache_read_input_tokens": 903,
+        }
+        doctored["modelUsage"] = {
+            "sonnet": {
+                "inputTokens": 100, "outputTokens": 101,
+                "cacheReadInputTokens": 102, "cacheCreationInputTokens": 103,
+                "costUSD": 1.0,
+                "canonicalModel": "claude-sonnet-5-20260101",
+            },
+            "haiku": {
+                "inputTokens": 200, "outputTokens": 201,
+                "cacheReadInputTokens": 202, "cacheCreationInputTokens": 203,
+                "costUSD": 2.0,
+                "canonicalModel": "claude-haiku-5-20260101",
+            },
+        }
+
+        usage = _parse_dispatch_usage(doctored)
+
+        assert usage.model_usage["sonnet"].canonical_model == "claude-sonnet-5-20260101"
+        assert usage.model_usage["haiku"].canonical_model == "claude-haiku-5-20260101"
+        assert usage.model is None, (
+            "two distinct canonical models is genuinely ambiguous for the "
+            "single-value convenience field -- must not silently pick one"
+        )
+        # The load-bearing anti-cross-wiring assertions: these values exist
+        # ONLY at the top level (900/901/9.0), never in either modelUsage
+        # entry (100/101/1.0 or 200/201/2.0) -- a mis-sourced field would
+        # fail these even though it might pass a single-model fixture.
+        assert usage.cost_usd == 9.0
+        assert usage.input_tokens == 900
+        assert usage.output_tokens == 901
+        assert usage.cache_creation_input_tokens == 902
+        assert usage.cache_read_input_tokens == 903
+
+
+class TestClaudeDispatchUsageSink:
+    """``usage_sink`` is a no-op by default (existing ~17 call sites pass
+    nothing); opting in gets exactly one DispatchUsage per successful
+    dispatch, without altering the returned dict."""
+
+    @pytest.mark.asyncio
+    async def test_default_none_is_unaffected(self) -> None:
+        """No usage_sink passed -- byte-identical to pre-change behaviour."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc(stdout=b'{"ok": true}')
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            result = await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert result == {"ok": True}
+
+    @pytest.mark.asyncio
+    async def test_usage_sink_populated_from_real_fixture_stream(self) -> None:
+        """Feed the FULL real stream-json fixture (every event, terminal
+        result included) as stdout and confirm usage_sink receives a
+        DispatchUsage matching the fixture's result event, while the
+        returned structured-output dict is unaffected."""
+        from nexus.operators.dispatch import claude_dispatch, DispatchUsage
+
+        lines = _load_fixture_lines("claude_dispatch_stream_json_sample.ndjson")
+        raw = ("\n".join(lines) + "\n").encode()
+        proc = _make_proc(stdout=raw)
+
+        sink: list[DispatchUsage] = []
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            result = await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=sink)
+
+        assert result == {"ok": True}, "usage_sink must not change claude_dispatch's return contract"
+        assert len(sink) == 1
+        usage = sink[0]
+        assert usage.cost_usd == 0.5414490000000001
+        assert usage.input_tokens == 2
+        assert usage.output_tokens == 52
+        assert usage.model == "claude-fable-5"
+
+    @pytest.mark.asyncio
+    async def test_usage_sink_none_when_legacy_bare_blob(self) -> None:
+        """A legacy bare-JSON test double (no result event) with
+        usage_sink set still appends exactly one DispatchUsage -- all
+        fields None, never 0.0 -- rather than silently appending nothing
+        or fabricating a zero-cost record."""
+        from nexus.operators.dispatch import claude_dispatch, DispatchUsage
+
+        proc = _make_proc(stdout=b'{"ok": true}')
+        sink: list[DispatchUsage] = []
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            result = await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=sink)
+
+        assert result == {"ok": True}
+        assert len(sink) == 1
+        assert sink[0].cost_usd is None
+        assert sink[0].model is None
+
+
+class TestUsageSinkAppendsBeforeSubsequentRaises:
+    """review findings (code-review-expert Important + substantive-critic
+    Significant #1): ``usage_sink.append()`` runs right after
+    ``_parse_stream_json_output(raw)``, which is BEFORE three of
+    ``claude_dispatch``'s six possible raises -- the append and the raise
+    both happen on those three paths, not one or the other. Coordinator
+    decision: adopt that as the contract (real spend is recorded whenever
+    a result envelope parsed, even when the dispatch then raises -- this
+    serves the arc's cost-tracking goal and .p1b builds on it), correct
+    the docstring to say so precisely (done), and cover all three paths
+    here -- previously zero test exercised usage_sink through any of
+    them."""
+
+    @pytest.mark.asyncio
+    async def test_is_error_true_still_appends_usage_then_raises(self) -> None:
+        """A result envelope with is_error=true (claude exited 0 but
+        reported an application-level error) still carries real,
+        non-zero spend -- the append must happen before the
+        OperatorError raise, not be skipped by it."""
+        from nexus.operators.dispatch import claude_dispatch, DispatchUsage, OperatorError
+
+        ndjson = "\n".join([
+            '{"type":"system","subtype":"init","cwd":"/tmp","session_id":"s1"}',
+            '{"type":"result","is_error":true,'
+            '"result":"claude reported: rate limit exceeded for this account",'
+            '"subtype":"error_during_execution","structured_output":null,'
+            '"total_cost_usd":0.42,"duration_ms":1000,"duration_api_ms":900,'
+            '"num_turns":1,'
+            '"usage":{"input_tokens":10,"output_tokens":20,'
+            '"cache_creation_input_tokens":0,"cache_read_input_tokens":0},'
+            '"modelUsage":{"claude-fable-5":{"inputTokens":10,"outputTokens":20,'
+            '"cacheReadInputTokens":0,"cacheCreationInputTokens":0,'
+            '"costUSD":0.42,"canonicalModel":"claude-fable-5"}}}',
+        ])
+        proc = _make_proc(stdout=ndjson.encode(), returncode=0, stderr=b"")
+        sink: list[DispatchUsage] = []
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError, match="rate limit exceeded"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=sink)
+
+        assert len(sink) == 1, "the append must happen even though the call raises"
+        assert sink[0].cost_usd == 0.42
+        assert sink[0].input_tokens == 10
+        assert sink[0].model == "claude-fable-5"
+
+    @pytest.mark.asyncio
+    async def test_null_structured_output_still_appends_usage_then_raises(self) -> None:
+        """is_error=false but structured_output=null: still a parsed
+        envelope with real usage, still appended before the
+        OperatorOutputError raise."""
+        from nexus.operators.dispatch import claude_dispatch, DispatchUsage, OperatorOutputError
+
+        ndjson = (
+            '{"type":"result","is_error":false,'
+            '"result":"","structured_output":null,'
+            '"total_cost_usd":0.13,"duration_ms":500,"duration_api_ms":450,'
+            '"num_turns":1,'
+            '"usage":{"input_tokens":5,"output_tokens":6,'
+            '"cache_creation_input_tokens":0,"cache_read_input_tokens":0},'
+            '"modelUsage":{"claude-fable-5":{"inputTokens":5,"outputTokens":6,'
+            '"cacheReadInputTokens":0,"cacheCreationInputTokens":0,'
+            '"costUSD":0.13,"canonicalModel":"claude-fable-5"}}}'
+        )
+        proc = _make_proc(stdout=ndjson.encode(), returncode=0, stderr=b"")
+        sink: list[DispatchUsage] = []
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorOutputError, match="null structured_output"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=sink)
+
+        assert len(sink) == 1, "the append must happen even though the call raises"
+        assert sink[0].cost_usd == 0.13
+        assert sink[0].output_tokens == 6
+
+    @pytest.mark.asyncio
+    async def test_invalid_json_fallback_still_appends_all_none_usage_then_raises(self) -> None:
+        """No stream-json result event at all AND the raw blob fails
+        json.loads: the append still runs (with the all-None DispatchUsage
+        _parse_dispatch_usage produces when final_result is None), then
+        the OperatorOutputError fires."""
+        from nexus.operators.dispatch import claude_dispatch, DispatchUsage, OperatorOutputError
+
+        proc = _make_proc(stdout=b'not valid json {{{{', returncode=0, stderr=b"")
+        sink: list[DispatchUsage] = []
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorOutputError, match="not valid JSON"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=sink)
+
+        assert len(sink) == 1, "the append must happen even though the call raises"
+        assert sink[0].cost_usd is None
+        assert sink[0].model is None
+
+
+@pytest.mark.integration
+class TestClaudeDispatchLiveUsage:
+    """Live claude -p dispatch records non-zero cost -- the fixture alone
+    only proves the parser handles a captured shape, not that it still
+    matches production's actual wire payload. Skipped by default; requires
+    ``claude`` on PATH with valid credentials.
+
+    Run with: uv run pytest -m integration tests/test_operator_dispatch.py -k LiveUsage
+    """
+
+    @staticmethod
+    def _claude_auth_available() -> bool:
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["claude", "auth", "status", "--json"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return False
+            data = json.loads(result.stdout)
+            return bool(data.get("loggedIn") or data.get("isLoggedIn"))
+        except Exception:
+            return False
+
+    @pytest.mark.asyncio
+    async def test_live_dispatch_records_nonzero_cost(self) -> None:
+        if not self._claude_auth_available():
+            pytest.skip("claude CLI not on PATH or not authenticated -- live dispatch skipped")
+
+        from nexus.operators.dispatch import claude_dispatch, DispatchUsage
+
+        sink: list[DispatchUsage] = []
+        result = await claude_dispatch(
+            'Respond with exactly {"ok": true} and nothing else.',
+            _SIMPLE_SCHEMA,
+            timeout=60.0,
+            usage_sink=sink,
+        )
+
+        assert isinstance(result, dict)
+        assert len(sink) == 1, f"expected exactly one usage record from a live dispatch, got {sink}"
+        usage = sink[0]
+        assert usage.cost_usd is not None and usage.cost_usd > 0, (
+            f"live dispatch must record a non-zero cost, got {usage.cost_usd!r}"
+        )
+        assert usage.input_tokens is not None and usage.input_tokens > 0
+        assert usage.model is not None and usage.model != "", (
+            "live dispatch must record a canonical model id"
+        )

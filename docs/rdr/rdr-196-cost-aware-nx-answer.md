@@ -262,6 +262,24 @@ semantics (RDR-100 owns that), any change to operator semantics.
   `{model, input_tokens, output_tokens, cost_usd, elapsed_ms}` parsed from the result event
   (field names **Assumed** — verify against the fixture). Existing callers are unaffected
   (keyword-only, default None).
+
+> **CORRECTION (2026-08-20, nexus-nyry9.7):** The `DispatchUsage` field names above were
+> illustrative and unverified. Verified against
+> `tests/fixtures/claude_dispatch_stream_json_sample.ndjson`'s terminal result event: the
+> per-dispatch duration field is `duration_ms` (plus a separate `duration_api_ms`), not
+> `elapsed_ms` as used above and in this section's `StepRecord` illustration below and in
+> the Approach section's telemetry-fields list. Top-level `usage.*` is snake_case
+> (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`,
+> `cache_read_input_tokens`); per-model `modelUsage.<key>.*` is camelCase (`inputTokens`,
+> `outputTokens`, `costUSD`, `canonicalModel`), and the map key can differ from
+> `canonicalModel` (a requested alias vs. the resolved id) — the recorded model id must be
+> `canonicalModel`, never the key (196-R3). Separately: "existing callers are unaffected"
+> does not hold for a tuple-return shape — all ~17 non-`aspect_extractor.py` call sites do
+> bare `return await claude_dispatch(...)` with no unpacking, so `.p1a`'s implementation
+> instead added a keyword-only `usage_sink: list[DispatchUsage] | None = None` out-param
+> (default `None` is a true no-op) rather than changing the return type. Implemented in
+> `src/nexus/operators/dispatch.py` (`DispatchUsage`, `ModelUsage`, `_parse_dispatch_usage`).
+
 - `plans/runner.py` collects one `StepRecord` per executed step (including SQL fast-path steps
   with `model=None, cost_usd=0`) and bundles one record per bundled dispatch with the bundled
   step indices listed; passes the list to the run recorder.
