@@ -941,6 +941,10 @@ _ALL_TENANT_TABLES = [
     # 2026-08-20: dead table dropped (migration-002-tenant-pk.xml),
     # mirrors health._RLS_TENANT_TABLES)
     "nexus.nx_answer_runs",
+    # RDR-196 .p1c (nexus-nyry9.9, telemetry-007-1/-2): per-step child of
+    # nx_answer_runs, RLS enabled+forced like its parent (mirrors
+    # health._RLS_TENANT_TABLES)
+    "nexus.nx_answer_steps",
     "nexus.pdf_chunks",
     "nexus.pdf_pages",
     "nexus.pdf_pipeline",
