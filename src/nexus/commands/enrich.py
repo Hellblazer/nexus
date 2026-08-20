@@ -911,9 +911,40 @@ def _enrich_apply(
 # ── nx enrich aspects (RDR-089 P2.2) ────────────────────────────────────────
 
 
-# Per-paper Haiku cost estimate (RDR §Trade-offs). Conservative ceiling
-# for ~5K-token output on Haiku-4-class models. Used by --dry-run.
-_PER_PAPER_COST_USD = 0.01
+# Per-paper cost estimate. Used by --dry-run and the post-run actual-cost
+# line.
+#
+# RDR-196 .p0b (bead nexus-nyry9.6): the prior ``0.01`` literal was a
+# fabricated ceiling with no measurement behind it -- ~100x under the real
+# figure (see the RDR §Trade-offs correction). ``aspect_extractor.py``
+# does not itself capture per-call usage telemetry (audit fold F1 chose
+# NOT to reroute it through ``operators.dispatch.claude_dispatch``.
+# CORRECTED reason (substantive-critic review, T2 nexus/review-nexus-
+# nyry9.6): the real sync callers are ``aspect_worker.py:571`` (the
+# worker-thread extraction loop) and ``commands/enrich.py:1363`` (this
+# CLI's own extraction loop) -- NOT ``HookRegistry.fire_document``, which
+# only enqueues (its own docstring says it does not call
+# ``extract_aspects`` inline). The actual blocker is
+# ``PR_SET_PDEATHSIG`` parity: ``aspect_extractor.py``'s ``Popen`` call
+# (around line 1572-1580) arms parent-death protection for the
+# aspect-worker daemon (RDR-173 RF-8 / nexus-4r9ja); ``claude_dispatch``'s
+# ``asyncio.create_subprocess_exec`` call (dispatch.py:943-948) has no
+# equivalent -- see nexus-nyry9.6's corrected bd comment for the full
+# reasoning. This is a single measured sample, not a live-metered
+# figure.
+#
+# Measured 2026-08-20 via tests/test_aspect_extraction_cost_measurement.py
+# ``TestLiveMeasurement`` -- one real dispatch of the SAME
+# ``_SCHOLARLY_PAPER_PROMPT`` template production uses, filled with a
+# ~1000-word synthetic paper, through ``claude_dispatch`` with NO
+# ``--model`` override (matching production: ``_run_claude_isolated``'s
+# default argv never passes ``--model`` either, so both this measurement
+# and production run whatever the ambient CLI default model is).
+# Result: cost_usd=1.179986, canonical model=claude-fable-5,
+# output_tokens=1087, duration_ms=13444. Re-run that test (``-m
+# integration -k LiveMeasurement -s``) to refresh this figure if the
+# ambient default model or its pricing changes.
+_PER_PAPER_COST_USD = 1.18
 
 # Default per the RDR's original Phase 2 spec. The P1.3 spike's
 # 16.7% strict-equality "stability" rate measures whether the model
@@ -1022,7 +1053,12 @@ def enrich_aspects(
         cost_str = "Estimated cost: $0 (deterministic parser, no API calls)"
     else:
         cost_estimate = len(entries) * _PER_PAPER_COST_USD
-        cost_str = f"Estimated cost: ~${cost_estimate:.2f} at Haiku rates"
+        # RDR-196 .p0b (nexus-nyry9.6): "at Haiku rates" was FALSE -- the
+        # extractor never passes --model, so it runs the CLI's ambient
+        # default model, not Haiku. Name the real basis instead: a single
+        # measured sample dispatch (see _PER_PAPER_COST_USD's docstring),
+        # not a live-metered per-run figure.
+        cost_str = f"Estimated cost: ~${cost_estimate:.2f} (single-sample measured estimate, default model)"
     click.echo(
         f"{len(entries)} document(s) in '{collection}' "
         f"(extractor={config.extractor_name}, "
@@ -1201,7 +1237,8 @@ def _dry_run_predict_skips(
     else:
         actual_cost = (len(entries) - skipped) * _PER_PAPER_COST_USD
         click.echo(
-            f"  Predicted actual cost (excluding skips): ~${actual_cost:.2f}"
+            f"  Predicted actual cost (excluding skips): ~${actual_cost:.2f} "
+            f"(single-sample measured estimate, default model)"
         )
 
 

@@ -435,6 +435,18 @@ telemetry records the post-fix baseline.
 > `claude_dispatch`, fixing all three at once; blast radius `nx enrich aspects` +
 > `daemon/aspect_worker_daemon.py`; Option B leaves two consequences open and requires
 > follow-up beads, not prose).
+>
+> **OUTCOME (2026-08-20, nexus-nyry9.6):** Option B taken, not Option A. Reason: PR_SET_PDEATHSIG
+> parity — `aspect_extractor.py`'s `Popen` call (~1572-1580) arms parent-death protection for the
+> aspect-worker daemon (RDR-173 RF-8 / nexus-4r9ja); `claude_dispatch`'s
+> `asyncio.create_subprocess_exec` call (dispatch.py:943-948) has no equivalent, and rerouting
+> would silently regress that incident-driven safety guarantee (stacked-review-corrected
+> reasoning — an earlier draft cited `HookRegistry.fire_document` as a sync-contract blocker;
+> that was wrong, it only enqueues; the real sync callers are `aspect_worker.py:571` and
+> `commands/enrich.py:1363`). `--strict-mcp-config` landed directly at `aspect_extractor.py:1559`
+> (consequence 2, fixed in this bead). The stream-json/partial-capture consequence (3) is tracked
+> as follow-up bead nexus-rhwbx. `_PER_PAPER_COST_USD` = 1.18, a single measured sample (n=1,
+> default model `claude-fable-5`, 2026-08-20) — not Option A's live-metered figure.
 #### Step 2: replace `_PER_PAPER_COST_USD` literal with a measured per-dispatch figure (or derive from Phase 1 history once available)
 
 ### Phase 1: Measure
