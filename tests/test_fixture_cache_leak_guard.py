@@ -11,10 +11,13 @@ instead we test the helper functions and the prefix list.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import tests.conftest as conftest_mod
 from tests.conftest import (
     _FIXTURE_CACHE_PREFIXES,
+    _check_fixture_cache_leaks,
     _scan_fixture_cache_files,
 )
 
@@ -82,3 +85,72 @@ class TestScanFixtureCacheFiles:
             f"expected {len(_FIXTURE_CACHE_PREFIXES)} flagged files, "
             f"got {len(found)}: {sorted(p.name for p in found)}"
         )
+
+
+class TestCheckFixtureCacheLeaksControllerOnlyEnforcement:
+    """nexus-pfuns round 2: this guard used to run unconditionally on
+    every xdist process. A worker's own ``session.exitstatus`` mutation
+    is silently discarded by xdist (same masking class as
+    ``_check_real_config_dir_mutations``), and WORSE, its own
+    ``unlink()`` best-effort cleanup ERASED the leaked file before the
+    controller (or any other worker) ever scanned -- a self-masking
+    guard that detected real leaks and silently destroyed the evidence
+    on every ``-n auto`` run. Fixed by gating the whole check behind
+    ``_is_controller_or_serial`` (set once in ``pytest_sessionstart``).
+    These tests simulate a mutation directly against the pure function
+    (non-vacuity: the guard actually reports what it claims to)."""
+
+    def test_noop_when_not_controller_or_serial(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The worker-side branch: a leaked file must be left ALONE
+        (not unlinked) and the session must not be failed."""
+        cfg = tmp_path / ".config" / "nexus"
+        cfg.mkdir(parents=True)
+        leaked = cfg / "code-repo-deadbeef.cache"
+        leaked.write_text("payload")
+
+        monkeypatch.setattr(conftest_mod, "_is_controller_or_serial", False)
+        monkeypatch.setattr(conftest_mod, "_fixture_cache_baseline", set())
+        fake_session = SimpleNamespace(exitstatus=0)
+
+        with patch.object(Path, "home", return_value=tmp_path):
+            _check_fixture_cache_leaks(fake_session)
+
+        assert leaked.exists(), "worker must never delete evidence"
+        assert fake_session.exitstatus == 0, "worker must never mutate exitstatus"
+
+    def test_detects_and_cleans_up_when_controller_or_serial(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The controller/serial-side branch: a leaked file IS reported
+        (session failed) and cleaned up (unlinked)."""
+        cfg = tmp_path / ".config" / "nexus"
+        cfg.mkdir(parents=True)
+        leaked = cfg / "code-repo-deadbeef.cache"
+        leaked.write_text("payload")
+
+        monkeypatch.setattr(conftest_mod, "_is_controller_or_serial", True)
+        monkeypatch.setattr(conftest_mod, "_fixture_cache_baseline", set())
+        fake_session = SimpleNamespace(exitstatus=0)
+
+        with patch.object(Path, "home", return_value=tmp_path):
+            _check_fixture_cache_leaks(fake_session)
+
+        assert not leaked.exists(), "controller must clean up the leak"
+        assert fake_session.exitstatus == 1, "controller must fail the session"
+
+    def test_no_leak_leaves_session_untouched(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        cfg = tmp_path / ".config" / "nexus"
+        cfg.mkdir(parents=True)
+
+        monkeypatch.setattr(conftest_mod, "_is_controller_or_serial", True)
+        monkeypatch.setattr(conftest_mod, "_fixture_cache_baseline", set())
+        fake_session = SimpleNamespace(exitstatus=0)
+
+        with patch.object(Path, "home", return_value=tmp_path):
+            _check_fixture_cache_leaks(fake_session)
+
+        assert fake_session.exitstatus == 0

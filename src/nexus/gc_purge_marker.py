@@ -28,7 +28,7 @@ from typing import Any
 
 import structlog
 
-from nexus.config import nexus_config_dir
+from nexus import config as _config
 
 _log = structlog.get_logger(__name__)
 
@@ -43,7 +43,18 @@ _MAX_MARKERS = 50
 
 
 def _marker_path() -> Path:
-    return nexus_config_dir() / _MARKER_FILENAME
+    # Resolved through the MODULE, never `from nexus.config import
+    # nexus_config_dir`: this module is first-imported lazily (deferred
+    # import in `health._check_gc_audit_non_empty_after_purge` and in
+    # `catalog_cmds.purge_trash`), so under pytest that first import can
+    # land inside a test's `monkeypatch.setattr("nexus.config.
+    # nexus_config_dir", ...)` window. A by-value import captures the
+    # patch lambda; teardown restores `nexus.config` but not this
+    # module's copy, pinning every later marker read/write in the process
+    # to one dead test's tmp dir (2026-08-20: broke three TestGcPurgeMarker
+    # tests in a full -n auto run; same class as the v7.11.0 / PR #1467
+    # incident recorded in tests/test_false_clean_diagnostics_service_mode).
+    return _config.nexus_config_dir() / _MARKER_FILENAME
 
 
 def record_purge_marker(result: dict[str, Any], *, older_than_days: int) -> None:

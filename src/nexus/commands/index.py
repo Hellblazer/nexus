@@ -1239,8 +1239,19 @@ def _spawn_deferred_labeling() -> bool:
     import subprocess  # noqa: PLC0415 — spawn-only branch
     import sys  # noqa: PLC0415 — spawn-only branch
 
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance, mirrors _registry_path above
+
     try:
-        log_dir = Path.home() / ".config" / "nexus" / "logs"
+        # nexus-pfuns: was a hardcoded ``Path.home()``, blind to
+        # NEXUS_CONFIG_DIR entirely -- tests/test_deferred_labeling.py's
+        # own ``monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))``
+        # was silently a no-op against this line, so every run of that
+        # test appended real bytes to Sam's actual
+        # ~/.config/nexus/logs/deferred_labeling.log (found while scoping
+        # the tests/conftest.py real-config-dir mutation guard -- the
+        # exact same import-blind-to-override class as the 3 writers this
+        # bead names).
+        log_dir = nexus_config_dir() / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log = open(log_dir / "deferred_labeling.log", "ab")  # noqa: SIM115 — handed to the child for its lifetime
         subprocess.Popen(

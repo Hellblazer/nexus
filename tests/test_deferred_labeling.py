@@ -9,11 +9,40 @@ CLI exits without waiting.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 from nexus.commands.index import _spawn_deferred_labeling
 
 
 class TestSpawnDeferredLabeling:
+    def test_log_dir_honors_nexus_config_dir_not_real_home(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """nexus-pfuns: ``log_dir`` used to be a hardcoded ``Path.home() /
+        ".config" / "nexus" / "logs"``, blind to NEXUS_CONFIG_DIR entirely
+        -- the test below's own ``monkeypatch.setenv("NEXUS_CONFIG_DIR",
+        ...)`` was a silent no-op against it, so every run appended real
+        bytes to Sam's actual
+        ~/.config/nexus/logs/deferred_labeling.log."""
+        real_log = Path.home() / ".config" / "nexus" / "logs" / "deferred_labeling.log"
+        real_stat_before = real_log.stat() if real_log.exists() else None
+
+        def fake_popen(cmd, **kw):
+            class P:
+                pid = 4242
+            return P()
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        assert _spawn_deferred_labeling() is True
+
+        isolated_log = tmp_path / "logs" / "deferred_labeling.log"
+        assert isolated_log.exists()
+        if real_stat_before is not None:
+            real_stat_after = real_log.stat()
+            assert real_stat_after.st_mtime == real_stat_before.st_mtime
+            assert real_stat_after.st_size == real_stat_before.st_size
+
     def test_spawns_detached_nx_taxonomy_label(self, monkeypatch, tmp_path) -> None:
         calls: list[dict] = []
 

@@ -12,6 +12,18 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 
+# nexus-pfuns round 2: enables the `pytester` fixture (pytest's own
+# built-in sandbox-subprocess testing plugin) for
+# tests/test_real_config_dir_guard_wiring.py, which drives a genuinely
+# separate, isolated pytest run to prove the real-config-dir mutation
+# guard's pytest_sessionstart/pytest_sessionfinish WIRING actually fires
+# -- every other guard test exercises the pure helper functions directly,
+# never pytest's own hook machinery. `pytest_plugins` must live in a root
+# conftest.py (declaring it in a test module itself is a collection
+# error since pytest 5), so it is registered here rather than in that
+# test file.
+pytest_plugins = ["pytester"]
+
 
 # NO _enable_t2_test_auto_migrate: the RDR-120 P3b auto-migrate default
 # (``_DEFAULT_RUN_MIGRATIONS`` / ``NX_T2_AUTO_MIGRATE``) died with
@@ -90,16 +102,41 @@ _FIXTURE_CACHE_PREFIXES: tuple[str, ...] = (
 )
 
 
+#: Env var seam (nexus-pfuns round 2, item 3): unset (the default) means
+#: both real-config-dir guards below scan the ACTUAL ``Path.home()`` --
+#: unchanged production behavior. Set ONLY by
+#: ``tests/test_real_config_dir_guard_wiring.py``'s pytester sandbox
+#: subprocess, which points it at a throwaway tmp dir so that end-to-end
+#: wiring test can prove ``pytest_sessionfinish`` actually fires and
+#: fails the run WITHOUT ever touching the real
+#: ``~/.config/nexus/``. Never read anywhere else in the codebase --
+#: grep confirms this name is conftest.py-local.
+_REAL_CONFIG_DIR_ENV_OVERRIDE = "NX_REAL_CONFIG_DIR_FOR_GUARD_TEST"
+
+
+def _real_config_dir_for_guard() -> Path:
+    """The directory both real-config-dir guards scan: ``Path.home() /
+    ".config" / "nexus"``, or the ``_REAL_CONFIG_DIR_ENV_OVERRIDE``-named
+    tmp dir when the wiring test's seam is set. Deliberately NOT
+    ``nexus_config_dir()`` -- bypassing any test-time ``NEXUS_CONFIG_DIR``
+    override IS the point (the leak being guarded against is precisely a
+    test hitting the real path despite that override existing)."""
+    override = os.environ.get(_REAL_CONFIG_DIR_ENV_OVERRIDE, "").strip()
+    home = Path(override) if override else Path.home()
+    return home / ".config" / "nexus"
+
+
 def _scan_fixture_cache_files() -> set[Path]:
     """Return the set of *.cache files in the REAL ~/.config/nexus/
     whose basename starts with a fixture-cache prefix. Empty when
     the directory doesn't exist.
 
-    Uses Path.home() rather than ``nexus_config_dir()`` to bypass
-    any test-time NEXUS_CONFIG_DIR override; the leak we're guarding
-    against is precisely tests that hit the REAL config dir.
+    Uses ``_real_config_dir_for_guard()`` (``Path.home()``-rooted, not
+    ``nexus_config_dir()``) to bypass any test-time NEXUS_CONFIG_DIR
+    override; the leak we're guarding against is precisely tests that
+    hit the REAL config dir.
     """
-    real_config = Path.home() / ".config" / "nexus"
+    real_config = _real_config_dir_for_guard()
     if not real_config.exists():
         return set()
     return {
@@ -155,22 +192,55 @@ def _warn_if_service_jar_is_stale() -> None:
     print(banner, file=_sys.stderr)  # noqa: T201 — session banner, must be seen before the run
 
 
+#: True iff this process is the xdist CONTROLLER, or there is no xdist at
+#: all (plain serial run). Computed once, in ``pytest_sessionstart``, and
+#: shared by every session-scan guard below (nexus-nifd cache-leak guard +
+#: nexus-pfuns real-config-dir guard) that needs to enforce exactly once
+#: per xdist run rather than once per worker. See
+#: ``_check_fixture_cache_leaks`` / ``_check_real_config_dir_mutations``
+#: docstrings for the full xdist-masking analysis this exists to avoid.
+_is_controller_or_serial: bool = False
+
+
 def pytest_sessionstart(session):
     """Snapshot fixture cache files in ~/.config/nexus/ at session
     start so ``pytest_sessionfinish`` can detect leaks introduced
     during the session (nexus-nifd).
 
-    Also emits the stale-service-jar banner (nexus-zryqm) so a doomed
-    engine-substrate run is visible immediately rather than 13 minutes later.
+    Also snapshots the FULL real config dir for the broader nexus-pfuns
+    mutation guard (see ``_check_real_config_dir_mutations``), and emits
+    the stale-service-jar banner (nexus-zryqm) so a doomed engine-substrate
+    run is visible immediately rather than 13 minutes later.
+
+    nexus-pfuns round 2: both baselines are captured CONTROLLER/SERIAL
+    ONLY (``_is_controller_or_serial``, computed here). A worker's own
+    scan/enforcement in ``pytest_sessionfinish`` is not just silently
+    discarded by xdist (the ``session.exitstatus``-relay masking class
+    documented at length in ``_check_real_config_dir_mutations``) --
+    round 1 review found the nexus-nifd guard's worker-side ``unlink()``
+    cleanup actively ERASES the leaked-file evidence before the
+    controller (or any other worker) ever gets a chance to see it, a
+    strictly worse SELF-MASKING failure than a merely-discarded exit
+    code. Skipping the baseline capture on a worker is not required for
+    correctness (an unused baseline is harmless) but keeps intent
+    unambiguous: these baselines only mean something on the one process
+    that will actually enforce.
     """
-    global _fixture_cache_baseline
-    _fixture_cache_baseline = _scan_fixture_cache_files()
+    global _fixture_cache_baseline, _real_config_dir_baseline, _is_controller_or_serial
+    _is_controller_or_serial = not _is_xdist_worker(session)
+    if _is_controller_or_serial:
+        # Snapshotting here (before any worker is spawned -- xdist spawns
+        # workers lazily inside pytest_runtestloop, called after
+        # pytest_sessionstart) captures the true pre-run baseline
+        # regardless of xdist mode.
+        _fixture_cache_baseline = _scan_fixture_cache_files()
+        _real_config_dir_baseline = _snapshot_real_config_dir()
     _warn_if_service_jar_is_stale()
 
 
-def pytest_sessionfinish(session, exitstatus):
-    """nexus-nifd: fail the session when any new test-fixture cache
-    file appears in the REAL ~/.config/nexus/ during the session.
+def _check_fixture_cache_leaks(session) -> None:
+    """nexus-nifd: fail the session when any new test-fixture cache file
+    appears in the REAL ~/.config/nexus/ during the session.
 
     Background: 2026-05-08 prod shakeout found 1,707 leaked
     test-fixture cache files (~121.5 MB) accumulated over weeks.
@@ -184,7 +254,29 @@ def pytest_sessionfinish(session, exitstatus):
     the failure surfaces so the next run starts from a clean
     baseline. The session is still failed so the offending test
     is visible in CI.
+
+    CONTROLLER/SERIAL ONLY (nexus-pfuns round 2 fix -- previously ran
+    unconditionally on every process): this guard used to run on every
+    xdist WORKER too, which is doubly broken under ``-n auto``. (1) A
+    worker's ``session.exitstatus = 1`` mutation here is captured by
+    xdist's own ``pytest_sessionfinish`` hookwrapper into
+    ``workeroutput`` BEFORE this plain hookimpl ever runs, and the
+    controller only inspects ``workeroutput["exitstatus"] == 2`` --
+    silently discarded, same masking class as
+    ``_check_real_config_dir_mutations`` (verified against the
+    installed pytest-xdist source there). (2) WORSE: this guard's own
+    ``path.unlink()`` best-effort cleanup is destructive -- the FIRST
+    worker to reach its own ``pytest_sessionfinish`` deletes the leaked
+    file before the controller (or any other worker) ever scans, so
+    even a hypothetical controller-side re-check would find nothing.
+    The guard was SELF-MASKING: real leaks were being detected AND
+    silently erased by workers on every ``-n auto`` run, never
+    surfacing anywhere. Gating to controller/serial only closes both
+    holes at once -- no worker ever scans, unlinks, or mutates
+    exitstatus for this guard now.
     """
+    if not _is_controller_or_serial:
+        return
     after = _scan_fixture_cache_files()
     leaked = after - _fixture_cache_baseline
     if leaked:
@@ -209,8 +301,236 @@ def pytest_sessionfinish(session, exitstatus):
             flush=True,
         )
 
+
+def pytest_sessionfinish(session, exitstatus):
+    _check_fixture_cache_leaks(session)
     _check_scenario_non_vacuity(session)
     _check_mandatory_pin_non_vacuity(session)
+    _check_real_config_dir_mutations(session)
+
+
+# ── real-config-dir mutation guard (nexus-pfuns, 2026-08-20) ────────────────
+#
+# WHY THIS EXISTS ALONGSIDE THE NARROWER nexus-nifd GUARD ABOVE: that guard
+# only tracks a SET of ``*.cache`` paths with specific known prefixes, so it
+# catches a NEW file of that shape appearing but nothing else. It structurally
+# cannot catch (a) an IN-PLACE OVERWRITE of a file that already existed
+# before the session started (T2 nexus/gc-purge-marker-xdist-leak-2026-08-20:
+# ``backfill_state.json`` was already present in Sam's real config dir --
+# clobbering it is not a "new path"), or (b) a leaked file whose name is
+# outside the ``*.cache`` + known-prefix shape at all (``routing_log.jsonl``,
+# ``lockstep.log``). This guard snapshots every file under the real
+# ``~/.config/nexus/`` by (relative path -> (mtime_ns, size)) and fails the
+# session if anything was added, removed, or its (mtime, size) changed --
+# content is deliberately never read (privacy/blast-radius: this directory
+# holds a live production user's real data).
+#
+# XDIST: enforced ONLY on the controller/serial process (see
+# ``_check_real_config_dir_mutations``'s own docstring for the full
+# reasoning, verified against xdist/remote.py + xdist/dsession.py) -- a
+# worker's own ``pytest_sessionfinish``-time ``session.exitstatus`` mutation
+# is captured by xdist's OWN sessionfinish hookwrapper BEFORE this
+# (non-wrapper) hookimpl ever runs, so it can never reach the controller.
+# This does not need worker-side enforcement anyway: the real config dir is
+# ONE shared, machine-global directory, not a per-worker resource, so the
+# controller/serial process re-deriving the same before/after diff from
+# that same physical path independently covers every worker's combined
+# effect on it.
+#
+# ALLOWLIST: entries below are files this project's OWN documented live
+# daemon / multi-session machinery legitimately touches on this box
+# independent of any unit test (this box runs Sam's real production nexus
+# install -- CLAUDE.md, "THIS BOX RUNS SAM'S PRODUCTION NEXUS INSTALL").
+# Each entry names the specific writing process; none was added
+# speculatively -- see the entries' own comments for how each was
+# established (measured directly, or reasoned from the writing code path
+# plus this project's T1/daemon architecture docs).
+
+
+def _snapshot_real_config_dir() -> dict[str, tuple[int, int]]:
+    """Return ``{relative_posix_path: (mtime_ns, size)}`` for every regular
+    file under the REAL ``~/.config/nexus/``.
+
+    Uses ``_real_config_dir_for_guard()`` (``Path.home()``-rooted, not
+    ``nexus_config_dir()``) -- same rationale as
+    ``_scan_fixture_cache_files``: the leak being guarded against is
+    precisely a test hitting the real path despite the per-test
+    ``NEXUS_CONFIG_DIR`` override. Content is deliberately never read:
+    mtime+size is enough to detect a write, and this directory can hold
+    a live production user's real data.
+    """
+    real_config = _real_config_dir_for_guard()
+    if not real_config.exists():
+        return {}
+    snapshot: dict[str, tuple[int, int]] = {}
+    for p in real_config.rglob("*"):
+        if not p.is_file():
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            # Race with a concurrent live process (daemon rotation, MCP
+            # server) removing/replacing the file mid-scan -- skip rather
+            # than fail the scan itself.
+            continue
+        snapshot[str(p.relative_to(real_config).as_posix())] = (st.st_mtime_ns, st.st_size)
+    return snapshot
+
+
+_real_config_dir_baseline: dict[str, tuple[int, int]] = {}
+
+#: Allowlist of relative-path PREFIXES under the real ``~/.config/nexus/``
+#: that legitimate, ambient, non-test processes touch during a normal unit
+#: run. A path is exempt if it starts with any entry here. Every entry is
+#: commented with the specific writing process and how it was established.
+_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
+    # Live aspect-worker daemon's own address/heartbeat registration file
+    # (``ttl=3.0``-second heartbeat_epoch bump, same size every write).
+    # MEASURED directly (nexus-pfuns round 1): ran `uv run pytest tests/
+    # test_health_service_checks.py tests/hooks -q -n 4` twice and, with
+    # zero pytest process running at all, confirmed via `ps` the mtime
+    # still advances every ~40s under a live daemon PID -- entirely
+    # independent of any pytest invocation. Re-confirmed round 2: live
+    # PID 91818, `nx daemon aspect-worker start ... --tenant default`
+    # (`ps -p <pid from the file's own endpoint.pid>`), still present.
+    "aspect_worker_addr.",
+    # The SAME live aspect-worker daemon PID's own rotating log files
+    # (main + numbered rotations + crash log) --
+    # src/nexus/daemon/aspect_worker_daemon.py's own `_log.info(...)`
+    # calls under `configure_logging`. Grepped tests/ for direct
+    # references to these filenames: only an e2e shell script outside the
+    # unit suite touches them by name, confirming no unit-test code path
+    # writes here.
+    "logs/aspect_worker_daemon",
+    # The live MCP server processes serving concurrent Claude Code
+    # sessions on this box -- `configure_logging("mcp")`, called from
+    # nexus/mcp/core.py + nexus/mcp/catalog.py (both FENCED, out of this
+    # bead's scope). Re-confirmed round 2 via `ps`: 4 live `nx-mcp`/
+    # `nx-mcp-catalog` processes (2 concurrent sessions' worth) at the
+    # moment of this edit, and logs/mcp.log's own mtime is within the
+    # last minute. logging_setup.py:204 resolves via the config_dir
+    # override, so no unit test can write here unless it explicitly opts
+    # out of the suite-wide `_isolate_config_dir` autouse fixture.
+    "logs/mcp.log",
+    # SessionStart hook's session-id flat file -- the actual writer is
+    # `nexus.session.write_claude_session_id()` (call-time-resolved via
+    # `claude_session_file()`, not the retained-for-compat
+    # `CLAUDE_SESSION_FILE` import-time snapshot -- that snapshot has no
+    # live callers outside tests, grepped clean), invoked from
+    # `nexus.hooks:227` on every real SessionStart -- including this
+    # very orchestrating session's own hook. Machine-wide,
+    # last-writer-wins (RDR-105, "T1 has THREE scopes").
+    "current_session",
+    # T1 CLI-scope lease file format -- `nexus.db.t1._T1_SESSION_LEASE_
+    # PREFIX = "t1_session_lease."` (t1.py:848), the CURRENT live lease
+    # publisher/reader format (nexus-c8yvj), written by any live `nx`
+    # CLI/MCP session's own T1 resolution chain -- including this very
+    # orchestrating session -- independent of the pytest subprocess
+    # under test.
+    "t1_session_lease.",
+    # `t1_addr.*` REMOVED round 2 (coordinator directive): the retired
+    # RDR-149 P4 Chroma-lease format (nexus-8zfwv, 2026-08-07) -- every
+    # remaining src/ reference is a comment/docstring noting readers were
+    # ported OFF it (health.py:1485,1579; commands/doctor.py:1991;
+    # console/watchers.py:84) or a design-heritage mention in
+    # `db/t1.py:840`/`mcp/core.py:1253`. `grep -rn "t1_addr\." src/`
+    # returns zero live writers -- a dead carve-out is a vacuous
+    # allowlist entry that would mask a real leak of that exact shape.
+    # Git's own post-commit hook (`.git/hooks/post-commit`, `nexus
+    # managed` block) -- fires on every commit made from this box,
+    # hardcodes `"$HOME/.config/nexus/index.log"` (bypasses
+    # NEXUS_CONFIG_DIR entirely, same as this hook script's `nx index
+    # repo ... --on-locked=skip` background dispatch), and appends a
+    # dated header line + indexer output on each run. A commit landing
+    # during a test run (this session's own orchestrator committing
+    # pathspec-limited diffs) touches this file independent of pytest.
+    "index.log",
+)
+
+
+def _is_allowlisted_config_dir_path(rel_path: str) -> bool:
+    return rel_path.startswith(_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES)
+
+
+def _diff_config_dir_snapshots(
+    before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]
+) -> list[str]:
+    """Pure diff: return one ``"ADDED "/"MODIFIED "/"REMOVED " + rel_path``
+    entry per non-allowlisted change between two snapshots. Split out from
+    ``_check_real_config_dir_mutations`` so it is unit-testable without a
+    real filesystem or a full pytest session (non-vacuity pin below)."""
+    changed: list[str] = []
+    for rel, after_stat in after.items():
+        if _is_allowlisted_config_dir_path(rel):
+            continue
+        before_stat = before.get(rel)
+        if before_stat is None:
+            changed.append(f"ADDED {rel}")
+        elif before_stat != after_stat:
+            changed.append(f"MODIFIED {rel}")
+    for rel in before:
+        if rel not in after and not _is_allowlisted_config_dir_path(rel):
+            changed.append(f"REMOVED {rel}")
+    return sorted(changed)
+
+
+def _check_real_config_dir_mutations(session) -> None:
+    """Fail the run when any non-allowlisted file under the REAL
+    ``~/.config/nexus/`` was added, removed, or modified (mtime/size
+    changed) during the session.
+
+    Controller/serial only (``_is_controller_or_serial``, set in
+    ``pytest_sessionstart`` and shared with the nexus-nifd cache-leak
+    guard's identical fix, ``_check_fixture_cache_leaks``): verified
+    against the installed
+    ``pytest-xdist`` source that a WORKER's own ``session.exitstatus``
+    mutation here can never reach the controller --
+    ``xdist/remote.py``'s ``pytest_sessionfinish`` is a
+    ``hookwrapper=True`` impl whose pre-``yield`` code captures
+    ``workeroutput["exitstatus"] = int(exitstatus)`` (the value pytest
+    core fixed BEFORE any sessionfinish hooks ran at all) and
+    ``workeroutput["shouldfail"] = self.session.shouldfail`` -- both
+    BEFORE this plain (non-wrapper) hookimpl gets a chance to run, since a
+    hookwrapper's pre-yield code always runs before the wrapped
+    (non-wrapper) impls. ``xdist/dsession.py``'s
+    ``worker_workerfinished`` then only ever inspects
+    ``workeroutput["exitstatus"] == 2`` (the keyboard-interrupt case) --
+    any other worker-set value is silently discarded. This does not need
+    a worker-side path anyway: the real config dir is ONE shared,
+    machine-global directory, not a per-worker resource, so the
+    controller (or the single serial process when xdist is not in use)
+    independently re-derives the exact combined end-state of every
+    worker's writes by re-scanning that same physical path itself, AFTER
+    all workers have finished (``dsession`` blocks in its own main loop
+    until every worker reports ``workerfinished`` before its ``doit()``
+    returns and the controller's own ``pytest_sessionfinish`` fires).
+
+    Non-destructive: unlike the nexus-nifd guard above, leaked files are
+    NOT auto-deleted here -- some are in-place overwrites of a real
+    production user's pre-existing file (``backfill_state.json``), and
+    silently discarding real resume/session state on a failing run would
+    compound the incident rather than surface it.
+    """
+    if not _is_controller_or_serial:
+        return
+    after = _snapshot_real_config_dir()
+    changed = _diff_config_dir_snapshots(_real_config_dir_baseline, after)
+    if not changed:
+        return
+    names = ", ".join(changed[:10])
+    suffix = "" if len(changed) <= 10 else f" (+{len(changed) - 10} more)"
+    session.exitstatus = 1
+    print(
+        f"\n\nFAIL: nexus-pfuns real-config-dir mutation guard caught "
+        f"{len(changed)} path(s) changed under the REAL ~/.config/nexus/ "
+        f"during the session: {names}{suffix}\n"
+        f"  A unit test wrote to the real config dir instead of an "
+        f"isolated tmp path (or a legitimate ambient writer needs adding "
+        f"to _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES with a justifying "
+        f"comment). See tests/conftest.py "
+        f"_check_real_config_dir_mutations.\n",
+        flush=True,
+    )
 
 
 # ── `scenario` marker non-vacuity guard (test-suite-compression P2-reduced,

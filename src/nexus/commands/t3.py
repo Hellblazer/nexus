@@ -37,6 +37,8 @@ from pathlib import Path
 import click
 import structlog
 
+from nexus import config as _config
+
 _log = structlog.get_logger(__name__)
 
 # SIG-6 (nexus-872w): resumable backfill state file.
@@ -51,9 +53,12 @@ _log = structlog.get_logger(__name__)
 # collection.
 # Atomic writes via .tmp + rename avoid partial-write corruption on crash.
 _BACKFILL_STATE_FILE_ENV = "NEXUS_BACKFILL_STATE_FILE"
-_BACKFILL_STATE_DEFAULT = os.path.expanduser(
-    "~/.config/nexus/backfill_state.json"
-)
+# Doc-only literal (nexus-pfuns): `--resume`'s click help= string is built
+# once at decorator-evaluation (module-import) time, so it can never
+# reflect a per-invocation NEXUS_CONFIG_DIR override regardless -- this is
+# purely informational text, NOT the runtime default (see
+# `_backfill_state_path` below for that).
+_BACKFILL_STATE_DEFAULT_DOC = "~/.config/nexus/backfill_state.json"
 _PROGRESS_INTERVAL = 10  # emit progress every N docs across all collections
 
 
@@ -99,8 +104,22 @@ def _backfill_state_path() -> Path:
 
     Respects ``NEXUS_BACKFILL_STATE_FILE`` env override so tests can
     redirect the file to a tmp directory without touching the real config.
+    Absent that, falls back to ``nexus_config_dir()/backfill_state.json``
+    -- NOT a hardcoded ``~/.config/nexus`` (nexus-pfuns: the old fallback
+    was a module-level ``os.path.expanduser(...)`` constant, frozen at
+    import and blind to ``NEXUS_CONFIG_DIR`` entirely, same import-time-
+    default class already fixed once in ``gc_purge_marker.py`` -- T2
+    nexus/gc-purge-marker-xdist-leak-2026-08-20). ``_config.nexus_config_dir``
+    is read via module-attribute access (not a by-value ``from nexus.config
+    import nexus_config_dir``) so a patch applied after this module is
+    already imported still takes effect, and the function itself re-reads
+    ``os.environ`` on every call -- both resolved at CALL time, never
+    frozen.
     """
-    return Path(os.environ.get(_BACKFILL_STATE_FILE_ENV, _BACKFILL_STATE_DEFAULT))
+    override = os.environ.get(_BACKFILL_STATE_FILE_ENV)
+    if override:
+        return Path(override)
+    return _config.nexus_config_dir() / "backfill_state.json"
 
 
 def _load_backfill_state(path: Path) -> dict[str, list[str]]:
@@ -605,7 +624,7 @@ def gc_cmd(
     default=False,
     help=(
         "Resume a previous interrupted backfill. Reads state from "
-        f"$NEXUS_BACKFILL_STATE_FILE (default: {_BACKFILL_STATE_DEFAULT}). "
+        f"$NEXUS_BACKFILL_STATE_FILE (default: {_BACKFILL_STATE_DEFAULT_DOC}). "
         "Collections marked done are skipped; others are re-processed "
         "from scratch (per-doc idempotency comes from write_manifest)."
     ),

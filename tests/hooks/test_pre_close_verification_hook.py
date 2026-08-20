@@ -47,6 +47,16 @@ if _PYTHON3_REAL:
     (_PYTHON3_ISOLATED_DIR / "python3").symlink_to(_PYTHON3_REAL)
 _SAFE_PATH = f"{_PYTHON3_ISOLATED_DIR}:/usr/bin:/bin"
 
+# nexus-pfuns: the override-escape path (NX_REVIEW_GATE_OVERRIDE=1) shells
+# out to `routing/_lib.py`'s `log_routing_event`, which falls back to the
+# REAL `~/.config/nexus/routing_log.jsonl` whenever NX_ROUTING_LOG_PATH is
+# unset (T2 nexus/gc-purge-marker-xdist-leak-2026-08-20). Every `_run_hook`
+# call gets an isolated default here so an override test that forgets to
+# set NX_ROUTING_LOG_PATH explicitly can never leak into the real path --
+# mirrors the `_PYTHON3_ISOLATED_DIR` pattern just above.
+_ROUTING_LOG_ISOLATED_DIR = Path(tempfile.mkdtemp(prefix="nx-hook-test-routing-log-"))
+_ISOLATED_ROUTING_LOG_PATH = _ROUTING_LOG_ISOLATED_DIR / "routing_log.jsonl"
+
 
 def _make_payload(
     tool_name: str = "Bash",
@@ -177,6 +187,7 @@ def _run_hook(
     env = {
         **os.environ,
         "PATH": path,
+        "NX_ROUTING_LOG_PATH": str(_ISOLATED_ROUTING_LOG_PATH),
         **(env_overrides or {}),
     }
     # Never let a real NX_REVIEW_GATE_OVERRIDE leak in from the outer shell
@@ -215,6 +226,61 @@ def _marker(tags: str, content: str) -> str:
 # (src/nexus/commands/memory.py search_cmd): two lines, header + content.
 def _t2_marker(project_title: str, content: str) -> str:
     return f"[1] {project_title}  (developer, 2026-08-06T00:00:00Z)\n  {content}\n"
+
+
+class TestRunHookIsolatesRoutingLog:
+    """nexus-pfuns: `_run_hook` must never let a call reach the hook
+    subprocess without an isolated NX_ROUTING_LOG_PATH -- the override-
+    escape path (`_log_override_escape` in
+    `pre_close_verification_hook.sh`) shells out to
+    `routing/_lib.py:log_routing_event`, which writes the REAL
+    `~/.config/nexus/routing_log.jsonl` whenever that env var is absent.
+    Asserted by intercepting `subprocess.run`'s env kwarg directly --
+    no real subprocess is spawned, so this cannot itself leak."""
+
+    def test_default_env_always_carries_isolated_routing_log_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, dict[str, str]] = {}
+
+        def _fake_run(*args, **kwargs):
+            captured["env"] = kwargs.get("env") or {}
+
+            class _Result:
+                returncode = 0
+                stdout = '{"hookSpecificOutput": {"permissionDecision": "allow"}}'
+                stderr = ""
+
+            return _Result()
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        _run_hook(_make_payload())
+
+        assert "NX_ROUTING_LOG_PATH" in captured["env"]
+        routing_log_path = captured["env"]["NX_ROUTING_LOG_PATH"]
+        real_path = str(Path.home() / ".config" / "nexus" / "routing_log.jsonl")
+        assert routing_log_path != real_path
+        assert routing_log_path == str(_ISOLATED_ROUTING_LOG_PATH)
+
+    def test_explicit_override_still_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A caller-supplied NX_ROUTING_LOG_PATH in env_overrides must not be
+        clobbered by the default -- env_overrides is applied last."""
+        captured: dict[str, dict[str, str]] = {}
+
+        def _fake_run(*args, **kwargs):
+            captured["env"] = kwargs.get("env") or {}
+
+            class _Result:
+                returncode = 0
+                stdout = '{"hookSpecificOutput": {"permissionDecision": "allow"}}'
+                stderr = ""
+
+            return _Result()
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        _run_hook(_make_payload(), env_overrides={"NX_ROUTING_LOG_PATH": "/tmp/explicit-override.jsonl"})
+
+        assert captured["env"]["NX_ROUTING_LOG_PATH"] == "/tmp/explicit-override.jsonl"
 
 
 class TestFastNoops:

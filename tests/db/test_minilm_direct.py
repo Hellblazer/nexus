@@ -17,7 +17,6 @@ import numpy as np
 import pytest
 
 from nexus.db.minilm_direct import (
-    ARTIFACT_DIR,
     MiniLMDirectEmbeddingFunction,
 )
 
