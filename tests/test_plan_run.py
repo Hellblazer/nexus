@@ -1599,7 +1599,11 @@ class TestPlanRunBundledAggregateCount:
         # Mock claude_dispatch to return a deterministic 2-aggregate
         # payload. The bundled prompt's terminal-step contract is the
         # aggregate operator's ``{aggregates: [{key_value, summary}]}``.
-        async def fake_dispatch(prompt, schema, timeout=300.0):
+        async def fake_dispatch(prompt, schema, timeout=300.0, **kwargs):
+            # RDR-196 .p1b: the real bundle path now always passes a
+            # usage_sink kwarg into claude_dispatch — accept and ignore
+            # unknown kwargs here since this fake stands in for
+            # claude_dispatch directly (not dispatch_bundle).
             return {
                 "aggregates": [
                     {"key_value": "Byzantine",
@@ -2088,3 +2092,398 @@ async def test_bundle_receives_remaining_budget_as_timeout_kwarg_on_success() ->
     assert result.budget_exhausted_at_step is None
     _, kwargs = fake_bundle.call_args
     assert kwargs["timeout"] == pytest.approx(12.5, abs=2.0)
+
+
+# ── StepRecord (RDR-196 .p1b, nexus-nyry9.8) ────────────────────────────────
+
+
+def _usage(**overrides):
+    """Build a DispatchUsage with sane all-populated defaults, overridable."""
+    from nexus.operators.dispatch import DispatchUsage
+
+    fields = {
+        "model": "claude-sonnet-5-20260101",
+        "cost_usd": 0.0123,
+        "input_tokens": 111,
+        "output_tokens": 22,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "duration_ms": 4200,
+        "duration_api_ms": 4000,
+        "num_turns": 1,
+    }
+    fields.update(overrides)
+    return DispatchUsage(**fields)
+
+
+class TestStepRecords:
+    """Covers the bead's falsifiable VERIFICATION list verbatim:
+
+    - len(step_records) == executed-segment count on a plan traversing
+      >=2 of the 3 nx_answer_step_complete sites (isolated + bundle here;
+      bundle_fallback covered separately in test_plan_bundle.py).
+    - a bundled dispatch produces exactly ONE record with bundled_steps
+      populated, cost never divided.
+    - a SQL fast-path step records source="sql", model is None,
+      cost_usd == 0 (distinguishable from a zero-cost LLM step).
+    - a FAILED step still produces a record with ok=False.
+    - the recorded model equals the envelope's reported canonical id,
+      never the requested alias (196-R3 audit-fold addition).
+    """
+
+    @pytest.mark.asyncio
+    async def test_one_record_per_executed_step_isolated_and_bundle(self):
+        """1 isolated (search, :1467 site) + 1 bundle (extract+summarize,
+        :1361 site) -> exactly 2 step_records, traversing 2 of the 3
+        completion sites. The bundle's cost is NOT divided across its
+        2 fused plan indices."""
+        from unittest.mock import AsyncMock, patch
+
+        from nexus.mcp import core as mcp_core
+        from nexus.plans.runner import plan_run
+
+        plan = {"steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+            {"tool": "summarize", "args": {"cited": False, "content": "$step2.extractions"}},
+        ]}
+
+        async def stub_search(**kwargs):
+            return {"ids": ["a"], "tumblers": ["1.1"], "distances": [0.1],
+                     "collections": ["kn"]}
+
+        bundle_usage = _usage(cost_usd=0.42, input_tokens=900, output_tokens=300)
+
+        async def fake_bundle(bundle, *, usage_sink=None, **kwargs):
+            if usage_sink is not None:
+                usage_sink.append(bundle_usage)
+            return {"summary": "synthesis"}
+
+        with patch.object(mcp_core, "search", stub_search), \
+             patch("nexus.plans.bundle.dispatch_bundle", fake_bundle):
+            result = await plan_run(_match(plan))
+
+        assert len(result.step_records) == 2
+
+        isolated = result.step_records[0]
+        assert isolated.step_index == 0
+        assert isolated.operator == "search"
+        assert isolated.source == "sql"  # retrieval tool, no LLM call
+        assert isolated.ok is True
+        assert isolated.bundled_steps == []
+        assert isolated.model is None
+        assert (isolated.input_tokens, isolated.output_tokens, isolated.cost_usd) == (0, 0, 0.0)
+
+        bundled = result.step_records[1]
+        assert bundled.source == "bundle"
+        assert bundled.step_index == 1
+        assert bundled.bundled_steps == [1, 2]
+        assert bundled.operator == "extract+summarize"
+        assert bundled.ok is True
+        # Real usage, NOT divided across the 2 fused indices.
+        assert bundled.cost_usd == 0.42
+        assert bundled.input_tokens == 900
+        assert bundled.output_tokens == 300
+        assert bundled.model == "claude-sonnet-5-20260101"
+
+    @pytest.mark.asyncio
+    async def test_sql_fast_path_step_source_sql_zero_cost(self):
+        """A Gap-5 SQL-hit operator_filter step: source="sql", model is
+        None, cost_usd == 0 (a TRUE zero — distinguishable from an
+        unobserved LLM cost, which would be None)."""
+        from unittest.mock import patch
+
+        from nexus.mcp import core as mcp_core
+        from nexus.plans.runner import plan_run
+
+        plan = {"steps": [
+            {"tool": "filter", "args": {"items": "[]", "criterion": "x"}},
+        ]}
+
+        async def stub_operator_filter(**kwargs):
+            # Mirrors core.py's real Gap-5 marker stamp on an SQL hit.
+            return {"items": [], "rationale": [], "_dispatch_source": "sql"}
+
+        with patch.object(mcp_core, "operator_filter", stub_operator_filter):
+            result = await plan_run(_match(plan))
+
+        assert len(result.step_records) == 1
+        rec = result.step_records[0]
+        assert rec.source == "sql"
+        assert rec.model is None
+        assert rec.cost_usd == 0.0
+        assert rec.input_tokens == 0
+        assert rec.output_tokens == 0
+        assert rec.ok is True
+        # The marker must not leak into the visible step output.
+        assert "_dispatch_source" not in result.steps[0]
+
+    @pytest.mark.asyncio
+    async def test_llm_fallback_filter_step_source_llm_unknown_cost(self):
+        """The SAME tool, but the SQL fast path fell through to LLM (no
+        marker on the returned dict) -> source="llm", and cost is
+        genuinely UNKNOWN (None), never a fabricated 0 — this is the
+        isolated-dispatch architecture gap named in the handback."""
+        from unittest.mock import patch
+
+        from nexus.mcp import core as mcp_core
+        from nexus.plans.runner import plan_run
+
+        plan = {"steps": [
+            {"tool": "filter", "args": {"items": "[]", "criterion": "x"}},
+        ]}
+
+        async def stub_operator_filter(**kwargs):
+            return {"items": [], "rationale": []}  # no _dispatch_source
+
+        with patch.object(mcp_core, "operator_filter", stub_operator_filter):
+            result = await plan_run(_match(plan))
+
+        rec = result.step_records[0]
+        assert rec.source == "llm"
+        assert rec.model is None
+        assert rec.cost_usd is None
+        assert rec.input_tokens is None
+        assert rec.output_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_failed_isolated_step_records_ok_false(self):
+        """A step that raises an operator error still produces a
+        record, with ok=False."""
+        import nexus.operators.dispatch as _dispatch_mod
+        from nexus.plans.runner import plan_run
+
+        plan = {"steps": [
+            {"tool": "summarize", "args": {"content": "x"}},
+        ]}
+
+        async def failing_dispatch(tool, args):
+            raise _dispatch_mod.OperatorError("boom")
+
+        result = await plan_run(_match(plan), dispatcher=failing_dispatch)
+
+        assert len(result.step_records) == 1
+        rec = result.step_records[0]
+        assert rec.ok is False
+        assert rec.source == "llm"
+        assert rec.step_index == 0
+        assert rec.operator == "summarize"
+        # Unobservable through a caller-supplied dispatcher -- honest None.
+        assert rec.model is None
+        assert rec.cost_usd is None
+
+    @pytest.mark.asyncio
+    async def test_bundle_failure_produces_one_record_ok_false(self):
+        """A whole bundled dispatch failing produces exactly ONE record
+        (not N, one per fused index) with ok=False."""
+        import nexus.operators.dispatch as _dispatch_mod
+        from unittest.mock import patch
+
+        from nexus.plans.runner import plan_run
+
+        plan = {"steps": [
+            {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+            {"tool": "summarize", "args": {"cited": False, "content": "x"}},
+        ]}
+
+        async def failing_bundle(bundle, *, usage_sink=None, **kwargs):
+            raise _dispatch_mod.OperatorError("bundle boom")
+
+        with patch("nexus.plans.bundle.dispatch_bundle", failing_bundle):
+            result = await plan_run(_match(plan))
+
+        assert len(result.step_records) == 1
+        rec = result.step_records[0]
+        assert rec.ok is False
+        assert rec.source == "bundle"
+        assert rec.bundled_steps == [0, 1]
+
+    @pytest.mark.asyncio
+    async def test_bundle_model_recorded_is_canonical_not_alias(self):
+        """196-R3 audit-fold verification: the recorded model equals the
+        envelope's reported canonical id. Feeding a DispatchUsage whose
+        model is already the canonical id (the only value this layer
+        ever sees -- DispatchUsage.model is canonical-or-None by
+        construction) and asserting it propagates verbatim, unaltered."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import plan_run
+
+        plan = {"steps": [
+            {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+            {"tool": "summarize", "args": {"cited": False, "content": "x"}},
+        ]}
+
+        canonical_usage = _usage(model="claude-opus-4-20260514")
+
+        async def fake_bundle(bundle, *, usage_sink=None, **kwargs):
+            if usage_sink is not None:
+                usage_sink.append(canonical_usage)
+            return {"summary": "ok"}
+
+        with patch("nexus.plans.bundle.dispatch_bundle", fake_bundle):
+            result = await plan_run(_match(plan))
+
+        assert result.step_records[0].model == "claude-opus-4-20260514"
+
+    @pytest.mark.asyncio
+    async def test_isolated_step_through_real_toolDispatcher_records_real_usage(self):
+        """RDR-196 .p1b Gap-1 addendum (nexus-nyry9.8 coordinator
+        directive, 2026-08-20): the DEFAULT dispatcher (real
+        _default_dispatcher -> mcp_core.operator_summarize ->
+        claude_dispatch -> subprocess), with a faked subprocess at the
+        claude_dispatch seam, must produce a non-None model/cost on its
+        StepRecord -- proving the ambient_usage_sink mechanism actually
+        threads through the real call chain, not just a mock."""
+        from unittest.mock import AsyncMock, patch
+
+        from tests.test_operator_dispatch import _make_proc, _result_ndjson
+        from nexus.plans.runner import plan_run
+
+        plan = {"steps": [
+            {"tool": "summarize", "args": {"content": "some content", "cited": False}},
+        ]}
+
+        proc = _make_proc(
+            stdout=_result_ndjson(
+                cost_usd=0.045, input_tokens=30, output_tokens=12,
+                model="claude-sonnet-5-20260101",
+                structured_output={"summary": "ok"},
+            ),
+            returncode=0, stderr=b"",
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            result = await plan_run(_match(plan), dispatcher=None)
+
+        assert len(result.step_records) == 1
+        rec = result.step_records[0]
+        assert rec.source == "llm"
+        assert rec.ok is True
+        assert rec.model == "claude-sonnet-5-20260101"
+        assert rec.cost_usd == 0.045
+        assert rec.input_tokens == 30
+        assert rec.output_tokens == 12
+
+    @pytest.mark.asyncio
+    async def test_two_consecutive_isolated_steps_no_usage_leakage(self):
+        """Two isolated LLM steps, back to back, each dispatching a
+        DIFFERENT faked subprocess response -- each StepRecord must
+        carry only its OWN step's usage, never the other's."""
+        from unittest.mock import AsyncMock, patch
+
+        from tests.test_operator_dispatch import _make_proc, _result_ndjson
+        from nexus.plans.runner import plan_run
+
+        plan = {"steps": [
+            {"tool": "summarize", "args": {"content": "first", "cited": False}},
+            # A non-bundleable-adjacent structure would bundle; force two
+            # ISOLATED dispatches by disabling bundling entirely.
+            {"tool": "check", "args": {"items": "[]", "check_instruction": "x"}},
+        ]}
+
+        responses = [
+            _make_proc(
+                stdout=_result_ndjson(
+                    cost_usd=0.01, input_tokens=1, output_tokens=1,
+                    model="claude-sonnet-5-20260101",
+                    structured_output={"summary": "first-out"},
+                ),
+                returncode=0, stderr=b"",
+            ),
+            _make_proc(
+                stdout=_result_ndjson(
+                    cost_usd=0.99, input_tokens=100, output_tokens=200,
+                    model="claude-opus-4-20260514",
+                    structured_output={"ok": True, "evidence": []},
+                ),
+                returncode=0, stderr=b"",
+            ),
+        ]
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            return responses.pop(0)
+
+        with patch("asyncio.create_subprocess_exec", side_effect=fake_create_subprocess_exec):
+            result = await plan_run(_match(plan), dispatcher=None, bundle_operators=False)
+
+        assert len(result.step_records) == 2
+        first, second = result.step_records
+        assert first.cost_usd == 0.01
+        assert first.model == "claude-sonnet-5-20260101"
+        assert second.cost_usd == 0.99
+        assert second.model == "claude-opus-4-20260514"
+
+    def test_rollup_step_usage_multi_entry(self):
+        """RDR-196 .p1b Gap-1 addendum, review-fix (code-review-expert
+        [23056] APPROVE / substantive-critic [23057] SHIP-with-3-
+        Significant, 2026-08-20): ``_rollup_step_usage``'s >1-entry
+        branch had zero coverage. No operator issues >1 internal
+        claude_dispatch call today, but the mechanism must not silently
+        mis-divide or fabricate a value if one ever does.
+
+        THE RULE, stated (per coordinator ask): summing an attribute
+        across entries is None+float -> None, never 0+float or a
+        partial sum -- if ANY entry's value for a field is None (usage
+        unobservable for that one dispatch), the summed field is None
+        too. Treating an unknown as a zero mid-sum would silently
+        understate real spend, exactly the RDR-196 risk-#1 class this
+        arc exists to close.
+
+        Two scenarios in one test (as requested): (1) two entries with
+        DIFFERENT canonical models, one with cost_usd=None -- exercises
+        the None-arithmetic path -- asserts tokens summed, cost_usd is
+        None (the rule above), model is None (ambiguous, same rule
+        DispatchUsage.model already applies within a single call).
+        (2) two entries sharing the SAME model, both fully populated --
+        asserts the model is KEPT (not needlessly nulled) and cost_usd
+        is a real sum, not divided or dropped.
+        """
+        from nexus.operators.dispatch import DispatchUsage
+        from nexus.plans.runner import _rollup_step_usage
+
+        def _usage(**overrides):
+            fields = {
+                "model": "claude-sonnet-5-20260101", "cost_usd": 0.1,
+                "input_tokens": 10, "output_tokens": 20,
+                "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+                "duration_ms": 100, "duration_api_ms": 90, "num_turns": 1,
+            }
+            fields.update(overrides)
+            return DispatchUsage(**fields)
+
+        # (1) Different models, one entry's cost_usd is None.
+        entry_a = _usage(
+            model="claude-sonnet-5-20260101", cost_usd=None,
+            input_tokens=10, output_tokens=20,
+        )
+        entry_b = _usage(
+            model="claude-opus-4-20260514", cost_usd=0.5,
+            input_tokens=100, output_tokens=200,
+        )
+        rolled = _rollup_step_usage([entry_a, entry_b])
+        assert rolled is not None
+        assert rolled.input_tokens == 110, "tokens sum across entries even when cost is unknown"
+        assert rolled.output_tokens == 220
+        assert rolled.cost_usd is None, (
+            "None+float must roll up to None, never a fabricated partial sum"
+        )
+        assert rolled.model is None, "two distinct models is ambiguous -- never guess"
+
+        # (2) Same model, both entries fully populated.
+        entry_c = _usage(
+            model="claude-sonnet-5-20260101", cost_usd=0.10,
+            input_tokens=10, output_tokens=20,
+        )
+        entry_d = _usage(
+            model="claude-sonnet-5-20260101", cost_usd=0.25,
+            input_tokens=30, output_tokens=40,
+        )
+        rolled_same = _rollup_step_usage([entry_c, entry_d])
+        assert rolled_same is not None
+        assert rolled_same.model == "claude-sonnet-5-20260101", (
+            "shared model across every entry must be KEPT, not nulled"
+        )
+        assert rolled_same.cost_usd == pytest.approx(0.35)
+        assert rolled_same.input_tokens == 40
+        assert rolled_same.output_tokens == 60

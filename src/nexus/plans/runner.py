@@ -63,6 +63,7 @@ __all__ = [
     "PlanRunOperatorUnavailableError",
     "PlanRunStepRefError",
     "PlanRunToolNotFoundError",
+    "StepRecord",
     "ToolDispatcher",
     "merge_bindings",
     "plan_run",
@@ -238,6 +239,96 @@ class ToolDispatcher(Protocol):
 
 
 @dataclass(frozen=True)
+class StepRecord:
+    """One cost/quality telemetry record for one EXECUTED dispatch segment
+    (RDR-196 .p1b, nexus-nyry9.8).
+
+    "One executed step" here means one dispatch *segment* as
+    :func:`plan_run` actually ran it, not one entry in ``plan_json``'s
+    ``steps`` array: a fused bundle of N plan-steps (see
+    :mod:`nexus.plans.bundle`) is ONE claude -p subprocess call and
+    therefore produces exactly ONE record, never N — inventing N
+    per-step costs by dividing the bundle's real cost would fabricate
+    data (the same principle the RDR states for bundle attribution).
+
+    ``step_index`` vs the run-level ``PlanResult.budget_exhausted_at_step``
+    (CROSS-REF, .r2 critique 2026-08-20): this field is 0-BASED (0 = the
+    first executed step), matching every existing 0-based ``plan_index``/
+    ``bi`` usage throughout this module. ``budget_exhausted_at_step`` is
+    1-INDEXED with ``0`` reserved as "no plan step ran at all" (core.py's
+    ``_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN`` sentinel). Same underlying
+    value space, OPPOSITE meaning at 0 and an off-by-one everywhere else —
+    never join or compare these two columns by raw value.
+
+    ``model`` derivation rule (196-R3 / audit fold, binding): always taken
+    VERBATIM from the underlying ``DispatchUsage.model`` — which is
+    itself already "the single modelUsage entry's canonical id, or
+    ``None`` when zero or ≥2 entries make a single value ambiguous" by
+    construction in ``dispatch._parse_dispatch_usage``. This field is
+    NEVER re-derived from ``model_usage`` keys here, NEVER defaulted to
+    a requested/alias model string, and NEVER coerced to ``""`` when
+    absent — ``None`` is the only "absent" spelling, matching RDR-196
+    risk #1 (a silently-zero/empty telemetry field reads as "this was
+    free", which is the exact measurement bug this arc exists to fix).
+
+    ``source`` is one of three values, kept to the RDR's own sketch
+    (no fourth value invented): ``"bundle"`` for a real fused
+    ``dispatch_bundle`` call; ``"llm"`` for an isolated (or
+    bundle-fallback) ``claude -p`` dispatch; ``"sql"`` for BOTH Gap 5's
+    ``operator_filter``/``groupby``/``aggregate`` SQL fast path AND any
+    non-operator (retrieval/traversal) tool dispatch — on this substrate
+    every retrieval call already runs a real SQL/pgvector query
+    server-side, so labelling it "sql" is accurate, not a stretch, and
+    it reuses the RDR's own framing of the llm/sql split as "NOMA's
+    deterministic-vs-stochastic engine choice" rather than adding an
+    unspecified fourth bucket.
+
+    ``input_tokens`` / ``output_tokens`` / ``cost_usd`` are ``| None``
+    — a DELIBERATE widening of the RDR's illustrative non-Optional
+    sketch, required by the RDR's OWN risk register (risk 1: "absent
+    fields record None, never 0.0"). Two distinct zero-vs-unknown
+    populations exist: a ``"sql"`` step is a TRUE, known zero (no
+    claude -p call happened at all) — ``0``/``0``/``0.0``. An isolated
+    or bundle-fallback ``"llm"`` step (dispatched through the
+    :class:`ToolDispatcher` abstraction, several stack frames away from
+    the ``claude_dispatch`` call an ``operator_*`` MCP tool owns
+    internally) genuinely SPENT money but this layer cannot observe it
+    today — ``None``, not a fabricated ``0``. Only the ``"bundle"``
+    path (wired with a real ``usage_sink`` into ``dispatch_bundle`` ->
+    ``claude_dispatch``) gets real, non-``None`` values when the
+    dispatch reached a parsed result.
+
+    ``run_id`` defaults to ``""`` — :func:`plan_run` has no concept of
+    a persisted run id (the PG primary key ``.p1c``/``.p1d`` will add
+    doesn't exist until AFTER this function returns and its caller
+    persists the run row). The caller re-stamps the real id via
+    ``dataclasses.replace(record, run_id=...)`` once known; this keeps
+    ``plan_run``'s signature unchanged for that future wiring, per this
+    bead's own DO instruction.
+    """
+
+    run_id: str = ""
+    step_index: int = 0
+    operator: str = ""
+    source: str = "llm"
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cost_usd: float | None = None
+    elapsed_ms: int = 0
+    ok: bool = True
+    #: Populated ONLY on a ``source="bundle"`` record — the full set of
+    #: 0-based plan indices this one dispatch fused. Empty for every
+    #: other source.
+    bundled_steps: list[int] = field(default_factory=list)
+
+    # Same landmine as DispatchUsage (dispatch.py): frozen=True + a
+    # mutable list field would auto-generate a __hash__ that raises
+    # lazily on the first hash() call. Declare it honestly unhashable.
+    __hash__ = None  # type: ignore[assignment]
+
+
+@dataclass(frozen=True)
 class PlanResult:
     """Captured output of a :func:`plan_run` execution."""
 
@@ -253,6 +344,11 @@ class PlanResult:
     #: ran. Lets a caller render "step N of M" without re-parsing
     #: ``match.plan_json`` itself.
     total_planned_steps: int = 0
+    #: RDR-196 .p1b (nexus-nyry9.8): one :class:`StepRecord` per executed
+    #: dispatch segment — see that class's docstring for the bundle/sql/
+    #: llm attribution rules. In-process only; the engine-side
+    #: ``nx_answer_steps`` write is `.p1c`/`.p1d`, not this bead.
+    step_records: list[StepRecord] = field(default_factory=list)
 
 
 # ── Embedding-domain mapping ────────────────────────────────────────────────
@@ -424,6 +520,56 @@ def _operator_timeout_sentinel(
         "partial_text": exc.partial_text,
         "event_count": exc.event_count,
     }
+
+
+def _rollup_step_usage(entries: list) -> Any:
+    """Reduce the ``DispatchUsage`` list captured via
+    :func:`nexus.operators.dispatch.ambient_usage_sink` for ONE isolated
+    or bundle-fallback step into a single usage record (RDR-196 .p1b
+    Gap-1 addendum, nexus-nyry9.8).
+
+    Zero entries: ``None`` — no claude -p call happened inside this step
+    (or the operator's own SQL fast path served it). One entry: returned
+    AS-IS. More than one entry (an operator that internally issues >1
+    claude_dispatch call — none do today, but the mechanism must not
+    silently drop or mis-divide a future one): the entries are SUMMED,
+    never divided — unlike a fused bundle's ONE real dispatch, these are
+    N SEPARATELY MEASURED real dispatches, so summing their real costs is
+    honest, not fabricated. ``model`` follows the same ambiguous-population
+    rule ``DispatchUsage.model`` already applies within a single call: the
+    shared canonical id if every entry agrees, else ``None``. Any field
+    that is ``None`` on ANY entry makes the summed field ``None`` too
+    (never silently treat "unknown" as "zero" mid-sum). The per-model
+    breakdown across entries is NOT preserved at StepRecord granularity —
+    the flat schema matches ``.p1c``'s ``nx_answer_steps`` sketch (no
+    ``model_usage`` column); this is a deliberate, stated roll-up, not a
+    silent drop.
+    """
+    if not entries:
+        return None
+    if len(entries) == 1:
+        return entries[0]
+    models = {e.model for e in entries if e.model is not None}
+    model = next(iter(models)) if len(models) == 1 else None
+
+    def _sum(attr: str) -> Any:
+        vals = [getattr(e, attr) for e in entries]
+        if any(v is None for v in vals):
+            return None
+        return sum(vals)
+
+    return _dispatch_mod.DispatchUsage(
+        model=model,
+        cost_usd=_sum("cost_usd"),
+        input_tokens=_sum("input_tokens"),
+        output_tokens=_sum("output_tokens"),
+        cache_creation_input_tokens=_sum("cache_creation_input_tokens"),
+        cache_read_input_tokens=_sum("cache_read_input_tokens"),
+        duration_ms=_sum("duration_ms"),
+        duration_api_ms=_sum("duration_api_ms"),
+        num_turns=_sum("num_turns"),
+        model_usage={},
+    )
 
 
 def _resolve_value(
@@ -1310,6 +1456,59 @@ async def plan_run(
     #: nexus-h33x8.6 a4: set when ``deadline`` cuts the run short. See
     #: :class:`PlanResult` and the ``deadline`` docstring above.
     budget_exhausted_at_step: int | None = None
+    #: RDR-196 .p1b (nexus-nyry9.8): one StepRecord per executed dispatch
+    #: segment. See StepRecord's own docstring for the source/model/cost
+    #: attribution rules.
+    step_records: list[StepRecord] = []
+
+    def _step_source(tool: str, result: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """Classify an isolated/bundle-fallback dispatch's ``source`` and
+        strip the runner-internal ``_dispatch_source`` marker (Gap 5 —
+        core.py's operator_filter/groupby/aggregate SQL fast path) off
+        *result* so it never leaks onto ``step_outputs`` / ``$stepN.field``.
+
+        Default: any operator tool (:func:`is_operator_tool`) is "llm";
+        any non-operator (retrieval/traversal) tool is "sql" — see
+        :class:`StepRecord`'s docstring for why that's accurate on this
+        substrate, not a stretch. The marker overrides the default to
+        "sql" only when an operator's own SQL fast path actually served
+        the request.
+        """
+        explicit = result.pop("_dispatch_source", None)
+        source = explicit or ("llm" if is_operator_tool(tool) else "sql")
+        return source, result
+
+    def _record_step(
+        *, step_index: int, operator: str, source: str, elapsed_ms: int,
+        ok: bool, usage: Any = None,
+        bundled_steps: list[int] | None = None,
+    ) -> None:
+        """Append one :class:`StepRecord`. *usage* is a
+        ``nexus.operators.dispatch.DispatchUsage`` or ``None``.
+
+        Priority: real ``usage`` always wins when present (the "bundle"
+        path, or a future path that captures it). Absent real usage: a
+        "sql" step is a TRUE, known zero (no claude -p call happened at
+        all) — ``0``/``0``/``0.0``. Any other source with no observable
+        usage (isolated/bundle-fallback "llm" dispatches — the
+        ``ToolDispatcher`` abstraction has no usage channel today) is
+        genuinely UNKNOWN — ``None``, never a fabricated ``0``.
+        """
+        if usage is not None:
+            model = usage.model
+            in_tok, out_tok, cost = (
+                usage.input_tokens, usage.output_tokens, usage.cost_usd,
+            )
+        elif source == "sql":
+            model, in_tok, out_tok, cost = None, 0, 0, 0.0
+        else:
+            model, in_tok, out_tok, cost = None, None, None, None
+        step_records.append(StepRecord(
+            step_index=step_index, operator=operator, source=source,
+            model=model, input_tokens=in_tok, output_tokens=out_tok,
+            cost_usd=cost, elapsed_ms=elapsed_ms, ok=ok,
+            bundled_steps=list(bundled_steps) if bundled_steps else [],
+        ))
 
     # One authoritative segmentation. When bundling is off or the caller
     # supplied a dispatcher that doesn't opt into bundling, flatten the
@@ -1429,12 +1628,24 @@ async def plan_run(
                         b_raw_args, bindings=merged,
                         step_outputs=step_outputs,
                     )
+                    # RDR-196 .p1b: per-bi timing, NOT the segment-aggregate
+                    # timer below — this loop dispatches N separate
+                    # ToolDispatcher calls (the oversized-bundle fallback),
+                    # so each gets its own real elapsed_ms rather than a
+                    # divided share of the aggregate (same no-fabrication
+                    # principle the bead states for cost).
+                    _bi_started_at = time.monotonic()
+                    # RDR-196 .p1b Gap-1 addendum: same ambient-sink scope
+                    # as the isolated path — this loop dispatches through
+                    # the identical ToolDispatcher abstraction.
+                    _bi_usage: list[Any] = []
                     try:
-                        raw = dispatch(btool, b_resolved)
-                        if inspect.iscoroutine(raw):
-                            result = await raw
-                        else:
-                            result = raw
+                        with _dispatch_mod.ambient_usage_sink(_bi_usage):
+                            raw = dispatch(btool, b_resolved)
+                            if inspect.iscoroutine(raw):
+                                result = await raw
+                            else:
+                                result = raw
                     except Exception as exc:
                         # nexus-nyry9.4 review-fix: _default_dispatcher
                         # doesn't know the step index (see its docstring
@@ -1465,6 +1676,16 @@ async def plan_run(
                         step_outputs.append(_operator_failed_sentinel(
                             tool=btool, step_index=bi, message=str(exc),
                         ))
+                        # RDR-196 .p1b: a step that errors still produces
+                        # a record — ok=False, real usage when a raise
+                        # site still appended it (.p1a contract), read
+                        # back via the ambient sink.
+                        _record_step(
+                            step_index=bi, operator=btool,
+                            source="llm" if is_operator_tool(btool) else "sql",
+                            elapsed_ms=int((time.monotonic() - _bi_started_at) * 1000),
+                            ok=False, usage=_rollup_step_usage(_bi_usage),
+                        )
                         continue
                     if not isinstance(result, dict):
                         raise PlanRunStepRefError(
@@ -1475,7 +1696,13 @@ async def plan_run(
                                 "(bundle fallback path)"
                             ),
                         )
+                    b_source, result = _step_source(btool, result)
                     step_outputs.append(result)
+                    _record_step(
+                        step_index=bi, operator=btool, source=b_source,
+                        elapsed_ms=int((time.monotonic() - _bi_started_at) * 1000),
+                        ok=True, usage=_rollup_step_usage(_bi_usage),
+                    )
                 _log.info(
                     "nx_answer_step_complete",
                     kind="bundle_fallback",
@@ -1492,8 +1719,17 @@ async def plan_run(
             _bundle_kwargs: dict[str, Any] = {}
             if deadline is not None:
                 _bundle_kwargs["timeout"] = max(0.0, deadline - time.monotonic())
+            # RDR-196 .p1b: the ONE genuine claude_dispatch call site this
+            # module owns directly (every operator_* MCP tool owns its
+            # own internal call, out of reach from here — see StepRecord's
+            # docstring). A fresh list per bundle segment; DispatchUsage is
+            # appended whenever a result envelope parsed, even on some
+            # subsequent raises (.p1a contract) — read back below.
+            _bundle_usage: list[Any] = []
             try:
-                bundle_result = await dispatch_bundle(bundle, **_bundle_kwargs)
+                bundle_result = await dispatch_bundle(
+                    bundle, usage_sink=_bundle_usage, **_bundle_kwargs,
+                )
             except Exception as exc:
                 if deadline is not None and isinstance(exc, _dispatch_mod.OperatorTimeoutError):
                     # a4: capture the reconstructed partial content on
@@ -1515,6 +1751,16 @@ async def plan_run(
                         exc=exc,
                     ))
                     budget_exhausted_at_step = seg.plan_indices[0] + 1
+                    # A timeout NEVER reaches claude_dispatch's usage_sink
+                    # append (.p1a contract) — usage is genuinely None,
+                    # never fabricated. Still one record: one dispatch
+                    # was attempted regardless of outcome.
+                    _record_step(
+                        step_index=seg.plan_indices[0],
+                        operator="+".join(_seg_tools), source="bundle",
+                        elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                        ok=False, bundled_steps=list(seg.plan_indices),
+                    )
                     break
                 if not _is_operator_error(exc):
                     raise
@@ -1536,6 +1782,19 @@ async def plan_run(
                         step_index=bi,
                         message=str(exc),
                     ))
+                # RDR-196 .p1b: ONE record for the whole segment (one
+                # dispatch_bundle call failed), not N — mirrors the
+                # success-path "never divide/duplicate a fused dispatch's
+                # telemetry" rule. Several raise sites still append real
+                # usage before raising (.p1a contract); read it back when
+                # present rather than assuming None.
+                _record_step(
+                    step_index=seg.plan_indices[0],
+                    operator="+".join(_seg_tools), source="bundle",
+                    elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                    ok=False, bundled_steps=list(seg.plan_indices),
+                    usage=_bundle_usage[-1] if _bundle_usage else None,
+                )
                 continue
             # Intermediate slots: sentinel. Terminal slot: the real
             # output. Downstream $stepN.<field> refs to an intermediate
@@ -1558,6 +1817,16 @@ async def plan_run(
                 step_indices=_seg_indices,
                 tools=_seg_tools,
                 elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+            )
+            # RDR-196 .p1b: exactly ONE record for the whole fused
+            # dispatch — never one per bundled_steps index, and never a
+            # per-step cost fabricated by dividing the bundle's real cost.
+            _record_step(
+                step_index=seg.plan_indices[0],
+                operator="+".join(_seg_tools), source="bundle",
+                elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                ok=True, bundled_steps=list(seg.plan_indices),
+                usage=_bundle_usage[-1] if _bundle_usage else None,
             )
             continue
 
@@ -1607,12 +1876,20 @@ async def plan_run(
         # (legacy test fixtures + any caller that prefers the simpler
         # contract). Detect a returned coroutine and await it; treat a
         # returned dict/mapping as the direct result.
+        # RDR-196 .p1b Gap-1 addendum (nexus-nyry9.8, 2026-08-20): scope an
+        # ambient usage sink around the dispatch so real DispatchUsage is
+        # captured even though ``dispatch`` goes through the
+        # ToolDispatcher abstraction into an operator_* MCP tool whose
+        # OWN internal claude_dispatch call this module never touches
+        # directly. See ``_rollup_step_usage`` for the >1-entry rule.
+        _step_usage: list[Any] = []
         try:
-            raw = dispatch(tool, resolved)
-            if inspect.iscoroutine(raw):
-                result = await raw
-            else:
-                result = raw
+            with _dispatch_mod.ambient_usage_sink(_step_usage):
+                raw = dispatch(tool, resolved)
+                if inspect.iscoroutine(raw):
+                    result = await raw
+                else:
+                    result = raw
         except Exception as exc:
             # nexus-nyry9.4 review-fix: _default_dispatcher doesn't know
             # the step index (see its docstring note); patch in the real
@@ -1643,6 +1920,17 @@ async def plan_run(
                     tool=tool, step_index=index, exc=exc,
                 ))
                 budget_exhausted_at_step = index + 1
+                # RDR-196 .p1b: a timeout never reaches usage_sink's
+                # append (.p1a contract) — usage genuinely None (the
+                # ambient sink is symmetric: it appends at the same site
+                # usage_sink does, so it is equally empty here). Still
+                # one record: a dispatch was attempted.
+                _record_step(
+                    step_index=index, operator=tool,
+                    source="llm" if is_operator_tool(tool) else "sql",
+                    elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                    ok=False, usage=_rollup_step_usage(_step_usage),
+                )
                 break
             if not _is_operator_error(exc):
                 raise
@@ -1658,6 +1946,17 @@ async def plan_run(
             step_outputs.append(_operator_failed_sentinel(
                 tool=tool, step_index=index, message=str(exc),
             ))
+            # RDR-196 .p1b: a step that errors still produces a record
+            # (ok=False) — a telemetry layer that only records successes
+            # measures the wrong population. Several raise sites still
+            # append real usage before raising (.p1a contract) — read it
+            # back via the ambient sink rather than assuming None.
+            _record_step(
+                step_index=index, operator=tool,
+                source="llm" if is_operator_tool(tool) else "sql",
+                elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                ok=False, usage=_rollup_step_usage(_step_usage),
+            )
             continue
         if not isinstance(result, dict):
             # Tool authors must follow the documented output contract;
@@ -1670,6 +1969,7 @@ async def plan_run(
                     f"expected dict per RDR-078 §Phase 1"
                 ),
             )
+        source, result = _step_source(tool, result)
         step_outputs.append(result)
         _log.info(
             "nx_answer_step_complete",
@@ -1678,10 +1978,16 @@ async def plan_run(
             tools=_seg_tools,
             elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
         )
+        _record_step(
+            step_index=index, operator=tool, source=source,
+            elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+            ok=True, usage=_rollup_step_usage(_step_usage),
+        )
 
     return PlanResult(
         steps=step_outputs,
         final=step_outputs[-1] if step_outputs else None,
         budget_exhausted_at_step=budget_exhausted_at_step,
         total_planned_steps=len(steps),
+        step_records=step_records,
     )

@@ -52,6 +52,53 @@ def rolled_up_dispatch_failures() -> Iterator[None]:
     finally:
         _ROLLED_UP.reset(token)
 
+
+#: RDR-196 .p1b Gap 1 (nexus-nyry9.8 coordinator addendum, 2026-08-20): an
+#: AMBIENT usage sink, parallel to ``_ROLLED_UP`` above. The explicit
+#: ``usage_sink`` kwarg on ``claude_dispatch`` only helps a caller that
+#: invokes ``claude_dispatch`` directly (``plans/bundle.py``'s
+#: ``dispatch_bundle`` is the only one inside this package) — it does
+#: NOT reach a caller further up the stack, such as ``plans/runner.py``'s
+#: isolated-step dispatch, which goes through the ``ToolDispatcher``
+#: protocol into one of 10 separate ``operator_*`` MCP-tool functions in
+#: ``mcp/core.py`` (extract/rank/compare/summarize/generate/filter/
+#: check/verify/groupby/aggregate), each of which owns ITS OWN internal
+#: ``claude_dispatch`` call. Threading an explicit ``usage_sink`` kwarg
+#: through all 10 signatures would be a much larger, separately-scoped
+#: change; the ambient sink closes that gap without touching any of
+#: them. ``None`` (the default) is a complete no-op — byte-identical to
+#: every dispatch before this addendum. asyncio Tasks copy the current
+#: ``contextvars.Context`` at creation time, so a sink set here survives
+#: any ``asyncio.create_task`` an operator issues internally (proven by
+#: ``test_ambient_usage_sink_survives_child_task`` in
+#: tests/test_operator_dispatch.py) — no special handling needed.
+_ambient_usage_sink: contextvars.ContextVar[list[DispatchUsage] | None] = (
+    contextvars.ContextVar("dispatch_ambient_usage_sink", default=None)
+)
+
+
+@contextmanager
+def ambient_usage_sink(sink: list[DispatchUsage]) -> Iterator[None]:
+    """Scope *sink* as the ambient usage-capture target for every
+    ``claude_dispatch`` call made within this context — IN ADDITION to
+    whatever explicit ``usage_sink`` (if any) an individual call also
+    passes; both receive the SAME ``DispatchUsage`` instance (parsed
+    once), never two independently-parsed copies.
+
+    ``plans/runner.py`` wraps each isolated / bundle-fallback step
+    dispatch in this context manager so a ``StepRecord`` can be built
+    from real usage even though the dispatch reaches ``claude_dispatch``
+    through an ``operator_*`` MCP-tool function this module never calls
+    directly. Nested/overlapping scopes are NOT a supported use case —
+    the inner scope's ``reset`` restores exactly the value the token
+    captured, same discipline as ``rolled_up_dispatch_failures`` above.
+    """
+    token = _ambient_usage_sink.set(sink)
+    try:
+        yield
+    finally:
+        _ambient_usage_sink.reset(token)
+
 #: Per-stream cap on what the failure log records, in characters.
 #: Sized against the handler's real budget, not picked for feel: the log
 #: rotates at 10 MB x 5 backups (:mod:`nexus.logging_setup`), so a 16 KB
@@ -71,6 +118,7 @@ _TRUNCATION_MARKER: str = "...[truncated]"
 
 __all__ = [
     "claude_dispatch",
+    "ambient_usage_sink",
     "rolled_up_dispatch_failures",
     "OperatorError",
     "OperatorOutputError",
@@ -797,6 +845,10 @@ async def claude_dispatch(
             ``None`` (default) is a complete no-op: this preserves
             ``claude_dispatch``'s existing return contract (a bare dict)
             for all current call sites, none of which unpack a tuple.
+            Independent of, and additive with, :func:`ambient_usage_sink`
+            (RDR-196 .p1b Gap-1 addendum, nexus-nyry9.8): when an ambient
+            sink is ALSO active, both receive the same parsed
+            ``DispatchUsage`` instance for this call.
         model: Opt-in ``--model`` override (RDR-196 .p2b, nexus-nyry9.15).
             ``None`` (default) appends NO ``--model`` flag -- argv is
             byte-identical to every pre-.p2b call site. When set, the
@@ -1162,8 +1214,10 @@ async def claude_dispatch(
         # subprocess/test double that emits a bare JSON blob rather than
         # real stream-json (the format this repo's own test doubles use).
         final_result, _partial_text, event_count = _parse_stream_json_output(raw)
-        if usage_sink is not None:
-            # RDR-196 .p1a (nexus-nyry9.7): capture cost/usage telemetry
+        _ambient_sink = _ambient_usage_sink.get()
+        if usage_sink is not None or _ambient_sink is not None:
+            # RDR-196 .p1a (nexus-nyry9.7) + .p1b Gap-1 addendum
+            # (nexus-nyry9.8, 2026-08-20): capture cost/usage telemetry
             # for a dispatch that reached a parsed result -- the raw JSON
             # fallback below (final_result is None) still parses to an
             # all-None DispatchUsage + warning via _parse_dispatch_usage,
@@ -1175,8 +1229,14 @@ async def claude_dispatch(
             # type, so that contract and its test
             # (TestUsageSinkAppendsBeforeSubsequentRaises::
             # test_invalid_json_fallback_still_appends_all_none_usage_
-            # then_raises) both stay true unchanged.
-            usage_sink.append(_parse_dispatch_usage(final_result))
+            # then_raises) both stay true unchanged. Parsed ONCE; the
+            # SAME DispatchUsage instance is appended to both sinks when
+            # both are active, never two independently-parsed copies.
+            _usage = _parse_dispatch_usage(final_result)
+            if usage_sink is not None:
+                usage_sink.append(_usage)
+            if _ambient_sink is not None:
+                _ambient_sink.append(_usage)
         if final_result is not None:
             parsed = final_result
         else:

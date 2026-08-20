@@ -2241,6 +2241,42 @@ class TestOperatorFilter:
             f"got extras {output_ids - input_ids}"
         )
 
+    @pytest.mark.asyncio
+    async def test_sql_hit_stamps_dispatch_source_marker(self, monkeypatch) -> None:
+        """RDR-196 .p1b Gap 5 (nexus-nyry9.8): when the SQL fast path
+        actually serves the request, the returned dict carries the
+        ``_dispatch_source: "sql"`` marker plan_run reads to record
+        source="sql" instead of the default "llm" inference. Empty
+        items is a pure-SQL hit with no document_aspects dependency —
+        monkeypatch claude_dispatch to raise so a wrongly-taken LLM
+        fallback fails loudly instead of hanging on a real subprocess.
+        """
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_filter
+
+        async def must_not_be_called(*a, **kw):
+            raise AssertionError("SQL fast path should have short-circuited")
+
+        monkeypatch.setattr(_mod, "claude_dispatch", must_not_be_called)
+        result = await operator_filter(items="[]", criterion="x")
+        assert result.get("_dispatch_source") == "sql"
+
+    @pytest.mark.asyncio
+    async def test_llm_fallback_has_no_dispatch_source_marker(self, monkeypatch) -> None:
+        """The LLM-dispatched branch must NOT stamp a marker — plan_run's
+        default is_operator_tool()-based inference ("llm") already
+        covers it; a marker here would be redundant, not wrong, but its
+        absence is the actual contract this test pins."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_filter
+
+        async def fake(prompt, schema, timeout=60.0):
+            return {"items": [], "rationale": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_filter(items="[]", criterion="x", source="llm")
+        assert "_dispatch_source" not in result
+
 
 class TestOperatorCheck:
     """RDR-088 Phase 2: operator_check returns a structured boolean plus
@@ -2625,6 +2661,20 @@ class TestOperatorGroupby:
                 )
                 assert "id" in it
 
+    @pytest.mark.asyncio
+    async def test_sql_hit_stamps_dispatch_source_marker(self, monkeypatch) -> None:
+        """RDR-196 .p1b Gap 5: empty items is a pure-SQL hit
+        (``{"groups": []}``), no document_aspects dependency."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_groupby
+
+        async def must_not_be_called(*a, **kw):
+            raise AssertionError("SQL fast path should have short-circuited")
+
+        monkeypatch.setattr(_mod, "claude_dispatch", must_not_be_called)
+        result = await operator_groupby(items="[]", key="x")
+        assert result.get("_dispatch_source") == "sql"
+
 
 class TestOperatorAggregate:
     """RDR-093 Phase 2: operator_aggregate reduces each group of items
@@ -2785,6 +2835,21 @@ class TestOperatorAggregate:
         assert len(result["aggregates"]) == 3
         keys = {a["key_value"] for a in result["aggregates"]}
         assert keys == {"alpha", "beta", "gamma"}
+
+    @pytest.mark.asyncio
+    async def test_sql_hit_stamps_dispatch_source_marker(self, monkeypatch) -> None:
+        """RDR-196 .p1b Gap 5: an empty ``groups`` array with the
+        recognised ``count`` reducer is a pure-SQL hit
+        (``{"aggregates": []}``), no document_aspects dependency."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_aggregate
+
+        async def must_not_be_called(*a, **kw):
+            raise AssertionError("SQL fast path should have short-circuited")
+
+        monkeypatch.setattr(_mod, "claude_dispatch", must_not_be_called)
+        result = await operator_aggregate(groups="[]", reducer="count")
+        assert result.get("_dispatch_source") == "sql"
 
 
 class TestFailureRecordAddressability:
@@ -3272,6 +3337,176 @@ class TestUsageSinkAppendsBeforeSubsequentRaises:
         assert len(sink) == 1, "the append must happen even though the call raises"
         assert sink[0].cost_usd is None
         assert sink[0].model is None
+
+
+def _result_ndjson(
+    *, cost_usd: float, input_tokens: int, output_tokens: int,
+    model: str, structured_output: dict | None = None,
+) -> bytes:
+    """Build a minimal-but-real terminal stream-json result event, shaped
+    like the fixture (RDR-196 .p1b Gap-1 addendum tests)."""
+    payload = {
+        "type": "result", "is_error": False,
+        "result": "", "structured_output": structured_output or {"summary": "ok"},
+        "total_cost_usd": cost_usd,
+        "duration_ms": 1000, "duration_api_ms": 900, "num_turns": 1,
+        "usage": {
+            "input_tokens": input_tokens, "output_tokens": output_tokens,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+        },
+        "modelUsage": {
+            model: {
+                "inputTokens": input_tokens, "outputTokens": output_tokens,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": cost_usd, "canonicalModel": model,
+            },
+        },
+    }
+    return json.dumps(payload).encode()
+
+
+class TestAmbientUsageSink:
+    """RDR-196 .p1b Gap-1 addendum (nexus-nyry9.8 coordinator directive,
+    2026-08-20): ``ambient_usage_sink`` closes the isolated/bundle-
+    fallback usage-observability gap the original .p1b handback left
+    open -- an operator_* MCP tool's OWN internal claude_dispatch call,
+    several stack frames past anywhere a caller could pass an explicit
+    usage_sink kwarg, is now captured via a contextvar instead."""
+
+    @pytest.mark.asyncio
+    async def test_ambient_sink_is_none_outside_any_scope(self) -> None:
+        from nexus.operators.dispatch import _ambient_usage_sink
+
+        assert _ambient_usage_sink.get() is None
+
+    @pytest.mark.asyncio
+    async def test_explicit_and_ambient_sinks_both_receive_same_record(self) -> None:
+        """Both sinks populated from ONE dispatch; the SAME DispatchUsage
+        instance lands in both -- parsed once, never two independently-
+        parsed copies."""
+        from nexus.operators.dispatch import (
+            ambient_usage_sink, claude_dispatch, DispatchUsage,
+        )
+
+        proc = _make_proc(
+            stdout=_result_ndjson(
+                cost_usd=0.07, input_tokens=11, output_tokens=22,
+                model="claude-sonnet-5-20260101",
+            ),
+            returncode=0, stderr=b"",
+        )
+        explicit_sink: list[DispatchUsage] = []
+        ambient_sink: list[DispatchUsage] = []
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with ambient_usage_sink(ambient_sink):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=explicit_sink)
+
+        assert len(explicit_sink) == 1
+        assert len(ambient_sink) == 1
+        assert explicit_sink[0] is ambient_sink[0]
+        assert explicit_sink[0].cost_usd == 0.07
+        assert explicit_sink[0].model == "claude-sonnet-5-20260101"
+
+    @pytest.mark.asyncio
+    async def test_ambient_sink_survives_child_task(self) -> None:
+        """asyncio Tasks copy the current contextvars.Context at creation
+        -- a claude_dispatch call issued from inside an
+        asyncio.create_task() spawned WHILE the ambient scope is active
+        must still be captured. This is the exact shape an operator that
+        internally fans out sub-dispatches would hit."""
+        from nexus.operators.dispatch import (
+            ambient_usage_sink, claude_dispatch, DispatchUsage,
+        )
+
+        proc = _make_proc(
+            stdout=_result_ndjson(
+                cost_usd=0.09, input_tokens=5, output_tokens=6,
+                model="claude-sonnet-5-20260101",
+            ),
+            returncode=0, stderr=b"",
+        )
+        sink: list[DispatchUsage] = []
+
+        async def _child() -> None:
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with ambient_usage_sink(sink):
+                task = asyncio.create_task(_child())
+                await task
+
+        assert len(sink) == 1, "ambient sink must survive a child asyncio.Task"
+        assert sink[0].cost_usd == 0.09
+
+    @pytest.mark.asyncio
+    async def test_two_sequential_scopes_no_cross_contamination(self) -> None:
+        """Two consecutive ambient-sink scopes, distinguished by cost --
+        each sink must contain ONLY its own scope's usage, not the
+        other's, and the ambient var must not leak state between them."""
+        from nexus.operators.dispatch import (
+            _ambient_usage_sink, ambient_usage_sink, claude_dispatch, DispatchUsage,
+        )
+
+        sink_a: list[DispatchUsage] = []
+        sink_b: list[DispatchUsage] = []
+
+        proc_a = _make_proc(
+            stdout=_result_ndjson(
+                cost_usd=0.11, input_tokens=1, output_tokens=2,
+                model="claude-sonnet-5-20260101",
+            ),
+            returncode=0, stderr=b"",
+        )
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc_a)):
+            with ambient_usage_sink(sink_a):
+                await claude_dispatch("prompt-a", _SIMPLE_SCHEMA)
+
+        assert _ambient_usage_sink.get() is None, "scope must fully reset after exit"
+
+        proc_b = _make_proc(
+            stdout=_result_ndjson(
+                cost_usd=0.22, input_tokens=3, output_tokens=4,
+                model="claude-opus-4-20260514",
+            ),
+            returncode=0, stderr=b"",
+        )
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc_b)):
+            with ambient_usage_sink(sink_b):
+                await claude_dispatch("prompt-b", _SIMPLE_SCHEMA)
+
+        assert len(sink_a) == 1 and sink_a[0].cost_usd == 0.11
+        assert len(sink_b) == 1 and sink_b[0].cost_usd == 0.22
+
+    @pytest.mark.asyncio
+    async def test_isolated_operator_summarize_records_real_usage(self) -> None:
+        """End-to-end through the REAL call chain: operator_summarize (an
+        MCP tool that owns its own internal claude_dispatch call, never
+        touched by plans/runner.py directly) still gets captured because
+        the ambient sink is set around the CALLER's dispatch, not around
+        claude_dispatch's own call site."""
+        from nexus.mcp.core import operator_summarize
+        from nexus.operators.dispatch import ambient_usage_sink, DispatchUsage
+
+        proc = _make_proc(
+            stdout=_result_ndjson(
+                cost_usd=0.031, input_tokens=40, output_tokens=15,
+                model="claude-sonnet-5-20260101",
+                structured_output={"summary": "a concise summary"},
+            ),
+            returncode=0, stderr=b"",
+        )
+        sink: list[DispatchUsage] = []
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with ambient_usage_sink(sink):
+                result = await operator_summarize(content="some long content")
+
+        assert result == {"summary": "a concise summary"}
+        assert len(sink) == 1
+        assert sink[0].model == "claude-sonnet-5-20260101"
+        assert sink[0].cost_usd == 0.031
+        assert sink[0].input_tokens == 40
 
 
 @pytest.mark.integration

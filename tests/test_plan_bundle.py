@@ -847,6 +847,54 @@ class TestPlanRunBundleIntegration:
         assert "_bundled_intermediate" not in result.steps[0]
         assert "_bundled_intermediate" not in result.steps[1]
 
+        # RDR-196 .p1b (nexus-nyry9.8): the bundle-fallback path (:1285)
+        # dispatches N SEPARATE claude -p calls (one per step, via the
+        # isolated ToolDispatcher) -- it must produce N StepRecords with
+        # source="llm" each, NOT one "bundle" record. Recording it as a
+        # single fused "bundle" would misattribute N real dispatches as
+        # one, the same fabrication risk the bead names for cost.
+        assert len(result.step_records) == 2
+        assert [r.source for r in result.step_records] == ["llm", "llm"]
+        assert [r.step_index for r in result.step_records] == [0, 1]
+        assert [r.operator for r in result.step_records] == ["extract", "summarize"]
+        assert all(r.ok for r in result.step_records)
+        assert all(r.bundled_steps == [] for r in result.step_records)
+
+    @pytest.mark.asyncio
+    async def test_oversized_bundle_fallback_failed_step_records_ok_false(self):
+        """A step that fails inside the oversized-bundle per-step
+        fallback loop still produces its own record with ok=False --
+        the other step in the same fallback segment still succeeds and
+        gets its own ok=True record."""
+        import nexus.operators.dispatch as _dispatch_mod
+        from nexus.plans.runner import plan_run
+        from nexus.plans import bundle as _bundle
+
+        huge = "X" * 250_000
+        plan_json = json.dumps({"steps": [
+            {"tool": "extract", "args": {"fields": "a", "inputs": huge}},
+            {"tool": "summarize", "args": {"cited": False, "content": "x"}},
+        ]})
+
+        bundle_call = AsyncMock(return_value={"summary": "won't fire"})
+
+        async def failing_extract(**kwargs):
+            raise _dispatch_mod.OperatorError("extract boom")
+
+        summarize_call = AsyncMock(return_value={"summary": "per-step"})
+
+        from nexus.mcp import core as mcp_core
+        with patch.object(_bundle, "dispatch_bundle", bundle_call), \
+             patch.object(mcp_core, "operator_extract", failing_extract), \
+             patch.object(mcp_core, "operator_summarize", summarize_call):
+            result = await plan_run(_make_match_from_plan(plan_json))
+
+        assert len(result.step_records) == 2
+        assert result.step_records[0].ok is False
+        assert result.step_records[0].step_index == 0
+        assert result.step_records[1].ok is True
+        assert result.step_records[1].step_index == 1
+
     @pytest.mark.asyncio
     async def test_supports_bundling_marker_attr_on_default_dispatcher(self):
         """The default dispatcher carries the ``supports_bundling``

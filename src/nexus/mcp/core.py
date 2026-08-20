@@ -4947,7 +4947,15 @@ async def operator_filter(
         items, criterion, source=source, aspect_field=aspect_field,
     )
     if sql_result is not None:
-        return sql_result
+        # RDR-196 .p1b (Gap 5, nexus-nyry9.8): minimal marker so plan_run
+        # can record source="sql" for this step instead of the default
+        # is_operator_tool()-inferred "llm" -- popped off the dict by
+        # plan_run before the result reaches step_outputs, so it never
+        # leaks into a $stepN.field reference. The LLM-fallback branch
+        # below needs no matching marker: plan_run's default inference
+        # already says "llm" for any operator-tool dispatch absent this
+        # override.
+        return {**sql_result, "_dispatch_source": "sql"}
 
     prompt = (
         f"Filter the following items by this criterion: {criterion}\n"
@@ -5167,7 +5175,15 @@ async def operator_groupby(
         items, key, source=source, aspect_field=aspect_field,
     )
     if sql_result is not None:
-        return sql_result
+        # RDR-196 .p1b (Gap 5, nexus-nyry9.8): minimal marker so plan_run
+        # can record source="sql" for this step instead of the default
+        # is_operator_tool()-inferred "llm" -- popped off the dict by
+        # plan_run before the result reaches step_outputs, so it never
+        # leaks into a $stepN.field reference. The LLM-fallback branch
+        # below needs no matching marker: plan_run's default inference
+        # already says "llm" for any operator-tool dispatch absent this
+        # override.
+        return {**sql_result, "_dispatch_source": "sql"}
 
     prompt = (
         f"Partition the following items by this key: {key}\n"
@@ -5268,7 +5284,15 @@ async def operator_aggregate(
         groups, reducer, source=source, aspect_field=aspect_field,
     )
     if sql_result is not None:
-        return sql_result
+        # RDR-196 .p1b (Gap 5, nexus-nyry9.8): minimal marker so plan_run
+        # can record source="sql" for this step instead of the default
+        # is_operator_tool()-inferred "llm" -- popped off the dict by
+        # plan_run before the result reaches step_outputs, so it never
+        # leaks into a $stepN.field reference. The LLM-fallback branch
+        # below needs no matching marker: plan_run's default inference
+        # already says "llm" for any operator-tool dispatch absent this
+        # override.
+        return {**sql_result, "_dispatch_source": "sql"}
 
     prompt = (
         f"Reduce each group of items into a per-group summary using "
