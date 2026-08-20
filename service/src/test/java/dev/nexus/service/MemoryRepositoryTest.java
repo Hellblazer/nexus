@@ -140,7 +140,7 @@ class MemoryRepositoryTest {
         assertThat(r.getContent()).isEqualTo("hello from generated jOOQ");
         assertThat(r.getTags()).isEqualTo("tag1,tag2");
         assertThat(r.getAgent()).isEqualTo("test-agent");
-        assertThat(r.getTtl()).isEqualTo(30);
+        assertThat(r.getTtlDays()).isEqualTo(30);
         // findByTitle now tracks access: access_count is 1 after first read
         assertThat(r.getAccessCount()).as("access_count incremented to 1 by findByTitle").isEqualTo(1);
         assertThat(r.getTimestamp()).as("timestamp must be set").isNotNull();
@@ -167,7 +167,28 @@ class MemoryRepositoryTest {
             .as("content must be updated after ON CONFLICT DO UPDATE").isEqualTo("updated content");
         assertThat(row.get().getTags()).isEqualTo("tag-new");
         assertThat(row.get().getAgent()).isEqualTo("updater");
-        assertThat(row.get().getTtl()).isEqualTo(14);
+        assertThat(row.get().getTtlDays()).isEqualTo(14);
+    }
+
+    // ── nexus-tk070.p6a (RDR-194 D5): CHECK-layer proof, independent of
+    //    MemoryHandler's boundary 400 ────────────────────────────────────────
+
+    @Test
+    void upsert_ttlZero_violatesCheckConstraintDirectlyAtRepositoryLayer() {
+        // This calls MemoryRepository directly -- bypassing MemoryHandler's
+        // handler-level ttl<=0 rejection entirely -- to prove the DB CHECK
+        // itself rejects ttl_days=0, independent of the HTTP boundary
+        // validation. The two layers are tested SEPARATELY (see
+        // MemoryHandlerTest's put_ttlZeroIsRejectedWith400 for the boundary
+        // proof): deleting MemoryHandler's validation code would not make
+        // THIS test fail, and dropping the CHECK constraint would not make
+        // the boundary test fail -- each test falsifies only its own layer.
+        assertThatThrownBy(() ->
+            repo.upsert(TENANT_A, "check-proj", "check-entry",
+                        "content", null, null, null, 0))
+            .as("ttl_days=0 must violate memory_ttl_days_positive_chk at the "
+                + "DB layer even when no handler-level validation runs")
+            .hasMessageContaining("memory_ttl_days_positive_chk");
     }
 
     // ── Test 3: RLS tenant isolation — tenant-B cannot see tenant-A rows ────

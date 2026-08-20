@@ -3834,24 +3834,31 @@ def memory_put(
     project: str,
     title: str,
     tags: str = "",
-    ttl: int = 30,
+    ttl: int | None = 30,
     agent: str = "",
     session: str = "",
 ) -> str:
-    """Store a memory entry in T2 (SQLite). Upserts by (project, title).
+    """Store a memory entry in T2. Upserts by (project, title).
 
     Args:
         content: Text content to store
         project: Project namespace (e.g. "nexus", "nexus_active")
         title: Entry title (unique within project)
         tags: Comma-separated tags
-        ttl: Time-to-live in days (default 30). 0 is accepted as "permanent"
-            and coerced to NULL by THIS tool (see ``ttl if ttl > 0 else None``
-            below) — but that coercion is the MCP layer's, not the store's.
-            A caller that bypasses MCP and writes ttl=0 directly (the store
-            API, or POST /v1/memory/put) gets effective_ttl = 0 and the row is
-            deleted on the next expire() sweep. PERMANENT AT THE STORE IS NULL.
-            Do not carry "0 means permanent" outside this function.
+        ttl: Time-to-live in days (default 30). Omit or pass ``None``/``null``
+            for a permanent entry — that is the ONLY way to get a permanent
+            row. ``ttl=0`` is RETIRED (RDR-194 D5, nexus-tk070.p6a): this tool
+            no longer coerces it to ``None``, and the engine itself now
+            REJECTS ``ttl=0`` (and any ``ttl<=0``) with a loud 400 naming the
+            fix, for every caller and every path — ``POST /v1/memory/put``
+            included, not just this MCP tool. That rejection propagates
+            through this function's error return (this tool does not
+            swallow it). Previously ``ttl=0`` was silently coerced to
+            permanent by THIS tool alone while the store and every other
+            caller stayed trapped (a stored ``0`` fed
+            ``effective_ttl = ttl * (1 + ln(access_count+1)) = 0``, deleted on
+            the next sweep) — that MCP-only shim is deleted; "0 means
+            permanent" is no longer true anywhere in this system.
         agent: Optional subagent / role attribution (e.g. "developer",
             "architect-planner"). When empty, falls back to
             ``NX_AGENT`` env, then NULL. Phase 1B (nexus-9clx) — lets
@@ -3883,7 +3890,11 @@ def memory_put(
                 title=title,
                 content=content,
                 tags=tags,
-                ttl=ttl if ttl > 0 else None,
+                # nexus-tk070.p6a: no coercion — ttl flows verbatim. A ttl<=0
+                # is rejected by the engine's own boundary validation
+                # (MemoryHandler.requirePositiveOrNullTtl -> 400), surfaced to
+                # the caller via _mcp_tool_error below, never swallowed here.
+                ttl=ttl,
                 agent=agent_arg,
                 session=session_arg,
             )

@@ -377,6 +377,8 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   taxonomy-014-3 nexus-tk070.p5a
                 //   taxonomy-014-4 nexus-tk070.p5a
                 //   taxonomy-014-5 nexus-tk070.p5a
+                //   memory-003-1 nexus-tk070.p6a
+                //   plans-003-1 nexus-tk070.p6a
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -578,6 +580,23 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // fixture proves the full walk now survives that row.
                     seedTopicAssignment(su, "t1", "8".repeat(32), p3bTopicId, "code__x");
 
+                    // memory-003-1 / plans-003-1 (nexus-tk070.p6a, RDR-194 § D5):
+                    // ttl -> ttl_days rename + counted DELETE of ttl=0 rows, the
+                    // SAME NO FORCE/FORCE toggle-wrap shape as catalog-013-1b/
+                    // catalog-014-0/catalog-025-0/catalog-029-1/catalog-032-1/
+                    // legacy-001-1/legacy-001-2. nexus.memory and nexus.plans are
+                    // baseline tables (memory-001-baseline.xml/plans-001-baseline.xml
+                    // both predate OLD_TAG), so both accept rows freely on the old
+                    // leg. DELETE arm: a ttl=0 row per table (memory-003-1/
+                    // plans-003-1's whole reason to exist -- ttl=0 is
+                    // unrepresentable under the new CHECK). KEEP arm: a NULL-ttl
+                    // (permanent) row per table, proving the DELETE is selective on
+                    // ttl=0 specifically, not a blanket wipe.
+                    seedMemoryRow(su, "t1", "p6a-proj", "p6a-zero", 0);
+                    seedMemoryRow(su, "t1", "p6a-proj", "p6a-permanent", null);
+                    seedPlanRow(su, "t1", "p6a-proj", "p6a zero query", 0);
+                    seedPlanRow(su, "t1", "p6a-proj", "p6a permanent query", null);
+
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("superuser ground truth after seeding").isEqualTo(5);
                     assertThat(count(su,
@@ -618,6 +637,14 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     assertThat(count(admin, "SELECT count(*) FROM nexus.topic_assignments"))
                         .as("FORCE RLS must hide all five seeded topic_assignments rows from "
                             + "the non-BYPASSRLS owner — taxonomy-010-1's own toggle-wrap target")
+                        .isEqualTo(0);
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.memory"))
+                        .as("FORCE RLS must hide both seeded memory rows from the "
+                            + "non-BYPASSRLS owner — memory-003-1's own toggle-wrap target")
+                        .isEqualTo(0);
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.plans"))
+                        .as("FORCE RLS must hide both seeded plans rows from the "
+                            + "non-BYPASSRLS owner — plans-003-1's own toggle-wrap target")
                         .isEqualTo(0);
                 }
 
@@ -1274,6 +1301,73 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "unconditional UNIQUE (tenant_id, id), the precondition every "
                             + "repoint above builds on")
                         .isEqualTo(1);
+
+                    // memory-003-1 / plans-003-1 legs (nexus-tk070.p6a, RDR-194 § D5,
+                    // seed-coverage lint follow-up): the ttl=0 DELETE arm must actually
+                    // fire under FORCE-RLS (not silently no-op like the v0.1.33 class),
+                    // the NULL-ttl KEEP arm must survive untouched (selective, not a
+                    // blanket wipe), the column must be renamed ttl -> ttl_days, and the
+                    // CHECK must exist at HEAD.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.memory WHERE tenant_id = 't1' "
+                        + "AND project = 'p6a-proj' AND title = 'p6a-zero'"))
+                        .as("memory-003-1's counted DELETE must actually remove the seeded "
+                            + "ttl=0 row -- the DELETE arm")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.memory WHERE tenant_id = 't1' "
+                        + "AND project = 'p6a-proj' AND title = 'p6a-permanent' "
+                        + "AND ttl_days IS NULL"))
+                        .as("the NULL-ttl (permanent) decoy row must survive memory-003-1's "
+                            + "DELETE untouched -- the KEEP arm, proving the DELETE is "
+                            + "selective on ttl=0 and not a blanket wipe")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM information_schema.columns WHERE table_schema = "
+                        + "'nexus' AND table_name = 'memory' AND column_name = 'ttl_days'"))
+                        .as("nexus.memory.ttl must be renamed to ttl_days at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'memory_ttl_days_positive_chk'"))
+                        .as("memory_ttl_days_positive_chk must exist at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity "
+                        + "AND oid = 'nexus.memory'::regclass"))
+                        .as("FORCE ROW LEVEL SECURITY restored on nexus.memory after "
+                            + "memory-003-1's own toggle-wrap")
+                        .isEqualTo(1);
+
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.plans WHERE tenant_id = 't1' "
+                        + "AND project = 'p6a-proj' AND query = 'p6a zero query'"))
+                        .as("plans-003-1's counted DELETE must actually remove the seeded "
+                            + "ttl=0 row -- the DELETE arm")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.plans WHERE tenant_id = 't1' "
+                        + "AND project = 'p6a-proj' AND query = 'p6a permanent query' "
+                        + "AND ttl_days IS NULL"))
+                        .as("the NULL-ttl (permanent) decoy row must survive plans-003-1's "
+                            + "DELETE untouched -- the KEEP arm")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM information_schema.columns WHERE table_schema = "
+                        + "'nexus' AND table_name = 'plans' AND column_name = 'ttl_days'"))
+                        .as("nexus.plans.ttl must be renamed to ttl_days at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'plans_ttl_days_positive_chk'"))
+                        .as("plans_ttl_days_positive_chk must exist at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity "
+                        + "AND oid = 'nexus.plans'::regclass"))
+                        .as("FORCE ROW LEVEL SECURITY restored on nexus.plans after "
+                            + "plans-003-1's own toggle-wrap")
+                        .isEqualTo(1);
                 }
             }
         } finally {
@@ -1687,6 +1781,49 @@ class SchemaUpgradeRehearsalIntegrationTest {
             ps.setString(1, tenant);
             ps.setString(2, query);
             ps.setString(3, chunkId);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A {@code nexus.memory} row (nexus-tk070.p6a, memory-003-1). {@code ttl}
+     * null seeds the KEEP arm (permanent); {@code 0} seeds the DELETE arm
+     * (unrepresentable under the new {@code ttl_days} CHECK).
+     */
+    private static void seedMemoryRow(Connection c, String tenant, String project,
+                                       String title, Integer ttl) throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.memory (tenant_id, project, title, content, timestamp, ttl) "
+            + "VALUES (?, ?, ?, 'content', now(), ?)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, project);
+            ps.setString(3, title);
+            if (ttl == null) {
+                ps.setNull(4, java.sql.Types.INTEGER);
+            } else {
+                ps.setInt(4, ttl);
+            }
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A {@code nexus.plans} row (nexus-tk070.p6a, plans-003-1) — same
+     * DELETE/KEEP-arm {@code ttl} choice as {@link #seedMemoryRow}.
+     */
+    private static void seedPlanRow(Connection c, String tenant, String project,
+                                     String query, Integer ttl) throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.plans (tenant_id, project, query, plan_json, created_at, ttl) "
+            + "VALUES (?, ?, ?, '{}'::jsonb, now(), ?)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, project);
+            ps.setString(3, query);
+            if (ttl == null) {
+                ps.setNull(4, java.sql.Types.INTEGER);
+            } else {
+                ps.setInt(4, ttl);
+            }
             ps.executeUpdate();
         }
     }

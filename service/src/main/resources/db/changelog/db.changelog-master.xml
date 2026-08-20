@@ -830,6 +830,37 @@
          this file's content, not its position (D0.1). -->
     <include file="db/changelog/migration-002-tenant-pk.xml"/>
 
+    <!-- nexus-tk070.p6a (RDR-194 D5, P6a) — nexus.memory.ttl -> ttl_days,
+         CHECK (ttl_days IS NULL OR ttl_days > 0). Counted DELETE of
+         pre-existing ttl=0 rows (RAISE NOTICE'd, RLS toggle-wrapped so
+         FORCE RLS cannot hide rows), then RENAME COLUMN, then ADD CHECK —
+         see the file's own header for the full disposition (ttl=0 meant
+         "expire on next sweep", the opposite of the documented
+         NULL=permanent contract; only NULL can be defended by a CHECK).
+         Client pairing: ships with MemoryHandler's boundary-400 rejection
+         of ttl=0 and the MCP core.py coercion deletion, same commit — the
+         docs/wire-contract-pending.md ## Unshipped entry is added in the
+         immediately-following commit (this commit's own sha is not known
+         until it exists; see memory-003-ttl-days.xml's own header for the
+         full pairing derivation). Placed after migration-002-tenant-
+         pk.xml (current tail) and before the grants-nexus-svc.xml
+         runAlways block (D0.1). -->
+    <include file="db/changelog/memory-003-ttl-days.xml"/>
+
+    <!-- nexus-tk070.p6a (RDR-194 D5, P6a) — nexus.plans.ttl -> ttl_days,
+         CHECK (ttl_days IS NULL OR ttl_days > 0). Same shape as this
+         bead's sibling memory-003-ttl-days.xml (counted DELETE, RAISE
+         NOTICE'd, RLS toggle-wrapped, then RENAME, then ADD CHECK) — see
+         the file's own header: plans.ttl=0 meant "hidden from every read,
+         forever, never swept", a THIRD distinct consequence for the same
+         written value across the schema's three TTL columns, the
+         strongest single argument for the CHECK. No new engine-side
+         boundary validation added to PlanHandler (scope decision recorded
+         in the file's own header — plan_save never had memory_put's
+         coercion bug). Placed after memory-003-ttl-days.xml and before the
+         grants-nexus-svc.xml runAlways block (D0.1). -->
+    <include file="db/changelog/plans-003-ttl-days.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

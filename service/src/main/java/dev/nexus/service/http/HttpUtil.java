@@ -235,10 +235,12 @@ public final class HttpUtil {
             String constraint = constraintName(e);
             log.warn("event={}_integrity_violation {} sqlstate={} constraint={} error={}",
                 event, context, sqlState, constraint, e.getMessage());
+            String remedy = ttlDaysCheckRemedy(constraint);
             send(exchange, 409,
                 "{\"error\":\"integrity constraint violation\",\"sqlstate\":"
                 + jsonString(sqlState)
                 + (constraint == null ? "" : ",\"constraint\":" + jsonString(constraint))
+                + (remedy == null ? "" : ",\"remedy\":" + jsonString(remedy))
                 + "}");
             return true;
         }
@@ -277,6 +279,37 @@ public final class HttpUtil {
      */
     static String constraintName(Throwable e) {
         return dev.nexus.service.db.SqlConstraints.violated(e);
+    }
+
+    /**
+     * A caller-facing remedy hint for a {@code *_ttl_days_positive_chk}
+     * violation, or {@code null} for any other constraint (nexus-tk070.p6a
+     * fix-pass, substantive-critic MINOR finding, 2026-08-20).
+     *
+     * <p>{@code memory_ttl_days_positive_chk} (memory-003-ttl-days.xml) and
+     * {@code plans_ttl_days_positive_chk} (plans-003-ttl-days.xml) both mean
+     * the identical thing: {@code ttl_days<=0} was rejected. {@code memory}'s
+     * {@code /put}/{@code /put_or_merge} paths never reach this branch at all
+     * — {@code MemoryHandler.requirePositiveOrNullTtl} rejects the same input
+     * earlier, with a 400 that already names the fix. {@code plans} has no
+     * such boundary validation by design (RDR-194 D5 names only memory_put +
+     * frecency as needing a NEW loud rejection — see plans-003-ttl-days.xml's
+     * header for that scope decision), so an explicit {@code ttl=0} to
+     * {@code POST /v1/plans/save} falls all the way through to THIS class-23
+     * branch and got only a bare "integrity constraint violation" + the raw
+     * constraint name — diagnosable by a developer, not self-explanatory to a
+     * caller. A wildcard match on the constraint-name SUFFIX (rather than an
+     * enumerated {@code memory}/{@code plans} pair) covers every current and
+     * future {@code ttl_days} CHECK the same way, mirroring
+     * {@link #pipelineConflict}'s own textual remedy field rather than
+     * inventing a new response shape.
+     */
+    static String ttlDaysCheckRemedy(String constraint) {
+        if (constraint != null && constraint.endsWith("_ttl_days_positive_chk")) {
+            return "ttl_days must be omitted, null, or a positive integer number "
+                + "of days — 0 does NOT mean permanent; null does";
+        }
+        return null;
     }
 
     /**

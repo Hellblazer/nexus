@@ -54,7 +54,7 @@ class PlansSchemaLiquibaseTest {
     // 23 mirrored plan_library columns + tenant_id + fts_vector = 25 total.
     private static final Set<String> EXPECTED_COLUMNS = Set.of(
         "id", "tenant_id", "project", "query", "plan_json", "outcome", "tags",
-        "created_at", "ttl", "name", "verb", "scope", "dimensions",
+        "created_at", "ttl_days", "name", "verb", "scope", "dimensions",
         "default_bindings", "parent_dims", "use_count", "last_used",
         "match_count", "match_conf_sum", "success_count", "failure_count",
         "scope_tags", "match_text", "disabled_at",

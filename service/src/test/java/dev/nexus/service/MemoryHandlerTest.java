@@ -184,37 +184,67 @@ class MemoryHandlerTest {
         assertThat(body.get("content")).isEqualTo("content A");
     }
 
-    // ── nexus-cg13x: ttl <= 0 is coerced to NULL (permanent) ─────────────────
+    // ── nexus-tk070.p6a (RDR-194 D5): ttl <= 0 is a loud 400, not a silent
+    //    coercion to NULL (retires nexus-cg13x's coercePermanentTtl) ─────────
 
     @Test
-    void put_ttlZeroIsCoercedToPermanentNull() throws Exception {
-        // ttl=0 does NOT mean permanent: expire() filters WHERE ttl IS NOT NULL
-        // and computes effective_ttl = ttl * (1 + log(access_count + 1)), so a
-        // stored 0 is deleted by the very next sweep. This destroyed
-        // nexus/deployed-engine-version repeatedly — each write returning 200
-        // with a row id, each immediate read-back passing, the row gone once a
-        // sweep ran. MCP always coerced; direct POSTers inherited the footgun.
+    void put_ttlZeroIsRejectedWith400() throws Exception {
+        // ttl=0 does NOT mean permanent: expire() filters WHERE ttl_days IS NOT
+        // NULL and computes effective_ttl = ttl_days * (1 + log(access_count +
+        // 1)), so a stored 0 would be deleted by the very next sweep. This
+        // destroyed nexus/deployed-engine-version repeatedly — each write
+        // returning 200 with a row id, each immediate read-back passing, the
+        // row gone once a sweep ran. MCP used to coerce silently; the engine
+        // itself also used to coerce (coercePermanentTtl) so direct POSTers
+        // inherited the footgun anyway. Both coercions are retired: the engine
+        // now rejects loudly, naming the fix, for EVERY caller.
+        //
+        // FALSIFICATION (bead nexus-tk070.p6a TDD ask): this test exercises
+        // MemoryHandler's own boundary validation, NOT the DB CHECK — deleting
+        // the memory_ttl_days_positive_chk constraint (memory-003-ttl-days.xml)
+        // does NOT make this test fail, because the rejection happens in Java
+        // before any SQL runs. The CHECK is proven independently by
+        // MemoryRepositoryTest's upsert_ttlZero_violatesCheckConstraintDirectly
+        // AtRepositoryLayer, which calls MemoryRepository directly, bypassing
+        // this handler entirely. The two layers are tested SEPARATELY on
+        // purpose (see requirePositiveOrNullTtl's javadoc for the full
+        // reconciliation).
         var putResp = post("/v1/memory/put", TENANT,
             "{\"project\":\"ttl0-proj\",\"title\":\"perm\",\"content\":\"keep me\",\"ttl\":0}");
-        assertThat(putResp.statusCode()).isEqualTo(200);
+        assertThat(putResp.statusCode())
+            .as("ttl=0 must be rejected with a 400, never silently accepted")
+            .isEqualTo(400);
+        var body = mapper.readValue(putResp.body(), MAP_T);
+        assertThat((String) body.get("error"))
+            .as("the 400 must NAME THE FIX (omit ttl or pass null), not just say 'invalid'")
+            .contains("ttl=0")
+            .containsIgnoringCase("null")
+            .containsIgnoringCase("permanent");
 
-        var resp = get("/v1/memory/get?project=ttl0-proj&title=perm", TENANT);
-        assertThat(resp.statusCode()).isEqualTo(200);
-        var body = mapper.readValue(resp.body(), MAP_T);
-        assertThat(body.get("ttl"))
-            .as("ttl=0 must be stored as NULL (permanent), not as 0 (expire immediately)")
-            .isNull();
+        // Non-vacuity: the rejected row must not exist at all (no partial write).
+        assertThat(get("/v1/memory/get?project=ttl0-proj&title=perm", TENANT).statusCode())
+            .as("a rejected put must not leave a row behind")
+            .isEqualTo(404);
     }
 
     @Test
-    void put_negativeTtlIsAlsoCoerced() throws Exception {
+    void put_negativeTtlIsAlsoRejectedWith400() throws Exception {
         var putResp = post("/v1/memory/put", TENANT,
             "{\"project\":\"ttlneg-proj\",\"title\":\"perm\",\"content\":\"x\",\"ttl\":-5}");
-        assertThat(putResp.statusCode()).isEqualTo(200);
+        assertThat(putResp.statusCode()).isEqualTo(400);
+        var body = mapper.readValue(putResp.body(), MAP_T);
+        assertThat((String) body.get("error")).contains("ttl=-5");
+    }
 
-        var body = mapper.readValue(
-            get("/v1/memory/get?project=ttlneg-proj&title=perm", TENANT).body(), MAP_T);
-        assertThat(body.get("ttl")).isNull();
+    @Test
+    void putOrMerge_ttlZeroIsAlsoRejectedWith400() throws Exception {
+        // Same boundary validation applies on the /put_or_merge path
+        // (requirePositiveOrNullTtl is shared by both handlers).
+        var resp = post("/v1/memory/put_or_merge", TENANT,
+            "{\"project\":\"ttl0-pom-proj\",\"title\":\"perm\",\"content\":\"keep me\",\"ttl\":0}");
+        assertThat(resp.statusCode()).isEqualTo(400);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat((String) body.get("error")).contains("ttl=0");
     }
 
     @Test
@@ -832,6 +862,50 @@ class MemoryHandlerTest {
         var body = mapper.readValue(get("/v1/memory/get?id=" + id, TENANT).body(), MAP_T);
         assertThat(body.get("content")).isEqualTo("never-accessed content");
         assertThat(body.get("timestamp")).isEqualTo("2026-04-01T06:00:00Z");
+    }
+
+    /**
+     * nexus-tk070.p6a fix-pass (substantive-critic SIGNIFICANT finding,
+     * 2026-08-20): a single legacy ttl=0 row must NOT abort the whole
+     * /import_batch — before this fix, one CHECK violation deep inside the
+     * batch's single multi-row INSERT rolled back every row, valid or not.
+     * The row must be SKIPPED (loudly, counted), never silently coerced to
+     * NULL (that would resurrect data the source considered already-dead —
+     * see requirePositiveOrNullTtl's javadoc: a memory ttl=0 row was ALREADY
+     * scheduled for deletion by the next expire() sweep, the same
+     * disposition memory-003-ttl-days.xml's own migration applies).
+     */
+    @Test
+    void importBatch_ttlZeroRow_skippedNotAbort_validRowsLand() throws Exception {
+        var resp = post("/v1/memory/import_batch", TENANT,
+            """
+            {"rows": [
+              {"project":"import-batch-skip","title":"valid-1","content":"c1",
+               "timestamp":"2026-05-01T00:00:00Z","ttl":30},
+              {"project":"import-batch-skip","title":"legacy-zero","content":"c2",
+               "timestamp":"2026-05-01T00:00:00Z","ttl":0},
+              {"project":"import-batch-skip","title":"valid-2","content":"c3",
+               "timestamp":"2026-05-01T00:00:00Z"}
+            ]}
+            """);
+        assertThat(resp.statusCode())
+            .as("a ttl=0 row must not abort the batch — the two valid rows must land")
+            .isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(((Number) body.get("imported")).intValue())
+            .as("only the two valid rows were actually inserted")
+            .isEqualTo(2);
+        assertThat(((Number) body.get("skipped_ttl_zero")).intValue())
+            .as("the skip must be COUNTED and reported, not silently absorbed")
+            .isEqualTo(1);
+
+        assertThat(get("/v1/memory/get?project=import-batch-skip&title=valid-1", TENANT).statusCode())
+            .isEqualTo(200);
+        assertThat(get("/v1/memory/get?project=import-batch-skip&title=valid-2", TENANT).statusCode())
+            .isEqualTo(200);
+        assertThat(get("/v1/memory/get?project=import-batch-skip&title=legacy-zero", TENANT).statusCode())
+            .as("the skipped row must not have been written — not even with ttl coerced to NULL")
+            .isEqualTo(404);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

@@ -331,6 +331,16 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         ("taxonomy-014-3", "nexus-tk070.p5a"),
         ("taxonomy-014-4", "nexus-tk070.p5a"),
         ("taxonomy-014-5", "nexus-tk070.p5a"),
+        # nexus-tk070.p6a (RDR-194 § D5): memory-003-1 / plans-003-1's
+        # counted DELETE of ttl=0 rows, the same NO FORCE/FORCE toggle-wrap
+        # shape as catalog-013-1b/catalog-014-0/catalog-025-0/catalog-029-1/
+        # catalog-032-1/legacy-001-1/legacy-001-2. Seeded as one ttl=0 row
+        # (DELETE arm) and one NULL-ttl row (KEEP arm, permanent) per table;
+        # effect-asserted (the ttl=0 rows are gone, the NULL-ttl rows
+        # survive, both columns renamed to ttl_days, both CHECK constraints
+        # exist, FORCE restored on both tables).
+        ("memory-003-1", "nexus-tk070.p6a"),
+        ("plans-003-1", "nexus-tk070.p6a"),
     }
 )
 

@@ -123,13 +123,6 @@ def test_expire_returns_zero_on_fresh_db(db: T2Database) -> None:
     ("stale.md",     1,    2,  0, 1, True),
     ("fresh.md",     30,   0,  0, 0, False),
     ("permanent.md", None, 1000, 0, 0, False),
-    # nexus-cg13x: ttl=0 through put() is PERMANENT, not expire-immediately.
-    # The store's expire() still treats a STORED 0 as expire-immediately
-    # (WHERE ttl IS NOT NULL, effective_ttl = 0), but put() — MCP and the
-    # engine's POST /v1/memory/put alike — now coerces ttl <= 0 to NULL, so a
-    # 0 can no longer REACH the column through this path. This row previously
-    # asserted the footgun that destroyed nexus/deployed-engine-version.
-    ("zero.md",      0,    0, 60, 0, False),
     ("recent.md",    30,  29,  0, 0, False),
 ])
 def test_expire_scenarios(
@@ -145,6 +138,27 @@ def test_expire_scenarios(
         assert db.get(project="proj", title=title) is None
     else:
         assert db.get(project="proj", title=title) is not None
+
+
+def test_put_ttl_zero_is_rejected_not_coerced(db: T2Database) -> None:
+    """nexus-tk070.p6a (RDR-194 D5): ttl=0 through put() is REJECTED, not
+    silently coerced to permanent.
+
+    Superseded scenario: this row used to live in ``test_expire_scenarios``
+    as ``("zero.md", 0, 0, 60, 0, False)``, asserting that a stored ``ttl=0``
+    row survived ``expire()`` untouched — because the ENGINE'S
+    ``MemoryHandler.coercePermanentTtl`` silently rewrote ``ttl<=0`` to NULL
+    before the row ever reached the column. That coercion is retired (RDR-194
+    A13: "a correctness contract enforced by one client is not enforced").
+    ``db.put()`` is the "store API" bypass path itself (T2Database, not the
+    MCP tool) — proving this here is the direct Python-level analogue of the
+    Java ``MemoryHandlerTest.put_ttlZeroIsRejectedWith400`` boundary test.
+    """
+    with pytest.raises(Exception, match=r"ttl=0"):
+        db.put(project="proj", title="zero.md", content="data", ttl=0)
+    assert db.get(project="proj", title="zero.md") is None, (
+        "a rejected put must not leave a row behind"
+    )
 
 
 # ── list_entries with agent filter ───────────────────────────────────────────
