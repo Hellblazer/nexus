@@ -404,6 +404,19 @@ test against the engine substrate, not a mock.
 into the in-flight release). Argv now always carries `--strict-mcp-config`; tool-free default =>
 zero servers, opt-in `mcp_servers` => only those.** RDR-196 does not re-implement it; Phase 1's
 telemetry records the post-fix baseline.
+
+> **CORRECTION (2026-08-20, plan audit fold — nexus-nyry9.6 / epic comment):** "LANDED" holds
+> for `claude_dispatch` only. `src/nexus/aspect_extractor.py:1559` runs its OWN
+> `["claude", "-p", "--output-format", "json"]` subprocess that never goes through
+> `claude_dispatch`, so Gap 4 is NOT closed for `nx enrich aspects` (one of the four consumers
+> this gap names): every aspect extraction still loads the ambient MCP set (196-R2's ~2x,
+> $1.84 vs $0.91) and still uses the buffered `json` output mode whose partial-output capture
+> h33x8.6 proved structurally vacuous (dispatch.py moved to stream-json at dca12e1e3; this site
+> did not). Phase 1's `.p1a` envelope capture therefore cannot reach it either. Bead
+> nexus-nyry9.6 owns the scope decision (Option A, recommended: re-route through
+> `claude_dispatch`, fixing all three at once; blast radius `nx enrich aspects` +
+> `daemon/aspect_worker_daemon.py`; Option B leaves two consequences open and requires
+> follow-up beads, not prose).
 #### Step 2: replace `_PER_PAPER_COST_USD` literal with a measured per-dispatch figure (or derive from Phase 1 history once available)
 
 ### Phase 1: Measure
