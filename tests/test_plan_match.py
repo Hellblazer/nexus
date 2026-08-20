@@ -128,6 +128,189 @@ def test_plan_match_returns_top_n(library) -> None:
 # ── FTS5 fallback (SC-11) ───────────────────────────────────────────────────
 
 
+# ── nexus-h33x8.6 a2: verbatim-repeat exact-match path ─────────────────────
+#
+# Root cause (T2 nexus/nx-answer-capability-analysis-2026-08-19, live run
+# row 382, 2026-08-19): a VERBATIM repeat of the question that grew plan
+# 357 five days earlier missed the plan-match gate. The grown plan's
+# stored ``query`` field already carries the ORIGINAL question verbatim
+# (nx_answer's plan-grow step passes ``query=question``) -- but the T1
+# cosine cache embeds a HYBRID match-text (``"<query>. <verb> <name>
+# scope <scope>"``, see ``nexus.plans.match_text``), and that extra
+# scaffolding dilutes the cosine score enough that a diluted-but-relevant
+# exact-repeat candidate can score BELOW an unrelated candidate that
+# scores >= min_confidence. Since the T1 path returns early as soon as
+# ANY candidate clears the threshold (never reaching the FTS5 fallback),
+# the exact-repeat candidate is dropped entirely.
+#
+# Fix: a cheap string comparison (casefold + whitespace-collapse) against
+# each candidate's stored ``query`` field, evaluated BEFORE the
+# min_confidence gate. A hit forces confidence=1.0, which — by
+# construction — clears every downstream floor (min_confidence,
+# the grown-plan 0.55 floor) without special-casing them.
+
+
+def test_verbatim_repeat_of_grown_plan_question_wins_over_unrelated_higher_cosine_hit(
+    library,
+) -> None:
+    """Reproduces the deep-analyst's live-run defect deterministically:
+    an exact-repeat candidate scores far below threshold on raw cosine
+    (distance 1.9) while an unrelated candidate clears it comfortably
+    (distance 0.5) -- pre-fix the unrelated candidate wins and the T1
+    path returns early, silently dropping the exact repeat."""
+    from nexus.plans.matcher import plan_match
+
+    question = "What is the chunk identity convention used for T3 chunks?"
+    grown_id = _seed(
+        library, query=question, tags="ad-hoc,grown",
+        dimensions={"verb": "research", "strategy": "chunk-identity-convention-used-t3"},
+    )
+    unrelated_id = _seed(
+        library, query="generic unrelated plan about release cadence",
+        dimensions={"verb": "research", "strategy": "generic"},
+    )
+    cache = _FakeCache(hits=[(unrelated_id, 0.5), (grown_id, 1.9)])
+
+    matches = plan_match(
+        intent=question, library=library, cache=cache,
+        dimensions={"verb": "research"}, min_confidence=0.40, n=5,
+    )
+
+    assert matches, "verbatim repeat produced no matches at all"
+    assert matches[0].plan_id == grown_id, (
+        f"verbatim repeat of the plan's own recorded question did not win "
+        f"-- top match was plan {matches[0].plan_id} "
+        f"(confidence={matches[0].confidence})"
+    )
+    assert matches[0].confidence == 1.0
+
+
+def test_verbatim_repeat_is_normalized_case_and_whitespace(library) -> None:
+    """'Trivially normalized' per the fix direction: casefold +
+    whitespace-collapse, not byte-exact equality."""
+    from nexus.plans.matcher import plan_match
+
+    stored_question = "what is the chunk identity convention?"
+    grown_id = _seed(
+        library, query=stored_question, tags="ad-hoc,grown",
+        dimensions={"verb": "research"},
+    )
+    cache = _FakeCache(hits=[(grown_id, 1.9)])
+
+    matches = plan_match(
+        intent="  What   IS the Chunk Identity   convention?  ",
+        library=library, cache=cache,
+        dimensions={"verb": "research"}, min_confidence=0.40,
+    )
+
+    assert matches and matches[0].plan_id == grown_id
+    assert matches[0].confidence == 1.0
+
+
+def test_non_verbatim_low_confidence_still_filtered(library) -> None:
+    """The 0.40 cosine gate for NON-verbatim phrasings must stay
+    unchanged -- the fix direction explicitly forbids lowering it."""
+    from nexus.plans.matcher import plan_match
+
+    grown_id = _seed(
+        library, query="what is the chunk identity convention?",
+        dimensions={"verb": "research"},
+    )
+    cache = _FakeCache(hits=[(grown_id, 1.9)])  # low cosine, NOT a verbatim repeat
+
+    matches = plan_match(
+        intent="totally unrelated question about release cadence",
+        library=library, cache=cache,
+        dimensions={"verb": "research"}, min_confidence=0.40,
+    )
+
+    assert matches == []
+
+
+def test_always_failing_grown_plan_not_force_matched_even_verbatim(library) -> None:
+    """nexus-vtp8h's always-failing skip must still apply -- an exact
+    text match on a plan that only ever crashes must not be force-fed
+    back to the runner."""
+    from nexus.plans.matcher import plan_match
+
+    question = "what is the chunk identity convention?"
+    grown_id = _seed(
+        library, query=question, tags="ad-hoc,grown",
+        dimensions={"verb": "research"},
+    )
+    for _ in range(3):
+        library.increment_run_outcome(grown_id, success=False)
+    cache = _FakeCache(hits=[(grown_id, 1.9)])
+
+    matches = plan_match(
+        intent=question, library=library, cache=cache,
+        dimensions={"verb": "research"}, min_confidence=0.40,
+    )
+
+    assert matches == []
+
+
+def test_verbatim_repeat_still_respects_scope_conflict(library) -> None:
+    """A verbatim repeat must NOT bypass the scope-conflict filter --
+    the exact-match override only concerns the CONFIDENCE floor, not
+    scope admissibility."""
+    from nexus.plans.matcher import plan_match
+
+    question = "what is the chunk identity convention?"
+    grown_id = _seed(
+        library, query=question, tags="ad-hoc,grown",
+        dimensions={"verb": "research"}, scope_tags="rdr__other-project",
+    )
+    cache = _FakeCache(hits=[(grown_id, 1.9)])
+
+    matches = plan_match(
+        intent=question, library=library, cache=cache,
+        dimensions={"verb": "research"}, min_confidence=0.40,
+        scope_preference="rdr__this-project",
+    )
+
+    assert matches == []
+
+
+def test_verbatim_repeat_records_raw_cosine_not_forced_one_to_match_conf_sum(
+    library,
+) -> None:
+    """substantive-critic SIGNIFICANT #2 (T2 substantive-critique-
+    nexus-h33x8.6-a4-a2-2026-08-19): the verbatim-repeat override forces
+    ``Match.confidence`` to 1.0 for GATING purposes only (clearing the
+    min_confidence / grown-plan floors). It must NOT flow the synthetic
+    1.0 into ``increment_match_metrics`` -- that permanently accumulates
+    into the plan's ``match_conf_sum`` column, which RDR-196's future
+    confidence-band plan selection reads as genuine embedding-quality
+    signal. The RAW cosine score (computed from the T1 cache's real
+    distance, before the override) must reach the metrics call instead.
+    """
+    from unittest.mock import patch
+    from nexus.plans.matcher import plan_match
+
+    question = "what is the chunk identity convention?"
+    grown_id = _seed(
+        library, query=question, tags="ad-hoc,grown",
+        dimensions={"verb": "research"},
+    )
+    # distance 1.9 -> raw cosine confidence = max(0.0, 1.0 - 1.9) = 0.0
+    cache = _FakeCache(hits=[(grown_id, 1.9)])
+
+    with patch.object(library, "increment_match_metrics") as mock_incr:
+        matches = plan_match(
+            intent=question, library=library, cache=cache,
+            dimensions={"verb": "research"}, min_confidence=0.40,
+        )
+
+    assert matches and matches[0].plan_id == grown_id
+    # Gating confidence stays forced -- unchanged from the existing
+    # verbatim-repeat contract, still needed so the plan clears the
+    # caller's threshold.
+    assert matches[0].confidence == 1.0
+
+    mock_incr.assert_called_once_with(grown_id, confidence=0.0)
+
+
 def test_plan_match_t1_unavailable_falls_back_to_fts5(library) -> None:
     from nexus.plans.matcher import plan_match
 

@@ -2275,3 +2275,438 @@ class TestEmptyRetrievalGuard:
     def test_empty_retrieval_guard(self, steps, expected):
         from nexus.mcp.core import _nx_answer_is_empty_retrieval
         assert _nx_answer_is_empty_retrieval(steps) is expected
+
+
+# ── nexus-h33x8.6 a4: hard time budget + partial results ────────────────────
+#
+# Contract (T2 nexus/nx-answer-capability-analysis-2026-08-19, converged
+# with RDR-196 §Approach): nx_answer accepts an OPTIONAL wall-clock
+# ``budget_seconds``. Default unset ("generous/off") reproduces existing
+# behavior exactly. When plan_run reports a budget cutoff
+# (``PlanResult.budget_exhausted_at_step``), nx_answer returns the
+# retrieved results plus any reconstructed partial operator text instead
+# of the normal final-step extraction, marked with a leading
+# ``[budget exhausted after step N of M — partial answer]`` line in text
+# mode and a ``budget_exhausted_at_step`` top-level field in structured
+# mode.
+
+
+class TestNxAnswerBudgetSeconds:
+
+    def test_default_is_off(self):
+        """The parameter defaults to None (no budget enforced) — the
+        module-level constant documents the default explicitly."""
+        import inspect
+        from nexus.mcp.core import nx_answer, _NX_ANSWER_DEFAULT_BUDGET_SECONDS
+
+        assert _NX_ANSWER_DEFAULT_BUDGET_SECONDS is None
+        sig = inspect.signature(nx_answer)
+        assert "budget_seconds" in sig.parameters
+        assert sig.parameters["budget_seconds"].default is None
+
+    @pytest.mark.asyncio
+    async def test_unset_budget_does_not_pass_a_deadline_to_plan_run(self, tmp_path):
+        """Regression: omitting budget_seconds must leave plan_run's
+        deadline kwarg at None — proves the default truly changes
+        nothing for existing callers."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(steps=[{"text": "answer"}])
+        captured: dict = {}
+
+        async def _spy(match, bindings, **kwargs):
+            captured.update(kwargs)
+            return run_result
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(side_effect=_spy)),
+        ):
+            from nexus.mcp.core import nx_answer
+            await nx_answer("q")
+
+        assert captured.get("deadline") is None
+
+    @pytest.mark.asyncio
+    async def test_explicit_budget_passes_a_deadline_to_plan_run(self, tmp_path):
+        """budget_seconds=N must translate to a real monotonic deadline
+        passed through to plan_run for an operator-bearing plan."""
+        import time
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)  # search + operator_summarize
+        run_result = PlanResult(steps=[{"text": "answer"}])
+        captured: dict = {}
+
+        async def _spy(match, bindings, **kwargs):
+            captured.update(kwargs)
+            return run_result
+
+        before = time.monotonic()
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(side_effect=_spy)),
+        ):
+            from nexus.mcp.core import nx_answer
+            await nx_answer("q", budget_seconds=30.0)
+        after = time.monotonic()
+
+        deadline = captured.get("deadline")
+        assert deadline is not None
+        assert before + 30.0 <= deadline <= after + 30.0
+
+    @pytest.mark.asyncio
+    async def test_retrieval_only_plan_exempt_from_budget_deadline(self, tmp_path):
+        """nexus-h33x8.6 a4 fold-in: a retrieval_only-classified plan has
+        no operator floor to protect against, so it must NOT receive a
+        deadline even when the caller supplied budget_seconds."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        retrieval_only_match = _make_match(
+            confidence=0.75,
+            plan_json=json.dumps({
+                "steps": [
+                    {"tool": "search", "args": {"query": "$intent"}},
+                    {"tool": "query", "args": {"question": "$intent"}},
+                ],
+            }),
+        )
+        run_result = PlanResult(steps=[{"text": "answer"}])
+        captured: dict = {}
+
+        async def _spy(match, bindings, **kwargs):
+            captured.update(kwargs)
+            return run_result
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[retrieval_only_match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(side_effect=_spy)),
+        ):
+            from nexus.mcp.core import nx_answer
+            await nx_answer("q", budget_seconds=5.0)
+
+        assert captured.get("deadline") is None, (
+            "retrieval_only plans must skip the a4 budget deadline entirely"
+        )
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_returns_marker_text_not_raw_error(self, tmp_path):
+        """A budget-exhausted PlanResult must produce the documented
+        marker line, not the normal final-step extraction and not a
+        raised exception."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)  # 2-step plan: search, operator_summarize
+        run_result = PlanResult(
+            steps=[{"ids": ["a", "b"], "tumblers": [], "distances": [0.1, 0.2],
+                    "collections": ["knowledge"]}],
+            budget_exhausted_at_step=2,
+            total_planned_steps=2,
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q", budget_seconds=20.0)
+
+        assert isinstance(result, str)
+        assert "[budget exhausted after step 2 of 2 — partial answer]" in result
+        assert "a" in result and "b" in result  # retrieved chunk ids surfaced
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_includes_partial_operator_text(self, tmp_path):
+        """The reconstructed OperatorTimeoutError.partial_text (captured
+        by plan_run into the terminal sentinel) must reach the final
+        answer text, not be silently dropped."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(
+            steps=[
+                {"ids": ["a"], "tumblers": [], "distances": [0.1], "collections": ["knowledge"]},
+                {"status": "timeout", "partial_text": "reconstructed partial synthesis",
+                 "event_count": 5, "text": "reconstructed partial synthesis",
+                 "summary": "", "aggregates": [], "error": "timed out",
+                 "tool": "operator_summarize", "step_index": 1},
+            ],
+            budget_exhausted_at_step=2,
+            total_planned_steps=2,
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q", budget_seconds=20.0)
+
+        assert "reconstructed partial synthesis" in result
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_structured_envelope_carries_marker_field(self, tmp_path):
+        """structured=True must surface budget_exhausted_at_step as a
+        top-level envelope field per the RDR-196 marker convention."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(
+            steps=[{"ids": ["a"], "tumblers": [], "distances": [0.1], "collections": ["knowledge"]}],
+            budget_exhausted_at_step=2,
+            total_planned_steps=2,
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q", budget_seconds=20.0, structured=True)
+
+        assert isinstance(result, dict)
+        assert result["budget_exhausted_at_step"] == 2
+        assert "[budget exhausted after step 2 of 2" in result["final_text"]
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_marker_uses_plan_result_total_planned_steps_field(
+        self, tmp_path,
+    ):
+        """code-review-expert Important (T2 code-review-nexus-h33x8.6-
+        a4-a2-2026-08-19): the marker's 'of M' must come from
+        ``PlanResult.total_planned_steps`` -- the field a4 added
+        specifically so callers don't re-parse ``best.plan_json`` --
+        not from a fresh re-parse. Deliberately diverges the two
+        sources (2-step plan_json vs total_planned_steps=5) so a
+        re-parse would produce the WRONG number and this test would
+        catch it."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)  # plan_json describes 2 steps
+        run_result = PlanResult(
+            steps=[{"ids": ["a"], "tumblers": [], "distances": [0.1], "collections": ["knowledge"]}],
+            budget_exhausted_at_step=2,
+            total_planned_steps=5,  # deliberately NOT what plan_json would yield
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q", budget_seconds=20.0)
+
+        assert "[budget exhausted after step 2 of 5 — partial answer]" in result, (
+            f"expected total_planned_steps=5 (from PlanResult) in the marker, "
+            f"got: {result!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_budget_seconds_silently_bypassed_by_miss_plus_retrieval_only_combo(
+        self, tmp_path,
+    ):
+        """PIN TEST (substantive-critic SIGNIFICANT #1, T2 substantive-
+        critique-nexus-h33x8.6-a4-a2-2026-08-19): budget_seconds does
+        NOT bound the plan-miss inline-planner phase (deliberately --
+        it has its own up-to-300s timeout, unrelated to this budget),
+        and a retrieval_only-classified plan is exempt from the a4
+        deadline even after a miss (deliberately -- no operator floor
+        to protect). Combined, a caller can supply budget_seconds and
+        get a run that is END-TO-END UNBOUNDED by it -- no marker, no
+        exception, plain success text -- because NEITHER boundary
+        individually looks like a bug.
+
+        This is DOCUMENTED, ACCEPTED behavior (see nx_answer's
+        budget_seconds docstring), not something this test fixes. Its
+        job is to go RED if a future half-fix changes just ONE side of
+        the combo (e.g. threading a deadline into the miss path while
+        leaving the retrieval_only exemption in place, or vice versa)
+        without addressing the combination honestly.
+        """
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        retrieval_only_match = _make_match(
+            plan_id=0, confidence=None,
+            plan_json=json.dumps({
+                "steps": [
+                    {"tool": "search", "args": {"query": "$intent"}},
+                    {"tool": "query", "args": {"question": "$intent"}},
+                ],
+            }),
+        )
+        run_result = PlanResult(steps=[{"text": "a normal completed answer"}])
+        captured: dict = {}
+
+        async def _spy(match, bindings, **kwargs):
+            captured.update(kwargs)
+            return run_result
+
+        async def fake_miss(question, scope="", max_steps=6, **kwargs):
+            return retrieval_only_match
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[]),  # miss
+            patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(side_effect=fake_miss)),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(side_effect=_spy)),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q", budget_seconds=1.0)
+
+        assert isinstance(result, str)
+        assert "[budget exhausted" not in result, (
+            "documents that this combo produces NO marker despite "
+            "budget_seconds being set"
+        )
+        assert captured.get("deadline") is None, (
+            "documents that plan_run receives deadline=None for this "
+            "combo -- the retrieval_only exemption applies even to a "
+            "miss-path-grown/matched plan"
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_budget_run_structured_envelope_field_is_none(self, tmp_path):
+        """A normal (non-budget) structured run must carry the new key
+        with value None — envelope shape is stable and discoverable
+        without special-casing 'is the key present'."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(steps=[{"output": "normal answer"}])
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q", structured=True)
+
+        assert result["budget_exhausted_at_step"] is None
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_run_records_outcome_as_failure(self, tmp_path):
+        """A budget-exhausted run did not complete — per the nexus-yg49g
+        doctrine (binary success/failure counters) it must record as a
+        failure, not a success, so a chronically-timing-out plan does
+        not accrue a false success rate."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75, plan_id=42)
+        run_result = PlanResult(
+            steps=[{"ids": ["a"], "tumblers": [], "distances": [0.1], "collections": ["knowledge"]}],
+            budget_exhausted_at_step=2,
+            total_planned_steps=2,
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+            patch("nexus.mcp.core._nx_answer_record_outcome") as record_outcome,
+        ):
+            from nexus.mcp.core import nx_answer
+            await nx_answer("q", budget_seconds=20.0)
+
+        record_outcome.assert_called_once_with(42, success=False)
+
+
+class TestNxAnswerClassifyPlanPrefixedOperatorNames:
+    """nexus-h33x8.6 a4 fold-in (found in passing, dev notes
+    nx-answer-a3-a1-dev-notes-2026-08-19): ``_nx_answer_classify_plan``
+    used a bare-name-only operator set (``_OPERATOR_TOOL_MAP`` keys),
+    narrower than the authoritative ``nexus.plans.bundle.is_operator_tool``
+    (bare AND ``operator_``-prefixed forms both accepted, per that
+    module's own docstring: 'plan YAMLs use either'). A plan step written
+    as ``operator_summarize`` (rather than bare ``summarize``) was
+    misclassified as retrieval_only even though it genuinely needs a
+    claude -p dispatch."""
+
+    def test_prefixed_operator_tool_name_classifies_as_needs_operators(self):
+        from nexus.mcp.core import _nx_answer_classify_plan
+        match = _make_match(
+            plan_json=json.dumps({
+                "steps": [
+                    {"tool": "search", "args": {"query": "$intent"}},
+                    {"tool": "operator_summarize", "args": {"content": "$step1.ids"}},
+                ],
+            }),
+        )
+        assert _nx_answer_classify_plan(match) == "needs_operators"
+
+    def test_bare_operator_tool_name_still_classifies_as_needs_operators(self):
+        """Regression: the bare-name path must keep working."""
+        from nexus.mcp.core import _nx_answer_classify_plan
+        assert _nx_answer_classify_plan(_make_multi_step_match()) == "needs_operators"
+
+    def test_genuine_retrieval_only_plan_still_classifies_as_retrieval_only(self):
+        """Regression: a plan with zero operator steps (bare OR prefixed)
+        must still classify as retrieval_only."""
+        from nexus.mcp.core import _nx_answer_classify_plan
+        match = _make_match(
+            plan_json=json.dumps({
+                "steps": [
+                    {"tool": "search", "args": {"query": "$intent"}},
+                    {"tool": "query", "args": {"question": "$intent"}},
+                ],
+            }),
+        )
+        assert _nx_answer_classify_plan(match) == "retrieval_only"

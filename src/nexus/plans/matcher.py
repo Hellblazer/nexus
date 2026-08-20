@@ -84,6 +84,34 @@ _GROWN_PLAN_MIN_CONFIDENCE: float = 0.55
 _ALWAYS_FAILING_MIN_FAILURES: int = 3
 
 
+def _normalize_for_exact_match(text: str) -> str:
+    """Casefold + whitespace-collapse for verbatim-repeat detection.
+
+    nexus-h33x8.6 a2. Deliberately NOT a fuzzy/paraphrase comparison —
+    "trivially normalized" per the fix direction means case and
+    whitespace only. Anything beyond that (word order, synonyms,
+    stemming) is left to the cosine path and its unchanged 0.40 gate.
+    """
+    return " ".join((text or "").casefold().split())
+
+
+def _is_verbatim_repeat(row: dict, normalized_intent: str) -> bool:
+    """True when *row*'s stored ``query`` verbatim-repeats *intent*.
+
+    nexus-h33x8.6 a2 (T2 nexus/nx-answer-capability-analysis-2026-08-19):
+    a plan's ``query`` column already carries the original question
+    verbatim — for a grown plan because ``nx_answer``'s plan-grow step
+    passes ``query=question``, for any other plan because promote.py's
+    own gate requires a non-degenerate description. A verbatim repeat of
+    that text is unambiguous signal a cosine-similarity threshold should
+    never be needed to establish; the caller is quite literally asking
+    the question that produced this plan.
+    """
+    if not normalized_intent:
+        return False
+    return _normalize_for_exact_match(row.get("query") or "") == normalized_intent
+
+
 def _is_always_failing(row: dict) -> bool:
     """True when the plan's run record is all-failure (see constant above)."""
     try:
@@ -413,6 +441,9 @@ def plan_match(
     ``min_confidence`` parameter does not apply to FTS5 hits.
     """
     filter_dims = dimensions or {}
+    # nexus-h33x8.6 a2: precompute once — every candidate on the T1 path
+    # is checked against this for a verbatim-repeat override.
+    normalized_intent = _normalize_for_exact_match(intent)
     scope_pref = _normalize_scope_string(scope_preference) if scope_preference else ""
     # nexus-mz5tv: a "real" scope preference excludes the corpus:all
     # sentinel ("all"). A corpus:all caller has NO project preference, so it
@@ -440,6 +471,15 @@ def plan_match(
         scored: list[tuple[float, int, Match]] = []
         scope_conflict_drops = 0
         always_failing_drops = 0
+        # nexus-h33x8.6 a2 fix-pass (substantive-critic SIGNIFICANT #2,
+        # T2 substantive-critique-nexus-h33x8.6-a4-a2-2026-08-19): the
+        # RAW cosine confidence per candidate, captured BEFORE the
+        # verbatim-repeat override below. increment_match_metrics must
+        # record this, not the synthetic 1.0 — match_conf_sum is a
+        # PERMANENT aggregate RDR-196's future confidence-band plan
+        # selection reads as genuine embedding-quality signal, and the
+        # forced 1.0 is a gating decision, not a quality measurement.
+        raw_confidence_by_plan_id: dict[int, float] = {}
         for plan_id, distance in hits:
             row = library.get_plan(plan_id)
             if row is None:
@@ -460,6 +500,24 @@ def plan_match(
                     )
                 continue
             confidence = max(0.0, 1.0 - float(distance))
+            raw_confidence_by_plan_id[plan_id] = confidence
+            # nexus-h33x8.6 a2: a verbatim (casefold + whitespace-collapse)
+            # repeat of the plan's own recorded question forces a
+            # guaranteed hit, REGARDLESS of the raw cosine score. This
+            # runs BEFORE the min_confidence gate deliberately — the
+            # hybrid match-text embedding (query + verb + name + scope,
+            # see nexus.plans.match_text) dilutes cosine similarity even
+            # for an exact repeat, which is exactly what let an unrelated
+            # higher-scoring candidate win and short-circuit the T1 path
+            # before FTS5 ever saw the exact match (T2
+            # nx-answer-capability-analysis-2026-08-19, row 382).
+            # Deliberately does NOT bypass the always-failing skip or
+            # the scope-conflict filter below — only the CONFIDENCE
+            # floors (this one and the grown-plan floor) are affected,
+            # and setting confidence=1.0 clears both without having to
+            # special-case either.
+            if _is_verbatim_repeat(row, normalized_intent):
+                confidence = 1.0
             if confidence < min_confidence:
                 continue
             if _is_always_failing(row):
@@ -526,7 +584,17 @@ def plan_match(
             scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
             matches = [m for _, _, m in scored[:n]]
             for m in matches:
-                library.increment_match_metrics(m.plan_id, confidence=m.confidence)
+                # a2 fix-pass: record the RAW cosine score (pre-
+                # verbatim-override) to match_conf_sum, not m.confidence
+                # (which stays 1.0 for gating on the returned Match —
+                # unchanged). Falls back to m.confidence only if the
+                # dict lookup somehow misses (defensive; every scored
+                # candidate's plan_id is populated in the same loop
+                # iteration that produced it, so this should not fire).
+                library.increment_match_metrics(
+                    m.plan_id,
+                    confidence=raw_confidence_by_plan_id.get(m.plan_id, m.confidence),
+                )
             return matches
 
     # FTS5 fallback: either cache unavailable or T1 returned no hits.

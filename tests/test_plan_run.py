@@ -1740,3 +1740,275 @@ async def test_run_substitutes_sentinel_on_operator_error_isolated() -> None:
     # Empty downstream-ref fields so $stepN.<field> resolves to "" not raises.
     assert s2["text"] == ""
     assert s2["summary"] == ""
+
+
+# ── nexus-h33x8.6 a4: hard wall-clock budget + partial results ─────────────
+#
+# Design (T2 nexus/nx-answer-capability-analysis-2026-08-19 + dev notes
+# nx-answer-a3-a1-dev-notes-2026-08-19): retrieval steps finish early
+# (16-29% of run time, mean 8.5s/step); the claude -p operator bundle is
+# the 30s+ tail. ``plan_run(..., deadline=<monotonic time>)`` checks the
+# deadline before starting each segment and, when exceeded, stops the
+# loop and records ``PlanResult.budget_exhausted_at_step`` (1-indexed)
+# instead of running the operator segment. When an operator segment's
+# own dispatch raises ``OperatorTimeoutError`` while a deadline is
+# active, the runner captures the exception's reconstructed
+# ``partial_text``/``event_count`` into the step sentinel and stops the
+# loop the same way — it does NOT silently substitute-and-continue as
+# the deadline-less path does.
+#
+# ``deadline=None`` (the default) must reproduce EXACTLY the pre-a4
+# behavior: substitute a sentinel and keep going, per
+# ``test_run_substitutes_sentinel_on_operator_error_isolated`` above.
+
+
+@pytest.mark.asyncio
+async def test_deadline_stops_before_operator_segment_after_retrieval() -> None:
+    """A budget that expires between the retrieval step and the operator
+    step must let retrieval finish, then stop BEFORE dispatching the
+    operator — never mid-flight, never after.
+    """
+    import time as _time
+    from unittest.mock import patch
+
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x", "corpus": "knowledge"}},
+            {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+        ],
+    }
+    calls: list[str] = []
+
+    async def stub_search(**kwargs):
+        calls.append("search")
+        import asyncio
+        await asyncio.sleep(0.05)
+        return {"ids": ["a"], "tumblers": [], "distances": [], "collections": []}
+
+    async def stub_extract(**kwargs):
+        calls.append("extract")
+        return {"extractions": []}
+
+    from nexus.mcp import core as mcp_core
+
+    deadline = _time.monotonic() + 0.02  # expires during the search sleep
+    with patch.object(mcp_core, "search", stub_search), \
+         patch.object(mcp_core, "operator_extract", stub_extract):
+        result = await plan_run(_match(plan), {}, deadline=deadline, bundle_operators=False)
+
+    assert calls == ["search"], f"extract must not have been dispatched, got {calls}"
+    assert result.budget_exhausted_at_step == 2
+    assert result.total_planned_steps == 2
+    assert len(result.steps) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_deadline_preserves_default_fields() -> None:
+    """``deadline=None`` (the default) must leave the new PlanResult
+    fields at their inert defaults — proves the a4 param does not
+    silently change behavior when unset.
+    """
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+    disp = _FakeDispatcher(outputs=[{"ids": [], "tumblers": []}])
+    result = await plan_run(_match(plan), {}, dispatcher=disp)
+
+    assert result.budget_exhausted_at_step is None
+    assert result.total_planned_steps == 1
+
+
+@pytest.mark.asyncio
+async def test_isolated_operator_timeout_under_deadline_captures_partial_and_stops() -> None:
+    """An OperatorTimeoutError raised while a deadline is active must
+    capture partial_text/event_count into the sentinel AND stop the
+    loop — the third step (another search) must never run.
+    """
+    from unittest.mock import patch
+    import time as _time
+
+    from nexus.operators.dispatch import OperatorTimeoutError
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+            {"tool": "search", "args": {"query": "y"}},
+        ],
+    }
+
+    async def stub_search(**kwargs):
+        return {"ids": ["a"], "tumblers": [], "distances": [], "collections": []}
+
+    async def stub_extract(**kwargs):
+        raise OperatorTimeoutError(
+            "claude -p timed out after 9s",
+            partial_text="partial synthesis text",
+            event_count=7,
+        )
+
+    from nexus.mcp import core as mcp_core
+
+    deadline = _time.monotonic() + 300  # not expired at any check point
+    with patch.object(mcp_core, "search", stub_search), \
+         patch.object(mcp_core, "operator_extract", stub_extract):
+        result = await plan_run(_match(plan), {}, deadline=deadline, bundle_operators=False)
+
+    assert result.budget_exhausted_at_step == 2
+    assert len(result.steps) == 2, "the third (post-timeout) step must not have run"
+    s2 = result.steps[1]
+    assert s2["partial_text"] == "partial synthesis text"
+    assert s2["event_count"] == 7
+    assert s2["status"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_isolated_operator_timeout_without_deadline_unchanged_behavior() -> None:
+    """Regression: with NO deadline, an OperatorTimeoutError must
+    behave exactly like any other OperatorError — sentinel substituted,
+    loop continues, no partial_text leaks into the sentinel shape.
+    """
+    from unittest.mock import patch
+
+    from nexus.operators.dispatch import OperatorTimeoutError
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+            {"tool": "search", "args": {"query": "y"}},
+        ],
+    }
+
+    async def stub_search(**kwargs):
+        return {"ids": ["a"], "tumblers": [], "distances": [], "collections": []}
+
+    async def stub_extract(**kwargs):
+        raise OperatorTimeoutError(
+            "claude -p timed out after 300s",
+            partial_text="should not leak",
+            event_count=3,
+        )
+
+    from nexus.mcp import core as mcp_core
+
+    with patch.object(mcp_core, "search", stub_search), \
+         patch.object(mcp_core, "operator_extract", stub_extract):
+        result = await plan_run(_match(plan), {}, bundle_operators=False)
+
+    assert result.budget_exhausted_at_step is None
+    assert len(result.steps) == 3, "all three steps must run without a deadline"
+    s2 = result.steps[1]
+    assert s2["status"] == "failed"
+    assert "partial_text" not in s2
+    assert "event_count" not in s2
+
+
+@pytest.mark.asyncio
+async def test_isolated_operator_receives_remaining_budget_as_timeout_kwarg() -> None:
+    """When a deadline is active, the isolated operator dispatch must
+    receive the REMAINING budget as its ``timeout`` kwarg — genuine
+    enforcement, not just a pre-check."""
+    from unittest.mock import patch
+    import time as _time
+
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "extract", "args": {"fields": "a", "inputs": "[]"}}]}
+    captured: dict = {}
+
+    async def stub_extract(**kwargs):
+        captured.update(kwargs)
+        return {"extractions": []}
+
+    from nexus.mcp import core as mcp_core
+
+    deadline = _time.monotonic() + 9.0
+    with patch.object(mcp_core, "operator_extract", stub_extract):
+        await plan_run(_match(plan), {}, deadline=deadline, bundle_operators=False)
+
+    assert "timeout" in captured
+    assert 0 < captured["timeout"] <= 9.0
+
+
+@pytest.mark.asyncio
+async def test_bundle_operator_timeout_under_deadline_captures_partial_and_stops() -> None:
+    """Same contract as the isolated-path test, for the bundle path:
+    the OperatorTimeoutError's partial_text must land on the terminal
+    slot's sentinel, and the loop must stop (bundling requires 2+
+    contiguous operator steps)."""
+    from unittest.mock import AsyncMock, patch
+    import time as _time
+
+    from nexus.operators.dispatch import OperatorTimeoutError
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+            {"tool": "summarize", "args": {"cited": False, "content": "$step2.extractions"}},
+        ],
+    }
+
+    async def stub_search(**kwargs):
+        return {"ids": ["a"], "tumblers": [], "distances": [], "collections": []}
+
+    fake_bundle = AsyncMock(side_effect=OperatorTimeoutError(
+        "claude -p timed out", partial_text="bundle partial", event_count=3,
+    ))
+
+    from nexus.mcp import core as mcp_core
+
+    deadline = _time.monotonic() + 300
+    with patch.object(mcp_core, "search", stub_search), \
+         patch("nexus.plans.bundle.dispatch_bundle", fake_bundle):
+        result = await plan_run(_match(plan), {}, deadline=deadline)
+
+    assert result.budget_exhausted_at_step == 2
+    last = result.steps[-1]
+    assert last["partial_text"] == "bundle partial"
+    assert last["event_count"] == 3
+    # dispatch_bundle received the remaining budget, not the 300s default.
+    _, kwargs = fake_bundle.call_args
+    assert "timeout" in kwargs
+    assert 0 < kwargs["timeout"] <= 300
+
+
+@pytest.mark.asyncio
+async def test_bundle_receives_remaining_budget_as_timeout_kwarg_on_success() -> None:
+    """Even on a successful bundle dispatch, an active deadline must
+    thread the REMAINING budget through as ``timeout`` — this is what
+    makes the budget genuinely hard rather than a best-effort pre-check."""
+    from unittest.mock import AsyncMock, patch
+    import time as _time
+
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+            {"tool": "summarize", "args": {"cited": False, "content": "$step2.extractions"}},
+        ],
+    }
+
+    async def stub_search(**kwargs):
+        return {"ids": ["a"], "tumblers": [], "distances": [], "collections": []}
+
+    fake_bundle = AsyncMock(return_value={"summary": "ok"})
+
+    from nexus.mcp import core as mcp_core
+
+    deadline = _time.monotonic() + 12.5
+    with patch.object(mcp_core, "search", stub_search), \
+         patch("nexus.plans.bundle.dispatch_bundle", fake_bundle):
+        result = await plan_run(_match(plan), {}, deadline=deadline)
+
+    assert result.budget_exhausted_at_step is None
+    _, kwargs = fake_bundle.call_args
+    assert kwargs["timeout"] == pytest.approx(12.5, abs=2.0)
