@@ -1328,3 +1328,39 @@ class TestJsonUnsupportedModesExhaustive:
             "are no longer is_flag parameters of doctor_cmd -- stale "
             "entry, remove it."
         )
+
+
+class TestCheckDanglingLinksFlagIsRetired:
+    """RDR-194 P7 deliverable 1 (bead nexus-tk070.p7): pin the ABSENCE of
+    the retired ``--check-dangling-links`` / ``--strict-dangling-links``
+    flags, not just their absence from ``doctor_cmd``'s
+    ``@click.option`` decorators (verified by code inspection instead --
+    ``grep -rn 'check.dangling.links' src/`` finds nothing but the
+    HttpCatalogClient.orphaned_links() docstring explaining the
+    retirement, nexus-tk070.p1 / RDR-194 § D2, catalog-032-links-
+    tumbler-fk.xml). Both flags were retired in the SAME commit
+    (b948bee3a) that VALIDATEs ``fk_catalog_links_from_document`` /
+    ``fk_catalog_links_to_document`` (D0.10 one-for-one) and deleted
+    ``tests/test_doctor_dangling_links.py`` outright -- this test is the
+    one that survives to prove a REGRESSION (someone re-adding the flag,
+    or a future doctor.py rewrite accidentally reviving it) would be
+    caught, since the deleted file obviously cannot catch its own
+    resurrection.
+
+    Click's own usage-error path is the assertion: an unrecognized
+    option exits 2 with "no such option" on stderr/output, never a
+    silent no-op and never a crash. No mock_reg / engine substrate
+    needed -- click never reaches ``doctor_cmd``'s body for an unknown
+    option.
+    """
+
+    @pytest.mark.parametrize("flag", ["--check-dangling-links", "--strict-dangling-links"])
+    def test_flag_is_unrecognized(self, runner: CliRunner, flag: str) -> None:
+        result = runner.invoke(main, ["doctor", flag])
+        assert result.exit_code == 2, (
+            f"expected {flag} to be an unrecognized option (exit 2), got "
+            f"exit_code={result.exit_code}, output={result.output!r}"
+        )
+        assert "no such option" in result.output.lower(), (
+            f"expected a 'no such option' usage error for {flag}, got: {result.output!r}"
+        )
