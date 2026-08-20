@@ -38,6 +38,22 @@
     nexus.chunks table's own collection FK (chunks_collection_fk) is a NEW
     constraint, added by fk-004-chunks-collection-registry.xml, not a revival
     of chunks_384_collection_fk et al.
+
+    STALE-PROSE CORRECTION (nexus-tk070.p4, RDR-194 D9, 2026-08): the
+    changeset fk-002-4 below (comment: "chash_index → catalog_collections
+    FK") describes nexus.chash_index as though it is still the live
+    routing target of a FK it names. `chash_index` was the ROUTER half of
+    the split-store architecture — RDR-187's own title is "Retire
+    chash_index: ... Drop the Router Remnant of the Split-Store
+    Architecture" — and that router table was dropped
+    (RDR-187/nexus-piwya.9), which is what the STALE-PROSE CORRECTION
+    directly above (nexus-o8dil.49) already records for
+    chash_index_collection_fk's liveness. This addendum names the specific
+    vestige a reader lands on inside fk-002-4's own comment text — the
+    "router" framing — for the case where they read that changeset
+    directly rather than this file's top-of-header note. This changeset is
+    frozen (already applied, D0.2) and is NOT edited; comment-only,
+    no DDL.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"

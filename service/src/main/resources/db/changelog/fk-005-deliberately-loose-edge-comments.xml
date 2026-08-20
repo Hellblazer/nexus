@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-tk070.p4 (RDR-194 P4, Decisions D7/D8) — comment-only changelog.
+    No DDL beyond `COMMENT ON COLUMN`: every column named below already
+    exists; nothing here creates, drops, or retypes anything.
+
+    THE POINT OF THIS PHASE: the next FK census must not re-litigate what
+    RDR-194 already decided to leave alone. Each reason lives AT the
+    column, not only in the RDR file — the same discipline
+    remap-003-new-chash-bytea.xml's `COMMENT ON COLUMN
+    nexus.chash_remap.new_chash` already applied for D3/D7.
+
+    SEVEN D7 "deliberately loose" reason-comments (the census edges this
+    RDR decided NOT to enforce, and why):
+
+      nexus.hook_failures.doc_id           — three-way identity space,
+                                              discriminated by `chain`; no
+                                              single FK target exists.
+      nexus.frecency.chunk_id              — no FK by GRAIN (no collection
+                                              column; PK is (tenant_id,
+                                              chunk_id) across collections).
+      nexus.relevance_log.chunk_id         — same grain argument.
+      nexus.pdf_chunks.chunk_id            — same grain argument; wire-
+                                              parity rationale is out of
+                                              this RDR's scope.
+      nexus.chash_remap.old_id             — foreign identity space (any
+                                              pre-remap id); an FK to
+                                              nexus.chunks would make
+                                              remap_membership tautological.
+      nexus.gc_audit.id                    — BIGSERIAL PK, no natural key;
+                                              sequence + RLS FORCE is
+                                              sufficient tenant isolation.
+      nexus.claude_assisted_remediation_consents.id — same reasoning as
+                                              gc_audit.id.
+
+    FOUR D8 "accepted sentinel" comments (empty-string sentinels D7
+    attaches no FK to, so no changeset exists to ride a NULL conversion
+    on; recorded as an accepted position, not silence, per D8):
+
+      nexus.gc_audit.collection, nexus.gc_audit.actor,
+      nexus.relevance_log.collection, nexus.relevance_log.session_id.
+
+    hook_failures.doc_id's own D8 sentinel note is folded into its D7
+    comment above rather than issued separately, since both apply to the
+    same column.
+
+    OMITTED FROM THIS PHASE, TREE-DRIFT FINDING (nexus-tk070.p4, verified
+    against HEAD 2026-08-20): the RDR-194 P4 text (drafted 2026-08-15,
+    RDR/bead last touched 2026-08-17) also names `chash_alias.old_bytes`
+    as an eighth D7 target. `nexus.chash_alias` — table and column both —
+    was DROPPED on 2026-08-16 (nexus-lgdel.l1,
+    legacy-001-drop-chash-alias.xml changeset legacy-001-5, Hal delete
+    directive: "I'm tired of carrying these legacy things... Delete it.").
+    `COMMENT ON COLUMN nexus.chash_alias.old_bytes` would fail outright —
+    the column no longer exists. No substitute comment is issued; the
+    reasoning (16-byte legacy refs, no width CHECK by design) is now
+    historical only, superseded by the deletion, and belongs to the
+    legacy-001 changelog's own record, not a comment on a column that no
+    longer exists. Seven D7 targets ship in this phase, not eight.
+
+    D0.1 placement: appended at the changelog tail, immediately before the
+    `grants-nexus-svc.xml` / `grants-nexus-diag.xml` runAlways block — see
+    `db.changelog-master.xml`'s `<include>` comment for this file for the
+    established late-append convention (catalog-033's / taxonomy-013's own
+    `<include>` comments carry the identical reasoning).
+
+    D0.6 rollback: restores the pre-comment baseline — `COMMENT ON COLUMN
+    ... IS NULL` for every column this changeset comments, the same shape
+    `taxonomy-003-doc-count-trigger.xml` and
+    `taxonomy-011-doc-id-bytea.xml` already use for their own column
+    comments.
+
+    EXPECT_NEW_CHANGESETS=1 (one file, one changeset — design intent, RDR
+    P4 execution notes).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset fk-005-1: D7/D8 recorded-reason column comments ────── -->
+    <changeSet id="fk-005-1" author="nexus-tk070.p4">
+        <comment>
+            RDR-194 P4 (D7/D8): record the reason for every deliberately-loose
+            census edge AT the column, plus the four D8 accepted-sentinel
+            positions. Comment-only — no DDL beyond COMMENT ON COLUMN.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+COMMENT ON COLUMN nexus.hook_failures.doc_id IS
+  'No FK (RDR-194 D7): this column holds THREE identity spaces, discriminated by the sibling chain column. chain=''single'' stores a T3 chunk chash in hex (hook_registry.py _record_hook_failure). chain=''batch'' stores the FIRST chunk chash of the batch (hook_registry.py _record_batch_hook_failure: doc_ids[0] if doc_ids else the empty string; mcp_infra.py''s taxonomy_assign_batch tripwire persists the same shape). chain=''document'' stores a FILE PATH, never a tumbler and never a title (hook_registry.py _record_document_hook_failure: "Stores source_path in the legacy doc_id column"). The tumbler travels beside it as a separate catalog_doc_id kwarg on fire_batch/fire_document, never through this column. No single FK target exists for three referents and PostgreSQL has no conditional FK. Two further obstacles hold independently: the NOT NULL DEFAULT empty-string default can never satisfy an FK, and dropping it breaks idx_hook_failures_etl_dedup (tenant_id, doc_id, hook_name, occurred_at) since NULLs are distinct in a unique index. Occurrence-time remedy: if a dangling-doc_id population is ever observed on the telemetry read path, file then, with the count in hand. D8: the NOT NULL DEFAULT empty-string sentinel is ACCEPTED, not converted to NULL -- no FK attaches here, so no changeset exists to ride a conversion on.';
+
+COMMENT ON COLUMN nexus.frecency.chunk_id IS
+  'No FK, by GRAIN, not by deferral (RDR-194 D7). nexus.chunks is keyed (tenant_id, collection, chash); frecency has no collection column -- its PK is (tenant_id, chunk_id), one row per chash per tenant ACROSS collections by design. Adding a collection column to make an FK expressible would change the table''s identity grain, a behaviour change, not hygiene. The ChashCensus grain-mismatch leg for this table stays as the standing detection; D0.10''s one-for-one FK retirement does not fire here.';
+
+COMMENT ON COLUMN nexus.relevance_log.chunk_id IS
+  'No FK, by GRAIN, not by deferral (RDR-194 D7) -- the same reasoning as nexus.frecency.chunk_id: nexus.chunks is keyed (tenant_id, collection, chash) and relevance_log has no collection column, so an FK is not expressible without changing the table''s identity grain. The ChashCensus grain-mismatch leg for this table stays as the standing detection; D0.10''s one-for-one FK retirement does not fire here.';
+
+COMMENT ON COLUMN nexus.pdf_chunks.chunk_id IS
+  'No FK, same grain argument as nexus.frecency.chunk_id / nexus.relevance_log.chunk_id (RDR-194 D7). The pdf pipeline''s wire-parity rationale (pipeline-001-baseline.xml header) is already excluded from this RDR''s scope by the Problem Statement.';
+
+COMMENT ON COLUMN nexus.chash_remap.old_id IS
+  'Unconstrained TEXT by design (RDR-194 D3/D7): names a FOREIGN identity space -- "any pre-remap id" (RemapRepository.java) -- not a chash, so it has no plausible FK target. No FK from chash_remap to nexus.chunks either: a remap fact asserts a claim whose target may legitimately not be present yet, which is the exact measurement remap_membership performs (present_count vs mapped_total); an FK would make the function tautological. The sibling new_chash column''s own COMMENT (remap-003-new-chash-bytea.xml) named this column as the one whose reason lands in RDR-194 P4 -- this is that comment.';
+
+COMMENT ON COLUMN nexus.gc_audit.id IS
+  'BIGSERIAL PK, no natural key (RDR-194 D4): gc_audit is an append-only audit trail. A sequence hands out one value per row for the whole table, so PRIMARY KEY (id) already gives per-tenant uniqueness for free; promoting to (tenant_id, id) buys nothing while rewriting the PK index. RLS FORCE plus this sequence PK is the correct and sufficient tenant-isolation posture -- recorded here so it is not re-derived by a future census.';
+
+COMMENT ON COLUMN nexus.claude_assisted_remediation_consents.id IS
+  'BIGSERIAL PK, no natural key (RDR-194 D4): claude_assisted_remediation_consents is an append-only consent audit trail. A sequence hands out one value per row for the whole table, so PRIMARY KEY (id) already gives per-tenant uniqueness for free; promoting to (tenant_id, id) buys nothing while rewriting the PK index. RLS FORCE plus this sequence PK is the correct and sufficient tenant-isolation posture -- recorded here so it is not re-derived by a future census.';
+
+COMMENT ON COLUMN nexus.gc_audit.collection IS
+  'Empty-string sentinel ACCEPTED, not converted to NULL (RDR-194 D8): D7 attaches no FK to gc_audit.collection (a free-text label describing what was reaped, not a validated collection reference), so there is no FK changeset for a NULL conversion to ride.';
+
+COMMENT ON COLUMN nexus.gc_audit.actor IS
+  'Empty-string sentinel ACCEPTED, not converted to NULL (RDR-194 D8): D7 attaches no FK to gc_audit.actor (''engine'' for the server-driven producers wired at catalog-033, caller-supplied for client-attributed /gc_audit/record rows), so there is no FK changeset for a NULL conversion to ride.';
+
+COMMENT ON COLUMN nexus.relevance_log.collection IS
+  'Empty-string sentinel ACCEPTED, not converted to NULL (RDR-194 D8). No FK currently attaches to relevance_log.collection: D7 decided relevance_log.chunk_id (the grain argument) but left this sibling column''s own FK undecided, not deliberately loose. Named trigger: a future FK (tenant_id, collection) REFERENCES nexus.catalog_collections (tenant_id, name) on relevance_log.collection -- the same shape fk-002-collection-registry.xml and fk-004-chunks-collection-registry.xml already use for the collection registry -- is what would convert this sentinel to NULL, in that FK''s own changeset, never before it.';
+
+COMMENT ON COLUMN nexus.relevance_log.session_id IS
+  'Empty-string sentinel ACCEPTED, not converted to NULL (RDR-194 D8). relevance_log.session_id is a client session identifier, not a reference to any table in this schema -- there is no sessions table and none is planned, so unlike relevance_log.collection above, no FK is nameable as a future trigger for this column; the accepted position is permanent, not merely pending. idx_relevance_log_etl_dedup''s COALESCE(session_id, empty string) already treats the empty string and NULL as interchangeable for dedup purposes, so the sentinel is inert there regardless.';
+        </sql>
+        <rollback>
+            <!-- D0.6: restores the pre-comment baseline (no comment) for
+                 every column this changeset comments. -->
+            <sql splitStatements="true" stripComments="false">
+COMMENT ON COLUMN nexus.hook_failures.doc_id IS NULL;
+COMMENT ON COLUMN nexus.frecency.chunk_id IS NULL;
+COMMENT ON COLUMN nexus.relevance_log.chunk_id IS NULL;
+COMMENT ON COLUMN nexus.pdf_chunks.chunk_id IS NULL;
+COMMENT ON COLUMN nexus.chash_remap.old_id IS NULL;
+COMMENT ON COLUMN nexus.gc_audit.id IS NULL;
+COMMENT ON COLUMN nexus.claude_assisted_remediation_consents.id IS NULL;
+COMMENT ON COLUMN nexus.gc_audit.collection IS NULL;
+COMMENT ON COLUMN nexus.gc_audit.actor IS NULL;
+COMMENT ON COLUMN nexus.relevance_log.collection IS NULL;
+COMMENT ON COLUMN nexus.relevance_log.session_id IS NULL;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

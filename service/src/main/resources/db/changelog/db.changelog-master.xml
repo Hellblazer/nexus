@@ -784,6 +784,20 @@
          already included well before this point. -->
     <include file="db/changelog/catalog-033-gc-audit-producers.xml"/>
 
+    <!-- nexus-tk070.p4 (RDR-194 P4, D7/D8): comment-only changelog — records
+         the reason for every deliberately-loose FK-census edge AT the
+         column (hook_failures.doc_id, frecency.chunk_id,
+         relevance_log.chunk_id, pdf_chunks.chunk_id, chash_remap.old_id,
+         gc_audit.id, claude_assisted_remediation_consents.id) plus the
+         four D8 accepted-sentinel columns (gc_audit.collection/.actor,
+         relevance_log.collection/.session_id). No DDL beyond
+         `COMMENT ON COLUMN`. Placed after catalog-033-gc-audit-producers.xml
+         (current tail) and before the grants-nexus-svc.xml runAlways block,
+         matching the established late-append convention (D0.1; see
+         taxonomy-013's / catalog-033's own <include> comments for the
+         identical reasoning). -->
+    <include file="db/changelog/fk-005-deliberately-loose-edge-comments.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
