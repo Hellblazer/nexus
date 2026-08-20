@@ -2,7 +2,8 @@
 title: "Post-RDR-187 FK Census and Structural Wart Retirement: One chash Encoding, One doc_id Meaning, Tenant-Keyed Uniqueness Everywhere, One TTL Semantics, and Every Enforceable Relationship Enforced"
 id: RDR-194
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-08-20
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
