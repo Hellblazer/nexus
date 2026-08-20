@@ -4,6 +4,14 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.13.0] - 2026-08-20
+
+Plugin version aligned with conexus 7.13.0. Pin advance activates the entries
+accumulated in PENDING_RELEASE.md since v7.12.0: the using-nx-skills
+imperative-first pointer (nexus-h33x8.5), the trimmed session-start hook +
+t2_prefix_scan render caps, and routing-log rotation in both plugin copies
+(nexus-h33x8.3 rotation pass, conexus + sn `_lib.py`).
+
 ## [7.12.0] - 2026-08-19
 
 Plugin version aligned with conexus 7.12.0. Advancing `source.ref` to
