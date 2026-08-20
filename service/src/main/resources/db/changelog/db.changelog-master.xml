@@ -798,6 +798,23 @@
          identical reasoning). -->
     <include file="db/changelog/fk-005-deliberately-loose-edge-comments.xml"/>
 
+    <!-- nexus-tk070.p5a (RDR-194 P5, D4): nexus.topics gains UNIQUE
+         (tenant_id, id) (unconditional) plus the four tenant-blind FKs
+         (topics.parent_id, topic_assignments.topic_id, topic_links.
+         from_topic_id/.to_topic_id) repointed onto it as tenant-scoped
+         composites, fail-loud on a nonzero cross-tenant anti-join (data
+         corruption, not a population to remediate silently — see the
+         file's own header). Named taxonomy-014, not taxonomy-013 as the
+         RDR text says: taxonomy-013-doc-count-lock-order.xml (nexus-0uuit)
+         claimed that number first, landing after the RDR was drafted (see
+         this file's own header for the full tree-drift note). Placed
+         after fk-005-deliberately-loose-edge-comments.xml (current tail)
+         and before the grants-nexus-svc.xml runAlways block, matching the
+         established late-append convention (D0.1; see taxonomy-013's /
+         catalog-033's / fk-005's own <include> comments for the identical
+         reasoning). -->
+    <include file="db/changelog/taxonomy-014-topics-tenant-unique.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

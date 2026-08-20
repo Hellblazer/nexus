@@ -351,8 +351,12 @@ public final class HttpUtil {
      * <p>Bead nexus-asaod. A fidelity-ETL import carries a CLIENT-SUPPLIED id
      * (``POST /v1/taxonomy/import/topic`` preserves ids verbatim so a migration
      * round-trips). ``nexus.topics`` has a global ``BIGSERIAL`` primary key — global
-     * because ``topics_parent_fk`` is self-referential, so a composite
-     * ``(tenant_id, id)`` key would force every ``parent_id`` to carry a tenant too.
+     * because its self-referential parent FK (``fk_topics_parent_tenant`` since
+     * RDR-194 P5a/taxonomy-014-2, formerly ``topics_parent_fk``) means a composite
+     * ``(tenant_id, id)`` PRIMARY KEY would force every ``parent_id`` to carry a
+     * tenant too. RDR-194 D4 instead added a separate ``UNIQUE (tenant_id, id)``
+     * alongside the unchanged global PK and repointed the parent FK onto that
+     * composite — the PK itself never moved.
      * When two tenants supply the same id, the second INSERT is refused by the RLS
      * policy rather than by the PK, because RLS is evaluated first: the row exists but
      * is invisible to this tenant.

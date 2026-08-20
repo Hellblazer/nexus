@@ -823,6 +823,16 @@ taxonomy assignment for the affected tenants, since assignments are derived
 (D1). No preventive scope is claimed beyond this: no cross-tenant population
 has been observed, and the count is the evidence gate.
 
+> **CORRECTION (2026-08-20, P5a implementation, code-review round, T2
+> [22964]):** "cloud-count-4" two sentences above is a pre-existing typo in
+> this RDR's own text — D4's precondition is **cloud-count-5**, exactly as
+> the Gate-preconditions table below (`cloud-count-5 | ... | P5a repoint`)
+> and every other D4 reference in this file already say. `cloud-count-4` is
+> D1's own precondition (`topic_assignments.doc_id`'s bytea conversion), a
+> different gate on a different table. Not a diff defect in the shipped
+> `taxonomy-014-topics-tenant-unique.xml` — that file's own header names
+> cloud-count-5 correctly throughout — only this one prose sentence drifted.
+
 **`service_tokens` / `session_tokens` stay out of scope.** They are the only
 in-scope tables with `rls_enabled=f`, they are auth-token tables rather than
 catalog or knowledge data, and this RDR does not touch auth posture. Recorded

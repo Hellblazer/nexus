@@ -232,11 +232,15 @@ public final class TaxonomyHandler implements HttpHandler {
             // rather than by choosing. The enumeration surface is NOT closed: there is
             // no rate limiting on this route (AuthFilter has none). Tracked separately.
             //
-            // Removing the oracle at source would mean a composite (tenant_id, id) key
-            // so ids cannot collide across tenants — which deletes this whole class.
-            // That was already considered and REJECTED: topics_parent_fk is
-            // self-referential, so a composite key forces every parent_id to carry a
-            // tenant too. The global BIGSERIAL is deliberate, not an oversight.
+            // Removing the oracle at source would mean a composite (tenant_id, id)
+            // PRIMARY KEY so ids cannot collide across tenants — which deletes this
+            // whole class. That was already considered and REJECTED (RDR-194 D4):
+            // the parent FK (fk_topics_parent_tenant since taxonomy-014-2, formerly
+            // topics_parent_fk) is self-referential, so making the PK itself
+            // composite forces every parent_id to carry a tenant too. RDR-194 D4's
+            // actual fix instead added a separate UNIQUE (tenant_id, id) and
+            // repointed the FK onto it, leaving the global BIGSERIAL PK — and this
+            // oracle — unchanged; the PK stays deliberate, not an oversight.
             if (isImportOp(op) && HttpUtil.isRlsRowRejection(e)) {
                 log.warn("event=taxonomy_import_id_unavailable tenant={} op={}", tenant, op);
                 HttpUtil.send(exchange, 409, json(Map.of(

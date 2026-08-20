@@ -1195,16 +1195,29 @@ class TaxonomyRepositoryTest {
 
     @Test @Order(42)
     void docCountTrigger_crossTenantIsolation() {
-        // An assignment INSERT in tenant A that references a topic OWNED BY
-        // tenant B (the FK check bypasses RLS, so the row can be inserted) MUST
-        // NOT mutate tenant B's topics.doc_count.
+        // RDR-194 D4 (nexus-tk070.p5a) SUPERSEDES this test's original scenario.
+        // Before the phase: an assignment INSERT in tenant A that referenced a
+        // topic OWNED BY tenant B was schema-legal (topic_assignments_topic_id_fkey
+        // was tenant-blind; PostgreSQL FK checks bypass RLS), and this test proved
+        // the doc_count trigger's own `t.tenant_id = a.tenant_id` predicate
+        // (defense-in-depth) kept tenant B's row from being mutated even though the
+        // row itself could be inserted.
         //
-        // NOTE on what this proves: topics PK is `id` alone (globally unique), so
-        // a same-id topic cannot exist under two tenants — meaning INVOKER vs
-        // DEFINER is NOT behaviorally distinguishable here. The isolation this
-        // test exercises is the trigger's explicit `t.tenant_id = a.tenant_id`
-        // predicate (defense-in-depth), not RLS. The enforceable guard for the
-        // SECURITY INVOKER property itself is the prosecdef=false assertion in
+        // taxonomy-014-3 (this phase) repoints that FK onto a tenant-scoped
+        // composite (fk_topic_assignments_topic_tenant, (tenant_id, topic_id) ->
+        // nexus.topics(tenant_id, id)) precisely BECAUSE a cross-tenant reference
+        // is data corruption, not a case the trigger should merely defend against
+        // in depth — the insert this test used to perform is now STRUCTURALLY
+        // IMPOSSIBLE, not merely trigger-isolated. This test now asserts THAT
+        // instead: the cross-tenant assignment is rejected outright by the FK,
+        // and tenant B's doc_count is (trivially) untouched because the row
+        // never lands at all.
+        //
+        // NOTE on INVOKER vs DEFINER: topics PK is `id` alone (globally unique),
+        // so a same-id topic cannot exist under two tenants — meaning INVOKER vs
+        // DEFINER is not behaviorally distinguishable here either way. The
+        // enforceable guard for the trigger's SECURITY INVOKER property itself is
+        // the prosecdef=false assertion in
         // TaxonomySchemaLiquibaseTest.docCountTrigger_functionsTriggersAndComment.
         final long bTopicId = 9900500L;
         final String col = "knowledge__dctrg_xtenant";
@@ -1213,14 +1226,22 @@ class TaxonomyRepositoryTest {
         assertThat(((Number) repo.getTopicById(TENANT_B, bTopicId).get().get("doc_count")).intValue())
             .isEqualTo(7);
 
-        // Tenant A inserts an assignment pointing at tenant B's topic id.
+        // Tenant A attempts an assignment pointing at tenant B's topic id.
         // topic_assignments_chunk_fk is keyed on the ASSIGNMENT's own tenant_id
-        // (TENANT_A here), not the referenced topic's tenant — orthogonal to
-        // what this test proves about the doc_count trigger's tenant scoping.
+        // (TENANT_A here), not the referenced topic's tenant, so seeding the
+        // chunk under TENANT_A isolates the topic FK specifically -- the
+        // violation below is fk_topic_assignments_topic_tenant, not the chunk FK.
         seedChunk(TENANT_A, col, hexChash("xt-doc-a"));
-        repo.assignTopic(TENANT_A, hexChash("xt-doc-a"), bTopicId, "manual", null, col, null);
+        assertThatThrownBy(() ->
+            repo.assignTopic(TENANT_A, hexChash("xt-doc-a"), bTopicId, "manual", null, col, null))
+            .as("a cross-tenant topic_id reference must be REJECTED by "
+                + "fk_topic_assignments_topic_tenant (RDR-194 D4) -- the row must never "
+                + "reach the doc_count trigger at all")
+            .hasMessageContaining("fk_topic_assignments_topic_tenant");
 
-        // Tenant B's row is untouched (trigger scoped to the session tenant).
+        // Tenant B's row is untouched -- trivially true now (the row was never
+        // inserted), but still worth pinning: a regression that silently widened
+        // the FK back to tenant-blind would show up here as a mutated doc_count.
         assertThat(((Number) repo.getTopicById(TENANT_B, bTopicId).get().get("doc_count")).intValue())
             .isEqualTo(7);
         // And tenant A owns no such topic id.

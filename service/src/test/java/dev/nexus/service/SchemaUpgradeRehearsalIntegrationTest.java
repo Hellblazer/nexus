@@ -373,6 +373,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   taxonomy-010-1 nexus-tk070.p3b
                 //   taxonomy-011-1 nexus-tk070.p3c
                 //   taxonomy-012-2 nexus-tk070.p3d
+                //   taxonomy-014-2 nexus-tk070.p5a
+                //   taxonomy-014-3 nexus-tk070.p5a
+                //   taxonomy-014-4 nexus-tk070.p5a
+                //   taxonomy-014-5 nexus-tk070.p5a
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -1161,6 +1165,115 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-012-2's own "
                             + "toggle-wrap covers")
                         .isEqualTo(2);
+
+                    // taxonomy-014-2/-3/-4/-5 legs (nexus-tk070.p5a, RDR-194 § D4, seed-
+                    // coverage lint follow-up): each repoints one of the four tenant-blind
+                    // FKs onto nexus.topics' new UNIQUE (tenant_id, id) (taxonomy-014-1),
+                    // the SAME catalog-029 three-step shape (DROP old -> ADD new NOT VALID
+                    // -> fail-loud anti-join -> VALIDATE) as taxonomy-012-2 above, but
+                    // FAIL-LOUD on a nonzero cross-tenant population instead of deleting it
+                    // (D4: a cross-tenant topic reference is corruption, not a population to
+                    // remediate silently). No NEW seed data is needed for ANY of the four:
+                    // the only nexus.topics row this hop ever seeds is seedTopic's own
+                    // single tenant-'t1' row (used by taxonomy-010-1 above, parent_id left
+                    // NULL), nexus.topic_assignments for tenant 't1' is already proven empty
+                    // (isEqualTo(0), asserted for the taxonomy-012-2 leg immediately above),
+                    // and nexus.topic_links is never seeded anywhere in this hop -- so all
+                    // four anti-joins are structurally zero by construction, the same
+                    // "always zero in this hop" reasoning as fk-004-0-reconcile-precount /
+                    // taxonomy-011-1 above. Effect-asserted the same minimal way: the
+                    // changeset EXECUTES (a nonzero anti-join would RAISE EXCEPTION and abort
+                    // the whole migration walk before this JDBC connection could run a single
+                    // assertion here), the anti-join population is independently still zero,
+                    // each new composite FK exists and is VALIDATED at HEAD, and FORCE ROW
+                    // LEVEL SECURITY is restored on every table each leg's own toggle-wrap
+                    // covers.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topics t WHERE t.parent_id IS NOT NULL "
+                        + "AND NOT EXISTS (SELECT 1 FROM nexus.topics p WHERE p.id = t.parent_id "
+                        + "AND p.tenant_id = t.tenant_id)"))
+                        .as("taxonomy-014-2's own anti-join population is empty -- the sole "
+                            + "nexus.topics row this hop seeds carries a NULL parent_id, so the "
+                            + "self-referential anti-join by construction finds nothing")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'fk_topics_parent_tenant' AND convalidated"))
+                        .as("fk_topics_parent_tenant must exist and be VALIDATED at HEAD -- only "
+                            + "reachable if taxonomy-014-2's DROP, ADD NOT VALID, anti-join, and "
+                            + "VALIDATE all ran in this same walk")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity "
+                        + "AND oid = 'nexus.topics'::regclass"))
+                        .as("FORCE ROW LEVEL SECURITY restored on nexus.topics after "
+                            + "taxonomy-014-2's own toggle-wrap")
+                        .isEqualTo(1);
+
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_assignments a WHERE NOT EXISTS "
+                        + "(SELECT 1 FROM nexus.topics t WHERE t.id = a.topic_id "
+                        + "AND t.tenant_id = a.tenant_id)"))
+                        .as("taxonomy-014-3's own anti-join population is empty -- "
+                            + "nexus.topic_assignments for tenant t1 was already drained to zero "
+                            + "by taxonomy-010-1's three DELETE arms above")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'fk_topic_assignments_topic_tenant' AND convalidated"))
+                        .as("fk_topic_assignments_topic_tenant must exist and be VALIDATED at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.topic_assignments'::regclass, 'nexus.topics'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-014-3's own "
+                            + "toggle-wrap covers")
+                        .isEqualTo(2);
+
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_links l WHERE NOT EXISTS "
+                        + "(SELECT 1 FROM nexus.topics t WHERE t.id = l.from_topic_id "
+                        + "AND t.tenant_id = l.tenant_id)"))
+                        .as("taxonomy-014-4's own anti-join population is empty -- "
+                            + "nexus.topic_links is never seeded anywhere in this hop")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'fk_topic_links_from_topic_tenant' AND convalidated"))
+                        .as("fk_topic_links_from_topic_tenant must exist and be VALIDATED at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.topic_links'::regclass, 'nexus.topics'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-014-4's own "
+                            + "toggle-wrap covers")
+                        .isEqualTo(2);
+
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_links l WHERE NOT EXISTS "
+                        + "(SELECT 1 FROM nexus.topics t WHERE t.id = l.to_topic_id "
+                        + "AND t.tenant_id = l.tenant_id)"))
+                        .as("taxonomy-014-5's own anti-join population is empty -- "
+                            + "nexus.topic_links is never seeded anywhere in this hop")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'fk_topic_links_to_topic_tenant' AND convalidated"))
+                        .as("fk_topic_links_to_topic_tenant must exist and be VALIDATED at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.topic_links'::regclass, 'nexus.topics'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-014-5's own "
+                            + "toggle-wrap covers")
+                        .isEqualTo(2);
+
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint WHERE conname = 'topics_tenant_id_unique'"))
+                        .as("topics_tenant_id_unique must exist at HEAD -- taxonomy-014-1's "
+                            + "unconditional UNIQUE (tenant_id, id), the precondition every "
+                            + "repoint above builds on")
+                        .isEqualTo(1);
                 }
             }
         } finally {

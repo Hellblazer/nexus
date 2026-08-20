@@ -1,0 +1,426 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-tk070.p5a (RDR-194 P5, Decision D4) — tenant-in-PK for `topics`.
+
+    FILE-NAME DEVIATION FROM THE BEAD, TREE-DRIFT FINDING (verified against
+    HEAD 2026-08-20, same discipline as fk-005-deliberately-loose-edge-
+    comments.xml's own tree-drift note): the bead and the RDR's Phasing
+    section (drafted 2026-08-15/17) both name this file
+    `taxonomy-013-topics-tenant-unique.xml`. That number is taken —
+    `taxonomy-013-doc-count-lock-order.xml` (nexus-0uuit, commit
+    `d401e92ca`, 2026-08-19 crit-fix day) landed AFTER the RDR text was
+    written and BEFORE this phase executed. This file is
+    `taxonomy-014-topics-tenant-unique.xml`, the next free number. Nothing
+    else about the design changes; only the file's own number.
+
+    THE PROBLEM (D4). `nexus.topics.id` is a BIGSERIAL surrogate PK that is
+    the FK TARGET of four tenant-blind columns: `topics.parent_id` (self-
+    referential, `taxonomy-001-baseline.xml:60`), `topic_assignments.
+    topic_id` (`:104`), and `topic_links.from_topic_id` / `.to_topic_id`
+    (`:132-133`). PostgreSQL referential-integrity checks run OUTSIDE row
+    security, so a tenant-blind FK accepts a reference to another tenant's
+    topic — cross-tenant references are schema-legal today. `topics` is
+    D4's "surrogate PK that other FKs reference" case: the PK STAYS (four
+    FKs depend on it) and the table gains `UNIQUE (tenant_id, id)`; the
+    four FKs are then repointed to that composite as a SEPARATELY-gated
+    step, so the UNIQUE ships even if the repoint's precondition comes
+    back nonzero.
+
+    CENSUS CONFIRMATION (nexus-tk070.p5a, re-verified before authoring):
+    grep across every changelog file for `REFERENCES nexus.topics` /
+    `topics(id)` finds exactly these four FK sites and no fifth —
+    `staging-001-landing-tables.xml:194` and `taxonomy-002-centroids.xml:27`
+    / `taxonomy-007-unify-centroids.xml:47` each explicitly document why
+    they do NOT carry an FK to `nexus.topics(id)` (BIGSERIAL-local staging
+    ids; centroid store mirrors the old Chroma collection by design). No
+    new dependent has appeared since the RDR's census.
+
+    WHAT SHIPS — 5 CHANGESETS (EXPECT_NEW_CHANGESETS=5, design intent,
+    confirmed via the jOOQ-codegen Liquibase walk: 323 changesets today,
+    328 after this file):
+
+      taxonomy-014-1: ALTER TABLE nexus.topics ADD UNIQUE (tenant_id, id).
+        Unconditional — ships regardless of the repoint's precondition.
+      taxonomy-014-2: fk_topics_parent_tenant  (topics.parent_id, self-ref)
+      taxonomy-014-3: fk_topic_assignments_topic_tenant (topic_assignments.topic_id)
+      taxonomy-014-4: fk_topic_links_from_topic_tenant  (topic_links.from_topic_id)
+      taxonomy-014-5: fk_topic_links_to_topic_tenant    (topic_links.to_topic_id)
+
+    Each of -2..-5 is ONE changeset containing the full catalog-029 three-
+    step shape (`catalog-029-manifest-chunk-fk.xml:19-45`) — DROP the old
+    tenant-blind FK, ADD the new tenant-scoped composite FK NOT VALID,
+    anti-join remediation, VALIDATE CONSTRAINT — all four statements in
+    ONE changeset per FK, not catalog-029's own 3-changeset-per-FK split.
+    This is a DELIBERATE, REQUIRED shape difference from catalog-029,
+    forced by EXPECT_NEW_CHANGESETS=5: 4 FKs × catalog-029's 3-changeset
+    shape would be 12+ changesets, not 4. D0 rule 3 only requires the
+    three SQL steps "shipping together in ONE file, ONE release, ONE
+    migration walk" — it does not mandate one changeset per step, and
+    bundling into one changeset per FK still satisfies that shape.
+
+    VALIDATE GUARD SHAPE DEVIATION, STATED (bead acceptance criteria say
+    "per-constraint MARK_RAN precondition" — that describes the LINT's
+    Shape 1, a whole-changeset `<preConditions onFail="MARK_RAN">` that
+    checks the target constraint ALREADY EXISTS before the changeset body
+    runs at all, exactly matching catalog-029-2's own guard, which is
+    correct there because catalog-029-2 is a SEPARATE changeset run AFTER
+    catalog-029-0 already created the constraint). That shape does not fit
+    here: because the ADD CONSTRAINT and the VALIDATE live in the SAME
+    changeset, a Shape-1 precondition checking "does the new constraint
+    exist" would ALWAYS evaluate false on a fresh box (the constraint is
+    created by this very changeset) and would permanently MARK_RAN-skip
+    the WHOLE changeset — including the DROP, the ADD, and the anti-join —
+    on every box, the opposite of correct. Each of -2..-5 therefore uses
+    the lint's OTHER approved shape (Shape 2,
+    `tests/test_changelog_validate_precondition_lint.py` module docstring
+    "Two approved-safe shapes"): a `DO $$ BEGIN IF EXISTS (SELECT 1 FROM
+    pg_constraint WHERE conname = '<new_name>') THEN ALTER TABLE ...
+    VALIDATE CONSTRAINT <new_name>; END IF; END $$;` immediately wrapping
+    the VALIDATE, evaluated mid-transaction AFTER the ADD has already run
+    earlier in the SAME changeset — exactly the catalog-029-3 guard idiom,
+    applied to a VALIDATE instead of a `SET CONSTRAINTS`. This satisfies
+    the lint (either shape is accepted) and the underlying D0 rule 3 intent
+    (guard the crash-loop class the lint exists for) without the Shape-1
+    chicken-and-egg problem.
+
+    CRITICAL SEMANTIC — FAIL-LOUD, NOT SILENT REMEDIATION (D4). Unlike
+    catalog-029-1 (which DELETEs dangling manifest rows as unrecomputable
+    bookkeeping debris) or D1/D2's own anti-join deletes, a cross-tenant
+    topic reference is DATA CORRUPTION, not a population safe to
+    remediate silently: it means one tenant's `topic_assignments` or
+    `topic_links` row points at ANOTHER tenant's `topics` row, or one
+    tenant's topic claims a parent in another tenant's hierarchy. Each
+    anti-join step below COUNTS the cross-tenant population (an anti-join
+    against `nexus.topics`, never a count comparison, per F17) and, on a
+    NONZERO count, `RAISE EXCEPTION`s naming the exact count and the
+    remedy (quarantine the offending rows, report them, re-run taxonomy
+    assignment for the affected tenant(s) — assignments are derived data,
+    D1) rather than deleting or coercing anything. The whole changeset —
+    DROP, ADD NOT VALID, and the failed anti-join check — rolls back
+    atomically on that exception (Liquibase changesets are one
+    transaction), so the OLD tenant-blind FK is left exactly as it was;
+    nothing is left half-migrated. On a CLEAN store (anti-join = 0, the
+    expected case — no cross-tenant population has ever been observed,
+    D0.11) the RAISE NOTICE fires instead and the VALIDATE proceeds.
+
+    RLS DISCIPLINE. All three tables (`topics`, `topic_assignments`,
+    `topic_links`) carry FORCE ROW LEVEL SECURITY
+    (`taxonomy-001-baseline.xml:167-190`, changeset taxonomy-001-5).
+    Liquibase runs as `nexus_admin`, table owner but NOT BYPASSRLS
+    (`role-001-nexus-svc.xml:42`) — an untoggled anti-join read under FORCE
+    RLS with no `nexus.tenant` GUC set returns ZERO rows for every tenant,
+    which would make the anti-join VACUOUSLY report zero cross-tenant rows
+    on every box regardless of actual content — the exact silent-fallback-
+    for-a-correctness-problem shape D0.9 forbids, and it would defeat the
+    entire fail-loud contract this phase exists to add. Every anti-join
+    below toggles NO FORCE / FORCE symmetrically around its own read,
+    matching the nexus-1wjmq shape catalog-029-1 already established. Note
+    this toggle is functionally required even though the RLS DML static
+    lint (`tests/test_changelog_rls_lint.py`) would not itself flag its
+    absence — that lint's `_DML_TARGET_RE` only recognizes a literal
+    top-level `INSERT`/`UPDATE`/`DELETE FROM`, not `SELECT`, so a bare,
+    untoggled anti-join `SELECT ... INTO` here is a real correctness bug
+    invisible to that specific static check; the toggle is present because
+    it is REQUIRED for the SQL to be correct, not merely to satisfy a lint.
+
+    D0.1 placement: appended at the changelog tail, immediately after
+    fk-005-deliberately-loose-edge-comments.xml (current tail) and before
+    the grants-nexus-svc.xml / grants-nexus-diag.xml runAlways block,
+    matching the established late-append convention (see fk-005's own
+    `<include>` comment for the identical reasoning).
+
+    D0.6 rollback: each changeset's rollback restores the exact
+    taxonomy-001-baseline.xml shape it replaces — DROP the new composite
+    FK, re-ADD the original untenant-scoped FK under its ORIGINAL name
+    (`topics_parent_fk`, `topic_assignments_topic_id_fkey`,
+    `topic_links_from_topic_id_fkey`, `topic_links_to_topic_id_fkey`) with
+    its original ON DELETE action. taxonomy-014-1's rollback drops the
+    UNIQUE. No remediation-side rollback: nothing was deleted by any of
+    these changesets (fail-loud, not silent delete), so there is nothing
+    to restore on that axis.
+
+    DELIVERY GATE — cloud-count-5 (nexus-tk070.cc5), BLOCKED pending a
+    BYPASSRLS measurement path: every conexus-reachable role today is
+    NOBYPASSRLS (`role-001-nexus-svc.xml:42`), so the cross-tenant
+    population on the LIVE cloud store cannot yet be measured ahead of
+    time without Sam/Crunchy superuser access or the `nexus_diag`
+    forensics path (bead nexus-tk070.cc5, still open). These five
+    changesets are SAFE TO APPLY on any local/fresh/empty substrate
+    (anti-join is structurally zero on an empty or freshly-migrated
+    store), and safe to apply idempotently on any store that has already
+    been proven clean. They are NOT safe to hand to the ENGINE CUT that
+    deploys to the shared cloud store until cloud-count-5 is recorded in
+    T2 as zero (D0.4: "a phase whose count is unavailable does not ship").
+    P7 close-out MUST verify a T2 record of cloud-count-5 = 0 (or the
+    named quarantine-and-recount remedy having driven it to zero) before
+    any engine tag carrying this file is cut for cloud deployment. If
+    cloud-count-5 comes back nonzero, the RAISE EXCEPTION above is exactly
+    the backstop that keeps a corrupt cloud store from silently accepting
+    the repoint — this file does not depend on cc5 being measured in
+    advance to be correct, only the DEPLOY decision does.
+
+    MECHANIZED (2026-08-20, code-review round, T2 [22964]/[22965]):
+    `scripts/check_rdr194_cc5_delivery_gate.py`, wired into the
+    `engine-release` skill's pre-tag battery (Step 3d), makes the P7
+    checklist item above a scripted pre-tag gate rather than a
+    memory/checklist-only step — mirrors `check_engine_release_floor.py`'s
+    mold. It exits 0 only when this file is absent from the ref being
+    tagged, or a T2 record at (`nexus`, `cloud-count-5-measured`) carries
+    an explicit MEASURED-zero reading for all three sub-populations; see
+    that script's own header for the exact record contract.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset taxonomy-014-1: topics gains UNIQUE (tenant_id, id) ─── -->
+    <changeSet id="taxonomy-014-1" author="nexus-tk070.p5a">
+        <comment>
+            RDR-194 D4: nexus.topics is the "surrogate PK that other FKs
+            reference" case. The BIGSERIAL PK stays (four FK columns depend
+            on it); this changeset adds UNIQUE (tenant_id, id) so the four
+            FKs below can be repointed onto a tenant-scoped composite.
+            Unconditional -- ships regardless of the repoint's own
+            precondition (cloud-count-5).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topics ADD CONSTRAINT topics_tenant_id_unique UNIQUE (tenant_id, id);
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.topics DROP CONSTRAINT IF EXISTS topics_tenant_id_unique;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset taxonomy-014-2: topics.parent_id repoint (self-ref) ─── -->
+    <changeSet id="taxonomy-014-2" author="nexus-tk070.p5a">
+        <comment>
+            RDR-194 D4: repoint topics_parent_fk (self-referential:
+            topics.parent_id -> topics.id) onto the tenant-scoped composite
+            UNIQUE added in taxonomy-014-1. Catalog-029 three-step shape
+            (DROP old -> ADD new NOT VALID -> anti-join -> VALIDATE), all in
+            this one changeset (EXPECT_NEW_CHANGESETS=5 forces one changeset
+            per FK, not catalog-029's own 3-changeset split -- see file
+            header). Anti-join is fail-loud on a nonzero cross-tenant
+            population (D4): a cross-tenant parent reference is corruption,
+            not a population to remediate silently. RLS toggle-wrapped
+            (nexus.topics is FORCE RLS and self-joined by the anti-join).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.topics DROP CONSTRAINT topics_parent_fk;
+
+ALTER TABLE nexus.topics
+    ADD CONSTRAINT fk_topics_parent_tenant
+    FOREIGN KEY (tenant_id, parent_id)
+    REFERENCES nexus.topics (tenant_id, id)
+    ON DELETE SET NULL
+    NOT VALID;
+
+ALTER TABLE nexus.topics NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_cross_tenant_count BIGINT;
+BEGIN
+    SELECT count(*) INTO v_cross_tenant_count
+      FROM nexus.topics t
+     WHERE t.parent_id IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1 FROM nexus.topics p
+            WHERE p.id = t.parent_id
+              AND p.tenant_id = t.tenant_id
+       );
+    IF v_cross_tenant_count > 0 THEN
+        RAISE EXCEPTION 'RDR-194 D4 (nexus-tk070.p5a): % cross-tenant nexus.topics.parent_id reference(s) found -- this is data CORRUPTION, not a population to remediate silently. Remedy: quarantine the offending row(s), report them, and re-run taxonomy assignment for the affected tenant(s) (assignments are derived data, RDR-194 D1). The fk_topics_parent_tenant repoint is BLOCKED until this count is zero. ENUMERATE (requires BYPASSRLS/superuser -- nexus_svc and nexus_admin are NOBYPASSRLS and this query must see every tenant row, the same access gap blocking cloud-count-5 itself, nexus-tk070.cc5): SELECT t.tenant_id, t.id, t.parent_id, p.tenant_id AS parent_tenant_id FROM nexus.topics t JOIN nexus.topics p ON p.id = t.parent_id WHERE t.parent_id IS NOT NULL AND p.tenant_id != t.tenant_id;', v_cross_tenant_count;
+    END IF;
+    RAISE NOTICE 'RDR-194 D4 (nexus-tk070.p5a): 0 cross-tenant nexus.topics.parent_id references found -- fk_topics_parent_tenant repoint proceeding.';
+END $$;
+
+ALTER TABLE nexus.topics FORCE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_topics_parent_tenant') THEN
+        ALTER TABLE nexus.topics VALIDATE CONSTRAINT fk_topics_parent_tenant;
+    END IF;
+END $$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topics DROP CONSTRAINT IF EXISTS fk_topics_parent_tenant;
+ALTER TABLE nexus.topics ADD CONSTRAINT topics_parent_fk FOREIGN KEY (parent_id) REFERENCES nexus.topics(id) ON DELETE SET NULL;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset taxonomy-014-3: topic_assignments.topic_id repoint ─── -->
+    <changeSet id="taxonomy-014-3" author="nexus-tk070.p5a">
+        <comment>
+            RDR-194 D4: repoint topic_assignments_topic_id_fkey onto the
+            tenant-scoped composite. Same catalog-029 three-step shape,
+            fail-loud anti-join, as taxonomy-014-2. RLS toggle-wrapped on
+            BOTH topic_assignments (target) and topics (referenced) --
+            nexus-1wjmq both-tables shape.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.topic_assignments DROP CONSTRAINT topic_assignments_topic_id_fkey;
+
+ALTER TABLE nexus.topic_assignments
+    ADD CONSTRAINT fk_topic_assignments_topic_tenant
+    FOREIGN KEY (tenant_id, topic_id)
+    REFERENCES nexus.topics (tenant_id, id)
+    ON DELETE CASCADE
+    NOT VALID;
+
+ALTER TABLE nexus.topic_assignments NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.topics NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_cross_tenant_count BIGINT;
+BEGIN
+    SELECT count(*) INTO v_cross_tenant_count
+      FROM nexus.topic_assignments a
+     WHERE NOT EXISTS (
+           SELECT 1 FROM nexus.topics t
+            WHERE t.id = a.topic_id
+              AND t.tenant_id = a.tenant_id
+       );
+    IF v_cross_tenant_count > 0 THEN
+        RAISE EXCEPTION 'RDR-194 D4 (nexus-tk070.p5a): % cross-tenant nexus.topic_assignments.topic_id reference(s) found -- this is data CORRUPTION, not a population to remediate silently. Remedy: quarantine the offending row(s), report them, and re-run taxonomy assignment for the affected tenant(s) (assignments are derived data, RDR-194 D1). The fk_topic_assignments_topic_tenant repoint is BLOCKED until this count is zero. ENUMERATE (requires BYPASSRLS/superuser -- nexus_svc and nexus_admin are NOBYPASSRLS and this query must see every tenant row, the same access gap blocking cloud-count-5 itself, nexus-tk070.cc5): SELECT a.tenant_id, a.doc_id, a.topic_id, t.tenant_id AS topic_tenant_id FROM nexus.topic_assignments a JOIN nexus.topics t ON t.id = a.topic_id WHERE t.tenant_id != a.tenant_id;', v_cross_tenant_count;
+    END IF;
+    RAISE NOTICE 'RDR-194 D4 (nexus-tk070.p5a): 0 cross-tenant nexus.topic_assignments.topic_id references found -- fk_topic_assignments_topic_tenant repoint proceeding.';
+END $$;
+
+ALTER TABLE nexus.topics FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.topic_assignments FORCE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_topic_assignments_topic_tenant') THEN
+        ALTER TABLE nexus.topic_assignments VALIDATE CONSTRAINT fk_topic_assignments_topic_tenant;
+    END IF;
+END $$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS fk_topic_assignments_topic_tenant;
+ALTER TABLE nexus.topic_assignments ADD CONSTRAINT topic_assignments_topic_id_fkey FOREIGN KEY (topic_id) REFERENCES nexus.topics(id) ON DELETE CASCADE;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset taxonomy-014-4: topic_links.from_topic_id repoint ──── -->
+    <changeSet id="taxonomy-014-4" author="nexus-tk070.p5a">
+        <comment>
+            RDR-194 D4: repoint topic_links_from_topic_id_fkey onto the
+            tenant-scoped composite. Same catalog-029 three-step shape,
+            fail-loud anti-join, as taxonomy-014-2/-3. RLS toggle-wrapped
+            on both topic_links (target) and topics (referenced).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.topic_links DROP CONSTRAINT topic_links_from_topic_id_fkey;
+
+ALTER TABLE nexus.topic_links
+    ADD CONSTRAINT fk_topic_links_from_topic_tenant
+    FOREIGN KEY (tenant_id, from_topic_id)
+    REFERENCES nexus.topics (tenant_id, id)
+    ON DELETE CASCADE
+    NOT VALID;
+
+ALTER TABLE nexus.topic_links NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.topics NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_cross_tenant_count BIGINT;
+BEGIN
+    SELECT count(*) INTO v_cross_tenant_count
+      FROM nexus.topic_links l
+     WHERE NOT EXISTS (
+           SELECT 1 FROM nexus.topics t
+            WHERE t.id = l.from_topic_id
+              AND t.tenant_id = l.tenant_id
+       );
+    IF v_cross_tenant_count > 0 THEN
+        RAISE EXCEPTION 'RDR-194 D4 (nexus-tk070.p5a): % cross-tenant nexus.topic_links.from_topic_id reference(s) found -- this is data CORRUPTION, not a population to remediate silently. Remedy: quarantine the offending row(s), report them, and re-run taxonomy assignment for the affected tenant(s) (assignments are derived data, RDR-194 D1). The fk_topic_links_from_topic_tenant repoint is BLOCKED until this count is zero. ENUMERATE (requires BYPASSRLS/superuser -- nexus_svc and nexus_admin are NOBYPASSRLS and this query must see every tenant row, the same access gap blocking cloud-count-5 itself, nexus-tk070.cc5): SELECT l.tenant_id, l.from_topic_id, l.to_topic_id, t.tenant_id AS from_topic_tenant_id FROM nexus.topic_links l JOIN nexus.topics t ON t.id = l.from_topic_id WHERE t.tenant_id != l.tenant_id;', v_cross_tenant_count;
+    END IF;
+    RAISE NOTICE 'RDR-194 D4 (nexus-tk070.p5a): 0 cross-tenant nexus.topic_links.from_topic_id references found -- fk_topic_links_from_topic_tenant repoint proceeding.';
+END $$;
+
+ALTER TABLE nexus.topics FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.topic_links FORCE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_topic_links_from_topic_tenant') THEN
+        ALTER TABLE nexus.topic_links VALIDATE CONSTRAINT fk_topic_links_from_topic_tenant;
+    END IF;
+END $$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topic_links DROP CONSTRAINT IF EXISTS fk_topic_links_from_topic_tenant;
+ALTER TABLE nexus.topic_links ADD CONSTRAINT topic_links_from_topic_id_fkey FOREIGN KEY (from_topic_id) REFERENCES nexus.topics(id) ON DELETE CASCADE;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset taxonomy-014-5: topic_links.to_topic_id repoint ─────── -->
+    <changeSet id="taxonomy-014-5" author="nexus-tk070.p5a">
+        <comment>
+            RDR-194 D4: repoint topic_links_to_topic_id_fkey onto the
+            tenant-scoped composite. Same catalog-029 three-step shape,
+            fail-loud anti-join, as taxonomy-014-2/-3/-4. RLS toggle-wrapped
+            on both topic_links (target) and topics (referenced).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.topic_links DROP CONSTRAINT topic_links_to_topic_id_fkey;
+
+ALTER TABLE nexus.topic_links
+    ADD CONSTRAINT fk_topic_links_to_topic_tenant
+    FOREIGN KEY (tenant_id, to_topic_id)
+    REFERENCES nexus.topics (tenant_id, id)
+    ON DELETE CASCADE
+    NOT VALID;
+
+ALTER TABLE nexus.topic_links NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.topics NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_cross_tenant_count BIGINT;
+BEGIN
+    SELECT count(*) INTO v_cross_tenant_count
+      FROM nexus.topic_links l
+     WHERE NOT EXISTS (
+           SELECT 1 FROM nexus.topics t
+            WHERE t.id = l.to_topic_id
+              AND t.tenant_id = l.tenant_id
+       );
+    IF v_cross_tenant_count > 0 THEN
+        RAISE EXCEPTION 'RDR-194 D4 (nexus-tk070.p5a): % cross-tenant nexus.topic_links.to_topic_id reference(s) found -- this is data CORRUPTION, not a population to remediate silently. Remedy: quarantine the offending row(s), report them, and re-run taxonomy assignment for the affected tenant(s) (assignments are derived data, RDR-194 D1). The fk_topic_links_to_topic_tenant repoint is BLOCKED until this count is zero. ENUMERATE (requires BYPASSRLS/superuser -- nexus_svc and nexus_admin are NOBYPASSRLS and this query must see every tenant row, the same access gap blocking cloud-count-5 itself, nexus-tk070.cc5): SELECT l.tenant_id, l.from_topic_id, l.to_topic_id, t.tenant_id AS to_topic_tenant_id FROM nexus.topic_links l JOIN nexus.topics t ON t.id = l.to_topic_id WHERE t.tenant_id != l.tenant_id;', v_cross_tenant_count;
+    END IF;
+    RAISE NOTICE 'RDR-194 D4 (nexus-tk070.p5a): 0 cross-tenant nexus.topic_links.to_topic_id references found -- fk_topic_links_to_topic_tenant repoint proceeding.';
+END $$;
+
+ALTER TABLE nexus.topics FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.topic_links FORCE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_topic_links_to_topic_tenant') THEN
+        ALTER TABLE nexus.topic_links VALIDATE CONSTRAINT fk_topic_links_to_topic_tenant;
+    END IF;
+END $$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topic_links DROP CONSTRAINT IF EXISTS fk_topic_links_to_topic_tenant;
+ALTER TABLE nexus.topic_links ADD CONSTRAINT topic_links_to_topic_id_fkey FOREIGN KEY (to_topic_id) REFERENCES nexus.topics(id) ON DELETE CASCADE;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

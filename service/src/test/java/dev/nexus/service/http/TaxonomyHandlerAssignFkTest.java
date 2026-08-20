@@ -123,12 +123,25 @@ class TaxonomyHandlerAssignFkTest {
         // is required here to isolate the topic_id FK specifically -- without
         // it, the NOT NULL constraint fires first and this test would observe
         // sqlstate 23502, not the topic_id FK's 23503 it means to exercise.
+        //
+        // RDR-194 P5a (nexus-tk070.p5a): taxonomy-014-3 repoints
+        // topic_assignments_topic_id_fkey onto the tenant-scoped composite
+        // fk_topic_assignments_topic_tenant AND (same phase) taxonomy-012's
+        // topic_assignments_chunk_fk (doc_id -> nexus.chunks) is now an
+        // independently-live constraint on this same INSERT. Since neither
+        // topic 999999 nor a matching chunk for DOC_ID_HEX/"coll" exists, BOTH
+        // FKs are violated by this statement, and repointing topic_id's FK
+        // changed its constraint OID (dropped and re-added), which changed
+        // WHICH violation Postgres reports first. seedChunk isolates the
+        // topic_id FK specifically, matching assign_existingTopicId_stillReturns200's
+        // own isolation discipline below.
+        seedChunk(TENANT, "coll", DOC_ID_HEX, 384);
         CapturingExchange ex = post("/v1/taxonomy/assignments/assign",
             "{\"doc_id\":\"" + DOC_ID_HEX + "\",\"topic_id\":999999,\"assigned_by\":\"manual\","
             + "\"source_collection\":\"coll\"}");
         handleWithTenant(ex);
         assertThat(ex.status)
-            .as("a nonexistent topic_id violates topics(id) FK → typed 409, not 500")
+            .as("a nonexistent topic_id violates the tenant-scoped topics FK → typed 409, not 500")
             .isEqualTo(409);
         assertThat(ex.bodyString()).contains("\"sqlstate\":\"23503\"");
         assertThat(ex.bodyString())
@@ -144,9 +157,14 @@ class TaxonomyHandlerAssignFkTest {
         // declares) was in the driver's exception the whole time and was being
         // discarded. So the body now carries the constraint NAME as a
         // structured field.
+        //
+        // Constraint name updated for RDR-194 P5a (nexus-tk070.p5a):
+        // topic_assignments_topic_id_fkey was DROPPED and re-ADDED as the
+        // tenant-scoped composite fk_topic_assignments_topic_tenant
+        // (taxonomy-014-3).
         assertThat(ex.bodyString())
             .as("the violated constraint must be nameable by the caller")
-            .contains("\"constraint\":\"topic_assignments_topic_id_fkey\"");
+            .contains("\"constraint\":\"fk_topic_assignments_topic_tenant\"");
 
         // The ORIGINAL intent still holds: no raw driver prose. A structured
         // name is not the same as echoing the exception text, which would carry

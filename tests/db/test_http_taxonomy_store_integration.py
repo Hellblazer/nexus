@@ -155,8 +155,24 @@ def _seed_chunk(pg: dict, tenant: str, collection: str, chash_hex: str, *, dim: 
 
 
 # ── Bootstrap SQL for taxonomy tables ─────────────────────────────────────────
-# Mirrors taxonomy-001-baseline.xml changeset, applied manually for the hermetic test.
-# Run as two separate psql invocations:
+# Mirrors taxonomy-001-baseline.xml PLUS taxonomy-014-topics-tenant-unique.xml
+# (RDR-194 D4, nexus-tk070.p5a: topics.id stays a global BIGSERIAL PK, gains a
+# tenant-scoped UNIQUE (tenant_id, id), and the four FKs onto topics.id --
+# topics.parent_id, topic_assignments.topic_id, topic_links.from_topic_id/
+# .to_topic_id -- are tenant-scoped composites onto that UNIQUE, not the bare
+# global id). code-review-tk070-p5a-2026-08-20 (T2 [22964], Important finding):
+# this constant went stale relative to HEAD when taxonomy-014 shipped and named
+# only taxonomy-001-baseline.xml.
+#
+# VESTIGIAL, NOT LIVE (net63, see the `service` fixture's own comment below):
+# the JAR runs Liquibase at startup and owns the full schema + grants before
+# binding the HTTP port, so this constant is defined but never psql'd against
+# the hermetic PG -- doing so would collide ("relation already exists") and
+# the service would exit at migration. Kept current anyway as documentation
+# of the shape this test's fixtures assume the REAL (Liquibase-applied) schema
+# has, and so a future reader does not mistake it for live, executed SQL.
+#
+# Run as two separate psql invocations (were this ever un-vestigial'd):
 #   1. _BOOTSTRAP_SQL_ROLE   — CREATE ROLE (autocommit, outside any txn)
 #   2. _BOOTSTRAP_SQL_SCHEMA — DDL: schema + tables + indexes + RLS
 #   3. _BOOTSTRAP_SQL_GRANTS — GRANT + ALTER ROLE
@@ -209,7 +225,14 @@ CREATE TABLE IF NOT EXISTS nexus.topics (
     terms         TEXT,
     CONSTRAINT topics_pk PRIMARY KEY (id),
     CONSTRAINT topics_tenant_collection_label_uq UNIQUE (tenant_id, collection, label),
-    CONSTRAINT topics_parent_fk FOREIGN KEY (parent_id) REFERENCES nexus.topics(id) ON DELETE SET NULL
+    -- RDR-194 D4 (taxonomy-014-1): tenant-scoped UNIQUE alongside the unchanged
+    -- global PK -- the target every tenant-scoped FK onto topics.id repoints to.
+    CONSTRAINT topics_tenant_id_unique UNIQUE (tenant_id, id),
+    -- RDR-194 D4 (taxonomy-014-2): self-referential parent FK, tenant-scoped
+    -- composite -- was FOREIGN KEY (parent_id) REFERENCES nexus.topics(id)
+    -- (tenant-blind) before this phase.
+    CONSTRAINT fk_topics_parent_tenant FOREIGN KEY (tenant_id, parent_id)
+        REFERENCES nexus.topics (tenant_id, id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_topics_tenant_collection ON nexus.topics (tenant_id, collection);
 CREATE INDEX IF NOT EXISTS idx_topics_tenant_review     ON nexus.topics (tenant_id, review_status);
@@ -243,7 +266,12 @@ CREATE TABLE IF NOT EXISTS nexus.topic_assignments (
     similarity        DOUBLE PRECISION,
     assigned_at       TIMESTAMPTZ,
     source_collection TEXT,
-    CONSTRAINT topic_assignments_pk PRIMARY KEY (tenant_id, doc_id, topic_id)
+    CONSTRAINT topic_assignments_pk PRIMARY KEY (tenant_id, doc_id, topic_id),
+    -- RDR-194 D4 (taxonomy-014-3): tenant-scoped composite -- was
+    -- FOREIGN KEY (topic_id) REFERENCES nexus.topics(id) (tenant-blind, and
+    -- this simplified fixture did not even model it) before this phase.
+    CONSTRAINT fk_topic_assignments_topic_tenant FOREIGN KEY (tenant_id, topic_id)
+        REFERENCES nexus.topics (tenant_id, id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_ta_tenant_topic  ON nexus.topic_assignments (tenant_id, topic_id);
 CREATE INDEX IF NOT EXISTS idx_ta_tenant_doc    ON nexus.topic_assignments (tenant_id, doc_id);
@@ -261,7 +289,13 @@ CREATE TABLE IF NOT EXISTS nexus.topic_links (
     to_topic_id   BIGINT  NOT NULL,
     link_count    INTEGER NOT NULL DEFAULT 0,
     link_types    TEXT    NOT NULL DEFAULT '[]',
-    CONSTRAINT topic_links_pk PRIMARY KEY (tenant_id, from_topic_id, to_topic_id)
+    CONSTRAINT topic_links_pk PRIMARY KEY (tenant_id, from_topic_id, to_topic_id),
+    -- RDR-194 D4 (taxonomy-014-4/-5): tenant-scoped composites -- this
+    -- simplified fixture did not model either FK before this phase.
+    CONSTRAINT fk_topic_links_from_topic_tenant FOREIGN KEY (tenant_id, from_topic_id)
+        REFERENCES nexus.topics (tenant_id, id) ON DELETE CASCADE,
+    CONSTRAINT fk_topic_links_to_topic_tenant FOREIGN KEY (tenant_id, to_topic_id)
+        REFERENCES nexus.topics (tenant_id, id) ON DELETE CASCADE
 );
 ALTER TABLE nexus.topic_links ENABLE ROW LEVEL SECURITY;
 ALTER TABLE nexus.topic_links FORCE ROW LEVEL SECURITY;
